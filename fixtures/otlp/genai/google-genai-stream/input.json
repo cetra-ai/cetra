@@ -41,15 +41,15 @@
           },
           "spans": [
             {
-              "traceId": "fc3c3eab75225f916580a7b55a52c15c",
-              "spanId": "8e5dd1bc6aa7887e",
+              "traceId": "8f682469d940ec4561a10451f8c9bfc9",
+              "spanId": "9cfdbff73d88b8c6",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
               "name": "generate_content gemini-2.5-flash",
               "kind": 3,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590178000000",
+              "endTimeUnixNano": "1767225590176000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",
@@ -120,7 +120,7 @@
                 {
                   "key": "gen_ai.response.time_to_first_chunk",
                   "value": {
-                    "doubleValue": 0.141660456021782
+                    "doubleValue": 0.13675462899846025
                   }
                 },
                 {

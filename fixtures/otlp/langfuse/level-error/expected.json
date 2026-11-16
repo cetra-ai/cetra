@@ -2,12 +2,12 @@
   "spans": [
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "3abd63589fa5ef397a271ceb22cdf1b8",
-      "span_id": "fb00a141331328a9",
+      "trace_id": "7ce96505ce061d65d39184b4056c7109",
+      "span_id": "469296a0fa274313",
       "name": "failed-lookup",
       "span_kind": "span",
       "start_time": "2025-12-31T23:59:50.000000000Z",
-      "end_time": "2025-12-31T23:59:50.055000000Z",
+      "end_time": "2025-12-31T23:59:50.053000000Z",
       "status": "error",
       "status_message": "weather lookup failed",
       "service_name": "capture-app",

@@ -68,11 +68,11 @@ pub struct Backfill {
     /// Where the backfill stands.
     pub status: BackfillStatus,
     /// Window start, inclusive. RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub from: i64,
     /// Window end, exclusive. RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub to: i64,
     /// Most targets the backfill reads.
@@ -90,7 +90,7 @@ pub struct Backfill {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_by: Option<Uuid>,
     /// Start time. RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub created_at: i64,
     /// End time. Omitted while the backfill runs. RFC 3339.
@@ -123,11 +123,11 @@ pub struct BackfillEstimate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimated_cost_usd: Option<f64>,
     /// The window that was counted. RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub from: i64,
     /// The end of the window that was counted. RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub to: i64,
 }

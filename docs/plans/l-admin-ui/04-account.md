@@ -283,7 +283,7 @@ Every test starts with `const { user, router } = await renderApp("/account");` (
 1. **"shows the top bar without org controls"**
    - Render `/account`.
    - The heading "Account" (level 1) is present.
-   - The link "llmobs" (`PRODUCT_NAME`) is present.
+   - The link "cetra" (`PRODUCT_NAME`) is present.
    - The buttons "Theme" and "Ada Example" are present.
    - `queryByRole("button", { name: "Acme" })` is `null`, and so is `queryByRole("button", { name: "Command palette" })`.
 2. **"shows the email read-only and the current name"**
@@ -383,8 +383,8 @@ just check
 
 | Operation | Call | Fixture |
 |---|---|---|
-| `list_personal_tokens` | `GET /api/v1/me/tokens?limit=50&cursor=` → `PersonalTokenPage`, newest first | `fixtures/api/static/personal-tokens.json`: one token, id `01900000-0000-7000-8000-000000000201`, name `CLI`, prefix `pat-llmobs-EXAMPL`, scopes `["read", "write"]`, created `2026-01-01T09:00:00.000000000Z`, no `expires_at`, no `last_used_at` |
-| `post_personal_token` | `POST /api/v1/me/tokens`, body `{ name, scopes, expires_at? }` → `201 CreatedPersonalToken` | `static/personal-token-created.json` (`secret` `pat-llmobs-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0`). Tests override it anyway. |
+| `list_personal_tokens` | `GET /api/v1/me/tokens?limit=50&cursor=` → `PersonalTokenPage`, newest first | `fixtures/api/static/personal-tokens.json`: one token, id `01900000-0000-7000-8000-000000000201`, name `CLI`, prefix `pat-cetra-EXAMPL`, scopes `["read", "write"]`, created `2026-01-01T09:00:00.000000000Z`, no `expires_at`, no `last_used_at` |
+| `post_personal_token` | `POST /api/v1/me/tokens`, body `{ name, scopes, expires_at? }` → `201 CreatedPersonalToken` | `static/personal-token-created.json` (`secret` `pat-cetra-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0`). Tests override it anyway. |
 | `delete_personal_token` | `DELETE /api/v1/me/tokens/{id}` → `204`; an unknown id is `404` | — |
 
 All three are session-only (spec 08), which is what the UI uses.
@@ -624,7 +624,7 @@ Imports: `screen`, `waitFor`, `within` from `@testing-library/react`; `HttpRespo
 1. **"lists the user's tokens"**
    - Render `/account`.
    - `findByRole("table", { name: "Personal access tokens" })`.
-   - The row named `/CLI/` contains "pat-llmobs-EXAMPL", "Read and write", and "Never" twice (last used and expires: `within(row).getAllByText("Never")` has length 2).
+   - The row named `/CLI/` contains "pat-cetra-EXAMPL", "Read and write", and "Never" twice (last used and expires: `within(row).getAllByText("Never")` has length 2).
 2. **"shows the empty state"**
    - `http.get("/api/v1/me/tokens", () => HttpResponse.json({ data: [], next_cursor: null }))`.
    - `findByText("No personal access tokens")`.
@@ -633,17 +633,17 @@ Imports: `screen`, `waitFor`, `within` from `@testing-library/react`; `HttpRespo
    - Click "Load more". `findByRole("row", { name: /^CI\b/ })` (the anchor keeps it from matching the `CLI` row).
    - The "Load more" button is gone.
 4. **"creates a read-only token and shows the secret once"**
-   - Capture the POST body. Answer `HttpResponse.json({ token: { id: "01900000-0000-7000-8000-000000000202", name: "Laptop", prefix: "pat-llmobs-NEWTOK", scopes: ["read"], created_at: "2026-01-05T00:00:00.000000000Z" }, secret: "pat-llmobs-NEWTOKEN0NEWTOKEN0NEWTOKEN0NEWT" }, { status: 201 })`.
+   - Capture the POST body. Answer `HttpResponse.json({ token: { id: "01900000-0000-7000-8000-000000000202", name: "Laptop", prefix: "pat-cetra-NEWTOK", scopes: ["read"], created_at: "2026-01-05T00:00:00.000000000Z" }, secret: "pat-cetra-NEWTOKEN0NEWTOKEN0NEWTOKEN0NEWT" }, { status: 201 })`.
    - Count `GET /api/v1/me/tokens` calls in an override that answers the fixture's shape.
    - Click "New token" and type "Laptop" in "Name". Keep "Read only".
    - Open "Expires" and choose "Never" (`user.click(getByRole("combobox", { name: "Expires" }))`, then `user.click(getByRole("option", { name: "Never" }))`).
    - Click "Create token".
    - `const dialog = await screen.findByRole("dialog", { name: "Personal access token created" })` first, then expect the body to equal `{ name: "Laptop", scopes: ["read"] }`, with no `expires_at`.
-   - `expect(within(dialog).getByLabelText("Secret")).toHaveValue("pat-llmobs-NEWTOKEN0NEWTOKEN0NEWTOKEN0NEWT")` (L2 shows the secret as an input value, not as text).
+   - `expect(within(dialog).getByLabelText("Secret")).toHaveValue("pat-cetra-NEWTOKEN0NEWTOKEN0NEWTOKEN0NEWT")` (L2 shows the secret as an input value, not as text).
    - The dialog's text contains `Copy it now. You won't see it again.`.
    - The token list was refetched: the call count grew.
-   - Click "Done". `queryByRole("dialog", { name: "Personal access token created" })` is `null`, and `screen.queryByDisplayValue("pat-llmobs-NEWTOKEN0NEWTOKEN0NEWTOKEN0NEWT")` is `null`.
-   - the secret left TanStack's mutation cache (D-L-5): with `queryClient` from `renderApp`, `await waitFor(() => expect(JSON.stringify(queryClient.getMutationCache().getAll().map((m) => m.state.data ?? null))).not.toContain("pat-llmobs-NEWTOKEN0"))`.
+   - Click "Done". `queryByRole("dialog", { name: "Personal access token created" })` is `null`, and `screen.queryByDisplayValue("pat-cetra-NEWTOKEN0NEWTOKEN0NEWTOKEN0NEWT")` is `null`.
+   - the secret left TanStack's mutation cache (D-L-5): with `queryClient` from `renderApp`, `await waitFor(() => expect(JSON.stringify(queryClient.getMutationCache().getAll().map((m) => m.state.data ?? null))).not.toContain("pat-cetra-NEWTOKEN0"))`.
 5. **"sends read and write scopes with a 90-day expiry by default"**
    - Capture the body in `let body: { scopes?: string[]; expires_at?: string } | undefined` (`body = (await request.json()) as typeof body`). Type "Laptop", choose "Read and write" (`user.click(getByLabelText("Read and write"))`) and submit.
    - Expect `body?.scopes` to equal `["read", "write"]`.
@@ -713,7 +713,7 @@ just check
 
 # L12 — CLI sign-in (`/cli-auth`)
 
-**Goal.** D-L-9: `llmobs login` opens `/cli-auth?port=&state=&host=`. The signed-in user confirms, the page creates a personal access token and hands it to the CLI's localhost callback. The page is not public. A signed-out user goes through `/login?redirect=…` (L5) and comes back.
+**Goal.** D-L-9: `cetra login` opens `/cli-auth?port=&state=&host=`. The signed-in user confirms, the page creates a personal access token and hands it to the CLI's localhost callback. The page is not public. A signed-out user goes through `/login?redirect=…` (L5) and comes back.
 
 Hardening (L-4): the token expires after 90 days; Authorize sends it by a form POST to the callback, not in a URL; the page warns about a crafted link and labels the host "reported by the CLI". The CLI side (the POST callback and the expiry) is owned by the CLI and server sessions.
 
@@ -868,7 +868,7 @@ Import `useRouter` from `@tanstack/react-router`, `cliAuthSearchFrom`, `parseCli
    - Title `` `Authorize the ${PRODUCT_NAME} CLI` `` (import `PRODUCT_NAME` from `@/product`).
    - Description `<>Signed in as <strong>{me.user.email}</strong>.</>`.
    - Body:
-     - A warning above the buttons: "Only continue if you just ran `llmobs login` on this computer. Someone who sent you this link could otherwise get access to your account."
+     - A warning above the buttons: "Only continue if you just ran `cetra login` on this computer. Someone who sent you this link could otherwise get access to your account."
      - `<p className="text-sm">Computer name reported by the CLI: <code>{request.host ?? "not reported"}</code></p>`, then the token name `cliTokenName(request)` with read and write access that expires in 90 days. You can revoke it on your account page.
      - `<FormError message={create.error ? problemMessage(create.error, "Could not create the token. Try again.") : undefined} />`
      - Two buttons in a row, `<div className="flex gap-2">…</div>`: `<Button type="button" disabled={create.isPending} onClick={authorize}>{create.isPending ? <Loader2 className="animate-spin" /> : null}Authorize</Button>` and `<Button type="button" variant="outline" disabled={create.isPending} onClick={cancel}>Cancel</Button>`.
@@ -896,7 +896,7 @@ create.mutate(
 );
 ```
 
-The token expires 90 days after it is created (`expires_at`, D-L-9). The user can revoke it on `/account` or with `llmobs logout`.
+The token expires 90 days after it is created (`expires_at`, D-L-9). The user can revoke it on `/account` or with `cetra logout`.
 
 Accepted risk: if the CLI's callback server is gone (a stale link), the token exists but the CLI never receives it. The page cannot detect this; the "You're signed in" copy tells the user what to do, and the token is visible and revocable on `/account`.
 
@@ -931,7 +931,7 @@ pnpm gen:routes
      - state missing, `""`, `"has space"`, 257 × `"a"`, all digits (`"12345678901234567890"`, `"7"`), or a JSON number (`"1e5"`, `"1E5"`, `"-123"`, `"123e10"`);
      - host `"bad/host"`, `""`, or 65 × `"a"`.
 3. `cliTokenName({ port: 5000, state: "s" })` is `"CLI"`. With `host: "laptop"` it is `"CLI on laptop"`.
-4. `cliCallbackForm({ port: 54321, state: "xyz" }, "pat-llmobs-A+B")` is `{ action: "http://127.0.0.1:54321/callback", fields: { token: "pat-llmobs-A+B", state: "xyz" } }`.
+4. `cliCallbackForm({ port: 54321, state: "xyz" }, "pat-cetra-A+B")` is `{ action: "http://127.0.0.1:54321/callback", fields: { token: "pat-cetra-A+B", state: "xyz" } }`.
 5. `cliCancelUrl({ port: 54321, state: "xyz" })` is `"http://127.0.0.1:54321/callback?error=access_denied&state=xyz"`.
 6. `cliTokenExpiry(new Date("2026-11-15T10:30:00.000Z"))` is `"2027-02-13T10:30:00.000Z"`.
 
@@ -965,15 +965,15 @@ Each test destructures what it uses from `await renderApp(url)`. The heading che
 
 1. **"asks the signed-in user to authorize"**
    - Render `/cli-auth?port=54321&state=s1&host=laptop`.
-   - The heading "Authorize the llmobs CLI" is shown, with the text `ada@example.com` and `CLI on laptop`.
+   - The heading "Authorize the cetra CLI" is shown, with the text `ada@example.com` and `CLI on laptop`.
 2. **"creates a token and returns it to the CLI"**
-   - Capture the POST body. Answer `HttpResponse.json({ token: { id: "01900000-0000-7000-8000-000000000203", name: "CLI on laptop", prefix: "pat-llmobs-CLITOK", scopes: ["read", "write"], created_at: "2026-01-05T00:00:00.000000000Z" }, secret: "pat-llmobs-CLITOKEN0CLITOKEN0CLITOKEN0CLIT" }, { status: 201 })`.
+   - Capture the POST body. Answer `HttpResponse.json({ token: { id: "01900000-0000-7000-8000-000000000203", name: "CLI on laptop", prefix: "pat-cetra-CLITOK", scopes: ["read", "write"], created_at: "2026-01-05T00:00:00.000000000Z" }, secret: "pat-cetra-CLITOKEN0CLITOKEN0CLITOKEN0CLIT" }, { status: 201 })`.
    - Click "Authorize".
    - Expect the body to equal `{ name: "CLI on laptop", scopes: ["read", "write"] }`.
-   - `await waitFor(() => expect(forms).toEqual([{ url: "http://127.0.0.1:54321/callback", fields: { token: "pat-llmobs-CLITOKEN0CLITOKEN0CLITOKEN0CLIT", state: "s1" } }]))`, and `urls` is empty: the token is posted in the body, never navigated to.
+   - `await waitFor(() => expect(forms).toEqual([{ url: "http://127.0.0.1:54321/callback", fields: { token: "pat-cetra-CLITOKEN0CLITOKEN0CLITOKEN0CLIT", state: "s1" } }]))`, and `urls` is empty: the token is posted in the body, never navigated to.
    - `findByRole("heading", { name: "You're signed in", level: 1 })`.
-   - `screen.queryByText(/pat-llmobs-CLITOKEN/)` is `null`: the secret is never shown on the page.
-   - The secret left TanStack's mutation cache (D-L-5): with `queryClient` from `renderApp`, `await waitFor(() => expect(JSON.stringify(queryClient.getMutationCache().getAll().map((m) => m.state.data ?? null))).not.toContain("pat-llmobs-CLITOKEN0"))`.
+   - `screen.queryByText(/pat-cetra-CLITOKEN/)` is `null`: the secret is never shown on the page.
+   - The secret left TanStack's mutation cache (D-L-5): with `queryClient` from `renderApp`, `await waitFor(() => expect(JSON.stringify(queryClient.getMutationCache().getAll().map((m) => m.state.data ?? null))).not.toContain("pat-cetra-CLITOKEN0"))`.
 3. **"names the token CLI without a host"**
    - Render `/cli-auth?port=54321&state=s1`.
    - The body name is `"CLI"`, and the page text says "this computer".
@@ -989,13 +989,13 @@ Each test destructures what it uses from `await renderApp(url)`. The heading che
      - see that `urls` and `calls` are empty.
    - Render each URL in its own `renderApp` call inside one `it`, calling the returned `unmount()` before the next.
 6. **"accepts the edge ports"**
-   - Render `/cli-auth?port=1024&state=s1`, then (after `unmount()`) `/cli-auth?port=65535&state=s1`: each shows the heading "Authorize the llmobs CLI".
+   - Render `/cli-auth?port=1024&state=s1`, then (after `unmount()`) `/cli-auth?port=65535&state=s1`: each shows the heading "Authorize the cetra CLI".
 7. **"refuses an all-digit state"**
    - Register a POST handler that pushes to `calls`. Render `/cli-auth?port=54321&state=12345678901234567890`.
    - The heading "This sign-in link is invalid" is shown, and `calls` and `urls` are empty.
 8. **"returns a long state with digits byte for byte"**
    - Answer the POST as in test 2. Render `/cli-auth?port=54321&state=s_12345678901234567890`.
-   - Click "Authorize". `await waitFor(() => expect(forms).toEqual([{ url: "http://127.0.0.1:54321/callback", fields: { token: "pat-llmobs-CLITOKEN0CLITOKEN0CLITOKEN0CLIT", state: "s_12345678901234567890" } }]))`.
+   - Click "Authorize". `await waitFor(() => expect(forms).toEqual([{ url: "http://127.0.0.1:54321/callback", fields: { token: "pat-cetra-CLITOKEN0CLITOKEN0CLITOKEN0CLIT", state: "s_12345678901234567890" } }]))`.
 9. **"shows a failure and stays on the page"**
    - The POST answers `problemResponse(429, "rate_limited", { detail: "slow down" })`.
    - Click "Authorize". `findByRole("alert")` has the text "slow down".

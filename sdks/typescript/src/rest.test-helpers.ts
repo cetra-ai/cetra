@@ -81,4 +81,4 @@ export function inOrder(
   };
 }
 
-export const BASE = "http://llmobs.test/api/v1/projects/current";
+export const BASE = "http://cetra.test/api/v1/projects/current";

@@ -54,14 +54,14 @@ M1 runs alone in J. Tracks S, T and N's M3 touch the same server files; keep eve
 
 ## Conventions for every sub-phase
 
-- **Time**: `i64` nanoseconds in Rust and `meta.db`; JSON times use `llmobs_core::time_serde` (`#[serde(with = "llmobs_core::time_serde")] #[schema(value_type = String, format = DateTime)]`).
+- **Time**: `i64` nanoseconds in Rust and `meta.db`; JSON times use `cetra_core::time_serde` (`#[serde(with = "cetra_core::time_serde")] #[schema(value_type = String, format = DateTime)]`).
 - **IDs**: `Uuid::now_v7()` for new rows, stored as hyphenated lowercase `TEXT` (`id.to_string()`). Trace and span ids are `BLOB`: bind `trace.as_bytes().to_vec()`, decode with `TraceId::from_slice(&bytes)` / `SpanId::from_slice(&bytes)` as `meta/eval_jobs.rs` does.
 - **JSON columns**: `serde_json::to_string(&value)` on write (the workspace enables `preserve_order`, so key order is kept); `serde_json::from_str` on read, a failure being `MetaError::Corrupt { table, column }`.
 - **Errors**: problem+json through `crate::http::error::ApiError`. A field error is `FieldError { field, message, position: None }` (`crate::api::common::FieldError`); a batch of them is `ApiError::BadRequest { detail: None, errors }`. `MetaError::Conflict(&'static str)` becomes a `409` through `?`.
-- **Privacy**: logs carry dataset, item, project, user and key ids, counts and sizes; never a name, a description, a schema, an item value, or a JSON Schema error that quotes a value (AGENTS.md § Privacy). JSON Schema errors are reported as `"<instance path>: <keyword>"` only, as `llmobs-eval`'s `check.rs` does.
+- **Privacy**: logs carry dataset, item, project, user and key ids, counts and sizes; never a name, a description, a schema, an item value, or a JSON Schema error that quotes a value (AGENTS.md § Privacy). JSON Schema errors are reported as `"<instance path>: <keyword>"` only, as `cetra-eval`'s `check.rs` does.
 - **No `unwrap`/`expect`** outside tests unless a comment next to it states the invariant.
 - **Tests**: Rust tests sit in the module they test (`#[cfg(test)] mod tests`). HTTP tests use `TestApp` (`crate::test_support`), `#[tokio::test(flavor = "multi_thread")]`.
-- **Commands**: `export PATH=$HOME/.local/share/nvm/v26.13.0/bin:$PATH` before `just check` (the web check needs Node). Focused runs: `cargo test -p llmobs-server meta::datasets`, `cargo test -p llmobs-server datasets`, `cargo test -p llmobs-server --test openapi`, `cargo test -p llmobs-server --test api_examples`.
+- **Commands**: `export PATH=$HOME/.local/share/nvm/v26.13.0/bin:$PATH` before `just check` (the web check needs Node). Focused runs: `cargo test -p cetra-server meta::datasets`, `cargo test -p cetra-server datasets`, `cargo test -p cetra-server --test openapi`, `cargo test -p cetra-server --test api_examples`.
 
 ## Final layout after M1
 
@@ -165,7 +165,7 @@ Copy the SQL from `docs/plans/j-datasets/00-design.md` § Data model character f
 The version tests read `crate::meta::expected_version()`, so they need no edit. Regenerate the snapshot:
 
 ```bash
-INSTA_UPDATE=always cargo test -p llmobs-server schema_matches_the_snapshot
+INSTA_UPDATE=always cargo test -p cetra-server schema_matches_the_snapshot
 ```
 
 `git diff crates/server/tests/snapshots/meta_schema.snap` must show only added blocks for the five tables, their eight explicit indexes (seven plus `dataset_items_one_live`) and the automatic indexes SQLite creates for the primary keys and the `UNIQUE(project_id, name)` (`sqlite_autoindex_…`). Anything else: STOP.
@@ -174,7 +174,7 @@ INSTA_UPDATE=always cargo test -p llmobs-server schema_matches_the_snapshot
 
 Module doc: `//! \`datasets\`, \`dataset_versions\` and \`dataset_items\` rows (spec 04 § Datasets & experiments, D-J-2, D-J-3, D-J-4).`
 
-Imports: `llmobs_core::ids::{ProjectId, SpanId, TraceId}`, `serde_json::{Map, Value}`, `sqlx::{SqliteConnection, SqlitePool}`, `uuid::Uuid`, `super::{MetaError, unique_or}`.
+Imports: `cetra_core::ids::{ProjectId, SpanId, TraceId}`, `serde_json::{Map, Value}`, `sqlx::{SqliteConnection, SqlitePool}`, `uuid::Uuid`, `super::{MetaError, unique_or}`.
 
 #### Constants
 
@@ -427,7 +427,7 @@ Helpers: `org` and `project` exactly as in `meta/score_definitions.rs` tests; `f
 ### Done when
 
 - The migration and the store exist with exactly the names above; `meta_schema.snap` is regenerated with only the additions.
-- `cargo test -p llmobs-server meta::` passes; `just check` is green.
+- `cargo test -p cetra-server meta::` passes; `just check` is green.
 
 ---
 
@@ -582,7 +582,7 @@ Every input, expected-output, output and preview-row field of J uses `#[schema(s
 
 Module doc: `//! Dataset request and response types (spec 09 § Datasets & experiments, D-J-2 to D-J-5).`
 
-Derives: responses `#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]`; requests add `#[serde(deny_unknown_fields)]`; query params `#[derive(Debug, Clone, PartialEq, Eq, Deserialize, IntoParams)] #[serde(deny_unknown_fields)]`. Every field has a doc comment (it becomes the OpenAPI description). Optional response fields carry `#[serde(default, skip_serializing_if = "Option::is_none")]`. Times as in `api/score_definitions.rs`. Trace and span ids are `llmobs_core::ids::{TraceId, SpanId}` (they serialize as lowercase hex and have `ToSchema`).
+Derives: responses `#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]`; requests add `#[serde(deny_unknown_fields)]`; query params `#[derive(Debug, Clone, PartialEq, Eq, Deserialize, IntoParams)] #[serde(deny_unknown_fields)]`. Every field has a doc comment (it becomes the OpenAPI description). Optional response fields carry `#[serde(default, skip_serializing_if = "Option::is_none")]`. Times as in `api/score_definitions.rs`. Trace and span ids are `cetra_core::ids::{TraceId, SpanId}` (they serialize as lowercase hex and have `ToSchema`).
 
 ```rust
 /// A dataset (D-J-2, D-J-3).
@@ -779,7 +779,7 @@ In `api/datasets.rs`: `update_requests_tell_absent_from_null` — `{"description
 
 ### Done when
 
-- `jsonschema` is a normal dependency of `llmobs-server`; no version changed.
+- `jsonschema` is a normal dependency of `cetra-server`; no version changed.
 - `api::common::any_json` exists and no J input/expected field uses `value_type = Object`.
 - The module, the permission and the types exist as written; `just check` is green.
 
@@ -937,7 +937,7 @@ It writes, in one `self.state.meta.write`, with `now = self.state.clock.now_ns()
 Also in `impl TestApp`:
 
 ```rust
-    /// A `sk-llmobs-…` key with `["read", "write"]` on `seeded.project`, as its plaintext.
+    /// A `sk-cetra-…` key with `["read", "write"]` on `seeded.project`, as its plaintext.
     pub(crate) async fn write_key(&self, seeded: &Seeded) -> String { … }
 ```
 

@@ -486,7 +486,7 @@ The title is **Reset your password**.
   ```tsx
   <>
     Email is not configured on this server, so we can't send you a reset link. Ask an instance admin for a reset link (Admin → Users), or have them run{" "}
-    <code className="font-mono text-xs">{"llmobs admin reset-password --email <your email>"}</code> on the server.
+    <code className="font-mono text-xs">{"cetra admin reset-password --email <your email>"}</code> on the server.
   </>
   ```
 
@@ -604,7 +604,7 @@ async function sendEmail(user: UserEvent, email = "ada@example.com") {
 
 Every test starts with `const { router, user } = await renderApp(…)` when it uses either. Tests 5–13 render `/reset?token=tok123`.
 
-1. `it("explains how to reset without email")`: the default fixture has `smtp_enabled: false`. `/reset`. Expect `await screen.findByRole("heading", { name: "Reset your password" })`, the text matching `/llmobs admin reset-password --email <your email>/`, and no button **Send reset link**.
+1. `it("explains how to reset without email")`: the default fixture has `smtp_enabled: false`. `/reset`. Expect `await screen.findByRole("heading", { name: "Reset your password" })`, the text matching `/cetra admin reset-password --email <your email>/`, and no button **Send reset link**.
 2. `it("sends a reset link")`: `withConfig({ smtp_enabled: true })`. The forgot override stores the body and answers `204`. `/reset`, `sendEmail(user)`. Expect `await screen.findByRole("status")` with text starting **If an account exists for ada@example.com**, then the body `{ email: "ada@example.com" }`.
 3. `it("starts over with another address")`: as test 2, then click **Use another address**. The **Email** input is back with an empty value, and `queryByRole("status")` is null.
 4. `it("maps the forgot errors")`: `withConfig({ smtp_enabled: true })`. The forgot override answers `answer`, a `let` variable. For each row, set `answer`, submit (type the email the first time only), and wait for the alert text:

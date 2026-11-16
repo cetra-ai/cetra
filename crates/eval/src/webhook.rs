@@ -1,14 +1,14 @@
 //! Webhook evaluator (D165).
 //!
 //! One POST, signed with HMAC-SHA256. The header name is not in
-//! [`llmobs_core::names`]; [`SIGNATURE_HEADER`] is the constant D46 renames.
+//! [`cetra_core::names`]; [`SIGNATURE_HEADER`] is the constant a rename changes.
 
 use std::time::Duration;
 
+use cetra_core::enums::ScoreDataType;
+use cetra_core::ids::{ProjectId, SpanId, TraceId};
+use cetra_core::score::ScoreValue;
 use hmac::{Hmac, KeyInit, Mac};
-use llmobs_core::enums::ScoreDataType;
-use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-use llmobs_core::score::ScoreValue;
 use reqwest::Url;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Serialize;
@@ -29,8 +29,8 @@ const RESPONSE_CAP: usize = 64 * 1024;
 /// Score reason length, in Unicode scalar values.
 const REASON_CHARS: usize = 8_000;
 
-/// The signature header, lower case. D46 renames it with the product.
-pub const SIGNATURE_HEADER: &str = "x-llmobs-signature";
+/// The signature header, lower case. A rename of the product changes it.
+pub const SIGNATURE_HEADER: &str = "x-cetra-signature";
 
 const NOT_JSON_OBJECT: &str = "not a JSON object";
 const MISSING_VALUE: &str = "missing value";
@@ -335,8 +335,8 @@ fn bad(reason: &'static str) -> WebhookError {
 
 #[cfg(test)]
 mod tests {
-    use llmobs_core::enums::ScoreDataType;
-    use llmobs_core::score::ScoreValue;
+    use cetra_core::enums::ScoreDataType;
+    use cetra_core::score::ScoreValue;
     use proptest::prelude::*;
 
     use super::{REASON_CHARS, parse_score};

@@ -137,7 +137,7 @@ Spec 08 already names the permissions (the planning commit did it). In `CHANGELO
 ## Commands
 
 ```bash
-cargo test -p llmobs-server model_prices
+cargo test -p cetra-server model_prices
 ```
 
 ```bash

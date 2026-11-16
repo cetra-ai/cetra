@@ -28,10 +28,10 @@ use crate::reads::{ListScope, SortOrder, TraceListRequest, TraceSort, trace_list
 use crate::views::TimeWindow;
 use crate::{QueryContext, QueryOptions, SqlRequest, Storage};
 
-const MODE_ENV: &str = "LLMOBS_FD_CHILD_MODE";
-const LIMIT_ENV: &str = "LLMOBS_FD_CHILD_LIMIT";
-const SECONDS_ENV: &str = "LLMOBS_FD_CHILD_SECONDS";
-const DIR_ENV: &str = "LLMOBS_FD_CHILD_DIR";
+const MODE_ENV: &str = "CETRA_FD_CHILD_MODE";
+const LIMIT_ENV: &str = "CETRA_FD_CHILD_LIMIT";
+const SECONDS_ENV: &str = "CETRA_FD_CHILD_SECONDS";
+const DIR_ENV: &str = "CETRA_FD_CHILD_DIR";
 const CHILD_TIMEOUT: Duration = Duration::from_secs(300);
 /// Every storage call of the load phase must return within this, or the child is wedged.
 const CALL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -125,7 +125,7 @@ impl ChildMode {
 }
 
 /// Re-executes `child_run` with the mode, the limit (0 keeps the current one) and the seconds, and
-/// returns its `LLMOBS_FD` line. The data directory is under `target/llmobs-resources`, removed
+/// returns its `CETRA_FD` line. The data directory is under `target/cetra-resources`, removed
 /// after the child ends.
 fn run_child(mode: ChildMode, limit: u64, seconds: u64) -> String {
     let dir = data_dir_under_target();
@@ -151,9 +151,9 @@ fn run_child(mode: ChildMode, limit: u64, seconds: u64) -> String {
         finished.status,
         tail(&finished.stdout, 40)
     );
-    marked_lines(&finished.stdout, "LLMOBS_FD ")
+    marked_lines(&finished.stdout, "CETRA_FD ")
         .pop()
-        .expect("the child printed its LLMOBS_FD line")
+        .expect("the child printed its CETRA_FD line")
 }
 
 /// What a load loop tallied.
@@ -446,7 +446,7 @@ fn load_child(limit: u64, seconds: u64, dir: &Path) {
             .join(",")
     };
     println!(
-        "LLMOBS_FD mode=load limit={effective} baseline={baseline} peak={peak} kinds={kinds} \
+        "CETRA_FD mode=load limit={effective} baseline={baseline} peak={peak} kinds={kinds} \
          appends_ok={} backpressure={} wal_failed={wal_failed} queries_ok={} \
          query_errors={query_errors} compaction_failed={} compaction_errors={}",
         tally.appends_ok,
@@ -489,7 +489,7 @@ fn open_child(limit: u64, dir: &Path) {
         Ok(storage) => {
             let shut = runtime.block_on(storage.shutdown());
             println!(
-                "LLMOBS_FD mode=open limit={limit} open=ok shutdown={}",
+                "CETRA_FD mode=open limit={limit} open=ok shutdown={}",
                 if shut.is_ok() { "ok" } else { "failed" }
             );
         }
@@ -507,7 +507,7 @@ fn open_child(limit: u64, dir: &Path) {
                 | OpenError::Catalog(_)
                 | OpenError::Anchor(_)
                 | OpenError::Objects(_) => {
-                    println!("LLMOBS_FD mode=open limit={limit} open=failed kind={kind}");
+                    println!("CETRA_FD mode=open limit={limit} open=failed kind={kind}");
                 }
             }
         }
@@ -515,7 +515,7 @@ fn open_child(limit: u64, dir: &Path) {
 }
 
 /// The child of every descriptor run. Ignored: it runs only when `run_child` starts it, and
-/// returns at once without `LLMOBS_FD_CHILD_MODE`.
+/// returns at once without `CETRA_FD_CHILD_MODE`.
 #[test]
 #[ignore = "a child process of the descriptor runs (run_child); run by just resources"]
 fn child_run() {
@@ -524,21 +524,21 @@ fn child_run() {
     };
     crate::test_support::no_core_dumps();
     let limit: u64 = std::env::var(LIMIT_ENV)
-        .expect("LLMOBS_FD_CHILD_LIMIT is set")
+        .expect("CETRA_FD_CHILD_LIMIT is set")
         .parse()
-        .expect("LLMOBS_FD_CHILD_LIMIT is a number");
+        .expect("CETRA_FD_CHILD_LIMIT is a number");
     let dir =
-        std::path::PathBuf::from(std::env::var_os(DIR_ENV).expect("LLMOBS_FD_CHILD_DIR is set"));
+        std::path::PathBuf::from(std::env::var_os(DIR_ENV).expect("CETRA_FD_CHILD_DIR is set"));
     match mode.to_str() {
         Some("load") => {
             let seconds: u64 = std::env::var(SECONDS_ENV)
-                .expect("LLMOBS_FD_CHILD_SECONDS is set")
+                .expect("CETRA_FD_CHILD_SECONDS is set")
                 .parse()
-                .expect("LLMOBS_FD_CHILD_SECONDS is a number");
+                .expect("CETRA_FD_CHILD_SECONDS is a number");
             load_child(limit, seconds, &dir);
         }
         Some("open") => open_child(limit, &dir),
-        _ => panic!("LLMOBS_FD_CHILD_MODE is load or open"),
+        _ => panic!("CETRA_FD_CHILD_MODE is load or open"),
     }
 }
 

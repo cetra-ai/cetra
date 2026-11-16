@@ -11,7 +11,7 @@ const workerPath = fileURLToPath(new URL("./msw/mockServiceWorker.js", import.me
 
 function mockServiceWorker(): Plugin {
   return {
-    name: "llmobs-mock-service-worker",
+    name: "cetra-mock-service-worker",
     apply: "serve",
     configureServer(server) {
       server.middlewares.use((request, response, next) => {

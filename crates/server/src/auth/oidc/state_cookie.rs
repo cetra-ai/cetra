@@ -17,8 +17,8 @@ use sha2::Sha256;
 use crate::auth::AuthError;
 use crate::auth::secret::constant_time_eq;
 
-/// `llmobs_oauth`.
-pub(crate) const OAUTH_COOKIE: &str = llmobs_core::llmobs_name!("_oauth");
+/// `cetra_oauth`.
+pub(crate) const OAUTH_COOKIE: &str = cetra_core::cetra_name!("_oauth");
 
 /// Cookie lifetime. Ten minutes.
 const MAX_AGE_SECS: u64 = 600;

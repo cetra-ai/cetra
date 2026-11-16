@@ -92,11 +92,11 @@ pub enum MetricsGroupBy {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct MetricsResponse {
     /// Inclusive range start, nanoseconds since the Unix epoch. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub from: i64,
     /// Exclusive range end, nanoseconds since the Unix epoch. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub to: i64,
     /// Resolved bucket width, nanoseconds.
@@ -165,7 +165,7 @@ pub struct MetricSeries {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct MetricPoint {
     /// Bucket start, nanoseconds since the Unix epoch. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub time: i64,
     /// Bucket value. Omitted when the bucket has no data.

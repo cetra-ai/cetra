@@ -125,7 +125,7 @@ describe("openai helper", () => {
     const [llm] = llmSpans(spans);
     expect(llm).toBeDefined();
     expect(llm?.parentSpanContext?.spanId).toBe(ours?.spanContext().spanId);
-    expect(llm?.attributes["llmobs.session.id"]).toBe("s1");
+    expect(llm?.attributes["cetra.session.id"]).toBe("s1");
     expect(llm?.attributes["llm.model_name"]).toBe("gpt-4o-mini");
     expect(String(llm?.attributes["input.value"])).toContain("hello");
   });
@@ -221,7 +221,7 @@ describe("anthropic helper", () => {
     const [llm] = llmSpans(spans);
     expect(llm).toBeDefined();
     expect(llm?.parentSpanContext?.spanId).toBe(ours?.spanContext().spanId);
-    expect(llm?.attributes["llmobs.session.id"]).toBe("s2");
+    expect(llm?.attributes["cetra.session.id"]).toBe("s2");
     expect(llm?.attributes["llm.model_name"]).toBe("claude-sonnet-4-5");
     expect(String(llm?.attributes["input.value"])).toContain("hello");
   });

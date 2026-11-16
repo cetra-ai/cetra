@@ -1,6 +1,6 @@
 //! Media blobs extracted from span payloads.
 //!
-//! Normalization (`llmobs-otel`) produces them and storage (`llmobs-storage`) stores them.
+//! Normalization (`cetra-otel`) produces them and storage (`cetra-storage`) stores them.
 //! Spec 01 § Media blob and spec 02 § Media extraction.
 
 use std::fmt;

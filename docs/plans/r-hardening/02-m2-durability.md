@@ -21,7 +21,7 @@ Sub-phases R2.1–R2.14, one commit each. R2.14 can produce several commits, one
   - `CHANGELOG.md` § `[Unreleased]`: the sub-phases that change user-visible behaviour add a line there (R2.3, R2.4, R2.5 and R2.6 under `Fixed`; R2.7 and R2.8 under `Added`). Each sub-phase gives the exact line.
 
   **Not** `crates/server/`: the `/readyz` change of R2.7–R2.8 is requested from the coordinating session (R2.7 § Requested outside R). **Not** `.github/`: the LazyFS probe of R2.12 runs on a throwaway branch, and the nightly workflow belongs to M3.
-- **No new dependency.** Everything needed is already a dependency of `llmobs-storage`: `rustix` (statvfs), `crc32c`, `sqlx`, `tempfile`, `proptest`. The lossy crash's RNG is a 10-line SplitMix64 in `fs/lossy.rs`, not `rand`.
+- **No new dependency.** Everything needed is already a dependency of `cetra-storage`: `rustix` (statvfs), `crc32c`, `sqlx`, `tempfile`, `proptest`. The lossy crash's RNG is a 10-line SplitMix64 in `fs/lossy.rs`, not `rand`.
 - **No production cost (`00-design.md` § Cross-cutting rules).** Every `crate::fs` function is `#[inline]`. Outside `cfg(test)` it is the `std::fs`/`rustix` call and nothing else. Lossy mode and its registry are `#[cfg(test)]`, like `hooks.rs`.
 - **Errors.** New variants go in `error.rs` with `thiserror` and a doc line each. Their messages add no payloads, user data or ids beyond what the enum already prints (`AGENTS.md` § Privacy).
 - **Logging.** A failure that stops a component logs once at `error`, with the component and the action (`"object store stopped after a failed fsync"`) and never a payload. Object keys contain project ids and media keys contain blob hashes, so keys are logged at `debug` only, as `gc.rs` does.
@@ -31,7 +31,7 @@ Sub-phases R2.1–R2.14, one commit each. R2.14 can produce several commits, one
   - If the probe shows that FUSE works on GitHub runners, M3's nightly workflow runs `just lazyfs`.
   - When the directory fsync of a WAL truncation fails, the flush task retries it, and the spec documents why that is safe (R2.13).
   - Startup fsyncs every object directory, in one walk (R2.3).
-  - `just test` runs one lossy seed per hook point; `LLMOBS_LOSSY_SEEDS` raises it (R2.10).
+  - `just test` runs one lossy seed per hook point; `CETRA_LOSSY_SEEDS` raises it (R2.10).
 - **Report at the end of each sub-phase:**
   - what was done;
   - any deviation from this plan, and why;
@@ -374,7 +374,7 @@ Each test uses a `tempfile::TempDir` `t`, with root `t/data` and shadow `t/shado
 - `a_recreated_directory_is_a_new_incarnation`: `create_dir(d)`, `sync_dir(root)`, create `d/a` and `sync_all` and `sync_dir(d)`, `remove_file(d/a)`, `remove_dir(d)`, `create_dir(d)`, create `d/b`. For seeds `0..64` with `KeepRandom`, nothing panics, and the tree is one that some prefix of the history produces: `d/a` and `d/b` never exist at the same time.
 
 ```bash
-cargo test -p llmobs-storage --all-features fs::lossy
+cargo test -p cetra-storage --all-features fs::lossy
 ```
 
 ---
@@ -841,8 +841,8 @@ proptest! {
 ### Commands
 
 ```bash
-cargo test -p llmobs-storage --all-features model_tests
-LLMOBS_MODEL_CASES=300 cargo test --release -p llmobs-storage --all-features model_tests
+cargo test -p cetra-storage --all-features model_tests
+CETRA_MODEL_CASES=300 cargo test --release -p cetra-storage --all-features model_tests
 ```
 
 A failure in the long run is a finding for R2.14: move its seed file out of the tree as R1.3 says.
@@ -876,11 +876,11 @@ let _lossy = lossy_from_env(Path::new(&dir));
 ```
 
 ```rust
-/// With `LLMOBS_LOSSY_SHADOW` and `LLMOBS_LOSSY_SEED` set: registers `dir`
+/// With `CETRA_LOSSY_SHADOW` and `CETRA_LOSSY_SEED` set: registers `dir`
 /// in lossy mode and arms the crash before the hook abort.
 fn lossy_from_env(dir: &Path) -> Option<crate::fs::lossy::Lossy> {
-    let shadow = std::env::var_os("LLMOBS_LOSSY_SHADOW")?;
-    let seed: u64 = std::env::var("LLMOBS_LOSSY_SEED").ok()?.parse().ok()?;
+    let shadow = std::env::var_os("CETRA_LOSSY_SHADOW")?;
+    let seed: u64 = std::env::var("CETRA_LOSSY_SEED").ok()?.parse().ok()?;
     let lossy = crate::fs::lossy::Lossy::enable(dir, Path::new(&shadow));
     lossy.crash_on_abort(seed);
     Some(lossy)
@@ -893,14 +893,14 @@ The registration lives until the abort. The child prints the `CrashReport` to st
 
 Five new ignored tests: `every_flush_hook_survives_a_lossy_crash`, and the same for compaction, deletion, media and drop. For each point at index `i` of its list, and each `s` in `0..seeds()`:
 1. `t = tempdir()`, `dir = t/data`, `shadow = t/shadow`, and `seed = (i as u64) * 1_000 + s`, so consecutive points cycle through the three modes;
-2. `run_child(…, &[("LLMOBS_LOSSY_SHADOW", shadow), ("LLMOBS_LOSSY_SEED", seed)])`. The child crashes its directory itself, then aborts;
+2. `run_child(…, &[("CETRA_LOSSY_SHADOW", shadow), ("CETRA_LOSSY_SEED", seed)])`. The child crashes its directory itself, then aborts;
 3. `check_*(dir, name)`, with the point and the seed in the failure message.
 
-`fn seeds() -> u64` reads `LLMOBS_LOSSY_SEEDS`, default 1.
+`fn seeds() -> u64` reads `CETRA_LOSSY_SEEDS`, default 1.
 
 ### `justfile` and `AGENTS.md`
 
-In the `justfile`, under `test:`, after the five existing crash lines, add the same five lines for the `_survives_a_lossy_crash` parents. In `AGENTS.md` § Tests, add: "`LLMOBS_LOSSY_SEEDS=N just test` runs each lossy crash point with N seeds (default 1)."
+In the `justfile`, under `test:`, after the five existing crash lines, add the same five lines for the `_survives_a_lossy_crash` parents. In `AGENTS.md` § Tests, add: "`CETRA_LOSSY_SEEDS=N just test` runs each lossy crash point with N seeds (default 1)."
 
 ### Expected results
 
@@ -955,22 +955,22 @@ The case runs in `wal.sync = "always"` mode. A lossy crash then loses nothing ac
 #[test]
 #[ignore = "run by every_model_hook_crash_reads_back"]
 fn hook_crash_child() {
-    let Ok(dir) = std::env::var("LLMOBS_HOOK_CRASH_DIR") else { return };
-    // LLMOBS_HOOK_CRASH_CASE: the case number. LLMOBS_LOSSY_SHADOW/LLMOBS_LOSSY_SEED: optional.
+    let Ok(dir) = std::env::var("CETRA_HOOK_CRASH_DIR") else { return };
+    // CETRA_HOOK_CRASH_CASE: the case number. CETRA_LOSSY_SHADOW/CETRA_LOSSY_SEED: optional.
     ...
 }
 ```
 
 1. `Harness::attach(dir, shadow)`: a new constructor that uses an existing `data` directory and a shadow path instead of making a `TempDir`. It registers lossy mode (always: `LossyCrash` ops in the prefix need it) and opens.
 2. Run the prefix ops with M1's `apply`, against a `Model` and a clock, exactly as `run_case` does but **without** the checks: the parent runs those.
-3. If `LLMOBS_LOSSY_SEED` is set, call `harness.lossy().crash_on_abort(seed)`.
+3. If `CETRA_LOSSY_SEED` is set, call `harness.lossy().crash_on_abort(seed)`.
 4. `harness.storage().hooks().abort_at(point)`, then `apply(&last, …)`.
 5. If the op returns without reaching the point, `std::process::exit(3)`, without shutdown. A pass with no job never reaches its hook, so this happens.
 
 ### Parent
 
-`every_model_hook_crash_reads_back`, `#[ignore]`d, runs cases `0..cases()`. `cases()` reads `LLMOBS_HOOK_CRASH_CASES`, default 8. Case `n` gets a lossy crash with seed `n` when `n` is odd, and none when it is even. For each case:
-1. `t = tempdir()`, then `run_child("model_tests::hook_crash::hook_crash_child", …)` with `LLMOBS_HOOK_CRASH_DIR = t/data` and `LLMOBS_HOOK_CRASH_CASE = n`, plus `LLMOBS_LOSSY_SHADOW = t/shadow` and `LLMOBS_LOSSY_SEED = n` for odd `n`. Accept two outcomes:
+`every_model_hook_crash_reads_back`, `#[ignore]`d, runs cases `0..cases()`. `cases()` reads `CETRA_HOOK_CRASH_CASES`, default 8. Case `n` gets a lossy crash with seed `n` when `n` is odd, and none when it is even. For each case:
+1. `t = tempdir()`, then `run_child("model_tests::hook_crash::hook_crash_child", …)` with `CETRA_HOOK_CRASH_DIR = t/data` and `CETRA_HOOK_CRASH_CASE = n`, plus `CETRA_LOSSY_SHADOW = t/shadow` and `CETRA_LOSSY_SEED = n` for odd `n`. Accept two outcomes:
    - an abort by signal: the point was reached;
    - exit code 3: the op completed;
 
@@ -988,7 +988,7 @@ Failure messages print the case number, the last op, the point, and whether a lo
 ### `justfile` and `AGENTS.md`
 
 - `justfile`, under `test:`, after the crash lines: `cargo test --workspace --all-features -- --ignored --exact model_tests::hook_crash::every_model_hook_crash_reads_back`.
-- `AGENTS.md` § Tests: "`LLMOBS_HOOK_CRASH_CASES=N just test` runs N model cases that crash inside their last operation (default 8)."
+- `AGENTS.md` § Tests: "`CETRA_HOOK_CRASH_CASES=N just test` runs N model cases that crash inside their last operation (default 8)."
 
 Measure the default run in debug and report the time. Keep the default at 8 unless it takes more than 60 s; then lower it, and report the time.
 
@@ -1012,11 +1012,11 @@ What LazyFS models, to check in this sub-phase: its README says unsynced **file 
 - `tools/lazyfs/lazyfs.toml.in`, the LazyFS config template, with `@WORK@` where the work directory goes;
 - `tools/lazyfs/README.md`.
 
-**The config template is a copy of LazyFS's own `lazyfs/config/default.toml` at the pinned SHA**, not written from memory. Take it with `git -C "$LLMOBS_LAZYFS_HOME" show 3edad01aa936b81fed9bd64e47e725fc5ef6c977:lazyfs/config/default.toml`, and change only the values listed below. When this plan was written, that file had the sections `[faults]`, `[cache]`, `[cache.simple]` and `[filesystem]` (not `[file system]`, as the README shows), and `custom_size="1gb"`, lower case. If the file at the SHA differs, follow the file.
+**The config template is a copy of LazyFS's own `lazyfs/config/default.toml` at the pinned SHA**, not written from memory. Take it with `git -C "$CETRA_LAZYFS_HOME" show 3edad01aa936b81fed9bd64e47e725fc5ef6c977:lazyfs/config/default.toml`, and change only the values listed below. When this plan was written, that file had the sections `[faults]`, `[cache]`, `[cache.simple]` and `[filesystem]` (not `[file system]`, as the README shows), and `custom_size="1gb"`, lower case. If the file at the SHA differs, follow the file.
 
 `tools/lazyfs/lazyfs.sh`, in bash, with `set -euo pipefail`, clean under shellcheck. Its subcommands:
 - `build`:
-  - clones LazyFS into `${LLMOBS_LAZYFS_HOME:-$HOME/.cache/llmobs/lazyfs}` and checks out the pinned SHA;
+  - clones LazyFS into `${CETRA_LAZYFS_HOME:-$HOME/.cache/cetra/lazyfs}` and checks out the pinned SHA;
   - runs `cd libs/libpcache && ./build.sh`, then `cd lazyfs && ./build.sh`;
   - first checks that `g++`, `cmake`, `libfuse3-dev` and `fuse3` are present (`command -v`, `pkg-config --exists fuse3`), and prints the `apt install` line for any that is missing.
 - `run`:
@@ -1043,18 +1043,18 @@ The README covers:
 
 ### The checks
 
-1. **Crash children.** A new ignored test, `crash_tests::every_hook_survives_lazyfs`. It reads three env vars: `LLMOBS_LAZYFS_DIR` (a directory on the mount), `LLMOBS_LAZYFS_FIFO` and `LLMOBS_LAZYFS_DONE`. Without them it returns, as the children do. For every group and point:
-   1. `dir = tempdir_in(LLMOBS_LAZYFS_DIR)`;
+1. **Crash children.** A new ignored test, `crash_tests::every_hook_survives_lazyfs`. It reads three env vars: `CETRA_LAZYFS_DIR` (a directory on the mount), `CETRA_LAZYFS_FIFO` and `CETRA_LAZYFS_DONE`. Without them it returns, as the children do. For every group and point:
+   1. `dir = tempdir_in(CETRA_LAZYFS_DIR)`;
    2. `run_child`, without the lossy env var;
    3. `clear_cache()`: write `"lazyfs::clear-cache\n"` to the FIFO, then read one line from the done FIFO, on a thread with a 30 s timeout;
    4. the group's `check_*` (R2.10).
 
    The script runs it with `cargo test --workspace --all-features -- --ignored --exact crash_tests::every_hook_survives_lazyfs`, with the workspace feature set, as `just test` does.
 2. **A short ingest.** `crash_recovery` in `crates/storage/tests/crash.rs` gets two optional env vars:
-   - `LLMOBS_CRASH_DIR_ROOT`: create the test directory with `tempfile::tempdir_in` it instead of `tempdir`;
-   - `LLMOBS_CRASH_CLEAR_CACHE=<fifo>:<done fifo>`: after each kill and before `check_dir`, the same `clear_cache`.
+   - `CETRA_CRASH_DIR_ROOT`: create the test directory with `tempfile::tempdir_in` it instead of `tempdir`;
+   - `CETRA_CRASH_CLEAR_CACHE=<fifo>:<done fifo>`: after each kill and before `check_dir`, the same `clear_cache`.
 
-   The script runs `LLMOBS_CRASH_ITERATIONS=10 cargo test --workspace --all-features --test crash -- --exact crash_recovery`. The child `sync_data`s `acked.log` after each line, so the log survives the clear.
+   The script runs `CETRA_CRASH_ITERATIONS=10 cargo test --workspace --all-features --test crash -- --exact crash_recovery`. The child `sync_data`s `acked.log` after each line, so the log survives the clear.
 
 A new recipe, `just lazyfs`, runs `tools/lazyfs/lazyfs.sh build && tools/lazyfs/lazyfs.sh run`. `AGENTS.md` gets:
 - a § Commands row for `just lazyfs`;
@@ -1121,7 +1121,7 @@ The rows of N sub-phases that have not merged yet say "(N M2, not merged yet)" i
 
 Add `## M2 — Durability`, with:
 - one paragraph: the seam, lossy mode, the three crash modes, where lossy crashes run (model test, crash children, unit tests), and LazyFS;
-- `### Runs`: the R2.9 long run, R2.10 with `LLMOBS_LOSSY_SEEDS=10`, R2.11 with `LLMOBS_HOOK_CRASH_CASES=500`, `just lazyfs`, and the GitHub probe. For each: date, commit, command, machine, duration, result;
+- `### Runs`: the R2.9 long run, R2.10 with `CETRA_LOSSY_SEEDS=10`, R2.11 with `CETRA_HOOK_CRASH_CASES=500`, `just lazyfs`, and the GitHub probe. For each: date, commit, command, machine, duration, result;
 - `### Findings`: one row per audit item, `M2-1` to `M2-8`. Each row has the item, its test, how the test failed before the fix (the assertion message), the cause and the fix commit. The items are 1 (rotation), 1b (open), 2 (GC unlink), 3a (second fsync), 3b (discarded segment), 4 (size file), 5 (catalog errors) and 6 (unsynced directory entries), plus any R2.14 finding;
 - `### LazyFS and the shim`: what each one loses (from the probe), which findings each reproduces (run R2.12 step 3's pre-fix check per finding where it applies), and the shim bugs found, if any;
 - `### Unverified`: SQLite's WAL recovery after a failed commit fsync (R2.8), and anything else left open.
@@ -1155,9 +1155,9 @@ And what M2 closed: every local file call of the crate, statvfs included, goes t
 Commit per bug: `storage: <fix in imperative> (R2.14)`. A final docs commit: `docs: record the M2 runs (R2.14)`.
 
 1. Run these in the background, each with its output in a log file under the scratchpad:
-   - `LLMOBS_MODEL_CASES=5000 cargo test --release --workspace --all-features -- model_tests`, twice, each time with a fresh `PROPTEST_RNG_SEED` (print it);
-   - for each of the five groups, `LLMOBS_LOSSY_SEEDS=20 cargo test --workspace --all-features -- --ignored --exact crash_tests::every_<group>_hook_survives_a_lossy_crash`;
-   - `LLMOBS_HOOK_CRASH_CASES=500 cargo test --workspace --all-features -- --ignored --exact model_tests::hook_crash::every_model_hook_crash_reads_back` (R2.11);
+   - `CETRA_MODEL_CASES=5000 cargo test --release --workspace --all-features -- model_tests`, twice, each time with a fresh `PROPTEST_RNG_SEED` (print it);
+   - for each of the five groups, `CETRA_LOSSY_SEEDS=20 cargo test --workspace --all-features -- --ignored --exact crash_tests::every_<group>_hook_survives_a_lossy_crash`;
+   - `CETRA_HOOK_CRASH_CASES=500 cargo test --workspace --all-features -- --ignored --exact model_tests::hook_crash::every_model_hook_crash_reads_back` (R2.11);
    - `just lazyfs`, three times.
 2. **For each failure**, follow R1.8's procedure:
    1. Keep the reproducer: the proptest seed file (`crates/storage/proptest-regressions/model_tests/mod.txt`), the group, point and seed, or R2.11's case number.

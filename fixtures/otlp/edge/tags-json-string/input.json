@@ -12,7 +12,7 @@
               "endTimeUnixNano": "1767225591000000000",
               "attributes": [
                 {
-                  "key": "llmobs.tags",
+                  "key": "cetra.tags",
                   "value": {
                     "stringValue": "[\"alpha\",\"beta\",\"alpha\"]"
                   }

@@ -1,9 +1,9 @@
 # N — Packaging and release
 
-Implementation plan for track N: how llmobs is built, packaged, published and documented for
+Implementation plan for track N: how cetra is built, packaged, published and documented for
 self-hosting. It covers:
 
-- release archives of the `llmobs` binary (UI embedded) for Linux x86_64 and aarch64 and macOS arm64;
+- release archives of the `cetra` binary (UI embedded) for Linux x86_64 and aarch64 and macOS arm64;
 - a multi-arch Docker image on GHCR;
 - docker-compose files, with an optional local S3 (Garage);
 - a minimal Helm chart;
@@ -23,13 +23,13 @@ GitHub Actions. § Design below is the whole design. The decisions are `D-N-1`�
 
 **Prerequisites** (checked when this plan was written, 2026-11-14):
 
-- G is done: `llmobs serve` serves the embedded UI, `/healthz` and `/readyz`, and
+- G is done: `cetra serve` serves the embedded UI, `/healthz` and `/readyz`, and
   `just check-release` exists (D-G-18, D-G-37).
 - **N3 to N11 need track P's P1** (`docs/plans/p-entitlements/01-m1-open-core-license.md` § P1)
   on `main`. P1 adds the root `LICENSE` and `crates/server/src/ee/LICENSE`, which every archive
   and the image ship. Check before N3: `test -f LICENSE && test -f crates/server/src/ee/LICENSE`.
   If either file is missing, stop and report.
-- N11 has one paragraph that depends on track M's M7 (`llmobs admin reapply-deletions`). N11
+- N11 has one paragraph that depends on track M's M7 (`cetra admin reapply-deletions`). N11
   says what to write in each case.
 - The tools in § Local tools are installed. If one is missing, stop and report. Do not install
   system packages yourself.
@@ -53,12 +53,12 @@ GitHub Actions. § Design below is the whole design. The decisions are `D-N-1`�
 
 | Area | What | Phase |
 |---|---|---|
-| CLI | `llmobs health`: the container healthcheck | N1 |
+| CLI | `cetra health`: the container healthcheck | N1 |
 | Licences | `THIRD-PARTY-NOTICES.md` (Rust crates through cargo-about, web packages through pnpm) | N2 |
 | Archives | `just dist <target>`: static musl Linux and macOS arm64 archives, built with `cargo auditable`; binary smoke test | N3 |
 | Image | `deploy/docker/Dockerfile` (distroless, uid 65532, built from the archives) and its smoke test | N4 |
 | Compose | `deploy/compose/` (local volume; S3 overlay with Garage) and its smoke tests | N5 |
-| Helm | `deploy/helm/llmobs/` (one StatefulSet), lint, kubeconform, a kind install test | N6 |
+| Helm | `deploy/helm/cetra/` (one StatefulSet), lint, kubeconform, a kind install test | N6 |
 | Install | `deploy/install.sh` (`curl \| sh`) and its smoke test | N7 |
 | Versions | `CHANGELOG.md`, `just release-prep`, `just release-verify`, release notes, image tags | N8 |
 | CI | the `packaging` job in `ci.yml` (cheap checks, part of `ci-ok`) and `packaging.yml` (the full `just check-packaging` on `main` and weekly) | N9 |
@@ -67,12 +67,12 @@ GitHub Actions. § Design below is the whole design. The decisions are `D-N-1`�
 
 **Out:**
 
-- Online backups (`llmobs admin backup`), automatic pre-migration copies
-  (`meta.db.pre-<version>`), and `llmobs admin gc-orphans`. These are track N's M2, a later plan
+- Online backups (`cetra admin backup`), automatic pre-migration copies
+  (`meta.db.pre-<version>`), and `cetra admin gc-orphans`. These are track N's M2, a later plan
   (§ After M1).
 - Publishing the Python and TypeScript SDKs to PyPI and npm (§ Open items).
 - Windows and Intel macOS binaries, Homebrew, Docker Hub (D-N-1, D-N-2).
-- The cloud's cell provisioning. That is track Q, in the private repository `llmobs-control`,
+- The cloud's cell provisioning. That is track Q, in the private repository `cetra-control`,
   which deploys N's image (§ Requests for Q).
 - Self-monitoring (`/metrics`), which is D38's and comes just before release.
 - Native TLS. The docs say to use a reverse proxy; spec 12's optional `tls.cert`/`tls.key` is not
@@ -84,17 +84,17 @@ GitHub Actions. § Design below is the whole design. The decisions are `D-N-1`�
 
 | Artifact | Where | Built by |
 |---|---|---|
-| `llmobs-<version>-<target>.tar.gz` for `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, `aarch64-apple-darwin` | GitHub release | `just dist <target>` (N3) |
-| `SHA256SUMS`, `llmobs-<version>-<target>.spdx.json` (SBOM per binary), `install.sh`, the chart `llmobs-<version>.tgz` | GitHub release | N3, N7, N10 |
-| image `ghcr.io/<owner>/llmobs:<version>` (`linux/amd64`, `linux/arm64`) | GHCR | `deploy/docker/Dockerfile` (N4, N10) |
-| chart `oci://ghcr.io/<owner>/charts/llmobs:<version>` | GHCR | `helm package` and `helm push` (N10) |
+| `cetra-<version>-<target>.tar.gz` for `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, `aarch64-apple-darwin` | GitHub release | `just dist <target>` (N3) |
+| `SHA256SUMS`, `cetra-<version>-<target>.spdx.json` (SBOM per binary), `install.sh`, the chart `cetra-<version>.tgz` | GitHub release | N3, N7, N10 |
+| image `ghcr.io/<owner>/cetra:<version>` (`linux/amd64`, `linux/arm64`) | GHCR | `deploy/docker/Dockerfile` (N4, N10) |
+| chart `oci://ghcr.io/<owner>/charts/cetra:<version>` | GHCR | `helm package` and `helm push` (N10) |
 | build provenance attestations for the archives, the image and the chart | GitHub attestations (Sigstore) | `actions/attest-build-provenance` (N10) |
 
-`<owner>` is the GitHub repository owner in lower case (`sebastiencs`). The files in the
-repository write `ghcr.io/sebastiencs/...` literally. The D46 rename changes that name with the
+`<owner>` is the GitHub repository owner in lower case (`cetra-ai`). The files in the
+repository write `ghcr.io/cetra-ai/...` literally. The D46 rename changed that name with the
 others.
 
-Each archive contains one directory, `llmobs-<version>-<target>/`, with four files: `llmobs`,
+Each archive contains one directory, `cetra-<version>-<target>/`, with four files: `cetra`,
 `LICENSE` (the root MIT licence, naming the `ee` directories), `LICENSE-ELASTIC` (a copy of
 `crates/server/src/ee/LICENSE`) and `THIRD-PARTY-NOTICES.md` (D-N-8, D-N-16).
 
@@ -111,7 +111,7 @@ Each archive contains one directory, `llmobs-<version>-<target>/`, with four fil
   binary, so syft and vulnerability scanners can read it from the binary and the image. The
   release profile is the workspace's (`lto = "thin"`, `codegen-units = 1`, `debug =
   "line-tables-only"`).
-- The web UI is built first (`pnpm --dir web run build`). `dist.sh` then checks that `llmobs
+- The web UI is built first (`pnpm --dir web run build`). `dist.sh` then checks that `cetra
   version` prints `ui: embedded` and the expected version, and that a Linux binary is static.
 
 ### Image (D-N-3)
@@ -121,19 +121,19 @@ Each archive contains one directory, `llmobs-<version>-<target>/`, with four fil
 - Nothing is compiled in the Dockerfile: it copies the binary from a release archive, staged by
   `image-context.sh` under `target/dist/image/linux-<arch>/`. The image and the archives therefore
   hold the same binary, and a multi-arch build needs no emulation.
-- `/data` is owned by 65532, so a new named volume is writable. Also: `ENV LLMOBS_DATA_DIR=/data`,
-  `VOLUME /data`, `EXPOSE 8080 4317 4318`, `ENTRYPOINT ["/usr/local/bin/llmobs"]`,
+- `/data` is owned by 65532, so a new named volume is writable. Also: `ENV CETRA_DATA_DIR=/data`,
+  `VOLUME /data`, `EXPOSE 8080 4317 4318`, `ENTRYPOINT ["/usr/local/bin/cetra"]`,
   `CMD ["serve"]`.
-- `HEALTHCHECK` runs `llmobs health`, which asks `http://127.0.0.1:8080/readyz` (N1, D-N-4).
+- `HEALTHCHECK` runs `cetra health`, which asks `http://127.0.0.1:8080/readyz` (N1, D-N-4).
   None of the competitors ships a healthcheck, because distroless has no curl.
 - One variant only: no root and no debug image.
 
 ### docker-compose (D-N-9)
 
-- `deploy/compose/compose.yaml` runs `llmobs` with a named volume.
+- `deploy/compose/compose.yaml` runs `cetra` with a named volume.
 - Compose settings (image, bind address, ports, Garage secrets) live in `.env`. Server settings
-  live in `llmobs.env`, passed with `env_file` (`required: false`). These are two files because:
-  - the config loader rejects unknown `LLMOBS_*` variables (`LLMOBS_IMAGE` would fail);
+  live in `cetra.env`, passed with `env_file` (`required: false`). These are two files because:
+  - the config loader rejects unknown `CETRA_*` variables (`CETRA_IMAGE` would fail);
   - it treats an empty variable as a set value.
 - Ports bind to `127.0.0.1` by default.
 - The image tag defaults to the release version, never `latest`. `release-prep` rewrites it.
@@ -142,15 +142,15 @@ Each archive contains one directory, `llmobs-<version>-<target>/`, with four fil
   v2 to:
   - apply a layout;
   - import the access key from `.env`;
-  - create the bucket `llmobs`;
+  - create the bucket `cetra`;
   - give the key read and write on it.
 
-  The overlay points llmobs at `s3://llmobs` on `http://garage:3900`. MinIO no longer publishes
+  The overlay points cetra at `s3://cetra` on `http://garage:3900`. MinIO no longer publishes
   its image (`crates/storage/tests/s3.rs`), and Garage is what the user runs for the CI cache.
 
 ### Helm chart (D-N-10)
 
-- `deploy/helm/llmobs/`.
+- `deploy/helm/cetra/`.
 - One StatefulSet with `replicas: 1` fixed (no value), plus:
   - `podManagementPolicy: OrderedReady`;
   - a `volumeClaimTemplates` entry `data` mounted at `/data`, retained when the release is deleted;
@@ -160,28 +160,28 @@ Each archive contains one directory, `llmobs-<version>-<target>/`, with four fil
   - probes: startup and liveness on `/healthz` (the startup probe allows 10 minutes for WAL
     replay), readiness on `/readyz`;
   - `enableServiceLinks: false`, because Kubernetes' service-link variables for a Service named
-    `llmobs` (`LLMOBS_PORT=tcp://…`) are unknown `LLMOBS_*` keys the config loader rejects.
+    `cetra` (`CETRA_PORT=tcp://…`) are unknown `CETRA_*` keys the config loader rejects.
 - A Service (8080, 4317, 4318) and the headless Service the StatefulSet requires.
 - An optional Ingress for port 8080.
 - Configuration:
-  - `config` is rendered with `toToml` into a ConfigMap mounted at `/etc/llmobs/llmobs.toml`
-    (`LLMOBS_CONFIG`);
+  - `config` is rendered with `toToml` into a ConfigMap mounted at `/etc/cetra/cetra.toml`
+    (`CETRA_CONFIG`);
   - `env` lists extra variables;
   - `secret.existingSecret` and `secret.values` are passed with `envFrom`;
-  - `s3.*` becomes the `LLMOBS_OBJECT_STORE` and `LLMOBS_STORAGE__S3__*` variables and
+  - `s3.*` becomes the `CETRA_OBJECT_STORE` and `CETRA_STORAGE__S3__*` variables and
     `AWS_REGION`.
 - The chart never generates a secret. Phoenix regenerates its secret on every upgrade; we avoid
-  that. Without `LLMOBS_ENCRYPTION_KEY`, the server writes `/data/secret.key` on the volume.
+  that. Without `CETRA_ENCRYPTION_KEY`, the server writes `/data/secret.key` on the volume.
 - Chart version = app version = workspace version (D-N-5).
 
 ### Install script (D-N-15)
 
 - `deploy/install.sh` is POSIX `sh` and is published as a release asset:
-  `https://github.com/<owner>/llmobs/releases/latest/download/install.sh`.
-- It maps `uname` to a target, finds the version (`LLMOBS_VERSION`, else the redirect of
+  `https://github.com/<owner>/cetra/releases/latest/download/install.sh`.
+- It maps `uname` to a target, finds the version (`CETRA_VERSION`, else the redirect of
   `/releases/latest`), downloads the archive and `SHA256SUMS`, checks the checksum, and installs
-  to `LLMOBS_INSTALL_DIR` (default `~/.local/bin`).
-- `LLMOBS_DOWNLOAD_BASE` overrides the download URL. Tests use it to serve `target/dist` on
+  to `CETRA_INSTALL_DIR` (default `~/.local/bin`).
+- `CETRA_DOWNLOAD_BASE` overrides the download URL. Tests use it to serve `target/dist` on
   loopback.
 
 ### Versions, changelog, publication (D-N-5, D-N-6)
@@ -221,13 +221,13 @@ Each archive contains one directory, `llmobs-<version>-<target>/`, with four fil
 ### Licence notices (D-N-8)
 
 - `THIRD-PARTY-NOTICES.md` is generated at build time and never committed. It has two parts:
-  - the Rust crates of `llmobs-cli` for the three targets, from `cargo about generate` with
+  - the Rust crates of `cetra-cli` for the three targets, from `cargo about generate` with
     `tools/packaging/about.toml`;
   - the web packages, from `pnpm --dir web licenses list --prod --json` and
     `tools/packaging/js-notices.mjs`, which copies each package's licence file.
 - `about.toml` accepts the same licences as `deny.toml`'s `[licenses]` allow-list (P1). Workspace
   crates are skipped (`private.ignore`); `LICENSE` covers them.
-- The archives and the image's `/usr/share/doc/llmobs/` carry `LICENSE`, `LICENSE-ELASTIC` and the
+- The archives and the image's `/usr/share/doc/cetra/` carry `LICENSE`, `LICENSE-ELASTIC` and the
   notices. The `ee` code is compiled into every artifact and is dormant without a licence key
   (D172).
 
@@ -240,10 +240,10 @@ Each archive contains one directory, `llmobs-<version>-<target>/`, with four fil
   3. posts one OTLP/JSON span, with the current time, to `<otlp_http_url>/v1/traces` with
      `Authorization: Bearer <key>`;
   4. polls `GET /api/v1/projects/current/traces/<trace_id>` until the trace's name is
-     `llmobs-smoke`.
+     `cetra-smoke`.
 
-  The server is started with `LLMOBS_INIT_*` and the key
-  `sk-llmobs-SMOKE0123456789ABCDEFGHIJKLMNOPQ`.
+  The server is started with `CETRA_INIT_*` and the key
+  `sk-cetra-SMOKE0123456789ABCDEFGHIJKLMNOPQ`.
 - The launchers:
   - `binary-smoke.sh` runs a binary on free loopback ports;
   - `image-smoke.sh` runs the image with a fresh volume and checks uid 65532 and the Docker
@@ -270,20 +270,20 @@ Each archive contains one directory, `llmobs-<version>-<target>/`, with four fil
 ### Backups and upgrades (D-N-11, D-N-12)
 
 - Backups in M1 are a documented **cold snapshot**:
-  1. stop llmobs (it drains and flushes, ≤ 60 s);
+  1. stop cetra (it drains and flushes, ≤ 60 s);
   2. copy the whole data directory (`meta.db` and `catalog.db` together, `wal/`, `secret.key`,
      and `objects/` in local mode);
   3. in S3 mode, also copy the bucket prefix during the same stop;
-  4. start llmobs.
+  4. start cetra.
 - Restore:
-  1. stop llmobs;
+  1. stop cetra;
   2. keep the current data directory;
   3. put the backup in place;
   4. in S3 mode, sync the bucket back with `--delete`;
-  5. start llmobs;
-  6. `llmobs admin reapply-deletions --from <kept dir>` (D-M-9), once track M's M7 is in; N11
+  5. start cetra;
+  6. `cetra admin reapply-deletions --from <kept dir>` (D-M-9), once track M's M7 is in; N11
      writes the docs for either case.
-- The online `llmobs admin backup` of spec 12 (S13) is N's M2.
+- The online `cetra admin backup` of spec 12 (S13) is N's M2.
 - Upgrades:
   - migrations run forward-only at start;
   - no downgrade: restore the backup taken before the upgrade;
@@ -296,10 +296,10 @@ Each archive contains one directory, `llmobs-<version>-<target>/`, with four fil
 ```
 deploy/docker/Dockerfile                  the image                                    (N4)
 .dockerignore                             build context = target/dist/image only      (N4)
-deploy/compose/compose.yaml               llmobs + volume                              (N5)
+deploy/compose/compose.yaml               cetra + volume                              (N5)
 deploy/compose/compose.s3.yaml            + Garage, garage-init                        (N5)
-deploy/compose/{garage.toml,garage-init.sh,llmobs.env.example,.env.example}            (N5)
-deploy/helm/llmobs/                       Chart.yaml, values.yaml, README.md, templates/, ci/  (N6)
+deploy/compose/{garage.toml,garage-init.sh,cetra.env.example,.env.example}            (N5)
+deploy/helm/cetra/                       Chart.yaml, values.yaml, README.md, templates/, ci/  (N6)
 deploy/install.sh                         curl | sh installer                          (N7)
 tools/packaging/about.toml, about.hbs     cargo-about config and template              (N2)
 tools/packaging/js-notices.mjs            web licence notices                          (N2)
@@ -326,7 +326,7 @@ CHANGELOG.md                                                                    
 .github/workflows/release.yml             the release workflow                         (N10)
 .github/workflows/packaging.yml           full packaging checks on main and weekly      (N9, D-N-13)
 docs/self-hosting/*.md                    user docs                                    (N11)
-crates/cli/src/health.rs                  llmobs health                                (N1)
+crates/cli/src/health.rs                  cetra health                                (N1)
 ```
 
 N edits only these files plus `justfile`, `AGENTS.md`, `.gitignore`, `biome.json`,
@@ -337,7 +337,7 @@ Nothing else in `crates/`, `web/` or `sdks/` changes.
 
 | # | File | Adds | Needs |
 |---|---|---|---|
-| N1 | [`01-health.md`](01-health.md) | `llmobs health` | — |
+| N1 | [`01-health.md`](01-health.md) | `cetra health` | — |
 | N2 | [`02-notices.md`](02-notices.md) | third-party licence notices | — |
 | N3 | [`03-dist.md`](03-dist.md) | release archives, smoke test, checksums | N1, N2, P's P1 |
 | N4 | [`04-image.md`](04-image.md) | Docker image | N3 |
@@ -436,17 +436,17 @@ Each sub-phase lists the tools it needs. If one is missing, stop and report whic
 2. Tag and push:
 
    ```bash
-   git fetch origin && git tag -a v0.1.0-rc.1 -m 'llmobs 0.1.0-rc.1' origin/main && git push origin v0.1.0-rc.1
+   git fetch origin && git tag -a v0.1.0-rc.1 -m 'cetra 0.1.0-rc.1' origin/main && git push origin v0.1.0-rc.1
    ```
 
 3. Watch the Release workflow. When it is done, check:
    - the **draft** pre-release on GitHub, with 3 archives, 3 SBOMs, `SHA256SUMS`,
-     `llmobs-0.1.0-rc.1.tgz` and `install.sh`;
-   - `ghcr.io/sebastiencs/llmobs:0.1.0-rc.1` with both platforms
+     `cetra-0.1.0-rc.1.tgz` and `install.sh`;
+   - `ghcr.io/cetra-ai/cetra:0.1.0-rc.1` with both platforms
      (`docker buildx imagetools inspect`);
-   - `oci://ghcr.io/sebastiencs/charts/llmobs` version `0.1.0-rc.1`;
+   - `oci://ghcr.io/cetra-ai/charts/cetra` version `0.1.0-rc.1`;
    - `gh attestation verify` on one archive, the image and the chart.
-4. On GitHub → Packages, make sure `llmobs` and `charts/llmobs` are **private**. Leave them so
+4. On GitHub → Packages, make sure `cetra` and `charts/cetra` are **private**. Leave them so
    until the rename.
 5. Delete the draft release, or keep it as a record. Tags of drafts stay.
 
@@ -455,42 +455,42 @@ Make the two GHCR packages public, then publish. That release is not a draft.
 
 ## Requests for Q
 
-Track Q (the control plane, `llmobs-control`) deploys N's image to cells; the first cell is one
+Track Q (the control plane, `cetra-control`) deploys N's image to cells; the first cell is one
 Hetzner server with Hetzner Object Storage (D170). What N gives Q, and what Q needs to know:
 
-1. **Image:** `ghcr.io/sebastiencs/llmobs:<version>`, multi-arch.
+1. **Image:** `ghcr.io/cetra-ai/cetra:<version>`, multi-arch.
    - Deploy by digest (`@sha256:…`), verified with
-     `gh attestation verify oci://ghcr.io/sebastiencs/llmobs@sha256:… --repo sebastiencs/llmobs`.
+     `gh attestation verify oci://ghcr.io/cetra-ai/cetra@sha256:… --repo cetra-ai/cetra`.
    - While the package is private (until D46), pull with a token that has `read:packages`.
 2. **Runtime contract:**
    - uid/gid 65532; the data volume at `/data`, owned by 65532;
    - ports 8080, 4317 and 4318;
    - `GET /healthz` (process up) and `GET /readyz` (meta.db and WALs);
-   - `llmobs health` inside the container;
+   - `cetra health` inside the container;
    - SIGTERM drains (≤ 20 s) and flushes (≤ 30 s): allow 60 s;
    - one process per data directory (`flock` on `/data/LOCK`): never two containers on one
      volume;
    - read-only root filesystem works.
-3. **Configuration** is only `LLMOBS_*` and `AWS_*` variables, or a TOML file at `LLMOBS_CONFIG`.
-   - For a cell: `LLMOBS_OBJECT_STORE=s3://<bucket>/<prefix>`,
-     `LLMOBS_STORAGE__S3__ENDPOINT=https://<location>.your-objectstorage.com`,
-     `AWS_REGION=<location>`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `LLMOBS_PUBLIC_URL`.
-   - The encryption key comes from `LLMOBS_ENCRYPTION_KEY` (recommended for cells, kept in Q's
+3. **Configuration** is only `CETRA_*` and `AWS_*` variables, or a TOML file at `CETRA_CONFIG`.
+   - For a cell: `CETRA_OBJECT_STORE=s3://<bucket>/<prefix>`,
+     `CETRA_STORAGE__S3__ENDPOINT=https://<location>.your-objectstorage.com`,
+     `AWS_REGION=<location>`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `CETRA_PUBLIC_URL`.
+   - The encryption key comes from `CETRA_ENCRYPTION_KEY` (recommended for cells, kept in Q's
      secret store) or `/data/secret.key`.
-   - Never set an `LLMOBS_*` variable to an empty string, and never let an unknown one in. On
-     Kubernetes, a Service named `llmobs` makes `LLMOBS_PORT` and similar service-link
+   - Never set a`CETRA_*` variable to an empty string, and never let an unknown one in. On
+     Kubernetes, a Service named `cetra` makes `CETRA_PORT` and similar service-link
      variables appear: set `enableServiceLinks: false`, as the chart does.
 4. **Backups:** M1 gives only cold snapshots (docs/self-hosting/backup.md), i.e. a minute of
-   downtime per cell. Q's design asks for two things: R9, `llmobs admin backup [--meta-only] --to
-   <dir>` run with `docker compose exec` while `llmobs serve` runs, writing `meta.db` and
+   downtime per cell. Q's design asks for two things: R9, `cetra admin backup [--meta-only] --to
+   <dir>` run with `docker compose exec` while `cetra serve` runs, writing `meta.db` and
    `catalog.db` at the top of `<dir>`; and R10, a longer object retention for meta-only backups. Both are N's M2 (§ After M1,
-   `docs/plans/n-packaging/m2/`), not this plan: R9 is `llmobs admin backup` through the control
+   `docs/plans/n-packaging/m2/`), not this plan: R9 is `cetra admin backup` through the control
    socket `<data_dir>/admin.sock` (D-N-17), and R10 is `storage.gc.grace` allowed up to `30d`, which
    Q sets to `8d` (D-N-20). There is no `storage.gc.object_retention` key, and the config loader
    rejects unknown keys. Q's M1 phases 10–11 (backups, restore drill) wait for M2.
 
 Q's R8 (the official image) is this plan's N4 and N10. Two differences from Q's interim image
-(`llmobs-control/deploy/image/Dockerfile`):
+(`cetra-control/deploy/image/Dockerfile`):
 
 - **The user is uid 65532, not 10001.** Volumes written by the interim image need
   `chown -R 65532:65532` before they switch.
@@ -510,15 +510,15 @@ The image's tags are release builds only, so they trust only the compiled-in lic
 - **P:** N3 needs P1's `LICENSE` files. `about.toml` copies P1's `deny.toml` allow-list, so a
   licence that P adds there must also go in `tools/packaging/about.toml`. If a release build fails
   in `cargo about` on a new licence, add it to both.
-- **M:** N11's restore section uses M7's `llmobs admin reapply-deletions` (D-M-9). Spec 12 already
+- **M:** N11's restore section uses M7's `cetra admin reapply-deletions` (D-M-9). Spec 12 already
   says so.
 - **Q:** § Requests for Q. Q's own repository holds its deploy tooling. N's chart and compose
   files are for self-hosters, and Q may use either.
 
 ## After M1 (N M2)
 
-Planned in [`m2/`](m2/00-design.md): online `llmobs admin backup` through a control socket,
-`gc.grace` up to 30 days for S3-mode metadata backups, `llmobs admin gc-orphans`, and pre-migration
+Planned in [`m2/`](m2/00-design.md): online `cetra admin backup` through a control socket,
+`gc.grace` up to 30 days for S3-mode metadata backups, `cetra admin gc-orphans`, and pre-migration
 copies of `meta.db` and `catalog.db` (D-N-17–D-N-24).
 
 ## N M3

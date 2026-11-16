@@ -113,8 +113,8 @@ Local-mode storage from the test helpers; `dest` is a temp directory on the same
 ## Verify
 
 ```bash
-cargo test -p llmobs-storage --all-features copy_objects
-cargo test -p llmobs-storage --all-features a_copied_backup_opens_and_answers_queries
+cargo test -p cetra-storage --all-features copy_objects
+cargo test -p cetra-storage --all-features a_copied_backup_opens_and_answers_queries
 just check
 ```
 

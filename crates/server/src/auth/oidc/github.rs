@@ -5,7 +5,7 @@
 //! GitHub requires.
 #![cfg_attr(not(test), allow(dead_code))]
 
-use llmobs_core::names::PRODUCT;
+use cetra_core::names::PRODUCT;
 use oauth2::basic::BasicClient;
 use oauth2::{
     AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EndpointNotSet, EndpointSet,

@@ -118,7 +118,7 @@ export function onlyProvider(config: Schema<"AuthConfig">): Schema<"AuthProvider
 }
 ```
 
-`lib/only-provider.test.ts` (import the fixture as `login.test.tsx` does, `../../../fixtures/api/static/auth-config.json`, and build configs with spreads; `const CLOUD = { id: "oidc:cloud", display_name: "llmobs Cloud" };`):
+`lib/only-provider.test.ts` (import the fixture as `login.test.tsx` does, `../../../fixtures/api/static/auth-config.json`, and build configs with spreads; `const CLOUD = { id: "oidc:cloud", display_name: "cetra Cloud" };`):
 - password off, discovery off, `[CLOUD]` → `CLOUD`;
 - password on, `[CLOUD]` → `undefined`;
 - password off, discovery on, `[CLOUD]` → `undefined`;
@@ -218,7 +218,7 @@ In `web/src/components/user-menu.test.tsx`, in the test with `await user.click(s
 
 ### 6. The reset page (`routes/reset.tsx`)
 
-1. In `ResetPage`, the `if (!config.password_enabled) { return (…disabled…) }` block applies only without a token. Change its condition to `if (!config.password_enabled && token === undefined)` and its `title` to the constant `"Reset your password"`. A reset link (from `llmobs admin reset-password` or the admin users page) always shows the form; the server accepts it for instance admins only (D-S-3), and a 403 already shows "Password sign-in is disabled on this server." through `resetFormError`.
+1. In `ResetPage`, the `if (!config.password_enabled) { return (…disabled…) }` block applies only without a token. Change its condition to `if (!config.password_enabled && token === undefined)` and its `title` to the constant `"Reset your password"`. A reset link (from `cetra admin reset-password` or the admin users page) always shows the form; the server accepts it for instance admins only (D-S-3), and a 403 already shows "Password sign-in is disabled on this server." through `resetFormError`.
 2. Pass `passwordEnabled={config.password_enabled}` to `NewPassword`, whose props become `{ token, passwordEnabled }: { token: string; passwordEnabled: boolean }`. In `NewPassword`, add `const loginSearch = passwordEnabled ? {} : { password: true as const };` and give every `<Link to="/login" …>` inside `NewPassword` (the done view's footer link and its "Sign in" button link, the form's footer link, the SSO "Go to sign in" link) the prop `search={loginSearch}`, so an admin is sent to the password form instead of the provider.
 3. `reset.test.tsx`: replace `explains when password sign-in is disabled with a token` with `shows the reset form with a token when password sign-in is disabled`: `withConfig({ password_enabled: false })`, `/reset?token=tok123` shows the "New password" field (`{ selector: "input#password" }`); a reset answered 204 (override `http.post("/api/auth/password/reset", () => new HttpResponse(null, { status: 204 }))`) shows "Password updated", and the "Sign in" link's `href` starts with `/login?` and contains `password=` (assert with `expect(link.getAttribute("href")).toMatch(/^\/login\?.*password=/)`: the router decides how it writes the flag); and a reset answered `problemResponse(403, "forbidden")` shows the alert "Password sign-in is disabled on this server.". `explains when password sign-in is disabled` (no token) stays as it is.
 
@@ -246,7 +246,7 @@ Replace `<dd>{data.password_enabled ? "Enabled" : "Disabled"}</dd>` with `<dd>{d
 The file already imports `setExternalNavigator` from `@/lib/external-navigation`; keep that import. Add at the top, after the existing helpers:
 
 ```ts
-const CLOUD = { id: "oidc:cloud", display_name: "llmobs Cloud" };
+const CLOUD = { id: "oidc:cloud", display_name: "cetra Cloud" };
 
 function onlyCloud(overrides: Partial<typeof authConfig> = {}) {
   withConfig({ password_enabled: false, providers: [CLOUD], ...overrides });
@@ -272,9 +272,9 @@ function recordNavigation() {
 
 (The file already resets the navigator in `afterEach`.) Tests:
 
-1. `starts the only provider at once, keeping the redirect`: `signedOut(); onlyCloud(); const { replaced, navigated } = recordNavigation();` render `/login?redirect=%2Facme%2Fsupport-bot%2Ftraces`; `await waitFor(() => expect(replaced).toEqual(["/api/auth/authorize/oidc%3Acloud?redirect=%2Facme%2Fsupport-bot%2Ftraces"]))`; `navigated` is empty; the text `Redirecting to llmobs Cloud…` is shown; the link "Continue with llmobs Cloud" is there; no "Email" field.
+1. `starts the only provider at once, keeping the redirect`: `signedOut(); onlyCloud(); const { replaced, navigated } = recordNavigation();` render `/login?redirect=%2Facme%2Fsupport-bot%2Ftraces`; `await waitFor(() => expect(replaced).toEqual(["/api/auth/authorize/oidc%3Acloud?redirect=%2Facme%2Fsupport-bot%2Ftraces"]))`; `navigated` is empty; the text `Redirecting to cetra Cloud…` is shown; the link "Continue with cetra Cloud" is there; no "Email" field.
 2. `shows the instance admins' password form on password=1`: `signedOut(); onlyCloud(); const { replaced } = recordNavigation(); const bodies = loginSucceeds();` render `/login?password=1`; the text `Password sign-in is for instance admins.` is shown; `await fillAndSubmit(user, "root@example.com", "correct horse battery")`; `await waitFor(() => expect(bodies).toEqual([{ email: "root@example.com", password: "correct horse battery" }]))`; `replaced` is empty; no "Forgot password?" link.
-3. `shows a provider error instead of starting the provider again`: `onlyCloud()`, `/login?error=signup_closed`: the alert has `oauthErrorMessage("signup_closed")`; the "Continue with llmobs Cloud" link is there; `replaced` is empty.
+3. `shows a provider error instead of starting the provider again`: `onlyCloud()`, `/login?error=signup_closed`: the alert has `oauthErrorMessage("signup_closed")`; the "Continue with cetra Cloud" link is there; `replaced` is empty.
 4. `does not start the provider right after signing out`: `onlyCloud()`, `/login?signed_out=1`: the status text `You're signed out.`; the provider link; `replaced` is empty.
 5. `links instance admins to the password form`: `onlyCloud()`, `/login?error=provider_error`; click the link "Instance admin? Sign in with a password"; `await screen.findByLabelText("Password")`; `await waitFor(() => expect(router.state.location.search).toEqual({ password: true }))` (the link drops `error`); then `expect(replaced).toEqual([])`.
 5b. `shows the password form on password=1 under org SSO`: `signedOut(); onlyCloud({ sso_discovery: true }); const { replaced } = recordNavigation();` render `/login?password=1`: the "Password" field shows, the "Continue" button does not, `replaced` is empty (D-P-60 with D-S-4).

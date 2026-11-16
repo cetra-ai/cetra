@@ -44,7 +44,7 @@ M2 adds no routes beyond the twelve above.
 | D-G-17 | `fixtures/api` example responses come from the real handlers. |
 | D-G-23 | The read operations declare `422` and `503`. Media declares `503`. A new problem code, `range_not_satisfiable` (416), is added. |
 | D-G-24 | Media ranges: the server reads the whole blob (at most `media.max_bytes`) and slices it. One `bytes=` range is honoured; anything else is served as `200` with the whole blob. |
-| D-G-25 | The example generator is a unit test inside `llmobs-server`. `get_schema` is compared with `static/schema.json`. `get_metrics` is generated over a fixed window and listed with an empty query. |
+| D-G-25 | The example generator is a unit test inside `cetra-server`. `get_schema` is compared with `static/schema.json`. `get_metrics` is generated over a fixed window and listed with an empty query. |
 | D94 | Query error codes: `invalid_filter`, `query_failed`, `query_timeout`, `query_too_large`, `busy`. Messages go to the caller and are never logged. |
 | D101 | Read endpoints build their context without a window. A2's `ListScope` applies the request's window. |
 | D154 | `?around=` goes through `QueryOptions { around }`. |
@@ -60,7 +60,7 @@ No new crate. In `crates/server/Cargo.toml`, move `arrow.workspace = true` from 
 - **Errors and panics.** No `unwrap()`/`expect()` outside tests (AGENTS.md). Errors are `thiserror` enums; `ApiError` is the handler error.
 - **Privacy.** A handler never logs filter text, search text, a payload or an attribute value. Log ids, counts and `RunError::kind()` only.
 - **Tests.** HTTP tests build a `TestApp`, call `seed()`, call `load_example_dataset` (G2.1), and send requests with `.header("cookie", &seeded.cookie)`. They use `#[tokio::test(flavor = "multi_thread")]` like `routes/otlp.rs`. Assert exact values from § Dataset facts.
-- **Names.** Storage types share names with API types (`TraceSort`, `SortOrder`, `MetricsGroupBy`, `Kpi`, `ViewName`, `Page`). In server code, refer to storage items through `llmobs_storage::…` (or `use llmobs_storage as storage;` and `storage::TraceSort`), never with a bare `use` that shadows the API type.
+- **Names.** Storage types share names with API types (`TraceSort`, `SortOrder`, `MetricsGroupBy`, `Kpi`, `ViewName`, `Page`). In server code, refer to storage items through `cetra_storage::…` (or `use cetra_storage as storage;` and `storage::TraceSort`), never with a bare `use` that shadows the API type.
 - **Large futures.** If clippy reports `large_futures` on an A2 call, wrap the future in `Box::pin(...)` and add no `#[allow]`.
 - **STOP rules.** Stop and report instead of improvising when:
   - an A2 function's behaviour differs from what this plan states (for example a column is missing or has another type);
@@ -103,7 +103,7 @@ crates/cli/src/main.rs                8 MiB worker stacks (G2.1)
 
 ### A2 outputs
 
-All read functions are re-exported at the crate root: `llmobs_storage::{trace_list, trace_detail, span_list, span_detail, session_list, session_detail, user_list, user_detail, score_list, latest_scores, metrics}`. The request types are there too. Each function takes `&QueryContext` and enforces its own `timeout` (it returns `RunError::Timeout`).
+All read functions are re-exported at the crate root: `cetra_storage::{trace_list, trace_detail, span_list, span_detail, session_list, session_detail, user_list, user_detail, score_list, latest_scores, metrics}`. The request types are there too. Each function takes `&QueryContext` and enforces its own `timeout` (it returns `RunError::Timeout`).
 
 | Function | Returns | Columns used by G |
 |---|---|---|
@@ -123,7 +123,7 @@ All read functions are re-exported at the crate root: `llmobs_storage::{trace_li
 
 ### Column → field tables
 
-The converter reads columns **by name**, never by position. "Cast" means: when the column's type differs from the one listed, convert it with `arrow::compute::cast` first. Use the `llmobs_core::schema::{spans,traces,scores}` constants for names. Columns that only views add (`duration_ns` on traces and sessions, `trace_count`, `session_count`, `first_seen`, `last_seen`, `target_key`) get local `const`s in `convert.rs`.
+The converter reads columns **by name**, never by position. "Cast" means: when the column's type differs from the one listed, convert it with `arrow::compute::cast` first. Use the `cetra_core::schema::{spans,traces,scores}` constants for names. Columns that only views add (`duration_ns` on traces and sessions, `trace_count`, `session_count`, `first_seen`, `last_seen`, `target_key`) get local `const`s in `convert.rs`.
 
 **`TraceSummary`** ← traces view:
 
@@ -191,7 +191,7 @@ A null required input is a `ConvertError::Null`. `numeric` and `boolean` need `v
 
 **Lists and maps.**
 - A list is read with `ListArray::value(row)`, cast to `Utf8`, and null items are skipped.
-- A map is read with `MapArray::value(row)`, a struct of `(keys, values)` cast to `Utf8`. An entry whose value is null is skipped: `llmobs_core::batch` never writes one.
+- A map is read with `MapArray::value(row)`, a struct of `(keys, values)` cast to `Utf8`. An entry whose value is null is skipped: `cetra_core::batch` never writes one.
 
 ### Dataset facts
 
@@ -203,7 +203,7 @@ A null required input is a `ConvertError::Null`. `numeric` and `boolean` need `v
 | 2 | `21` root, `22` | 10:05:00 → 10:05:02.5 | `sess-001`, `user-42` | production | tags `beta`, `refund`; cost 0.00246 |
 | 3 | `31` root, `32` | 10:10:00 → 10:10:00.8 | `sess-002`, `user-7` | production | both spans `error`; no cost |
 | 4 | `41` root, `42`, `43` | 10:20:00 → 10:20:03 | —, `user-42` | staging | `43` input has a media `uri` part; cost 0.00133 |
-| 5 | `51` root, `52` | 10:01:00 → 10:01:01.5 | `sess-001`, `user-42` | `llmobs-eval` | excluded by default |
+| 5 | `51` root, `52` | 10:01:00 → 10:01:01.5 | `sess-001`, `user-42` | `cetra-eval` | excluded by default |
 | 6 | `61` only, parent `b1000000000000ff` missing | 10:30:00 → 10:30:02 | — | production | no root; one detached span; cost 0.0027 |
 
 Scores (`01900000-0000-7000-8000-000000000301` … `…0306`; created at):
@@ -246,7 +246,7 @@ Expected results:
    ```rust
    /// A2 refused or failed the query (D94). The message goes to the caller and is never logged.
    #[error("query error")]
-   Query(#[source] llmobs_storage::RunError),
+   Query(#[source] cetra_storage::RunError),
    ```
    `problem()` maps it:
    | `RunError` | Problem |
@@ -264,8 +264,8 @@ Expected results:
 
    Never log the error's message or source.
 2. **Conversions.**
-   - `impl From<llmobs_storage::RunError> for ApiError` → `ApiError::Query(error)`.
-   - `impl From<llmobs_storage::error::QueryError> for ApiError`:
+   - `impl From<cetra_storage::RunError> for ApiError` → `ApiError::Query(error)`.
+   - `impl From<cetra_storage::error::QueryError> for ApiError`:
      - `Busy` → `ApiError::Unavailable { detail: "too many queries are running" }`;
      - `DataFusion(e)` → `ApiError::Query(RunError::Internal(e))`.
 3. **`routes/read.rs`.** Create it, `pub(crate) mod read;` in `routes/mod.rs`. Contents:
@@ -290,11 +290,11 @@ Expected results:
        -> Result<ListScope, ApiError>
 
    /// `Limit` as A2's `usize`. `Limit` is already 1–1000.
-   pub(crate) fn page_limit(limit: Limit) -> usize   // usize::try_from(limit.get()).unwrap_or(llmobs_storage::MAX_PAGE)
+   pub(crate) fn page_limit(limit: Limit) -> usize   // usize::try_from(limit.get()).unwrap_or(cetra_storage::MAX_PAGE)
 
-   pub(crate) fn sort_order(order: SortOrder) -> llmobs_storage::SortOrder   // Asc → Asc, Desc → Desc
+   pub(crate) fn sort_order(order: SortOrder) -> cetra_storage::SortOrder   // Asc → Asc, Desc → Desc
    ```
-   `QueryOptions` is `llmobs_storage::QueryOptions`. `TimeWindow`, `ListScope` and `QueryContext` are `llmobs_storage::…`.
+   `QueryOptions` is `cetra_storage::QueryOptions`. `TimeWindow`, `ListScope` and `QueryContext` are `cetra_storage::…`.
 4. **Worker stacks.** In `crates/cli/src/main.rs`, add `.thread_stack_size(8 * 1024 * 1024)` to the `new_multi_thread()` builder, with the comment `// A2 asks for at least 8 MiB per worker: DataFusion plans recursively (A2 plan § Boundaries).`
 5. **Example dataset loader.** In `test_support/mod.rs`, add to `impl TestApp`:
    ```rust
@@ -302,7 +302,7 @@ Expected results:
    /// `fixtures/api/media`. Every row's `project_id` is set to `project`.
    pub(crate) async fn load_example_dataset(&self, project: ProjectId)
    ```
-   - **Spans.** Read `concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/api/dataset/spans.json")` as `Vec<Span>`. Set each `project_id`, build the batch with `llmobs_core::batch::spans_to_record_batch`, and call `self.state.storage.append_spans(project, batch)`.
+   - **Spans.** Read `concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/api/dataset/spans.json")` as `Vec<Span>`. Set each `project_id`, build the batch with `cetra_core::batch::spans_to_record_batch`, and call `self.state.storage.append_spans(project, batch)`.
    - **Scores.** Do the same with `scores.json`, `scores_to_record_batch` and `append_scores`.
    - **Media.** For every `*.png` in `fixtures/api/media`, the file stem is the hex SHA-256. Call `put_media(project, MediaBlob { sha256: <hex decoded>, mime_type: "image/png".to_owned(), bytes: Bytes::from(file) })`.
    - `unwrap()` is fine here: this is test code.
@@ -316,7 +316,7 @@ Expected results:
   - `from == to` is `Err` (400 `bad_request`).
 - In `test_support` (a `#[tokio::test(flavor = "multi_thread")]` in `routes/read.rs`'s tests):
   - `seed()`, `load_example_dataset(seeded.project.id)`, then `open_query`;
-  - `llmobs_storage::trace_list` with `filter: None`, `search: None`, the default scope, `TraceSort::StartTime`, `Desc`, `limit: 50`, `cursor: None` and `READ_TIMEOUT` returns 5 rows;
+  - `cetra_storage::trace_list` with `filter: None`, `search: None`, the default scope, `TraceSort::StartTime`, `Desc`, `limit: 50`, `cursor: None` and `READ_TIMEOUT` returns 5 rows;
   - its `trace_id` column, read with `as_string::<i32>()`, is `["a1…6", "a1…4", "a1…3", "a1…2", "a1…1"]`. This checks A2 against § Dataset facts before G writes any converter.
 
 ### Done when
@@ -431,8 +431,8 @@ Expected results:
    Each returns `Result<error::Json<…>, ApiError>`.
    - **`list_traces`:**
      - `scope = list_scope(from, to, include_eval, include_experiments)?` and `ctx = open_query(&state, id, None).await?`;
-     - call `llmobs_storage::trace_list(&ctx, TraceListRequest { filter: params.filter.as_deref(), search: params.search.as_deref(), scope, sort, order: sort_order(params.order), limit: page_limit(params.limit), cursor: params.cursor.as_deref(), timeout: READ_TIMEOUT })`;
-     - `sort` maps `TraceSort` variant by variant to `llmobs_storage::TraceSort`;
+     - call `cetra_storage::trace_list(&ctx, TraceListRequest { filter: params.filter.as_deref(), search: params.search.as_deref(), scope, sort, order: sort_order(params.order), limit: page_limit(params.limit), cursor: params.cursor.as_deref(), timeout: READ_TIMEOUT })`;
+     - `sort` maps `TraceSort` variant by variant to `cetra_storage::TraceSort`;
      - then `trace_summaries`, `attach_trace_scores`, and answer `Page { data, next_cursor: page.next_cursor }`.
    - **`list_spans`.** Same shape with `SpanListRequest`, `SpanSort` and `span_summaries`. No scores.
    - **`get_trace`:**
@@ -555,7 +555,7 @@ In `routes/users.rs`:
 1. **`convert.rs`.** `scores(batches, project_id: ProjectId) -> Result<Vec<Score>, ConvertError>`, per the `Score` table.
 2. **`convert.rs` (infallible).** These two map storage types to API types variant by variant; the variant names are identical (`LatencyP95` → `LatencyP95`).
    ```rust
-   pub(crate) fn metrics_response(data: llmobs_storage::MetricsData, from: i64, to: i64,
+   pub(crate) fn metrics_response(data: cetra_storage::MetricsData, from: i64, to: i64,
        group_by: Option<api::metrics::MetricsGroupBy>) -> MetricsResponse
    pub(crate) fn schema_response() -> SchemaResponse
    ```
@@ -566,7 +566,7 @@ In `routes/users.rs`:
      - `ModelUsageRow` → `ModelUsage`;
      - `bucket_ns` is copied, and `group_by` is echoed.
    - **`schema_response`:**
-     - `view_catalog()` → `ViewSchema`, mapping `llmobs_storage::ViewName` to `api::schema::ViewName` (`ExperimentItems` and `DatasetItems` included) and `ColumnKind` to `ColumnType`;
+     - `view_catalog()` → `ViewSchema`, mapping `cetra_storage::ViewName` to `api::schema::ViewName` (`ExperimentItems` and `DatasetItems` included) and `ColumnKind` to `ColumnType`;
      - `function_catalog()` → `FunctionSchema { name, signature, description, in_filter, in_sql }`;
      - strings are `to_owned()`.
 3. **`routes/scores.rs`.** `GET /api/v1/projects/{project}/scores` → `list_scores`. Build `ScoreListRequest`:
@@ -601,9 +601,9 @@ In `routes/users.rs`:
    - otherwise:
      - `window = TimeWindow::new(params.from.ns(), params.to.ns())?`;
      - `ctx = open_query(..)`;
-     - call `llmobs_storage::metrics(&ctx, MetricsRequest { window, bucket, filter: params.filter.as_deref(), group_by, include_eval, include_experiments, timeout: READ_TIMEOUT })`;
+     - call `cetra_storage::metrics(&ctx, MetricsRequest { window, bucket, filter: params.filter.as_deref(), group_by, include_eval, include_experiments, timeout: READ_TIMEOUT })`;
      - `bucket` is `MetricsBucket::Auto` → `Bucket::Auto`, or a width → `Bucket::Fixed(BucketWidth::…)` with the same name (`M1` → `M1`, …, `D1` → `D1`);
-     - `group_by` maps to `llmobs_storage::MetricsGroupBy`;
+     - `group_by` maps to `cetra_storage::MetricsGroupBy`;
      - convert with `metrics_response`, `put` the result, and answer it.
    - Errors are not cached.
 8. **Wiring.** Register the three route lists in `access::routes()` after `users`. Every route uses `ProjectPerm::View`.
@@ -703,7 +703,7 @@ In `routes/users.rs`:
   - **Part.** `Range: bytes=0-9` → 206, `content-range` is `bytes 0-9/70`, and the body is the first 10 bytes.
   - **Unsatisfiable.** `Range: bytes=70-` → 416, `content-range` is `bytes */70`, and the problem `code` is `range_not_satisfiable`.
   - **Not found.** An uppercase sha → 404. An unknown sha (64 × `0`) → 404.
-- **Contract.** `cargo test -p llmobs-server --test openapi` passes after `just openapi`. The diff of `openapi.json` shows only these changes:
+- **Contract.** `cargo test -p cetra-server --test openapi` passes after `just openapi`. The diff of `openapi.json` shows only these changes:
   - the `422` and `503` responses, and `400` on `get_span`;
   - the `416` problem code;
   - the two descriptions.
@@ -780,7 +780,7 @@ In `routes/users.rs`:
       - **`get_media`.** The raw body of `/media/{MEDIA}` must equal the bytes of `media/{MEDIA}.png`, with `content-type` `image/png`. Manifest: `get_media`, `{sha256: MEDIA}`, `media/{MEDIA}.png`, `image/png`.
    5. **Static entries.** Copy them unchanged from today's `build()`: `list_admin_users`, `post_admin_user`, `get_admin_settings`, `get_auth_config`, `post_setup`, `post_login`, `post_signup`, `get_me`, `list_orgs`, `get_org`, `list_org_members`, `list_org_invites`, `post_org_invite`, `get_invite_preview`, `list_project_members`, `list_projects`, `get_project`, `list_api_keys`, `post_api_key`, `list_personal_tokens`, `post_personal_token` and `list_saved_views`. Their statuses and `path_params` stay as they are. `get_metrics` is no longer static.
    6. **Sort.** Sort the manifest by `(operation_id, file)`. The files map holds every `responses/…` file plus `"manifest.json"` → `canonical_json(&manifest)`.
-4. **`justfile`.** The `api-examples` recipe becomes `LLMOBS_API_EXAMPLES_WRITE=1 cargo test -p llmobs-server --lib api_examples::examples_are_up_to_date`.
+4. **`justfile`.** The `api-examples` recipe becomes `CETRA_API_EXAMPLES_WRITE=1 cargo test -p cetra-server --lib api_examples::examples_are_up_to_date`.
 5. **`tests/api_examples.rs`.** Delete the hand model:
    - the functions `params`, `example_created`, `example_status`, `example`, `page`, `group_spans`, `summaries`, `build`, `session_views`, `user_views`, `turn`, `expected_files`, `on_disk_files`, `collect_dir`, `write_files`, `examples_write_requested` and the test `examples_are_up_to_date`;
    - the struct `Built`, and every import and constant that becomes unused.
@@ -795,9 +795,9 @@ In `routes/users.rs`:
 7. **Regenerate.**
    1. `git rm fixtures/api/static/metrics.json`.
    2. Run `just api-examples`.
-   3. Run `cargo test -p llmobs-server --lib api_examples` five times. Every run must pass, which shows the output is deterministic. If a value jitters between runs (for example a metrics percentile), STOP and report the file and field; do not pin settings to hide it.
-   4. Run `cargo test -p llmobs-server --test api_examples`. `example_scenarios` must pass unchanged (STOP rule).
-   5. Run `cargo test -p llmobs-storage`. A2's own tests read `fixtures/api/responses` as the expected answers (`reads/*.rs`, `views/mod.rs`, `filter/mod.rs`). STOP if any of them fails: G must not edit `crates/storage`.
+   3. Run `cargo test -p cetra-server --lib api_examples` five times. Every run must pass, which shows the output is deterministic. If a value jitters between runs (for example a metrics percentile), STOP and report the file and field; do not pin settings to hide it.
+   4. Run `cargo test -p cetra-server --test api_examples`. `example_scenarios` must pass unchanged (STOP rule).
+   5. Run `cargo test -p cetra-storage`. A2's own tests read `fixtures/api/responses` as the expected answers (`reads/*.rs`, `views/mod.rs`, `filter/mod.rs`). STOP if any of them fails: G must not edit `crates/storage`.
    6. Run `git diff --stat fixtures/api` and put the list in the report. For each changed file, describe what changed in one line, for example "cost_total of trace 1 is now 0.00306 (exact sum, D-A2-4)".
 8. **Web.** Run `export PATH=… && just check-web`. Change a web test only when it asserts a value that comes from a fixture file and that value changed in step 7. For example, the dashboard test's `"Cost: $0.00955"` would become the new KPI value. Rules for those edits:
    - update the expected value to the new one;

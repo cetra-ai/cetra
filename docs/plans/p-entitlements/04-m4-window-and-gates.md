@@ -10,7 +10,7 @@ When M4 is done:
 - `max_alert_rules` limits enabled alert rules (D-P-23), and, once I's M3 is in, `max_active_online_rules` limits active online rules;
 - an org drop keeps the org's `usage_daily` rows; a daily task deletes them 40 days after the drop is applied (D-P-46);
 - the control plane deletes orgs (`DELETE /api/internal/v1/orgs/{org_id}`, R17) and reads applied drops (`GET /api/internal/v1/deletions`, R5); internal org creation refuses a dropped or dropping id (D-P-49);
-- `llmobs admin entitlements show` prints the month's units (D-P-32);
+- `cetra admin entitlements show` prints the month's units (D-P-32);
 - the time-range picker shows the window with a lock, and the retention, alert and online-rule pages show the upgrade states of D-P-15 (D-P-48).
 
 **Read first, in this order:**
@@ -27,7 +27,7 @@ The same as M3 (`03-m3-units-and-limits.md` § Conventions), which are M2's: one
 
 **Dead code between phases.** An item with no non-test caller until a later phase gets an item-level `#[cfg_attr(not(test), allow(dead_code))]` with the comment `// Track P M4: P<n> uses it.`; the phase that adds the caller removes it, and P16 checks none is left. **None is expected:** every item this plan adds has its production caller in the same sub-phase (P11's `flushed_month_units` included). If the compiler disagrees, use the attribute and report it.
 
-**Generated files.** `crates/server/openapi.json`, `web/src/api/schema.gen.ts` and `fixtures/api/manifest.json` are regenerated (`just openapi`, `just api-examples`), never hand-merged. `crates/server/tests/snapshots/meta_schema.snap` is regenerated with `INSTA_UPDATE=always cargo test -p llmobs-server schema_matches_the_snapshot` and reviewed.
+**Generated files.** `crates/server/openapi.json`, `web/src/api/schema.gen.ts` and `fixtures/api/manifest.json` are regenerated (`just openapi`, `just api-examples`), never hand-merged. `crates/server/tests/snapshots/meta_schema.snap` is regenerated with `INSTA_UPDATE=always cargo test -p cetra-server schema_matches_the_snapshot` and reviewed.
 
 **Migrations.** A new `meta.db` migration takes the next free number in `crates/server/migrations/meta/` **at implementation time** (0009 is the last today; track I's M3 may add more). A new `catalog.db` migration takes the next free number in `crates/storage/migrations/catalog/` (0006 is the last today).
 
@@ -51,7 +51,7 @@ just fmt
 just check
 ```
 
-`just check` before every commit (over 20 minutes). Quick loops: `cargo test -p llmobs-storage <filter>`, `cargo test -p llmobs-server <filter>`, `cargo test -p llmobs-cli <filter>`, `just lint`, `just check-web`, `cd web && pnpm vitest run <file>`.
+`just check` before every commit (over 20 minutes). Quick loops: `cargo test -p cetra-storage <filter>`, `cargo test -p cetra-server <filter>`, `cargo test -p cetra-cli <filter>`, `just lint`, `just check-web`, `cd web && pnpm vitest run <file>`.
 
 ## Sub-phases
 
@@ -91,7 +91,7 @@ Every release build trusts the `cloud-1` key for `org` and `control_plane` token
 ```rust
 /// This instance is a cloud cell managed by the control plane (D-P-50). When false (the
 /// default), every `/api/internal/v1/*` route answers 404, stored and pushed org tokens are
-/// ignored, and `llmobs1.` bearer tokens are refused: only licence keys are trusted.
+/// ignored, and `cetra1.` bearer tokens are refused: only licence keys are trusted.
 pub control_plane: bool,
 ```
 
@@ -207,7 +207,7 @@ Use `example_query()` (the API dataset). Read its span start times and score `cr
 
 ### Done when
 
-`cargo test -p llmobs-storage` and `cargo test -p llmobs-server` pass; `just check`.
+`cargo test -p cetra-storage` and `cargo test -p cetra-server` pass; `just check`.
 
 ---
 
@@ -218,8 +218,8 @@ Use `example_query()` (the API dataset). Read its span start times and score `cr
 ```rust
 //! The org's data window on every read (D175, D-P-21, D-P-44).
 
-use llmobs_core::ids::OrgId;
-use llmobs_storage::QueryOptions;
+use cetra_core::ids::OrgId;
+use cetra_storage::QueryOptions;
 
 use crate::http::AppState;
 
@@ -327,7 +327,7 @@ Also in `test_support/mod.rs`:
 pub(crate) async fn raw_span_count(storage: &Storage, project: ProjectId) -> u64
 ```
 
-(Run the SQL through the context's session the way `routes/read.rs` tests read batches, or with `llmobs_storage::sql_json` as the SQL route does; read the `count` column as `Int64` and convert with `u64::try_from(..).unwrap_or(0)`.)
+(Run the SQL through the context's session the way `routes/read.rs` tests read batches, or with `cetra_storage::sql_json` as the SQL route does; read the `count` column as `Int64` and convert with `u64::try_from(..).unwrap_or(0)`.)
 
 After this phase `QueryOptions` appears in `crates/server/src` only in `entitlements/window.rs`, and `Visibility::Window(` only there and in `test_support/mod.rs`.
 
@@ -632,7 +632,7 @@ pub struct InternalDrop {
     /// Project drops only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<Uuid>,
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub applied_at: i64,
 }
@@ -682,7 +682,7 @@ Spec 09's internal row gains `GET /api/internal/v1/deletions?kind&limit&cursor` 
 
 ---
 
-## P11 — Month units in `llmobs admin entitlements show` (D-P-32)
+## P11 — Month units in `cetra admin entitlements show` (D-P-32)
 
 - `usage.rs`: extract the `usage_daily` sum of `Usage::month_units`' slow path into `pub(crate) async fn flushed_month_units(pool: &SqlitePool, org: OrgId, now_ns: i64) -> Result<u64, MetaError>` (the same SQL and month bounds); `month_units` calls it. Offline, counts not yet flushed by a running server (at most 10 s) are missing; the doc says so.
 - `admin.rs` `EntitlementsReport` gains `pub month_units: u64` ("Units (spans + scores) this UTC month, flushed only (D-P-16).") after `limits`; `entitlements_in` fills it with `flushed_month_units(meta.reader(), row.id, now)`.

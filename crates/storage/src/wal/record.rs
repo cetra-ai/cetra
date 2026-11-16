@@ -451,11 +451,11 @@ mod tests {
 
     use arrow::array::{Int32Array, RecordBatch};
     use arrow::datatypes::{DataType, Field, Schema};
-    use llmobs_core::batch::{scores_to_record_batch, spans_to_record_batch};
-    use llmobs_core::enums::{ScoreSource, SpanKind, SpanStatus};
-    use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-    use llmobs_core::score::{Score, ScoreTarget, ScoreValue};
-    use llmobs_core::span::{Span, SpanEvent};
+    use cetra_core::batch::{scores_to_record_batch, spans_to_record_batch};
+    use cetra_core::enums::{ScoreSource, SpanKind, SpanStatus};
+    use cetra_core::ids::{ProjectId, SpanId, TraceId};
+    use cetra_core::score::{Score, ScoreTarget, ScoreValue};
+    use cetra_core::span::{Span, SpanEvent};
     use proptest::prelude::*;
 
     use crate::wal::{sample_span_batch, segment_name};

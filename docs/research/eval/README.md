@@ -37,7 +37,7 @@ Abbreviations: **P** Phoenix, **O** Opik, **LF** Langfuse, **LW** LangWatch.
 - O and LF write the judge trace into the user's project (O hides it with a visibility flag, LF with a reserved environment prefix). P creates a hidden project per evaluator. LW records no judge spans.
 - LF derives the judge trace id from the job execution id, so a retry reuses it.
 - Recursion guards: LF never evaluates environments starting with its prefix; O samples only SDK and experiment sources; LW has a causality-depth attribute.
-- → Spec 06 already matches LF (reserved `llmobs-eval` environment). D161: the caller supplies the trace id, and E derives span ids from it.
+- → Spec 06 already matches LF (reserved `cetra-eval` environment). D161: the caller supplies the trace id, and E derives span ids from it.
 
 ## G5 · Variable mapping and templates
 

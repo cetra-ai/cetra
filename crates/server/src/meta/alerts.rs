@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use llmobs_core::ids::{OrgId, ProjectId};
+use cetra_core::ids::{OrgId, ProjectId};
 use serde::{Deserialize, Serialize};
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;

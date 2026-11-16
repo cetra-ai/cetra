@@ -1,6 +1,6 @@
 # Full plan review
 
-Date: 2026-11-15. Scope: every plan in `docs/plans/` on `main`, plus plan updates still on branches (PR #92 `claude/p-xtrack-fixes` for P; `claude/i-m3-m4-plans`, `claude/m8-align-i-m3` and `claude/n-m2-backup-plan` where they differ from `main`), and track Q's plans in the private `llmobs-control` repository (branch `claude/q-cross-track-fixes`, its PR #3). PRs #88 (N M2) and #89 (R design and M1) were already merged when the review ran. No R M2–M7 plan text had been pushed, so R covers only `00-design.md` and `01-m1-model.md`.
+Date: 2026-11-15. Scope: every plan in `docs/plans/` on `main`, plus plan updates still on branches (PR #92 `claude/p-xtrack-fixes` for P; `claude/i-m3-m4-plans`, `claude/m8-align-i-m3` and `claude/n-m2-backup-plan` where they differ from `main`), and track Q's plans in the private `cetra-control` repository (branch `claude/q-cross-track-fixes`, its PR #3). PRs #88 (N M2) and #89 (R design and M1) were already merged when the review ran. No R M2–M7 plan text had been pushed, so R covers only `00-design.md` and `01-m1-model.md`.
 
 Method: 16 Opus reviewers on high reasoning effort, one per area. Each read its plans in full, checked them against the spec, `docs/mvp-decisions.md`, `docs/roadmap.md` and AGENTS.md, and for implemented plans checked what `main` actually delivered (not a line-by-line code review). Then 16 Opus verifiers, one per area, each tried to disprove every finding by reading the sources itself. Findings already covered by the cross-track review (`docs/reviews/cross-track.md`, X1–X38, PR #91) were excluded; a finding cites an X-id only when it adds something new.
 
@@ -131,7 +131,7 @@ Within a track, findings are ordered by severity. "Verdict" is the verifier's: C
 
 **Problem.** Since M5.6, staged-object GC also collects media blobs: interrupted puts, collect_media's created_at=0 rows, and a put to a dropped project. M5.6 treats a media object path as sensitive because it holds the content's SHA-256. Media code obeys this with error.label(), but gc.rs and open_inner still log the raw path and %error at debug level. The comments there say only that keys contain project ids.
 
-**Failure scenario.** An operator turns on debug logging (LLMOBS_LOG=debug) to diagnose GC. After a crash during put_media, or after a media collection, the log gets 'deleted staged object path=media/<project>/<sha256>'. Logs are shipped to a third-party aggregator. The hash identifies the exact image or document the user sent: a known file can be matched against it. That is the case the M5.6 rule exists to prevent.
+**Failure scenario.** An operator turns on debug logging (CETRA_LOG=debug) to diagnose GC. After a crash during put_media, or after a media collection, the log gets 'deleted staged object path=media/<project>/<sha256>'. Logs are shipped to a third-party aggregator. The hash identifies the exact image or document the user sent: a known file can be matched against it. That is the case the M5.6 rule exists to prevent.
 
 **Suggested fix.** In gc.rs and lib.rs, redact paths under media/: log only 'media' plus the project id, and log GcError through a static label, not %error, as MediaError::label() does. Add a comment that staged rows include media paths.
 
@@ -168,7 +168,7 @@ The row cap therefore does not bound bytes. The amplification is the number of a
 
 **Merged.** Also reported by the H reviewer as H-1: H exposes the same unbounded body to viewers, read-only PATs, `sk` read keys and MCP `query_sql`, and records it only as a "known limit" in the h-console README.
 
-**Failure scenario.** A project viewer, or MCP query_sql with its 1,000-row cap, sends `SELECT input AS c1, input AS c2, …, input AS c4000 FROM spans LIMIT 10000`. The text stays under 64 KiB and has 0 operator tokens. With 10 KiB prompts, the encoder writes 10,000 × 4,000 × 10 KiB ≈ 400 GB into one Vec<u8> and then parses it into serde_json, so the single llmobs process is OOM-killed. `SELECT a.input FROM spans a CROSS JOIN spans b LIMIT 10000` does the same with 8 MiB payloads (80 GB). A CSV/NDJSON export by a member does it per batch (8,192 rows × fan-out). This is the same impact as the earlier blocker B-2: one authenticated user takes the server down.
+**Failure scenario.** A project viewer, or MCP query_sql with its 1,000-row cap, sends `SELECT input AS c1, input AS c2, …, input AS c4000 FROM spans LIMIT 10000`. The text stays under 64 KiB and has 0 operator tokens. With 10 KiB prompts, the encoder writes 10,000 × 4,000 × 10 KiB ≈ 400 GB into one Vec<u8> and then parses it into serde_json, so the single cetra process is OOM-killed. `SELECT a.input FROM spans a CROSS JOIN spans b LIMIT 10000` does the same with 8 MiB payloads (80 GB). A CSV/NDJSON export by a member does it per batch (8,192 rows × fan-out). This is the same impact as the earlier blocker B-2: one authenticated user takes the server down.
 
 **Suggested fix.** Bound encoding in A2. json_rows, csv_rows and ndjson_rows should write row by row (or in slices) and reserve the encoded bytes in the query memory pool through a MemoryConsumer, for example "sql result encoding", failing with RunError::TooLarge. sql_json should also have a hard byte cap, for example 64 MiB, that returns query_too_large (or truncated: true with a stated rule). Exports should encode in slices of rows so one chunk is bounded.
 
@@ -253,7 +253,7 @@ The A2 README's Boundaries and Public API sections, and Q12, still say A1 M6 add
   - docs/reviews/a2-query.md:188 (Open question 4: CSV formula injection, unanswered)
   - docs/plans/h-console/05-sql-export.md § 6 tests 2 and 11 (verbatim CSV pinned)
   - docs/plans/h-console/13-web-export-chart.md § 4 Export menu (UI download)
-  - docs/plans/h-console/09-cli-query.md Step 4 § 9 (llmobs query --format csv)
+  - docs/plans/h-console/09-cli-query.md Step 4 § 9 (cetra query --format csv)
   - docs/mvp-decisions.md:372 D-H-8 (silent on it)
 
 **Problem.** Span `name`, `input`, `output`, metadata values and user ids come from the instrumented application, and often from that application's own end users (their prompts). The CSV export writes them verbatim. A cell starting with `=`, `+`, `-`, `@`, tab or CR is evaluated as a formula when a team member opens the export in Excel, LibreOffice or Google Sheets. The A2 review raised this as open question 4, but no decision, spec text or backlog item records an answer, so the behaviour is neither fixed nor accepted on record.
@@ -319,11 +319,11 @@ The golden suite cannot catch this, because fixtures use prices.json, which has 
 - environment, release, service_name, scope_name/version;
 - link attributes.
 
-Rule 2 removes a consumed attribute over 256 bytes from `attributes`. So a huge `llmobs.metadata.x` or `session.id` survives only in its promoted column, uncut. The proptest generates exactly these keys with 64 KiB values, but its bound check skips those columns. Property 4 of N23 was narrowed without saying so, and the spec's § Limits row ('single attribute value … truncated') is not what the code does.
+Rule 2 removes a consumed attribute over 256 bytes from `attributes`. So a huge `cetra.metadata.x` or `session.id` survives only in its promoted column, uncut. The proptest generates exactly these keys with 64 KiB values, but its bound check skips those columns. Property 4 of N23 was narrowed without saying so, and the spec's § Limits row ('single attribute value … truncated') is not what the code does.
 
 **Verifier correction.** Promoted string columns (session_id, user_id, tags, metadata values, request_params, model/provider/operation, environment, release, service/scope names, link attributes) are never cut to max_attribute_bytes, and the N23 property 4 check skips them. The fix restores the 8 MiB bound the spec promises. Whether ID-like columns need a much smaller cap is a separate spec question.
 
-**Failure scenario.** A client sends `session.id`, `llmobs.metadata.note` or `gen_ai.request.model` with a 9 MiB string. That fits the 10 MiB HTTP or 32 MiB gRPC body.
+**Failure scenario.** A client sends `session.id`, `cetra.metadata.note` or `gen_ai.request.model` with a 9 MiB string. That fits the 10 MiB HTTP or 32 MiB gRPC body.
 - The span is stored with a 9 MiB session_id or metadata value, and nothing in `truncated` says so.
 - Storage, session listings, filters on session_id and the UI then handle multi-megabyte keys per span.
 - The price RegexSet runs over a 9 MiB model string.
@@ -407,7 +407,7 @@ In both cases a crafted 10 000-deep kvlistValue body could overflow the stack.
   - tools/README.md:11 ('The recipes arrive with the tool, in K9–K10'; they exist)
   - docs/plans/b1-normalization/README.md § Public API (omits the exported JsonErrorCategory, crates/otel/src/lib.rs:28)
 
-**Problem.** B2 plans cite D111 eight times where they mean D113, and cite D107 where they mean D109. The fixtures themselves correctly say 'Covers D113'. tools/README.md still describes the recipes as future work. B1's README calls itself 'the whole public surface' of llmobs-otel but leaves out a public enum.
+**Problem.** B2 plans cite D111 eight times where they mean D113, and cite D107 where they mean D109. The fixtures themselves correctly say 'Covers D113'. tools/README.md still describes the recipes as future work. B1's README calls itself 'the whole public surface' of cetra-otel but leaves out a public enum.
 
 **Verifier correction.** B2 plans cite D111 seven times (not eight) where D113 is meant.
 
@@ -568,7 +568,7 @@ List the remaining C minors with an owner in the roadmap row.
 
 **Failure scenario.** An org's Anthropic account runs out of credit. Each sampled job fails as Permanent instead of pausing the rule, so the rule keeps enqueuing and calling until the 50%-of-last-50 breaker trips. With Gemini, each job is retried up to 6 times with backoff before it fails. The UI shows generic failures instead of the 'billing' pause the spec promises. The SSRF exceptions stay undocumented, so a later reviewer cannot tell an intentional allowance from a bug.
 
-**Suggested fix.** The coordinator assigns the five items to I, which owns the eval queue and calls llmobs-eval. Recommended: classify Anthropic's `billing_error` / credit-balance 400 and Gemini's RESOURCE_EXHAUSTED with a quota-type detail as Pause; deny the listed edge ranges in egress.rs, or add a D-I decision that allows them; settle header precedence. Record each choice as an amendment of D160 or D166 and remove the 'Needs a decision' list from the E README.
+**Suggested fix.** The coordinator assigns the five items to I, which owns the eval queue and calls cetra-eval. Recommended: classify Anthropic's `billing_error` / credit-balance 400 and Gemini's RESOURCE_EXHAUSTED with a quota-type detail as Pause; deny the listed edge ranges in egress.rs, or add a D-I decision that allows them; settle header precedence. Record each choice as an amendment of D160 or D166 and remove the 'Needs a decision' list from the E README.
 
 **Verifier evidence.** e-eval/README.md lists five open items under 'Needs a decision', at about lines 165-170. In judge/http.rs classify(), only 429 combined with insufficient_quota maps to Pause. tests/gemini.rs:398 asserts that (429, RESOURCE_EXHAUSTED) is Retryable, and no code handles Anthropic billing_error. Spec 06:139 says quota exhausted pauses the rule at once. No D-I decision or I plan covers the quota cases or the edge ranges: grep finds nothing beyond i-online-eval's unrelated rule quota. X12 is about the units-cap 402 on score writes, which is a different issue. Severity major is reasonable for the quota part; the edge ranges alone would be minor.
 
@@ -612,7 +612,7 @@ List the remaining C minors with an owner in the roadmap row.
 - **Severity:** minor · **Verdict:** CONFIRMED · **Kind:** consistency · **Owner:** coordinator
 - **References:**
   - docs/plans/d-meta-auth/README.md:13 ('Status: … Nothing is implemented.')
-  - docs/plans/d-meta-auth/README.md D135 row ('Secret encryption (`LLMOBS_ENCRYPTION_KEY`, `rotate-encryption-key`) is E's'; superseded by D156)
+  - docs/plans/d-meta-auth/README.md D135 row ('Secret encryption (`CETRA_ENCRYPTION_KEY`, `rotate-encryption-key`) is E's'; superseded by D156)
   - docs/plans/e-eval/README.md:52 (D164: 'an empty `values` list is invalid configuration') vs docs/spec/06-evaluation.md § check Defaults and crates/eval/src/check.rs:61-83
   - docs/plans/e-eval/README.md:170 (E20 noted the D164 wording and left it)
 
@@ -622,7 +622,7 @@ List the remaining C minors with an owner in the roadmap row.
 
 **Suggested fix.** D README: set the status to 'P1–P25 implemented (#21, #25); P26 pending' and add '(superseded by D156: track I)' to the D135 row. E README: reword D164 to match spec 06 and remove the item from 'Needs a decision'.
 
-**Verifier evidence.** d-meta-auth/README.md:13 says 'Nothing is implemented.' The D135 row (line 43) still says 'instance_settings comes with its first user (... track E). Secret encryption (LLMOBS_ENCRYPTION_KEY ...' is E's. e-eval/README.md:52 (D164) says 'an empty `values` list is invalid configuration'. Spec 06:75 instead says that omitting value and values compares with expected and that an empty needle string is invalid, and check.rs:61-83 falls back to expected when values is empty.
+**Verifier evidence.** d-meta-auth/README.md:13 says 'Nothing is implemented.' The D135 row (line 43) still says 'instance_settings comes with its first user (... track E). Secret encryption (CETRA_ENCRYPTION_KEY ...' is E's. e-eval/README.md:52 (D164) says 'an empty `values` list is invalid configuration'. Spec 06:75 instead says that omitting value and values compares with expected and that an empty needle string is invalid, and check.rs:61-83 falls back to expected when values is empty.
 
 ### Track F, phase 0 and maintenance
 
@@ -656,7 +656,7 @@ List the remaining C minors with an owner in the roadmap row.
 
 - **Severity:** minor · **Verdict:** CONFIRMED · **Kind:** security-privacy · **Owner:** coordinator (CI) with F
 - **References:**
-  - justfile:91-103 (ts-smoke: `npm install --no-audit --no-fund --ignore-scripts "$tarball"` in a scratch dir, then imports `llmobs` under ESM and CJS)
+  - justfile:91-103 (ts-smoke: `npm install --no-audit --no-fund --ignore-scripts "$tarball"` in a scratch dir, then imports `cetra` under ESM and CJS)
   - docs/plans/phase-0/06-ci-and-closeout.md:232 ('The package has no dependencies, so `npm install` fetches nothing from the registry')
   - sdks/typescript/package.json dependencies (five @opentelemetry packages) and the non-optional peer `@opentelemetry/api` `>=1.9.0 <1.10.0`
   - node_modules/.pnpm …/@opentelemetry/core, resources, sdk-trace, sdk-logs: `@opentelemetry/semantic-conventions ^1.29.0`; api-logs: `@opentelemetry/api ^1.3.0`
@@ -682,7 +682,7 @@ List the remaining C minors with an owner in the roadmap row.
   - sdks/python/README.md:433-459 § Known limits (abandoned async generators, OTEL_EXPORTER_OTLP_HEADERS; no zero-argument/None, integral-float, large-integer or resource-attribute entries)
   - sdks/typescript/README.md:271-288 § Known limits (lists zero-arg, integral floats, resource attributes, abandoned generators)
   - docs/plans/f-sdk/04-review.md:36 ('Accepted differences left as is: TS `setUsage` accepts only safe integers …, Python's `Retry-After` parsing accepts "+5" via `int()`')
-  - sdks/python/src/llmobs/_scores.py:366-377 (`int(header)`: also accepts ' 5', '1_0' and non-ASCII digits) vs sdks/typescript/src/scores.ts:417-423 (digit regex)
+  - sdks/python/src/cetra/_scores.py:366-377 (`int(header)`: also accepts ' 5', '1_0' and non-ASCII digits) vs sdks/typescript/src/scores.ts:417-423 (digit regex)
   - docs/spec/10-sdk.md § Lifecycle 'Score delivery' (Retry-After: 'a non-negative integer number of seconds')
 
 **Problem.** F's shared contract says each README lists the cross-language differences.
@@ -704,11 +704,11 @@ List the remaining C minors with an owner in the roadmap row.
 - **References:**
   - docs/spec/10-sdk.md:3 ('everything else uses a small REST client generated from the OpenAPI spec')
   - docs/mvp-decisions.md:70 (D17: 'REST client for datasets/experiments/scores')
-  - sdks/python/src/llmobs/_scores.py (hand-written `requests.Session().post` to /api/v1/scores)
+  - sdks/python/src/cetra/_scores.py (hand-written `requests.Session().post` to /api/v1/scores)
   - sdks/typescript/src/scores.ts and browser.ts (hand-written fetch to /api/v1/scores and /api/public/feedback)
   - docs/plans/f-sdk/01-shared.md F1 (rewrote § Design rules, § Lifecycle, § Testing, but not the intro sentence)
 
-**Problem.** F's score and feedback transports are intentionally small, hand-written and dependency-free: requests in Python, fetch in TS. No OpenAPI-generated client exists in either SDK. F1 rewrote most of spec 10 but left the intro sentence claiming every non-OTLP call goes through a generated client. Today that describes no code. It is also a constraint the future J track (`llmobs.Client`, datasets, experiments) would read as binding.
+**Problem.** F's score and feedback transports are intentionally small, hand-written and dependency-free: requests in Python, fetch in TS. No OpenAPI-generated client exists in either SDK. F1 rewrote most of spec 10 but left the intro sentence claiming every non-OTLP call goes through a generated client. Today that describes no code. It is also a constraint the future J track (`cetra.Client`, datasets, experiments) would read as binding.
 
 **Failure scenario.** Track J's planner reads spec 10's intro, and adds an OpenAPI code generator and its runtime dependency to both SDKs. It then either rewrites F's score transport to match, which goes against F's retry/queue contract, or leaves two HTTP clients in each SDK.
 
@@ -748,7 +748,7 @@ List the remaining C minors with an owner in the roadmap row.
   - docs/plans/g-fixes/04-commit-task.md § 4
   - docs/spec/12-operations.md § Process lifecycle, Shutdown bullet (drain <= 20 s, flush <= 30 s; no commit wait, no usage or last_used flush, no live-stream close)
   - docs/plans/n-packaging/README.md:470 ('SIGTERM drains (<= 20 s) and flushes (<= 30 s): allow 60 s')
-  - deploy/compose/compose.yaml:15 stop_grace_period: 60s; deploy/helm/llmobs/templates/statefulset.yaml:42 terminationGracePeriodSeconds: 60
+  - deploy/compose/compose.yaml:15 stop_grace_period: 60s; deploy/helm/cetra/templates/statefulset.yaml:42 terminationGracePeriodSeconds: 60
 
 **Problem.** F4 inserted a wait for detached commits, bounded by its own 30 s (`STORAGE_SHUTDOWN`), between the 20 s HTTP drain and the 30 s storage shutdown. The worst case is now 80 s. N sized the container grace periods at 60 s from spec 12's 20 + 30 budget, and neither spec 12 nor D-G-38 mentions the new step.
 
@@ -859,7 +859,7 @@ Or replace the decision table with a pointer to mvp-decisions § Track G so it c
 
 **Problem.** H9 says the CLI scan mirrors sqlparser 0.62's GenericDialect tokenizer, which the server uses to find `{name:Type}`. GenericDialect nests block comments, but the CLI ends a comment at the first `*/`. Text after an inner `*/` is then scanned as code, so a `'` there starts a phantom string literal that swallows real placeholders after the comment. H12's web scanner nests correctly, so the two clients disagree. Separately, H12 deliberately does not model `E'…'` backslash escapes, which GenericDialect supports, so the web scanner also diverges from the server in the other direction. H9's test 12 has no nested-comment case.
 
-**Failure scenario.** `llmobs query "SELECT /* outer /* inner */ don't */ count(*) FROM spans WHERE total_tokens > {n:Int}" --param n=5`. The server sees one nested comment and the Int placeholder `n`. The CLI closes the comment at the first `*/`, treats `'t */ … ` as an unterminated literal and stops scanning, so `n` is not a placeholder. It sends `"5"` as a string, and the server answers 400 with an ill-typed parameter error for a statement that is correct.
+**Failure scenario.** `cetra query "SELECT /* outer /* inner */ don't */ count(*) FROM spans WHERE total_tokens > {n:Int}" --param n=5`. The server sees one nested comment and the Int placeholder `n`. The CLI closes the comment at the first `*/`, treats `'t */ … ` as an unterminated literal and stops scanning, so `n` is not a placeholder. It sends `"5"` as a string, and the server answers 400 with an ill-typed parameter error for a statement that is correct.
 
 **Suggested fix.** Track nesting depth for `/*` … `*/` in `placeholder_types`, as web/src/lib/sql/params.ts does. Fix the H9 plan text. Add a test-12 case such as `/* a /* b */ c's */ {x:Int}` that yields `x` Int. Optionally record in H12 that the web scanner's `E'…'` gap means a spurious parameter input can appear (the server then says 'unknown parameter').
 
@@ -1055,7 +1055,7 @@ Or replace the decision table with a pointer to mvp-decisions § Track G so it c
 
 ### Track L — admin UI
 
-#### L-1 — The CLI half of D-L-9 was never built: no `host`, no `error=access_denied`, so Cancel leaves `llmobs login` hanging 5 minutes
+#### L-1 — The CLI half of D-L-9 was never built: no `host`, no `error=access_denied`, so Cancel leaves `cetra login` hanging 5 minutes
 
 - **Severity:** minor (reviewer: major) · **Verdict:** CONFIRMED · **Kind:** delivery-gap · **Owner:** coordinator (CLI login, D's code; track H was named but does not own it)
 - **References:**
@@ -1067,13 +1067,13 @@ Or replace the decision table with a pointer to mvp-decisions § Track G so it c
   - web/src/routes/cli-auth.tsx:74-77 (cancel navigates to callback?error=access_denied)
   - docs/spec/08-auth.md:118 (no `host`, no error callback)
 
-**Problem.** L built the UI side of D-L-9. The page names the token `CLI on <host>` and, on Cancel, navigates to `http://127.0.0.1:<port>/callback?error=access_denied&state=…`. L handed the CLI side to track H, but `llmobs login` is D's code (commit 1bd7876) and no H plan mentions `cli-auth` or `access_denied`. So nobody picked it up.
+**Problem.** L built the UI side of D-L-9. The page names the token `CLI on <host>` and, on Cancel, navigates to `http://127.0.0.1:<port>/callback?error=access_denied&state=…`. L handed the CLI side to track H, but `cetra login` is D's code (commit 1bd7876) and no H plan mentions `cli-auth` or `access_denied`. So nobody picked it up.
 
 On main, `login.rs` builds the URL with `port` and `state` only. `token_from_request_line` returns `None` for any callback without `token`, so `handle_callback` answers `400 rejected` and the loop keeps waiting until the 5-minute WAIT runs out. CG3 asked spec 08 to name `host`, but spec 08 line 118 still lists only `port` and `state`, and never describes the error callback.
 
 **Verifier correction.** Accurate, but the impact is UX only: Cancel leaves the CLI waiting up to 5 minutes (Ctrl-C ends it) and shows a bare "rejected" page, and every CLI token is named just "CLI". No security or data impact, so minor rather than major.
 
-**Failure scenario.** A user runs `llmobs login` and clicks Cancel on /cli-auth. The browser lands on a bare plain-text page that says "rejected" instead of a cancelled page, and the terminal sits silently for 5 minutes before printing "timed out waiting for the browser".
+**Failure scenario.** A user runs `cetra login` and clicks Cancel on /cli-auth. The browser lands on a bare plain-text page that says "rejected" instead of a cancelled page, and the terminal sits silently for 5 minutes before printing "timed out waiting for the browser".
 
 Every CLI login also creates a token named just "CLI". On the account page, a user with logins from several machines cannot tell which token belongs to which machine when revoking one.
 
@@ -1138,11 +1138,11 @@ Add CG5 to the README's D-owner note.
 
 **Problem.** D-L-2 moved the login page to L on the condition that G's M5 would check L's pages against the real server. G's M5 plan lists L's pages under "Already done elsewhere" and puts no page check in scope. The Rust e2e test only checks that the SPA answers with text/html and signs in through the JSON API.
 
-No test or recorded manual run has driven /login, /setup, /invite, /reset, /verify, /cli-auth or the 401 redirect against `llmobs serve`. Every L test runs on MSW mocks, and those mocks follow server behaviour as the plan described it. The roadmap row still states the pages run against the real server.
+No test or recorded manual run has driven /login, /setup, /invite, /reset, /verify, /cli-auth or the 401 redirect against `cetra serve`. Every L test runs on MSW mocks, and those mocks follow server behaviour as the plan described it. The roadmap row still states the pages run against the real server.
 
 **Failure scenario.** A behaviour that the mocks encode but the server does differently would ship unseen. Examples: the origin check on session POSTs behind a proxy, the cookie after `/api/auth/setup`, the `/login?error=` codes from the OAuth callback, or the `/setup` redirect from the gate. The fixture-versus-type check catches only response shapes, not status codes or redirects.
 
-**Suggested fix.** Either add a short smoke check to `just e2e` (tools/e2e/run.sh) that drives the real server through setup, then login, then an `/api/v1` call and logout, and asserts the 401 redirect target and the `/login?error=` codes. Or record a dated manual pass of the L pages on `llmobs serve` and reword the roadmap L row and D-L-2 to match what was actually verified.
+**Suggested fix.** Either add a short smoke check to `just e2e` (tools/e2e/run.sh) that drives the real server through setup, then login, then an `/api/v1` call and logout, and asserts the 401 redirect target and the `/login?error=` codes. Or record a dated manual pass of the L pages on `cetra serve` and reword the roadmap L row and D-L-2 to match what was actually verified.
 
 **Verifier evidence.** D-L-2 in the L README says "G's M5 only serves the UI on the real API and checks these pages work there." g-spine/05-m5-ui-and-e2e.md lists L's pages under "Already done elsewhere", and its e2e scope is SDK ingest plus sign-in through the API. crates/cli/tests/e2e.rs:160-168 signs in through POST /api/auth/login, and :347/:360 only assert text/html. tools/e2e/run.sh has no login, setup or cli-auth. The roadmap L row says "the pages run against the real server since G's M5 (D-L-2)". That is true in that the pages are served, but nothing checks them. Related to X33 (roadmap rows vs plans), but X33 does not cover this.
 
@@ -1157,13 +1157,13 @@ No test or recorded manual run has driven /login, /setup, /invite, /reset, /veri
   - docs/mvp-decisions.md D-L-9
   - docs/spec/08-auth.md:118
 
-**Problem.** After Authorize, the page calls `window.location.assign('http://127.0.0.1:<port>/callback?token=pat-llmobs-…&state=…')`. The full read-write PAT has no `expires_at`, and it stays in the browser's history. Browser sync and extensions with history access can read it.
+**Problem.** After Authorize, the page calls `window.location.assign('http://127.0.0.1:<port>/callback?token=pat-cetra-…&state=…')`. The full read-write PAT has no `expires_at`, and it stays in the browser's history. Browser sync and extensions with history access can read it.
 
-Anyone can craft the link. `host` is taken verbatim into the copy ("The CLI on <host> will get…") and into the token name. The page never says "Only continue if you just ran `llmobs login`". On a shared machine, a dev container or anything with a forwarded port, a crafted link sends the token to whichever local process listens on that port. The README's privacy rule names D-L-9's callback as an accepted exception, but nothing reduces what that exception exposes.
+Anyone can craft the link. `host` is taken verbatim into the copy ("The CLI on <host> will get…") and into the token name. The page never says "Only continue if you just ran `cetra login`". On a shared machine, a dev container or anything with a forwarded port, a crafted link sends the token to whichever local process listens on that port. The README's privacy rule names D-L-9's callback as an accepted exception, but nothing reduces what that exception exposes.
 
 **Verifier correction.** A defense-in-depth gap in the chosen design, not a bug. The non-expiring PAT stays in browser history and can be synced, and the page gives no warning against a crafted link. The crafted-link case needs a local listener on the victim's host.
 
-**Failure scenario.** A local process on a multi-user host, or one reachable through a forwarded port, listens on port 50123 and sends the victim `https://llmobs.example.com/cli-auth?port=50123&state=abc_x&host=build-server`. The victim sees a familiar-looking host label and clicks Authorize. The listener receives a permanent read-write PAT. The same secret also sits in the victim's synced browser history until it is revoked.
+**Failure scenario.** A local process on a multi-user host, or one reachable through a forwarded port, listens on port 50123 and sends the victim `https://cetra.example.com/cli-auth?port=50123&state=abc_x&host=build-server`. The victim sees a familiar-looking host label and clicks Authorize. The listener receives a permanent read-write PAT. The same secret also sits in the victim's synced browser history until it is revoked.
 
 **Suggested fix.** Keep the flow but bound it:
 - Create the CLI token with an expiry (for example 90 days), or have the CLI exchange a one-time code. With the code, the callback carries a short-lived code, and the CLI swaps it for the PAT with `POST /api/v1/me/tokens/exchange`, so history never holds the secret.
@@ -1172,7 +1172,7 @@ Anyone can craft the link. `host` is taken verbatim into the copy ("The CLI on <
 
 Record the choice in D-L-9 and spec 08.
 
-**Verifier evidence.** cli-auth.tsx:59-71 creates the PAT with {name, scopes:[read,write]} and no expires_at, then calls navigateExternal, which is window.location.assign (external-navigation.ts) and leaves a history entry. cli-auth.ts:62-75 puts the token in the callback query. The copy at tsx:88-92 shows request.host verbatim (validated only as [A-Za-z0-9.-]{1,64}), and there is no "only continue if you just ran llmobs login" warning. This is the design spec 08 and D-L-9 chose. The callback is pinned to 127.0.0.1, so an attacker needs a listener on the victim's own machine (multi-user host, dev container, forwarded port). That is the standard RFC 8252 loopback risk, not a remote attack. The history exposure of a non-expiring secret is real. This is hardening, not a defect.
+**Verifier evidence.** cli-auth.tsx:59-71 creates the PAT with {name, scopes:[read,write]} and no expires_at, then calls navigateExternal, which is window.location.assign (external-navigation.ts) and leaves a history entry. cli-auth.ts:62-75 puts the token in the callback query. The copy at tsx:88-92 shows request.host verbatim (validated only as [A-Za-z0-9.-]{1,64}), and there is no "only continue if you just ran cetra login" warning. This is the design spec 08 and D-L-9 chose. The callback is pinned to 127.0.0.1, so an attacker needs a listener on the victim's own machine (multi-user host, dev container, forwarded port). That is the standard RFC 8252 loopback risk, not a remote attack. The history exposure of a non-expiring secret is real. This is hardening, not a defect.
 
 ### Track M — deletion and retention
 
@@ -1274,24 +1274,24 @@ D-M-6 and spec 03 § 7 promise the guard prevents 'a copy after the cut-off'.
 
 ### Track N — packaging and backups
 
-#### N-1 — Control-socket auth checks the data dir's owner, so `kubectl exec … llmobs admin backup` is refused on the Helm chart
+#### N-1 — Control-socket auth checks the data dir's owner, so `kubectl exec … cetra admin backup` is refused on the Helm chart
 
 - **Severity:** major · **Verdict:** CONFIRMED · **Kind:** plan-defect · **Owner:** N
 - **References:**
   - docs/plans/n-packaging/m2/00-design.md § Trigger: a local control socket (D-N-17), lines 103-105
   - docs/plans/n-packaging/m2/07-admin-socket.md § Changes › Authentication, lines 74-78
   - docs/mvp-decisions.md D-N-17 (owner-or-root rule in the design)
-  - deploy/helm/llmobs/templates/statefulset.yaml lines 47-52 (runAsUser 65532, fsGroup 65532) and 139-141 (PVC mounted directly at /data, LLMOBS_DATA_DIR=/data)
+  - deploy/helm/cetra/templates/statefulset.yaml lines 47-52 (runAsUser 65532, fsGroup 65532) and 139-141 (PVC mounted directly at /data, CETRA_DATA_DIR=/data)
   - claude/n-m2-impl:crates/server/src/admin_socket.rs peer_is_allowed (cred.uid() == 0 || cred.uid() == metadata(data_dir).uid())
-  - claude/n-m2-impl:docs/self-hosting/backup.md § Where to put <dir> › Kubernetes (documents `kubectl -n llmobs exec llmobs-0 -- llmobs admin backup`)
+  - claude/n-m2-impl:docs/self-hosting/backup.md § Where to put <dir> › Kubernetes (documents `kubectl -n cetra exec cetra-0 -- cetra admin backup`)
 
 **Problem.** D-N-17 and B7 accept a peer only when its uid is root or the owner of `data_dir`. That assumes the server's own uid owns the data directory. On the Helm chart, `/data` is the root of the PVC. fsGroup changes only the group of the volume root, so the owner stays whatever the provisioner set: uid 0 for a freshly formatted block volume, and root for kind's local-path hostPath directory. The server runs as 65532 and can write through the group, and so can `kubectl exec` (also 65532). The same applies to any bind mount the server can write but does not own. No B7 test covers an owner that differs from the server's uid, and helm-smoke never runs a backup.
 
-**Failure scenario.** A Kubernetes user follows the B10 docs: `kubectl -n llmobs exec llmobs-0 -- llmobs admin backup --to /backups/2026-11-15`. The peer uid is 65532 and `metadata("/data").uid()` is 0, so the server answers `forbidden` and every online backup on the chart fails. Docker Compose works only because the named volume copies the image's /data owner.
+**Failure scenario.** A Kubernetes user follows the B10 docs: `kubectl -n cetra exec cetra-0 -- cetra admin backup --to /backups/2026-11-15`. The peer uid is 65532 and `metadata("/data").uid()` is 0, so the server answers `forbidden` and every online backup on the chart fails. Docker Compose works only because the named volume copies the image's /data owner.
 
-**Suggested fix.** Compare the peer uid with the server process's own effective uid, plus root. Without `unsafe`, take it from a file the server just created, such as the owner of `<data_dir>/LOCK` or of the bound `admin.sock.tmp`, not from `data_dir`. Amend D-N-17, 00-design § Trigger and B7 § Authentication to match. Add a unit test where the data dir's owner differs from the creating uid. Where that cannot be arranged, factor the uid check into a pure function and test that. Optionally run one `llmobs admin backup` in helm-smoke.sh.
+**Suggested fix.** Compare the peer uid with the server process's own effective uid, plus root. Without `unsafe`, take it from a file the server just created, such as the owner of `<data_dir>/LOCK` or of the bound `admin.sock.tmp`, not from `data_dir`. Amend D-N-17, 00-design § Trigger and B7 § Authentication to match. Add a unit test where the data dir's owner differs from the creating uid. Where that cannot be arranged, factor the uid check into a pure function and test that. Optionally run one `cetra admin backup` in helm-smoke.sh.
 
-**Verifier evidence.** In 00-design.md lines 103-105 and 07-admin-socket.md lines 74-78, a peer is accepted only when its uid is root or the owner of data_dir. claude/n-m2-impl admin_socket.rs:194-202 implements exactly that: `cred.uid() == 0 || cred.uid() == metadata(data_dir).uid()`. statefulset.yaml sets runAsUser/fsGroup 65532 with fsGroupChangePolicy OnRootMismatch and mounts the PVC `data` directly at /data. There is no initContainer and no chown anywhere in deploy/helm. fsGroup changes only the group (plus setgid), so the PVC root keeps the owner the provisioner gave it, normally root. The Dockerfile `COPY --chown=65532` covers only image and named-volume /data, so compose works. The impl backup.md:115 documents `kubectl -n llmobs exec llmobs-0 -- llmobs admin backup`. No packaging smoke runs a backup (grep for 'backup' in tools/packaging/*.sh finds nothing). I did not run this on a real cluster, but the mechanism holds.
+**Verifier evidence.** In 00-design.md lines 103-105 and 07-admin-socket.md lines 74-78, a peer is accepted only when its uid is root or the owner of data_dir. claude/n-m2-impl admin_socket.rs:194-202 implements exactly that: `cred.uid() == 0 || cred.uid() == metadata(data_dir).uid()`. statefulset.yaml sets runAsUser/fsGroup 65532 with fsGroupChangePolicy OnRootMismatch and mounts the PVC `data` directly at /data. There is no initContainer and no chown anywhere in deploy/helm. fsGroup changes only the group (plus setgid), so the PVC root keeps the owner the provisioner gave it, normally root. The Dockerfile `COPY --chown=65532` covers only image and named-volume /data, so compose works. The impl backup.md:115 documents `kubectl -n cetra exec cetra-0 -- cetra admin backup`. No packaging smoke runs a backup (grep for 'backup' in tools/packaging/*.sh finds nothing). I did not run this on a real cluster, but the mechanism holds.
 
 #### N-2 — `gc-orphans --dry-run` opens the full engine, whose startup GC can delete live S3 objects
 
@@ -1307,28 +1307,28 @@ D-M-6 and spec 03 § 7 promise the guard prevents 'a copy after the cut-off'.
 
 **Verifier correction.** `--dry-run` is not report-only: Storage::open deletes staged objects unknown to the restored catalog and starts compaction and GC. In S3 mode this can delete objects the live (kept) catalog references if the operator later abandons the restore.
 
-**Failure scenario.** An S3 meta-only backup is taken while a compaction upload is in flight. Days later the operator restores it and runs `llmobs admin gc-orphans --dry-run` to see what would be rolled back. The startup staged-GC deletes the compaction output, which the live (kept) catalog lists as an active data file. The operator decides not to restore and puts the kept data directory back. Queries now fail on a missing Parquet file, so data is lost by a command documented as report-only. Even if the restore goes ahead, the restored catalog.db may already have been changed by compaction during the dry run.
+**Failure scenario.** An S3 meta-only backup is taken while a compaction upload is in flight. Days later the operator restores it and runs `cetra admin gc-orphans --dry-run` to see what would be rolled back. The startup staged-GC deletes the compaction output, which the live (kept) catalog lists as an active data file. The operator decides not to restore and puts the kept data directory back. Queries now fail on a missing Parquet file, so data is lost by a command documented as report-only. Even if the restore goes ahead, the restored catalog.db may already have been changed by compaction during the dry run.
 
 **Suggested fix.** Have B5/B8 open the storage for maintenance: take LOCK and run the catalog migrations, but run no startup GC, finish_drops, compaction, flush or GC tasks. Do this with an explicit open parameter or a dedicated `Storage::open_for_maintenance`; it is not a feature flag. Use it for both `gc-orphans` and `admin migrate`. Add a test: a store (InMemory) with a staged row whose object is not in the opened catalog; `collect_orphans(dry_run = true)` leaves every object and the catalog file unchanged. Correct the wording in 05-orphans.md lines 143-146.
 
 **Verifier evidence.** crates/storage/src/lib.rs:458-490: Storage::open runs gc::collect_once (deletes staged_objects paths older than MAX_AGE that are not published in the opened catalog), collect_obsolete and media.finish_drops, then spawns the GC, compaction and flush tasks. 08-cli.md has GcOrphans call Storage::open(config.storage_config()). 00-design.md:261/266 says '`--dry-run` only reports' and 'Run it with `--dry-run` first'. 05-orphans.md:143-146 admits 'opening is not read-only' but treats that as safe (and the sentence there is garbled). The restore procedure keeps the old data dir aside (00-design.md:251), so aborting a restore after the dry run is a real path. The data-loss scenario needs a staged row in the snapshot whose object the live server later published, plus an aborted restore. That is credible but narrow and I did not reproduce it. The claim that dry-run is not side-effect free is confirmed.
 
-#### N-4 — B8's added `llmobs admin migrate` is under-specified, and the obvious order migrates meta.db under a running server
+#### N-4 — B8's added `cetra admin migrate` is under-specified, and the obvious order migrates meta.db under a running server
 
 - **Severity:** major · **Verdict:** CONFIRMED · **Kind:** plan-defect · **Owner:** N
 - **References:**
   - docs/plans/n-packaging/m2/08-cli.md lines 6-14 (the X15 paragraph), § Edit only (admin.rs only for `gc_orphans`), § docs/spec/09-api.md block (no migrate row), § Done when ('Both commands … seven tests')
   - crates/server/src/meta/mod.rs (MetaDb::open migrates; meta.db has no LOCK)
-  - crates/cli/src/main.rs line 132 (reapply-deletions help: 'run `llmobs serve` once on a restored older backup first')
-  - crates/server/src/admin.rs lines 129-131 (SourceSchema: 'run `llmobs serve` on a copy of it first')
+  - crates/cli/src/main.rs line 132 (reapply-deletions help: 'run `cetra serve` once on a restored older backup first')
+  - crates/server/src/admin.rs lines 129-131 (SourceSchema: 'run `cetra serve` on a copy of it first')
 
-**Problem.** The X15 fold adds a third command as one paragraph. There is no `AdminCommand::Migrate` variant, no `llmobs_server::admin::migrate` signature (the CLI cannot call Storage::open, since it does not depend on llmobs-storage), and no Edit-only entry for it. Its spec 09 row is in prose and missing from the replacement block. The Done-when counts remain 'both commands' and 'seven tests'. The paragraph says 'opens `meta.db` with `MetaDb::open` and the storage with `Storage::open`', in that order. Only Storage::open takes `LOCK`, so following the text migrates meta.db before the running-server check fires. Nothing requires meta.db and catalog.db to exist, so `migrate` on a wrong path quietly creates an empty instance. The existing CLI help text and the SourceSchema error still tell operators to start `llmobs serve` before reapplying, the order X15 removes, and B8 does not ask to change them.
+**Problem.** The X15 fold adds a third command as one paragraph. There is no `AdminCommand::Migrate` variant, no `cetra_server::admin::migrate` signature (the CLI cannot call Storage::open, since it does not depend on cetra-storage), and no Edit-only entry for it. Its spec 09 row is in prose and missing from the replacement block. The Done-when counts remain 'both commands' and 'seven tests'. The paragraph says 'opens `meta.db` with `MetaDb::open` and the storage with `Storage::open`', in that order. Only Storage::open takes `LOCK`, so following the text migrates meta.db before the running-server check fires. Nothing requires meta.db and catalog.db to exist, so `migrate` on a wrong path quietly creates an empty instance. The existing CLI help text and the SourceSchema error still tell operators to start `cetra serve` before reapplying, the order X15 removes, and B8 does not ask to change them.
 
-**Failure scenario.** On a systemd host the operator installs the new binary and runs `llmobs admin migrate` before restarting. The old server is still running. MetaDb::open applies the new migrations under it, and only then does Storage::open return Locked. The running old binary now has a meta.db at a newer schema. Separately, a weak implementer adds no variant or server function and ticks 'seven tests', and the `migrate_while_the_server_runs_is_refused` test (same binary, so meta migrate is a no-op) cannot catch the ordering.
+**Failure scenario.** On a systemd host the operator installs the new binary and runs `cetra admin migrate` before restarting. The old server is still running. MetaDb::open applies the new migrations under it, and only then does Storage::open return Locked. The running old binary now has a meta.db at a newer schema. Separately, a weak implementer adds no variant or server function and ticks 'seven tests', and the `migrate_while_the_server_runs_is_refused` test (same binary, so meta migrate is a no-op) cannot catch the ordering.
 
-**Suggested fix.** In 08-cli.md, specify the full change. Add `AdminCommand::Migrate { config }`. Add `pub async fn migrate(config: &ServerConfig) -> Result<(), AdminError>` in crates/server/src/admin.rs, which first requires `meta.db` and `catalog.db` to exist (new `NotInitialized`/`NoCatalog` errors), then opens storage (LOCK; maintenance mode, see N-2), then MetaDb::open, then shuts down. Add the migrate row to the spec 09 block. Add a test that the server-running refusal happens before meta.db is touched, checking the schema version unchanged with an older meta.db fixture. Update the counts in Done when. Have B8 also change main.rs:132 and AdminError::SourceSchema's remedy to `llmobs admin migrate`.
+**Suggested fix.** In 08-cli.md, specify the full change. Add `AdminCommand::Migrate { config }`. Add `pub async fn migrate(config: &ServerConfig) -> Result<(), AdminError>` in crates/server/src/admin.rs, which first requires `meta.db` and `catalog.db` to exist (new `NotInitialized`/`NoCatalog` errors), then opens storage (LOCK; maintenance mode, see N-2), then MetaDb::open, then shuts down. Add the migrate row to the spec 09 block. Add a test that the server-running refusal happens before meta.db is touched, checking the schema version unchanged with an older meta.db fixture. Update the counts in Done when. Have B8 also change main.rs:132 and AdminError::SourceSchema's remedy to `cetra admin migrate`.
 
-**Verifier evidence.** origin/claude/n-m2-backup-plan 08-cli.md lines 6-14 add `llmobs admin migrate` as a single paragraph: 'opens `meta.db` with `MetaDb::open` and the storage with `Storage::open`'. It defines no AdminCommand variant, no server function signature and no Edit-only entry. The spec 09 replacement block (lines ~120-126) has no migrate row, and Done-when line 180 still reads 'Both commands exist with the seven tests'. MetaDb (crates/server/src/meta/mod.rs) takes no LOCK; only Storage::open does. If the implementer follows the stated order, meta.db is migrated before the Locked refusal. Nothing requires meta.db or catalog.db to exist first (gc_orphans has a NoCatalog guard, migrate has none). crates/cli/src/main.rs:132 ('run `llmobs serve` once on a restored older backup first') and admin.rs:129-131 (SourceSchema: 'run `llmobs serve` on a copy of it first') still prescribe the order X15 removes. This is related to X15 but is a defect in how its fix was folded in, not a restatement.
+**Verifier evidence.** origin/claude/n-m2-backup-plan 08-cli.md lines 6-14 add `cetra admin migrate` as a single paragraph: 'opens `meta.db` with `MetaDb::open` and the storage with `Storage::open`'. It defines no AdminCommand variant, no server function signature and no Edit-only entry. The spec 09 replacement block (lines ~120-126) has no migrate row, and Done-when line 180 still reads 'Both commands exist with the seven tests'. MetaDb (crates/server/src/meta/mod.rs) takes no LOCK; only Storage::open does. If the implementer follows the stated order, meta.db is migrated before the Locked refusal. Nothing requires meta.db or catalog.db to exist first (gc_orphans has a NoCatalog guard, migrate has none). crates/cli/src/main.rs:132 ('run `cetra serve` once on a restored older backup first') and admin.rs:129-131 (SourceSchema: 'run `cetra serve` on a copy of it first') still prescribe the order X15 removes. This is related to X15 but is a defect in how its fix was folded in, not a restatement.
 
 #### N-10 — Small cross-references between phase files a weaker model would trip on
 
@@ -1352,17 +1352,17 @@ D-M-6 and spec 03 § 7 promise the guard prevents 'a copy after the cut-off'.
 - **Severity:** minor (reviewer: major) · **Verdict:** CONFIRMED · **Kind:** plan-defect · **Owner:** N
 - **References:**
   - docs/plans/n-packaging/m2/06-backup.md lines 191-192 ('S3 mode is covered by the storage tests (B3, B4) and by B8's manual check')
-  - docs/plans/n-packaging/m2/00-design.md § How to verify (local `llmobs serve` on a temp data dir only)
+  - docs/plans/n-packaging/m2/00-design.md § How to verify (local `cetra serve` on a temp data dir only)
   - docs/plans/n-packaging/m2/05-orphans.md § Tests (all eight on the default local store)
   - docs/plans/n-packaging/m2/04-copy-objects.md copy_objects_refuses_a_remote_store (the only remote-store test, and it only checks the refusal)
-  - claude/n-m2-impl:crates/storage/src/gc.rs (collect_orphans tests: no InMemory/open_with_store/LLMOBS_TEST_S3 use)
-  - AGENTS.md § Tests (LLMOBS_TEST_S3_ENDPOINT, crates/storage/tests/s3.rs); tools/packaging/compose-smoke.sh s3 (Garage)
+  - claude/n-m2-impl:crates/storage/src/gc.rs (collect_orphans tests: no InMemory/open_with_store/CETRA_TEST_S3 use)
+  - AGENTS.md § Tests (CETRA_TEST_S3_ENDPOINT, crates/storage/tests/s3.rs); tools/packaging/compose-smoke.sh s3 (Garage)
 
 **Problem.** Q's cells run only in S3 mode and rely on meta-only backups and the `gc.grace` window (R9, R10, D-N-20). The plan never runs that path end to end: B6 defers it to B3/B4 and to 'B8's manual check', but B8's manual check is local-mode. No test lists a prefixed remote store in collect_orphans, which goes through `raw_store().list` on a PrefixStore. No test rolls a bucket back by deleting post-backup objects. No test checks that `missing` is 0 inside `gc.grace` and above 0 once an obsolete file has been collected. No test checks the MetaOnly manifest (`restorable_until`) from a server.
 
 **Failure scenario.** A key-prefix or listing difference on a PrefixStore makes collect_orphans count every live object as unknown, or none. Or a meta-only restore within `gc.grace` reports missing files. Every local-mode test passes. The first restore drill on a Q cell, or a real incident, is the first time the path runs.
 
-**Suggested fix.** Add a storage test on `open_with_store(InMemory)` with a prefix. It snapshots, shuts down, puts post-backup objects, reopens a fresh data dir on the copied catalog.db against the same store, runs collect_orphans, and asserts that the post-backup objects are deleted and `missing == 0`. A second case collects an obsolete file past grace before the restore and asserts `missing == 1`. Add an env-gated case to crates/storage/tests/s3.rs. Make the B8/B10 manual verification also run the S3 path, using `just compose-smoke … s3`'s Garage or `LLMOBS_TEST_S3_ENDPOINT`.
+**Suggested fix.** Add a storage test on `open_with_store(InMemory)` with a prefix. It snapshots, shuts down, puts post-backup objects, reopens a fresh data dir on the copied catalog.db against the same store, runs collect_orphans, and asserts that the post-backup objects are deleted and `missing == 0`. A second case collects an obsolete file past grace before the restore and asserts `missing == 1`. Add an env-gated case to crates/storage/tests/s3.rs. Make the B8/B10 manual verification also run the S3 path, using `just compose-smoke … s3`'s Garage or `CETRA_TEST_S3_ENDPOINT`.
 
 **Verifier evidence.** 06-backup.md:191-192 defers S3 coverage to 'the storage tests (B3, B4) and B8's manual check'. 00-design.md § How to verify (350-360) is local-mode only (temp data dir, release build). In claude/n-m2-impl, gc.rs has nine collect_orphans tests (lines 1022-1273), all on the default local store, with no InMemory, open_with_store or PrefixStore. tests/s3.rs has no orphan or snapshot case. Remote stores are wrapped in PrefixStore (objects.rs:619) and local ones are not (objects.rs:595), so collect_orphans's raw_store().list over `tables`/`media` never runs against a prefixed store in tests. The gap is real. The severity is lowered because PrefixStore listing is library behaviour and the risk is a missed regression, not a known defect.
 
@@ -1372,7 +1372,7 @@ D-M-6 and spec 03 § 7 promise the guard prevents 'a copy after the cut-off'.
 - **References:**
   - docs/plans/n-packaging/m2/08-cli.md lines 64-66 (flag), 98-102 (`gc_orphans(&config, min_age, dry_run)` but new `AdminError::RollbackNeedsConfirmation`), 114 ('returns the `OrphanReport`' vs `GcOrphansReport` at 110), spec 09 row (lines 134-136), tests (lines 141-165)
   - docs/plans/n-packaging/m2/00-design.md § Restore step 3 and D-N-21 (no confirmation flag)
-  - docs/plans/n-packaging/m2/10-docs.md § Restore step 5 (plain `llmobs admin gc-orphans`)
+  - docs/plans/n-packaging/m2/10-docs.md § Restore step 5 (plain `cetra admin gc-orphans`)
 
 **Problem.** The S3 safety flag has no consistent definition. The server-side error that enforces it is placed in `admin.rs`, but the function signature cannot receive the flag. D-N-21, the design, the spec 09 row and B10's restore steps never mention it, and no test covers the refusal or the parsing. The same section says the function returns both `GcOrphansReport` and `OrphanReport`.
 
@@ -1394,7 +1394,7 @@ D-M-6 and spec 03 § 7 promise the guard prevents 'a copy after the cut-off'.
 
 **Failure scenario.** Q's authors, or the coordinator fixing X1, re-read N's README § Requests for Q and keep `object_retention = "8d"`. The cell config then fails at startup with an unknown key.
 
-**Suggested fix.** In README § Requests for Q item 4: R10 is answered by D-N-20 with `storage.gc.grace = "8d"` (max 30d), and R9 by `llmobs admin backup` through the control socket (D-N-17). Also point § After M1 at the R9/R10 mapping.
+**Suggested fix.** In README § Requests for Q item 4: R10 is answered by D-N-20 with `storage.gc.grace = "8d"` (max 30d), and R9 by `cetra admin backup` through the control socket (D-N-17). Also point § After M1 at the R9/R10 mapping.
 
 **Verifier evidence.** docs/plans/n-packaging/README.md lines 484-488, on both main and the plan branch, still read 'R10, `storage.gc.object_retention`, which Q sets to `8d`'. D-N-20 rejects that key. The X1 references list the M2 design, mvp-decisions and spec 12 but not this README. This is related to X1 (same root cause) and adds a stale N-side source that X1's fix would miss.
 
@@ -1419,17 +1419,17 @@ D-M-6 and spec 03 § 7 promise the guard prevents 'a copy after the cut-off'.
 
 - **Severity:** minor · **Verdict:** CONFIRMED · **Kind:** plan-defect · **Owner:** N
 - **References:**
-  - docs/plans/n-packaging/m2/10-docs.md § Restore (lines 55-68: bare `llmobs admin …` commands) and § Online backup ('B10 does not change `deploy/`')
+  - docs/plans/n-packaging/m2/10-docs.md § Restore (lines 55-68: bare `cetra admin …` commands) and § Online backup ('B10 does not change `deploy/`')
   - claude/n-m2-impl:docs/self-hosting/backup.md § Restore steps 3-7 (no compose or Kubernetes commands) and § Kubernetes ('The Helm chart has no value for a second volume yet … post-renderer')
-  - deploy/helm/llmobs/values.yaml and templates/statefulset.yaml lines 139-151 (only the data and config volumes)
+  - deploy/helm/cetra/values.yaml and templates/statefulset.yaml lines 139-151 (only the data and config volumes)
 
-**Problem.** The restore steps (copying into the data volume, `gc-orphans`, `admin migrate`, `reapply-deletions`) must run with llmobs stopped, from the image, with the server's env and config. For compose that means `docker compose run --rm --no-deps llmobs admin …` and a helper container to fill the named volume. For Kubernetes the StatefulSet is scaled to 0, so there is no pod to exec into, and a one-off pod has to mount the PVC with the same env, Secret and ConfigMap. Neither the plan nor the implemented docs say any of this, although the cold-backup section does give per-install commands. The online backup on Kubernetes also needs a hand-maintained post-renderer, because the chart has no extraVolumes/extraVolumeMounts.
+**Problem.** The restore steps (copying into the data volume, `gc-orphans`, `admin migrate`, `reapply-deletions`) must run with cetra stopped, from the image, with the server's env and config. For compose that means `docker compose run --rm --no-deps cetra admin …` and a helper container to fill the named volume. For Kubernetes the StatefulSet is scaled to 0, so there is no pod to exec into, and a one-off pod has to mount the PVC with the same env, Secret and ConfigMap. Neither the plan nor the implemented docs say any of this, although the cold-backup section does give per-install commands. The online backup on Kubernetes also needs a hand-maintained post-renderer, because the chart has no extraVolumes/extraVolumeMounts.
 
-**Failure scenario.** A compose or Kubernetes operator follows § Restore and types `llmobs admin gc-orphans` on the host. The command either does not exist there or reads a different data directory and config, or it is run through `docker compose exec`, which fails because the service is stopped. The restore stalls in an incident, or the operator starts the server to get a shell, which is exactly the start-before-reapply X15 forbids.
+**Failure scenario.** A compose or Kubernetes operator follows § Restore and types `cetra admin gc-orphans` on the host. The command either does not exist there or reads a different data directory and config, or it is run through `docker compose exec`, which fails because the service is stopped. The restore stalls in an incident, or the operator starts the server to get a shell, which is exactly the start-before-reapply X15 forbids.
 
-**Suggested fix.** In 10-docs.md, require per-install restore commands. For compose: `docker compose run --rm --no-deps llmobs admin gc-orphans --dry-run`, and so on, plus a busybox step to fill the volume. For Kubernetes: a documented one-off pod (or `kubectl debug`) that mounts `data-llmobs-0` with the chart's env, Secret and ConfigMap. Either add `extraVolumes`/`extraVolumeMounts` to the chart in a small N change, or record the post-renderer limitation as a decision.
+**Suggested fix.** In 10-docs.md, require per-install restore commands. For compose: `docker compose run --rm --no-deps cetra admin gc-orphans --dry-run`, and so on, plus a busybox step to fill the volume. For Kubernetes: a documented one-off pod (or `kubectl debug`) that mounts `data-cetra-0` with the chart's env, Secret and ConfigMap. Either add `extraVolumes`/`extraVolumeMounts` to the chart in a small N change, or record the post-renderer limitation as a decision.
 
-**Verifier evidence.** The impl backup.md § Restore steps 3-7 give bare `llmobs admin gc-orphans` / `admin migrate` / `reapply-deletions` commands with only 'Use the server's configuration'. They include no `docker compose run --rm --no-deps` form and no Kubernetes one-off pod, while the server is stopped (scaled to 0 on k8s, so there is nothing to exec into). The Kubernetes online-backup section (lines 111-115) admits that a post-renderer or chart copy is needed for a backup volume. deploy/helm statefulset.yaml mounts only data and config, with no extraVolumes. X2 covers Q's runbook, not N's docs, so this is not a duplicate.
+**Verifier evidence.** The impl backup.md § Restore steps 3-7 give bare `cetra admin gc-orphans` / `admin migrate` / `reapply-deletions` commands with only 'Use the server's configuration'. They include no `docker compose run --rm --no-deps` form and no Kubernetes one-off pod, while the server is stopped (scaled to 0 on k8s, so there is nothing to exec into). The Kubernetes online-backup section (lines 111-115) admits that a post-renderer or chart copy is needed for a backup volume. deploy/helm statefulset.yaml mounts only data and config, with no extraVolumes. X2 covers Q's runbook, not N's docs, so this is not a duplicate.
 
 #### N-9 — The impl branch ran B10 before B8: roadmap and changelog claim commands that do not exist yet
 
@@ -1437,16 +1437,16 @@ D-M-6 and spec 03 § 7 promise the guard prevents 'a copy after the cut-off'.
 - **References:**
   - docs/plans/n-packaging/m2/00-design.md § Phases (B10 needs B1–B9; B6, B7, B8 in order, B10 last)
   - claude/n-m2-impl:docs/roadmap.md row N ('M2 (online backups, `gc-orphans`, pre-migration copies) implemented.')
-  - claude/n-m2-impl:CHANGELOG.md [Unreleased] (lists `llmobs admin backup`, `gc-orphans`, `admin migrate`)
+  - claude/n-m2-impl:CHANGELOG.md [Unreleased] (lists `cetra admin backup`, `gc-orphans`, `admin migrate`)
   - claude/n-m2-impl:crates/cli/src/main.rs (no Backup, GcOrphans or Migrate command); claude/n-m2-b8 has the same tip as n-m2-impl
 
-**Problem.** On claude/n-m2-impl, 'Document online backups' (B10) landed and the eventual B8 branch is identical to it. The roadmap row says M2 is implemented, and the changelog, spec 12 and self-hosting docs describe `llmobs admin backup`, `gc-orphans`, `--rollback-bucket` and `admin migrate`, but the CLI has none of them. Only the server side (socket, backup::run) exists.
+**Problem.** On claude/n-m2-impl, 'Document online backups' (B10) landed and the eventual B8 branch is identical to it. The roadmap row says M2 is implemented, and the changelog, spec 12 and self-hosting docs describe `cetra admin backup`, `gc-orphans`, `--rollback-bucket` and `admin migrate`, but the CLI has none of them. Only the server side (socket, backup::run) exists.
 
 **Failure scenario.** The branch is merged as is, for example to unblock Q's R9 check (`admin backup --help`). Main then documents and announces commands that fail with 'unrecognized subcommand', and the roadmap marks track N's M2 done with B8 and its manual end-to-end verification never run.
 
 **Suggested fix.** Do B8 on the branch before it merges, then run the 00-design § How to verify sequence. Until then, keep the roadmap cell at 'B1–B7, B9 done; B8 pending' and hold the changelog and docs lines that name the CLI commands.
 
-**Verifier evidence.** claude/n-m2-b8 and claude/n-m2-impl both point at 5b35a3e. claude/n-m2-impl crates/cli/src/main.rs has no Backup, GcOrphans or Migrate command (grep finds only the old reapply-deletions help at line 131-132). Its roadmap row N says 'M2 (online backups, `gc-orphans`, pre-migration copies) implemented.' Its CHANGELOG lines 15-18 announce `llmobs admin backup`, `gc-orphans` and `admin migrate`. 'Document online backups' (95f91d2) landed before any B8 commit. This is a branch state, not yet merged.
+**Verifier evidence.** claude/n-m2-b8 and claude/n-m2-impl both point at 5b35a3e. claude/n-m2-impl crates/cli/src/main.rs has no Backup, GcOrphans or Migrate command (grep finds only the old reapply-deletions help at line 131-132). Its roadmap row N says 'M2 (online backups, `gc-orphans`, pre-migration copies) implemented.' Its CHANGELOG lines 15-18 announce `cetra admin backup`, `gc-orphans` and `admin migrate`. 'Document online backups' (95f91d2) landed before any B8 commit. This is a branch state, not yet merged.
 
 ### Track P — plans and entitlements
 
@@ -1555,7 +1555,7 @@ The scope reads are not only in `crate::deletion`. The filter-deletion create ha
 
 **Verifier evidence.** crates/server/src/api/deletions.rs:53-60: the public DeletionActorKind has only User and ApiKey. 0007_deletions.sql has `requested_by_kind` and `requested_by` NOT NULL. PR #92 00-design.md:233 (item 5) only says the DELETE 'starts track M's org drop'. Neither the hook table (:189-200) nor any other text says which actor is recorded or whether `?confirm=` applies. No 04-m4 plan exists on any branch.
 
-#### P-7 — M3 plan omits D-P-32's promise to add the month's usage to `llmobs admin entitlements show`
+#### P-7 — M3 plan omits D-P-32's promise to add the month's usage to `cetra admin entitlements show`
 
 - **Severity:** minor · **Verdict:** CONFIRMED · **Kind:** delivery-gap · **Owner:** P
 - **References:**
@@ -1564,13 +1564,13 @@ The scope reads are not only in `crate::deletion`. The filter-deletion create ha
   - crates/server/src/admin.rs:58-60 EntitlementsReport (no usage field)
   - origin/claude/p-m3-impl: no change to crates/cli or crates/server/src/admin.rs
 
-**Problem.** D-P-32 says M3 adds the month's usage both to the entitlements response and to `llmobs admin entitlements show`. M3's plan only covers the API, and PR #90 leaves EntitlementsReport and the CLI unchanged. This narrows a decision without recording it, and PR #90's close-out does not mention it.
+**Problem.** D-P-32 says M3 adds the month's usage both to the entitlements response and to `cetra admin entitlements show`. M3's plan only covers the API, and PR #90 leaves EntitlementsReport and the CLI unchanged. This narrows a decision without recording it, and PR #90's close-out does not mention it.
 
-**Failure scenario.** An operator debugging a 402 on a cell runs `llmobs admin entitlements show <org>` expecting the month's units against the cap, as D-P-32 promised. The command shows only plan and limits, and nothing records that the item was dropped.
+**Failure scenario.** An operator debugging a 402 on a cell runs `cetra admin entitlements show <org>` expecting the month's units against the cap, as D-P-32 promised. The command shows only plan and limits, and nothing records that the item was dropped.
 
 **Suggested fix.** Either add `month_units` (from usage_daily, read offline) to EntitlementsReport and the CLI table in M3/PR #90 with a test, or amend D-P-32 to say only the API carries usage.
 
-**Verifier evidence.** 00-design.md:90 D-P-32: 'M3 adds the month's usage to both' (the API and `llmobs admin entitlements show`). 03-m3 changes only plan.tsx (:573) and the API response, and has no admin or EntitlementsReport change (grep). In origin/claude/p-m3-impl, the diff under crates/cli and crates/server/src/admin.rs only touches crates/cli/tests/e2e.rs, and there is no EntitlementsReport or month_units change.
+**Verifier evidence.** 00-design.md:90 D-P-32: 'M3 adds the month's usage to both' (the API and `cetra admin entitlements show`). 03-m3 changes only plan.tsx (:573) and the API response, and has no admin or EntitlementsReport change (grep). In origin/claude/p-m3-impl, the diff under crates/cli and crates/server/src/admin.rs only touches crates/cli/tests/e2e.rs, and there is no EntitlementsReport or month_units change.
 
 #### P-8 — 00-design architecture text contradicts later decisions and the M3 plan
 
@@ -1589,7 +1589,7 @@ The scope reads are not only in `crate::deletion`. The filter-deletion create ha
 
 **Verifier evidence.** PR #92 00-design.md:152 still says gRPC `RESOURCE_EXHAUSTED` with `RetryInfo` for the rate limit, against D-P-35 (:98, UNAVAILABLE). Lines :151-152 use `check_cap(&state, org, now)` and `rate::take(&state, org, spans, now)`, but 03-m3 has `check_cap(state, org)` (:177) and `take(&self, org, spans, rate, burst, now_ns)` (:221). The layout at :143 lists `web/src/routes/$org/settings/usage.tsx`, while M3 uses plan.tsx (:573). The internal_* route modules are missing from the layout. :249 still says 'M1 can start now', though M1 and M2 are merged.
 
-### Track Q — cloud control plane (llmobs-control)
+### Track Q — cloud control plane (cetra-control)
 
 Track Q's plans live in a private repository, so the full text of these findings (references, problem, failure scenario, fix and verifier evidence) is kept with that track rather than in this public file.
 
@@ -1699,7 +1699,7 @@ The two rules contradict each other as the finding says.
   - Cargo.toml:14-18 ([workspace.lints.rust] has no unexpected_cfgs entry)
   - AGENTS.md § Parallel work and ownership (root Cargo.toml is shared)
 
-**Problem.** Rust 1.99 checks cfg names by default, so `#[cfg(any(test, fuzzing))]` in llmobs-storage and llmobs-otel raises `unexpected_cfgs` for `fuzzing`. `just check-rust` runs clippy with `-D warnings`, so the build fails. The fix is `unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }`. Both crates use `[lints] workspace = true`, and Cargo does not accept crate-level lint keys next to that. So the entry must go in the root Cargo.toml's `[workspace.lints.rust]`. The design does not mention it, and its scope of edits does not include the root manifest.
+**Problem.** Rust 1.99 checks cfg names by default, so `#[cfg(any(test, fuzzing))]` in cetra-storage and cetra-otel raises `unexpected_cfgs` for `fuzzing`. `just check-rust` runs clippy with `-D warnings`, so the build fails. The fix is `unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }`. Both crates use `[lints] workspace = true`, and Cargo does not accept crate-level lint keys next to that. So the entry must go in the root Cargo.toml's `[workspace.lints.rust]`. The design does not mention it, and its scope of edits does not include the root manifest.
 
 **Verifier correction.** `cfg(any(test, fuzzing))` will trigger unexpected_cfgs under -D warnings on Rust 1.99. The design does not say how the `fuzzing` cfg is declared. Options: a build.rs `cargo::rustc-check-cfg` in each crate (in scope), a local allow, or a root `[workspace.lints.rust]` check-cfg entry, which would need the coordinator. M3's plan should pick one.
 
@@ -1727,7 +1727,7 @@ So the gap is real. But the claim that the entry 'must go in the root Cargo.toml
 - call the M1 oracle or checks, which live in the cfg(test) `src/model_tests`;
 - read files per level, compaction lag or WAL bytes, which no public API exposes.
 D-R-2 says that adding a public API stops and goes to the coordinator first.
-(b) M5's memory-limit runs expect HTTP 503/422. Those codes exist only in llmobs-server, which is outside R's scope ('Changes to ... the server are requested from the coordinating session').
+(b) M5's memory-limit runs expect HTTP 503/422. Those codes exist only in cetra-server, which is outside R's scope ('Changes to ... the server are requested from the coordinating session').
 
 **Verifier correction.** M7's soak in tests/soak.rs cannot reuse the cfg(test) M1 oracle and checks. The design should put the end-of-soak model check in-crate, or drop it. The sampled metrics can come from health()/read_cache_stats() plus reading catalog.db and the WAL directory directly, as tests/crash.rs does, with no new API. M5's 503/422 expectation should say whether it runs the real binary (no server edit needed) or what the storage-level outcome is.
 
@@ -1744,7 +1744,7 @@ For M5, it writes a storage-level test that can never see a 503 and silently che
 
 **Verifier evidence.** (a) 00-design.md:169 places the soak in crates/storage/tests/soak.rs and says 'The M1 model's checks run on a sample of traces at the end'. M1's model and checks live in the cfg(test) src/model_tests (m.md:22), which an integration test cannot reach. That part holds.
 - However, 'files per level, compaction lag, WAL bytes' do not need a new public API. tests/crash.rs already reads catalog.db directly (read_catalog, crash.rs:480) and walks the directory. Memtable bytes come from the public Storage::health (lib.rs:130-140, 777), and the read cache from the public read_cache_stats (lib.rs:772).
-(b) 00-design.md:154 says only that the memory-limit runs end in 503/422. It does not say they are storage-level tests. Running the real `llmobs serve` under systemd-run and sending HTTP needs no edit to the server crate. Location and ownership are unstated rather than impossible.
+(b) 00-design.md:154 says only that the memory-limit runs end in 503/422. It does not say they are storage-level tests. Running the real `cetra serve` under systemd-run and sending HTTP needs no edit to the server crate. Location and ownership are unstated rather than impossible.
 M5 and M7 plans are not written yet.
 
 ## Systemic issues
@@ -1882,7 +1882,7 @@ Checked delivery against main using the merge contents of PR #21/#25 (D: P1–P2
 - auth: last_used coalescing; the key and PAT caches and their eviction; the limits and lockout bounds; the common-password list.
 - OIDC: hd check, Entra refusal, metadata TTL and the redirect policy.
 - the generated access suite, credentials file modes, mailer log privacy, the /cli-auth page, and the project members routes.
-- crates/eval: the egress deny ranges, judge HTTP classification, webhook status classification and categorical parsing, Cargo deps (core and otel only), the tests included via #[path], snapshots, just eval-live, the built-in templates, the llmobs-eval-external rewrite in the server, and unwrap/TODO sweeps.
+- crates/eval: the egress deny ranges, judge HTTP classification, webhook status classification and categorical parsing, Cargo deps (core and otel only), the tests included via #[path], snapshots, just eval-live, the built-in templates, the cetra-eval-external rewrite in the server, and unwrap/TODO sweeps.
 
 Not checked: P2–P25 were not reviewed line by line against each test bullet. I did not run any tests, and I did not verify that E20 was done by a different model.
 
@@ -1894,7 +1894,7 @@ Checked against main:
 - F delivery: git log shows every P/T sub-phase commit and the X1 commit.
 - D-F-1–D-F-16 are in mvp-decisions, with the D80 and D121 annotations.
 - The F1 spec edits are in spec 10 (Recorded data, Language differences, Testing), spec 06, spec 09, spec 02 and fixtures/otlp/README.
-- The 11 fixtures/otlp/llmobs/sdk-* cases exist.
+- The 11 fixtures/otlp/cetra/sdk-* cases exist.
 - pyproject has the 10 extras plus all. package.json has the pins, optional peers and subpath exports.
 - Python score queue: fork hook, buffer-full and retry warnings. TS score queue: drop and retry warnings.
 - Python instrumentor TraceConfig; TS openai helper hideInputs.
@@ -2065,7 +2065,7 @@ Read first: the cross-track review (origin/claude/cross-track-review-6a41ad, X1�
 - The tests M2 promised: grepped by name, all present.
 M1 and M2 look delivered, with no narrowed sub-phases found. On PR #90 (M3 implementation), I checked the diff stat, the seat-limit call sites, the new log lines (no emails or payload), unwrap/expect (tests or invariant-commented), the spec 02/09/12 updates, and the CLI and admin.rs (not touched). M4 and M5 plans do not exist on any remote branch (checked every origin/* branch); the design rows were judged on their own. Not done: no build or tests were run, no line-by-line review of the PR #90 code, and the web and SDK parts of M3 were not checked against the plan.
 
-### Track Q — cloud control plane (llmobs-control)
+### Track Q — cloud control plane (cetra-control)
 
 Kept with the track (private repository).
 

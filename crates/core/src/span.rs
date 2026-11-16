@@ -309,7 +309,7 @@ pub(crate) fn full_span() -> Span {
         tool_definitions: Some("[]".to_owned()),
         attributes,
         resource_attributes: resource,
-        scope_name: Some("llmobs".to_owned()),
+        scope_name: Some("cetra".to_owned()),
         scope_version: Some("0.0.0".to_owned()),
         events: vec![SpanEvent {
             time: start,
@@ -322,8 +322,8 @@ pub(crate) fn full_span() -> Span {
             attributes: Some(r#"{"link.kind":"child"}"#.to_owned()),
         }],
         media_refs: vec!["ab".repeat(32)],
-        truncated: vec!["llmobs.input".to_owned()],
-        conventions: vec![Convention::Llmobs, Convention::Genai],
+        truncated: vec!["cetra.input".to_owned()],
+        conventions: vec![Convention::Cetra, Convention::Genai],
         ingest_time: start + 2_000_000_000,
         schema_version: 1,
     }

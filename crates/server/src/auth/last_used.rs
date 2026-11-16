@@ -1,7 +1,7 @@
 //! Coalesced `last_used_at` updates (D140).
 //!
 //! [`LastUsed::record`] keeps the latest timestamp per id in memory.
-//! [`LastUsed::flush`] writes that map and clears it. `llmobs serve` flushes
+//! [`LastUsed::flush`] writes that map and clears it. `cetra serve` flushes
 //! every 60 s and once at shutdown.
 
 use std::collections::HashMap;

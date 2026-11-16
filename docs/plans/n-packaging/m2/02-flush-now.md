@@ -160,7 +160,7 @@ Running a query: use the same query plumbing the existing `lib.rs` tests use to 
 ## Verify
 
 ```bash
-cargo test -p llmobs-storage --all-features flush_now
+cargo test -p cetra-storage --all-features flush_now
 just check
 ```
 

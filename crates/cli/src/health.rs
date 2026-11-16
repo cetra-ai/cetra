@@ -1,4 +1,4 @@
-//! `llmobs health`: the container healthcheck (D-N-4). The distroless image has no curl, so
+//! `cetra health`: the container healthcheck (D-N-4). The distroless image has no curl, so
 //! Docker's `HEALTHCHECK` and compose's `healthcheck` run this command.
 
 use std::time::Duration;
@@ -16,7 +16,7 @@ pub(crate) async fn check(url: &str) -> anyhow::Result<()> {
     let http = reqwest::Client::builder()
         .timeout(TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
-        .user_agent(concat!("llmobs-cli/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("cetra-cli/", env!("CARGO_PKG_VERSION")))
         .build()
         .context("building the http client")?;
     let target = format!("{}/readyz", url.trim_end_matches('/'));

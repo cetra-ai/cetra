@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use llmobs_core::enums::{CostSource, PayloadFormat, SpanKind};
-use llmobs_core::message::parse_messages;
-use llmobs_core::span::Span;
+use cetra_core::enums::{CostSource, PayloadFormat, SpanKind};
+use cetra_core::message::parse_messages;
+use cetra_core::span::Span;
 use regex::{Regex, RegexBuilder};
 use sha2::{Digest, Sha256};
 use support::{
@@ -130,7 +130,7 @@ fn costs() {
 
 #[test]
 fn canonical_formatting() {
-    let rewrite = std::env::var_os("LLMOBS_FIXTURES_FMT").is_some_and(|value| value == "1");
+    let rewrite = std::env::var_os("CETRA_FIXTURES_FMT").is_some_and(|value| value == "1");
     let mut failures = Vec::new();
     for path in json_files() {
         match fs::read_to_string(&path) {
@@ -764,7 +764,7 @@ fn recompute(span: &Span, row: &PriceRow) -> (Option<f64>, Option<f64>, Option<f
     let tier = row.tiers.as_ref().and_then(|tiers| {
         tiers
             .iter()
-            .fold(None, |best: Option<&llmobs_otel::PriceTier>, tier| {
+            .fold(None, |best: Option<&cetra_otel::PriceTier>, tier| {
                 if tier.min_input_tokens > tokens {
                     return best;
                 }
@@ -1355,7 +1355,7 @@ fn directory_names_match_the_readme() {
     assert!(!name_matches(CASE_NAME, "google_adk"));
     assert!(name_matches(CASE_NAME, "chat-cache-tokens"));
 
-    let root = std::env::temp_dir().join(format!("llmobs-otlp-names-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("cetra-otlp-names-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(root.join("Bad_Name")).unwrap_or_else(|err| panic!("{err}"));
     let mut failures = Vec::new();
@@ -1384,7 +1384,7 @@ fn directory_names_match_the_readme() {
 
 #[test]
 fn captured_case_may_omit_expected_json() {
-    let root = std::env::temp_dir().join(format!("llmobs-otlp-captured-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("cetra-otlp-captured-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     let case_dir = root.join("awaiting");
     fs::create_dir_all(&case_dir).unwrap_or_else(|err| panic!("{err}"));
@@ -1449,7 +1449,7 @@ fn empty_case() -> Case {
     Case {
         group: "edge".to_owned(),
         name: "sample".to_owned(),
-        dir: PathBuf::from("/no/such/llmobs-fixture"),
+        dir: PathBuf::from("/no/such/cetra-fixture"),
         meta: CaseMeta {
             description: "sample".to_owned(),
             origin: Origin::HandWritten,
@@ -1514,7 +1514,7 @@ fn null_reasoning_price_uses_the_output_price() {
 
 fn sample_price() -> PriceRow {
     PriceRow {
-        scope: llmobs_otel::PriceScope::Builtin,
+        scope: cetra_otel::PriceScope::Builtin,
         model_name: "demo".to_owned(),
         match_pattern: "demo".to_owned(),
         provider: None,
@@ -1538,7 +1538,7 @@ fn row_prices(row: &PriceRow) -> [Option<f64>; 5] {
     ]
 }
 
-fn tier_prices(tier: &llmobs_otel::PriceTier) -> [Option<f64>; 5] {
+fn tier_prices(tier: &cetra_otel::PriceTier) -> [Option<f64>; 5] {
     [
         tier.price_input,
         tier.price_output,

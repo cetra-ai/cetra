@@ -1,4 +1,4 @@
-//! Command line for `llmobs-capture`.
+//! Command line for `cetra-capture`.
 //!
 //! `CARGO_MANIFEST_DIR` is `tools/capture` when this binary is built with
 //! `cargo run`. The tool is only run that way. User-facing lines go through
@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::str::FromStr;
 
+use cetra_capture::{CaptureError, CasePath, Language, Program, discover, run_case};
 use clap::{Parser, Subcommand};
-use llmobs_capture::{CaptureError, CasePath, Language, Program, discover, run_case};
 
 fn main() -> ExitCode {
     init_tracing();
@@ -43,7 +43,7 @@ fn init_tracing() {
 
 /// Record OTLP fixtures from real instrumentations.
 #[derive(Debug, Parser)]
-#[command(name = "llmobs-capture")]
+#[command(name = "cetra-capture")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -91,7 +91,7 @@ async fn run(check: bool, all: bool, cases: &[String]) -> Result<(), CaptureErro
         } else {
             tracing::info!("captured {case}");
             if outcome.stale_expected {
-                tracing::info!("{case}: expected.json is stale; re-bless with LLMOBS_BLESS=1");
+                tracing::info!("{case}: expected.json is stale; re-bless with CETRA_BLESS=1");
             }
         }
     }

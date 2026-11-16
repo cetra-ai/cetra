@@ -1,82 +1,82 @@
 //! Branded attribute names, reserved keys, and reserved values.
 //!
-//! Renaming the product (D46) means changing [`llmobs_name`](crate::llmobs_name). Specs 02, 06, and 10.
+//! Renaming the product means changing [`cetra_name`](crate::cetra_name). Specs 02, 06, and 10.
 
 /// Product name used in every branded identifier.
 ///
-/// Renaming the product means changing this macro (D46).
+/// Renaming the product means changing this macro.
 #[macro_export]
-macro_rules! llmobs_name {
+macro_rules! cetra_name {
     () => {
-        "llmobs"
+        "cetra"
     };
     ($suffix:literal) => {
-        concat!("llmobs", $suffix)
+        concat!("cetra", $suffix)
     };
 }
 
-/// The product name. Equal to [`llmobs_name`](crate::llmobs_name).
-pub const PRODUCT: &str = crate::llmobs_name!();
+/// The product name. Equal to [`cetra_name`](crate::cetra_name).
+pub const PRODUCT: &str = crate::cetra_name!();
 
 /// Span attributes our SDKs emit and ingestion reads.
 ///
 /// Spec 02 § Mapping tables and spec 10.
 pub mod attr {
-    /// `llmobs.span.kind`. Spec 02 § Span kind, spec 10.
-    pub const SPAN_KIND: &str = crate::llmobs_name!(".span.kind");
-    /// `llmobs.input`. Spec 02 § Input / output, spec 10.
-    pub const INPUT: &str = crate::llmobs_name!(".input");
-    /// `llmobs.input.format`. Spec 02 § Input / output.
-    pub const INPUT_FORMAT: &str = crate::llmobs_name!(".input.format");
-    /// `llmobs.output`. Spec 02 § Input / output, spec 10.
-    pub const OUTPUT: &str = crate::llmobs_name!(".output");
-    /// `llmobs.output.format`. Spec 02 § Input / output.
-    pub const OUTPUT_FORMAT: &str = crate::llmobs_name!(".output.format");
-    /// `llmobs.session.id`. Spec 02 § Context fields, spec 10.
-    pub const SESSION_ID: &str = crate::llmobs_name!(".session.id");
-    /// `llmobs.user.id`. Spec 02 § Context fields, spec 10.
-    pub const USER_ID: &str = crate::llmobs_name!(".user.id");
-    /// `llmobs.tags`. Spec 02 § Context fields, spec 10.
-    pub const TAGS: &str = crate::llmobs_name!(".tags");
-    /// `llmobs.metadata.` prefix. One attribute per metadata key. Spec 02 § Context fields.
-    pub const METADATA_PREFIX: &str = crate::llmobs_name!(".metadata.");
-    /// `llmobs.environment`. Spec 02 § Context fields, spec 10.
-    pub const ENVIRONMENT: &str = crate::llmobs_name!(".environment");
-    /// `llmobs.release`. Spec 02 § Context fields.
-    pub const RELEASE: &str = crate::llmobs_name!(".release");
-    /// `llmobs.ttft_ns`. Spec 02 § Model, provider, usage.
-    pub const TTFT_NS: &str = crate::llmobs_name!(".ttft_ns");
-    /// `llmobs.cost.total`. Spec 02 § Cost computation.
-    pub const COST_TOTAL: &str = crate::llmobs_name!(".cost.total");
-    /// `llmobs.experiment.id`. Spec 02 § Context fields.
-    pub const EXPERIMENT_ID: &str = crate::llmobs_name!(".experiment.id");
-    /// `llmobs.dataset_item.id`. Spec 02 § Context fields.
-    pub const DATASET_ITEM_ID: &str = crate::llmobs_name!(".dataset_item.id");
+    /// `cetra.span.kind`. Spec 02 § Span kind, spec 10.
+    pub const SPAN_KIND: &str = crate::cetra_name!(".span.kind");
+    /// `cetra.input`. Spec 02 § Input / output, spec 10.
+    pub const INPUT: &str = crate::cetra_name!(".input");
+    /// `cetra.input.format`. Spec 02 § Input / output.
+    pub const INPUT_FORMAT: &str = crate::cetra_name!(".input.format");
+    /// `cetra.output`. Spec 02 § Input / output, spec 10.
+    pub const OUTPUT: &str = crate::cetra_name!(".output");
+    /// `cetra.output.format`. Spec 02 § Input / output.
+    pub const OUTPUT_FORMAT: &str = crate::cetra_name!(".output.format");
+    /// `cetra.session.id`. Spec 02 § Context fields, spec 10.
+    pub const SESSION_ID: &str = crate::cetra_name!(".session.id");
+    /// `cetra.user.id`. Spec 02 § Context fields, spec 10.
+    pub const USER_ID: &str = crate::cetra_name!(".user.id");
+    /// `cetra.tags`. Spec 02 § Context fields, spec 10.
+    pub const TAGS: &str = crate::cetra_name!(".tags");
+    /// `cetra.metadata.` prefix. One attribute per metadata key. Spec 02 § Context fields.
+    pub const METADATA_PREFIX: &str = crate::cetra_name!(".metadata.");
+    /// `cetra.environment`. Spec 02 § Context fields, spec 10.
+    pub const ENVIRONMENT: &str = crate::cetra_name!(".environment");
+    /// `cetra.release`. Spec 02 § Context fields.
+    pub const RELEASE: &str = crate::cetra_name!(".release");
+    /// `cetra.ttft_ns`. Spec 02 § Model, provider, usage.
+    pub const TTFT_NS: &str = crate::cetra_name!(".ttft_ns");
+    /// `cetra.cost.total`. Spec 02 § Cost computation.
+    pub const COST_TOTAL: &str = crate::cetra_name!(".cost.total");
+    /// `cetra.experiment.id`. Spec 02 § Context fields.
+    pub const EXPERIMENT_ID: &str = crate::cetra_name!(".experiment.id");
+    /// `cetra.dataset_item.id`. Spec 02 § Context fields.
+    pub const DATASET_ITEM_ID: &str = crate::cetra_name!(".dataset_item.id");
 }
 
 /// Reserved keys inside the span `metadata` map, plus the normalize-error attribute.
 ///
 /// Spec 02 § Context fields and spec 06 § Evaluators.
 pub mod metadata_key {
-    /// `llmobs.experiment_id`. Spec 02 § Context fields, spec 06.
-    pub const EXPERIMENT_ID: &str = crate::llmobs_name!(".experiment_id");
-    /// `llmobs.dataset_item_id`. Spec 02 § Context fields, spec 06.
-    pub const DATASET_ITEM_ID: &str = crate::llmobs_name!(".dataset_item_id");
-    /// `llmobs.eval.target_trace_id`. Spec 06 § Evaluators.
-    pub const EVAL_TARGET_TRACE_ID: &str = crate::llmobs_name!(".eval.target_trace_id");
-    /// `llmobs.eval.target_span_id`. Spec 06 § Evaluators.
-    pub const EVAL_TARGET_SPAN_ID: &str = crate::llmobs_name!(".eval.target_span_id");
-    /// `llmobs.eval.rule_id`. Spec 06 § Evaluators.
-    pub const EVAL_RULE_ID: &str = crate::llmobs_name!(".eval.rule_id");
-    /// `llmobs.eval.experiment_id`. Spec 06 § Evaluators.
-    pub const EVAL_EXPERIMENT_ID: &str = crate::llmobs_name!(".eval.experiment_id");
-    /// `llmobs.eval.evaluator_id`. Spec 06 § Evaluators.
-    pub const EVAL_EVALUATOR_ID: &str = crate::llmobs_name!(".eval.evaluator_id");
-    /// `llmobs.normalize_error`, stored in `attributes`. Spec 02 § Message conversion.
-    pub const NORMALIZE_ERROR: &str = crate::llmobs_name!(".normalize_error");
-    /// `llmobs.normalize_warning`, stored in `attributes`: a JSON array of warning codes,
+    /// `cetra.experiment_id`. Spec 02 § Context fields, spec 06.
+    pub const EXPERIMENT_ID: &str = crate::cetra_name!(".experiment_id");
+    /// `cetra.dataset_item_id`. Spec 02 § Context fields, spec 06.
+    pub const DATASET_ITEM_ID: &str = crate::cetra_name!(".dataset_item_id");
+    /// `cetra.eval.target_trace_id`. Spec 06 § Evaluators.
+    pub const EVAL_TARGET_TRACE_ID: &str = crate::cetra_name!(".eval.target_trace_id");
+    /// `cetra.eval.target_span_id`. Spec 06 § Evaluators.
+    pub const EVAL_TARGET_SPAN_ID: &str = crate::cetra_name!(".eval.target_span_id");
+    /// `cetra.eval.rule_id`. Spec 06 § Evaluators.
+    pub const EVAL_RULE_ID: &str = crate::cetra_name!(".eval.rule_id");
+    /// `cetra.eval.experiment_id`. Spec 06 § Evaluators.
+    pub const EVAL_EXPERIMENT_ID: &str = crate::cetra_name!(".eval.experiment_id");
+    /// `cetra.eval.evaluator_id`. Spec 06 § Evaluators.
+    pub const EVAL_EVALUATOR_ID: &str = crate::cetra_name!(".eval.evaluator_id");
+    /// `cetra.normalize_error`, stored in `attributes`. Spec 02 § Message conversion.
+    pub const NORMALIZE_ERROR: &str = crate::cetra_name!(".normalize_error");
+    /// `cetra.normalize_warning`, stored in `attributes`: a JSON array of warning codes,
     /// sorted and without duplicates. Spec 02 § Normalization rules.
-    pub const NORMALIZE_WARNING: &str = crate::llmobs_name!(".normalize_warning");
+    pub const NORMALIZE_WARNING: &str = crate::cetra_name!(".normalize_warning");
 }
 
 /// Keys written into score metadata by evaluators.
@@ -102,9 +102,9 @@ pub mod score_metadata_key {
 /// Spec 01 `environment` and spec 06 § Evaluators.
 pub mod environment {
     /// Evaluator executions. Ingestion rewrites external claims of this value.
-    pub const EVAL: &str = crate::llmobs_name!("-eval");
+    pub const EVAL: &str = crate::cetra_name!("-eval");
     /// What external data that claimed [`EVAL`] is rewritten to. Spec 06.
-    pub const EVAL_EXTERNAL: &str = crate::llmobs_name!("-eval-external");
+    pub const EVAL_EXTERNAL: &str = crate::cetra_name!("-eval-external");
     /// Default environment for experiment runs. Spec 01 `environment`.
     pub const EXPERIMENT: &str = "experiment";
 }
@@ -116,21 +116,21 @@ pub mod media {
     /// URI scheme for an extracted blob: `media://<sha256>`.
     pub const URI_SCHEME: &str = "media://";
     /// URI written when a blob is dropped for size. Spec 02 § Media extraction.
-    pub const DROPPED_URI: &str = crate::llmobs_name!(":dropped");
+    pub const DROPPED_URI: &str = crate::cetra_name!(":dropped");
 }
 
 /// Prefixes of truncation placeholders. Ingestion formats the full text.
 ///
 /// Spec 02 § Truncation.
 pub mod marker {
-    /// Prefix of a truncated string: `…[llmobs: truncated, original `, then `<N> bytes]`.
+    /// Prefix of a truncated string: `…[cetra: truncated, original `, then `<N> bytes]`.
     pub const TRUNCATED_STRING_SUFFIX_PREFIX: &str =
-        concat!("…[", crate::llmobs_name!(), ": truncated, original ");
-    /// Prefix of a truncated message placeholder: `[llmobs: `, then `<K> messages truncated]`.
-    pub const TRUNCATED_MESSAGES_PREFIX: &str = concat!("[", crate::llmobs_name!(), ": ");
+        concat!("…[", crate::cetra_name!(), ": truncated, original ");
+    /// Prefix of a truncated message placeholder: `[cetra: `, then `<K> messages truncated]`.
+    pub const TRUNCATED_MESSAGES_PREFIX: &str = concat!("[", crate::cetra_name!(), ": ");
     /// Replaces an attribute value nested deeper than the ingest depth limit:
-    /// `[llmobs: max depth]`. Spec 02 § Normalization rules.
-    pub const MAX_DEPTH: &str = concat!("[", crate::llmobs_name!(), ": max depth]");
+    /// `[cetra: max depth]`. Spec 02 § Normalization rules.
+    pub const MAX_DEPTH: &str = concat!("[", crate::cetra_name!(), ": max depth]");
 }
 
 #[cfg(test)]

@@ -31,7 +31,7 @@ H11 builds the page: the route, the sidebar entry, a multi-line CodeMirror edito
 - `tsconfig.app.json` sets `noUncheckedIndexedAccess`: `array[0]` is `T | undefined`. Tests read list items through the `single` helper in § Tests, never as `bodies[0].x`.
 - Biome formats at 100 columns with organized imports (packages first, then `@/…` aliases in path order). Some lines below may still be longer or out of order; `pnpm --dir web exec biome check --write .` (§ Commands) fixes formatting and import order, so run it before `just check-web`.
 - Test setup (`web/src/test/setup.ts`) clears localStorage after each test and fails a test on any unhandled request. The manifest mocks answer `GET /schema` and `GET /api/v1/projects/{project}` for any project, including `acme/playground`.
-- `DataTable` always persists column widths under `llmobs.table.<tableId>`; it has no switch to turn that off. The result grid uses `tableId="sql-results"` and column ids `c0`, `c1`, …, so a width the user drags carries over to the same column position of the next query. That limitation is accepted.
+- `DataTable` always persists column widths under `cetra.table.<tableId>`; it has no switch to turn that off. The result grid uses `tableId="sql-results"` and column ids `c0`, `c1`, …, so a width the user drags carries over to the same column position of the next query. That limitation is accepted.
 - **Use `user.click`**, never `fireEvent.click`: a `fireEvent` click on a router `Link` does not navigate.
 
 ## Edit only
@@ -943,7 +943,7 @@ function editorContent(): HTMLElement {
 }
 
 function storeDraft(query: string, ref = "acme/support-bot") {
-  localStorage.setItem(`llmobs.sql.draft.${ref}`, JSON.stringify({ query }));
+  localStorage.setItem(`cetra.sql.draft.${ref}`, JSON.stringify({ query }));
 }
 
 function captureSql(
@@ -982,7 +982,7 @@ The existing test's expected list gains `"⌘↵"` after `"0"` (step 2).
 ### `web/src/lib/sql/draft.test.ts`
 
 1. `readDraft("acme/support-bot")` with nothing stored is `{ query: DEFAULT_QUERY }`.
-2. After `writeDraft("acme/support-bot", { query: "SELECT 1" })`, `localStorage.getItem("llmobs.sql.draft.acme/support-bot")` is `'{"query":"SELECT 1"}'` and `readDraft` returns `{ query: "SELECT 1" }`; `readDraft("acme/playground")` is still the default.
+2. After `writeDraft("acme/support-bot", { query: "SELECT 1" })`, `localStorage.getItem("cetra.sql.draft.acme/support-bot")` is `'{"query":"SELECT 1"}'` and `readDraft` returns `{ query: "SELECT 1" }`; `readDraft("acme/playground")` is still the default.
 3. Stored `"not json"` and stored `'{"query":3}'` read as the default.
 4. `useSqlDraft` (with `renderHook` and `act` from `@testing-library/react`): two updates in one `act` — `update((d) => ({ query: \`${d.query}A\` }))` twice, starting from a stored `{ query: "" }` — leave `result.current[0]` equal to `{ query: "AA" }` and the same JSON in localStorage.
 
@@ -1074,7 +1074,7 @@ function Harness({
 2. **"opens the console from the palette"**: `renderApp("/acme/support-bot/traces")`; `await screen.findByRole("grid", { name: "Traces" })`; `await user.keyboard("{Meta>}k{/Meta}")`; `const dialog = await screen.findByRole("dialog", { name: /Command palette/ })`; `await user.click(within(dialog).getByRole("option", { name: "SQL" }))`; `waitFor` the pathname is `/acme/support-bot/sql`.
 3. **"runs the draft over the picked range"**: `const sql = captureSql();` `renderApp("/acme/support-bot/sql?range=1h")`; `await user.click(screen.getByRole("button", { name: "Run" }))`; in `waitFor`: `const body = single(sql.bodies)`; `body.query` is `DEFAULT_QUERY`; `Date.parse(String(body.to)) - Date.parse(String(body.from))` is `3_600_000`; `Object.keys(body).sort()` is `["from", "query", "to"]`; `single(sql.accepts)` is `"application/json"`. Then `findByRole("grid", { name: "Query results" })`; `getAllByRole("columnheader").map((header) => header.textContent?.trim())` equals `resultDocument.columns.map((column) => column.name)`; `await screen.findByText(new RegExp(\`^${resultDocument.rows.length} rows? · \\d+ ms$\`))`.
 4. **"runs the stored draft with Ctrl+Enter"**: `storeDraft("SELECT 1")`; `const sql = captureSql();` render `/acme/support-bot/sql`; `const content = await waitFor(editorContent)`; `content.focus()`; `await user.keyboard("{Control>}{Enter}{/Control}")`; `waitFor` `single(sql.bodies).query` is `"SELECT 1"`.
-5. **"saves typing to the draft"**: `storeDraft("")`; render; `const content = await waitFor(editorContent)`; `await user.type(content, "SELECT 7")`; `waitFor` `JSON.parse(localStorage.getItem("llmobs.sql.draft.acme/support-bot") ?? "null")` equals `{ query: "SELECT 7" }`.
+5. **"saves typing to the draft"**: `storeDraft("")`; render; `const content = await waitFor(editorContent)`; `await user.type(content, "SELECT 7")`; `waitFor` `JSON.parse(localStorage.getItem("cetra.sql.draft.acme/support-bot") ?? "null")` equals `{ query: "SELECT 7" }`.
 6. **"restores the draft from localStorage"**: `storeDraft("SELECT 42")`; render; `waitFor` `editorContent().textContent` is `"SELECT 42"`.
 7. **"keeps one draft per project"**: `storeDraft("SELECT 'bot'")`; `storeDraft("SELECT 'play'", "acme/playground")`; `const { router } = await renderApp("/acme/support-bot/sql")`; `waitFor` the editor text is `SELECT 'bot'`; `await router.navigate({ to: "/$org/$project/sql", params: { org: "acme", project: "playground" } })`; `waitFor` the editor text is `SELECT 'play'`.
 8. **"does nothing for an empty query"**: `storeDraft("   ")`; `const sql = captureSql();` render; the Run button is disabled; focus the editor and press Ctrl+Enter; after `await new Promise((resolve) => setTimeout(resolve, 50))`: `sql.bodies` is empty, the Run button is still disabled, and `screen.queryByText("Running…")` is null.

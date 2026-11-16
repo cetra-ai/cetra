@@ -1,5 +1,5 @@
 [package]
-name = "llmobs-server"
+name = "cetra-server"
 description = "HTTP and gRPC API, auth, metadata DB, evaluation, and alerts"
 version.workspace = true
 edition.workspace = true
@@ -13,11 +13,11 @@ workspace = true
 [dependencies]
 aes-gcm.workspace = true
 arrow.workspace = true
-llmobs-core.workspace = true
-llmobs-eval.workspace = true
-llmobs-otel.workspace = true
-llmobs-storage.workspace = true
-llmobs-token.workspace = true
+cetra-core.workspace = true
+cetra-eval.workspace = true
+cetra-otel.workspace = true
+cetra-storage.workspace = true
+cetra-token.workspace = true
 utoipa.workspace = true
 serde.workspace = true
 serde_json.workspace = true

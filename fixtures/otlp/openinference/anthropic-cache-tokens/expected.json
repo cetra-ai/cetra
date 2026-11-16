@@ -2,12 +2,12 @@
   "spans": [
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "2ac37617cacd2cc5067dc21a9248874e",
-      "span_id": "8c6606df413b8b05",
+      "trace_id": "2019527e3617be40bc0e17d3f46703a9",
+      "span_id": "21687569c35ca856",
       "name": "messages.create",
       "span_kind": "llm",
       "start_time": "2025-12-31T23:59:50.000000000Z",
-      "end_time": "2025-12-31T23:59:50.044000000Z",
+      "end_time": "2025-12-31T23:59:50.043000000Z",
       "status": "ok",
       "service_name": "capture-app",
       "provider": "anthropic",

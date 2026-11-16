@@ -17,10 +17,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
+use cetra_core::ids::ProjectId;
 use chrono::NaiveDate;
 use datafusion::execution::object_store::ObjectStoreUrl as RegisteredUrl;
 use datafusion::execution::runtime_env::RuntimeEnv;
-use llmobs_core::ids::ProjectId;
 use object_store::aws::AmazonS3Builder;
 use object_store::local::LocalFileSystem;
 use object_store::path::Path as ObjectPath;
@@ -42,8 +42,8 @@ use tokio::io::AsyncReadExt;
 /// not part of that key, and [`RegisteredUrl::parse`] rejects any path other
 /// than empty or `/`.
 ///
-/// File URLs used by the providers are `llmobs://objects/tables/...`.
-pub(crate) const OBJECT_STORE_URL: &str = "llmobs://objects";
+/// File URLs used by the providers are `cetra://objects/tables/...`.
+pub(crate) const OBJECT_STORE_URL: &str = "cetra://objects";
 
 /// The marker [`Objects::probe`] HEADs and, if that fails, writes (D-N-36). Outside
 /// `tables/` and `media/`, so GC, orphan collection and backups never see it.
@@ -1302,9 +1302,9 @@ mod tests {
     use std::time::Duration;
 
     use bytes::Bytes;
+    use cetra_core::ids::ProjectId;
     use chrono::NaiveDate;
     use datafusion::execution::runtime_env::RuntimeEnv;
-    use llmobs_core::ids::ProjectId;
     use object_store::ObjectStoreExt;
     use object_store::memory::InMemory;
 
@@ -1583,7 +1583,7 @@ mod tests {
         let landed = read_registered(&objects, "tables/spans/f.parquet").await;
         assert_eq!(landed.len(), SIZES.single_max + 1);
         assert_eq!(objects.remove_temp_files().unwrap(), 0);
-        assert_eq!(OBJECT_STORE_URL, "llmobs://objects");
+        assert_eq!(OBJECT_STORE_URL, "cetra://objects");
     }
 
     #[tokio::test]

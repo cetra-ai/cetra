@@ -19,7 +19,7 @@ See [README.md](README.md) for the rules that apply to every phase.
 Spec 11 § Quality bar says "No external network calls", and plan U18 says "External URLs are never loaded automatically". Today:
 - `isExternal` in `media-view.tsx` is `uri.startsWith("https:") || uri.startsWith("http:")`, which is case-sensitive.
 - Every other URI goes through `sourceUrl` → `mediaUrl`.
-- `mediaUrl` (`lib/media.ts`) returns anything that is not `media://` or `llmobs:dropped` unchanged.
+- `mediaUrl` (`lib/media.ts`) returns anything that is not `media://` or `cetra:dropped` unchanged.
 - The result is put straight into `<img src>` or `<audio src>`.
 
 So `HTTPS://host/x.png`, `//host/x.png`, `ftp://…` and relative URLs all load as soon as the span is opened. `MediaChip` also links any such URI with `target="_blank"`.
@@ -32,7 +32,7 @@ Replace `mediaUrl` with one classifier. Delete `mediaUrl`, and update every call
 const MEDIA_PREFIX = "media://";
 
 export type MediaSource =
-  /** `llmobs:dropped`: the bytes were dropped at ingest. */
+  /** `cetra:dropped`: the bytes were dropped at ingest. */
   | { kind: "dropped" }
   /** `media://<sha256>` of this project: served by the API. */
   | { kind: "stored"; url: string }
@@ -44,7 +44,7 @@ export type MediaSource =
   | { kind: "unsupported" };
 
 export function classifyMedia(projectRef: string | undefined, uri: string): MediaSource {
-  if (uri === "llmobs:dropped") return { kind: "dropped" };
+  if (uri === "cetra:dropped") return { kind: "dropped" };
   if (uri.startsWith(MEDIA_PREFIX)) {
     if (projectRef === undefined) return { kind: "unsupported" };
     const sha = uri.slice(MEDIA_PREFIX.length);
@@ -93,7 +93,7 @@ Rewrite `MediaView`'s decision with `classifyMedia`:
 
 ```ts
 it.each([
-  ["llmobs:dropped", "acme/support-bot", { kind: "dropped" }],
+  ["cetra:dropped", "acme/support-bot", { kind: "dropped" }],
   ["media://497790947d466676", "acme/support-bot", { kind: "stored", url: "/api/v1/projects/acme%2Fsupport-bot/media/497790947d466676" }],
   ["media://497790947d466676", undefined, { kind: "unsupported" }],
   ["https://example.com/a.png", "acme/support-bot", { kind: "external", url: "https://example.com/a.png" }],
@@ -403,7 +403,7 @@ This phase adds **tests only**. If a test fails because the behaviour differs fr
   ```
 
   `restoreMocks: true` in `vite.config.ts` restores it after each test. A pointer at `clientX: 600` is then at 50 % of the timeline.
-- Split panes (`components/trace/split-pane.tsx`) render each handle as `role="separator"`. Its `aria-controls` is the start panel id (`traces-list` for the list split, `trace-tree` for the tree split), and its `aria-valuenow` is that panel's size in percent. The defaults are 40 and 55. Stored values live in `llmobs.split.traces` and `llmobs.split.trace`, as `{"<start id>": n, "<end id>": 100 - n}`. A value that is not a number strictly between 0 and 100 falls back to the default.
+- Split panes (`components/trace/split-pane.tsx`) render each handle as `role="separator"`. Its `aria-controls` is the start panel id (`traces-list` for the list split, `trace-tree` for the tree split), and its `aria-valuenow` is that panel's size in percent. The defaults are 40 and 55. Stored values live in `cetra.split.traces` and `cetra.split.trace`, as `{"<start id>": n, "<end id>": 100 - n}`. A value that is not a number strictly between 0 and 100 falls back to the default.
 - Keyboard resizing of a split does nothing in jsdom (checked: `aria-valuenow` stays put). So the **write** path, `onLayoutChanged` → `localStorage`, cannot be tested here. Do not try. Report it as untested.
 
 ### Tests to add to `web/src/components/trace/tree-grid.test.tsx`
@@ -473,8 +473,8 @@ it("opens both splits at their default ratios", async () => {
 });
 
 it("restores stored ratios", async () => {
-  localStorage.setItem("llmobs.split.traces", JSON.stringify({ "traces-list": 30, "traces-detail": 70 }));
-  localStorage.setItem("llmobs.split.trace", JSON.stringify({ "trace-tree": 65, "trace-detail": 35 }));
+  localStorage.setItem("cetra.split.traces", JSON.stringify({ "traces-list": 30, "traces-detail": 70 }));
+  localStorage.setItem("cetra.split.trace", JSON.stringify({ "trace-tree": 65, "trace-detail": 35 }));
   await renderApp(URL_WITH_TRACE);
   await screen.findByRole("grid", { name: "Trace" });
   expect(size("traces-list")).toBe("30");
@@ -486,7 +486,7 @@ it.each([
   ["out of range", JSON.stringify({ "traces-list": 0, "traces-detail": 100 })],
   ["wrong keys", JSON.stringify({ list: 30, detail: 70 })],
 ])("falls back to the default for a stored value that is %s", async (_label, raw) => {
-  localStorage.setItem("llmobs.split.traces", raw);
+  localStorage.setItem("cetra.split.traces", raw);
   await renderApp(URL_WITH_TRACE);
   await screen.findByRole("grid", { name: "Trace" });
   expect(size("traces-list")).toBe("40");

@@ -108,7 +108,7 @@ Test, in `serve.rs`: `restore_mode_opens_storage_without_object_deletion`. Start
 - The meta.db failure detail is still exactly `"meta.db"`. The local store is reachable, the disk is not low (TestApp's `min_free_bytes` must be 0 or small: check, and set it in TestApp if needed), and the flags are clear.
 
 **In `health.rs`, a test module:**
-- `sticky_failures_fail_liveness`: needs a way to set a storage failure flag from a server test. If `llmobs_storage` has no test seam the server can reach, test the pure part instead: move the "which flags are set" logic into `fn sticky_failures(health: &StorageHealth) -> Vec<&'static str>` and test it with hand-built `StorageHealth` values (all clear → empty; `catalog_failed` → `["catalog"]`; two set → both, in table order). Then `/healthz` on a healthy `TestApp` is still 200 `{"status":"ok"}`.
+- `sticky_failures_fail_liveness`: needs a way to set a storage failure flag from a server test. If `cetra_storage` has no test seam the server can reach, test the pure part instead: move the "which flags are set" logic into `fn sticky_failures(health: &StorageHealth) -> Vec<&'static str>` and test it with hand-built `StorageHealth` values (all clear → empty; `catalog_failed` → `["catalog"]`; two set → both, in table order). Then `/healthz` on a healthy `TestApp` is still 200 `{"status":"ok"}`.
 - `low_disk_fails_readiness`: `TestApp::with_config(|c| c.storage.min_free_bytes = ByteSize::pib(1))`. Wait until `state.storage.health().disk_low` is `true`: poll for up to 3 s, since the monitor measures every second. Then `/readyz` is 503, its detail contains `free disk`, and `/healthz` is 200.
 - `probe_result_is_cached_for_ten_seconds` (`#[tokio::test(start_paused = true)]`):
   - A `ReadyCache` and an `AtomicUsize` count the probe calls.
@@ -122,7 +122,7 @@ Test, in `serve.rs`: `restore_mode_opens_storage_without_object_deletion`. Start
 ## Verify
 
 ```bash
-cargo test -p llmobs-server --all-features health
+cargo test -p cetra-server --all-features health
 just check
 ```
 

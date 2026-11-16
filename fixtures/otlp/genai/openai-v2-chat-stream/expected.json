@@ -2,12 +2,12 @@
   "spans": [
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "28ca5e27a1879788b6d396961bb11511",
-      "span_id": "512ddbb1e31547c9",
+      "trace_id": "2469e32007008b3026b8bb7f0ca5447c",
+      "span_id": "93b684d32910d279",
       "name": "chat gpt-4o-mini-2024-07-18",
       "span_kind": "llm",
       "start_time": "2025-12-31T23:59:50.000000000Z",
-      "end_time": "2025-12-31T23:59:50.168000000Z",
+      "end_time": "2025-12-31T23:59:50.170000000Z",
       "status": "unset",
       "service_name": "capture-app",
       "provider": "openai",

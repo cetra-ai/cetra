@@ -6,8 +6,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use cetra_core::ids::ProjectId;
 use chrono::NaiveDate;
-use llmobs_core::ids::ProjectId;
 
 use crate::catalog::{Catalog, FileId, FileMeta, FileTable};
 use crate::config::CompactionConfig;
@@ -280,7 +280,7 @@ mod tests {
         chrono::NaiveDate::from_ymd_opt(2026, 3, 5).unwrap()
     }
 
-    fn project() -> llmobs_core::ids::ProjectId {
+    fn project() -> cetra_core::ids::ProjectId {
         "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().unwrap()
     }
 

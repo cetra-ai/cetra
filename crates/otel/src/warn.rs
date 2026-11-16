@@ -1,4 +1,4 @@
-//! Warning codes stored in `llmobs.normalize_warning`.
+//! Warning codes stored in `cetra.normalize_warning`.
 //!
 //! Spec 02 rule 18. The normalizer writes the attribute from N4 on.
 #![allow(dead_code)]

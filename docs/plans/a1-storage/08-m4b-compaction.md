@@ -421,7 +421,7 @@ Mirror `gc.rs`:
 ### Deterministic aborts (`src/crash_tests.rs`)
 
 **The child,** a second ignored test `compaction_child`:
-- It reads `LLMOBS_COMPACTION_CRASH_DIR` and `LLMOBS_COMPACTION_CRASH_POINT`.
+- It reads `CETRA_COMPACTION_CRASH_DIR` and `CETRA_COMPACTION_CRASH_POINT`.
 - It uses `quiet_config` plus `compaction.interval = 1h` and `compaction.l0_files = 2`, with every other compaction value at its default.
 - It runs, in order:
   1. For `i` in 0..3: open, append `span_rows(&[span_row(0, 2 * i, t, t + 1 s), span_row(0, 2 * i + 1, t + 1 s, t + 2 s)])` with `t` = D 10:00 + `i` min, then `shutdown`. That leaves 3 L0 spans files and 3 traces files of one trace.
@@ -431,7 +431,7 @@ Mirror `gc.rs`:
 
 **The parent,** `every_compaction_hook_aborts_safely`:
 - **It is `#[ignore]`d**, like `every_flush_hook_aborts_safely`. The flush parent runs alone because forked children must not inherit other tests' `LOCK` file descriptors, and the same applies here.
-  - Add it to the `test` recipe of `justfile` as a third line: `cargo test -p llmobs-storage --lib --all-features -- --ignored --exact crash_tests::every_compaction_hook_aborts_safely`.
+  - Add it to the `test` recipe of `justfile` as a third line: `cargo test -p cetra-storage --lib --all-features -- --ignored --exact crash_tests::every_compaction_hook_aborts_safely`.
   - Besides the `crates/server` `StorageConfig` literals (one added field each, see `07` § Conventions), this is the only change outside `crates/storage/` and `docs/` that M4 makes.
 - **The parent's own opens** use `quiet_config` plus `compaction.interval = 1h` and `compaction.l0_files = 2`, the child's config, so the background task never races its checks.
 - It runs the child for each point of:
@@ -576,7 +576,7 @@ Expected: about 2, one L0 merge and one day close per byte. The ratio of output 
 
 Create `docs/research/storage/compaction.md`:
 - the method above, with the policy values;
-- the measured line: copy the `println!` output from `cargo test -p llmobs-storage write_amplification -- --nocapture`;
+- the measured line: copy the `println!` output from `cargo test -p cetra-storage write_amplification -- --nocapture`;
 - the machine (CPU, disk);
 - the commit hash.
 

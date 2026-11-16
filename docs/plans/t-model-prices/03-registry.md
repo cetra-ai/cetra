@@ -50,7 +50,7 @@ Module doc, then the allowance (T4 removes it: `builtin`, `reload_org` and `lock
 #![cfg_attr(not(test), allow(dead_code))]
 ```
 
-Imports: `std::collections::HashMap`, `std::sync::{Arc, PoisonError, RwLock}`, `llmobs_core::ids::{OrgId, ProjectId}`, `llmobs_otel::{PriceError, PriceRow, PriceTable}`, `sqlx::SqlitePool`, `tokio::sync::{Mutex, MutexGuard}`, `crate::meta::MetaError`, `crate::meta::model_prices::{self, PriceRecord}`. (`llmobs_otel` re-exports `PriceError`.)
+Imports: `std::collections::HashMap`, `std::sync::{Arc, PoisonError, RwLock}`, `cetra_core::ids::{OrgId, ProjectId}`, `cetra_otel::{PriceError, PriceRow, PriceTable}`, `sqlx::SqlitePool`, `tokio::sync::{Mutex, MutexGuard}`, `crate::meta::MetaError`, `crate::meta::model_prices::{self, PriceRecord}`. (`cetra_otel` re-exports `PriceError`.)
 
 ### Types (exactly these)
 
@@ -191,7 +191,7 @@ pub(crate) fn prices(&self) -> &crate::prices::Prices {
 - Tests:
   - `builtin_prices()` stays.
   - Rename `replace_prices_changes_what_accept_uses` to `the_builtin_table_is_what_accept_uses_without_custom_rows`; replace its `replace_prices(…)` call with `app.state.ingest.prices().set_builtin(PriceTable::new(Vec::new()).expect("an empty table compiles"));`. The rest stays.
-  - New `a_project_row_prices_that_project_only` (`#[tokio::test(flavor = "multi_thread")]`): `set_builtin(empty)`; create a second project in the seeded org (`meta::projects::insert_project` inside `app.state.meta.write`); insert a project row for the seeded project with pattern `".*"`, `price_input: Some(1.0)`, `price_output: Some(1.0)` (T2 `insert_tx`); `app.state.ingest.prices().reload_org(app.state.meta.reader(), seeded.project.org_id).await`. Accept `fixture("edge/cost-embedding/input.json")` into the seeded project: the embedding span has `cost_source` `computed` and `cost_input` equal to its `input_tokens` / 1e6. Accept the same body into the second project: `cost_source` `none`. (Find the span in `accepted.normalized.spans` by kind `Embedding`; read the `Span` field names in `llmobs_core`.)
+  - New `a_project_row_prices_that_project_only` (`#[tokio::test(flavor = "multi_thread")]`): `set_builtin(empty)`; create a second project in the seeded org (`meta::projects::insert_project` inside `app.state.meta.write`); insert a project row for the seeded project with pattern `".*"`, `price_input: Some(1.0)`, `price_output: Some(1.0)` (T2 `insert_tx`); `app.state.ingest.prices().reload_org(app.state.meta.reader(), seeded.project.org_id).await`. Accept `fixture("edge/cost-embedding/input.json")` into the seeded project: the embedding span has `cost_source` `computed` and `cost_input` equal to its `input_tokens` / 1e6. Accept the same body into the second project: `cost_source` `none`. (Find the span in `accepted.normalized.spans` by kind `Embedding`; read the `Span` field names in `cetra_core`.)
   - New `an_org_row_prices_every_project_of_the_org`: the same with an org row (`project` `None`): both projects are priced; a project of another org (create an org and a project) is not.
   - New `a_project_row_beats_an_org_row`: org row `.*` at 1.0 and project row `.*` at 2.0: the seeded project's `cost_input` is twice the other project's.
 
@@ -231,7 +231,7 @@ Each line below replaces `state.ingest.prices()` (an `Arc<PriceTable>` today) wi
 | `routes/online_rules.rs`, `validate` | `state.ingest.prices().for_project(org, project)` |
 | tests in `eval/execute.rs`, `routes/backfills.rs`, `routes/evaluators.rs` | `app.state.ingest.prices().builtin()` |
 
-Import `llmobs_core::ids::OrgId` in `execute.rs` if it is not imported. If a variable named in the table does not exist where it is used, STOP and report.
+Import `cetra_core::ids::OrgId` in `execute.rs` if it is not imported. If a variable named in the table does not exist where it is used, STOP and report.
 
 Add one test in `routes/online_rules.rs`'s test module, next to the existing budget tests: `a_budget_on_a_local_model_is_accepted_once_the_project_prices_it`. Create a judge evaluator whose model is `"llama3.1:8b"` (no built-in price; use the existing helper that creates a judge evaluator with a given model — it takes `model: &'static str`). Creating a rule with `budget_usd: 5.0, budget_period: "day"` is `400` with field `budget_usd`. Insert a project row `{model_name: "llama3.1:8b", match_pattern: exact_pattern("llama3.1:8b"), provider: None, price_input: Some(0.0), price_output: Some(0.0)}` with T2's `insert_tx`, call `reload_org`, and create the rule again: `201`.
 
@@ -254,11 +254,11 @@ No new test: the cascade is T2's test 10, and `forget_*` are case 7.
 ## Commands
 
 ```bash
-cargo test -p llmobs-server prices
+cargo test -p cetra-server prices
 ```
 
 ```bash
-cargo test -p llmobs-server ingest
+cargo test -p cetra-server ingest
 ```
 
 ```bash

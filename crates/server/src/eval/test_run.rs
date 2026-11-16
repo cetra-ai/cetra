@@ -4,8 +4,8 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use llmobs_core::ids::{SpanId, TraceId};
-use llmobs_eval::{
+use cetra_core::ids::{SpanId, TraceId};
+use cetra_eval::{
     ErrorClass, EvalOrigin, EvalRun, EvalTarget, EvaluatorConfig, OutputScore, PromptTemplate,
     Secret, TraceData, VariableMapping, Variables,
 };
@@ -185,7 +185,7 @@ pub(crate) async fn run(
                 return Err(ApiError::NotFound);
             }
             let data = TraceData::new(&loaded.spans, span_id);
-            match llmobs_eval::resolve(&mapping, Some(&data), None) {
+            match cetra_eval::resolve(&mapping, Some(&data), None) {
                 Ok(variables) => (
                     variables,
                     EvalTarget {
@@ -663,9 +663,9 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use axum::http::{Method, header};
-    use llmobs_core::enums::PayloadFormat;
-    use llmobs_core::ids::{SpanId, TraceId};
-    use llmobs_core::span::Span;
+    use cetra_core::enums::PayloadFormat;
+    use cetra_core::ids::{SpanId, TraceId};
+    use cetra_core::span::Span;
     use serde_json::{Value, json};
     use uuid::Uuid;
 

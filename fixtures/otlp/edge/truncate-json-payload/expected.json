@@ -9,14 +9,14 @@
       "start_time": "2025-12-31T23:59:50.000000000Z",
       "end_time": "2025-12-31T23:59:51.000000000Z",
       "status": "unset",
-      "input": "{\"query\":\"abcdefghijklmnopqrstuv…[llmobs: truncated, original 48 bytes]",
+      "input": "{\"query\":\"abcdefghijklmnopqrstuv…[cetra: truncated, original 48 bytes]",
       "input_format": "text",
-      "input_preview": "{\"query\":\"abcdefghijklmnopqrstuv…[llmobs: truncated, original 48 bytes]",
+      "input_preview": "{\"query\":\"abcdefghijklmnopqrstuv…[cetra: truncated, original 48 bytes]",
       "truncated": [
         "input"
       ],
       "conventions": [
-        "llmobs"
+        "cetra"
       ],
       "ingest_time": "2026-01-01T00:00:00.000000000Z",
       "schema_version": 1

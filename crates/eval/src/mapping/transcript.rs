@@ -6,8 +6,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use llmobs_core::ids::SpanId;
-use llmobs_core::span::Span;
+use cetra_core::ids::SpanId;
+use cetra_core::span::Span;
 
 use super::decode_payload;
 use crate::text::render_value;
@@ -106,7 +106,7 @@ fn render_line(span: &Span, depth: usize) -> String {
 
 fn render_payload(
     payload: Option<&str>,
-    format: Option<llmobs_core::enums::PayloadFormat>,
+    format: Option<cetra_core::enums::PayloadFormat>,
 ) -> String {
     let Some(value) = decode_payload(payload, format) else {
         return "-".to_owned();
@@ -174,9 +174,9 @@ fn join_capped(lines: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use llmobs_core::enums::{PayloadFormat, SpanKind, SpanStatus};
-    use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-    use llmobs_core::span::Span;
+    use cetra_core::enums::{PayloadFormat, SpanKind, SpanStatus};
+    use cetra_core::ids::{ProjectId, SpanId, TraceId};
+    use cetra_core::span::Span;
 
     use super::render;
 

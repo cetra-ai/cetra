@@ -38,11 +38,11 @@ function tokenCreated(name: string): Response {
       token: {
         id: "01900000-0000-7000-8000-000000000203",
         name,
-        prefix: "pat-llmobs-CLITOK",
+        prefix: "pat-cetra-CLITOK",
         scopes: ["read", "write"],
         created_at: "2026-01-05T00:00:00.000000000Z",
       },
-      secret: "pat-llmobs-CLITOKEN0CLITOKEN0CLITOKEN0CLIT",
+      secret: "pat-cetra-CLITOKEN0CLITOKEN0CLITOKEN0CLIT",
     },
     { status: 201 },
   );
@@ -52,7 +52,7 @@ it("asks the signed-in user to authorize", async () => {
   await renderApp("/cli-auth?port=54321&state=s1&host=laptop");
 
   expect(
-    await screen.findByRole("heading", { name: "Authorize the llmobs CLI", level: 1 }),
+    await screen.findByRole("heading", { name: "Authorize the cetra CLI", level: 1 }),
   ).toBeInTheDocument();
   expect(screen.getByText("ada@example.com")).toBeInTheDocument();
   expect(screen.getByText("CLI on laptop")).toBeInTheDocument();
@@ -82,7 +82,7 @@ it("creates a token that expires in 90 days and posts it to the CLI", async () =
     expect(forms).toEqual([
       {
         url: "http://127.0.0.1:54321/callback",
-        fields: { token: "pat-llmobs-CLITOKEN0CLITOKEN0CLITOKEN0CLIT", state: "s1" },
+        fields: { token: "pat-cetra-CLITOKEN0CLITOKEN0CLITOKEN0CLIT", state: "s1" },
       },
     ]),
   );
@@ -90,7 +90,7 @@ it("creates a token that expires in 90 days and posts it to the CLI", async () =
   expect(
     await screen.findByRole("heading", { name: "You're signed in", level: 1 }),
   ).toBeInTheDocument();
-  expect(screen.queryByText(/pat-llmobs-CLITOKEN/)).toBeNull();
+  expect(screen.queryByText(/pat-cetra-CLITOKEN/)).toBeNull();
   await waitFor(() =>
     expect(
       JSON.stringify(
@@ -99,7 +99,7 @@ it("creates a token that expires in 90 days and posts it to the CLI", async () =
           .getAll()
           .map((mutation) => mutation.state.data ?? null),
       ),
-    ).not.toContain("pat-llmobs-CLITOKEN0"),
+    ).not.toContain("pat-cetra-CLITOKEN0"),
   );
 });
 
@@ -132,7 +132,7 @@ it("reads the host from the raw query string", async () => {
   // values; only the raw query string keeps it byte for byte.
   const { user } = await renderApp("/cli-auth?port=54321&state=s1&host=1e3");
   expect(
-    await screen.findByRole("heading", { name: "Authorize the llmobs CLI", level: 1 }),
+    await screen.findByRole("heading", { name: "Authorize the cetra CLI", level: 1 }),
   ).toBeInTheDocument();
   expect(screen.getByText("CLI on 1e3")).toBeInTheDocument();
 
@@ -191,13 +191,13 @@ it("refuses an invalid link", async () => {
 it("accepts the edge ports", async () => {
   const first = await renderApp("/cli-auth?port=1024&state=s1");
   expect(
-    await screen.findByRole("heading", { name: "Authorize the llmobs CLI", level: 1 }),
+    await screen.findByRole("heading", { name: "Authorize the cetra CLI", level: 1 }),
   ).toBeInTheDocument();
   first.unmount();
 
   await renderApp("/cli-auth?port=65535&state=s1");
   expect(
-    await screen.findByRole("heading", { name: "Authorize the llmobs CLI", level: 1 }),
+    await screen.findByRole("heading", { name: "Authorize the cetra CLI", level: 1 }),
   ).toBeInTheDocument();
 });
 
@@ -230,7 +230,7 @@ it("returns a long state with digits byte for byte", async () => {
       {
         url: "http://127.0.0.1:54321/callback",
         fields: {
-          token: "pat-llmobs-CLITOKEN0CLITOKEN0CLITOKEN0CLIT",
+          token: "pat-cetra-CLITOKEN0CLITOKEN0CLITOKEN0CLIT",
           state: "s_12345678901234567890",
         },
       },
@@ -242,7 +242,7 @@ it("warns before authorizing and shows the host as reported by the CLI", async (
   await renderApp("/cli-auth?port=54321&state=s1&host=build-server");
 
   expect(await screen.findByRole("note")).toHaveTextContent(
-    "Only continue if you just ran llmobs login on this computer.",
+    "Only continue if you just ran cetra login on this computer.",
   );
   expect(screen.getByText("Computer name reported by the CLI:")).toHaveTextContent(
     "Computer name reported by the CLI: build-server",

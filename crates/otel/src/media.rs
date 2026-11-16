@@ -10,9 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use base64::Engine;
 use base64::alphabet::STANDARD as STANDARD_ALPHABET;
 use base64::engine::general_purpose::{GeneralPurpose, PAD_INDIFFERENT};
-use llmobs_core::media::MediaBlob;
-use llmobs_core::message::{Message, Modality, Part};
-use llmobs_core::names::media::{DROPPED_URI, URI_SCHEME};
+use cetra_core::media::MediaBlob;
+use cetra_core::message::{Message, Modality, Part};
+use cetra_core::names::media::{DROPPED_URI, URI_SCHEME};
 use serde_json::{Map, Value as Json};
 use sha2::{Digest, Sha256};
 
@@ -581,7 +581,7 @@ fn hex_sha256(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::normalize::IngestLimits;
-    use llmobs_core::message::messages_to_json;
+    use cetra_core::message::messages_to_json;
     use serde_json::json;
 
     fn limits(min: usize, max: usize) -> IngestLimits {
@@ -722,7 +722,7 @@ mod tests {
         let limits = limits(1, 64);
         let mut sink = MediaSink::new(&limits);
         let mut payload = Payload::Messages(vec![Message {
-            role: llmobs_core::message::Role::User,
+            role: cetra_core::message::Role::User,
             name: None,
             parts: vec![Part::Blob {
                 modality: Some(Modality::Image),

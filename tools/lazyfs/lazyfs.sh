@@ -11,7 +11,7 @@ set -euo pipefail
 # The LazyFS commit this check is pinned to. Bump it with `probe` (README).
 readonly LAZYFS_SHA=3edad01aa936b81fed9bd64e47e725fc5ef6c977
 readonly LAZYFS_URL=https://github.com/dsrhaslab/lazyfs
-readonly LAZYFS_HOME="${LLMOBS_LAZYFS_HOME:-$HOME/.cache/llmobs/lazyfs}"
+readonly LAZYFS_HOME="${CETRA_LAZYFS_HOME:-$HOME/.cache/cetra/lazyfs}"
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 template="$root/tools/lazyfs/lazyfs.toml.in"
@@ -139,18 +139,18 @@ run() {
   mount_lazyfs
   local tests_dir="$work/mnt/crash-children"
   mkdir -p "$tests_dir"
-  export LLMOBS_LAZYFS_DIR="$tests_dir"
-  export LLMOBS_LAZYFS_FIFO="$work/faults.fifo"
-  export LLMOBS_LAZYFS_DONE="$work/done.fifo"
+  export CETRA_LAZYFS_DIR="$tests_dir"
+  export CETRA_LAZYFS_FIFO="$work/faults.fifo"
+  export CETRA_LAZYFS_DONE="$work/done.fifo"
 
   echo "== crash children, one power loss per point"
   (cd "$root" && cargo test --workspace --all-features -- --ignored --exact \
     crash_tests::every_hook_survives_lazyfs)
 
   echo "== short ingest, a power loss per kill"
-  (cd "$root" && LLMOBS_CRASH_ITERATIONS=10 \
-    LLMOBS_CRASH_DIR_ROOT="$work/mnt" \
-    LLMOBS_CRASH_CLEAR_CACHE="$work/faults.fifo:$work/done.fifo" \
+  (cd "$root" && CETRA_CRASH_ITERATIONS=10 \
+    CETRA_CRASH_DIR_ROOT="$work/mnt" \
+    CETRA_CRASH_CLEAR_CACHE="$work/faults.fifo:$work/done.fifo" \
     cargo test --workspace --all-features --test crash -- --exact crash_recovery)
   echo "LazyFS cross-check passed at $LAZYFS_SHA"
 }

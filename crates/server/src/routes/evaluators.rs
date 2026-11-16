@@ -8,9 +8,9 @@ use std::sync::Arc;
 
 use axum::http::StatusCode;
 use axum::routing::{delete, get, patch, post};
-use llmobs_core::ids::{OrgId, ProjectId};
-use llmobs_eval::{Adapter, EvaluatorConfig, JudgeOutput, OutputScore, VariableMapping};
-use llmobs_otel::PriceTable;
+use cetra_core::ids::{OrgId, ProjectId};
+use cetra_eval::{Adapter, EvaluatorConfig, JudgeOutput, OutputScore, VariableMapping};
+use cetra_otel::PriceTable;
 use serde::Deserialize;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
@@ -705,9 +705,9 @@ mod tests {
     use crate::test_support::mock_llm::{MockLlm, Reply, completion};
     use crate::test_support::mock_webhook::MockWebhook;
     use crate::test_support::{Seeded, TestApp, TestResponse, capture_logs, dataset_span};
-    use llmobs_core::enums::PayloadFormat;
-    use llmobs_core::ids::{SpanId, TraceId};
-    use llmobs_core::span::Span;
+    use cetra_core::enums::PayloadFormat;
+    use cetra_core::ids::{SpanId, TraceId};
+    use cetra_core::span::Span;
 
     /// The fixture judge's connection (`fixtures/api/README.md`).
     const FIXTURE_CONNECTION: &str = "01900000-0000-7000-8000-000000000400";
@@ -2106,8 +2106,8 @@ mod tests {
             .await;
         assert_eq!(read.status, 200, "{}", text(&read));
         assert!(
-            text(&read).contains("llmobs-eval"),
-            "the judge trace is in llmobs-eval"
+            text(&read).contains("cetra-eval"),
+            "the judge trace is in cetra-eval"
         );
 
         app.state
@@ -2224,7 +2224,7 @@ mod tests {
                 None,
                 "judge input",
                 "judge output",
-                "llmobs-eval",
+                "cetra-eval",
             )],
         )
         .await;
@@ -2413,7 +2413,7 @@ mod tests {
         assert_eq!(requests.len(), 1);
         let signature = requests[0]
             .0
-            .get("x-llmobs-signature")
+            .get("x-cetra-signature")
             .expect("a signature header")
             .to_str()
             .unwrap();
@@ -2453,7 +2453,7 @@ mod tests {
         assert_eq!(answer["ok"], true, "{answer}");
         let requests = hook.requests();
         assert_eq!(requests.len(), 1, "the saved URL was called");
-        assert!(requests[0].0.get("x-llmobs-signature").is_some());
+        assert!(requests[0].0.get("x-cetra-signature").is_some());
     }
 
     #[tokio::test]

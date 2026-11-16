@@ -495,12 +495,12 @@ const RESPONSES: Record<string, Respond> = {
           ...unnamedKey,
           kind,
           scopes,
-          prefix: kind === "public" ? "pk-llmobs-EXAMPL" : "sk-llmobs-EXAMPL",
+          prefix: kind === "public" ? "pk-cetra-EXAMPL" : "sk-cetra-EXAMPL",
           ...(name !== undefined ? { name } : {}),
         },
         secret:
           kind === "public"
-            ? "pk-llmobs-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0"
+            ? "pk-cetra-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0"
             : apiKeyCreatedDocument.secret,
       },
       { status: 201 },

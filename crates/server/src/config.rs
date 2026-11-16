@@ -1,10 +1,10 @@
-//! Process configuration for `llmobs serve` (spec 12).
+//! Process configuration for `cetra serve` (spec 12).
 //!
-//! [`ServerConfig::load`] merges serde defaults, `llmobs.toml`, and `LLMOBS_*`
+//! [`ServerConfig::load`] merges serde defaults, `cetra.toml`, and `CETRA_*`
 //! environment variables. Later sources win. A secret's [`Debug`] output is
 //! `Secret(***)`, and a rejected secret is reported by key only.
 //!
-//! The `[storage]` table is [`llmobs_storage::config::StorageConfig`]. That
+//! The `[storage]` table is [`cetra_storage::config::StorageConfig`]. That
 //! type requires `data_dir`, which is not a `[storage]` key here: a user-set
 //! `storage.data_dir` is an error, and the top-level `data_dir` is injected
 //! before the table is deserialized. [`StorageConfig::validate`] then runs
@@ -16,13 +16,13 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use bytesize::ByteSize;
+use cetra_otel::IngestLimits;
+use cetra_storage::config::StorageConfig;
 use figment::providers::{Format, Serialized, Toml};
 use figment::value::{Dict, Map, Value};
 use figment::{Figment, Metadata, Profile, Provider};
 use ipnet::IpNet;
 use lettre::message::Mailbox;
-use llmobs_otel::IngestLimits;
-use llmobs_storage::config::StorageConfig;
 use serde::Deserialize;
 use serde::de::{self, Deserializer, SeqAccess, Visitor};
 
@@ -33,41 +33,38 @@ use crate::api::entitlements::Feature;
 const INIT_GROUP: &str =
     "set admin_email, admin_password, org, and project together, or leave them all unset";
 
-/// Environment names that map to a different key than `LLMOBS_` + `__` splitting.
+/// Environment names that map to a different key than `CETRA_` + `__` splitting.
 ///
-/// These names are not also read by the split provider. `LLMOBS_AUTH_SIGNUP`
+/// These names are not also read by the split provider. `CETRA_AUTH_SIGNUP`
 /// would otherwise become a top-level `auth_signup` and fail
 /// [`deny_unknown_fields`](https://serde.rs/container-attrs.html#deny_unknown_fields).
 const ALIASES: &[(&str, &str)] = &[
-    ("LLMOBS_DATA_DIR", "data_dir"),
-    ("LLMOBS_PUBLIC_URL", "public_url"),
-    ("LLMOBS_HTTP_ADDR", "http_addr"),
-    ("LLMOBS_OTLP_HTTP_ADDR", "otlp_http_addr"),
-    ("LLMOBS_GRPC_ADDR", "grpc_addr"),
-    ("LLMOBS_METRICS_ADDR", "metrics_addr"),
-    ("LLMOBS_TRUSTED_PROXIES", "trusted_proxies"),
-    ("LLMOBS_OBJECT_STORE", "storage.object_store"),
-    ("LLMOBS_SMTP_URL", "smtp_url"),
-    ("LLMOBS_EMAIL_FROM", "email_from"),
-    ("LLMOBS_ENCRYPTION_KEY", "encryption_key"),
-    ("LLMOBS_LICENSE_KEY", "license_key"),
-    ("LLMOBS_AUTH_SIGNUP", "auth.signup"),
-    ("LLMOBS_AUTH_SIGNUP_DOMAINS", "auth.signup_domains"),
-    ("LLMOBS_AUTH_DISABLE_PASSWORD", "auth.disable_password"),
+    ("CETRA_DATA_DIR", "data_dir"),
+    ("CETRA_PUBLIC_URL", "public_url"),
+    ("CETRA_HTTP_ADDR", "http_addr"),
+    ("CETRA_OTLP_HTTP_ADDR", "otlp_http_addr"),
+    ("CETRA_GRPC_ADDR", "grpc_addr"),
+    ("CETRA_METRICS_ADDR", "metrics_addr"),
+    ("CETRA_TRUSTED_PROXIES", "trusted_proxies"),
+    ("CETRA_OBJECT_STORE", "storage.object_store"),
+    ("CETRA_SMTP_URL", "smtp_url"),
+    ("CETRA_EMAIL_FROM", "email_from"),
+    ("CETRA_ENCRYPTION_KEY", "encryption_key"),
+    ("CETRA_LICENSE_KEY", "license_key"),
+    ("CETRA_AUTH_SIGNUP", "auth.signup"),
+    ("CETRA_AUTH_SIGNUP_DOMAINS", "auth.signup_domains"),
+    ("CETRA_AUTH_DISABLE_PASSWORD", "auth.disable_password"),
     (
-        "LLMOBS_AUTH_REQUIRE_EMAIL_VERIFICATION",
+        "CETRA_AUTH_REQUIRE_EMAIL_VERIFICATION",
         "auth.require_email_verification",
     ),
-    (
-        "LLMOBS_AUTH_ENFORCE_SSO_DOMAINS",
-        "auth.enforce_sso_domains",
-    ),
-    ("LLMOBS_INIT_ADMIN_EMAIL", "init.admin_email"),
-    ("LLMOBS_INIT_ADMIN_PASSWORD", "init.admin_password"),
-    ("LLMOBS_INIT_ORG", "init.org"),
-    ("LLMOBS_INIT_PROJECT", "init.project"),
-    ("LLMOBS_INIT_SECRET_KEY", "init.secret_key"),
-    ("LLMOBS_LOG", "log.level"),
+    ("CETRA_AUTH_ENFORCE_SSO_DOMAINS", "auth.enforce_sso_domains"),
+    ("CETRA_INIT_ADMIN_EMAIL", "init.admin_email"),
+    ("CETRA_INIT_ADMIN_PASSWORD", "init.admin_password"),
+    ("CETRA_INIT_ORG", "init.org"),
+    ("CETRA_INIT_PROJECT", "init.project"),
+    ("CETRA_INIT_SECRET_KEY", "init.secret_key"),
+    ("CETRA_LOG", "log.level"),
 ];
 
 /// A value that must not appear in logs or error text.
@@ -225,10 +222,10 @@ impl<'de> Deserialize<'de> for PublicUrl {
 
 /// Who may register, password and SSO flags, and the OAuth providers (spec 08).
 ///
-/// GitHub and Google accept the split env form (`LLMOBS_AUTH__GITHUB__CLIENT_ID`,
-/// `LLMOBS_AUTH__GOOGLE__CLIENT_SECRET`, and the other scalar fields).
+/// GitHub and Google accept the split env form (`CETRA_AUTH__GITHUB__CLIENT_ID`,
+/// `CETRA_AUTH__GOOGLE__CLIENT_SECRET`, and the other scalar fields).
 /// `[[auth.oidc]]` providers are defined in TOML; only their client secret has an env
-/// form, `LLMOBS_AUTH__OIDC__<NAME>__CLIENT_SECRET` (D-S-2).
+/// form, `CETRA_AUTH__OIDC__<NAME>__CLIENT_SECRET` (D-S-2).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthSettings {
@@ -315,7 +312,7 @@ pub struct OidcAuth {
     /// OAuth client id.
     pub client_id: String,
     /// OAuth client secret. Optional in the file when
-    /// `LLMOBS_AUTH__OIDC__<NAME>__CLIENT_SECRET` sets it (D-S-2); required after loading.
+    /// `CETRA_AUTH__OIDC__<NAME>__CLIENT_SECRET` sets it (D-S-2); required after loading.
     #[serde(default = "empty_secret")]
     pub client_secret: Secret<String>,
     /// Must include `openid`. Default `openid`, `email`, `profile`.
@@ -515,7 +512,7 @@ pub struct EntitlementsConfig {
     pub control_plane_provider: String,
     /// This instance is a cloud cell managed by the control plane (D-P-50). When false (the
     /// default), every `/api/internal/v1/*` route answers 404, stored and pushed org tokens are
-    /// ignored, and `llmobs1.` bearer tokens are refused: only licence keys are trusted.
+    /// ignored, and `cetra1.` bearer tokens are refused: only licence keys are trusted.
     pub control_plane: bool,
 }
 
@@ -587,7 +584,7 @@ impl Default for OrgsConfig {
     }
 }
 
-/// Everything `llmobs serve` reads from the environment and `llmobs.toml`.
+/// Everything `cetra serve` reads from the environment and `cetra.toml`.
 ///
 /// Keys that spec 12 lists for later work (telemetry, compaction, gc, deletion,
 /// anchor) are not fields. Setting one is an unknown-key error.
@@ -675,10 +672,10 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
-    /// Load defaults, then `path`, otherwise `$LLMOBS_CONFIG`, then `LLMOBS_*`.
+    /// Load defaults, then `path`, otherwise `$CETRA_CONFIG`, then `CETRA_*`.
     ///
     /// A path that is given but missing is [`ConfigError::MissingFile`]. An
-    /// unset path and an unset `LLMOBS_CONFIG` mean there is no file.
+    /// unset path and an unset `CETRA_CONFIG` mean there is no file.
     ///
     /// # Errors
     ///
@@ -733,13 +730,13 @@ pub enum ConfigError {
         /// Static rule.
         reason: &'static str,
     },
-    /// `path` or `$LLMOBS_CONFIG` names a file that does not exist.
+    /// `path` or `$CETRA_CONFIG` names a file that does not exist.
     #[error("config file not found: {}", .0.display())]
     MissingFile(PathBuf),
 }
 
 fn default_data_dir() -> PathBuf {
-    PathBuf::from("./llmobs-data")
+    PathBuf::from("./cetra-data")
 }
 
 fn default_http_addr() -> SocketAddr {
@@ -803,18 +800,18 @@ fn load_from(toml: Option<&str>, env: &[(&str, &str)]) -> Result<ServerConfig, C
 }
 
 /// The variable that sets provider `name`'s client secret (D-S-2): `cloud` →
-/// `LLMOBS_AUTH__OIDC__CLOUD__CLIENT_SECRET`, `my-idp` → `…__MY_IDP__CLIENT_SECRET`.
+/// `CETRA_AUTH__OIDC__CLOUD__CLIENT_SECRET`, `my-idp` → `…__MY_IDP__CLIENT_SECRET`.
 fn oidc_env_name(name: &str) -> String {
     format!(
-        "LLMOBS_AUTH__OIDC__{}__CLIENT_SECRET",
+        "CETRA_AUTH__OIDC__{}__CLIENT_SECRET",
         name.to_ascii_uppercase().replace('-', "_")
     )
 }
 
-/// Applies `LLMOBS_AUTH__OIDC__<NAME>__CLIENT_SECRET` to the `[[auth.oidc]]` provider of
-/// that name (D-S-2). Any other `LLMOBS_AUTH__OIDC__*` variable, and one naming no
+/// Applies `CETRA_AUTH__OIDC__<NAME>__CLIENT_SECRET` to the `[[auth.oidc]]` provider of
+/// that name (D-S-2). Any other `CETRA_AUTH__OIDC__*` variable, and one naming no
 /// provider, is an error that names the variable, never its value. Names compare without
-/// regard to case, like every `LLMOBS_` variable.
+/// regard to case, like every `CETRA_` variable.
 fn apply_oidc_env(auth: &mut AuthSettings, env: &[(&str, &str)]) -> Result<(), ConfigError> {
     for (name, value) in env {
         let Some(dotted) = split_key(name) else {
@@ -830,7 +827,7 @@ fn apply_oidc_env(auth: &mut AuthSettings, env: &[(&str, &str)]) -> Result<(), C
         let Some(provider) = provider else {
             return Err(ConfigError::Provider {
                 key: name.to_ascii_uppercase(),
-                reason: "only LLMOBS_AUTH__OIDC__<NAME>__CLIENT_SECRET is read, for a provider of the config file",
+                reason: "only CETRA_AUTH__OIDC__<NAME>__CLIENT_SECRET is read, for a provider of the config file",
             });
         };
         provider.client_secret = Secret((*value).to_owned());
@@ -856,7 +853,7 @@ fn read_toml(path: Option<&Path>) -> Result<Option<String>, ConfigError> {
 fn configured_path(path: Option<&Path>) -> Option<PathBuf> {
     match path {
         Some(path) => Some(path.to_path_buf()),
-        None => std::env::var_os("LLMOBS_CONFIG").map(PathBuf::from),
+        None => std::env::var_os("CETRA_CONFIG").map(PathBuf::from),
     }
 }
 
@@ -1010,7 +1007,7 @@ fn validate(config: &mut ServerConfig) -> Result<(), ConfigError> {
     }
     validate_ingest(&config.ingest, &config.media)?;
     config.storage.validate().map_err(|error| match error {
-        llmobs_storage::error::ConfigError::Invalid { field, rule } => ConfigError::Invalid {
+        cetra_storage::error::ConfigError::Invalid { field, rule } => ConfigError::Invalid {
             key: field,
             reason: rule,
         },
@@ -1689,7 +1686,7 @@ struct EnvSource<'a> {
 
 impl Provider for EnvSource<'_> {
     fn metadata(&self) -> Metadata {
-        Metadata::named("LLMOBS_ environment")
+        Metadata::named("CETRA_ environment")
     }
 
     fn data(&self) -> Result<Map<Profile, Dict>, figment::Error> {
@@ -1714,8 +1711,8 @@ impl Provider for EnvSource<'_> {
 }
 
 fn split_key(name: &str) -> Option<String> {
-    let (prefix, rest) = name.split_at_checked("LLMOBS_".len())?;
-    if !prefix.eq_ignore_ascii_case("LLMOBS_") || is_filtered(name) {
+    let (prefix, rest) = name.split_at_checked("CETRA_".len())?;
+    if !prefix.eq_ignore_ascii_case("CETRA_") || is_filtered(name) {
         return None;
     }
     let parts: Vec<&str> = rest.split("__").collect();
@@ -1731,16 +1728,11 @@ fn split_key(name: &str) -> Option<String> {
     )
 }
 
-/// `LLMOBS_CONFIG` and the CLI's own variables (D-H-12) are not config keys.
+/// `CETRA_CONFIG` and the CLI's own variables (D-H-12) are not config keys.
 fn is_filtered(name: &str) -> bool {
-    [
-        "LLMOBS_CONFIG",
-        "LLMOBS_URL",
-        "LLMOBS_TOKEN",
-        "LLMOBS_PROJECT",
-    ]
-    .iter()
-    .any(|filtered| name.eq_ignore_ascii_case(filtered))
+    ["CETRA_CONFIG", "CETRA_URL", "CETRA_TOKEN", "CETRA_PROJECT"]
+        .iter()
+        .any(|filtered| name.eq_ignore_ascii_case(filtered))
         || alias_key(name).is_some()
 }
 
@@ -1806,7 +1798,7 @@ mod tests {
     use std::time::Duration;
 
     use bytesize::ByteSize;
-    use llmobs_storage::config::{ObjectStoreUrl, WalSync};
+    use cetra_storage::config::{ObjectStoreUrl, WalSync};
 
     use super::{
         ConfigError, IngestConfig, LogFormat, MediaConfig, OrgsConfig, Secret, ServerConfig,
@@ -1840,7 +1832,7 @@ mod tests {
     #[test]
     fn defaults_match_spec() {
         let config = load_from(None, &[]).unwrap();
-        assert_eq!(config.data_dir, PathBuf::from("./llmobs-data"));
+        assert_eq!(config.data_dir, PathBuf::from("./cetra-data"));
         assert_eq!(config.public_url.origin(), "http://localhost:8080");
         assert!(!config.public_url.is_https());
         assert_eq!(config.http_addr, socket("0.0.0.0:8080"));
@@ -1892,8 +1884,8 @@ mod tests {
         let config = load_from(
             Some(toml),
             &[
-                ("LLMOBS_HTTP_ADDR", "127.0.0.1:10"),
-                ("LLMOBS_DATA_DIR", "/from/env"),
+                ("CETRA_HTTP_ADDR", "127.0.0.1:10"),
+                ("CETRA_DATA_DIR", "/from/env"),
             ],
         )
         .unwrap();
@@ -1907,11 +1899,11 @@ mod tests {
         let config = load_from(
             None,
             &[
-                ("LLMOBS_AUTH__SIGNUP", "open"),
-                ("LLMOBS_AUTH_SIGNUP", "disabled"),
-                ("LLMOBS_LOG__LEVEL", "warn"),
-                ("LLMOBS_LOG__FORMAT", "json"),
-                ("LLMOBS_LOG", "debug"),
+                ("CETRA_AUTH__SIGNUP", "open"),
+                ("CETRA_AUTH_SIGNUP", "disabled"),
+                ("CETRA_LOG__LEVEL", "warn"),
+                ("CETRA_LOG__FORMAT", "json"),
+                ("CETRA_LOG", "debug"),
             ],
         )
         .unwrap();
@@ -1922,7 +1914,7 @@ mod tests {
 
     #[test]
     fn storage_wal_sync_reads_the_split_env_key() {
-        let config = load_from(None, &[("LLMOBS_STORAGE__WAL__SYNC", "5ms")]).unwrap();
+        let config = load_from(None, &[("CETRA_STORAGE__WAL__SYNC", "5ms")]).unwrap();
         assert_eq!(
             config.storage.wal.sync,
             WalSync::Interval(Duration::from_millis(5))
@@ -1934,7 +1926,7 @@ mod tests {
         let toml_error = load_from(Some("nope = true\n"), &[]).unwrap_err();
         assert!(toml_error.to_string().contains("nope"), "{toml_error}");
 
-        let env_error = load_from(None, &[("LLMOBS_FOO", "1")]).unwrap_err();
+        let env_error = load_from(None, &[("CETRA_FOO", "1")]).unwrap_err();
         assert!(env_error.to_string().contains("foo"), "{env_error}");
     }
 
@@ -1943,12 +1935,9 @@ mod tests {
         let config = load_from(
             None,
             &[
-                ("LLMOBS_URL", "http://127.0.0.1:8080"),
-                (
-                    "LLMOBS_TOKEN",
-                    "pat-llmobs-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0",
-                ),
-                ("llmobs_project", "acme/app"),
+                ("CETRA_URL", "http://127.0.0.1:8080"),
+                ("CETRA_TOKEN", "pat-cetra-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0"),
+                ("cetra_project", "acme/app"),
             ],
         );
         assert!(config.is_ok());
@@ -1962,7 +1951,7 @@ mod tests {
         assert!(!text.contains("secret-path"), "{text}");
 
         let env_error =
-            load_from(None, &[("LLMOBS_STORAGE__DATA_DIR", "/also-secret")]).unwrap_err();
+            load_from(None, &[("CETRA_STORAGE__DATA_DIR", "/also-secret")]).unwrap_err();
         assert!(env_error.to_string().contains("data_dir"), "{env_error}");
         assert!(
             !env_error.to_string().contains("also-secret"),
@@ -1987,7 +1976,7 @@ mod tests {
                 "#,
             ),
             &[(
-                "LLMOBS_AUTH_ENFORCE_SSO_DOMAINS",
+                "CETRA_AUTH_ENFORCE_SSO_DOMAINS",
                 "Acme.ORG,, partner.example",
             )],
         )
@@ -2001,18 +1990,18 @@ mod tests {
 
         let env_lists = load_from(
             None,
-            &[("LLMOBS_TRUSTED_PROXIES", "127.0.0.1/32, 10.0.0.0/8")],
+            &[("CETRA_TRUSTED_PROXIES", "127.0.0.1/32, 10.0.0.0/8")],
         )
         .unwrap();
         assert_eq!(env_lists.trusted_proxies.len(), 2);
 
-        let error = load_from(None, &[("LLMOBS_TRUSTED_PROXIES", "not-a-cidr")]).unwrap_err();
+        let error = load_from(None, &[("CETRA_TRUSTED_PROXIES", "not-a-cidr")]).unwrap_err();
         let text = error.to_string();
         assert!(text.contains("trusted_proxies"), "{text}");
         assert!(!text.contains("not-a-cidr"), "{text}");
 
         let domain_error =
-            load_from(None, &[("LLMOBS_AUTH_SIGNUP_DOMAINS", "bad domain")]).unwrap_err();
+            load_from(None, &[("CETRA_AUTH_SIGNUP_DOMAINS", "bad domain")]).unwrap_err();
         let domain_text = domain_error.to_string();
         assert!(domain_text.contains("auth.signup_domains"), "{domain_text}");
         assert!(!domain_text.contains("bad domain"), "{domain_text}");
@@ -2025,30 +2014,27 @@ mod tests {
             "http://localhost/api",
             "http://localhost/?q=1",
         ] {
-            let error = load_from(None, &[("LLMOBS_PUBLIC_URL", bad)]).unwrap_err();
+            let error = load_from(None, &[("CETRA_PUBLIC_URL", bad)]).unwrap_err();
             assert!(error.to_string().contains("public_url"), "{bad}: {error}");
         }
 
-        let userinfo = load_from(
-            None,
-            &[("LLMOBS_PUBLIC_URL", "http://ada:s3cret@localhost")],
-        )
-        .unwrap_err();
+        let userinfo =
+            load_from(None, &[("CETRA_PUBLIC_URL", "http://ada:s3cret@localhost")]).unwrap_err();
         assert!(!userinfo.to_string().contains("s3cret"), "{userinfo}");
 
-        let config = load_from(None, &[("LLMOBS_PUBLIC_URL", "http://localhost:8080/")]).unwrap();
+        let config = load_from(None, &[("CETRA_PUBLIC_URL", "http://localhost:8080/")]).unwrap();
         assert_eq!(config.public_url.origin(), "http://localhost:8080");
         assert_eq!(config.public_url.join("/api"), "http://localhost:8080/api");
         assert_eq!(config.public_url.join("api"), "http://localhost:8080/api");
 
-        let ipv6 = load_from(None, &[("LLMOBS_PUBLIC_URL", "https://[::1]:8080/")]).unwrap();
+        let ipv6 = load_from(None, &[("CETRA_PUBLIC_URL", "https://[::1]:8080/")]).unwrap();
         assert_eq!(ipv6.public_url.origin(), "https://[::1]:8080");
         assert!(ipv6.public_url.is_https());
     }
 
     #[test]
     fn http_addr_errors_name_the_key() {
-        let error = load_from(None, &[("LLMOBS_HTTP_ADDR", "nope")]).unwrap_err();
+        let error = load_from(None, &[("CETRA_HTTP_ADDR", "nope")]).unwrap_err();
         let text = error.to_string();
         assert!(text.contains("http_addr"), "{text}");
         assert!(!text.contains("nope"), "{text}");
@@ -2130,10 +2116,10 @@ mod tests {
         let config = load_from(
             None,
             &[
-                ("LLMOBS_INIT_ADMIN_EMAIL", "ada@example.com"),
-                ("LLMOBS_INIT_ADMIN_PASSWORD", "9876543210"),
-                ("LLMOBS_INIT_ORG", "Acme"),
-                ("LLMOBS_INIT_PROJECT", "App"),
+                ("CETRA_INIT_ADMIN_EMAIL", "ada@example.com"),
+                ("CETRA_INIT_ADMIN_PASSWORD", "9876543210"),
+                ("CETRA_INIT_ORG", "Acme"),
+                ("CETRA_INIT_PROJECT", "App"),
             ],
         )
         .unwrap();
@@ -2166,13 +2152,13 @@ mod tests {
             Some(
                 r#"
                 smtp_url = "smtp://user:s3cret-token@localhost:587"
-                email_from = "llmobs <noreply@example.com>"
+                email_from = "cetra <noreply@example.com>"
                 [init]
                 admin_email = "ada@example.com"
                 admin_password = "hunter2hunter2"
                 org = "Acme"
                 project = "App"
-                secret_key = "sk-llmobs-EXAMPLEKEYEXAMPLEKEYEXAMPLE"
+                secret_key = "sk-cetra-EXAMPLEKEYEXAMPLEKEYEXAMPLE"
                 "#,
             ),
             &[],
@@ -2182,7 +2168,7 @@ mod tests {
         assert!(text.contains("Secret(***)"), "{text}");
         assert!(!text.contains("hunter2hunter2"), "{text}");
         assert!(
-            !text.contains("sk-llmobs-EXAMPLEKEYEXAMPLEKEYEXAMPLE"),
+            !text.contains("sk-cetra-EXAMPLEKEYEXAMPLEKEYEXAMPLE"),
             "{text}"
         );
         assert!(!text.contains("s3cret-token"), "{text}");
@@ -2222,7 +2208,7 @@ mod tests {
 
     #[test]
     fn encryption_key_comes_from_the_environment() {
-        let config = load_from(None, &[("LLMOBS_ENCRYPTION_KEY", "abc")]).unwrap();
+        let config = load_from(None, &[("CETRA_ENCRYPTION_KEY", "abc")]).unwrap();
         assert_eq!(
             config.encryption_key.map(|key| key.expose().clone()),
             Some("abc".to_owned())
@@ -2231,7 +2217,7 @@ mod tests {
 
     #[test]
     fn license_key_comes_from_the_environment() {
-        let config = load_from(None, &[("LLMOBS_LICENSE_KEY", "abc")]).unwrap();
+        let config = load_from(None, &[("CETRA_LICENSE_KEY", "abc")]).unwrap();
         assert_eq!(
             config.license_key.map(|key| key.expose().clone()),
             Some("abc".to_owned())
@@ -2241,7 +2227,7 @@ mod tests {
     #[test]
     fn empty_license_key_is_unset() {
         for value in ["", "   "] {
-            let config = load_from(None, &[("LLMOBS_LICENSE_KEY", value)]).unwrap();
+            let config = load_from(None, &[("CETRA_LICENSE_KEY", value)]).unwrap();
             assert!(config.license_key.is_none(), "{value:?}");
         }
     }
@@ -2265,7 +2251,7 @@ mod tests {
 
     #[test]
     fn numeric_encryption_key_stays_a_string() {
-        let config = load_from(None, &[("LLMOBS_ENCRYPTION_KEY", "12345678")]).unwrap();
+        let config = load_from(None, &[("CETRA_ENCRYPTION_KEY", "12345678")]).unwrap();
         assert_eq!(
             config.encryption_key.map(|key| key.expose().clone()),
             Some("12345678".to_owned())
@@ -2329,7 +2315,7 @@ mod tests {
     fn upgrade_url_from_env() {
         let config = load_from(
             None,
-            &[("LLMOBS_ENTITLEMENTS__UPGRADE_URL", "https://example.com/up")],
+            &[("CETRA_ENTITLEMENTS__UPGRADE_URL", "https://example.com/up")],
         )
         .unwrap();
         assert_eq!(
@@ -2387,7 +2373,7 @@ mod tests {
 
     #[test]
     fn control_plane_from_env() {
-        let config = load_from(None, &[("LLMOBS_ENTITLEMENTS__CONTROL_PLANE", "true")]).unwrap();
+        let config = load_from(None, &[("CETRA_ENTITLEMENTS__CONTROL_PLANE", "true")]).unwrap();
         assert!(config.entitlements.control_plane);
     }
 
@@ -2415,7 +2401,7 @@ mod tests {
 
     #[test]
     fn orgs_from_env() {
-        let config = load_from(None, &[("LLMOBS_ORGS__USER_CREATE", "false")]).unwrap();
+        let config = load_from(None, &[("CETRA_ORGS__USER_CREATE", "false")]).unwrap();
         assert!(!config.orgs.user_create);
     }
 
@@ -2634,13 +2620,13 @@ mod tests {
         assert!(!format!("{invalid:?}").contains("not-a-mailbox"));
 
         let named = load_from(
-            Some("smtp_url = \"smtp://localhost\"\nemail_from = \"llmobs <noreply@acme.com>\"\n"),
+            Some("smtp_url = \"smtp://localhost\"\nemail_from = \"cetra <noreply@acme.com>\"\n"),
             &[],
         )
         .unwrap();
         assert_eq!(
             named.email_from.as_deref(),
-            Some("llmobs <noreply@acme.com>")
+            Some("cetra <noreply@acme.com>")
         );
 
         let bare = load_from(
@@ -2687,10 +2673,10 @@ mod tests {
 
     #[test]
     fn missing_config_file_names_the_path() {
-        let path = Path::new("/no/such/llmobs-config.toml");
+        let path = Path::new("/no/such/cetra-config.toml");
         let error = ServerConfig::load(Some(path)).unwrap_err();
         assert!(
-            error.to_string().contains("/no/such/llmobs-config.toml"),
+            error.to_string().contains("/no/such/cetra-config.toml"),
             "{error}"
         );
     }
@@ -2815,8 +2801,8 @@ mod tests {
         let config = load_from(
             None,
             &[
-                ("LLMOBS_AUTH__GITHUB__CLIENT_ID", "gh-client"),
-                ("LLMOBS_AUTH__GITHUB__CLIENT_SECRET", "987654321"),
+                ("CETRA_AUTH__GITHUB__CLIENT_ID", "gh-client"),
+                ("CETRA_AUTH__GITHUB__CLIENT_SECRET", "987654321"),
             ],
         )
         .expect("env github");
@@ -2872,7 +2858,7 @@ client_id = "client"
     fn oidc_client_secret_comes_from_the_env() {
         let config = load_from(
             Some(OIDC_WITHOUT_SECRET),
-            &[("LLMOBS_AUTH__OIDC__MY_IDP__CLIENT_SECRET", "987654321")],
+            &[("CETRA_AUTH__OIDC__MY_IDP__CLIENT_SECRET", "987654321")],
         )
         .expect("env secret");
         // An all-digit secret stays a string: it never goes through figment's env parser.
@@ -2884,7 +2870,7 @@ client_id = "client"
     fn oidc_env_name_ignores_case() {
         let config = load_from(
             Some(OIDC_WITHOUT_SECRET),
-            &[("llmobs_auth__oidc__my_idp__client_secret", "from-env")],
+            &[("cetra_auth__oidc__my_idp__client_secret", "from-env")],
         )
         .expect("lower-case secret");
         assert_eq!(config.auth.oidc[0].client_secret.expose(), "from-env");
@@ -2894,7 +2880,7 @@ client_id = "client"
     fn oidc_env_secret_wins_over_the_file() {
         let config = load_from(
             Some(&oidc("")),
-            &[("LLMOBS_AUTH__OIDC__OKTA__CLIENT_SECRET", "from-env")],
+            &[("CETRA_AUTH__OIDC__OKTA__CLIENT_SECRET", "from-env")],
         )
         .expect("env wins");
         assert_eq!(config.auth.oidc[0].client_secret.expose(), "from-env");
@@ -2909,7 +2895,7 @@ client_id = "client"
         );
         let error = load_from(
             Some(OIDC_WITHOUT_SECRET),
-            &[("LLMOBS_AUTH__OIDC__MY_IDP__CLIENT_SECRET", "")],
+            &[("CETRA_AUTH__OIDC__MY_IDP__CLIENT_SECRET", "")],
         )
         .expect_err("empty env secret");
         assert_eq!(
@@ -2921,10 +2907,10 @@ client_id = "client"
     #[test]
     fn stray_oidc_env_is_refused() {
         for var in [
-            "LLMOBS_AUTH__OIDC__OTHER__CLIENT_SECRET",
-            "LLMOBS_AUTH__OIDC__0__CLIENT_SECRET",
-            "LLMOBS_AUTH__OIDC__OKTA__CLIENT_ID",
-            "LLMOBS_AUTH__OIDC__0__NAME",
+            "CETRA_AUTH__OIDC__OTHER__CLIENT_SECRET",
+            "CETRA_AUTH__OIDC__0__CLIENT_SECRET",
+            "CETRA_AUTH__OIDC__OKTA__CLIENT_ID",
+            "CETRA_AUTH__OIDC__0__NAME",
         ] {
             let error =
                 load_from(Some(&oidc("")), &[(var, "leaked-value")]).expect_err("stray variable");
@@ -2932,7 +2918,7 @@ client_id = "client"
             assert_eq!(
                 text,
                 format!(
-                    "{var}: only LLMOBS_AUTH__OIDC__<NAME>__CLIENT_SECRET is read, for a provider of the config file"
+                    "{var}: only CETRA_AUTH__OIDC__<NAME>__CLIENT_SECRET is read, for a provider of the config file"
                 )
             );
             assert!(!text.contains("leaked-value"), "{text}");
@@ -2941,11 +2927,11 @@ client_id = "client"
 
     #[test]
     fn oidc_env_without_any_provider_is_refused() {
-        let error = load_from(None, &[("LLMOBS_AUTH__OIDC__CLOUD__CLIENT_SECRET", "x")])
+        let error = load_from(None, &[("CETRA_AUTH__OIDC__CLOUD__CLIENT_SECRET", "x")])
             .expect_err("no provider");
         assert_eq!(
             error.to_string(),
-            "LLMOBS_AUTH__OIDC__CLOUD__CLIENT_SECRET: only LLMOBS_AUTH__OIDC__<NAME>__CLIENT_SECRET is read, for a provider of the config file"
+            "CETRA_AUTH__OIDC__CLOUD__CLIENT_SECRET: only CETRA_AUTH__OIDC__<NAME>__CLIENT_SECRET is read, for a provider of the config file"
         );
     }
 
@@ -2953,11 +2939,11 @@ client_id = "client"
     fn oidc_env_name_maps_dashes() {
         assert_eq!(
             oidc_env_name("cloud"),
-            "LLMOBS_AUTH__OIDC__CLOUD__CLIENT_SECRET"
+            "CETRA_AUTH__OIDC__CLOUD__CLIENT_SECRET"
         );
         assert_eq!(
             oidc_env_name("my-idp-2"),
-            "LLMOBS_AUTH__OIDC__MY_IDP_2__CLIENT_SECRET"
+            "CETRA_AUTH__OIDC__MY_IDP_2__CLIENT_SECRET"
         );
     }
 
@@ -3047,7 +3033,7 @@ link_existing_by_email = true
     fn ingest_toml_and_split_env_both_apply() {
         let config = load_from(
             Some("[ingest]\nmax_request_bytes = \"2MiB\"\n"),
-            &[("LLMOBS_INGEST__MAX_SPANS_PER_REQUEST", "10")],
+            &[("CETRA_INGEST__MAX_SPANS_PER_REQUEST", "10")],
         )
         .unwrap();
         assert_eq!(config.ingest.max_request_bytes, ByteSize::mib(2));
@@ -3060,16 +3046,16 @@ link_existing_by_email = true
         let toml = load_from(Some("otlp_http_addr = \"\"\n"), &[]).unwrap();
         assert_eq!(toml.otlp_http_addr, None);
 
-        let env = load_from(None, &[("LLMOBS_OTLP_HTTP_ADDR", "")]).unwrap();
+        let env = load_from(None, &[("CETRA_OTLP_HTTP_ADDR", "")]).unwrap();
         assert_eq!(env.otlp_http_addr, None);
 
-        let blank = load_from(None, &[("LLMOBS_OTLP_HTTP_ADDR", "  ")]).unwrap();
+        let blank = load_from(None, &[("CETRA_OTLP_HTTP_ADDR", "  ")]).unwrap();
         assert_eq!(blank.otlp_http_addr, None);
 
-        let set = load_from(None, &[("LLMOBS_OTLP_HTTP_ADDR", "127.0.0.1:9999")]).unwrap();
+        let set = load_from(None, &[("CETRA_OTLP_HTTP_ADDR", "127.0.0.1:9999")]).unwrap();
         assert_eq!(set.otlp_http_addr, Some(socket("127.0.0.1:9999")));
 
-        let error = load_from(None, &[("LLMOBS_OTLP_HTTP_ADDR", "nope")]).unwrap_err();
+        let error = load_from(None, &[("CETRA_OTLP_HTTP_ADDR", "nope")]).unwrap_err();
         let text = error.to_string();
         assert!(text.contains("invalid socket address"), "{text}");
         assert!(text.contains("otlp_http_addr"), "{text}");
@@ -3081,16 +3067,16 @@ link_existing_by_email = true
         let toml = load_from(Some("grpc_addr = \"\"\n"), &[]).unwrap();
         assert_eq!(toml.grpc_addr, None);
 
-        let env = load_from(None, &[("LLMOBS_GRPC_ADDR", "")]).unwrap();
+        let env = load_from(None, &[("CETRA_GRPC_ADDR", "")]).unwrap();
         assert_eq!(env.grpc_addr, None);
 
-        let blank = load_from(None, &[("LLMOBS_GRPC_ADDR", "  ")]).unwrap();
+        let blank = load_from(None, &[("CETRA_GRPC_ADDR", "  ")]).unwrap();
         assert_eq!(blank.grpc_addr, None);
 
-        let set = load_from(None, &[("LLMOBS_GRPC_ADDR", "127.0.0.1:9998")]).unwrap();
+        let set = load_from(None, &[("CETRA_GRPC_ADDR", "127.0.0.1:9998")]).unwrap();
         assert_eq!(set.grpc_addr, Some(socket("127.0.0.1:9998")));
 
-        let error = load_from(None, &[("LLMOBS_GRPC_ADDR", "nope")]).unwrap_err();
+        let error = load_from(None, &[("CETRA_GRPC_ADDR", "nope")]).unwrap_err();
         let text = error.to_string();
         assert!(text.contains("invalid socket address"), "{text}");
         assert!(text.contains("grpc_addr"), "{text}");
@@ -3105,7 +3091,7 @@ link_existing_by_email = true
         let toml = load_from(Some("restore_mode = true\n"), &[]).unwrap();
         assert!(toml.restore_mode);
 
-        let env = load_from(None, &[("LLMOBS_RESTORE_MODE", "true")]).unwrap();
+        let env = load_from(None, &[("CETRA_RESTORE_MODE", "true")]).unwrap();
         assert!(env.restore_mode);
     }
 
@@ -3238,13 +3224,13 @@ link_existing_by_email = true
         let toml = load_from(Some("metrics_addr = \"\"\n"), &[]).unwrap();
         assert_eq!(toml.metrics_addr, None);
 
-        let env = load_from(None, &[("LLMOBS_METRICS_ADDR", "  ")]).unwrap();
+        let env = load_from(None, &[("CETRA_METRICS_ADDR", "  ")]).unwrap();
         assert_eq!(env.metrics_addr, None);
 
         let set = load_from(Some("metrics_addr = \"127.0.0.1:9464\"\n"), &[]).unwrap();
         assert_eq!(set.metrics_addr, Some(socket("127.0.0.1:9464")));
 
-        let from_env = load_from(None, &[("LLMOBS_METRICS_ADDR", "127.0.0.1:9465")]).unwrap();
+        let from_env = load_from(None, &[("CETRA_METRICS_ADDR", "127.0.0.1:9465")]).unwrap();
         assert_eq!(from_env.metrics_addr, Some(socket("127.0.0.1:9465")));
     }
 

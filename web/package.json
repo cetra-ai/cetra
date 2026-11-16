@@ -1,5 +1,5 @@
 {
-  "name": "@llmobs/web",
+  "name": "@cetra/web",
   "private": true,
   "type": "module",
   "scripts": {

@@ -2,12 +2,12 @@
   "spans": [
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "90339297f80338b5502fc8eafc6f38e6",
-      "span_id": "e83ad654b9c83928",
+      "trace_id": "2b24ac135ab91202eac59e1611e82a31",
+      "span_id": "62057dcc6c5051f6",
       "name": "ai.generateText",
       "span_kind": "chain",
       "start_time": "2025-12-31T23:59:50.000000000Z",
-      "end_time": "2025-12-31T23:59:50.060000000Z",
+      "end_time": "2025-12-31T23:59:50.069000000Z",
       "status": "unset",
       "service_name": "capture-app",
       "metadata": {
@@ -57,13 +57,13 @@
     },
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "90339297f80338b5502fc8eafc6f38e6",
-      "span_id": "c83d724afdb83b47",
-      "parent_span_id": "e83ad654b9c83928",
+      "trace_id": "2b24ac135ab91202eac59e1611e82a31",
+      "span_id": "bb3343c4cc5909e9",
+      "parent_span_id": "62057dcc6c5051f6",
       "name": "ai.generateText.doGenerate",
       "span_kind": "llm",
-      "start_time": "2025-12-31T23:59:50.002000000Z",
-      "end_time": "2025-12-31T23:59:50.055000000Z",
+      "start_time": "2025-12-31T23:59:50.003000000Z",
+      "end_time": "2025-12-31T23:59:50.064000000Z",
       "status": "unset",
       "service_name": "capture-app",
       "metadata": {

@@ -7,8 +7,8 @@ use serde_json::{Map, Value};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-use llmobs_core::enums::ScoreDataType;
-use llmobs_core::ids::TraceId;
+use cetra_core::enums::ScoreDataType;
+use cetra_core::ids::TraceId;
 
 use super::common::{Limit, any_json};
 use super::datasets::DatasetItem;
@@ -83,7 +83,7 @@ pub struct Experiment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// Creation time. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub created_at: i64,
     /// When the experiment finished. Omitted while it runs. JSON is RFC 3339.

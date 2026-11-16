@@ -69,11 +69,11 @@ pub struct OrgSsoProvider {
     #[schema(value_type = Option<String>, format = DateTime)]
     pub last_login_at: Option<i64>,
     /// Creation time.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub created_at: i64,
     /// Last change to the settings.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub updated_at: i64,
 }
@@ -97,9 +97,9 @@ pub struct OrgSsoDomain {
     pub domain: String,
     /// Pending or verified.
     pub status: DomainStatus,
-    /// TXT record name, `_llmobs-verify.<domain>`.
+    /// TXT record name, `_cetra-verify.<domain>`.
     pub txt_name: String,
-    /// TXT record value, `llmobs-verify=<token>`.
+    /// TXT record value, `cetra-verify=<token>`.
     pub txt_value: String,
     /// When the TXT record was found. Omitted while pending.
     #[serde(
@@ -118,7 +118,7 @@ pub struct OrgSsoDomain {
     #[schema(value_type = Option<String>, format = DateTime)]
     pub last_checked_at: Option<i64>,
     /// Creation time.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub created_at: i64,
 }

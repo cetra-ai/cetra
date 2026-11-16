@@ -2,13 +2,13 @@
 
 use std::sync::Arc;
 
+use cetra_core::enums::ScoreTargetKind;
 use datafusion::arrow::datatypes::{DataType, Field, Fields};
 use datafusion::common::{DFSchema, DFSchemaRef, ScalarValue};
 use datafusion::error::DataFusionError;
 use datafusion::functions_window::expr_fn::row_number;
 use datafusion::logical_expr::{Expr, ExprFunctionExt, JoinType, col, lit};
 use datafusion::prelude::DataFrame;
-use llmobs_core::enums::ScoreTargetKind;
 
 use super::FilterView;
 use crate::query_error::InvalidQuery;

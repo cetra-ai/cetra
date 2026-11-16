@@ -2,9 +2,9 @@
 
 use std::time::{Duration, Instant};
 
-use llmobs_core::ids::OrgId;
-use llmobs_core::ids::ProjectId;
-use llmobs_storage::{ListScope, QueryContext, RunError, ScoreTargets, Storage, TimeWindow};
+use cetra_core::ids::OrgId;
+use cetra_core::ids::ProjectId;
+use cetra_storage::{ListScope, QueryContext, RunError, ScoreTargets, Storage, TimeWindow};
 
 use crate::api::common::{Limit, SortOrder, TimeParam};
 use crate::api::convert;
@@ -143,13 +143,13 @@ pub(crate) fn list_scope(
 
 /// `Limit` as A2's `usize`. `Limit` is already 1–1000.
 pub(crate) fn page_limit(limit: Limit) -> usize {
-    usize::try_from(limit.get()).unwrap_or(llmobs_storage::MAX_PAGE)
+    usize::try_from(limit.get()).unwrap_or(cetra_storage::MAX_PAGE)
 }
 
-pub(crate) fn sort_order(order: SortOrder) -> llmobs_storage::SortOrder {
+pub(crate) fn sort_order(order: SortOrder) -> cetra_storage::SortOrder {
     match order {
-        SortOrder::Asc => llmobs_storage::SortOrder::Asc,
-        SortOrder::Desc => llmobs_storage::SortOrder::Desc,
+        SortOrder::Asc => cetra_storage::SortOrder::Asc,
+        SortOrder::Desc => cetra_storage::SortOrder::Desc,
     }
 }
 
@@ -170,7 +170,7 @@ pub(crate) async fn attach_trace_scores(
         .collect();
     let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
     let batches =
-        llmobs_storage::latest_scores(ctx, ScoreTargets::Traces(&refs), deadline.remaining()?)
+        cetra_storage::latest_scores(ctx, ScoreTargets::Traces(&refs), deadline.remaining()?)
             .await?;
     let mut briefs = convert::score_briefs(&batches)?;
     for (trace, id) in traces.iter_mut().zip(&ids) {
@@ -196,7 +196,7 @@ pub(crate) async fn attach_session_scores(
         .collect();
     let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
     let batches =
-        llmobs_storage::latest_scores(ctx, ScoreTargets::Sessions(&refs), deadline.remaining()?)
+        cetra_storage::latest_scores(ctx, ScoreTargets::Sessions(&refs), deadline.remaining()?)
             .await?;
     let mut briefs = convert::score_briefs(&batches)?;
     for (session, id) in sessions.iter_mut().zip(&ids) {
@@ -207,7 +207,7 @@ pub(crate) async fn attach_session_scores(
 
 #[cfg(test)]
 mod tests {
-    use llmobs_storage::{RunError, SortOrder as StorageSortOrder, TraceListRequest, TraceSort};
+    use cetra_storage::{RunError, SortOrder as StorageSortOrder, TraceListRequest, TraceSort};
 
     use super::*;
     use crate::test_support::TestApp;
@@ -288,7 +288,7 @@ mod tests {
             .await
             .unwrap();
         let scope = list_scope(None, None, false, false).unwrap();
-        let page = llmobs_storage::trace_list(
+        let page = cetra_storage::trace_list(
             &ctx,
             TraceListRequest {
                 filter: None,

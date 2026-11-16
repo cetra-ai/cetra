@@ -1,5 +1,5 @@
 [package]
-name = "llmobs-storage"
+name = "cetra-storage"
 description = "WAL, Parquet storage, catalog, compaction, and queries"
 version.workspace = true
 edition.workspace = true
@@ -11,7 +11,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-llmobs-core.workspace = true
+cetra-core.workspace = true
 arrow = { workspace = true, features = ["ipc_compression", "json"] }
 async-trait.workspace = true
 bytes.workspace = true

@@ -15,7 +15,7 @@ use arrow::array::{RecordBatch, TimestampNanosecondArray};
 use arrow::compute::{concat_batches, min};
 use arrow::datatypes::SchemaRef;
 use bytes::Bytes;
-use llmobs_core::ids::ProjectId;
+use cetra_core::ids::ProjectId;
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 
@@ -484,7 +484,7 @@ fn prepare(
                 let min_ingest = min_ingest_time(&partition.batch, table)?;
                 let batch = uncovered_rows(
                     file_table,
-                    &llmobs_core::schema::spans_schema(),
+                    &cetra_core::schema::spans_schema(),
                     &partition.batch,
                     tombstones,
                     partition.key.project,
@@ -508,14 +508,13 @@ fn prepare(
                 }
                 let refs: Vec<&RecordBatch> =
                     batches.iter().map(|batch| batch.batch.as_ref()).collect();
-                let combined = concat_batches(&llmobs_core::schema::scores_schema(), refs)
-                    .map_err(|source| {
-                        FlushError::prepare(crate::error::ParquetWriteError::arrow(source))
-                    })?;
+                let combined = concat_batches(&cetra_core::schema::scores_schema(), refs).map_err(
+                    |source| FlushError::prepare(crate::error::ParquetWriteError::arrow(source)),
+                )?;
                 let min_ingest = min_ingest_time(&combined, table)?;
                 let combined = uncovered_rows(
                     file_table,
-                    &llmobs_core::schema::scores_schema(),
+                    &cetra_core::schema::scores_schema(),
                     &combined,
                     tombstones,
                     key.project,
@@ -754,8 +753,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use arrow::array::Array;
+    use cetra_core::ids::ProjectId;
     use chrono::{Datelike, NaiveDate};
-    use llmobs_core::ids::ProjectId;
 
     use super::dedup_spans;
     use crate::Storage;
@@ -775,7 +774,7 @@ mod tests {
 
     fn names(batch: &arrow::array::RecordBatch) -> Vec<String> {
         let column = batch
-            .column_by_name(llmobs_core::schema::spans::NAME)
+            .column_by_name(cetra_core::schema::spans::NAME)
             .unwrap()
             .as_any()
             .downcast_ref::<arrow::array::StringArray>()
@@ -1081,7 +1080,7 @@ mod tests {
             false,
             "session-score",
         );
-        session.target = llmobs_core::score::ScoreTarget::Session {
+        session.target = cetra_core::score::ScoreTarget::Session {
             session_id: "s".to_owned(),
         };
         storage
@@ -1104,7 +1103,7 @@ mod tests {
         assert_eq!(
             values_of(
                 &object_rows(dir.path(), &files[0]),
-                llmobs_core::schema::scores::NAME
+                cetra_core::schema::scores::NAME
             ),
             vec!["session-score".to_owned()],
             "the score on trace 1 is not flushed; the session score is"

@@ -14,12 +14,12 @@ anything not measured is labelled as pending.
 by hand on the same server as S1b:
 
 ```bash
-LLMOBS_TRACE_BENCH_DIR=/path/to/data cargo test --release \
-    -p llmobs-storage --test trace_bench -- --ignored --nocapture
+CETRA_TRACE_BENCH_DIR=/path/to/data cargo test --release \
+    -p cetra-storage --test trace_bench -- --ignored --nocapture
 ```
 
-`LLMOBS_TRACE_BENCH_TRACES` overrides the trace count (default 5,000,000).
-`LLMOBS_TRACE_BENCH_DIR` is generated once (when it holds no `catalog.db`) and
+`CETRA_TRACE_BENCH_TRACES` overrides the trace count (default 5,000,000).
+`CETRA_TRACE_BENCH_DIR` is generated once (when it holds no `catalog.db`) and
 reused afterwards; a `bench-manifest.json` keeps the dataset info and Q4 id
 sample across runs. The Q2r thresholds are recomputed each run with untimed
 range-mode queries, as S1b did. The data directory is never committed.
@@ -66,7 +66,7 @@ the table below is a reduced validation run, not the target verdict.
 
 #### Validation run (reduced dataset, debug build — not comparable with targets)
 
-`LLMOBS_TRACE_BENCH_TRACES=100000`, 100,000 traces, 11 spans files (after one
+`CETRA_TRACE_BENCH_TRACES=100000`, 100,000 traces, 11 spans files (after one
 regeneration), 37,344,116 bytes on disk, generated in 23.3 s, 2,970 traces
 with a 1–3 h late group. Times are milliseconds. All list queries used `list`
 mode; `differing ids` is 0 for every list query (no window-limit differences at

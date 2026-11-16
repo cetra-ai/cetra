@@ -48,7 +48,7 @@ describe("withLlmSpan attributes", () => {
     expect(span?.kind).toBe(SpanKind.INTERNAL);
     expect(span?.status.code).toBe(SpanStatusCode.UNSET);
     const attributes = span?.attributes ?? {};
-    expect(attributes["llmobs.span.kind"]).toBe("llm");
+    expect(attributes["cetra.span.kind"]).toBe("llm");
     expect(attributes["gen_ai.operation.name"]).toBe("chat");
     expect(attributes["gen_ai.provider.name"]).toBe("openai");
     expect(attributes["gen_ai.request.model"]).toBe("gpt-4o-mini");
@@ -63,8 +63,8 @@ describe("withLlmSpan attributes", () => {
     expect(attributes["gen_ai.usage.input_tokens"]).toBe(12);
     expect(attributes["gen_ai.usage.output_tokens"]).toBe(3);
     // The body's return value and the chat-less payloads are never written.
-    expect(attributes["llmobs.input"]).toBeUndefined();
-    expect(attributes["llmobs.output"]).toBeUndefined();
+    expect(attributes["cetra.input"]).toBeUndefined();
+    expect(attributes["cetra.output"]).toBeUndefined();
   });
 
   it("records system instructions from a string and from parts", async () => {
@@ -177,8 +177,8 @@ describe("withLlmSpan attributes", () => {
       span.setCost(Number.POSITIVE_INFINITY);
     });
     const spans = await finished(exporter);
-    expect(spans[0]?.attributes["llmobs.cost.total"]).toBe(0.0012);
-    expect(spans[1]?.attributes["llmobs.cost.total"]).toBeUndefined();
+    expect(spans[0]?.attributes["cetra.cost.total"]).toBe(0.0012);
+    expect(spans[1]?.attributes["cetra.cost.total"]).toBeUndefined();
   });
 
   it("records the first token once, from the span start", async () => {
@@ -189,7 +189,7 @@ describe("withLlmSpan attributes", () => {
       span.recordFirstToken();
     });
     const [span] = await finished(exporter);
-    const ttft = span?.attributes["llmobs.ttft_ns"];
+    const ttft = span?.attributes["cetra.ttft_ns"];
     expect(typeof ttft).toBe("number");
     expect(Number.isSafeInteger(ttft)).toBe(true);
     // The second call must not overwrite: it ran >= 10 ms in, the first at ~0.
@@ -280,15 +280,15 @@ describe("withLlmSpan attributes", () => {
       },
     );
     const attributes = (await finished(exporter))[0]?.attributes ?? {};
-    expect(attributes["llmobs.span.kind"]).toBe("llm");
+    expect(attributes["cetra.span.kind"]).toBe("llm");
     expect(attributes["gen_ai.operation.name"]).toBe("chat");
     expect(attributes["gen_ai.provider.name"]).toBe("openai");
     expect(attributes["gen_ai.request.model"]).toBe("gpt-4o-mini");
     expect(attributes["gen_ai.request.temperature"]).toBe(0.2);
     expect(attributes["gen_ai.response.model"]).toBe("gpt-4o-mini-2024-07-18");
     expect(attributes["gen_ai.usage.input_tokens"]).toBe(12);
-    expect(attributes["llmobs.cost.total"]).toBe(0.001);
-    expect(typeof attributes["llmobs.ttft_ns"]).toBe("number");
+    expect(attributes["cetra.cost.total"]).toBe(0.001);
+    expect(typeof attributes["cetra.ttft_ns"]).toBe("number");
     expect(attributes["gen_ai.input.messages"]).toBeUndefined();
     expect(attributes["gen_ai.output.messages"]).toBeUndefined();
     expect(attributes["gen_ai.system_instructions"]).toBeUndefined();
@@ -302,8 +302,8 @@ describe("withLlmSpan attributes", () => {
       span.setMetadata({ seats: 3 });
     });
     const attributes = (await finished(exporter))[0]?.attributes ?? {};
-    expect(attributes["llmobs.metadata.plan"]).toBe("PRO");
-    expect(attributes["llmobs.metadata.seats"]).toBe(3);
+    expect(attributes["cetra.metadata.plan"]).toBe("PRO");
+    expect(attributes["cetra.metadata.seats"]).toBe(3);
   });
 });
 
@@ -380,7 +380,7 @@ describe("withLlmSpan control flow", () => {
     });
     expect(value).toBe("v");
     const [span] = await finished(exporter);
-    expect(span?.attributes["llmobs.output"]).toBeUndefined();
+    expect(span?.attributes["cetra.output"]).toBeUndefined();
     expect(span?.attributes["gen_ai.output.messages"]).toBeUndefined();
     expect(span?.status.code).toBe(SpanStatusCode.UNSET);
   });
@@ -415,9 +415,9 @@ describe("withLlmSpan control flow", () => {
     expect(attributes["gen_ai.output.messages"]).toBeUndefined();
     expect(attributes["gen_ai.response.model"]).toBeUndefined();
     expect(attributes["gen_ai.usage.input_tokens"]).toBeUndefined();
-    expect(attributes["llmobs.cost.total"]).toBeUndefined();
-    expect(attributes["llmobs.ttft_ns"]).toBeUndefined();
-    expect(attributes["llmobs.output"]).toBeUndefined();
+    expect(attributes["cetra.cost.total"]).toBeUndefined();
+    expect(attributes["cetra.ttft_ns"]).toBeUndefined();
+    expect(attributes["cetra.output"]).toBeUndefined();
   });
 
   it("nests a child span under the LLM span", async () => {

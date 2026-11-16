@@ -200,7 +200,7 @@ export class ExperimentResult {
 export async function evaluate(options: EvaluateOptions): Promise<ExperimentResult> {
   const runtime = currentRuntime();
   if (runtime === undefined) {
-    throw new ConfigError("evaluate", "needs llmobs.init() with an API key");
+    throw new ConfigError("evaluate", "needs cetra.init() with an API key");
   }
   const checked = checkOptions(options);
   const client =
@@ -209,7 +209,7 @@ export async function evaluate(options: EvaluateOptions): Promise<ExperimentResu
   if (runtime.config.sampleRate < 1) {
     warnOnce(
       "evaluate-sample-rate",
-      "llmobs: sample_rate is below 1; some experiment runs will have no trace and no score",
+      "cetra: sample_rate is below 1; some experiment runs will have no trace and no score",
     );
   }
   const created = await createExperiment(
@@ -492,7 +492,7 @@ async function finishWithError(
       retry: true,
     });
   } catch (finishError) {
-    debug(`llmobs: finishing a failed experiment failed: ${errorName(finishError)}`);
+    debug(`cetra: finishing a failed experiment failed: ${errorName(finishError)}`);
   }
 }
 
@@ -599,7 +599,7 @@ async function scoreRun(
       scorerErrors.set(scorer.name, (scorerErrors.get(scorer.name) ?? 0) + 1);
       if (!warned.has(scorer.index)) {
         warned.add(scorer.index);
-        warn(`llmobs: scorer ${String(scorer.index)} failed (${outcome.name})`);
+        warn(`cetra: scorer ${String(scorer.index)} failed (${outcome.name})`);
       }
       continue;
     }
@@ -611,7 +611,7 @@ async function scoreRun(
       if (plan.runtime.scores.paused()) {
         warnOnce(
           "evaluate-score-pause",
-          "llmobs: the monthly units cap paused score uploads; experiment scores are being dropped",
+          "cetra: the monthly units cap paused score uploads; experiment scores are being dropped",
         );
       }
       queueExperimentScore(plan.runtime, {
@@ -721,7 +721,7 @@ function outputForRow(value: unknown): { output: unknown; bytes: number } | unde
       return { output: converted, bytes: size };
     }
     const kept = cutUtf8(text, OUTPUT_KEEP_BYTES);
-    const truncated = `${kept}…[llmobs: truncated, original ${String(size)} bytes]`;
+    const truncated = `${kept}…[cetra: truncated, original ${String(size)} bytes]`;
     return { output: truncated, bytes: utf8Encode(JSON.stringify(truncated)).length };
   } catch {
     const marker = `<unserializable ${typeName(value)}>`;

@@ -23,15 +23,15 @@
           },
           "spans": [
             {
-              "traceId": "a398469a9572bd282d459d34c20a4a06",
-              "spanId": "c272b6d7f49f73df",
+              "traceId": "fb7eea935296c3742065d09c3a73cb54",
+              "spanId": "e88aba6d9da363aa",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
               "name": "answer-weather",
               "kind": 1,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590057000000",
+              "endTimeUnixNano": "1767225590059000000",
               "attributes": [
                 {
                   "key": "lmnr.span.type",
@@ -57,7 +57,7 @@
                     "arrayValue": {
                       "values": [
                         {
-                          "stringValue": "00000000-0000-0000-c272-b6d7f49f73df"
+                          "stringValue": "00000000-0000-0000-e88a-ba6d9da363aa"
                         }
                       ]
                     }
@@ -138,15 +138,15 @@
               "status": null
             },
             {
-              "traceId": "a398469a9572bd282d459d34c20a4a06",
-              "spanId": "7f3803b6bd2d6627",
+              "traceId": "fb7eea935296c3742065d09c3a73cb54",
+              "spanId": "95d31fa12a8f7d4a",
               "traceState": "",
-              "parentSpanId": "c272b6d7f49f73df",
+              "parentSpanId": "e88aba6d9da363aa",
               "flags": 256,
               "name": "openai.chat",
               "kind": 1,
-              "startTimeUnixNano": "1767225590015000000",
-              "endTimeUnixNano": "1767225590056000000",
+              "startTimeUnixNano": "1767225590012000000",
+              "endTimeUnixNano": "1767225590058000000",
               "attributes": [
                 {
                   "key": "lmnr.span.type",
@@ -191,10 +191,10 @@
                     "arrayValue": {
                       "values": [
                         {
-                          "stringValue": "00000000-0000-0000-c272-b6d7f49f73df"
+                          "stringValue": "00000000-0000-0000-e88a-ba6d9da363aa"
                         },
                         {
-                          "stringValue": "00000000-0000-0000-7f38-03b6bd2d6627"
+                          "stringValue": "00000000-0000-0000-95d3-1fa12a8f7d4a"
                         }
                       ]
                     }

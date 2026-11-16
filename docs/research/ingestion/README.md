@@ -1,6 +1,6 @@
 # OTLP ingestion research (track B1)
 
-How other systems decode and normalize OTLP traces, and what `llmobs-otel` (spec 02) should adopt or avoid. Written 2026-11-10 while planning B1.
+How other systems decode and normalize OTLP traces, and what `cetra-otel` (spec 02) should adopt or avoid. Written 2026-11-10 while planning B1.
 
 | File | Scope |
 |---|---|
@@ -18,7 +18,7 @@ No code was copied. Citations point at the local checkouts named in each file.
 - `with-serde` (0.33.1, our pin) decodes hex IDs of **any length**. It accepts int64 as a string or a number, but not enum names (`"SPAN_KIND_CLIENT"`). We keep it, and B1 adds the checks it doesn't do:
   - ID length, enforced by rule 15;
   - fixtures pinning each JSON quirk we accept or reject.
-- Decompression and body limits belong to the server's HTTP layer, not `llmobs-otel`.
+- Decompression and body limits belong to the server's HTTP layer, not `cetra-otel`.
 
 ### Attribute model
 

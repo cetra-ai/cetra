@@ -10,8 +10,8 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.sdk.util.instrumentation import InstrumentationScope
 from opentelemetry.trace import SpanContext, TraceFlags
 
-from llmobs._filter import default_filter
-from llmobs._processor import LlmobsSpanProcessor
+from cetra._filter import default_filter
+from cetra._processor import CetraSpanProcessor
 
 
 def _span(
@@ -34,7 +34,7 @@ def _span(
     )
 
 
-@pytest.mark.parametrize("scope", ["llmobs", "ai"])
+@pytest.mark.parametrize("scope", ["cetra", "ai"])
 def test_scope_names_export(scope: str) -> None:
     assert default_filter(_span(scope=scope)) is True
 
@@ -47,8 +47,8 @@ def test_other_or_missing_scope_needs_a_matching_attribute(scope: str | None) ->
 @pytest.mark.parametrize(
     "key",
     [
-        "llmobs.input",
-        "llmobs.span.kind",
+        "cetra.input",
+        "cetra.span.kind",
         "gen_ai.input.messages",
         "llm.token_count.prompt_tokens",
         "openinference.span.kind",
@@ -70,13 +70,13 @@ def test_exact_attribute_keys_export(key: str) -> None:
 
 @pytest.mark.parametrize(
     "key",
-    ["inputs.value", "input.values", "myllmobs.x", "llmobs", "openai.input.value", "http.method"],
+    ["inputs.value", "input.values", "mycetra.x", "cetra", "openai.input.value", "http.method"],
 )
 def test_near_miss_keys_do_not_export(key: str) -> None:
     assert default_filter(_span(scope="httpx", attributes={key: "v"})) is False
 
 
-def _drain(processor: LlmobsSpanProcessor, exporter: InMemorySpanExporter) -> list[str]:
+def _drain(processor: CetraSpanProcessor, exporter: InMemorySpanExporter) -> list[str]:
     processor.shutdown()
     return [span.name for span in exporter.get_finished_spans()]
 
@@ -89,8 +89,8 @@ def _processor(
     *,
     export_filter: Callable[[ReadableSpan], bool] | None = None,
     default_filter_on: bool,
-) -> LlmobsSpanProcessor:
-    return LlmobsSpanProcessor(
+) -> CetraSpanProcessor:
+    return CetraSpanProcessor(
         exporter,
         environment=None,
         release=None,
@@ -138,7 +138,7 @@ def test_export_filter_applies_in_own_mode() -> None:
 
     exporter = InMemorySpanExporter()
     processor = _processor(exporter, export_filter=never, default_filter_on=False)
-    processor.on_end(_span(name="chat", scope="llmobs", attributes={"llmobs.input": "hi"}))
+    processor.on_end(_span(name="chat", scope="cetra", attributes={"cetra.input": "hi"}))
     assert _drain(processor, exporter) == []
 
 
@@ -150,8 +150,8 @@ def test_raising_export_filter_exports(
 
     exporter = InMemorySpanExporter()
     processor = _processor(exporter, export_filter=broken, default_filter_on=False)
-    with caplog.at_level(logging.DEBUG, logger="llmobs"):
+    with caplog.at_level(logging.DEBUG, logger="cetra"):
         processor.on_end(_span(name="GET /x", scope="httpx", attributes=_HTTP_ATTRIBUTES))
     assert _drain(processor, exporter) == ["GET /x"]
-    debug = [record.getMessage() for record in caplog.records if record.name == "llmobs"]
-    assert debug == ["llmobs: export_filter raised RuntimeError; span exported"]
+    debug = [record.getMessage() for record in caplog.records if record.name == "cetra"]
+    assert debug == ["cetra: export_filter raised RuntimeError; span exported"]

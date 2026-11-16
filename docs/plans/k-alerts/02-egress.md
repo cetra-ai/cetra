@@ -1,4 +1,4 @@
-# K2 — Public egress client and payload signature in `llmobs-eval`
+# K2 — Public egress client and payload signature in `cetra-eval`
 
 **Commit subject:** `eval: expose the egress client and the payload signature`
 
@@ -42,7 +42,7 @@ Change only visibility and doc comments, not behaviour:
 
 ## 2. `webhook.rs`
 
-- `pub(crate) const SIGNATURE_HEADER: &str = "x-llmobs-signature";` → `pub const`. Doc: `/// The signature header, lower case. D46 renames it with the product.`
+- `pub(crate) const SIGNATURE_HEADER: &str = "x-cetra-signature";` → `pub const`. Doc: `/// The signature header, lower case. D46 renames it with the product.`
 - Add, above the private `signature` function:
 
 ```rust
@@ -193,7 +193,7 @@ async fn the_public_client_keeps_the_guard() {
 ## Commands
 
 ```bash
-cargo test -p llmobs-eval
+cargo test -p cetra-eval
 ```
 
 ```bash
@@ -202,6 +202,6 @@ just check
 
 ## Done when
 
-- `llmobs_eval::{EgressClient, EgressRequest, EgressResponse, SIGNATURE_HEADER, sign_payload}` are public and `EvalRunner::egress` exists.
+- `cetra_eval::{EgressClient, EgressRequest, EgressResponse, SIGNATURE_HEADER, sign_payload}` are public and `EvalRunner::egress` exists.
 - The existing webhook tests still pass unchanged (the signature is byte-identical), and the four new tests pass.
 - `just check` is green with no new warnings.

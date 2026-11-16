@@ -20,15 +20,15 @@ import { currentRuntime } from "./runtime.js";
 import { serialize } from "./serialize.js";
 import { runtimeGlobals } from "./web.js";
 
-export const MASK_FAILED = "[llmobs: mask failed]";
+export const MASK_FAILED = "[cetra: mask failed]";
 
 /**
  * § Payload keys: the exact attribute names every known schema uses for
  * payload content, in span and event attributes alike.
  */
 const PAYLOAD_KEYS: ReadonlySet<string> = new Set([
-  "llmobs.input",
-  "llmobs.output",
+  "cetra.input",
+  "cetra.output",
   "gen_ai.input.messages",
   "gen_ai.output.messages",
   "gen_ai.system_instructions",
@@ -79,7 +79,7 @@ function applyWithFailClosed(mask: (value: unknown) => unknown, value: unknown):
   try {
     return mask(value);
   } catch (error) {
-    debug(`llmobs: mask raised ${errorName(error)}`);
+    debug(`cetra: mask raised ${errorName(error)}`);
     return MASK_FAILED;
   }
 }
@@ -87,7 +87,7 @@ function applyWithFailClosed(mask: (value: unknown) => unknown, value: unknown):
 /**
  * The export-time masking pass (D-F-6), installed by `Runtime.create` only
  * when a `mask` is configured or `captureContent` is false. Spans whose scope
- * is `llmobs` were already masked at capture and pass through untouched.
+ * is `cetra` were already masked at capture and pass through untouched.
  */
 export class MaskingExporter implements SpanExporter {
   private readonly inner: SpanExporter;
@@ -113,7 +113,7 @@ export class MaskingExporter implements SpanExporter {
     } catch {
       // Fail closed: never let an unmasked batch through (the count is all the
       // message may contain).
-      runtimeGlobals().console?.warn(`llmobs: masking failed; dropped ${spans.length} spans`);
+      runtimeGlobals().console?.warn(`cetra: masking failed; dropped ${spans.length} spans`);
       resultCallback({
         code: ExportResultCode.FAILED,
         error: new Error("masking failed"),
@@ -137,7 +137,7 @@ export class MaskingExporter implements SpanExporter {
    * spread the original: its `spanContext` lives on the prototype.
    */
   private rewrite(span: ReadableSpan): ReadableSpan {
-    if (span.instrumentationScope.name === "llmobs" || !hasPayloadKeys(span)) {
+    if (span.instrumentationScope.name === "cetra" || !hasPayloadKeys(span)) {
       return span;
     }
     return {

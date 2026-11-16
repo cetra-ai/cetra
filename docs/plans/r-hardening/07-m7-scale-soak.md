@@ -53,7 +53,7 @@ Sub-phases R7.1–R7.9, one commit each. R7.9 can produce several commits, one p
 
   Don't touch `crates/storage/tests/s3.rs` or `crash.rs`; M4 owns the S3 tests. R7.9 may fix bugs anywhere in `crates/storage/src/` (D-R-2), and stops and reports instead when a fix would change a file format, a public API or a spec rule.
 - **No production code changes before R7.9.** Everything an integration test needs is already public: `Storage::{open, append_spans, append_scores, query, register_deletion, deletion_status, apply_retention, health, read_cache_stats, compact, apply_deletions, collect_obsolete, collect_staged, shutdown}`, and the `reads` functions. Files per level, the lag of the oldest L0 file, staged objects and pending deletions are read from `catalog.db` through a read-only `sqlx` connection, as `tests/s3.rs` does (`SqliteConnectOptions::new().filename(..).read_only(true)`). If a read-only open fails on the `-shm` file while the storage is open, open it read-write and run `SELECT`s only, and say so in the report. Don't add a stats API to `Storage`.
-- **Dependencies.** Two new dev-dependencies of `llmobs-storage`, both already declared in the root `[workspace.dependencies]`, so nothing changes there:
+- **Dependencies.** Two new dev-dependencies of `cetra-storage`, both already declared in the root `[workspace.dependencies]`, so nothing changes there:
   - `flate2 = { workspace = true }` (1.1.11 in `Cargo.lock`): it reads the gzip corpus (R7.2);
   - `tracing-subscriber = { workspace = true }` (0.3.23 in `Cargo.lock`, features `env-filter`, `json`, `fmt`): the soak writes the storage's log events to a file (R7.5).
 
@@ -64,10 +64,10 @@ Sub-phases R7.1–R7.9, one commit each. R7.9 can produce several commits, one p
   - **Soak modules.** The soak's own modules live in `tests/soak/` and are declared in `tests/soak.rs` with `#[path = "soak/<name>.rs"] mod <name>;`. A plain `mod` would look for `tests/<name>.rs`, which Cargo treats as another test target.
   - **Allow lists.** Every new test target root (`bench_support.rs`, `soak.rs`) starts with the benches' list: `#![allow(clippy::unwrap_used, clippy::expect_used, clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::too_many_lines, clippy::print_stdout)]`. `print_stdout` is needed because helpers that print are not `#[test]` functions, so `allow-print-in-tests` doesn't cover them.
   - **Nothing unused in any commit.** Each sub-phase adds only items that something in the same commit uses: a test, or the bench or soak entry point. Clippy runs with `-D warnings`. The `#[allow(dead_code)]` on `mod common;` covers only the shared module.
-- **Data directories** for benchmarks and soaks live outside the scratch directory, in `~/llmobs-bench/`, created once with compression off:
+- **Data directories** for benchmarks and soaks live outside the scratch directory, in `~/cetra-bench/`, created once with compression off:
 
   ```bash
-  mkdir -p ~/llmobs-bench && chattr +m ~/llmobs-bench && lsattr -d ~/llmobs-bench   # shows 'm'
+  mkdir -p ~/cetra-bench && chattr +m ~/cetra-bench && lsattr -d ~/cetra-bench   # shows 'm'
   ```
 
   New files under it inherit the flag. On a filesystem other than btrfs, skip `chattr`. Every run records `findmnt -T <dir>` (R7.1's `machine()` does).
@@ -77,7 +77,7 @@ Sub-phases R7.1–R7.9, one commit each. R7.9 can produce several commits, one p
     - it redacts in a clone of each value before serializing (`run.json`, `summary.json`);
     - it scrubs `events.jsonl` before the file is committed (R7.7).
 
-    The machine is named by `LLMOBS_SOAK_LABEL`.
+    The machine is named by `CETRA_SOAK_LABEL`.
   - `journalctl` prefixes each line with the hostname: always use `journalctl -o cat` for logs that are kept.
   - Credentials live only in the environment, or in a `chmod 600` env file outside the repository (R7.8).
 - **`systemd-run --user`.** A user unit doesn't inherit the login shell's `PATH`, and `just`, `cargo` and `uv` live in `~/.cargo/bin` and `~/.local/bin`. Every `systemd-run` in this plan passes `--setenv=PATH=$HOME/.cargo/bin:$HOME/.local/bin:/usr/bin:/bin`. The shell expands `$HOME` before `systemd-run` sees it, so write `$HOME/...`, never `%h`: systemd specifiers are not expanded in `-p` values passed on the command line.
@@ -170,15 +170,15 @@ Model names contain spaces and may be blank, so `physical_disk` doesn't split on
 /// The S3 target of a benchmark (D119), from the environment.
 #[derive(Debug, Clone)]
 pub(crate) struct S3Env {
-    pub(crate) endpoint: String,   // LLMOBS_TEST_S3_ENDPOINT
-    pub(crate) bucket: String,     // LLMOBS_TEST_S3_BUCKET
-    pub(crate) region: String,     // LLMOBS_TEST_S3_REGION, default "us-east-1"
-    pub(crate) path_style: bool,   // LLMOBS_TEST_S3_PATH_STYLE, default true; "false" or "0" turn it off
+    pub(crate) endpoint: String,   // CETRA_TEST_S3_ENDPOINT
+    pub(crate) bucket: String,     // CETRA_TEST_S3_BUCKET
+    pub(crate) region: String,     // CETRA_TEST_S3_REGION, default "us-east-1"
+    pub(crate) path_style: bool,   // CETRA_TEST_S3_PATH_STYLE, default true; "false" or "0" turn it off
 }
 
 impl S3Env {
     /// Pure parser: `lookup(name)` returns the variable's value. `None` when
-    /// LLMOBS_TEST_S3_ENDPOINT is absent; panics when the endpoint is set but the bucket is not.
+    /// CETRA_TEST_S3_ENDPOINT is absent; panics when the endpoint is set but the bucket is not.
     pub(crate) fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Option<Self>;
     /// `from_lookup(|name| std::env::var(name).ok())`.
     pub(crate) fn from_env() -> Option<Self>;
@@ -223,7 +223,7 @@ impl S3Env {
 5. `s3_env_reads_region_and_style`: calls `S3Env::from_lookup` with a closure over a `HashMap<&str, &str>`, never the process environment. The crate is edition 2024 with `unsafe_code = "forbid"`, and `std::env::set_var` is `unsafe` there. Check:
    - an empty map gives `None`;
    - endpoint and bucket alone give region `"us-east-1"` and `path_style == true`;
-   - `LLMOBS_TEST_S3_REGION=fsn1` and `LLMOBS_TEST_S3_PATH_STYLE=false` give `"fsn1"` and `false`;
+   - `CETRA_TEST_S3_REGION=fsn1` and `CETRA_TEST_S3_PATH_STYLE=false` give `"fsn1"` and `false`;
    - `PATH_STYLE=0` gives `false`.
 6. `describe_hides_remote_targets`:
    - a `127.0.0.1` endpoint prints its bucket;
@@ -243,8 +243,8 @@ Old rows are not rewritten.
 ### Commands
 
 ```bash
-cargo test -p llmobs-storage --all-features --test bench_support
-cargo test --release -p llmobs-storage --all-features --test ingest_bench --test trace_bench --no-run
+cargo test -p cetra-storage --all-features --test bench_support
+cargo test --release -p cetra-storage --all-features --test ingest_bench --test trace_bench --no-run
 ```
 
 Expected: 7 passed, and both benches build. Report the `machine()` line printed on the workstation.
@@ -283,7 +283,7 @@ fetch-corpus:
 pub(crate) const CORPUS_SHA256: &str = "a9f240c4c77aa1378364f70d37e753c07ba284e247b019d700e1947a0e5da751";
 pub(crate) const CORPUS_FILE: &str = "oasst2-ready-messages.jsonl.gz";
 
-/// `LLMOBS_BENCH_CORPUS`, else `<CARGO_MANIFEST_DIR>/../../target/bench-corpus/<CORPUS_FILE>`.
+/// `CETRA_BENCH_CORPUS`, else `<CARGO_MANIFEST_DIR>/../../target/bench-corpus/<CORPUS_FILE>`.
 pub(crate) fn corpus_path() -> PathBuf;
 
 /// `Debug` is written by hand: counts only, never text.
@@ -554,8 +554,8 @@ They use `Corpus::from_texts` with 200 synthetic texts: `format!("message {i}: "
 
 ```bash
 just fetch-corpus
-cargo test -p llmobs-storage --all-features --test bench_support
-cargo test -p llmobs-storage --all-features --test bench_support -- --ignored --nocapture real_corpus_loads
+cargo test -p cetra-storage --all-features --test bench_support
+cargo test -p cetra-storage --all-features --test bench_support -- --ignored --nocapture real_corpus_loads
 ```
 
 Report the counts, and the mean `bytes()` of `llm_calls(seed, 1)[0]` over seeds `0..10,000` with the real corpus (a one-off printout, not committed).
@@ -610,24 +610,24 @@ It opens each file with `parquet::file::serialized_reader::SerializedFileReader:
     Each comes from `column_sizes(dir/objects, &active_spans_files(dir))`, per level, with one line each for `input`, `output`, `system_instructions`, `tool_definitions`, `attributes` (the map's key and value leaves summed), and `all columns`: `<uncompressed> → <compressed> = <ratio>×`. Then `Arrow / file bytes = <ratio>×` over the active files of that level, the measure Run 1 reported.
 
   S3 mode prints the `Arrow / flushed bytes` ratio only.
-- **Writer count.** If `gen share` is above 50%, the bench is bound by the generator, not the engine. Rerun with `LLMOBS_INGEST_BENCH_WRITERS=12` and then 16, keep the run with the most spans/s, and report all three.
+- **Writer count.** If `gen share` is above 50%, the bench is bound by the generator, not the engine. Rerun with `CETRA_INGEST_BENCH_WRITERS=12` and then 16, keep the run with the most spans/s, and report all three.
 
 ### Runs (results in `benchmarks.md`)
 
 ```bash
-RUST_MIN_STACK=33554432 cargo test --release -p llmobs-storage --all-features --test ingest_bench --no-run
-RUST_MIN_STACK=33554432 LLMOBS_INGEST_BENCH_DIR=~/llmobs-bench/ingest-local LLMOBS_INGEST_BENCH_SECS=60 \
-  cargo test --release -p llmobs-storage --all-features --test ingest_bench -- --ignored --nocapture
+RUST_MIN_STACK=33554432 cargo test --release -p cetra-storage --all-features --test ingest_bench --no-run
+RUST_MIN_STACK=33554432 CETRA_INGEST_BENCH_DIR=~/cetra-bench/ingest-local CETRA_INGEST_BENCH_SECS=60 \
+  cargo test --release -p cetra-storage --all-features --test ingest_bench -- --ignored --nocapture
 ```
 
 Then the same command against Versity Gateway on disk, not tmpfs: a 60 s run writes tens of GB of Arrow. The container runs under Docker or podman (§ Prerequisites); with podman, replace `docker` with `podman`. `:Z` relabels the directory for SELinux.
 
 ```bash
-mkdir -p ~/llmobs-bench/vgw
-docker run -d --name llmobs-s3 -p 7070:7070 -v ~/llmobs-bench/vgw:/data:Z -e ROOT_ACCESS_KEY=llmobs -e ROOT_SECRET_KEY=llmobs-secret -e VGW_BACKEND=posix -e VGW_BACKEND_ARGS=/data -e VGW_ARGS="--port :7070" versity/versitygw:v1.11.0
-curl --aws-sigv4 "aws:amz:us-east-1:s3" --user llmobs:llmobs-secret -X PUT http://127.0.0.1:7070/llmobs-bench
-export LLMOBS_TEST_S3_ENDPOINT=http://127.0.0.1:7070 LLMOBS_TEST_S3_BUCKET=llmobs-bench AWS_ACCESS_KEY_ID=llmobs AWS_SECRET_ACCESS_KEY=llmobs-secret
-RUST_MIN_STACK=33554432 LLMOBS_INGEST_BENCH_DIR=~/llmobs-bench/ingest-s3 LLMOBS_INGEST_BENCH_SECS=60 cargo test --release -p llmobs-storage --all-features --test ingest_bench -- --ignored --nocapture
+mkdir -p ~/cetra-bench/vgw
+docker run -d --name cetra-s3 -p 7070:7070 -v ~/cetra-bench/vgw:/data:Z -e ROOT_ACCESS_KEY=cetra -e ROOT_SECRET_KEY=cetra-secret -e VGW_BACKEND=posix -e VGW_BACKEND_ARGS=/data -e VGW_ARGS="--port :7070" versity/versitygw:v1.11.0
+curl --aws-sigv4 "aws:amz:us-east-1:s3" --user cetra:cetra-secret -X PUT http://127.0.0.1:7070/cetra-bench
+export CETRA_TEST_S3_ENDPOINT=http://127.0.0.1:7070 CETRA_TEST_S3_BUCKET=cetra-bench AWS_ACCESS_KEY_ID=cetra AWS_SECRET_ACCESS_KEY=cetra-secret
+RUST_MIN_STACK=33554432 CETRA_INGEST_BENCH_DIR=~/cetra-bench/ingest-s3 CETRA_INGEST_BENCH_SECS=60 cargo test --release -p cetra-storage --all-features --test ingest_bench -- --ignored --nocapture
 ```
 
 ### `benchmarks.md`
@@ -680,7 +680,7 @@ Commit: `storage: fill trace_bench spans with realistic payloads (R7.4)`, and a 
   - Add `#[serde(default)] payload: Option<String>`, set to `format!("m7:{}", &CORPUS_SHA256[..12])`. `dataset()` reuses a stored dataset only when `payload` matches, in both the S3 and the local branch. The `(true, None, None)` branch (a catalog without a manifest) now regenerates instead of trusting the directory, since its payload is unknown.
   - Add `arrow_bytes: u64` and `payload_bytes: u64`, summed during generation, and print them with the dataset line.
 - **First `max_bytes`, from a measurement.** With payloads, a trace is tens of KiB of Arrow instead of a few KiB. At 128 MiB the first generation would write thousands of spans files and then regenerate (Findings (c)).
-  - Add `LLMOBS_TRACE_BENCH_MAX_BYTES` (a `ByteSize` string, e.g. `384MiB`). When set, it replaces the first attempt's 128 MiB; the scaling retry stays as it is.
+  - Add `CETRA_TRACE_BENCH_MAX_BYTES` (a `ByteSize` string, e.g. `384MiB`). When set, it replaces the first attempt's 128 MiB; the scaling retry stays as it is.
   - Run 10 (1M) prints `arrow bytes per trace = arrow_bytes / traces`. From it, compute the value for Run 11:
 
     ```
@@ -693,15 +693,15 @@ Commit: `storage: fill trace_bench spans with realistic payloads (R7.4)`, and a 
 
 Preconditions:
 - `free -g` shows at least 16 GiB available (the 5M plan holds about 5 GiB);
-- `df -h ~/llmobs-bench` shows at least 400 GiB free (estimate below).
+- `df -h ~/cetra-bench` shows at least 400 GiB free (estimate below).
 
 | Run | Command env | Notes |
 |---|---|---|
-| 10 | `LLMOBS_TRACE_BENCH_DIR=~/llmobs-bench/trace-1m LLMOBS_TRACE_BENCH_TRACES=1000000` | Validation at Run 7's size: same plan, new payloads. List-query p50s should be within Run 7's pass criterion (no more than 10 ms or 20% above Run 7's p50), since lists read `traces` partials. Q4 reads `spans` with payloads now and may be slower. |
-| 11 | `LLMOBS_TRACE_BENCH_DIR=~/llmobs-bench/trace-5m` (default 5,000,000) | The pending 5M run, local disk. |
-| 12–14 | `LLMOBS_TRACE_BENCH_DIR=~/llmobs-bench/trace-5m-s3`, the Versity environment of R7.3, `LLMOBS_TRACE_BENCH_CACHE=cold`, then `warm`, then `off` | 12 generates onto Versity, 13–14 reuse it. |
+| 10 | `CETRA_TRACE_BENCH_DIR=~/cetra-bench/trace-1m CETRA_TRACE_BENCH_TRACES=1000000` | Validation at Run 7's size: same plan, new payloads. List-query p50s should be within Run 7's pass criterion (no more than 10 ms or 20% above Run 7's p50), since lists read `traces` partials. Q4 reads `spans` with payloads now and may be slower. |
+| 11 | `CETRA_TRACE_BENCH_DIR=~/cetra-bench/trace-5m` (default 5,000,000) | The pending 5M run, local disk. |
+| 12–14 | `CETRA_TRACE_BENCH_DIR=~/cetra-bench/trace-5m-s3`, the Versity environment of R7.3, `CETRA_TRACE_BENCH_CACHE=cold`, then `warm`, then `off` | 12 generates onto Versity, 13–14 reuse it. |
 
-Each command is `RUST_MIN_STACK=33554432 cargo test --release -p llmobs-storage --all-features --test trace_bench -- --ignored --nocapture`. The variable is needed on the run line too: a test-binary rebuild triggered by `cargo test` would otherwise hit the rustc stack overflow `benchmarks.md` notes.
+Each command is `RUST_MIN_STACK=33554432 cargo test --release -p cetra-storage --all-features --test trace_bench -- --ignored --nocapture`. The variable is needed on the run line too: a test-binary rebuild triggered by `cargo test` would otherwise hit the rustc stack overflow `benchmarks.md` notes.
 
 **Expected size.** The plan has 1–5 LLM spans per trace (mean 3) at about 25 KiB each:
 - about 375 GB of Arrow at 5M traces;
@@ -709,7 +709,7 @@ Each command is `RUST_MIN_STACK=33554432 cargo test --release -p llmobs-storage 
 - WAL traffic of roughly a third of the Arrow bytes, as spec 03's capacity check says for LZ4 bodies, transient. Text-heavy columns may compress differently under LZ4; M7 doesn't measure WAL bytes written, so this stays an estimate;
 - generation probably 1–2 h per attempt.
 
-Start each 5M run in the background with its output in a log file (`… > ~/llmobs-bench/run-11.log 2>&1`), never as a foreground command.
+Start each 5M run in the background with its output in a log file (`… > ~/cetra-bench/run-11.log 2>&1`), never as a foreground command.
 
 **A missed target is a finding, not a failure of the sub-phase.** Record the table with `EXPLAIN ANALYZE` (the bench prints it), and add a § Findings entry. Fixing it is not part of M7 unless it is a bug (R7.9); a slow query that is not a bug is raised to the coordinator.
 
@@ -746,20 +746,20 @@ R7.6 adds `soak/registry.rs` and `soak/rules.rs`.
 ```rust
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct SoakConfig {
-    pub(crate) dir: PathBuf,              // LLMOBS_SOAK_DIR, required
-    pub(crate) out: PathBuf,              // LLMOBS_SOAK_OUT, required
-    pub(crate) label: String,             // LLMOBS_SOAK_LABEL, default "local"; names the run
-    pub(crate) hours: f64,                // LLMOBS_SOAK_HOURS, default 24
-    pub(crate) rate: u64,                 // LLMOBS_SOAK_RATE spans/s, default 2_000
-    pub(crate) projects: usize,           // LLMOBS_SOAK_PROJECTS, default 4, 1..=8
-    pub(crate) qps: f64,                  // LLMOBS_SOAK_QPS, default 1.0
-    pub(crate) mix: Vec<(QueryKind, u32)>,// LLMOBS_SOAK_QUERY_MIX, default "list=30,filter=15,detail=25,sessions=10,metrics=10,scores=10"
-    pub(crate) retention_days: u32,       // LLMOBS_SOAK_RETENTION_DAYS, default 0 (keep today only)
-    pub(crate) sample_secs: u64,          // LLMOBS_SOAK_SAMPLE_SECS, default 60
-    pub(crate) warmup_hours: f64,         // LLMOBS_SOAK_WARMUP_HOURS, default max(1, hours / 10): 2.4 h for 24 h, 7.2 h for 72 h
-    pub(crate) max_rss_gib: f64,          // LLMOBS_SOAK_MAX_RSS_GIB, default 8
-    pub(crate) max_l0_age_min: u64,       // LLMOBS_SOAK_MAX_L0_AGE_MIN, default 30
-    pub(crate) keep: bool,                // LLMOBS_SOAK_KEEP=1: keep the S3 prefix after a pass
+    pub(crate) dir: PathBuf,              // CETRA_SOAK_DIR, required
+    pub(crate) out: PathBuf,              // CETRA_SOAK_OUT, required
+    pub(crate) label: String,             // CETRA_SOAK_LABEL, default "local"; names the run
+    pub(crate) hours: f64,                // CETRA_SOAK_HOURS, default 24
+    pub(crate) rate: u64,                 // CETRA_SOAK_RATE spans/s, default 2_000
+    pub(crate) projects: usize,           // CETRA_SOAK_PROJECTS, default 4, 1..=8
+    pub(crate) qps: f64,                  // CETRA_SOAK_QPS, default 1.0
+    pub(crate) mix: Vec<(QueryKind, u32)>,// CETRA_SOAK_QUERY_MIX, default "list=30,filter=15,detail=25,sessions=10,metrics=10,scores=10"
+    pub(crate) retention_days: u32,       // CETRA_SOAK_RETENTION_DAYS, default 0 (keep today only)
+    pub(crate) sample_secs: u64,          // CETRA_SOAK_SAMPLE_SECS, default 60
+    pub(crate) warmup_hours: f64,         // CETRA_SOAK_WARMUP_HOURS, default max(1, hours / 10): 2.4 h for 24 h, 7.2 h for 72 h
+    pub(crate) max_rss_gib: f64,          // CETRA_SOAK_MAX_RSS_GIB, default 8
+    pub(crate) max_l0_age_min: u64,       // CETRA_SOAK_MAX_L0_AGE_MIN, default 30
+    pub(crate) keep: bool,                // CETRA_SOAK_KEEP=1: keep the S3 prefix after a pass
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
@@ -772,13 +772,13 @@ impl SoakConfig {
     pub(crate) fn from_env() -> Result<Self, String>;
 }
 
-/// Makes `dir` ready: creates it with the marker file `.llmobs-soak` when
+/// Makes `dir` ready: creates it with the marker file `.cetra-soak` when
 /// missing or empty; empties it when it holds the marker; refuses otherwise.
 pub(crate) fn prepare_data_dir(dir: &Path) -> Result<(), String>;
 ```
 
 **Directory guards.**
-- **`dir`.** The soak deletes `dir` recursively, so a typo must not wipe real data. `prepare_data_dir` refuses a non-empty directory that has no `.llmobs-soak` marker. It also refuses a `dir` under `/tmp` (the scratch quota, § Facts).
+- **`dir`.** The soak deletes `dir` recursively, so a typo must not wipe real data. `prepare_data_dir` refuses a non-empty directory that has no `.cetra-soak` marker. It also refuses a `dir` under `/tmp` (the scratch quota, § Facts).
 - **`out`.** It must be missing or empty; the soak never deletes it.
 
 **Retention boundary, lagged by 4 h.** The soak's watermark is `keep_from = (now − 4 h).date_naive() − retention_days` (UTC). With `retention_days = 0` it keeps today plus, until 04:00 UTC, yesterday.
@@ -1038,8 +1038,8 @@ R7.6 replaces this with the full end of run.
 ### Smoke run
 
 ```bash
-LLMOBS_SOAK_DIR=~/llmobs-bench/soak-smoke LLMOBS_SOAK_OUT=~/llmobs-bench/soak-smoke-out LLMOBS_SOAK_HOURS=0.25 LLMOBS_SOAK_SAMPLE_SECS=10 \
-  cargo test --release -p llmobs-storage --all-features --test soak -- --ignored --nocapture --exact soak
+CETRA_SOAK_DIR=~/cetra-bench/soak-smoke CETRA_SOAK_OUT=~/cetra-bench/soak-smoke-out CETRA_SOAK_HOURS=0.25 CETRA_SOAK_SAMPLE_SECS=10 \
+  cargo test --release -p cetra-storage --all-features --test soak -- --ignored --nocapture --exact soak
 ```
 
 Report:
@@ -1052,7 +1052,7 @@ Report:
 ### Unit tests (`soak.rs`, not ignored)
 
 - `parse_mix_reads_weights`: the default string parses to six kinds; `"list=0"` is an error (every weight ≥ 1), and so is an unknown kind.
-- `config_defaults`: `SoakConfig::from_lookup` with only `LLMOBS_SOAK_DIR` and `LLMOBS_SOAK_OUT` gives the defaults above, and a `/tmp/x` dir is refused.
+- `config_defaults`: `SoakConfig::from_lookup` with only `CETRA_SOAK_DIR` and `CETRA_SOAK_OUT` gives the defaults above, and a `/tmp/x` dir is refused.
 - `prepare_refuses_unmarked_dirs`: in a `tempfile::tempdir()` (allowed: the guard checks the configured path, not this helper's argument; test `prepare_data_dir` directly):
   - an unmarked directory holding a file is refused;
   - a marked one is emptied and keeps its marker;
@@ -1131,7 +1131,7 @@ Its picks are cloned out of the registry under the gate, before any query. The `
   - `cost_total`, within 1e-9;
   - `session_id`, `user_id`.
 
-  `spans` holds `span_count` rows. Column names are the constants in `llmobs_core::schema::traces`.
+  `spans` holds `span_count` rows. Column names are the constants in `cetra_core::schema::traces`.
 - **`Deleted` and `Retained`.** `trace_detail` returns `None`.
 - The soak's traces have no re-sends and no ties, and their context is constant, so these values are exact before compaction too (spec 01 § Order).
 
@@ -1258,7 +1258,7 @@ Disk usage is **not** a growth rule. With retention by day, it rises for `retent
 
 ### Run
 
-A 30-minute smoke (`LLMOBS_SOAK_HOURS=0.5`, `LLMOBS_SOAK_WARMUP_HOURS=0.1`, `LLMOBS_SOAK_SAMPLE_SECS=10`). Its growth rules are `Info` by construction, and every harness rule must `Pass`. The settle step includes a 130 s flush wait unless `flush_now` exists. Report `summary.json`.
+A 30-minute smoke (`CETRA_SOAK_HOURS=0.5`, `CETRA_SOAK_WARMUP_HOURS=0.1`, `CETRA_SOAK_SAMPLE_SECS=10`). Its growth rules are `Info` by construction, and every harness rule must `Pass`. The settle step includes a 130 s flush wait unless `flush_now` exists. Report `summary.json`.
 
 ---
 
@@ -1268,7 +1268,7 @@ Commits: `tools: add the soak plot script and recipes (R7.7)`, then `docs: recor
 
 ### `tools/soak/` (uv project)
 
-- `pyproject.toml`: `name = "llmobs-soak-plot"`, `requires-python = "==3.13.*"`, `dependencies = ["matplotlib==3.11.2"]`, `[dependency-groups] dev = ["ruff==0.17.3", "mypy==2.4.1"]`, `[tool.uv] package = false` and `exclude-newer = "7 days"` (D74/D117, as `tools/capture/py`), plus ruff (`target-version = "py313"`, `line-length = 100`, the same `select` list as capture) and `mypy` `strict = true`.
+- `pyproject.toml`: `name = "cetra-soak-plot"`, `requires-python = "==3.13.*"`, `dependencies = ["matplotlib==3.11.2"]`, `[dependency-groups] dev = ["ruff==0.17.3", "mypy==2.4.1"]`, `[tool.uv] package = false` and `exclude-newer = "7 days"` (D74/D117, as `tools/capture/py`), plus ruff (`target-version = "py313"`, `line-length = 100`, the same `select` list as capture) and `mypy` `strict = true`.
 - `.python-version` with `3.13`.
 - `uv.lock`, committed (`uv lock` inside `tools/soak`).
 - `plot.py`:
@@ -1290,9 +1290,9 @@ Commits: `tools: add the soak plot script and recipes (R7.7)`, then `docs: recor
 `justfile`:
 
 ```just
-# Storage soak (D-R-11). Needs LLMOBS_SOAK_DIR and LLMOBS_SOAK_OUT; see crates/storage/tests/soak.rs
+# Storage soak (D-R-11). Needs CETRA_SOAK_DIR and CETRA_SOAK_OUT; see crates/storage/tests/soak.rs
 soak:
-    RUST_MIN_STACK=33554432 cargo test --release -p llmobs-storage --all-features --test soak -- --ignored --nocapture --exact soak
+    RUST_MIN_STACK=33554432 cargo test --release -p cetra-storage --all-features --test soak -- --ignored --nocapture --exact soak
 
 # Plots of a soak run's samples into <out>/plots
 soak-plot out:
@@ -1309,10 +1309,10 @@ check-soak-plot:
 
 - **§ Commands table**, one row each:
   - `just fetch-corpus`: download the pinned benchmark corpus (oasst2) into `target/bench-corpus`;
-  - `just soak`: the storage soak (D-R-11), configured by `LLMOBS_SOAK_*`;
+  - `just soak`: the storage soak (D-R-11), configured by `CETRA_SOAK_*`;
   - `just soak-plot <out>`: plots of a soak run;
   - `just check-soak-plot`: lint and type-check `tools/soak`.
-- **§ Tests**, one bullet. `LLMOBS_BENCH_CORPUS` overrides the corpus path. `LLMOBS_TEST_S3_REGION` (default `us-east-1`) and `LLMOBS_TEST_S3_PATH_STYLE` (default `true`) complete `LLMOBS_TEST_S3_ENDPOINT` for the benches and the soak. `LLMOBS_SOAK_*` configure the soak (`crates/storage/tests/soak.rs`).
+- **§ Tests**, one bullet. `CETRA_BENCH_CORPUS` overrides the corpus path. `CETRA_TEST_S3_REGION` (default `us-east-1`) and `CETRA_TEST_S3_PATH_STYLE` (default `true`) complete `CETRA_TEST_S3_ENDPOINT` for the benches and the soak. `CETRA_SOAK_*` configure the soak (`crates/storage/tests/soak.rs`).
 - **§ Layout**, under `tools/`: `tools/soak/  soak plots (uv)`.
 
 ### `docs/research/storage/soak.md` (new): the write-up format
@@ -1372,25 +1372,25 @@ Add `## M7 — Scale and soak`, with:
 
 ### The 24 h dry run (D-R-11)
 
-On the workstation, in S3 mode against Versity Gateway on disk (R7.3's container, with `:Z`), so the configuration matches the Hetzner run. `LLMOBS_SOAK_RETENTION_DAYS=0` makes the run cross one UTC midnight with retention dropping the previous day.
+On the workstation, in S3 mode against Versity Gateway on disk (R7.3's container, with `:Z`), so the configuration matches the Hetzner run. `CETRA_SOAK_RETENTION_DAYS=0` makes the run cross one UTC midnight with retention dropping the previous day.
 
 ```bash
-export LLMOBS_TEST_S3_ENDPOINT=http://127.0.0.1:7070 LLMOBS_TEST_S3_BUCKET=llmobs-bench AWS_ACCESS_KEY_ID=llmobs AWS_SECRET_ACCESS_KEY=llmobs-secret
-export LLMOBS_SOAK_DIR=$HOME/llmobs-bench/soak-ws LLMOBS_SOAK_OUT=$HOME/llmobs-bench/soak-ws-out LLMOBS_SOAK_LABEL=ws \
-  LLMOBS_SOAK_HOURS=24 LLMOBS_SOAK_RETENTION_DAYS=0
-systemd-run --user --unit llmobs-soak-ws --same-dir -p LimitNOFILE=65536 \
+export CETRA_TEST_S3_ENDPOINT=http://127.0.0.1:7070 CETRA_TEST_S3_BUCKET=cetra-bench AWS_ACCESS_KEY_ID=cetra AWS_SECRET_ACCESS_KEY=cetra-secret
+export CETRA_SOAK_DIR=$HOME/cetra-bench/soak-ws CETRA_SOAK_OUT=$HOME/cetra-bench/soak-ws-out CETRA_SOAK_LABEL=ws \
+  CETRA_SOAK_HOURS=24 CETRA_SOAK_RETENTION_DAYS=0
+systemd-run --user --unit cetra-soak-ws --same-dir -p LimitNOFILE=65536 \
   --setenv=PATH=$HOME/.cargo/bin:$HOME/.local/bin:/usr/bin:/bin \
-  --setenv=LLMOBS_TEST_S3_ENDPOINT --setenv=LLMOBS_TEST_S3_BUCKET --setenv=AWS_ACCESS_KEY_ID --setenv=AWS_SECRET_ACCESS_KEY \
-  --setenv=LLMOBS_SOAK_DIR --setenv=LLMOBS_SOAK_OUT --setenv=LLMOBS_SOAK_LABEL --setenv=LLMOBS_SOAK_HOURS \
-  --setenv=LLMOBS_SOAK_RETENTION_DAYS just soak
-journalctl --user -o cat -u llmobs-soak-ws -f
+  --setenv=CETRA_TEST_S3_ENDPOINT --setenv=CETRA_TEST_S3_BUCKET --setenv=AWS_ACCESS_KEY_ID --setenv=AWS_SECRET_ACCESS_KEY \
+  --setenv=CETRA_SOAK_DIR --setenv=CETRA_SOAK_OUT --setenv=CETRA_SOAK_LABEL --setenv=CETRA_SOAK_HOURS \
+  --setenv=CETRA_SOAK_RETENTION_DAYS just soak
+journalctl --user -o cat -u cetra-soak-ws -f
 ```
 
 `--setenv=NAME` without a value copies the variable from the caller's environment.
 - **What it can prove.** A 24 h run with retention 0 is shorter than the growth warm-up plus a day (R7.6), so its growth rules are `Info`. The dry run checks the harness rules (lag, retention, deletions, orphans, errors, oracle) and the tooling; growth is enforced by the 72 h run.
 - **Estimates.** At 2,000 spans/s and about 4–5 KiB per span, expect about 0.7–0.8 TB of Arrow per day, and 100–150 GB per day in the bucket at 5–8×. With retention 0, at most about a day of that is kept.
 - **Caveat.** The workstation is shared (the dry run's own `load1` samples show it), so latency and RSS are noisier than on a dedicated server. A failed rule there is still investigated, in R7.9.
-- **After the run.** `just soak-plot ~/llmobs-bench/soak-ws-out`. Copy the committed files into `docs/research/storage/soak/<id>/` and write the run's section of `soak.md`.
+- **After the run.** `just soak-plot ~/cetra-bench/soak-ws-out`. Copy the committed files into `docs/research/storage/soak/<id>/` and write the run's section of `soak.md`.
 
 The docs commit includes the run. **A failed rule is a finding for R7.9**: record it in `hardening.md` and commit the run anyway.
 
@@ -1424,8 +1424,8 @@ Why it rather than the AX42 (Ryzen 7 PRO 8700GE, 64 GB, 2 × 512 GB NVMe):
 3. **The data disk.**
 
    ```bash
-   mkfs.ext4 -L llmobs-data /dev/nvme1n1
-   mkdir -p /data && echo 'LABEL=llmobs-data /data ext4 defaults,noatime 0 2' >> /etc/fstab && mount /data
+   mkfs.ext4 -L cetra-data /dev/nvme1n1
+   mkdir -p /data && echo 'LABEL=cetra-data /data ext4 defaults,noatime 0 2' >> /etc/fstab && mount /data
    chown <user>: /data
    ```
 
@@ -1443,30 +1443,30 @@ Why it rather than the AX42 (Ryzen 7 PRO 8700GE, 64 GB, 2 × 512 GB NVMe):
    ```bash
    git clone <repo> && cd llm-observer && git checkout <commit>
    just fetch-corpus
-   RUST_MIN_STACK=33554432 cargo test --release -p llmobs-storage --all-features --test soak --test trace_bench --test ingest_bench --no-run
+   RUST_MIN_STACK=33554432 cargo test --release -p cetra-storage --all-features --test soak --test trace_bench --test ingest_bench --no-run
    ```
 
 7. **Credentials.**
    - Create the bucket and an access key pair in the Hetzner console.
-   - Put them in `~/.config/llmobs-soak.env`, mode 600, with nothing else in it:
+   - Put them in `~/.config/cetra-soak.env`, mode 600, with nothing else in it:
      - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`;
-     - `LLMOBS_TEST_S3_ENDPOINT=https://<location>.your-objectstorage.com`;
-     - `LLMOBS_TEST_S3_BUCKET`;
-     - `LLMOBS_TEST_S3_REGION=<location>`.
+     - `CETRA_TEST_S3_ENDPOINT=https://<location>.your-objectstorage.com`;
+     - `CETRA_TEST_S3_BUCKET`;
+     - `CETRA_TEST_S3_REGION=<location>`.
    - Never type the keys on a command line (shell history).
 8. **Addressing check, and the multipart lifecycle rule.**
-   - Run `set -a; . ~/.config/llmobs-soak.env; set +a` and a 60 s `ingest_bench` with `LLMOBS_INGEST_BENCH_DIR=/data/ingest-hz` (Run 15).
-   - **If it fails with a signature or bucket-not-found error,** set `LLMOBS_TEST_S3_PATH_STYLE=false` and `LLMOBS_TEST_S3_ENDPOINT=https://<bucket>.<location>.your-objectstorage.com` (object_store expects the bucket in a virtual-hosted endpoint), and retry.
+   - Run `set -a; . ~/.config/cetra-soak.env; set +a` and a 60 s `ingest_bench` with `CETRA_INGEST_BENCH_DIR=/data/ingest-hz` (Run 15).
+   - **If it fails with a signature or bucket-not-found error,** set `CETRA_TEST_S3_PATH_STYLE=false` and `CETRA_TEST_S3_ENDPOINT=https://<bucket>.<location>.your-objectstorage.com` (object_store expects the bucket in a virtual-hosted endpoint), and retry.
    - **Record which addressing worked.** It goes into `hardening.md` and, through the coordinator, into the self-hosting docs.
    - **Lifecycle rule.** Add Hetzner's rule that aborts incomplete multipart uploads after 1 day (M4 recommends it), so a crashed run cannot leave billed parts.
-9. **Bucket benchmarks, before the soak** (runs 16–18): `trace_bench` 5M with `LLMOBS_TRACE_BENCH_DIR=/data/trace-5m-hz` and `LLMOBS_TRACE_BENCH_MAX_BYTES` from R7.4, with `LLMOBS_TRACE_BENCH_CACHE=cold`, then `warm`, then `off`, each in the background:
+9. **Bucket benchmarks, before the soak** (runs 16–18): `trace_bench` 5M with `CETRA_TRACE_BENCH_DIR=/data/trace-5m-hz` and `CETRA_TRACE_BENCH_MAX_BYTES` from R7.4, with `CETRA_TRACE_BENCH_CACHE=cold`, then `warm`, then `off`, each in the background:
 
    ```bash
-   systemd-run --user --unit tb-cold --same-dir -p EnvironmentFile=$HOME/.config/llmobs-soak.env \
+   systemd-run --user --unit tb-cold --same-dir -p EnvironmentFile=$HOME/.config/cetra-soak.env \
      --setenv=PATH=$HOME/.cargo/bin:$HOME/.local/bin:/usr/bin:/bin --setenv=RUST_MIN_STACK=33554432 \
-     --setenv=LLMOBS_TRACE_BENCH_DIR=/data/trace-5m-hz --setenv=LLMOBS_TRACE_BENCH_MAX_BYTES=<from R7.4> \
-     --setenv=LLMOBS_TRACE_BENCH_CACHE=cold \
-     cargo test --release -p llmobs-storage --all-features --test trace_bench -- --ignored --nocapture
+     --setenv=CETRA_TRACE_BENCH_DIR=/data/trace-5m-hz --setenv=CETRA_TRACE_BENCH_MAX_BYTES=<from R7.4> \
+     --setenv=CETRA_TRACE_BENCH_CACHE=cold \
+     cargo test --release -p cetra-storage --all-features --test trace_bench -- --ignored --nocapture
    journalctl --user -o cat -u tb-cold > /data/run-16.log
    ```
 
@@ -1475,26 +1475,26 @@ Why it rather than the AX42 (Ryzen 7 PRO 8700GE, 64 GB, 2 × 512 GB NVMe):
 10. **The 72 h soak.**
 
     ```bash
-    systemd-run --user --unit llmobs-soak --same-dir -p EnvironmentFile=$HOME/.config/llmobs-soak.env \
+    systemd-run --user --unit cetra-soak --same-dir -p EnvironmentFile=$HOME/.config/cetra-soak.env \
       -p LimitNOFILE=65536 -p MemoryMax=32G \
       --setenv=PATH=$HOME/.cargo/bin:$HOME/.local/bin:/usr/bin:/bin \
-      --setenv=LLMOBS_SOAK_DIR=/data/soak --setenv=LLMOBS_SOAK_OUT=/data/soak-out \
-      --setenv=LLMOBS_SOAK_LABEL=hz-ax52 --setenv=LLMOBS_SOAK_HOURS=72 \
-      --setenv=LLMOBS_SOAK_RETENTION_DAYS=0 --setenv=LLMOBS_SOAK_RATE=2000 just soak
+      --setenv=CETRA_SOAK_DIR=/data/soak --setenv=CETRA_SOAK_OUT=/data/soak-out \
+      --setenv=CETRA_SOAK_LABEL=hz-ax52 --setenv=CETRA_SOAK_HOURS=72 \
+      --setenv=CETRA_SOAK_RETENTION_DAYS=0 --setenv=CETRA_SOAK_RATE=2000 just soak
     ```
 
     - **Rate.** 2,000 spans/s is the default and the recommendation. The user may choose about 5,000 spans/s (spec 03's "an order of magnitude below 50k" for the target box) for a stronger claim: about 2.5× the bucket volume (roughly 250–400 GB per day). Whatever rate is used, the claims state it (R7.7).
     - **Check the memory limit applies.**
       - `cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/cgroup.controllers` must list `memory`. Ubuntu 24.04 delegates it to user managers by default; if it is missing, `MemoryMax` is silently ignored.
-      - After the start, `systemctl --user show llmobs-soak -p MemoryMax` shows `34359738368`.
-      - **Fallback:** a system unit, `sudo systemd-run --unit llmobs-soak --uid=<user> --working-directory=$PWD -p MemoryMax=32G …` with the same `--setenv`s and `EnvironmentFile`. It is read with `journalctl -o cat -u llmobs-soak`, without `--user`.
+      - After the start, `systemctl --user show cetra-soak -p MemoryMax` shows `34359738368`.
+      - **Fallback:** a system unit, `sudo systemd-run --unit cetra-soak --uid=<user> --working-directory=$PWD -p MemoryMax=32G …` with the same `--setenv`s and `EnvironmentFile`. It is read with `journalctl -o cat -u cetra-soak`, without `--user`.
     - **`MemoryMax=32G`** holds the run to the target box's memory. An OOM kill is a result (rule `rss_max` fails first at 8 GiB by default).
     - **No `Restart=`.** A crash is a result, not something to hide.
     - **User units.** The unit needs a user systemd instance: either log in by SSH first, or rely on the linger of step 4.
-    - **Check-ins:** `journalctl --user -o cat -u llmobs-soak -n 50`, `tail -1 /data/soak-out/samples.jsonl`, `just soak-plot /data/soak-out` at any time.
+    - **Check-ins:** `journalctl --user -o cat -u cetra-soak -n 50`, `tail -1 /data/soak-out/samples.jsonl`, `just soak-plot /data/soak-out` at any time.
     - tmux is the fallback if user units are unavailable.
 11. **Results back.**
-    - `rsync -av <server>:/data/soak-out/ ~/llmobs-bench/soak-hz-out/`, and the bench logs the same way.
+    - `rsync -av <server>:/data/soak-out/ ~/cetra-bench/soak-hz-out/`, and the bench logs the same way.
     - Then plot, run the grep check of R7.7, and copy the committed files into `docs/research/storage/soak/<id>/`.
 12. **Teardown.**
     - Check the soak deleted its prefix (it does on a pass; otherwise delete it after inspection).

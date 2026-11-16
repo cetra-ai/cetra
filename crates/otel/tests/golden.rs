@@ -1,16 +1,16 @@
 //! Compares the normalizer with `fixtures/otlp`.
 //!
 //! Pending cases are the ones this phase cannot produce yet. They must fail.
-//! `LLMOBS_BLESS=1` rewrites `expected.json` and is not used in CI.
+//! `CETRA_BLESS=1` rewrites `expected.json` and is not used in CI.
 
 #[allow(dead_code, unreachable_pub)]
 mod support;
 
 use std::fs;
 
-use llmobs_core::enums::{CostSource, SpanKind};
-use llmobs_core::media::MediaBlob;
-use llmobs_otel::{
+use cetra_core::enums::{CostSource, SpanKind};
+use cetra_core::media::MediaBlob;
+use cetra_otel::{
     IngestContext, IngestLimits, Normalized, PriceTable, builtin_price_rows, decode_json, normalize,
 };
 use serde_json::{Map, Value};
@@ -33,7 +33,7 @@ fn golden() {
         "fixtures failed to load:\n{}",
         loaded.failures.join("\n")
     );
-    let bless = std::env::var_os("LLMOBS_BLESS").is_some_and(|value| value == "1");
+    let bless = std::env::var_os("CETRA_BLESS").is_some_and(|value| value == "1");
     let mut failures = Vec::new();
     for case in &loaded.cases {
         match run_case(case, bless) {
@@ -221,7 +221,7 @@ fn first_diff(actual: &Value, expected: &Value, path: &str) -> Option<String> {
 
 #[test]
 fn bless_writes_expected_json_when_a_captured_case_has_none() {
-    let dir = std::env::temp_dir().join(format!("llmobs-bless-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("cetra-bless-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap_or_else(|err| panic!("{err}"));
     fs::write(dir.join("input.json"), "{\"resourceSpans\":[]}\n")
@@ -236,7 +236,7 @@ fn bless_writes_expected_json_when_a_captured_case_has_none() {
 
 #[test]
 fn captured_case_without_expected_json_is_skipped() {
-    let dir = std::env::temp_dir().join(format!("llmobs-await-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("cetra-await-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap_or_else(|err| panic!("{err}"));
     fs::write(dir.join("input.json"), "{\"resourceSpans\":[]}\n")

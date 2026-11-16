@@ -43,7 +43,7 @@ Validation at load (errors name the key and the provider, never a secret):
 - Multi-tenant Microsoft issuers are refused: host `login.microsoftonline.com` with first path segment `common`, `organizations` or `consumers`.
 - `auto_provision.org` has slug syntax; its role is not `owner`. Whether the org exists is checked at login.
 - `auth.disable_password = true` without any provider → error. `auth.enforce_sso_domains` non-empty without any provider → error.
-- Env: GitHub and Google work through the split form (`LLMOBS_AUTH__GITHUB__CLIENT_ID`); `[[auth.oidc]]` arrays are TOML only (document it in spec 12 and the config doc comment).
+- Env: GitHub and Google work through the split form (`CETRA_AUTH__GITHUB__CLIENT_ID`); `[[auth.oidc]]` arrays are TOML only (document it in spec 12 and the config doc comment).
 
 ### Runtime (`auth/oidc/`)
 
@@ -101,7 +101,7 @@ The `rsa`/`rand_core` combination used, and the openidconnect 4.1 types for meta
 
 - `AppInner.oauth_key: [u8; 32]`, random per process (D148): a restart invalidates logins in flight, which is acceptable for a 10-minute cookie.
 - Value: `base64url(json(OAuthState { provider, state, nonce, pkce_verifier, redirect, created_ns }))` + `.` + `base64url(HMAC-SHA256(oauth_key, first part))`. Verification is constant-time (`hmac`'s `verify_slice`).
-- Cookie `llmobs_oauth` (name from the constant): `HttpOnly; SameSite=Lax; Path=/api/auth/callback; Max-Age=600`, plus `Secure` with an https `public_url`.
+- Cookie `cetra_oauth` (name from the constant): `HttpOnly; SameSite=Lax; Path=/api/auth/callback; Max-Age=600`, plus `Secure` with an https `public_url`.
 
 ### Routes
 

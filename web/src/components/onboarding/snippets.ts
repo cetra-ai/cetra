@@ -1,4 +1,4 @@
-export const PLACEHOLDER_KEY = "sk-llmobs-…";
+export const PLACEHOLDER_KEY = "sk-cetra-…";
 
 export const API_KEY_NOTE = "Create a secret key in Settings → API keys";
 
@@ -15,39 +15,39 @@ export function otelSnippet(origin: string, key: string = PLACEHOLDER_KEY): stri
   ].join("\n");
 }
 
-/** `llmobs.init` with the Python option names. Env vars apply when an argument is omitted. */
+/** `cetra.init` with the Python option names. Env vars apply when an argument is omitted. */
 export function pythonSnippet(origin: string, key: string = PLACEHOLDER_KEY): string {
   return [
-    "import llmobs",
+    "import cetra",
     "",
-    "# Or set LLMOBS_API_KEY and LLMOBS_BASE_URL.",
-    "llmobs.init(",
+    "# Or set CETRA_API_KEY and CETRA_BASE_URL.",
+    "cetra.init(",
     `    api_key="${key}",`,
     `    base_url="${origin}",`,
     ")",
   ].join("\n");
 }
 
-/** `llmobs.init` with the TypeScript option names. The env vars match Python. */
+/** `cetra.init` with the TypeScript option names. The env vars match Python. */
 export function typescriptSnippet(origin: string, key: string = PLACEHOLDER_KEY): string {
   return [
-    'import * as llmobs from "llmobs";',
+    'import * as cetra from "@cetra-ai/sdk";',
     "",
-    "// Or set LLMOBS_API_KEY and LLMOBS_BASE_URL.",
-    "llmobs.init({",
+    "// Or set CETRA_API_KEY and CETRA_BASE_URL.",
+    "cetra.init({",
     `  apiKey: "${key}",`,
     `  baseUrl: "${origin}",`,
     "});",
   ].join("\n");
 }
 
-/** Pass `llmobs.aiTelemetry()` as the AI SDK's `experimental_telemetry`. */
+/** Pass `cetra.aiTelemetry()` as the AI SDK's `experimental_telemetry`. */
 export function vercelSnippet(origin: string, key: string = PLACEHOLDER_KEY): string {
   return [
     'import { generateText } from "ai";',
-    'import * as llmobs from "llmobs";',
+    'import * as cetra from "@cetra-ai/sdk";',
     "",
-    "llmobs.init({",
+    "cetra.init({",
     `  apiKey: "${key}",`,
     `  baseUrl: "${origin}",`,
     "});",
@@ -55,7 +55,7 @@ export function vercelSnippet(origin: string, key: string = PLACEHOLDER_KEY): st
     "await generateText({",
     "  model,",
     '  prompt: "Hello",',
-    "  experimental_telemetry: llmobs.aiTelemetry(),",
+    "  experimental_telemetry: cetra.aiTelemetry(),",
     "});",
   ].join("\n");
 }

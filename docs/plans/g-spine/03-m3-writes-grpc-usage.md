@@ -48,7 +48,7 @@ Add to the root `[workspace.dependencies]`, with a one-line comment saying why, 
 
 Change in the root `opentelemetry-proto` entry: add the feature `"gen-tonic"` to its list (it generates `trace_service_server` and `trace_service_client`; it pulls `tonic-prost` 0.14 and `tonic/channel`, which the gRPC tests use as a client). Update the entry's comment: "OTLP messages and the tonic `TraceService` (server and test client)." Do not change its version.
 
-`chrono` (workspace entry exists) becomes a dependency of `llmobs-server` in G3.6 (UTC day of the usage counters).
+`chrono` (workspace entry exists) becomes a dependency of `cetra-server` in G3.6 (UTC day of the usage counters).
 
 After G3.7, `cargo deny check` must still pass. `deny.toml` sets `multiple-versions = "warn"` and denies duplicates only in the arrow/datafusion/parquet/object_store family: duplicate *warnings* for other crates are fine; an *error* is a STOP.
 
@@ -59,8 +59,8 @@ After G3.7, `cargo deny check` must still pass. `deny.toml` sets `multiple-versi
 - **Temporary files** go in the session's scratchpad directory, not `/tmp`.
 - **Errors and panics.** No `unwrap()`/`expect()` outside tests (AGENTS.md). Handlers return `ApiError`.
 - **Privacy.** Never log a score value, reason, metadata value, name, feedback comment, key or token. Log ids, counts, sizes and error kinds.
-- **Tests.** HTTP tests build a `TestApp`, call `seed()`, and use `#[tokio::test(flavor = "multi_thread")]`. They read stored scores back with `GET /api/v1/projects/{id}/scores` (M2) or `llmobs_storage::score_list`, and assert exact values.
-- **Names.** Storage types share names with API types. Refer to storage items as `llmobs_storage::…`.
+- **Tests.** HTTP tests build a `TestApp`, call `seed()`, and use `#[tokio::test(flavor = "multi_thread")]`. They read stored scores back with `GET /api/v1/projects/{id}/scores` (M2) or `cetra_storage::score_list`, and assert exact values.
+- **Names.** Storage types share names with API types. Refer to storage items as `cetra_storage::…`.
 - **STOP rules.** Stop and report, without committing, when:
   - the plan is wrong about the code in a way you cannot resolve without guessing;
   - a test of an earlier milestone fails for a reason outside your change;
@@ -95,7 +95,7 @@ fixtures/api/requests/{score-batch.json,feedback.json}   (G3.2)
 
 ### Score write rules (D-G-26, D-G-27, D-G-28)
 
-Every write path (project route, key route, feedback) ends in one function, `crate::scores::write`, that turns request items into `llmobs_core::score::Score` rows and appends them.
+Every write path (project route, key route, feedback) ends in one function, `crate::scores::write`, that turns request items into `cetra_core::score::Score` rows and appends them.
 
 **Caller → source and author.**
 
@@ -125,7 +125,7 @@ Ids, enums, `value` shapes and finite numbers are checked by serde when the body
 
 **Duplicates in one request.** Items with the same final `score_id` (given or derived) keep only the last one; `score_ids` in the answer still has one entry per input item, in input order.
 
-**Derived `score_id`** (spec 06), when the item has none: `Uuid` from `uuid::Builder::from_custom_bytes(first 16 bytes of SHA-256(input)).into_uuid()` (version 8, RFC variant). `input` is the ASCII tag `llmobs.score.v1` followed by these fields in order, each written as its byte length (`u32`, big-endian) then its UTF-8 bytes:
+**Derived `score_id`** (spec 06), when the item has none: `Uuid` from `uuid::Builder::from_custom_bytes(first 16 bytes of SHA-256(input)).into_uuid()` (version 8, RFC variant). `input` is the ASCII tag `cetra.score.v1` followed by these fields in order, each written as its byte length (`u32`, big-endian) then its UTF-8 bytes:
 1. the project id, as `ProjectId::to_string()` (lowercase hyphenated);
 2. the target kind (`ScoreTargetKind::as_str()`: `span`, `trace`, `session`);
 3. the trace id as 32 lowercase hex, or the empty string for a session target;
@@ -137,12 +137,12 @@ Ids, enums, `value` shapes and finite numbers are checked by serde when the body
 **Times** (`now` = `state.clock.now_ns()`, read once per request):
 - `score_id` is UUIDv7 (`uuid.get_version() == Some(uuid::Version::SortRand)`): `created_at` = the id's Unix time (`get_timestamp()` → `to_unix()` → `(secs, nanos)`, computed as `i64::try_from(secs)` then `checked_mul(1_000_000_000)` then `checked_add(nanos)`; any overflow is the field error `score_id time is in the future`; v7 has millisecond precision). `updated_at = max(now, created_at)`. No lookup.
 - A v7 time older than the project's retention (`project.retention_days` is `Some(d)` and `created_at < now - d·86 400·10⁹`, computed with saturating arithmetic) is the field error `scores[i].score_id`: `"score_id time is older than the project's retention"` (storage would drop such a row at flush, spec 03 §8).
-- any other id: it goes into one `llmobs_storage::scores_by_id` call per request (G3.1). Found: `created_at` = the live version's `created_at`, `updated_at = max(now, live.updated_at + 1)`. Not found: `created_at = updated_at = now`.
+- any other id: it goes into one `cetra_storage::scores_by_id` call per request (G3.1). Found: `created_at` = the live version's `created_at`, `updated_at = max(now, live.updated_at + 1)`. Not found: `created_at = updated_at = now`.
 - `ingest_time = now`, `deleted = false`. `evaluator_id`, `rule_id`, `experiment_id`, `dataset_item_id` are `None` (track I sets them).
 
 **Delete** (`DELETE …/scores/{score_id}`): `scores_by_id` for that one id (a lookup error is 503 as in `write` step 5); none → 404. Otherwise append a copy of the live `Score` with `deleted = true`, `updated_at = max(now, live.updated_at + 1)`, `ingest_time = now`; every other field unchanged, so `created_at` stays (spec 03 §5).
 
-**Append.** `llmobs_core::batch::scores_to_record_batch(&rows)` (a `CoreError` is `ApiError::Internal`) then `state.storage.append_scores(project_id, batch)`. `AppendError` maps through the M1 table: `ApiError::from(IngestError::Append(error))` (503 for backpressure, WAL failure, disk full and shutdown; 404 for a dropped project; 500 otherwise).
+**Append.** `cetra_core::batch::scores_to_record_batch(&rows)` (a `CoreError` is `ApiError::Internal`) then `state.storage.append_scores(project_id, batch)`. `AppendError` maps through the M1 table: `ApiError::from(IngestError::Append(error))` (503 for backpressure, WAL failure, disk full and shutdown; 404 for a dropped project; 500 otherwise).
 
 ### Request and response types (G3.2)
 
@@ -154,18 +154,18 @@ pub struct ScoreCreate {
     /// Client id; a UUIDv7 gives `created_at` from its time (D-G-26). Derived when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub score_id: Option<Uuid>,
-    pub target: ScoreTarget,                 // llmobs_core::score::ScoreTarget
+    pub target: ScoreTarget,                 // cetra_core::score::ScoreTarget
     /// Session of a span or trace target. Ignored for a session target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_id: Option<String>,
     pub name: String,
-    pub value: ScoreValue,                   // llmobs_core::score::ScoreValue
+    pub value: ScoreValue,                   // cetra_core::score::ScoreValue
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<ScoreSource>,         // llmobs_core::enums::ScoreSource
+    pub source: Option<ScoreSource>,         // cetra_core::enums::ScoreSource
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata: BTreeMap<String, String>,
 }
@@ -254,7 +254,7 @@ A message larger than `ingest.max_grpc_message_bytes` is refused by tonic itself
        timeout: Duration,
    ) -> Result<Vec<RecordBatch>, RunError>
    ```
-   - More than `MAX_PAGE` ids → `InvalidRequest("at most 1000 ids")`. Each id is parsed with `uuid::Uuid::parse_str` (`uuid` is a dependency of `llmobs-storage`; check `crates/storage/Cargo.toml`, and if it is not, use the `llmobs_core` re-export or STOP); a failure → `InvalidRequest("invalid score_id")`. The literal compared is `uuid.to_string()` (lowercase hyphenated, as `scores_to_record_batch` stores it).
+   - More than `MAX_PAGE` ids → `InvalidRequest("at most 1000 ids")`. Each id is parsed with `uuid::Uuid::parse_str` (`uuid` is a dependency of `cetra-storage`; check `crates/storage/Cargo.toml`, and if it is not, use the `cetra_core` re-export or STOP); a failure → `InvalidRequest("invalid score_id")`. The literal compared is `uuid.to_string()` (lowercase hyphenated, as `scores_to_record_batch` stores it).
    - Query: `ctx.session().table("scores")` → `.filter(col(scores::SCORE_ID).in_list(<literals>, false))` → `.collect()`, under `tokio::time::timeout(timeout, …)` like `latest_scores`; DataFusion errors go through `classify` / `ctx.fail` exactly as `latest` does. The `scores` view already keeps one live row per `score_id` (last writer wins, deleted rows dropped).
 2. Re-export `scores_by_id` from `reads/mod.rs` and in `lib.rs`'s `pub use reads::{…}` list (keep it sorted).
 
@@ -291,7 +291,7 @@ A message larger than `ingest.max_grpc_message_bytes` is refused by tonic itself
    - Summaries: "Write scores", "Delete a score", "Write scores with an ingest key", "Send end-user feedback". Descriptions: one sentence each, stating the batch size (1–1000) and that the answer has one id per item in order; for `create_key_scores` "The project comes from the `sk` key, which needs the `ingest` scope."; for `post_feedback` "Needs a `pk` key with the `feedback` scope. CORS allows any origin. At most 4 KiB, 10 requests per second per key and client IP."
    - "Bearer only" security: an operation-level security list with the one `bearer` requirement. Find how session-only operations set theirs and mirror it with `bearer`.
    - Add `413 => "The request body is larger than the limit."` to `problem()`'s descriptions if it is not there.
-   - The `bearer` security scheme's description lists the accepted prefixes; add `pk-llmobs-` (public keys, feedback only).
+   - The `bearer` security scheme's description lists the accepted prefixes; add `pk-cetra-` (public keys, feedback only).
 3. **Lint.** In `crates/server/tests/openapi.rs`:
    - add the four `(method, path, id)` rows to `OPERATIONS`;
    - in `document_lint`, add a bearer-only security branch for `create_key_scores` and `post_feedback` (`security` is a one-element list whose element has `bearer` and not `session`), and an expected 4xx set per new operation, each in its own `else if` before the generic branches: `create_scores` and `create_key_scores` {400, 401, 403, 404, 413, 429}; `delete_score` {400, 401, 403, 404, 429}; `post_feedback` {400, 401, 403, 404, 413, 429}.
@@ -324,7 +324,7 @@ A message larger than `ingest.max_grpc_message_bytes` is refused by tonic itself
 
 ### Tests
 
-The two contract tests above; `cargo test -p llmobs-server --test openapi` passes.
+The two contract tests above; `cargo test -p cetra-server --test openapi` passes.
 
 ### Done when
 
@@ -368,7 +368,7 @@ The two contract tests above; `cargo test -p llmobs-server --test openapi` passe
    2. Per item: source check, length checks, v7 future check → collect every `FieldError` (`crate::api::common::FieldError { field, message, position: None }`); any error → `ApiError::BadRequest { detail: Some("invalid scores".to_owned()), errors }`.
    3. Per item: final `score_id` (given, or `derive_id(project.id, &item, source, author)`).
    4. Dedupe: keep the last item per final id; remember the per-input id list for the answer.
-   5. Non-v7 ids → one `llmobs_storage::scores_by_id` call (skip when empty) on `crate::routes::read::open_query(state, project.id, None)`, timeout `READ_TIMEOUT`; convert with `crate::api::convert::scores(&batches, project.id)`; build `HashMap<Uuid, Score>`. A `RunError` from the lookup (timeout, memory, internal) becomes `ApiError::Unavailable { detail: "score lookup is unavailable, retry later" }` (503, so the SDKs retry; no 422 on write routes), logged with `RunError::kind()`; `open_query`'s own errors keep their mapping (503 busy).
+   5. Non-v7 ids → one `cetra_storage::scores_by_id` call (skip when empty) on `crate::routes::read::open_query(state, project.id, None)`, timeout `READ_TIMEOUT`; convert with `crate::api::convert::scores(&batches, project.id)`; build `HashMap<Uuid, Score>`. A `RunError` from the lookup (timeout, memory, internal) becomes `ApiError::Unavailable { detail: "score lookup is unavailable, retry later" }` (503, so the SDKs retry; no 422 on write routes), logged with `RunError::kind()`; `open_query`'s own errors keep their mapping (503 busy).
    6. Build each `Score` (fields of `ScoreCreate` plus the resolved times, `source`, `author_user_id`, `project_id = project.id`). For a session target, `session_id` is `None` (the target holds it).
    7. Append (one batch); count usage — **not in G3.3**: G3.6 adds the counting call here.
    8. Return the per-input ids.
@@ -380,7 +380,7 @@ The two contract tests above; `cargo test -p llmobs-server --test openapi` passe
 
 - **Derived ids.** `derive_id` for a fixed input equals a constant written in the test (compute it once, then pin it); it is version 8 (`get_version_num() == 8`); changing any one of the seven fields changes it.
 - **v7 time.** For `01900000-0000-7000-8000-000000000401`, `created_at` = the id's ms time × 10⁶; a v7 id more than 1 h after `now` is a field error; at exactly `now + 1 h` it is accepted.
-- **New score.** Write one v4-id score (`Uuid::from_u128(…)` with version 4 bits, or `Uuid::new_v4()` if the `v4` feature is enabled — check; otherwise build the bytes with `uuid::Builder::from_random_bytes`) → read back with `llmobs_storage::score_list`: one row, `created_at == updated_at == now`, `source` per writer.
+- **New score.** Write one v4-id score (`Uuid::from_u128(…)` with version 4 bits, or `Uuid::new_v4()` if the `v4` feature is enabled — check; otherwise build the bytes with `uuid::Builder::from_random_bytes`) → read back with `cetra_storage::score_list`: one row, `created_at == updated_at == now`, `source` per writer.
 - **Update keeps `created_at`.** Write it again with another value after `state.clock.advance(Duration::from_secs(60))` → one live row, new value, `created_at` unchanged, `updated_at` = the later `now`.
 - **Delete.** `delete` it → `score_list` returns no row; deleting again → `NotFound`.
 - **Sources.** `Writer::Human` with body source `api` → 400 with field `scores[0].source`; `Writer::Sdk` with `human` → 400; `Writer::Api` with `sdk` → stored `sdk`; `Writer::Human` stores `author_user_id`.
@@ -479,7 +479,7 @@ The two contract tests above; `cargo test -p llmobs-server --test openapi` passe
    - `meta/mod.rs` `open_existing_checks_the_file_and_the_version`: insert fake version **3** (version 2 now exists) and expect found 3, expected 2;
    - `admin.rs` `schema_mismatch_names_the_versions`: insert version 3 and expect `this binary expects schema 2, found 3`.
 
-   Re-accept the snapshot: `INSTA_UPDATE=always cargo test -p llmobs-server --lib meta::tests::schema_matches_the_snapshot` (or `cargo insta accept` when `cargo-insta` is installed); the diff of `crates/server/tests/snapshots/meta_schema.snap` adds only `usage_daily` and its `sqlite_autoindex_usage_daily_1`.
+   Re-accept the snapshot: `INSTA_UPDATE=always cargo test -p cetra-server --lib meta::tests::schema_matches_the_snapshot` (or `cargo insta accept` when `cargo-insta` is installed); the diff of `crates/server/tests/snapshots/meta_schema.snap` adds only `usage_daily` and its `sqlite_autoindex_usage_daily_1`.
 2. **`crate::usage`**, modelled on `auth/last_used.rs`:
    ```rust
    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -537,7 +537,7 @@ The two contract tests above; `cargo test -p llmobs-server --test openapi` passe
 
 1. **Dependencies** per § Versions. `tonic.workspace = true` in `crates/server/Cargo.toml`. Run `cargo deny check` (STOP rule).
 2. **Config** (mirror `otlp_http_addr` exactly):
-   - `grpc_addr: Option<SocketAddr>`, default `Some(0.0.0.0:4317)`, `deserialize_optional_socket_addr`, env `LLMOBS_GRPC_ADDR` in the env table; doc `/// OTLP/gRPC listener (D-G-21, D-G-29). \`None\` when the value is an empty string.`
+   - `grpc_addr: Option<SocketAddr>`, default `Some(0.0.0.0:4317)`, `deserialize_optional_socket_addr`, env `CETRA_GRPC_ADDR` in the env table; doc `/// OTLP/gRPC listener (D-G-21, D-G-29). \`None\` when the value is an empty string.`
    - Validation: `grpc_addr` must differ from `http_addr` and from `otlp_http_addr` (`"must differ from http_addr"`, `"must differ from otlp_http_addr"`), checked next to the existing `otlp_http_addr` check.
    - `IngestConfig.max_grpc_message_bytes: ByteSize`, default `32MiB`, doc `/// Decoded gRPC message cap. Default 32 MiB.`; `validate_ingest`: in the platform-size list; between 1 KiB and 1 GiB (`"must be between 1KiB and 1GiB"`); at most `max_inflight_bytes` (`"must be at most max_inflight_bytes"`), checked **after** the existing `max_inflight_bytes` check so its tests still hit their own message first.
    - Existing literals and tests to update: the default-equality test near `config.rs` line 2150 gains the new field; `ingest_and_media_accept_the_edges` (inflight `1KiB`) adds `max_grpc_message_bytes = "1KiB"` to its TOML; the `ServerConfig` literals in `serve.rs`'s test `config()` and `ingest/fixtures_tests.rs` get `grpc_addr: None`; `serve.rs`'s `empty_otlp_address_in_toml_binds_one_listener` TOML adds `grpc_addr = ""` (otherwise it binds 4317).
@@ -561,7 +561,7 @@ The two contract tests above; `cargo test -p llmobs-server --test openapi` passe
 
 ### Tests
 
-- Config: default `grpc_addr` is `0.0.0.0:4317`; empty string and `LLMOBS_GRPC_ADDR=""` disable it; equal to `http_addr` is an error; `max_grpc_message_bytes` bounds (512 B, 2 GiB, more than `max_inflight_bytes`) are errors with their messages.
+- Config: default `grpc_addr` is `0.0.0.0:4317`; empty string and `CETRA_GRPC_ADDR=""` disable it; equal to `http_addr` is an error; `max_grpc_message_bytes` bounds (512 B, 2 GiB, more than `max_inflight_bytes`) are errors with their messages.
 - `accept_request` on a decoded fixture request gives the same `Normalized` as `accept` on its bytes.
 - `reserve_exact(u64::MAX)` is `Busy`.
 
@@ -613,8 +613,8 @@ The two contract tests above; `cargo test -p llmobs-server --test openapi` passe
 
 ### Tests
 
-- **`grpc.rs` unit tests** (`TestApp` + `seed()`, sending an encoded gRPC request through the layered `service(state)` with `tower::ServiceExt::oneshot` (G-1: admission is in the layer, so the tests go through it); the `authorization` header is `Bearer {key}`; the message is `llmobs_otel::decode_json` of `fixtures/otlp/genai/finish-reasons-fill/input.json`; `export` called without the layer is `Internal`):
-  - the `ingest_key` → OK with `partial_success: None`; `llmobs_storage` / `GET …/traces` (cookie) then lists the trace; after `state.usage.flush(&state.meta)` `usage_daily.spans` equals the stored span count and `bytes` equals the message's `encoded_len()`;
+- **`grpc.rs` unit tests** (`TestApp` + `seed()`, sending an encoded gRPC request through the layered `service(state)` with `tower::ServiceExt::oneshot` (G-1: admission is in the layer, so the tests go through it); the `authorization` header is `Bearer {key}`; the message is `cetra_otel::decode_json` of `fixtures/otlp/genai/finish-reasons-fill/input.json`; `export` called without the layer is `Internal`):
+  - the `ingest_key` → OK with `partial_success: None`; `cetra_storage` / `GET …/traces` (cookie) then lists the trace; after `state.usage.flush(&state.meta)` `usage_daily.spans` equals the stored span count and `bytes` equals the message's `encoded_len()`;
   - no metadata → `Code::Unauthenticated`; the `read_key` → `Code::PermissionDenied`; a session cookie in `cookie` metadata only → `Code::Unauthenticated`;
   - each `tonic::Status` message is the static text of § gRPC status mapping.
 - **`serve.rs` TCP tests** (reuse `with_init`, `OTLP_KEY` and `TRACES`; set `grpc_addr` to `Some(127.0.0.1:0)`), using `opentelemetry_proto::tonic::collector::trace::v1::trace_service_client::TraceServiceClient::connect(format!("http://{addr}"))`:

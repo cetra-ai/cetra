@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Elastic-2.0
 //! Signed tokens: licence keys, org entitlement tokens and control-plane requests (D-P-5).
 //!
-//! A token is `llmobs1.<kid>.<payload>.<signature>`. `<payload>` and `<signature>` are
+//! A token is `cetra1.<kid>.<payload>.<signature>`. `<payload>` and `<signature>` are
 //! base64url without padding. The signature is ed25519 over the ASCII bytes of
-//! `llmobs1.<kid>.<payload>`, checked before the payload is decoded as JSON, so the JSON
+//! `cetra1.<kid>.<payload>`, checked before the payload is decoded as JSON, so the JSON
 //! is never re-serialised. Release builds trust only the release keys; debug builds also
 //! trust the development key (D-P-6). Each key may sign only the kinds it is bound to
 //! (D-P-27). No config can add a key.
 //!
-//! Shared by `llmobs-server`, `tools/license` and the control plane. Depends on no other
+//! Shared by `cetra-server`, `tools/license` and the control plane. Depends on no other
 //! workspace crate.
 
 #![warn(missing_docs)]
@@ -26,8 +26,8 @@ mod rfc3339;
 
 pub use keys::{BuiltInKey, built_in_keys};
 
-/// Format tag. Renamed with the product (D46).
-pub const TOKEN_TAG: &str = "llmobs1";
+/// Format tag. Renamed with the product.
+pub const TOKEN_TAG: &str = "cetra1";
 
 /// Largest accepted token, in bytes.
 pub const MAX_TOKEN_BYTES: usize = 16 * 1024;
@@ -508,16 +508,13 @@ mod tests {
         let sig = URL_SAFE_NO_PAD.encode([0_u8; 64]);
         let cases = [
             String::new(),
-            "llmobs1.dev-1.abc".to_owned(),
-            format!("llmobs1.dev-1.{body}.{sig}.extra"),
-            format!("llmobs2.dev-1.{body}.{sig}"),
-            format!("llmobs1.Dev-1.{body}.{sig}"),
-            format!("llmobs1.{}.{body}.{sig}", "a".repeat(33)),
-            format!("llmobs1.dev-1.!!.{sig}"),
-            format!(
-                "llmobs1.dev-1.{body}.{}",
-                URL_SAFE_NO_PAD.encode([0_u8; 10])
-            ),
+            "cetra1.dev-1.abc".to_owned(),
+            format!("cetra1.dev-1.{body}.{sig}.extra"),
+            format!("cetra2.dev-1.{body}.{sig}"),
+            format!("cetra1.Dev-1.{body}.{sig}"),
+            format!("cetra1.{}.{body}.{sig}", "a".repeat(33)),
+            format!("cetra1.dev-1.!!.{sig}"),
+            format!("cetra1.dev-1.{body}.{}", URL_SAFE_NO_PAD.encode([0_u8; 10])),
         ];
         for token in cases {
             assert_eq!(verify(&token), Err(TokenError::Malformed), "{token}");
@@ -600,7 +597,7 @@ mod tests {
             TokenError::Payload,
             TokenError::WrongKind,
         ] {
-            assert!(!error.to_string().contains("llmobs1."), "{error}");
+            assert!(!error.to_string().contains("cetra1."), "{error}");
         }
     }
 

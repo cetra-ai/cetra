@@ -2,31 +2,31 @@
 //! client's own retry loop runs for real. `ChaosStore` (in-process) never triggers that loop.
 //!
 //! Every test is `#[ignore]`d: run them with `just s3-chaos`. Each one also skips (prints and
-//! returns) when `LLMOBS_TEST_S3_ENDPOINT` or `LLMOBS_TEST_TOXIPROXY` is unset.
+//! returns) when `CETRA_TEST_S3_ENDPOINT` or `CETRA_TEST_TOXIPROXY` is unset.
 //!
 //! Environment:
-//! - `LLMOBS_TEST_S3_ENDPOINT`: the S3 endpoint, Versity's address, e.g. `http://127.0.0.1:7070`;
-//! - `LLMOBS_TEST_S3_BUCKET`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`;
-//! - `LLMOBS_TEST_S3_REGION` (default `us-east-1`) and `LLMOBS_TEST_S3_PATH_STYLE` (default `true`);
-//! - `LLMOBS_TEST_TOXIPROXY`: the toxiproxy API, e.g. `http://127.0.0.1:8474`;
-//! - `LLMOBS_TEST_TOXIPROXY_TOKEN`: optional, sent as a bearer token.
+//! - `CETRA_TEST_S3_ENDPOINT`: the S3 endpoint, Versity's address, e.g. `http://127.0.0.1:7070`;
+//! - `CETRA_TEST_S3_BUCKET`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`;
+//! - `CETRA_TEST_S3_REGION` (default `us-east-1`) and `CETRA_TEST_S3_PATH_STYLE` (default `true`);
+//! - `CETRA_TEST_TOXIPROXY`: the toxiproxy API, e.g. `http://127.0.0.1:8474`;
+//! - `CETRA_TEST_TOXIPROXY_TOKEN`: optional, sent as a bearer token.
 //!
 //! Setup. Versity Gateway serves a directory as S3 (see `tests/s3.rs`):
 //!
 //! ```text
-//! docker run --rm --name llmobs-s3 -p 7070:7070 --tmpfs /data:rw,mode=1777,size=4g -e ROOT_ACCESS_KEY=llmobs -e ROOT_SECRET_KEY=llmobs-secret -e VGW_BACKEND=posix -e VGW_BACKEND_ARGS=/data -e VGW_ARGS="--port :7070" versity/versitygw:v1.11.0
-//! curl --aws-sigv4 "aws:amz:us-east-1:s3" --user llmobs:llmobs-secret -X PUT http://127.0.0.1:7070/llmobs-test
-//! docker run --rm --name llmobs-toxiproxy --net=host ghcr.io/shopify/toxiproxy:2.13.0 -host 127.0.0.1
+//! docker run --rm --name cetra-s3 -p 7070:7070 --tmpfs /data:rw,mode=1777,size=4g -e ROOT_ACCESS_KEY=cetra -e ROOT_SECRET_KEY=cetra-secret -e VGW_BACKEND=posix -e VGW_BACKEND_ARGS=/data -e VGW_ARGS="--port :7070" versity/versitygw:v1.11.0
+//! curl --aws-sigv4 "aws:amz:us-east-1:s3" --user cetra:cetra-secret -X PUT http://127.0.0.1:7070/cetra-test
+//! docker run --rm --name cetra-toxiproxy --net=host ghcr.io/shopify/toxiproxy:2.13.0 -host 127.0.0.1
 //! ```
 //!
 //! `-host 127.0.0.1` keeps the API (`:8474`) and the proxies on loopback. With it no token is
-//! needed; if one is set anyway, `LLMOBS_TEST_TOXIPROXY_TOKEN` must match. Without Docker, run the
+//! needed; if one is set anyway, `CETRA_TEST_TOXIPROXY_TOKEN` must match. Without Docker, run the
 //! release binary `toxiproxy-server-linux-amd64` (v2.13.0) with `-host 127.0.0.1`.
 //!
 //! Verify both image tags and the toxiproxy flags when M4 runs (`docker pull`); if a newer
 //! release exists, use it and record the versions in `docs/research/storage/hardening.md`.
 //!
-//! Each test has its own proxy, `llmobs-<test>`, and its own prefix, `s3-chaos-<test>-<ms>`. A
+//! Each test has its own proxy, `cetra-<test>`, and its own prefix, `s3-chaos-<test>-<ms>`. A
 //! test deletes its proxy first, ignoring a 404, so a proxy left by a failed run cannot make
 //! `proxy` fail. At the end it deletes the proxy, then the prefix, calling Versity directly.
 
@@ -42,17 +42,15 @@ use std::time::{Duration, Instant};
 
 use arrow::array::{Array, StringArray};
 use bytesize::ByteSize;
+use cetra_core::batch::spans_to_record_batch;
+use cetra_core::enums::{SpanKind, SpanStatus};
+use cetra_core::ids::{ProjectId, SpanId, TraceId};
+use cetra_core::span::Span;
+use cetra_storage::config::{FlushConfig, MemtableConfig, ObjectStoreUrl, S3Config, StorageConfig};
+use cetra_storage::error::AppendError;
+use cetra_storage::{ProjectQuery, Storage};
 use datafusion::execution::context::{SessionConfig, SessionContext};
 use futures::TryStreamExt;
-use llmobs_core::batch::spans_to_record_batch;
-use llmobs_core::enums::{SpanKind, SpanStatus};
-use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-use llmobs_core::span::Span;
-use llmobs_storage::config::{
-    FlushConfig, MemtableConfig, ObjectStoreUrl, S3Config, StorageConfig,
-};
-use llmobs_storage::error::AppendError;
-use llmobs_storage::{ProjectQuery, Storage};
 use object_store::aws::AmazonS3Builder;
 use object_store::{ObjectStore, ObjectStoreExt};
 use serde_json::{Value, json};
@@ -75,19 +73,19 @@ struct Env {
 
 impl Env {
     fn from_env() -> Option<Self> {
-        let Ok(endpoint) = std::env::var("LLMOBS_TEST_S3_ENDPOINT") else {
-            println!("skipped: LLMOBS_TEST_S3_ENDPOINT is not set");
+        let Ok(endpoint) = std::env::var("CETRA_TEST_S3_ENDPOINT") else {
+            println!("skipped: CETRA_TEST_S3_ENDPOINT is not set");
             return None;
         };
-        let Ok(api) = std::env::var("LLMOBS_TEST_TOXIPROXY") else {
-            println!("skipped: LLMOBS_TEST_TOXIPROXY is not set");
+        let Ok(api) = std::env::var("CETRA_TEST_TOXIPROXY") else {
+            println!("skipped: CETRA_TEST_TOXIPROXY is not set");
             return None;
         };
-        let bucket = std::env::var("LLMOBS_TEST_S3_BUCKET").expect("LLMOBS_TEST_S3_BUCKET");
-        let region = std::env::var("LLMOBS_TEST_S3_REGION").unwrap_or_else(|_| "us-east-1".into());
+        let bucket = std::env::var("CETRA_TEST_S3_BUCKET").expect("CETRA_TEST_S3_BUCKET");
+        let region = std::env::var("CETRA_TEST_S3_REGION").unwrap_or_else(|_| "us-east-1".into());
         let path_style =
-            std::env::var("LLMOBS_TEST_S3_PATH_STYLE").map_or(true, |value| value != "false");
-        let token = std::env::var("LLMOBS_TEST_TOXIPROXY_TOKEN").ok();
+            std::env::var("CETRA_TEST_S3_PATH_STYLE").map_or(true, |value| value != "false");
+        let token = std::env::var("CETRA_TEST_TOXIPROXY_TOKEN").ok();
         Some(Self {
             endpoint,
             bucket,
@@ -223,7 +221,7 @@ fn check(response: reqwest::Response, what: &str) -> Result<reqwest::Response, S
 /// One test's proxy, prefix and storage endpoint.
 struct Case {
     env: Env,
-    /// The proxy's name, `llmobs-<test>`.
+    /// The proxy's name, `cetra-<test>`.
     proxy: String,
     /// The object prefix of this test, `s3-chaos-<test>-<ms>`.
     prefix: String,
@@ -233,7 +231,7 @@ struct Case {
 
 impl Case {
     async fn start(env: Env, test: &str) -> Result<Self, String> {
-        let proxy = format!("llmobs-{test}");
+        let proxy = format!("cetra-{test}");
         env.toxi.delete(&proxy).await?;
         let upstream = env
             .endpoint
@@ -386,7 +384,7 @@ async fn append(storage: &Storage, rows: usize, payload: usize) -> Result<usize,
 /// Every span row the project reads, through a query of its snapshot.
 async fn count_rows(storage: &Storage) -> Result<usize, String> {
     let query = storage
-        .query(project(), llmobs_storage::QueryOptions::new(None, None))
+        .query(project(), cetra_storage::QueryOptions::new(None, None))
         .await
         .map_err(|error| format!("query: {error}"))?;
     Ok(span_count(&query).await)
@@ -432,7 +430,7 @@ async fn largest_object(dir: &Path) -> Result<i64, String> {
 
 /// The multipart uploads under `prefix`, as `ListMultipartUploads` reports them. `object_store`
 /// has no call for it, so this runs curl with its built-in SigV4 signing. The keys go to curl on
-/// stdin (`-K -`), never on a command line. The URL follows `LLMOBS_TEST_S3_PATH_STYLE`, with the
+/// stdin (`-K -`), never on a command line. The URL follows `CETRA_TEST_S3_PATH_STYLE`, with the
 /// query parameters in sorted order, which is the order curl signs. The prefix is sent with a
 /// trailing `/` (encoded), so `s3-chaos-x-1` does not match `s3-chaos-x-12`. The answer must be a
 /// 200 `ListMultipartUploadsResult`: any other status is an error, not an empty list.

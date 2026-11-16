@@ -20,11 +20,11 @@ pub struct SessionSummary {
     /// Session id.
     pub session_id: String,
     /// Earliest trace start, nanoseconds since the Unix epoch. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub start_time: i64,
     /// Latest trace end, nanoseconds since the Unix epoch. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub end_time: i64,
     /// `end_time - start_time`, nanoseconds.
@@ -133,9 +133,9 @@ pub struct SessionListParams {
 mod tests {
     use std::collections::BTreeMap;
 
-    use llmobs_core::enums::{ScoreSource, SpanStatus};
-    use llmobs_core::ids::TraceId;
-    use llmobs_core::score::ScoreValue;
+    use cetra_core::enums::{ScoreSource, SpanStatus};
+    use cetra_core::ids::TraceId;
+    use cetra_core::score::ScoreValue;
     use serde::Serialize;
     use uuid::Uuid;
 

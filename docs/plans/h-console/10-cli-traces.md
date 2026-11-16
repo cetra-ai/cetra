@@ -1,8 +1,8 @@
-# H10 — `llmobs traces` and `llmobs projects`
+# H10 — `cetra traces` and `cetra projects`
 
 One commit: `cli: add traces and projects commands`.
 
-Adds `llmobs traces list`, `llmobs traces get <TRACE_ID>` and `llmobs projects list` (spec 09 § CLI, D-H-12) on top of H9's client and table renderer.
+Adds `cetra traces list`, `cetra traces get <TRACE_ID>` and `cetra projects list` (spec 09 § CLI, D-H-12) on top of H9's client and table renderer.
 
 ## Before you start
 
@@ -29,7 +29,7 @@ No new dependency.
 
 ## Why the server's types
 
-Responses are deserialized into `llmobs_server::api::traces::{TraceSummary, TraceDetail}`, `llmobs_server::api::account::{OrgMembership, Project, OrgRole}` and `llmobs_server::api::common::Page<T>`. They are `pub`, derive `Deserialize`, and are the types the server serializes, so the CLI cannot drift from the contract. (H9 kept a CLI-local copy for the SQL result only because it reads two fields of it.)
+Responses are deserialized into `cetra_server::api::traces::{TraceSummary, TraceDetail}`, `cetra_server::api::account::{OrgMembership, Project, OrgRole}` and `cetra_server::api::common::Page<T>`. They are `pub`, derive `Deserialize`, and are the types the server serializes, so the CLI cannot drift from the contract. (H9 kept a CLI-local copy for the SQL result only because it reads two fields of it.)
 
 `--format json` parses the body as a `serde_json::Value` and prints `serde_json::to_string_pretty(&value)` plus `\n`. The root `Cargo.toml` enables serde_json's `preserve_order`, so object keys keep the server's order; the output is indented with two spaces; numbers are re-printed by serde_json, which is the library the server used to write them, so they print the same. No field is dropped or added.
 
@@ -37,7 +37,7 @@ Responses are deserialized into `llmobs_server::api::traces::{TraceSummary, Trac
 
 `traces list` and `traces get` work with a PAT (read or read-write) or with an `sk` key that has the `read` scope, on the key's own project (spec 08; `--project` must then name that project). `projects list` needs a PAT: an `sk` key gets `403`, printed as `Forbidden (forbidden)`.
 
-`--project` is required on `traces list` and `traces get`, through the flag or `LLMOBS_PROJECT`. When both are missing, clap prints its own "required argument" error and exits 2; that is intended.
+`--project` is required on `traces list` and `traces get`, through the flag or `CETRA_PROJECT`. When both are missing, clap prints its own "required argument" error and exits 2; that is intended.
 
 ## Files
 
@@ -88,7 +88,7 @@ and declare `mod projects; mod traces;`. In `run_cli`, add the arms `Command::Tr
 In `traces.rs`:
 
 ```rust
-/// `llmobs traces …`.
+/// `cetra traces …`.
 #[derive(Debug, Subcommand)]
 pub(crate) enum TracesCommand {
     /// List traces, newest first by default.
@@ -154,11 +154,11 @@ pub(crate) enum TraceFormat {
     Json,
 }
 
-/// `llmobs traces list`.
+/// `cetra traces list`.
 #[derive(Debug, Args)]
 pub(crate) struct TraceListArgs {
     /// Project UUID or org-slug/project-slug.
-    #[arg(long, env = "LLMOBS_PROJECT", value_name = "PROJECT")]
+    #[arg(long, env = "CETRA_PROJECT", value_name = "PROJECT")]
     pub(crate) project: String,
     /// Filter DSL over the traces view (spec 05), for example "status = 'error'".
     #[arg(long, value_name = "DSL")]
@@ -200,14 +200,14 @@ pub(crate) struct TraceListArgs {
     pub(crate) connection: ConnectionArgs,
 }
 
-/// `llmobs traces get`.
+/// `cetra traces get`.
 #[derive(Debug, Args)]
 pub(crate) struct TraceGetArgs {
     /// Trace id, 32 hex digits.
     #[arg(value_name = "TRACE_ID")]
     pub(crate) trace_id: String,
     /// Project UUID or org-slug/project-slug.
-    #[arg(long, env = "LLMOBS_PROJECT", value_name = "PROJECT")]
+    #[arg(long, env = "CETRA_PROJECT", value_name = "PROJECT")]
     pub(crate) project: String,
     /// When the trace happened, RFC 3339 or epoch milliseconds; speeds up the lookup.
     #[arg(long, value_name = "TIME")]
@@ -225,14 +225,14 @@ pub(crate) struct TraceGetArgs {
 In `projects.rs`:
 
 ```rust
-/// `llmobs projects …`.
+/// `cetra projects …`.
 #[derive(Debug, Subcommand)]
 pub(crate) enum ProjectsCommand {
     /// List every project you can read, across your orgs.
     List(ProjectListArgs),
 }
 
-/// `llmobs projects list`.
+/// `cetra projects list`.
 #[derive(Debug, Args)]
 pub(crate) struct ProjectListArgs {
     /// Output format.
@@ -325,7 +325,7 @@ Six decimals round: `Some(0.0000036)` prints `0.000004`, and a cost below `0.000
 
 ## Step 3 — `traces get`
 
-1. Parse `args.trace_id.trim()` with `llmobs_core::ids::TraceId::from_str`; failure is the error `the trace id must be 32 hex digits`. This happens before resolving the target.
+1. Parse `args.trace_id.trim()` with `cetra_core::ids::TraceId::from_str`; failure is the error `the trace id must be 32 hex digits`. This happens before resolving the target.
 2. Resolve the target; `client.get_json(&format!("/api/v1/projects/{}/traces/{}", client::project_segment(&args.project), trace_id.to_string()), &query, Duration::from_secs(60))`, where `query` is `[("around", value)]` when `--around` is given and empty otherwise. A `404` comes back as H9's `problem_error` text, `Not Found (not_found)`.
 3. `--format json`: `serde_json::to_string_pretty(&value)?` and `\n` to `streams.out`.
 4. `--format tree`: `serde_json::from_value::<TraceDetail>(value)` (error `the server sent an invalid response`), then `write_tree(streams.out, &detail)?`. When `detail.truncated`, write to `streams.err` exactly `note: the trace has more spans than the server returns; the tree shows the first <n>\n`, where `<n>` is `detail.spans.len()`.
@@ -382,7 +382,7 @@ pub(crate) async fn run(command: &ProjectsCommand, credentials: impl FnOnce() ->
 
 All tests are in `#[cfg(test)] mod tests` of `traces.rs` and `projects.rs`. Server tests use `#[tokio::test(flavor = "multi_thread")]`.
 
-**Argument helpers.** Like H9's `query_args`, add in `traces.rs`'s tests `fn traces_args(argv: &[&str]) -> TracesCommand` (parses `["llmobs", "traces", …argv]` with `crate::Cli::try_parse_from(...).unwrap()` and returns `*command` from `crate::Command::Traces { command }`, else `panic!`), and in `projects.rs`'s tests `fn projects_args(argv: &[&str]) -> ProjectsCommand` the same way. Tests call `run(&traces_args(…), provider, &mut streams).await` (or `projects::run`), except test 7, which needs a fixed `now`: it takes the arguments out with `let TracesCommand::List(args) = traces_args(&[…]) else { panic!() };` and calls `list(&args, provider, &mut streams, now).await`. `use clap::Parser;` in both test modules. Collect output in `Vec<u8>` writers through an `Io` with `input: &mut std::io::empty()` and `stdout_is_terminal: false`. The credentials provider is `|| Ok(dir.path().join("missing.toml"))` for a `tempfile::tempdir()` `dir`, which is never read because every test passes `--url` and `--token`.
+**Argument helpers.** Like H9's `query_args`, add in `traces.rs`'s tests `fn traces_args(argv: &[&str]) -> TracesCommand` (parses `["cetra", "traces", …argv]` with `crate::Cli::try_parse_from(...).unwrap()` and returns `*command` from `crate::Command::Traces { command }`, else `panic!`), and in `projects.rs`'s tests `fn projects_args(argv: &[&str]) -> ProjectsCommand` the same way. Tests call `run(&traces_args(…), provider, &mut streams).await` (or `projects::run`), except test 7, which needs a fixed `now`: it takes the arguments out with `let TracesCommand::List(args) = traces_args(&[…]) else { panic!() };` and calls `list(&args, provider, &mut streams, now).await`. `use clap::Parser;` in both test modules. Collect output in `Vec<u8>` writers through an `Io` with `input: &mut std::io::empty()` and `stdout_is_terminal: false`. The credentials provider is `|| Ok(dir.path().join("missing.toml"))` for a `tempfile::tempdir()` `dir`, which is never read because every test passes `--url` and `--token`.
 
 **Canned server.** Requests whose exact shape matters are checked against H9's `crate::test_server::Canned`: `Canned::json(responses).await` answers each request in order, and `canned.recorded()` returns the `Recorded` requests (`target` is the path and query as sent), readable as soon as the command returns. Tests pass `--url <canned.url> --token x`.
 
@@ -434,7 +434,7 @@ Real-server tests (`crate::test_server::TestServer`, explicit `--url <server.url
 
 `main.rs` tests:
 
-21. `admin_list_users_keeps_its_format_flag`: `crate::Cli::try_parse_from(["llmobs", "admin", "list-users", "--format", "json"])` parses, and its `format` is `output::ListFormat::Json`; with no `--format` it is `Table`; `--format xml` → `ErrorKind::InvalidValue`.
+21. `admin_list_users_keeps_its_format_flag`: `crate::Cli::try_parse_from(["cetra", "admin", "list-users", "--format", "json"])` parses, and its `format` is `output::ListFormat::Json`; with no `--format` it is `Table`; `--format xml` → `ErrorKind::InvalidValue`.
 
 More `traces.rs` tests (canned server unless stated):
 
@@ -447,14 +447,14 @@ More `traces.rs` tests (canned server unless stated):
 
 ```bash
 export PATH="$HOME/.local/share/nvm/v26.13.0/bin:$PATH"
-cargo test -p llmobs-cli
+cargo test -p cetra-cli
 just check-rust
 just check
 ```
 
 ## Done when
 
-- `llmobs traces list --help`, `llmobs traces get --help` and `llmobs projects list --help` show every flag of Step 1.
+- `cetra traces list --help`, `cetra traces get --help` and `cetra projects list --help` show every flag of Step 1.
 - Tests 1–25 and every H9 test pass.
 - `just check` passes; `git status` shows only the files of § Files.
 - Commit `cli: add traces and projects commands`.

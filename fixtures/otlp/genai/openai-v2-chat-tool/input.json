@@ -41,15 +41,15 @@
           },
           "spans": [
             {
-              "traceId": "4542f4588b37313fb3ac4b953f83c6eb",
-              "spanId": "e023c2094dc1fb2e",
+              "traceId": "84f31bb10e9fbbe9026e4d6901926481",
+              "spanId": "2f4a797d0cf5f83d",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
               "name": "chat gpt-4o-mini-2024-07-18",
               "kind": 3,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590040000000",
+              "endTimeUnixNano": "1767225590041000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",
@@ -132,15 +132,15 @@
               "status": null
             },
             {
-              "traceId": "3e37632a82e4fb03efa5af71be79762a",
-              "spanId": "4f809cbcc03dc2e9",
+              "traceId": "8b465acc6ecaa0e960affc4d4df1f786",
+              "spanId": "5b8f2855a23f4001",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
               "name": "chat gpt-4o-mini-2024-07-18",
               "kind": 3,
               "startTimeUnixNano": "1767225590042000000",
-              "endTimeUnixNano": "1767225590075000000",
+              "endTimeUnixNano": "1767225590076000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",

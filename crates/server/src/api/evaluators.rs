@@ -6,9 +6,9 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use llmobs_core::enums::ScoreDataType;
-use llmobs_core::ids::TraceId;
-use llmobs_core::score::ScoreValue;
+use cetra_core::enums::ScoreDataType;
+use cetra_core::ids::TraceId;
+use cetra_core::score::ScoreValue;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
@@ -50,7 +50,7 @@ impl EvaluatorKind {
     }
 }
 
-/// The score an evaluator writes. The JSON of `llmobs_eval::OutputScore`.
+/// The score an evaluator writes. The JSON of `cetra_eval::OutputScore`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OutputScoreBody {
@@ -85,11 +85,11 @@ pub struct Evaluator {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_by: Option<Uuid>,
     /// Creation time. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub created_at: i64,
     /// Last change time. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub updated_at: i64,
 }
@@ -197,8 +197,8 @@ pub struct EvaluatorTemplateList {
     pub data: Vec<EvaluatorTemplate>,
 }
 
-impl From<&llmobs_eval::JudgeTemplate> for EvaluatorTemplate {
-    fn from(template: &llmobs_eval::JudgeTemplate) -> Self {
+impl From<&cetra_eval::JudgeTemplate> for EvaluatorTemplate {
+    fn from(template: &cetra_eval::JudgeTemplate) -> Self {
         Self {
             id: template.id.to_owned(),
             name: template.name.to_owned(),
@@ -219,10 +219,10 @@ impl From<&llmobs_eval::JudgeTemplate> for EvaluatorTemplate {
     }
 }
 
-/// The built-in templates, in `llmobs_eval::builtin_templates` order.
+/// The built-in templates, in `cetra_eval::builtin_templates` order.
 pub fn builtin_template_list() -> EvaluatorTemplateList {
     EvaluatorTemplateList {
-        data: llmobs_eval::builtin_templates()
+        data: cetra_eval::builtin_templates()
             .iter()
             .map(EvaluatorTemplate::from)
             .collect(),
@@ -367,7 +367,7 @@ pub struct EvaluatorTestResult {
     pub latency_ms: u64,
     /// Whether the target trace was cut to fit the loading limits. Always false for literal variables.
     pub trace_truncated: bool,
-    /// The judge trace the run wrote (environment `llmobs-eval`). Omitted when no judge trace was written.
+    /// The judge trace the run wrote (environment `cetra-eval`). Omitted when no judge trace was written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub judge_trace_id: Option<TraceId>,
 }
@@ -378,7 +378,7 @@ mod tests {
         CreateEvaluatorRequest, EvaluatorKind, EvaluatorTestRequest, OutputScoreBody,
         builtin_template_list,
     };
-    use llmobs_core::enums::ScoreDataType;
+    use cetra_core::enums::ScoreDataType;
     use serde_json::json;
 
     #[test]

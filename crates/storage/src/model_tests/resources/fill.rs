@@ -6,8 +6,8 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use arrow::array::RecordBatch;
-use llmobs_core::ids::ProjectId;
-use llmobs_core::span::Span;
+use cetra_core::ids::ProjectId;
+use cetra_core::span::Span;
 
 use super::super::harness::{Harness, visible_span_rows};
 use super::super::shape::{HOUR_NS, SECOND_NS, day, midnight};

@@ -1,5 +1,5 @@
 [package]
-name = "llmobs-capture"
+name = "cetra-capture"
 description = "Record OTLP fixtures from real instrumentations against a local mock provider"
 version.workspace = true
 edition.workspace = true
@@ -8,7 +8,7 @@ publish = false
 license.workspace = true
 
 [[bin]]
-name = "llmobs-capture"
+name = "cetra-capture"
 path = "src/main.rs"
 
 [dependencies]

@@ -5,8 +5,8 @@
 
 use std::sync::Arc;
 
-use llmobs_core::enums::{CostSource, SpanKind};
-use llmobs_core::names::attr;
+use cetra_core::enums::{CostSource, SpanKind};
+use cetra_core::names::attr;
 use regex::{Regex, RegexBuilder, RegexSet, RegexSetBuilder};
 use serde::{Deserialize, Serialize};
 
@@ -75,7 +75,7 @@ pub struct PriceRow {
     /// When set, the row matches this provider, and also a span that names none.
     pub provider: Option<String>,
     /// Row applies at span start times at or after this instant.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     pub valid_from: i64,
     /// USD per 1M uncached input tokens.
     pub price_input: Option<f64>,

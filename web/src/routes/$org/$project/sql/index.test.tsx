@@ -34,7 +34,7 @@ function editorContent(): HTMLElement {
 }
 
 function storeDraft(query: string, ref = "acme/support-bot") {
-  localStorage.setItem(`llmobs.sql.draft.${ref}`, JSON.stringify({ query }));
+  localStorage.setItem(`cetra.sql.draft.${ref}`, JSON.stringify({ query }));
 }
 
 function captureSql(
@@ -156,9 +156,10 @@ it("saves typing to the draft", async () => {
   const content = await waitFor(editorContent);
   await user.type(content, "SELECT 7");
   await waitFor(() => {
-    expect(JSON.parse(localStorage.getItem("llmobs.sql.draft.acme/support-bot") ?? "null")).toEqual(
-      { query: "SELECT 7", params: {} },
-    );
+    expect(JSON.parse(localStorage.getItem("cetra.sql.draft.acme/support-bot") ?? "null")).toEqual({
+      query: "SELECT 7",
+      params: {},
+    });
   });
 });
 
@@ -397,17 +398,17 @@ function sqlView(overrides: Record<string, unknown>) {
 
 function storeFullDraft(draft: { query: string; params?: Record<string, string>; view?: string }) {
   localStorage.setItem(
-    "llmobs.sql.draft.acme/support-bot",
+    "cetra.sql.draft.acme/support-bot",
     JSON.stringify({ params: {}, ...draft }),
   );
 }
 
 function storedDraft(): unknown {
-  return JSON.parse(localStorage.getItem("llmobs.sql.draft.acme/support-bot") ?? "null");
+  return JSON.parse(localStorage.getItem("cetra.sql.draft.acme/support-bot") ?? "null");
 }
 
 function storedHistory(): Record<string, unknown>[] {
-  return JSON.parse(localStorage.getItem("llmobs.sql.history.acme/support-bot") ?? "[]");
+  return JSON.parse(localStorage.getItem("cetra.sql.history.acme/support-bot") ?? "[]");
 }
 
 function asRole(role: string) {
@@ -1166,7 +1167,7 @@ it("an example clears the parameters and keeps the view", async () => {
 
 it("a history pick keeps a stale ?view= from reloading", async () => {
   localStorage.setItem(
-    "llmobs.sql.history.acme/support-bot",
+    "cetra.sql.history.acme/support-bot",
     JSON.stringify([{ query: "SELECT 9", params: {}, ranAt: "2026-01-01T00:00:00.000Z", rows: 1 }]),
   );
   const { user } = await renderApp(`/acme/support-bot/sql?view=${COST_VIEW}`);
@@ -1711,11 +1712,11 @@ it("hides the schema browser and remembers it", async () => {
   await user.click(await screen.findByRole("button", { name: "Schema" }));
   expect(screen.queryByRole("navigation", { name: "Schema" })).toBeNull();
   expect(screen.getByRole("button", { name: "Schema" })).toHaveAttribute("aria-pressed", "false");
-  expect(localStorage.getItem("llmobs.sql.schema")).toBe("closed");
+  expect(localStorage.getItem("cetra.sql.schema")).toBe("closed");
 });
 
 it("starts closed when it was closed", async () => {
-  localStorage.setItem("llmobs.sql.schema", "closed");
+  localStorage.setItem("cetra.sql.schema", "closed");
   await renderApp("/acme/support-bot/sql");
   expect(await screen.findByRole("button", { name: "Schema" })).toHaveAttribute(
     "aria-pressed",

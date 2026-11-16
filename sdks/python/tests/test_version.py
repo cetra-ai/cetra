@@ -2,7 +2,7 @@ import importlib.metadata
 import tomllib
 from pathlib import Path
 
-import llmobs
+import cetra
 
 
 def test_version_matches_the_project() -> None:
@@ -10,5 +10,5 @@ def test_version_matches_the_project() -> None:
     with pyproject.open("rb") as project_file:
         project = tomllib.load(project_file)
     version = project["project"]["version"]
-    assert llmobs.__version__ == version
-    assert llmobs.__version__ == importlib.metadata.version("llmobs")
+    assert cetra.__version__ == version
+    assert cetra.__version__ == importlib.metadata.version("cetra-sdk")

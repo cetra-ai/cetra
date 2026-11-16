@@ -4,7 +4,7 @@ import { InMemorySpanExporter, type ReadableSpan, TracerProvider } from "@opente
 import { describe, expect, it, vi } from "vitest";
 
 import { defaultFilter } from "./filter.js";
-import { LlmobsSpanProcessor } from "./processor.js";
+import { CetraSpanProcessor } from "./processor.js";
 
 /** A minimal `ReadableSpan`: only the scope and the attributes vary here. */
 function spanOf(options: { scope?: string; attributes?: Attributes } = {}): ReadableSpan {
@@ -33,12 +33,12 @@ function spanOf(options: { scope?: string; attributes?: Attributes } = {}): Read
 }
 
 describe("defaultFilter (D-F-5)", () => {
-  it.each(["llmobs", "ai"])("exports a span whose scope is %s", (scope) => {
+  it.each(["cetra", "ai"])("exports a span whose scope is %s", (scope) => {
     expect(defaultFilter(spanOf({ scope }))).toBe(true);
   });
 
   it.each([
-    "llmobs.span.kind",
+    "cetra.span.kind",
     "gen_ai.request.model",
     "llm.input_messages.0.message.role",
     "openinference.inference.usage",
@@ -57,7 +57,7 @@ describe("defaultFilter (D-F-5)", () => {
 
   it.each([
     ["an HTTP-like span", { "http.request.method": "GET", "server.address": "example.com" }],
-    ["a near-miss prefix", { llmobsx: "v", "input.values": "v", gen_ai: "v" }],
+    ["a near-miss prefix", { cetrax: "v", "input.values": "v", gen_ai: "v" }],
     ["no attributes at all", {}],
   ])("drops %s", (_name, attributes) => {
     expect(defaultFilter(spanOf({ scope: "http.client", attributes }))).toBe(false);
@@ -73,13 +73,13 @@ describe("defaultFilter (D-F-5)", () => {
   });
 });
 
-/** A provider whose spans flow through one llmobs processor into memory. */
+/** A provider whose spans flow through one cetra processor into memory. */
 function ruleProvider(options: {
   exportFilter?: (span: ReadableSpan) => boolean;
   defaultFilter: boolean;
-}): { exporter: InMemorySpanExporter; provider: TracerProvider; processor: LlmobsSpanProcessor } {
+}): { exporter: InMemorySpanExporter; provider: TracerProvider; processor: CetraSpanProcessor } {
   const exporter = new InMemorySpanExporter();
-  const processor = new LlmobsSpanProcessor(exporter, options);
+  const processor = new CetraSpanProcessor(exporter, options);
   const provider = new TracerProvider({ spanProcessors: [processor] });
   return { exporter, provider, processor };
 }
@@ -95,7 +95,7 @@ describe("the processor's export rule", () => {
   it("exports everything in own mode (defaultFilter false)", async () => {
     const { exporter, provider, processor } = ruleProvider({ defaultFilter: false });
     httpSpan(provider);
-    provider.getTracer("llmobs").startSpan("work").end();
+    provider.getTracer("cetra").startSpan("work").end();
     await processor.forceFlush();
     expect(exporter.getFinishedSpans().map((span) => span.name)).toEqual(["GET", "work"]);
   });
@@ -103,7 +103,7 @@ describe("the processor's export rule", () => {
   it("applies the default rule in global mode: the HTTP span is dropped, ours kept", async () => {
     const { exporter, provider, processor } = ruleProvider({ defaultFilter: true });
     httpSpan(provider);
-    provider.getTracer("llmobs").startSpan("work").end();
+    provider.getTracer("cetra").startSpan("work").end();
     await processor.forceFlush();
     expect(exporter.getFinishedSpans().map((span) => span.name)).toEqual(["work"]);
   });
@@ -114,7 +114,7 @@ describe("the processor's export rule", () => {
       exportFilter: (span) => span.name === "GET",
     });
     httpSpan(provider);
-    provider.getTracer("llmobs").startSpan("work").end();
+    provider.getTracer("cetra").startSpan("work").end();
     await processor.forceFlush();
     expect(exporter.getFinishedSpans().map((span) => span.name)).toEqual(["GET"]);
   });
@@ -141,7 +141,7 @@ describe("the processor's export rule", () => {
       httpSpan(provider);
       await processor.forceFlush();
       expect(exporter.getFinishedSpans().map((span) => span.name)).toEqual(["GET"]);
-      expect(debug).toHaveBeenCalledWith("llmobs: exportFilter raised RangeError; span exported");
+      expect(debug).toHaveBeenCalledWith("cetra: exportFilter raised RangeError; span exported");
     } finally {
       debug.mockRestore();
     }

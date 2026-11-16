@@ -5,7 +5,7 @@ use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
-use llmobs_core::ids::OrgId;
+use cetra_core::ids::OrgId;
 
 use crate::api::account::{CreateProjectRequest, OrgRole, Project, UpdateProjectRequest};
 use crate::api::common::{FieldError, Page, PageParams};
@@ -944,9 +944,9 @@ mod tests {
     /// Commits one span of `trace` to `project`, starting at `start_time`.
     async fn commit_at(app: &TestApp, project: &ProjectRow, trace: &str, start_time: i64) {
         let mut row = dataset_span(0);
-        row.trace_id = trace.parse::<llmobs_core::ids::TraceId>().unwrap();
+        row.trace_id = trace.parse::<cetra_core::ids::TraceId>().unwrap();
         row.span_id = "b4000000000000aa"
-            .parse::<llmobs_core::ids::SpanId>()
+            .parse::<cetra_core::ids::SpanId>()
             .unwrap();
         row.parent_span_id = None;
         row.start_time = start_time;

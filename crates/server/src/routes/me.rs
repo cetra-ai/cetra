@@ -198,8 +198,8 @@ mod tests {
     use crate::test_support::{TestApp, assert_logs_clean};
     use uuid::Uuid;
 
-    const PASSWORD: &str = "llmobs-ok1";
-    const NEW_PASSWORD: &str = "llmobs-ok2";
+    const PASSWORD: &str = "cetra-ok-1";
+    const NEW_PASSWORD: &str = "cetra-ok-2";
 
     fn cookie_pair(set_cookie: &axum::http::HeaderValue) -> String {
         set_cookie

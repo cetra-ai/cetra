@@ -1,16 +1,16 @@
 # P · M2 — Org entitlements and the control-plane interface
 
-Milestone 2 of track P ([`00-design.md`](00-design.md)). It builds on M1 ([`01-m1-open-core-license.md`](01-m1-open-core-license.md), merged first) and gives track Q (the cloud control plane, private repository `llmobs-control`) what its M2 needs.
+Milestone 2 of track P ([`00-design.md`](00-design.md)). It builds on M1 ([`01-m1-open-core-license.md`](01-m1-open-core-license.md), merged first) and gives track Q (the cloud control plane, private repository `cetra-control`) what its M2 needs.
 
 When M2 is done:
-- the signed-token code lives in its own Elastic-2.0 crate, `crates/token` (`llmobs-token`), which the server, `tools/license` and Q share; each built-in key names the token kinds it may sign (D-P-26, D-P-27);
+- the signed-token code lives in its own Elastic-2.0 crate, `crates/token` (`cetra-token`), which the server, `tools/license` and Q share; each built-in key names the token kinds it may sign (D-P-26, D-P-27);
 - `[entitlements.defaults]` sets the instance defaults: plan name, core features and the nine limits (D-P-10, D-P-13);
 - a cloud cell accepts each org's signed token on `PUT /api/internal/v1/orgs/{org_id}/entitlements`, stores it in `meta.db`, and resolves the org's entitlements from it until its grace period ends (D-P-11);
 - the cell records every shrink of an org's data window, so M4's retention can use the largest window of the last 30 days (D-P-30);
 - `control_plane` bearer tokens with a `scope` authenticate internal endpoints (D-P-24, D-P-28); `POST /api/internal/v1/orgs` creates an org with Q's id and its owner (D-P-29);
 - `orgs.user_create = false` stops users from creating orgs on a cloud cell (D-P-31);
 - `GET /api/v1/orgs/{org}/entitlements` returns the plan, limits and token status, shown on a new org settings **Plan** page (D-P-32);
-- `llmobs admin entitlements show <org>` prints an org's resolved entitlements.
+- `cetra admin entitlements show <org>` prints an org's resolved entitlements.
 
 **Read first, in this order:**
 1. `AGENTS.md` (rules, commands, privacy).
@@ -41,13 +41,13 @@ just fmt
 just check
 ```
 
-`just check` must pass before every commit; it takes over 20 minutes (storage crash tests). While iterating use `cargo test -p llmobs-token`, `cargo test -p llmobs-server <filter>`, `cargo test -p llmobs-license-tool`, `just lint`, `just check-ee`, `just check-web`, `cd web && pnpm vitest run <file>`.
+`just check` must pass before every commit; it takes over 20 minutes (storage crash tests). While iterating use `cargo test -p cetra-token`, `cargo test -p cetra-server <filter>`, `cargo test -p cetra-license-tool`, `just lint`, `just check-ee`, `just check-web`, `cd web && pnpm vitest run <file>`.
 
 ## Sub-phases
 
 | # | Subject | What | After |
 |---|---|---|---|
-| P1 | `Move signed tokens into llmobs-token` | `crates/token`, claim types, keys bound to kinds; server, tool and fixtures use it | M1 |
+| P1 | `Move signed tokens into cetra-token` | `crates/token`, claim types, keys bound to kinds; server, tool and fixtures use it | M1 |
 | P2 | `Add instance entitlement defaults` | `[entitlements.defaults]`, `Feature::RetentionManagement`, `Limits`, defaults layer | P1 |
 | P3 | `Store org entitlement tokens` | migration (`org_entitlements`, `org_window_ends`, drop `orgs.limits`), `meta::entitlements` | P2 |
 | P4 | `Resolve entitlements from org tokens` | `OrgGrant`, load at startup, `of` with tokens, `resolve`, `plan_at`, `retention_window_at` | P3 |
@@ -55,7 +55,7 @@ just check
 | P6 | `Add control-plane bearer tokens` | `Principal::ControlPlane`, `Access::ControlPlane { scope }` | P5 |
 | P7 | `Let the control plane create orgs` | `POST /api/internal/v1/orgs`, `insert_org` takes the id, `owner_not_allowed` | P6 |
 | P8 | `Add orgs.user_create` | config, `403` on `POST /api/v1/orgs`, `AuthConfig`, web "New organization" link | P7 |
-| P9 | `Return the plan and limits of an org` | `OrgEntitlements` v2, fixtures, `llmobs admin entitlements show` | P8 |
+| P9 | `Return the plan and limits of an org` | `OrgEntitlements` v2, fixtures, `cetra admin entitlements show` | P8 |
 | P10 | `Add the org Plan page` | `/$org/settings/plan`; roadmap | P9 |
 | P11 | `Add the cloud signing keys` | `cloud-1`, `cloud-2` in `RELEASE_KEYS`; roadmap | P10 |
 
@@ -75,7 +75,7 @@ Track Q depends on this crate by git commit, so it has no dependency on another 
 
 ```toml
 [package]
-name = "llmobs-token"
+name = "cetra-token"
 description = "Signed licence, org and control-plane tokens (D-P-5, D-P-26)"
 version.workspace = true
 edition.workspace = true
@@ -96,19 +96,19 @@ uuid.workspace = true
 workspace = true
 ```
 
-Root `Cargo.toml`: `llmobs-token = { path = "crates/token" }` in `[workspace.dependencies]` under `# workspace crates` (`crates/*` already makes it a member). `crates/server/Cargo.toml` and `tools/license/Cargo.toml` add `llmobs-token.workspace = true`; `tools/license` drops `ed25519-dalek` and `base64` if it no longer uses them directly (keep what the compiler needs).
+Root `Cargo.toml`: `cetra-token = { path = "crates/token" }` in `[workspace.dependencies]` under `# workspace crates` (`crates/*` already makes it a member). `crates/server/Cargo.toml` and `tools/license/Cargo.toml` add `cetra-token.workspace = true`; `tools/license` drops `ed25519-dalek` and `base64` if it no longer uses them directly (keep what the compiler needs).
 
 **`crates/token/src/lib.rs`** (SPDX first line). Modules `mod keys; mod rfc3339;` and the public API below. Move the M1 code of `crates/server/src/ee/token.rs` here (format, `verify`, key decoding) and extend it.
 
 ```rust
 // SPDX-License-Identifier: Elastic-2.0
 //! Signed tokens: licence keys, org entitlement tokens and control-plane requests
-//! (D-P-5, D-P-26, D-P-27). Shared by `llmobs-server`, `tools/license` and the
+//! (D-P-5, D-P-26, D-P-27). Shared by `cetra-server`, `tools/license` and the
 //! control plane. Depends on no other workspace crate.
 //!
-//! A token is `llmobs1.<kid>.<payload>.<signature>`: base64url (no padding) of a
+//! A token is `cetra1.<kid>.<payload>.<signature>`: base64url (no padding) of a
 //! UTF-8 JSON object, then of the ed25519 signature of the ASCII bytes
-//! `llmobs1.<kid>.<payload>`. The signature is checked before the JSON is parsed.
+//! `cetra1.<kid>.<payload>`. The signature is checked before the JSON is parsed.
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -122,7 +122,7 @@ mod rfc3339;
 pub use keys::{BuiltInKey, built_in_keys};
 
 /// Format tag. Renamed with the product (D46).
-pub const TOKEN_TAG: &str = "llmobs1";
+pub const TOKEN_TAG: &str = "cetra1";
 
 /// Largest accepted token, in bytes.
 pub const MAX_TOKEN_BYTES: usize = 16 * 1024;
@@ -327,10 +327,10 @@ plus a crate-private `fn find(kid: &str) -> Option<(&'static BuiltInKey, Verifyi
 ### Moves and adaptations
 
 - **Delete** `crates/server/src/ee/token.rs` and the `pub(crate) mod token;` line in `ee/mod.rs`; move its tests into `crates/token/src/lib.rs` `#[cfg(test)] mod tests`, adapted: `Verified` has no `payload` field any more, so `round_trip` and `tampering_is_refused` sign a **complete** licence payload (the JSON of `fixtures/license/payloads/active.json`) and compare `verified.claims`; `fixture_tokens_verify` reads each token and payload with `std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/license/…"))` and compares `verified.claims` with `serde_json::from_str::<Claims>(payload)`; the "error texts never quote the token" test iterates all seven `TokenError` variants. The test-only signer in the crate tests builds the dev key from `fixtures/license/dev-1.key` the same way.
-- **Other references** to the removed module: `entitlements/mod.rs` imports `crate::ee::token::TokenError` (use `llmobs_token::TokenError`); `test_support/mod.rs` uses `crate::ee::token::TOKEN_TAG` (use `llmobs_token::TOKEN_TAG` or remove the use with the new `sign_raw`). `grep -rn 'ee::token' crates/` must be empty. Also update the text that names the old file: `fixtures/license/README.md` ("`DEV_KEYS` in `crates/token/src/keys.rs`"), the module doc of `tools/license/src/main.rs`, and `docs/plans/p-entitlements/00-design.md` § Request paths (`llmobs_token::verify` instead of `ee::token::verify`).
-- **Server, `ee/license.rs`**: parse with `llmobs_token::verify`, then `match verified.claims { Claims::License(claims) => …, _ => return Err(InvalidLicense::Token(TokenError::WrongKind)) }`. `InvalidLicense` becomes two variants: `Token(#[from] llmobs_token::TokenError)` and `Fields` (the customer and date checks stay in the server). Remove the `Kind`/`Claims` structs M1 had there. Update the tests: what was `InvalidLicense::WrongKind` is now `InvalidLicense::Token(TokenError::WrongKind)`, `InvalidLicense::Payload` is `InvalidLicense::Token(TokenError::Payload)`; the admin licence tests that compare `reason` texts use the new `Display` strings above.
-- **Server, `test_support/mod.rs`**: `sign_raw(payload: &[u8])` calls `llmobs_token::sign_raw(&dev_signing_key(), "dev-1", payload)` (`.expect("dev key signs")` is fine in test code); `sign_token` keeps its signature. Add `pub(crate) fn dev_signing_key() -> ed25519_dalek::SigningKey` built from `DEV_SEED` (the server keeps `ed25519-dalek` as a dev-dependency only if the build needs it there; move it from `[dependencies]` to `[dev-dependencies]` when nothing else uses it).
-- **`tools/license/src/main.rs`**: `sign` calls `llmobs_token::sign_raw`; delete its own `TAG` and `valid_kid` copies (map `TokenError::Malformed` to its `BadKid` error).
+- **Other references** to the removed module: `entitlements/mod.rs` imports `crate::ee::token::TokenError` (use `cetra_token::TokenError`); `test_support/mod.rs` uses `crate::ee::token::TOKEN_TAG` (use `cetra_token::TOKEN_TAG` or remove the use with the new `sign_raw`). `grep -rn 'ee::token' crates/` must be empty. Also update the text that names the old file: `fixtures/license/README.md` ("`DEV_KEYS` in `crates/token/src/keys.rs`"), the module doc of `tools/license/src/main.rs`, and `docs/plans/p-entitlements/00-design.md` § Request paths (`cetra_token::verify` instead of `ee::token::verify`).
+- **Server, `ee/license.rs`**: parse with `cetra_token::verify`, then `match verified.claims { Claims::License(claims) => …, _ => return Err(InvalidLicense::Token(TokenError::WrongKind)) }`. `InvalidLicense` becomes two variants: `Token(#[from] cetra_token::TokenError)` and `Fields` (the customer and date checks stay in the server). Remove the `Kind`/`Claims` structs M1 had there. Update the tests: what was `InvalidLicense::WrongKind` is now `InvalidLicense::Token(TokenError::WrongKind)`, `InvalidLicense::Payload` is `InvalidLicense::Token(TokenError::Payload)`; the admin licence tests that compare `reason` texts use the new `Display` strings above.
+- **Server, `test_support/mod.rs`**: `sign_raw(payload: &[u8])` calls `cetra_token::sign_raw(&dev_signing_key(), "dev-1", payload)` (`.expect("dev key signs")` is fine in test code); `sign_token` keeps its signature. Add `pub(crate) fn dev_signing_key() -> ed25519_dalek::SigningKey` built from `DEV_SEED` (the server keeps `ed25519-dalek` as a dev-dependency only if the build needs it there; move it from `[dependencies]` to `[dev-dependencies]` when nothing else uses it).
+- **`tools/license/src/main.rs`**: `sign` calls `cetra_token::sign_raw`; delete its own `TAG` and `valid_kid` copies (map `TokenError::Malformed` to its `BadKid` error).
 - **`fixtures/license/payloads/wrong-kind.json`** becomes a complete control-plane payload, so that it parses and is refused as the wrong kind by the licence parser:
 
   ```json
@@ -346,9 +346,9 @@ plus a crate-private `fn find(kid: &str) -> Option<(&'static BuiltInKey, Verifyi
   The tool scans `payloads/*.json`, so it signs the new file by itself; add `org-pro` to the crate's `fixture_tokens_verify` list. Run `just license-fixtures` (tokens are regenerated and committed).
 - **`justfile` `check-ee`**: add `crates/token` to the `for dir in` list and to the `case` allow-list.
 - **Root `LICENSE`**: add `- crates/token/` to the list of Elastic-2.0 directories. **`docs/spec/12-operations.md`** § Licence keys, plans and entitlements, "Open core": add `crates/token/` to the list.
-- **`AGENTS.md`** § Layout: add `  token/     llmobs-token    signed licence, org and control-plane tokens (Elastic-2.0, D-P-26)`; § Crate dependency graph: "`token` depends on no workspace crate; `server` depends on it, and so do `tools/license` and the control plane (by git)".
+- **`AGENTS.md`** § Layout: add `  token/     cetra-token    signed licence, org and control-plane tokens (Elastic-2.0, D-P-26)`; § Crate dependency graph: "`token` depends on no workspace crate; `server` depends on it, and so do `tools/license` and the control plane (by git)".
 
-### Tests (`llmobs_token` tests)
+### Tests (`cetra_token` tests)
 
 1. All of M1's token tests, moved (keys decode; dev seed matches dev key; round trip; tampering; malformed; unknown key; release key needs prod signature; error texts never quote the token; fixture tokens verify).
 2. `keys_are_bound_to_kinds`: a dev-signed token whose kid is rewritten to `prod-1` and whose payload is `kind: org` is `BadSignature` (signature first); a token signed with the dev seed under kid `dev-1` of each kind verifies; build a test-only key table is not possible for `KeyNotAllowed` with real keys, so test `KeyNotAllowed` through a crate-private `verify_with(token, keys: &[(BuiltInKey, VerifyingKey)])` that `verify` calls with the built-in keys: a dev-seed key bound only to `License` refuses an `Org` payload with `KeyNotAllowed`.
@@ -356,11 +356,11 @@ plus a crate-private `fn find(kid: &str) -> Option<(&'static BuiltInKey, Verifyi
 4. `org_claims_round_trip`: build an `OrgClaims` with every limit `Some(None)` except `data_access_days: Some(Some(30))`, sign with `sign`, `verify` → equal claims; the payload JSON (decode the middle part) contains `"units_cap":null` and `"data_access_days":30`; a `LimitsClaim::default()` serializes to `{}` and parses back to all `None`.
 5. `rfc3339_accepts_offsets_and_writes_nanos`: `"2026-01-01T01:00:00+01:00"` parses to 2026-01-01T00:00:00Z; serialization writes `"2026-01-01T00:00:00.000000000Z"`; `"2026-01-01"` is an error whose text does not contain `2026`.
 
-Server tests keep passing with the adaptations above; `cargo test -p llmobs-license-tool` passes with regenerated fixtures.
+Server tests keep passing with the adaptations above; `cargo test -p cetra-license-tool` passes with regenerated fixtures.
 
 ### Done
 
-`just check-ee`, `just lint`, `cargo test -p llmobs-token`, `cargo test -p llmobs-server ee::`, `cargo test -p llmobs-server entitlements::`, `cargo test -p llmobs-server routes::admin`, `cargo test -p llmobs-license-tool`, then `just check`. `Cargo.lock` gains the `llmobs-token` package and the dependency-list changes of `llmobs-server` and `llmobs-license-tool`; no new third-party version.
+`just check-ee`, `just lint`, `cargo test -p cetra-token`, `cargo test -p cetra-server ee::`, `cargo test -p cetra-server entitlements::`, `cargo test -p cetra-server routes::admin`, `cargo test -p cetra-license-tool`, then `just check`. `Cargo.lock` gains the `cetra-token` package and the dependency-list changes of `cetra-server` and `cetra-license-tool`; no new third-party version.
 
 ---
 
@@ -513,7 +513,7 @@ CREATE TABLE org_window_ends (
 
 `crates/server/src/meta/orgs.rs`: change the `OrgRow` doc line "`limits` is not read in D." to describe the row only. Nothing selects `limits` today; if the compiler or a test still names it, remove that use.
 
-`crates/server/src/meta/mod.rs`: make `expected_version` `pub(crate)`. Tests that hard-code the migration count or versions must derive them: `admin.rs` `schema_mismatch_names_the_versions` (insert `expected_version() + 1`, assert `format!("this binary expects schema {e}, found {}", e + 1)` with `e = crate::meta::expected_version()`), and the tests in `meta/mod.rs` that assert the `_sqlx_migrations` row count is 4 and use versions 4/5 (use `expected_version()` and `expected_version() + 1`). The insta snapshot of the schema (`schema_matches_the_snapshot`, `crates/server/tests/snapshots/meta_schema.snap` or wherever it lives) changes: run `INSTA_UPDATE=always cargo test -p llmobs-server schema_matches_the_snapshot`, review the diff (two new tables, no `orgs.limits`), and commit the `.snap`.
+`crates/server/src/meta/mod.rs`: make `expected_version` `pub(crate)`. Tests that hard-code the migration count or versions must derive them: `admin.rs` `schema_mismatch_names_the_versions` (insert `expected_version() + 1`, assert `format!("this binary expects schema {e}, found {}", e + 1)` with `e = crate::meta::expected_version()`), and the tests in `meta/mod.rs` that assert the `_sqlx_migrations` row count is 4 and use versions 4/5 (use `expected_version()` and `expected_version() + 1`). The insta snapshot of the schema (`schema_matches_the_snapshot`, `crates/server/tests/snapshots/meta_schema.snap` or wherever it lives) changes: run `INSTA_UPDATE=always cargo test -p cetra-server schema_matches_the_snapshot`, review the diff (two new tables, no `orgs.limits`), and commit the `.snap`.
 
 ### Store (`crates/server/src/meta/entitlements.rs`, new; `pub(crate) mod entitlements;` in `meta/mod.rs`)
 
@@ -595,7 +595,7 @@ pub(crate) struct PlanInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum OrgTokenError {
     #[error(transparent)]
-    Token(#[from] llmobs_token::TokenError),
+    Token(#[from] cetra_token::TokenError),
     #[error("the token is for another cell")]
     Audience,
     #[error("the token is for another org")]
@@ -607,7 +607,7 @@ pub(crate) enum OrgTokenError {
 }
 
 /// Verifies `token` as an org token for this cell and returns its org and grant.
-/// Checks, in order: `llmobs_token::verify` (a non-org kind is `Token(WrongKind)`),
+/// Checks, in order: `cetra_token::verify` (a non-org kind is `Token(WrongKind)`),
 /// `audience == public_url` (`Audience`), then `issued_at <= expires_at <= grace_ends_at`,
 /// a plan id and name of 1–64 characters (`Fields`). Dates against now are the caller's.
 pub(crate) fn grant_from_token(token: &str, public_url: &str, defaults: &Limits) -> Result<(OrgId, OrgGrant), OrgTokenError>;
@@ -786,7 +786,7 @@ Seed an org (`app.seed()`), make an org token for `seeded.org_id` with `test_sup
 3. `refusals`: garbage token → 400 detail `the token is malformed`; licence token → 400 `the token is not of the expected kind`; wrong audience → 400 `the token is for another cell`; org mismatch → 400; expired (grace before the clock) → 400 `the token has expired`; unknown org id (a fresh v7 uuid) → 404; a `deny_unknown_fields` body `{"token": "…", "x": 1}` → 400.
 4. `failed_tokens_hit_the_limiter_and_good_ones_do_not`: 6 PUTs with a garbage token from one peer IP (`TestRequest::peer`) → the 6th is 429 with `Retry-After`; then a valid token from the same IP → 204; 10 valid PUTs in a row (fresh tokens with increasing `issued_at`) → all 204.
 5. `window_shrink_is_recorded`: a token with `data_access_days 1825`, then a newer one with `30` → `window_ends_since` has one row with `Some(1825)` at the clock's time; a third with `30` again records nothing more.
-6. `audit_log_has_no_token`: `capture_logs` around a PUT: contains `org entitlements updated` and the org id, not `llmobs1.`.
+6. `audit_log_has_no_token`: `capture_logs` around a PUT: contains `org entitlements updated` and the org id, not `cetra1.`.
 7. `expired_token_window_is_kept_after_replacement`: a token with `data_access_days 1825` and grace ending 2025-12-20 stored directly (`meta::entitlements::put_token` + `put_grant`), defaults without a window; PUT a new token with `30` at the clock (2026-01-01) → `window_ends_since` holds `(2025-12-20, Some(1825))` and `(now, None)`; `retention_window_at` is `None` (unlimited, from the defaults that applied since 2025-12-20).
 
 The `access_suite` drives documented routes automatically; if it needs an entry for a public PUT with a path parameter, follow how it treats `post_login`.
@@ -811,12 +811,12 @@ ControlPlane {
 },
 ```
 
-In `bearer_principal`, right after reading the token and before `secret::parse_key` (compute `let now = state.clock.now_ns();` first; it is defined later in the function today, move it up): if `token.starts_with("llmobs1.")` (`format!("{}.", llmobs_token::TOKEN_TAG)`), return `control_plane_principal(state, token, now)`:
+In `bearer_principal`, right after reading the token and before `secret::parse_key` (compute `let now = state.clock.now_ns();` first; it is defined later in the function today, move it up): if `token.starts_with("cetra1.")` (`format!("{}.", cetra_token::TOKEN_TAG)`), return `control_plane_principal(state, token, now)`:
 
 ```rust
 fn control_plane_principal(state: &AppState, token: &str, now: i64) -> Result<Principal, ApiError> {
-    let Ok(verified) = llmobs_token::verify(token) else { return Err(ApiError::Unauthorized) };
-    let llmobs_token::Claims::ControlPlane(claims) = verified.claims else { return Err(ApiError::Unauthorized) };
+    let Ok(verified) = cetra_token::verify(token) else { return Err(ApiError::Unauthorized) };
+    let cetra_token::Claims::ControlPlane(claims) = verified.claims else { return Err(ApiError::Unauthorized) };
     let five_minutes = 300 * 1_000_000_000;
     let skew = 60 * 1_000_000_000;
     if claims.audience != state.config.public_url.origin()
@@ -958,7 +958,7 @@ pub struct OrgsConfig {
 // Default: user_create true, create_url None.
 ```
 
-`ServerConfig.orgs: OrgsConfig` (`#[serde(default)]`) after `entitlements`; every literal `ServerConfig { … }` gains `orgs: OrgsConfig::default(),`. Validate `create_url` like `upgrade_url` but with no placeholder (`http`/`https` with a host) → `Invalid { key: "orgs.create_url", reason: "must be an http or https URL" }`. Env: `LLMOBS_ORGS__USER_CREATE=false` works through the split provider. Config tests: default, `user_create = false` with a URL, a bad URL.
+`ServerConfig.orgs: OrgsConfig` (`#[serde(default)]`) after `entitlements`; every literal `ServerConfig { … }` gains `orgs: OrgsConfig::default(),`. Validate `create_url` like `upgrade_url` but with no placeholder (`http`/`https` with a host) → `Invalid { key: "orgs.create_url", reason: "must be an http or https URL" }`. Env: `CETRA_ORGS__USER_CREATE=false` works through the split provider. Config tests: default, `user_create = false` with a URL, a bad URL.
 
 ### Server
 
@@ -1089,7 +1089,7 @@ Tests (`routes::entitlements::tests`): the tests that compare the whole response
 `crates/server/src/admin.rs`:
 
 ```rust
-/// One org's resolved entitlements, for `llmobs admin entitlements show` (D-P-32).
+/// One org's resolved entitlements, for `cetra admin entitlements show` (D-P-32).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct EntitlementsReport {
     pub org_id: Uuid,
@@ -1136,7 +1136,7 @@ Tests: `admin::tests::entitlements_show_reads_the_token` (a stored org token →
 - The route tree is generated by `pnpm test` / `just check-web` (`gen:routes`); no manual step.
 - Tests `web/src/routes/$org/settings/plan.test.tsx`: the default fixture → "Pro + Teams", "Included" for project roles, a lock for SSO enforcement, "200,000" (or the formatter's output) for included units, "unlimited" for seats, "1,825 days"; `server.use` with `plan.source: "defaults"`, `name: "Self-hosted"`, `limits: {}` → "Instance defaults apply." and "unlimited" everywhere; `status: "grace"` → the grace warning; no `upgrade_url` → no Upgrade link.
 
-- `docs/roadmap.md` row **P** Status: `**In progress.** M1 merged (open core, licence keys, entitlements core). M2 implemented: the llmobs-token crate, org tokens from the control plane, instance defaults, control-plane tokens, internal org creation, orgs.user_create, the Plan page. M3–M5 plans to follow.`
+- `docs/roadmap.md` row **P** Status: `**In progress.** M1 merged (open core, licence keys, entitlements core). M2 implemented: the cetra-token crate, org tokens from the control plane, instance defaults, control-plane tokens, internal org creation, orgs.user_create, the Plan page. M3–M5 plans to follow.`
 
 ### Done
 

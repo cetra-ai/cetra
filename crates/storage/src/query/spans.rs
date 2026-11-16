@@ -3,11 +3,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use cetra_core::ids::ProjectId;
+use cetra_core::schema::{spans, spans_schema};
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown, TableType};
 use datafusion::physical_plan::ExecutionPlan;
-use llmobs_core::ids::ProjectId;
-use llmobs_core::schema::{spans, spans_schema};
 
 #[cfg(test)]
 use super::overlapping_files;
@@ -126,11 +126,11 @@ mod tests {
 
     use arrow::array::{Array, Int64Array, RecordBatch, StringArray, TimestampNanosecondArray};
     use arrow::datatypes::DataType;
+    use cetra_core::ids::{ProjectId, TraceId};
+    use cetra_core::schema::spans;
     use datafusion::common::ScalarValue;
     use datafusion::execution::context::{SessionConfig, SessionContext};
     use datafusion::logical_expr::{BinaryExpr, Cast, Expr, Operator, col, lit};
-    use llmobs_core::ids::{ProjectId, TraceId};
-    use llmobs_core::schema::spans;
 
     use crate::ProjectQuery;
     use crate::QueryOptions;

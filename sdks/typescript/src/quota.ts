@@ -43,7 +43,7 @@ export class QuotaState {
         : resetAt.toISOString();
       const resetText = `${reset.slice(0, 19)}Z`;
       warn(
-        `llmobs: the organization reached its monthly units cap; telemetry is dropped until ${resetText} (retrying at most every hour)`,
+        `cetra: the organization reached its monthly units cap; telemetry is dropped until ${resetText} (retrying at most every hour)`,
       );
     }
   }

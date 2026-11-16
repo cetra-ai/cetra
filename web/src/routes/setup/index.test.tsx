@@ -103,7 +103,7 @@ it("creates the admin, the org and the project, then shows the key", async () =>
   ]);
   expect(await screen.findByRole("heading", { name: "Send your first trace" })).toBeInTheDocument();
   expect(screen.getByLabelText("Secret key")).toHaveValue(
-    "sk-llmobs-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0",
+    "sk-cetra-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0",
   );
   expect(screen.getByRole("link", { name: "Go to project" })).toHaveAttribute(
     "href",
@@ -127,7 +127,7 @@ it("creates the admin, the org and the project, then shows the key", async () =>
         })),
     );
   await waitFor(() => {
-    expect(cached()).not.toContain("sk-llmobs-EXAMPLE0");
+    expect(cached()).not.toContain("sk-cetra-EXAMPLE0");
     expect(cached()).not.toContain("correct horse battery");
     expect(cached()).not.toContain("tok123");
   });

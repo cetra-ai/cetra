@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
-use llmobs_core::ids::OrgId;
+use cetra_core::ids::OrgId;
 
 use crate::auth::limits::RetryAfter;
 

@@ -25,7 +25,7 @@ Sub-phases R6.1–R6.9, one commit each. R6.8 and R6.9 can produce several commi
   - `docs/`.
 
   R6.8 and R6.9 may fix bugs anywhere in `crates/storage/src/` (D-R-2). Stop and report instead when a fix would change a file format, a public API or a spec rule beyond the spec sentence a sub-phase names.
-- **No new dependency.** Everything needed is already a dependency or dev-dependency of `llmobs-storage`: `proptest` (1.12.0; `TestRunner`, `TestRng` in R6.7), `tokio`, `tempfile`, `object_store` (its `memory::InMemory`), `futures`, `bytes`, `sqlx`. Random choices inside reader threads use a 10-line xorshift written in `concurrent.rs`, not the `rand` crate, which `llmobs-storage` does not depend on.
+- **No new dependency.** Everything needed is already a dependency or dev-dependency of `cetra-storage`: `proptest` (1.12.0; `TestRunner`, `TestRng` in R6.7), `tokio`, `tempfile`, `object_store` (its `memory::InMemory`), `futures`, `bytes`, `sqlx`. Random choices inside reader threads use a 10-line xorshift written in `concurrent.rs`, not the `rand` crate, which `cetra-storage` does not depend on.
 - **Test code**, except R6.4's fix and R6.8–R6.9's fixes. New modules are declared in `model_tests/mod.rs`; the `mod model_tests` line in `lib.rs` is M1's.
 - **Threads, not tasks, drive the test.** Lane drivers, readers, the GC thread and the watchdog are `std::thread::scope` threads that call `Harness::block_on` (M1). `Runtime::block_on` takes `&self` and may be called from several non-runtime threads at once on a multi-thread runtime; each call runs its future on the calling thread, and the futures' own spawns (DataFusion partitions, `spawn_blocking`) go to the runtime's workers. Scoped threads borrow `&Harness`, so a restart or a crash (`&mut Harness`) can only happen between scopes: that is how readers are kept out of a life that is ending.
 - **The oracle stays independent** (M1 § Conventions): `model.rs` doesn't call engine code. The concurrent mode adds no model logic, only *which* model states a read may match.
@@ -578,7 +578,7 @@ pub(super) fn run_concurrent_case(ops: &[Op], options: &ConcurrentOptions);
 
 ```rust
 fn concurrent_cases() -> u32 {
-    std::env::var("LLMOBS_CONCURRENT_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(4)
+    std::env::var("CETRA_CONCURRENT_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(4)
 }
 
 proptest! {
@@ -606,7 +606,7 @@ proptest! {
 
 The name does not contain `storage_matches_the_model`, so `just model`'s filter (`model_tests::storage_matches_the_model`) does not select it.
 
-**Budget (D-R-14).** Measure in debug, the way `just test` runs it: `time cargo test --workspace --all-features` with `LLMOBS_CONCURRENT_CASES=2`, and the filtered `cargo test --workspace --all-features model_tests::concurrent`. Other tests run in parallel with it there, which slows it. Set the default to the largest of 4, 2 or 1 that keeps the concurrent test under 60 s in the workspace run, and report both times and the value.
+**Budget (D-R-14).** Measure in debug, the way `just test` runs it: `time cargo test --workspace --all-features` with `CETRA_CONCURRENT_CASES=2`, and the filtered `cargo test --workspace --all-features model_tests::concurrent`. Other tests run in parallel with it there, which slows it. Set the default to the largest of 4, 2 or 1 that keeps the concurrent test under 60 s in the workspace run, and report both times and the value.
 
 **Seed files.** A failing concurrent case writes `crates/storage/proptest-regressions/model_tests/concurrent.txt`. Keep it only when the case fails again on at least 3 of 5 reruns (R6.9 § 3); otherwise move it to the scratchpad and name its path in the report, so `just check` doesn't become flaky.
 
@@ -622,7 +622,7 @@ The name does not contain `storage_matches_the_model`, so `just model`'s filter 
 
 ```bash
 cargo test --workspace --all-features model_tests
-LLMOBS_CONCURRENT_CASES=50 cargo test --release --workspace --all-features model_tests::concurrent::concurrent_matches_the_model
+CETRA_CONCURRENT_CASES=50 cargo test --release --workspace --all-features model_tests::concurrent::concurrent_matches_the_model
 ```
 
 Both pass. A failure in the 50-case run is a finding for R6.9: record the message and ops in the report; don't fix it here.
@@ -717,18 +717,18 @@ Parameters, from the environment, each printed at the start with `eprintln!`:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `LLMOBS_STRESS_SECS` | 300 | no new round starts after this many seconds |
-| `LLMOBS_STRESS_LANES` | 6 | lanes (projects `P(0)…P(2 × lanes − 1)`), at most 16 |
-| `LLMOBS_STRESS_READERS` | 8 | reader threads |
-| `LLMOBS_STRESS_WORKERS` | 8 | tokio worker threads per life |
-| `LLMOBS_STRESS_REMOTE` | `0` | `1` runs on the in-memory store with the 64 KiB read cache |
-| `LLMOBS_STRESS_SEED` | wall-clock nanoseconds | seeds the op lists and the readers' read mix; always printed. The same seed repeats the op lists and read choices, not the thread interleavings |
+| `CETRA_STRESS_SECS` | 300 | no new round starts after this many seconds |
+| `CETRA_STRESS_LANES` | 6 | lanes (projects `P(0)…P(2 × lanes − 1)`), at most 16 |
+| `CETRA_STRESS_READERS` | 8 | reader threads |
+| `CETRA_STRESS_WORKERS` | 8 | tokio worker threads per life |
+| `CETRA_STRESS_REMOTE` | `0` | `1` runs on the in-memory store with the 64 KiB read cache |
+| `CETRA_STRESS_SEED` | wall-clock nanoseconds | seeds the op lists and the readers' read mix; always printed. The same seed repeats the op lists and read choices, not the thread interleavings |
 
 **Ops per lane.** Each lane has its own `TestRunner::new_with_rng(Config::default(), TestRng::from_seed(RngAlgorithm::ChaCha, &seed_bytes(seed, lane)))` (`proptest::test_runner`); `seed_bytes` is the 8 little-endian bytes of `seed ^ (u64::from(lane) * 0x9E37_79B9_7F4A_7C15)` repeated 4 times (32 bytes). Each round draws one op list with `ops::ops_for(a, b).new_tree(&mut runner).expect("op tree").current()` (`proptest::strategy::{Strategy, ValueTree}`) and removes `Restart`, `Crash` and `Settle`. Lists have 1..=24 ops, so rounds are short and many.
 
 **Epochs.** A lane saturates quickly: each trace has at most 12 spans and `next_span` never goes back, and one `Retention` at `D + 4` empties a project for good. So the run is cut into **epochs** of 5 rounds. Each epoch starts from scratch: a new `TempDir` and `Harness` (`HarnessOptions { config: concurrent_config or concurrent_remote_config, workers, store: a new InMemory when remote }`), new lanes, new `Model`s (`Model::for_pair(a, b)` with `(a, b) = P::pair(lane)`) and M1's start clock. The op runners are **not** reset, so each epoch draws new op lists. One `Stats` value is kept across epochs. Every progress line prints the epoch, the round and the seed.
 
-**Rounds.** Until `LLMOBS_STRESS_SECS` have passed, epoch after epoch:
+**Rounds.** Until `CETRA_STRESS_SECS` have passed, epoch after epoch:
 1. `run_segment` with every lane's list, `readers` readers, `pace: Duration::ZERO`, `gc_every: 20 ms`, `history_keep: 512`.
 2. The barrier, by round number `r` within the epoch (from 1): `r == 5` → `settle_concurrent`, which ends the epoch; else `r == 4` → `h.crash()`; else `r == 2` → `h.restart()`; else none. After any barrier, `check_full` per lane. An epoch that runs out of time ends with `settle_concurrent` too.
 3. After each epoch, `eprintln!` the epoch, the elapsed time and the stats, then drop the harness (its `Drop` shuts the life down) before the next epoch opens its own.
@@ -749,9 +749,9 @@ After `model`:
 
 ```just
 # The concurrent model stress test (track R M6), release mode. `secs` is the
-# run time; LLMOBS_STRESS_* variables tune it (docs/plans/r-hardening/06-m6-concurrency.md).
+# run time; CETRA_STRESS_* variables tune it (docs/plans/r-hardening/06-m6-concurrency.md).
 stress secs="300":
-    LLMOBS_STRESS_SECS={{secs}} cargo test --release --workspace --all-features -- --ignored --exact --nocapture model_tests::stress::concurrent_lanes_match_the_model
+    CETRA_STRESS_SECS={{secs}} cargo test --release --workspace --all-features -- --ignored --exact --nocapture model_tests::stress::concurrent_lanes_match_the_model
 ```
 
 `just test` runs only the `#[ignore]`d crash tests it names with `--exact`, so the stress test never runs there.
@@ -759,11 +759,11 @@ stress secs="300":
 ### `AGENTS.md`
 
 - § Commands, after `just eval-live`: `` | `just stress [secs]` | the storage's concurrent model stress test, release mode (track R M6) | ``.
-- § Rules › **Tests**, after the `LLMOBS_CRASH_ITERATIONS` line: "`LLMOBS_CONCURRENT_CASES=N just test` runs more cases of the storage's concurrent model test (default 4 or less, set by measurement). `just stress [secs]` runs its stress test; `LLMOBS_STRESS_LANES`, `_READERS`, `_WORKERS`, `_REMOTE` and `_SEED` tune it, and the seed is printed so a run's op lists can be repeated (not its interleavings)."
+- § Rules › **Tests**, after the `CETRA_CRASH_ITERATIONS` line: "`CETRA_CONCURRENT_CASES=N just test` runs more cases of the storage's concurrent model test (default 4 or less, set by measurement). `just stress [secs]` runs its stress test; `CETRA_STRESS_LANES`, `_READERS`, `_WORKERS`, `_REMOTE` and `_SEED` tune it, and the seed is printed so a run's op lists can be repeated (not its interleavings)."
 
 ### Nightly (decided)
 
-The nightly workflow of M3 (`.github/workflows/nightly.yml`, outside `ci-ok`) runs `just stress 1800` and `LLMOBS_STRESS_REMOTE=1 just stress 600`, and opens an issue on failure like its other jobs, with the printed seed in the log.
+The nightly workflow of M3 (`.github/workflows/nightly.yml`, outside `ci-ok`) runs `just stress 1800` and `CETRA_STRESS_REMOTE=1 just stress 600`, and opens an issue on failure like its other jobs, with the printed seed in the log.
 - If `nightly.yml` exists when R6.7 lands: add the two steps there as `run:` steps calling the recipes (`AGENTS.md` § CI), with a job timeout of 60 minutes; run `just check-workflows`.
 - If it doesn't: write in the report and in `hardening.md` § M6 "nightly stress steps pending M3"; M3's plan carries the job.
 
@@ -771,7 +771,7 @@ The nightly workflow of M3 (`.github/workflows/nightly.yml`, outside `ci-ok`) ru
 
 ```bash
 just stress 60
-LLMOBS_STRESS_REMOTE=1 just stress 60
+CETRA_STRESS_REMOTE=1 just stress 60
 ```
 
 Both pass. Report their final stats lines. A failure is a finding for R6.9.
@@ -840,10 +840,10 @@ Each new test passes (after its fix). Run each new hook-based test 20 times in a
 Commit per bug: `storage: <fix in imperative> (R6.9)`. A final docs commit: `docs: record the M6 concurrency runs (R6.9)`.
 
 1. **Runs**, each in the background with its output in a log file in the scratchpad (a foreground command times out after 10 minutes):
-   - `LLMOBS_CONCURRENT_CASES=1000 cargo test --release --workspace --all-features model_tests::concurrent` (the local and remote proptests);
-   - `just stress 3600`, three times, each with a fresh `LLMOBS_STRESS_SEED` (printed);
-   - `LLMOBS_STRESS_REMOTE=1 just stress 3600`, once;
-   - `LLMOBS_STRESS_WORKERS=2 LLMOBS_STRESS_READERS=16 just stress 1800`, once: few workers and many readers make tasks queue behind each other, which changes the interleavings.
+   - `CETRA_CONCURRENT_CASES=1000 cargo test --release --workspace --all-features model_tests::concurrent` (the local and remote proptests);
+   - `just stress 3600`, three times, each with a fresh `CETRA_STRESS_SEED` (printed);
+   - `CETRA_STRESS_REMOTE=1 just stress 3600`, once;
+   - `CETRA_STRESS_WORKERS=2 CETRA_STRESS_READERS=16 just stress 1800`, once: few workers and many readers make tasks queue behind each other, which changes the interleavings.
 
    Record the machine, command, seed, duration and final stats line of each in `hardening.md` § M6 § Runs. These are the local counterparts of the nightly jobs (R6.7), which run `just stress 1800` and a 600 s remote run every night from then on.
 2. **For each failure:**

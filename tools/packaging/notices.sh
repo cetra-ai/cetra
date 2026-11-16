@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Writes target/dist/THIRD-PARTY-NOTICES.md: the licences of the Rust crates and of the web
-# packages compiled into the `llmobs` binary (D-N-8). Needs cargo-about, node and pnpm, and
+# packages compiled into the `cetra` binary (D-N-8). Needs cargo-about, node and pnpm, and
 # `pnpm install` done (just js-install).
 set -euo pipefail
 
@@ -21,7 +21,7 @@ pnpm --dir web licenses list --prod --json | node tools/packaging/js-notices.mjs
 {
   echo "# Third-party notices"
   echo
-  echo "The \`llmobs\` binary contains third-party software. This file lists it with its licences:"
+  echo "The \`cetra\` binary contains third-party software. This file lists it with its licences:"
   echo "first the Rust crates, then the JavaScript packages of the embedded web UI."
   echo
   cat "$rust"

@@ -36,7 +36,7 @@ Linux only).
   2. Checks that it differs from the current version and has no changelog section yet.
   3. Checks that `## [Unreleased]` is not empty.
   4. Rewrites `Cargo.toml`'s version line inside `[workspace.package]`, `Chart.yaml`'s `version:`
-     and `appVersion:`, the `image:` default of `compose.yaml` and the `#LLMOBS_IMAGE=` line of
+     and `appVersion:`, the `image:` default of `compose.yaml` and the `#CETRA_IMAGE=` line of
      `.env.example`.
   5. Inserts `## [<new>] - <UTC date>` under a fresh empty `## [Unreleased]`.
   6. Runs `cargo update --workspace --offline`, so the workspace crates' versions in
@@ -62,7 +62,7 @@ needs action on upgrade adds it under `### Upgrade notes`, which comes first in 
 ```markdown
 # Changelog
 
-All notable changes to llmobs are listed here. The format follows
+All notable changes to cetra are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/) (D-N-5). A release that needs action on upgrade starts
 with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
@@ -81,7 +81,7 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 ```bash
 #!/usr/bin/env bash
 # Checks that every file carrying the release version agrees with the workspace version (D-N-5):
-# deploy/helm/llmobs/Chart.yaml (version, appVersion), the default image of
+# deploy/helm/cetra/Chart.yaml (version, appVersion), the default image of
 # deploy/compose/compose.yaml and the commented image of deploy/compose/.env.example.
 set -euo pipefail
 
@@ -98,10 +98,10 @@ expect() {
   fi
 }
 
-expect deploy/helm/llmobs/Chart.yaml "version: $version"
-expect deploy/helm/llmobs/Chart.yaml "appVersion: \"$version\""
-expect deploy/compose/compose.yaml "    image: \${LLMOBS_IMAGE:-ghcr.io/sebastiencs/llmobs:$version}"
-expect deploy/compose/.env.example "#LLMOBS_IMAGE=ghcr.io/sebastiencs/llmobs:$version"
+expect deploy/helm/cetra/Chart.yaml "version: $version"
+expect deploy/helm/cetra/Chart.yaml "appVersion: \"$version\""
+expect deploy/compose/compose.yaml "    image: \${CETRA_IMAGE:-ghcr.io/cetra-ai/cetra:$version}"
+expect deploy/compose/.env.example "#CETRA_IMAGE=ghcr.io/cetra-ai/cetra:$version"
 
 if [[ "$status" -eq 0 ]]; then
   echo "versions-check: every file says $version"
@@ -152,19 +152,19 @@ fi
 
 sed -i.bak "/^\[workspace\.package\]/,/^\[/{s/^version = \".*\"$/version = \"$new\"/;}" Cargo.toml
 sed -i.bak -e "s/^version: .*/version: $new/" -e "s/^appVersion: .*/appVersion: \"$new\"/" \
-  deploy/helm/llmobs/Chart.yaml
-sed -i.bak "s|ghcr.io/sebastiencs/llmobs:$old}|ghcr.io/sebastiencs/llmobs:$new}|" deploy/compose/compose.yaml
-sed -i.bak "s|^#LLMOBS_IMAGE=ghcr.io/sebastiencs/llmobs:$old$|#LLMOBS_IMAGE=ghcr.io/sebastiencs/llmobs:$new|" \
+  deploy/helm/cetra/Chart.yaml
+sed -i.bak "s|ghcr.io/cetra-ai/cetra:$old}|ghcr.io/cetra-ai/cetra:$new}|" deploy/compose/compose.yaml
+sed -i.bak "s|^#CETRA_IMAGE=ghcr.io/cetra-ai/cetra:$old$|#CETRA_IMAGE=ghcr.io/cetra-ai/cetra:$new|" \
   deploy/compose/.env.example
 today="$(date -u +%Y-%m-%d)"
 sed -i.bak "s/^## \[Unreleased\]$/## [Unreleased]\n\n## [$new] - $today/" CHANGELOG.md
-rm -f Cargo.toml.bak deploy/helm/llmobs/Chart.yaml.bak deploy/compose/compose.yaml.bak \
+rm -f Cargo.toml.bak deploy/helm/cetra/Chart.yaml.bak deploy/compose/compose.yaml.bak \
   deploy/compose/.env.example.bak CHANGELOG.md.bak
 
 cargo update --workspace --offline
 tools/packaging/versions-check.sh
 echo "release-prep: $old -> $new. Review the diff, commit 'Release $new', merge to main, then:"
-echo "  git tag -a v$new -m 'llmobs $new' <merged commit> && git push origin v$new"
+echo "  git tag -a v$new -m 'cetra $new' <merged commit> && git push origin v$new"
 ```
 
 ### `tools/packaging/release-notes.sh`
@@ -233,7 +233,7 @@ echo "release-verify: $tag is ready"
 # <image>:<version> always; for a version without a pre-release part also <image>:<major>.<minor>,
 # <image>:<major> when major > 0, and <image>:latest.
 #
-# Usage: image-tags.sh <image> <version>, e.g. image-tags.sh ghcr.io/owner/llmobs 0.1.0
+# Usage: image-tags.sh <image> <version>, e.g. image-tags.sh ghcr.io/owner/cetra 0.1.0
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
@@ -310,9 +310,9 @@ just versions-check
 tmp="$(mktemp -d)" && git worktree add --detach "$tmp" HEAD
 (cd "$tmp" && just release-prep 0.1.0-rc.1 && git diff --stat && just release-notes 0.1.0-rc.1 && tools/packaging/release-verify.sh v0.1.0-rc.1; echo "verify exit=$?")
 git worktree remove --force "$tmp"
-tools/packaging/image-tags.sh ghcr.io/o/llmobs 0.1.0
-tools/packaging/image-tags.sh ghcr.io/o/llmobs 0.1.0-rc.1
-tools/packaging/image-tags.sh ghcr.io/o/llmobs 1.2.3
+tools/packaging/image-tags.sh ghcr.io/o/cetra 0.1.0
+tools/packaging/image-tags.sh ghcr.io/o/cetra 0.1.0-rc.1
+tools/packaging/image-tags.sh ghcr.io/o/cetra 1.2.3
 just check
 just assert-clean
 ```
@@ -323,14 +323,14 @@ Expected:
   - `release-prep` ends with the tag hint;
   - `git diff --stat` lists `CHANGELOG.md`, `Cargo.lock`, `Cargo.toml`,
     `deploy/compose/.env.example`, `deploy/compose/compose.yaml` and
-    `deploy/helm/llmobs/Chart.yaml`;
+    `deploy/helm/cetra/Chart.yaml`;
   - `release-notes` prints the section, starting with its `### Added` line;
   - `release-verify` fails with `… is not on origin/main`, because the commit is not merged.
     That shows the check works: `verify exit=1`.
 - `image-tags.sh` prints:
-  - `ghcr.io/o/llmobs:0.1.0,ghcr.io/o/llmobs:0.1,ghcr.io/o/llmobs:latest`;
-  - `ghcr.io/o/llmobs:0.1.0-rc.1`;
-  - `ghcr.io/o/llmobs:1.2.3,ghcr.io/o/llmobs:1.2,ghcr.io/o/llmobs:1,ghcr.io/o/llmobs:latest`.
+  - `ghcr.io/o/cetra:0.1.0,ghcr.io/o/cetra:0.1,ghcr.io/o/cetra:latest`;
+  - `ghcr.io/o/cetra:0.1.0-rc.1`;
+  - `ghcr.io/o/cetra:1.2.3,ghcr.io/o/cetra:1.2,ghcr.io/o/cetra:1,ghcr.io/o/cetra:latest`.
 
 ## Done when
 

@@ -1,6 +1,6 @@
 # B2 · The harness (K1–K9)
 
-See [README.md](README.md) for the decisions, the scenario format and the rules. K1 is documentation only. K2–K9 build `llmobs-capture` without running any real instrumentation, so every behaviour here is pinned by Rust unit tests. The first real capture is K10.
+See [README.md](README.md) for the decisions, the scenario format and the rules. K1 is documentation only. K2–K9 build `cetra-capture` without running any real instrumentation, so every behaviour here is pinned by Rust unit tests. The first real capture is K10.
 
 ## K1 — Spec and decisions
 
@@ -33,7 +33,7 @@ See [README.md](README.md) for the decisions, the scenario format and the rules.
 - `tools/capture/Cargo.toml`;
 - `tools/capture/src/{lib.rs,error.rs,scenario.rs}`.
 
-**Crate.** Package `llmobs-capture`, `publish = false`, `[lints] workspace = true`, the workspace `version`/`edition`/`rust-version`. It's a library only in this sub-phase. The binary target arrives with its `main.rs` in K9, so there is never a binary that does nothing. Dependencies: `serde`, `serde_json`, `thiserror` (all workspace).
+**Crate.** Package `cetra-capture`, `publish = false`, `[lints] workspace = true`, the workspace `version`/`edition`/`rust-version`. It's a library only in this sub-phase. The binary target arrives with its `main.rs` in K9, so there is never a binary that does nothing. Dependencies: `serde`, `serde_json`, `thiserror` (all workspace).
 
 **`error.rs`.** `pub enum CaptureError` (`thiserror`). This sub-phase's variants:
 - `ScenarioIo { path: PathBuf, source: std::io::Error }`;
@@ -45,7 +45,7 @@ Later sub-phases add their own variants. Error messages name files, case paths, 
 **`scenario.rs`.** Every struct uses `#[serde(deny_unknown_fields)]`.
 - `pub struct CasePath { pub group: String, pub case: String }`.
   - `FromStr` parses `group/case`.
-  - `group` must be one of `genai`, `openinference`, `openllmetry`, `vercel`, `langfuse`, `laminar`, `google_adk`, `edge`. That's the `fixtures/otlp/README.md` list without `llmobs`, which D121 excludes. Put the list in a `const` with a comment pointing at that README.
+  - `group` must be one of `genai`, `openinference`, `openllmetry`, `vercel`, `langfuse`, `laminar`, `google_adk`, `edge`. That's the `fixtures/otlp/README.md` list without `cetra`, which D121 excludes. Put the list in a `const` with a comment pointing at that README.
   - `case` must match `^[a-z0-9]+(?:-[a-z0-9]+)*$`.
   - `Display` prints `group/case`.
 - `pub struct Scenario`, holding the fields of README § The scenario format:
@@ -107,7 +107,7 @@ Later sub-phases add their own variants. Error messages name files, case paths, 
 - defaults apply;
 - each validation rule has one failing case and checks the reason text;
 - unknown fields are rejected;
-- `CasePath` parsing, including a bad group, a bad case name and `llmobs`.
+- `CasePath` parsing, including a bad group, a bad case name and `cetra`.
 
 **Checks:** `just check`.
 
@@ -267,7 +267,7 @@ impl Mock {
   - `streamGenerateContent` (requires query `alt=sse`; otherwise answer 400 and log the error);
   - `embedContent`;
   - `batchEmbedContents`.
-- **Fallback:** any other method or path answers 404 `{"error":{"message":"llmobs-capture mock: no route <METHOD> <path>"}}` and logs the error.
+- **Fallback:** any other method or path answers 404 `{"error":{"message":"cetra-capture mock: no route <METHOD> <path>"}}` and logs the error.
 
 **Per request:**
 1. Parse the body as JSON. The only facts read from it:
@@ -361,7 +361,7 @@ pub struct Received { pub exports: Vec<ExportTraceServiceRequest>, pub other_sig
 2. **Re-mint IDs.**
    - Walk the spans in the final order. Assign trace IDs `k = 0, 1, …` in order of first appearance, and the same for span IDs, with one counter across all traces. A span's own ID is assigned before its parent's.
    - Parent and link IDs not seen as span IDs get the next number when they are first met.
-   - **The new ID** is the first 16 (trace) or 8 (span) bytes of `sha256("llmobs-capture\0{group}/{case}\0trace\0{k}")` (or `…\0span\0{k}`). If those bytes are all zero, use `k + 1_000_000`.
+   - **The new ID** is the first 16 (trace) or 8 (span) bytes of `sha256("cetra-capture\0{group}/{case}\0trace\0{k}")` (or `…\0span\0{k}`). If those bytes are all zero, use `k + 1_000_000`.
    - **ID text inside attributes:** in every string `AnyValue`, at any depth, in span, event, link, scope and resource attributes, each occurrence of an original ID's lowercase hex is replaced with the new ID's hex. The match is case-insensitive, so W3C `traceparent` values and SDK-specific ID attributes stay consistent.
 3. **Shift times.**
    - `base = ingest_time − 10 s`, `min_start` = the smallest span start.
@@ -462,7 +462,7 @@ pub struct Received { pub exports: Vec<ExportTraceServiceRequest>, pub other_sig
 
 **Edit only:**
 - `tools/capture/src/{lib.rs,error.rs,run.rs,main.rs}`;
-- `tools/capture/Cargo.toml` (`[[bin]] name = "llmobs-capture"`, `clap`, `tracing`, `tracing-subscriber`, `tokio` features `process`, `rt-multi-thread`, `macros`);
+- `tools/capture/Cargo.toml` (`[[bin]] name = "cetra-capture"`, `clap`, `tracing`, `tracing-subscriber`, `tokio` features `process`, `rt-multi-thread`, `macros`);
 - `justfile`;
 - `AGENTS.md` (§ Layout and § Commands).
 
@@ -476,11 +476,11 @@ pub struct Received { pub exports: Vec<ExportTraceServiceRequest>, pub other_sig
 - **Passed through from the parent:** `PATH`, `HOME`, and every `UV_*` and `XDG_*` variable (uv's cache).
 - **Fixed:**
   - `LANG=C.UTF-8`, `TZ=UTC`, `PYTHONHASHSEED=0`;
-  - `LLMOBS_CAPTURE_MOCK_URL=http://127.0.0.1:{mock_port}`;
-  - `LLMOBS_CAPTURE_OTLP_ENDPOINT=http://127.0.0.1:{receiver_port}/v1/traces`;
-  - `LLMOBS_CAPTURE_META={temp file}`;
-  - `LLMOBS_CAPTURE_LIBRARIES={comma-separated scenario.libraries}`;
-  - `LLMOBS_CAPTURE_CASE={group}/{case}`;
+  - `CETRA_CAPTURE_MOCK_URL=http://127.0.0.1:{mock_port}`;
+  - `CETRA_CAPTURE_OTLP_ENDPOINT=http://127.0.0.1:{receiver_port}/v1/traces`;
+  - `CETRA_CAPTURE_META={temp file}`;
+  - `CETRA_CAPTURE_LIBRARIES={comma-separated scenario.libraries}`;
+  - `CETRA_CAPTURE_CASE={group}/{case}`;
   - `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`, all `capture-mock-key`;
   - `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`;
   - `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` = the receiver URL;
@@ -514,8 +514,8 @@ Nothing else from the parent environment reaches the program. A real `OPENAI_API
      Differences fail with `CheckFailed { case, paths }`, listing at most 20 JSON paths and no values. A missing committed case fails with "not captured yet".
 
 **CLI** (`clap`):
-- `llmobs-capture list` prints the discovered cases, one per line.
-- `llmobs-capture run [--check] (--all | <group/case>...)` runs cases one at a time and prints `captured <case>` or `checked <case>`, plus a re-bless hint when `stale_expected`. It stops at the first failure and exits 1.
+- `cetra-capture list` prints the discovered cases, one per line.
+- `cetra-capture run [--check] (--all | <group/case>...)` runs cases one at a time and prints `captured <case>` or `checked <case>`, plus a re-bless hint when `stale_expected`. It stops at the first failure and exits 1.
 
 `repo_root` is `env!("CARGO_MANIFEST_DIR")/../..`. That's acceptable for a dev tool that is only run through `cargo run`, and a comment says so. Output goes through `tracing-subscriber` (fmt, to stderr) so the workspace print lints hold.
 
@@ -523,11 +523,11 @@ Nothing else from the parent environment reaches the program. A real `OPENAI_API
 ```
 # Capture OTLP fixtures from real instrumentations (tools/capture), e.g. `just capture openinference/openai-chat-tool`
 capture +cases:
-    cargo run -q -p llmobs-capture -- run {{cases}}
+    cargo run -q -p cetra-capture -- run {{cases}}
 
 # Recapture every scenario
 capture-all:
-    cargo run -q -p llmobs-capture -- run --all
+    cargo run -q -p cetra-capture -- run --all
 ```
 K10 and K14 add the project syncing and `check-capture`.
 

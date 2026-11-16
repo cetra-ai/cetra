@@ -47,7 +47,7 @@ impl EgressClient {
 }
 ```
 
-- The client: `redirect(Policy::none())`, `no_proxy()` (a proxy would bypass the address check; document it), `connect_timeout(10 s)`, rustls, `user_agent` = `llmobs_core::names::PRODUCT` + `/` + the crate version, and `dns_resolver(Arc<GuardedResolver>)`.
+- The client: `redirect(Policy::none())`, `no_proxy()` (a proxy would bypass the address check; document it), `connect_timeout(10 s)`, rustls, `user_agent` = `cetra_core::names::PRODUCT` + `/` + the crate version, and `dns_resolver(Arc<GuardedResolver>)`.
 - `GuardedResolver` implements `reqwest::dns::Resolve`: `tokio::net::lookup_host((host, 0))`, then keeps only allowed addresses. None left → an error that becomes `EgressError::Denied { host }`. With `allow_private_network`, nothing is filtered.
 - `pub(crate) fn is_denied(ip: IpAddr) -> bool`: the ranges of D166, written with `std::net` methods and explicit octet checks (no extra crate). IPv6: unwrap IPv4-mapped (`::ffff:0:0/96`) and NAT64 (`64:ff9b::/96`) addresses and check the embedded IPv4.
 - `post`: accept only `http`/`https` (`EgressError::Scheme`); a literal IP host is checked with `is_denied` before sending (reqwest skips the resolver for literals); read the body in chunks and stop with `EgressError::TooLarge { limit }` past `max_response_bytes`; map reqwest errors to `Timeout`, `Connect`, `Request` without their `Display` (it contains the URL). `EgressError` names the host, never the path or query.

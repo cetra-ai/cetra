@@ -5,9 +5,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use llmobs_core::ids::ProjectId;
-use llmobs_core::span::Span;
-use llmobs_core::time_serde::parse_rfc3339;
+use cetra_core::ids::ProjectId;
+use cetra_core::span::Span;
+use cetra_core::time_serde::parse_rfc3339;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use serde::Deserialize;
 
@@ -34,7 +34,7 @@ pub const GROUPS: &[&str] = &[
     "langfuse",
     "laminar",
     "google_adk",
-    "llmobs",
+    "cetra",
     "edge",
 ];
 
@@ -148,8 +148,8 @@ pub struct ExpectedMedia {
     pub size_bytes: u64,
 }
 
-/// One row of `prices.json`. The normalizer's [`llmobs_otel::PriceRow`].
-pub use llmobs_otel::PriceRow;
+/// One row of `prices.json`. The normalizer's [`cetra_otel::PriceRow`].
+pub use cetra_otel::PriceRow;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -661,7 +661,7 @@ mod tests {
     }
 
     fn temp_case(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("llmobs-load-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("cetra-load-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap_or_else(|err| panic!("{err}"));
         dir

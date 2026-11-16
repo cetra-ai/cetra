@@ -11,8 +11,8 @@ On the Garage host, create an access key scoped to the `kache` bucket with read
 and write permission:
 
 ```sh
-garage key new --name llmobs-ci
-garage bucket allow --read --write kache --key llmobs-ci
+garage key new --name cetra-ci
+garage bucket allow --read --write kache --key cetra-ci
 ```
 
 Store the key's **Access Key ID** and **Secret Access Key** in the GitHub
@@ -27,8 +27,8 @@ receive its secrets. Alternatively, from an authenticated GitHub CLI, run these
 commands and enter each value at its hidden prompt:
 
 ```sh
-gh secret set S3_CACHE_ACCESS_KEY_ID --repo sebastiencs/llmobs --env s3-cache
-gh secret set S3_CACHE_SECRET_ACCESS_KEY --repo sebastiencs/llmobs --env s3-cache
+gh secret set S3_CACHE_ACCESS_KEY_ID --repo cetra-ai/cetra --env s3-cache
+gh secret set S3_CACHE_SECRET_ACCESS_KEY --repo cetra-ai/cetra --env s3-cache
 ```
 
 ## Trusted runs
@@ -68,7 +68,7 @@ The Rust jobs that link (`rust-lint`, `rust-test`, `e2e`) pass `mold: "true"` to
 checking its sha256. Release and packaging jobs do not install it and use the default linker.
 The Rust jobs link with mold rather than the default `rust-lld`, selected workflow-wide by
 `RUSTFLAGS: -Clinker-features=-lld -Clink-arg=-fuse-ld=mold` in `ci.yml`. mold
-links the workspace test binaries and the `llmobs` binary several times faster.
+links the workspace test binaries and the `cetra` binary several times faster.
 The flag lives in CI only: local builds are unaffected, and any `RUSTFLAGS`
 change changes every kache cache key, so one cold run repopulates the store.
 

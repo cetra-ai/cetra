@@ -78,7 +78,7 @@ pub(crate) async fn prune_spend(
 
 #[cfg(test)]
 mod tests {
-    use llmobs_core::ids::{OrgId, ProjectId};
+    use cetra_core::ids::{OrgId, ProjectId};
     use uuid::Uuid;
 
     use super::{add_spend, prune_spend, spent_between};

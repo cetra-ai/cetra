@@ -2,9 +2,9 @@
 //!
 //! One writer connection sits behind a [`tokio::sync::Mutex`]. A pool of four
 //! read-only connections serves reads. Migrations run only in [`MetaDb::open`]
-//! (`llmobs serve`). [`MetaDb::open_existing`] refuses a file whose latest
+//! (`cetra serve`). [`MetaDb::open_existing`] refuses a file whose latest
 //! migration is not this binary's.
-#![cfg_attr(not(test), allow(dead_code))] // `llmobs serve` opens this from P5 on
+#![cfg_attr(not(test), allow(dead_code))] // `cetra serve` opens this from P5 on
 
 pub(crate) mod alerts;
 pub(crate) mod api_keys;
@@ -60,7 +60,7 @@ impl MetaDb {
     /// Creates `<data_dir>/meta.db` when it is missing, sets the D136 pragmas,
     /// and runs migrations.
     ///
-    /// `data_dir` must already exist. `llmobs serve` calls this; admin
+    /// `data_dir` must already exist. `cetra serve` calls this; admin
     /// commands use [`Self::open_existing`].
     pub(crate) async fn open(data_dir: &Path) -> Result<Self, MetaError> {
         let path = data_dir.join("meta.db");
@@ -98,7 +98,7 @@ impl MetaDb {
 
     /// [`Self::open_existing`], but a schema **newer** than this binary's is accepted
     /// too. Only for reading a source whose tables this binary knows by column name:
-    /// `llmobs admin reapply-deletions --from` after a rollback (D-M-9). Migrations only
+    /// `cetra admin reapply-deletions --from` after a rollback (D-M-9). Migrations only
     /// add, so the columns this binary reads are still there; a missing one fails the
     /// read with [`MetaError::Database`]. An older schema is still
     /// [`MetaError::SchemaMismatch`].

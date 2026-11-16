@@ -2,7 +2,7 @@
 //! D-I-39 to D-I-42). A backfill is `running` until the runner finishes it; startup fails the
 //! ones a stop or a crash left running.
 
-use llmobs_core::ids::ProjectId;
+use cetra_core::ids::ProjectId;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
@@ -375,7 +375,7 @@ fn parse_uuid(value: &str, column: &'static str) -> Result<Uuid, MetaError> {
 mod tests {
     use std::str::FromStr;
 
-    use llmobs_core::ids::{OrgId, ProjectId, TraceId};
+    use cetra_core::ids::{OrgId, ProjectId, TraceId};
     use sqlx::SqliteConnection;
     use uuid::Uuid;
 

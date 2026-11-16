@@ -11,7 +11,7 @@ import {
   type ReadableSpan,
 } from "@opentelemetry/sdk-trace";
 
-import { type LlmobsOptions, resolveConfig } from "./config.js";
+import { type CetraOptions, resolveConfig } from "./config.js";
 import { enableInstrumentations } from "./instrument.js";
 import { flush, installRuntime, Runtime } from "./runtime.js";
 import type { FetchLike } from "./web.js";
@@ -43,13 +43,13 @@ export interface MemoryRuntime {
 /** A runtime exporting in memory, with sequential ids, installed as current.
  * `seams.fetch` feeds the score queue (the span exporter is always in memory). */
 export function startMemory(
-  options?: Partial<LlmobsOptions>,
+  options?: Partial<CetraOptions>,
   env?: Record<string, string>,
   seams?: { fetch?: FetchLike },
 ): MemoryRuntime {
   const exporter = new InMemorySpanExporter();
   const config = resolveConfig(
-    { apiKey: "sk-llmobs-test", baseUrl: "http://127.0.0.1:9", ...options },
+    { apiKey: "sk-cetra-test", baseUrl: "http://127.0.0.1:9", ...options },
     { OTEL_SERVICE_NAME: "conformance", ...env },
   );
   const runtime = Runtime.create(config, {

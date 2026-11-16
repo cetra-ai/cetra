@@ -60,7 +60,7 @@ Cookie sessions signed with `NEXTAUTH_SECRET`; no detailed public doc on lifetim
 
 `@langwatch/mcp-server` standalone HTTP mode authorized requests by session id alone and accepted the API key in the URL (GHSA-h25p, see advisories.md). The hosted handler re-checks the key on every request.
 
-## Takeaways for llmobs
+## Takeaways for cetra
 
 - Copy: domain-bound SSO with linking only on verified domain/email; refuse multi-tenant issuers; trusted-IdP allowlist separate from the general SSRF opt-in; prefixed keys with a lookup id; documented secret rotation with a "previous key" window; fallback admin rule.
 - Avoid: plaintext legacy keys, placeholder secrets in example config, "first account wins" bootstrap on an exposed host, tokens in URLs, auth by session id alone.

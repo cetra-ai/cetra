@@ -1,4 +1,4 @@
-# Third-party notices for the llmobs binary (D-N-8). Same allow-list as deny.toml [licenses] as
+# Third-party notices for the cetra binary (D-N-8). Same allow-list as deny.toml [licenses] as
 # track P's P1 writes it (docs/plans/p-entitlements/01-m1-open-core-license.md § P1).
 accepted = [
     "0BSD",

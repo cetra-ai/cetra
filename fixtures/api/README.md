@@ -29,8 +29,8 @@ Do not edit `responses/`, `manifest.json` or `static/sql-result.json` by hand. R
 | Second project | `01900000-0000-7000-8000-000000000002`, slug `playground`, name `Playground` |
 | User | `01900000-0000-7000-8000-000000000100`, `ada@example.com`, `Ada Example`, instance admin, org owner |
 | Member | `01900000-0000-7000-8000-000000000101`, `bob@example.com`, `Bob Example`, org member. Used by the member examples |
-| API key | `01900000-0000-7000-8000-000000000200`, prefix `sk-llmobs-EXAMPL`. `api-key-created.json` uses the same synthetic `sk-llmobs-EXAMPLE0…` secret as `setup-response.json`. It is not a live key |
-| Personal token | `01900000-0000-7000-8000-000000000201`, prefix `pat-llmobs-EXAMPL`. `personal-token-created.json` uses the synthetic `pat-llmobs-EXAMPLE0…` secret. It is not a live token |
+| API key | `01900000-0000-7000-8000-000000000200`, prefix `sk-cetra-EXAMPL`. `api-key-created.json` uses the same synthetic `sk-cetra-EXAMPLE0…` secret as `setup-response.json`. It is not a live key |
+| Personal token | `01900000-0000-7000-8000-000000000201`, prefix `pat-cetra-EXAMPL`. `personal-token-created.json` uses the synthetic `pat-cetra-EXAMPLE0…` secret. It is not a live token |
 | Invitation | `01900000-0000-7000-8000-000000000300` for `guest@example.com`. `invite-created.json` uses the synthetic accept token `EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0EXA`. It is not a live invitation |
 | LLM connection | `01900000-0000-7000-8000-000000000400`, `OpenAI`. `requests/llm-connection-create.json` holds a synthetic key; it is not a live key |
 | Deletions | `01900000-0000-7000-8000-000000000900` (`trace_ids`), `…0901` (`filter`), `…0902` (`user`), `…0903` (`project`), `…0904` (`org`), `…0905` (`user`, `resolving`, the `202` answer of `create_deletion`). `deletions.json`, `deletion.json`, `deletion-project.json`, `deletion-org.json` and `deletion-resolving.json` use them. They are not live deletions |
@@ -52,7 +52,7 @@ Do not edit `responses/`, `manifest.json` or `static/sql-result.json` by hand. R
 | Missing parent of trace 6 | `b1000000000000ff` |
 | PNG | `497790947d4666760ce38f3c00e852c71fdb66cae849bae8e9ede352719e1581` |
 
-Session and user ids match `[a-z0-9-]+` so they can be file names. Trace 5 uses environment `llmobs-eval` and is left out of the default lists.
+Session and user ids match `[a-z0-9-]+` so they can be file names. Trace 5 uses environment `cetra-eval` and is left out of the default lists.
 
 ## Manifest
 

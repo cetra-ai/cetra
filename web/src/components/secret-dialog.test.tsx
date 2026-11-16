@@ -4,8 +4,8 @@ import { useState } from "react";
 import { expect, it, vi } from "vitest";
 import { SecretDialog } from "@/components/secret-dialog";
 
-const PAT_SECRET = "pat-llmobs-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0";
-const SK_SECRET = "sk-llmobs-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0";
+const PAT_SECRET = "pat-cetra-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0";
+const SK_SECRET = "sk-cetra-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0";
 
 // The dialog stays mounted; only its `open` prop toggles, so a reopen shows the same
 // component instance and the tests really exercise `finish()` resetting the state.
@@ -168,8 +168,6 @@ it("resets the warning when the secret changes", async () => {
   const view = render(<Harness secret={PAT_SECRET} onDone={onDone} />);
   await user.keyboard("{Escape}");
   expect(screen.getByRole("alert")).toBeInTheDocument();
-  view.rerender(
-    <Harness secret="pat-llmobs-OTHER0OTHER0OTHER0OTHER0OTHER0OTHER" onDone={onDone} />,
-  );
+  view.rerender(<Harness secret="pat-cetra-OTHER0OTHER0OTHER0OTHER0OTHER0OTHER" onDone={onDone} />);
   expect(screen.queryByRole("alert")).toBeNull();
 });

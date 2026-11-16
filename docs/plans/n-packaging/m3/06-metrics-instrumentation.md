@@ -36,7 +36,7 @@ Read [00-design.md](00-design.md) first, especially § `/metrics` and its label 
 
 Keep every increment one line at the place where the event is already known. Do not restructure the code to reach a value; if a value is not available where the event happens, say so in the report and leave that label out.
 
-### HTTP (`llmobs_http_requests_total`, `llmobs_http_request_duration_seconds`)
+### HTTP (`cetra_http_requests_total`, `cetra_http_request_duration_seconds`)
 
 - A middleware function `telemetry::track_http(State(state), MatchedPath (optional), req, next)`, built with `axum::middleware::from_fn_with_state`, is added once in `finish()`, next to the layer that runs `log_request`, so both the main and the OTLP HTTP router get it. It must be inside the routing (where `MatchedPath` is set), as `log_request` is.
 - `route` is the `MatchedPath` string, or `"other"` when the request matched no route. The UI fallback and its assets also give `"other"`.
@@ -44,7 +44,7 @@ Keep every increment one line at the place where the event is already known. Do 
 - `status` is `"1xx"`…`"5xx"` from the response.
 - The duration is measured from before `next.run` to the response. A streamed body (SSE) is counted when its headers are sent. That is acceptable, and the doc comment says so.
 
-### Ingest (`llmobs_ingest_requests_total`, `_spans_total`, `_bytes_total`)
+### Ingest (`cetra_ingest_requests_total`, `_spans_total`, `_bytes_total`)
 
 **`protocol`:** `otlp_http` for the OTLP HTTP handler (on either router), `otlp_grpc` for the gRPC export.
 
@@ -65,7 +65,7 @@ Auth and size checks may run in an extractor or middleware before the handler. I
 
 **`_spans_total` and `_bytes_total`** count accepted requests only: the span count the handler appends, and the request body length in bytes (compressed, as received).
 
-### Eval (`llmobs_eval_jobs_finished_total`, `llmobs_eval_run_duration_seconds`)
+### Eval (`cetra_eval_jobs_finished_total`, `cetra_eval_run_duration_seconds`)
 
 - Where a job's final status is written (`done`, `failed`, `skipped`), increment `outcome`. **Count after the write succeeds.** A lost claim (the update matched no row) is not counted.
 - Where an `EvalRunner::run` (or the check executor) returns, observe the run's wall time under `kind`:
@@ -77,12 +77,12 @@ Auth and size checks may run in an extractor or middleware before the handler. I
 
 ### Alerts
 
-- `llmobs_alert_evaluations_total{outcome}`: in `evaluate_once`, add `report.evaluated - report.failed` to `ok` and `report.failed` to `failed`.
-- `llmobs_alert_deliveries_total{channel,outcome}`: in `send_one`, after each attempt:
+- `cetra_alert_evaluations_total{outcome}`: in `evaluate_once`, add `report.evaluated - report.failed` to `ok` and `report.failed` to `failed`.
+- `cetra_alert_deliveries_total{channel,outcome}`: in `send_one`, after each attempt:
   - `channel` from the channel's `ChannelKind` (`email`, `webhook`, `slack`);
   - `outcome` `sent` or `failed`.
 
-### Email (`llmobs_emails_total{outcome}`)
+### Email (`cetra_emails_total{outcome}`)
 
 The `Mailer` has no `AppState`.
 - Give `Mailer` a field `emails: Family<EmailOutcomeLabel, Counter>`. A `Family` is `Arc`-backed, so a clone counts into the same series.
@@ -102,19 +102,19 @@ The `Mailer` has no `AppState`.
 **`telemetry.rs` or `http/mod.rs`:**
 - `http_requests_are_counted_by_route`:
   - `GET /api/auth/config` twice on a `TestApp`;
-  - `render` contains `llmobs_http_requests_total{route="/api/auth/config",method="GET",status="2xx"} 2`;
+  - `render` contains `cetra_http_requests_total{route="/api/auth/config",method="GET",status="2xx"} 2`;
   - a `GET /nope/xyz` is counted under `route="other"`.
 
 **`ingest/mod.rs`:**
-- `accepted_otlp_request_is_counted`: post a fixture (the existing ingest tests show how). Then `llmobs_ingest_requests_total{protocol="otlp_http",outcome="ok"} 1`, `llmobs_ingest_spans_total{protocol="otlp_http"}` equals the fixture's span count, and the bytes total is > 0.
+- `accepted_otlp_request_is_counted`: post a fixture (the existing ingest tests show how). Then `cetra_ingest_requests_total{protocol="otlp_http",outcome="ok"} 1`, `cetra_ingest_spans_total{protocol="otlp_http"}` equals the fixture's span count, and the bytes total is > 0.
 - `invalid_otlp_request_is_counted`: garbage body → `outcome="invalid"` 1, spans 0.
 
 **`ingest/grpc.rs`:** `accepted_grpc_export_is_counted`, same as the HTTP case with `protocol="otlp_grpc"`.
 
-**Eval:** in an existing dispatcher test that runs a job to `done` and one to `failed`, assert the two counters, and that `llmobs_eval_run_duration_seconds_count{kind=…}` ≥ 1.
+**Eval:** in an existing dispatcher test that runs a job to `done` and one to `failed`, assert the two counters, and that `cetra_eval_run_duration_seconds_count{kind=…}` ≥ 1.
 
 **Alerts:**
-- In an existing delivery test with a webhook channel that answers 200, assert `llmobs_alert_deliveries_total{channel="webhook",outcome="sent"} 1`.
+- In an existing delivery test with a webhook channel that answers 200, assert `cetra_alert_deliveries_total{channel="webhook",outcome="sent"} 1`.
 - With a failing one, assert `outcome="failed"`.
 
 **Email:**
@@ -130,7 +130,7 @@ Assert with a regex that no `[0-9a-f]{8}-[0-9a-f]{4}-` appears.
 ## Verify
 
 ```bash
-cargo test -p llmobs-server --all-features counted telemetry
+cargo test -p cetra-server --all-features counted telemetry
 just check
 ```
 

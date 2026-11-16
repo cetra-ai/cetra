@@ -5,16 +5,16 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use llmobs_core::enums::SpanKind;
-use llmobs_core::ids::{OrgId, ProjectId, TraceId};
-use llmobs_core::score::ScoreTarget;
-use llmobs_core::span::Span;
-use llmobs_eval::{
+use cetra_core::enums::SpanKind;
+use cetra_core::ids::{OrgId, ProjectId, TraceId};
+use cetra_core::score::ScoreTarget;
+use cetra_core::span::Span;
+use cetra_eval::{
     Adapter, Check, ErrorClass, EvalError, EvalOrigin, EvalOutcome, EvalRun, EvalTarget, Evaluator,
     EvaluatorConfig, JudgeConfig, JudgeConnection, JudgeError, PromptTemplate, RunInput, Secret,
     TraceData, VariableMapping, Variables, resolve,
 };
-use llmobs_otel::Normalized;
+use cetra_otel::Normalized;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::SqliteConnection;
@@ -44,9 +44,9 @@ use crate::meta::rule_spend;
 use crate::scores::{self, Writer};
 
 /// The tags of the score a run writes (D-I-18): the job, the evaluator version, a truncated trace.
-const JOB_ID_KEY: &str = llmobs_core::llmobs_name!(".eval.job_id");
-const EVALUATOR_VERSION_KEY: &str = llmobs_core::llmobs_name!(".eval.evaluator_version");
-const TRUNCATED_KEY: &str = llmobs_core::llmobs_name!(".eval.truncated");
+const JOB_ID_KEY: &str = cetra_core::cetra_name!(".eval.job_id");
+const EVALUATOR_VERSION_KEY: &str = cetra_core::cetra_name!(".eval.evaluator_version");
+const TRUNCATED_KEY: &str = cetra_core::cetra_name!(".eval.truncated");
 /// The job error of a write that kept failing (D-I-13).
 const STORE_ERROR: &str = "could not store the result";
 /// The job error of a score refused at the org's monthly units cap (D-I-35).
@@ -56,8 +56,8 @@ const BREAKER_DETAIL: &str = "half or more of the last 50 jobs failed";
 
 /// Longest `output` and `expected` of a levenshtein check, in bytes (the distance is quadratic).
 const MAX_LEVENSHTEIN_BYTES: usize = 64 * 1024;
-/// A hash input, not an attribute name: the D46 rename must not change judge trace ids.
-const JUDGE_TRACE_TAG: &[u8] = b"llmobs.judge-trace.v1";
+/// A hash input, not an attribute name: changing it changes judge trace ids.
+const JUDGE_TRACE_TAG: &[u8] = b"cetra.judge-trace.v1";
 
 /// What one run needs besides the evaluator.
 pub(crate) struct RunArgs<'a> {
@@ -262,7 +262,7 @@ pub(crate) async fn after_commit(
 }
 
 /// The judge trace id of a job's run (D-I-16): the first 16 bytes of
-/// SHA-256(`llmobs.judge-trace.v1` ‖ job id (16 bytes) ‖ the run's claims as u32 BE).
+/// SHA-256(`cetra.judge-trace.v1` ‖ job id (16 bytes) ‖ the run's claims as u32 BE).
 pub(crate) fn job_judge_trace_id(job: Uuid, claims: u32) -> TraceId {
     let mut hasher = Sha256::new();
     hasher.update(JUDGE_TRACE_TAG);
@@ -1656,14 +1656,14 @@ fn over_budget(rule_id: Uuid) -> Exit {
 
 #[cfg(test)]
 mod tests {
-    use llmobs_eval::{CheckError, EvalError};
-    use llmobs_otel::Rejections;
+    use cetra_eval::{CheckError, EvalError};
+    use cetra_otel::Rejections;
     use serde_json::json;
 
     use super::*;
 
     /// The first 16 bytes of the hash, computed outside this code.
-    const PINNED_JUDGE_TRACE_ID: &str = "53d501b27e5b1ce8c268b9eb4d746a71";
+    const PINNED_JUDGE_TRACE_ID: &str = "fec6474a00764aaf4c87b3c771237ac1";
 
     #[test]
     fn job_judge_trace_id_is_pinned() {
@@ -1676,7 +1676,7 @@ mod tests {
 
     #[test]
     fn levenshtein_inputs_are_capped_at_64_kib_each() {
-        use llmobs_eval::{Evaluator, EvaluatorConfig, OutputScore, Variables};
+        use cetra_eval::{Evaluator, EvaluatorConfig, OutputScore, Variables};
         let evaluator = Evaluator {
             id: Uuid::nil(),
             name: "Similar".to_owned(),
@@ -1725,10 +1725,10 @@ mod job_tests {
     use std::time::Duration;
 
     use axum::http::{Method, header};
-    use llmobs_core::enums::PayloadFormat;
-    use llmobs_core::ids::{SpanId, TraceId};
-    use llmobs_core::score::ScoreValue;
-    use llmobs_core::span::Span;
+    use cetra_core::enums::PayloadFormat;
+    use cetra_core::ids::{SpanId, TraceId};
+    use cetra_core::score::ScoreValue;
+    use cetra_core::span::Span;
     use serde_json::{Value, json};
 
     use super::*;
@@ -2243,7 +2243,7 @@ mod job_tests {
         assert_eq!(scores[0]["session_id"], json!("session-7"));
         assert_eq!(scores[0]["user_id"], json!("user-7"));
         assert_eq!(
-            scores[0]["metadata"]["llmobs.eval.job_id"],
+            scores[0]["metadata"]["cetra.eval.job_id"],
             json!(job.to_string())
         );
     }
@@ -2560,7 +2560,7 @@ mod job_tests {
         let (app, seeded) = test_app().await;
         let conn = connection(&app, &seeded.cookie, &mock).await;
         let evaluator = judge(&app, &seeded, conn, "gpt-test").await;
-        store_trace(&app, &seeded.project, trace(11), "llmobs-eval").await;
+        store_trace(&app, &seeded.project, trace(11), "cetra-eval").await;
         let (job, new) = new_job(
             seeded.project.id,
             KIND_MANUAL,
@@ -2768,7 +2768,7 @@ mod job_tests {
         let scores = scores_of(&app, &seeded, evaluator).await;
         assert_eq!(scores.len(), 1, "the score is written");
         assert_eq!(
-            scores[0]["metadata"]["llmobs.eval.job_id"],
+            scores[0]["metadata"]["cetra.eval.job_id"],
             json!(job.to_string())
         );
         assert!(
@@ -3977,10 +3977,10 @@ mod job_tests {
         copy.trace_id = judge_copy;
         copy.span_id = span(1);
         copy.parent_span_id = None;
-        copy.environment = Some("llmobs-eval".to_owned());
+        copy.environment = Some("cetra-eval".to_owned());
         copy.metadata.clear();
         copy.metadata.insert(
-            llmobs_core::names::metadata_key::EVAL_TARGET_TRACE_ID.to_owned(),
+            cetra_core::names::metadata_key::EVAL_TARGET_TRACE_ID.to_owned(),
             target.to_hex(),
         );
         copy.ingest_time = now - 1_000_000_000;

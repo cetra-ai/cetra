@@ -105,7 +105,7 @@ T1 and T2 are regression guards: they pass on today's code too. T4 fails on toda
 Unknown IDs are already covered: `session_detail_matches_the_fixture` asserts `session_detail(&ctx, "missing", …)` is `None`, and `user_detail_matches_the_fixtures` asserts the same for `"nobody"`. Those assertions guard the removed existence checks.
 
 **T1 `a_session_with_only_excluded_traces_is_none`.**
-- Build spans with `span_row`: one trace whose root span has `session_id = Some("eval-only")` and `environment = Some(llmobs_core::names::environment::EVAL.to_owned())` (the value is `llmobs-eval`).
+- Build spans with `span_row`: one trace whose root span has `session_id = Some("eval-only")` and `environment = Some(cetra_core::names::environment::EVAL.to_owned())` (the value is `cetra-eval`).
 - Build a context from `example_query()` with `spans` and `traces` replaced by `spans_table(&spans)` and `traces_table(&spans)`.
 - `session_detail(&ctx, "eval-only", false, false, TIMEOUT)` returns `Ok(None)`.
 - `session_detail(&ctx, "eval-only", true, false, TIMEOUT)` returns `Ok(Some(_))`.
@@ -124,5 +124,5 @@ Unknown IDs are already covered: `session_detail_matches_the_fixture` asserts `s
 
 ## Done when
 
-- `cargo test -p llmobs-storage --lib reads::` passes.
+- `cargo test -p cetra-storage --lib reads::` passes.
 - `just check` passes.

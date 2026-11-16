@@ -28,7 +28,7 @@ const CAP_NS: i64 = 600_000_000_000;
 const TWO_POW_64: f64 = 18_446_744_073_709_551_616.0;
 
 /// `min(5 s · 2^(attempts−1), 10 min)` scaled by a factor in `[0.8, 1.2)` taken from
-/// SHA-256(`llmobs.retry.v1` ‖ job id ‖ attempts as u32 BE): deterministic, so a test can pin it.
+/// SHA-256(`cetra.retry.v1` ‖ job id ‖ attempts as u32 BE): deterministic, so a test can pin it.
 /// `attempts` 0 is treated as 1.
 pub(crate) fn backoff_ns(job: Uuid, attempts: u32) -> i64 {
     let attempts = attempts.max(1);
@@ -42,7 +42,7 @@ pub(crate) fn backoff_ns(job: Uuid, attempts: u32) -> i64 {
     let delay = delay.min(CAP_NS);
 
     let mut hasher = Sha256::new();
-    hasher.update(b"llmobs.retry.v1");
+    hasher.update(b"cetra.retry.v1");
     hasher.update(job.as_bytes());
     hasher.update(attempts.to_be_bytes());
     let digest = hasher.finalize();

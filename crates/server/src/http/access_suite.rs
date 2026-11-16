@@ -7,7 +7,7 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use axum::body::Bytes;
 use axum::http::{Method, header};
-use llmobs_core::ids::OrgId;
+use cetra_core::ids::OrgId;
 use serde_json::{Value, json};
 use uuid::Uuid;
 

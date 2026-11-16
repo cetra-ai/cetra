@@ -4,7 +4,7 @@
 //! in the accept URL returned to the caller and, when mail is configured, in
 //! the message.
 
-use llmobs_core::ids::OrgId;
+use cetra_core::ids::OrgId;
 use sqlx::{SqliteConnection, SqliteExecutor, SqlitePool};
 use uuid::Uuid;
 

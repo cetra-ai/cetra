@@ -34,15 +34,15 @@ const COMPLETED: i32 = 3;
 /// the default run has both kinds (see [`is_lossy`]).
 const DEFAULT_CASES: u64 = 25;
 
-/// Cases per run: `LLMOBS_HOOK_CRASH_CASES`, else [`DEFAULT_CASES`]. A value that is not a count
+/// Cases per run: `CETRA_HOOK_CRASH_CASES`, else [`DEFAULT_CASES`]. A value that is not a count
 /// panics.
 fn hook_cases() -> u64 {
-    match std::env::var("LLMOBS_HOOK_CRASH_CASES") {
+    match std::env::var("CETRA_HOOK_CRASH_CASES") {
         Ok(value) => value.parse().unwrap_or_else(|error| {
-            panic!("LLMOBS_HOOK_CRASH_CASES is not a case count ({error}): {value:?}")
+            panic!("CETRA_HOOK_CRASH_CASES is not a case count ({error}): {value:?}")
         }),
         Err(std::env::VarError::NotPresent) => DEFAULT_CASES,
-        Err(error) => panic!("LLMOBS_HOOK_CRASH_CASES: {error}"),
+        Err(error) => panic!("CETRA_HOOK_CRASH_CASES: {error}"),
     }
 }
 
@@ -183,24 +183,24 @@ fn start() -> i64 {
     midnight(day(0)) + 12 * HOUR_NS
 }
 
-/// The child of `every_model_hook_crash_reads_back`: runs case `LLMOBS_HOOK_CRASH_CASE` in the
-/// directory `LLMOBS_HOOK_CRASH_DIR`, then aborts at the hook point of its last op. With
-/// `LLMOBS_LOSSY_SEED` set, the abort first applies that lossy crash to the directory (R2.2).
+/// The child of `every_model_hook_crash_reads_back`: runs case `CETRA_HOOK_CRASH_CASE` in the
+/// directory `CETRA_HOOK_CRASH_DIR`, then aborts at the hook point of its last op. With
+/// `CETRA_LOSSY_SEED` set, the abort first applies that lossy crash to the directory (R2.2).
 #[test]
 #[ignore = "run by every_model_hook_crash_reads_back"]
 fn hook_crash_child() {
-    let Ok(dir) = std::env::var("LLMOBS_HOOK_CRASH_DIR") else {
+    let Ok(dir) = std::env::var("CETRA_HOOK_CRASH_DIR") else {
         return;
     };
     crate::test_support::no_core_dumps();
-    let number: u64 = std::env::var("LLMOBS_HOOK_CRASH_CASE")
-        .expect("LLMOBS_HOOK_CRASH_CASE is set with the directory")
+    let number: u64 = std::env::var("CETRA_HOOK_CRASH_CASE")
+        .expect("CETRA_HOOK_CRASH_CASE is set with the directory")
         .parse()
-        .expect("LLMOBS_HOOK_CRASH_CASE is a case number");
-    let shadow = std::env::var_os("LLMOBS_LOSSY_SHADOW").expect("LLMOBS_LOSSY_SHADOW is set");
-    let seed = std::env::var("LLMOBS_LOSSY_SEED")
+        .expect("CETRA_HOOK_CRASH_CASE is a case number");
+    let shadow = std::env::var_os("CETRA_LOSSY_SHADOW").expect("CETRA_LOSSY_SHADOW is set");
+    let seed = std::env::var("CETRA_LOSSY_SEED")
         .ok()
-        .map(|seed| seed.parse().expect("LLMOBS_LOSSY_SEED is a number"));
+        .map(|seed| seed.parse().expect("CETRA_LOSSY_SEED is a number"));
     let HookCase {
         prefix,
         last,
@@ -288,16 +288,16 @@ fn check_case(number: u64) -> bool {
     let stderr_path = dir.join("child.stderr");
     let stderr = File::create(&stderr_path).expect("a file for the child's stderr");
     let mut extra: Vec<(&str, &OsStr)> = vec![
-        ("LLMOBS_LOSSY_SHADOW", shadow.as_os_str()),
-        ("LLMOBS_ABORT_MARKER", OsStr::new("1")),
+        ("CETRA_LOSSY_SHADOW", shadow.as_os_str()),
+        ("CETRA_ABORT_MARKER", OsStr::new("1")),
     ];
     if lossy {
-        extra.push(("LLMOBS_LOSSY_SEED", OsStr::new(&number_text)));
+        extra.push(("CETRA_LOSSY_SEED", OsStr::new(&number_text)));
     }
     let status = spawn_child(
         "model_tests::hook_crash::hook_crash_child",
-        "LLMOBS_HOOK_CRASH_DIR",
-        "LLMOBS_HOOK_CRASH_CASE",
+        "CETRA_HOOK_CRASH_DIR",
+        "CETRA_HOOK_CRASH_CASE",
         &number_text,
         &data,
         &extra,

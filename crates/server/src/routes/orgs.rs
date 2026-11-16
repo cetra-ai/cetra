@@ -17,7 +17,7 @@ use crate::http::access::{Access, OrgAccess, RouteDef};
 use crate::http::error::{self, ApiError};
 use crate::meta::members::add_org_member;
 use crate::meta::orgs::{self, OrgRow, SlugError};
-use llmobs_core::ids::OrgId;
+use cetra_core::ids::OrgId;
 
 /// Org routes. Any signed-in caller may list and create orgs (spec 08).
 pub(crate) fn routes() -> Vec<RouteDef> {

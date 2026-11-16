@@ -10,7 +10,7 @@
     "status": "ok",
     "session_id": "sess-001",
     "user_id": "user-42",
-    "environment": "llmobs-eval",
+    "environment": "cetra-eval",
     "release": "v1.4.0",
     "tags": [
       "eval"
@@ -46,7 +46,7 @@
         "service_name": "support-bot",
         "session_id": "sess-001",
         "user_id": "user-42",
-        "environment": "llmobs-eval",
+        "environment": "cetra-eval",
         "release": "v1.4.0",
         "tags": [
           "eval"
@@ -70,7 +70,7 @@
         "service_name": "support-bot",
         "session_id": "sess-001",
         "user_id": "user-42",
-        "environment": "llmobs-eval",
+        "environment": "cetra-eval",
         "release": "v1.4.0",
         "tags": [],
         "metadata": {},

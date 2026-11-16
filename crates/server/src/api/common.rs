@@ -4,7 +4,7 @@
 
 use std::borrow::Cow;
 
-use llmobs_core::time_serde::parse_rfc3339;
+use cetra_core::time_serde::parse_rfc3339;
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 use utoipa::openapi::schema::{ArrayBuilder, ObjectBuilder, SchemaType};

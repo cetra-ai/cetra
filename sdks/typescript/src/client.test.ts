@@ -4,12 +4,12 @@ import { ApiError, Client } from "./client.js";
 import { ConfigError } from "./config.js";
 import { BASE, FakeRest, inOrder } from "./rest.test-helpers.js";
 
-const KEY = "sk-llmobs-test";
+const KEY = "sk-cetra-test";
 
 function clientFor(rest: FakeRest): Client {
   return new Client({
     apiKey: KEY,
-    baseUrl: "http://llmobs.test",
+    baseUrl: "http://cetra.test",
     fetch: rest.fetch,
     sleep: rest.sleep,
   });
@@ -21,7 +21,7 @@ afterEach(() => {
 
 describe("Client", () => {
   it("clientNeedsAKey", () => {
-    vi.stubEnv("LLMOBS_API_KEY", "");
+    vi.stubEnv("CETRA_API_KEY", "");
     expect(() => new Client()).toThrow(ConfigError);
     expect(() => new Client()).toThrow("apiKey: required");
   });

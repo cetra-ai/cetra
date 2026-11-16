@@ -92,7 +92,7 @@ export class FetchTraceExporter implements SpanExporter {
     }
     const fetch = this.fetcher;
     if (fetch === undefined) {
-      warnOnce("no-fetch", "llmobs: fetch is not available; spans are not exported");
+      warnOnce("no-fetch", "cetra: fetch is not available; spans are not exported");
       return failure("no fetch");
     }
     try {

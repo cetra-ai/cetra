@@ -144,25 +144,25 @@ describe("serialize", () => {
           return this;
         },
       }),
-    ).toEqual(['"[llmobs: cycle]"', "json"]);
+    ).toEqual(['"[cetra: cycle]"', "json"]);
   });
 
   it("replaces a self-referencing object with the cycle marker", () => {
     const value: Record<string, unknown> = {};
     value.self = value;
-    expect(serialize(value)).toEqual(['{"self":"[llmobs: cycle]"}', "json"]);
+    expect(serialize(value)).toEqual(['{"self":"[cetra: cycle]"}', "json"]);
   });
 
   it("replaces a self-referencing array with the cycle marker", () => {
     const value: unknown[] = [1];
     value.push(value);
-    expect(serialize(value)).toEqual(['[1,"[llmobs: cycle]"]', "json"]);
+    expect(serialize(value)).toEqual(['[1,"[cetra: cycle]"]', "json"]);
   });
 
   it("replaces a self-referencing Map with the cycle marker", () => {
     const value = new Map<string, unknown>();
     value.set("m", value);
-    expect(serialize(value)).toEqual(['{"m":"[llmobs: cycle]"}', "json"]);
+    expect(serialize(value)).toEqual(['{"m":"[cetra: cycle]"}', "json"]);
   });
 
   it("serializes a shared reference each time", () => {
@@ -173,13 +173,13 @@ describe("serialize", () => {
   it("serializes 32 nested containers without a marker", () => {
     const [text, format] = serialize(nested(MAX_DEPTH));
     expect(format).toBe("json");
-    expect(text).not.toContain("[llmobs: max depth]");
+    expect(text).not.toContain("[cetra: max depth]");
     expect(dig(JSON.parse(text), MAX_DEPTH)).toBe("leaf");
   });
 
   it("replaces the 33rd container with the depth marker", () => {
     const [text] = serialize(nested(MAX_DEPTH + 1));
-    expect(dig(JSON.parse(text), MAX_DEPTH)).toBe("[llmobs: max depth]");
+    expect(dig(JSON.parse(text), MAX_DEPTH)).toBe("[cetra: max depth]");
   });
 
   it("respects the offset of a byte view", () => {
@@ -252,7 +252,7 @@ describe("truncate", () => {
     const value = "a".repeat(MAX_PAYLOAD_BYTES + 1);
     const original = value.length;
     expect(truncate(value, "json")).toEqual([
-      `${"a".repeat(MAX_PAYLOAD_BYTES)}…[llmobs: truncated, original ${original} bytes]`,
+      `${"a".repeat(MAX_PAYLOAD_BYTES)}…[cetra: truncated, original ${original} bytes]`,
       "text",
     ]);
   });
@@ -261,14 +261,14 @@ describe("truncate", () => {
     const value = `x${"é".repeat(600_000)}`; // 1 + 1_200_000 bytes
     const [text, format] = truncate(value, "json");
     expect(format).toBe("text");
-    expect(text).toBe(`x${"é".repeat(524_287)}…[llmobs: truncated, original 1200001 bytes]`);
+    expect(text).toBe(`x${"é".repeat(524_287)}…[cetra: truncated, original 1200001 bytes]`);
   });
 
   it("steps back over a 4-byte character at the cut", () => {
     const value = `x${"🎉".repeat(300_000)}`; // 1 + 1_200_000 bytes
     const [text, format] = truncate(value, "text");
     expect(format).toBe("text");
-    expect(text).toBe(`x${"🎉".repeat(262_143)}…[llmobs: truncated, original 1200001 bytes]`);
+    expect(text).toBe(`x${"🎉".repeat(262_143)}…[cetra: truncated, original 1200001 bytes]`);
   });
 
   it("turns truncated JSON into text", () => {
@@ -279,7 +279,7 @@ describe("truncate", () => {
     const [text, format] = serialize(value);
     expect(format).toBe("text");
     expect(text.startsWith('{"v":"aaaa')).toBe(true);
-    expect(text.endsWith(`…[llmobs: truncated, original ${original} bytes]`)).toBe(true);
+    expect(text.endsWith(`…[cetra: truncated, original ${original} bytes]`)).toBe(true);
   });
 });
 
@@ -310,7 +310,7 @@ describe("attributeValue", () => {
   it("truncates long strings", () => {
     const value = "a".repeat(MAX_PAYLOAD_BYTES + 1);
     expect(attributeValue(value)).toBe(
-      `${"a".repeat(MAX_PAYLOAD_BYTES)}…[llmobs: truncated, original ${value.length} bytes]`,
+      `${"a".repeat(MAX_PAYLOAD_BYTES)}…[cetra: truncated, original ${value.length} bytes]`,
     );
   });
 });

@@ -2,12 +2,47 @@
   "spans": [
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "1e42aadd3b69271519f853ff838432eb",
-      "span_id": "0ac1d50ff803eada",
+      "trace_id": "47e8b977b32779863224cafd5ab8212d",
+      "span_id": "960da26652558f49",
+      "name": "get_weather",
+      "span_kind": "tool",
+      "start_time": "2025-12-31T23:59:50.044000000Z",
+      "end_time": "2025-12-31T23:59:50.044000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "input": "Paris",
+      "input_format": "text",
+      "output": "{\"temperature_c\":18,\"conditions\":\"sunny\",\"city\":\"Paris\"}",
+      "output_format": "json",
+      "input_preview": "Paris",
+      "output_preview": "{\"temperature_c\":18,\"conditions\":\"sunny\",\"city\":\"Paris\"}",
+      "attributes": {
+        "openinference.span.kind": "TOOL",
+        "output.mime_type": "application/json",
+        "tool.description": "Look up the weather for a city.",
+        "tool.name": "get_weather"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.langchain",
+      "scope_version": "0.1.81",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 1
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "7056ba6e572d2a43874470e44087d403",
+      "span_id": "b547d4ba3eab7d13",
       "name": "ChatOpenAI",
       "span_kind": "llm",
-      "start_time": "2025-12-31T23:59:50.091000000Z",
-      "end_time": "2025-12-31T23:59:50.124000000Z",
+      "start_time": "2025-12-31T23:59:50.045000000Z",
+      "end_time": "2025-12-31T23:59:50.078000000Z",
       "status": "ok",
       "service_name": "capture-app",
       "metadata": {
@@ -68,12 +103,12 @@
     },
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "8cc4a9aa8204b7c18d4d1ef49747dd05",
-      "span_id": "f67688267e0bcf51",
+      "trace_id": "b4722e90299f28e8ee624db80812e226",
+      "span_id": "dce2d199c63a540e",
       "name": "ChatOpenAI",
       "span_kind": "llm",
       "start_time": "2025-12-31T23:59:50.000000000Z",
-      "end_time": "2025-12-31T23:59:50.088000000Z",
+      "end_time": "2025-12-31T23:59:50.042000000Z",
       "status": "ok",
       "service_name": "capture-app",
       "metadata": {
@@ -117,41 +152,6 @@
         "metadata": "{\"ls_provider\": \"openai\", \"ls_model_name\": \"gpt-4o-mini-2024-07-18\", \"ls_model_type\": \"chat\", \"ls_temperature\": null, \"ls_integration\": \"langchain_chat_model\", \"lc_versions\": {\"langchain-core\": \"1.7.4\", \"langchain\": \"1.4.8\", \"langchain-openai\": \"1.7.3\"}}",
         "openinference.span.kind": "LLM",
         "output.mime_type": "application/json"
-      },
-      "resource_attributes": {
-        "telemetry.sdk.language": "python",
-        "telemetry.sdk.name": "opentelemetry",
-        "telemetry.sdk.version": "1.45.2"
-      },
-      "scope_name": "openinference.instrumentation.langchain",
-      "scope_version": "0.1.81",
-      "conventions": [
-        "openinference"
-      ],
-      "ingest_time": "2026-01-01T00:00:00.000000000Z",
-      "schema_version": 1
-    },
-    {
-      "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "bfeebbed4c8225a11a0ff7163de2b419",
-      "span_id": "c1b7efa4e43fcb9d",
-      "name": "get_weather",
-      "span_kind": "tool",
-      "start_time": "2025-12-31T23:59:50.090000000Z",
-      "end_time": "2025-12-31T23:59:50.090000000Z",
-      "status": "ok",
-      "service_name": "capture-app",
-      "input": "Paris",
-      "input_format": "text",
-      "output": "{\"temperature_c\":18,\"conditions\":\"sunny\",\"city\":\"Paris\"}",
-      "output_format": "json",
-      "input_preview": "Paris",
-      "output_preview": "{\"temperature_c\":18,\"conditions\":\"sunny\",\"city\":\"Paris\"}",
-      "attributes": {
-        "openinference.span.kind": "TOOL",
-        "output.mime_type": "application/json",
-        "tool.description": "Look up the weather for a city.",
-        "tool.name": "get_weather"
       },
       "resource_attributes": {
         "telemetry.sdk.language": "python",

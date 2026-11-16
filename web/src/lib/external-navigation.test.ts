@@ -51,7 +51,7 @@ it("posts the fields as hidden inputs, submits once, and removes the form", () =
   });
 
   submitExternalForm("http://127.0.0.1:54321/callback", {
-    token: "pat-llmobs-A+B",
+    token: "pat-cetra-A+B",
     state: "xyz",
   });
 
@@ -62,7 +62,7 @@ it("posts the fields as hidden inputs, submits once, and removes the form", () =
       action: "http://127.0.0.1:54321/callback",
       attached: true,
       inputs: [
-        { name: "token", type: "hidden", value: "pat-llmobs-A+B" },
+        { name: "token", type: "hidden", value: "pat-cetra-A+B" },
         { name: "state", type: "hidden", value: "xyz" },
       ],
     },

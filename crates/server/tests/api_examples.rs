@@ -6,57 +6,57 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use llmobs_core::enums::PayloadFormat;
-use llmobs_core::ids::{SpanId, TraceId};
-use llmobs_core::message::{Message, Part};
-use llmobs_core::score::{Score, ScoreTarget, ScoreValue};
-use llmobs_core::span::Span;
-use llmobs_server::api::account::{
+use cetra_core::enums::PayloadFormat;
+use cetra_core::ids::{SpanId, TraceId};
+use cetra_core::message::{Message, Part};
+use cetra_core::score::{Score, ScoreTarget, ScoreValue};
+use cetra_core::span::Span;
+use cetra_server::api::account::{
     AuthConfig, Me, OrgMembership, OrgRole, Project, SetupResponse, SignupResponse,
 };
-use llmobs_server::api::admin::{AdminLicense, AdminSettings, AdminUser, CreatedAdminUser};
-use llmobs_server::api::alerts::{AlertEvent, AlertRule, NotificationChannel};
-use llmobs_server::api::backfills::{Backfill, BackfillEstimate, CreateBackfillRequest};
-use llmobs_server::api::common::Page;
-use llmobs_server::api::connections::{
+use cetra_server::api::admin::{AdminLicense, AdminSettings, AdminUser, CreatedAdminUser};
+use cetra_server::api::alerts::{AlertEvent, AlertRule, NotificationChannel};
+use cetra_server::api::backfills::{Backfill, BackfillEstimate, CreateBackfillRequest};
+use cetra_server::api::common::Page;
+use cetra_server::api::connections::{
     CreateLlmConnectionRequest, LlmConnection, LlmConnectionTestResult,
 };
-use llmobs_server::api::datasets::{
+use cetra_server::api::datasets::{
     AddItemsRequest, CreateDatasetRequest, Dataset, DatasetItem, DatasetVersion, FromTraceRequest,
     ImportMapping, ImportPreview, ImportResult,
 };
-use llmobs_server::api::deletions::{Deletion, DeletionPreview};
-use llmobs_server::api::entitlements::OrgEntitlements;
-use llmobs_server::api::eval_jobs::{EvalJob, RunEvaluatorRequest};
-use llmobs_server::api::evaluators::{
+use cetra_server::api::deletions::{Deletion, DeletionPreview};
+use cetra_server::api::entitlements::OrgEntitlements;
+use cetra_server::api::eval_jobs::{EvalJob, RunEvaluatorRequest};
+use cetra_server::api::evaluators::{
     CreateEvaluatorRequest, Evaluator, EvaluatorTemplateList, EvaluatorTestRequest,
     EvaluatorTestResult,
 };
-use llmobs_server::api::experiments::{
+use cetra_server::api::experiments::{
     CreateExperimentResponse, Experiment, ExperimentComparison, ExperimentResults,
     ExperimentResultsRequest,
 };
-use llmobs_server::api::invites::{CreatedInvite, Invite, InvitePreview};
-use llmobs_server::api::keys::{ApiKey, CreatedApiKey, CreatedPersonalToken, PersonalToken};
-use llmobs_server::api::members::{OrgMember, ProjectMember};
-use llmobs_server::api::metrics::MetricsResponse;
-use llmobs_server::api::model_prices::{ModelPrice, ModelPriceInput, ModelPriceResolution};
-use llmobs_server::api::online_rules::{
+use cetra_server::api::invites::{CreatedInvite, Invite, InvitePreview};
+use cetra_server::api::keys::{ApiKey, CreatedApiKey, CreatedPersonalToken, PersonalToken};
+use cetra_server::api::members::{OrgMember, ProjectMember};
+use cetra_server::api::metrics::MetricsResponse;
+use cetra_server::api::model_prices::{ModelPrice, ModelPriceInput, ModelPriceResolution};
+use cetra_server::api::online_rules::{
     CreateOnlineRuleRequest, OnlineRule, OnlineRulePage, OnlineRulePreview,
     OnlineRulePreviewRequest, UpdateOnlineRuleRequest,
 };
-use llmobs_server::api::openapi::openapi;
-use llmobs_server::api::org_sso::OrgSso;
-use llmobs_server::api::payload::Payload;
-use llmobs_server::api::saved_views::SavedView;
-use llmobs_server::api::schema::SchemaResponse;
-use llmobs_server::api::score_definitions::{CreateScoreDefinitionRequest, ScoreDefinition};
-use llmobs_server::api::scores::{FeedbackRequest, ScoreBatch};
-use llmobs_server::api::sessions::{SessionDetail, SessionSummary};
-use llmobs_server::api::sql::{SqlQueryRequest, SqlQueryResult};
-use llmobs_server::api::traces::{SpanDetail, SpanSummary, TraceDetail, TraceSummary};
-use llmobs_server::api::usage::OrgUsage;
-use llmobs_server::api::users::{EndUserDetail, EndUserSummary};
+use cetra_server::api::openapi::openapi;
+use cetra_server::api::org_sso::OrgSso;
+use cetra_server::api::payload::Payload;
+use cetra_server::api::saved_views::SavedView;
+use cetra_server::api::schema::SchemaResponse;
+use cetra_server::api::score_definitions::{CreateScoreDefinitionRequest, ScoreDefinition};
+use cetra_server::api::scores::{FeedbackRequest, ScoreBatch};
+use cetra_server::api::sessions::{SessionDetail, SessionSummary};
+use cetra_server::api::sql::{SqlQueryRequest, SqlQueryResult};
+use cetra_server::api::traces::{SpanDetail, SpanSummary, TraceDetail, TraceSummary};
+use cetra_server::api::usage::OrgUsage;
+use cetra_server::api::users::{EndUserDetail, EndUserSummary};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -216,7 +216,7 @@ fn contract_document() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("openapi.json")
 }
 
-const OPENAPI_URI: &str = "urn:llmobs:openapi";
+const OPENAPI_URI: &str = "urn:cetra:openapi";
 
 fn schema_pointer(document: &Value, entry: &Example, failures: &mut Vec<String>) -> Option<String> {
     let Some((path, method, operation)) = operation_at(document, &entry.operation_id) else {
@@ -923,7 +923,7 @@ fn example_scenarios() {
         .iter()
         .find(|trace| trace.trace_id.to_string() == TRACE_3)
         .unwrap_or_else(|| panic!("T3"));
-    assert_eq!(third.status, llmobs_core::enums::SpanStatus::Error);
+    assert_eq!(third.status, cetra_core::enums::SpanStatus::Error);
     assert_eq!(third.error_count, 2);
 
     let span: SpanDetail =

@@ -1,47 +1,47 @@
-//! The soak's configuration, read from `LLMOBS_SOAK_*` (track R M7, R7.5).
+//! The soak's configuration, read from `CETRA_SOAK_*` (track R M7, R7.5).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use bytesize::ByteSize;
-use llmobs_storage::config::{
+use cetra_storage::config::{
     CompactionConfig, QueryConfig, S3Config, StorageConfig, WalConfig, WalSync,
 };
 
 use crate::common::s3::S3Env;
 
 /// The file a soak data directory is marked with: only marked directories are emptied.
-pub(crate) const MARKER: &str = ".llmobs-soak";
+pub(crate) const MARKER: &str = ".cetra-soak";
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct SoakConfig {
-    /// `LLMOBS_SOAK_DIR`, required. The soak deletes it recursively when marked.
+    /// `CETRA_SOAK_DIR`, required. The soak deletes it recursively when marked.
     pub(crate) dir: PathBuf,
-    /// `LLMOBS_SOAK_OUT`, required. Missing or empty; never deleted by the soak.
+    /// `CETRA_SOAK_OUT`, required. Missing or empty; never deleted by the soak.
     pub(crate) out: PathBuf,
-    /// `LLMOBS_SOAK_LABEL`, default "local"; names the run.
+    /// `CETRA_SOAK_LABEL`, default "local"; names the run.
     pub(crate) label: String,
-    /// `LLMOBS_SOAK_HOURS`, default 24.
+    /// `CETRA_SOAK_HOURS`, default 24.
     pub(crate) hours: f64,
-    /// `LLMOBS_SOAK_RATE` spans/s, default 2,000.
+    /// `CETRA_SOAK_RATE` spans/s, default 2,000.
     pub(crate) rate: u64,
-    /// `LLMOBS_SOAK_PROJECTS`, default 4, 1..=8.
+    /// `CETRA_SOAK_PROJECTS`, default 4, 1..=8.
     pub(crate) projects: usize,
-    /// `LLMOBS_SOAK_QPS`, default 1.0.
+    /// `CETRA_SOAK_QPS`, default 1.0.
     pub(crate) qps: f64,
-    /// `LLMOBS_SOAK_QUERY_MIX`, default "list=30,filter=15,detail=25,sessions=10,metrics=10,scores=10".
+    /// `CETRA_SOAK_QUERY_MIX`, default "list=30,filter=15,detail=25,sessions=10,metrics=10,scores=10".
     pub(crate) mix: Vec<(QueryKind, u32)>,
-    /// `LLMOBS_SOAK_RETENTION_DAYS`, default 0 (keep today only).
+    /// `CETRA_SOAK_RETENTION_DAYS`, default 0 (keep today only).
     pub(crate) retention_days: u32,
-    /// `LLMOBS_SOAK_SAMPLE_SECS`, default 60.
+    /// `CETRA_SOAK_SAMPLE_SECS`, default 60.
     pub(crate) sample_secs: u64,
-    /// `LLMOBS_SOAK_WARMUP_HOURS`, default max(1, hours / 10).
+    /// `CETRA_SOAK_WARMUP_HOURS`, default max(1, hours / 10).
     pub(crate) warmup_hours: f64,
-    /// `LLMOBS_SOAK_MAX_RSS_GIB`, default 8.
+    /// `CETRA_SOAK_MAX_RSS_GIB`, default 8.
     pub(crate) max_rss_gib: f64,
-    /// `LLMOBS_SOAK_MAX_L0_AGE_MIN`, default 30.
+    /// `CETRA_SOAK_MAX_L0_AGE_MIN`, default 30.
     pub(crate) max_l0_age_min: u64,
-    /// `LLMOBS_SOAK_KEEP=1`: keep the S3 prefix after a pass.
+    /// `CETRA_SOAK_KEEP=1`: keep the S3 prefix after a pass.
     pub(crate) keep: bool,
 }
 
@@ -65,7 +65,7 @@ impl QueryKind {
         QueryKind::Scores,
     ];
 
-    /// The name used in `LLMOBS_SOAK_QUERY_MIX` and in the samples.
+    /// The name used in `CETRA_SOAK_QUERY_MIX` and in the samples.
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::List => "list",
@@ -121,36 +121,36 @@ impl SoakConfig {
                 })
                 .transpose()
         };
-        let dir = required("LLMOBS_SOAK_DIR")?;
+        let dir = required("CETRA_SOAK_DIR")?;
         if dir.starts_with("/tmp") {
-            return Err("LLMOBS_SOAK_DIR must not be under /tmp (the scratch quota)".to_owned());
+            return Err("CETRA_SOAK_DIR must not be under /tmp (the scratch quota)".to_owned());
         }
-        let out = required("LLMOBS_SOAK_OUT")?;
-        let hours = number("LLMOBS_SOAK_HOURS")?.unwrap_or(24.0);
-        let projects = number("LLMOBS_SOAK_PROJECTS")?.map_or(4, |n| n as usize);
+        let out = required("CETRA_SOAK_OUT")?;
+        let hours = number("CETRA_SOAK_HOURS")?.unwrap_or(24.0);
+        let projects = number("CETRA_SOAK_PROJECTS")?.map_or(4, |n| n as usize);
         if !(1..=8).contains(&projects) {
-            return Err("LLMOBS_SOAK_PROJECTS must be between 1 and 8".to_owned());
+            return Err("CETRA_SOAK_PROJECTS must be between 1 and 8".to_owned());
         }
         let mix = parse_mix(
-            lookup("LLMOBS_SOAK_QUERY_MIX")
+            lookup("CETRA_SOAK_QUERY_MIX")
                 .as_deref()
                 .unwrap_or(DEFAULT_MIX),
         )?;
         Ok(Self {
             dir,
             out,
-            label: lookup("LLMOBS_SOAK_LABEL").unwrap_or_else(|| "local".to_owned()),
+            label: lookup("CETRA_SOAK_LABEL").unwrap_or_else(|| "local".to_owned()),
             hours,
-            rate: number("LLMOBS_SOAK_RATE")?.map_or(2_000, |n| n as u64),
+            rate: number("CETRA_SOAK_RATE")?.map_or(2_000, |n| n as u64),
             projects,
-            qps: number("LLMOBS_SOAK_QPS")?.unwrap_or(1.0),
+            qps: number("CETRA_SOAK_QPS")?.unwrap_or(1.0),
             mix,
-            retention_days: number("LLMOBS_SOAK_RETENTION_DAYS")?.map_or(0, |n| n as u32),
-            sample_secs: number("LLMOBS_SOAK_SAMPLE_SECS")?.map_or(60, |n| n as u64),
-            warmup_hours: number("LLMOBS_SOAK_WARMUP_HOURS")?.unwrap_or((hours / 10.0).max(1.0)),
-            max_rss_gib: number("LLMOBS_SOAK_MAX_RSS_GIB")?.unwrap_or(8.0),
-            max_l0_age_min: number("LLMOBS_SOAK_MAX_L0_AGE_MIN")?.map_or(30, |n| n as u64),
-            keep: lookup("LLMOBS_SOAK_KEEP").as_deref() == Some("1"),
+            retention_days: number("CETRA_SOAK_RETENTION_DAYS")?.map_or(0, |n| n as u32),
+            sample_secs: number("CETRA_SOAK_SAMPLE_SECS")?.map_or(60, |n| n as u64),
+            warmup_hours: number("CETRA_SOAK_WARMUP_HOURS")?.unwrap_or((hours / 10.0).max(1.0)),
+            max_rss_gib: number("CETRA_SOAK_MAX_RSS_GIB")?.unwrap_or(8.0),
+            max_l0_age_min: number("CETRA_SOAK_MAX_L0_AGE_MIN")?.map_or(30, |n| n as u64),
+            keep: lookup("CETRA_SOAK_KEEP").as_deref() == Some("1"),
         })
     }
 

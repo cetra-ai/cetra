@@ -5,13 +5,13 @@
 //! deeply nested JSON, and JSON shaped like a real reply with arbitrary leaves.
 //! The decoders stay private: their properties live in each module's tests and
 //! use the strategies here. Each property runs 256 cases unless
-//! `LLMOBS_PROPTEST_CASES` sets another count. Inputs stay far below the 4 MiB
+//! `CETRA_PROPTEST_CASES` sets another count. Inputs stay far below the 4 MiB
 //! judge and 64 KiB webhook caps, which the egress client enforces.
 #![allow(clippy::expect_used)]
 
 use std::collections::BTreeMap;
 
-use llmobs_core::score::ScoreValue;
+use cetra_core::score::ScoreValue;
 use proptest::prelude::*;
 use proptest::test_runner::FileFailurePersistence;
 use serde_json::{Map, Value};
@@ -97,7 +97,7 @@ const WORDS: &[&str] = &[
 const LABELS: &[&str] = &["correct", "incorrect", "Partially correct"];
 
 pub(crate) fn config() -> ProptestConfig {
-    let cases = std::env::var("LLMOBS_PROPTEST_CASES")
+    let cases = std::env::var("CETRA_PROPTEST_CASES")
         .ok()
         .and_then(|text| text.parse().ok())
         .unwrap_or(256);

@@ -207,11 +207,11 @@ it("persists a column width and restores the default on double-click", async () 
   fireEvent.pointerDown(handle, { clientX: 100 });
   fireEvent.pointerMove(window, { clientX: 180 });
   fireEvent.pointerUp(window, { clientX: 180 });
-  expect(JSON.parse(localStorage.getItem("llmobs.table.traces") ?? "")).toEqual({ name: 280 });
+  expect(JSON.parse(localStorage.getItem("cetra.table.traces") ?? "")).toEqual({ name: 280 });
   const header = handle.parentElement?.parentElement;
   expect(header?.style.gridTemplateColumns.startsWith("28px 132px 280px")).toBe(true);
   fireEvent.doubleClick(handle);
-  expect(localStorage.getItem("llmobs.table.traces")).toBeNull();
+  expect(localStorage.getItem("cetra.table.traces")).toBeNull();
   expect(header?.style.gridTemplateColumns.startsWith("28px 132px 200px")).toBe(true);
 });
 

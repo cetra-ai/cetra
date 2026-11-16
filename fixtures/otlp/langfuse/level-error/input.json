@@ -48,15 +48,15 @@
           },
           "spans": [
             {
-              "traceId": "3abd63589fa5ef397a271ceb22cdf1b8",
-              "spanId": "fb00a141331328a9",
+              "traceId": "7ce96505ce061d65d39184b4056c7109",
+              "spanId": "469296a0fa274313",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
               "name": "failed-lookup",
               "kind": 1,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590055000000",
+              "endTimeUnixNano": "1767225590053000000",
               "attributes": [
                 {
                   "key": "langfuse.internal.is_app_root",

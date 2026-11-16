@@ -6,7 +6,7 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use llmobs_core::ids::OrgId;
+use cetra_core::ids::OrgId;
 use oauth2::{
     AuthorizationCode, ClientId, ClientSecret, EndpointMaybeSet, EndpointNotSet, EndpointSet,
     PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, RequestTokenError, Scope,
@@ -30,7 +30,7 @@ const MAX_IDP_BODY: usize = 1024 * 1024;
 #[derive(Debug, Clone)]
 pub(crate) struct IdpHttp {
     client: reqwest::Client,
-    policy: Option<llmobs_eval::EgressPolicy>,
+    policy: Option<cetra_eval::EgressPolicy>,
 }
 
 /// Why an identity-provider request failed. No variant holds the URL or a body.
@@ -57,8 +57,8 @@ impl IdpHttp {
     }
 
     /// The client of an org's provider: every request is checked against `policy` first.
-    /// `client` must come from [`llmobs_eval::identity_http_client`] with the same policy.
-    pub(crate) fn guarded(client: reqwest::Client, policy: llmobs_eval::EgressPolicy) -> Self {
+    /// `client` must come from [`cetra_eval::identity_http_client`] with the same policy.
+    pub(crate) fn guarded(client: reqwest::Client, policy: cetra_eval::EgressPolicy) -> Self {
         Self {
             client,
             policy: Some(policy),
@@ -196,7 +196,7 @@ impl OidcProvider {
 
     /// An org's provider (D-P-52, D-P-53): id `org:<org_id>`, default scopes, no domain list,
     /// no auto-provision, no linking flag (the org flow decides). `http` must be
-    /// `IdpHttp::guarded(llmobs_eval::identity_http_client(policy)?, policy)`.
+    /// `IdpHttp::guarded(cetra_eval::identity_http_client(policy)?, policy)`.
     pub(crate) fn for_org(
         org_id: OrgId,
         display_name: &str,
@@ -684,12 +684,12 @@ mod tests {
     }
 
     fn guarded(allow_private_network: bool) -> IdpHttp {
-        let policy = llmobs_eval::EgressPolicy {
+        let policy = cetra_eval::EgressPolicy {
             allow_private_network,
             restore_mode: false,
         };
         IdpHttp::guarded(
-            llmobs_eval::identity_http_client(policy).expect("client"),
+            cetra_eval::identity_http_client(policy).expect("client"),
             policy,
         )
     }

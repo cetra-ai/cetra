@@ -13,8 +13,8 @@ if [[ $# -lt 1 || $# -gt 2 || ( $# -eq 2 && "$2" != "s3" ) ]]; then
 fi
 image="$1"
 mode="${2:-local}"
-project="llmobs-smoke-$$"
-key="sk-llmobs-SMOKE0123456789ABCDEFGHIJKLMNOPQ"
+project="cetra-smoke-$$"
+key="sk-cetra-SMOKE0123456789ABCDEFGHIJKLMNOPQ"
 
 dir="$(mktemp -d)"
 cp -R "$root/deploy/compose/." "$dir/"
@@ -43,24 +43,24 @@ for sock in socks:
 ')
 
 cat >"$dir/.env" <<EOF
-LLMOBS_IMAGE=$image
-LLMOBS_BIND=127.0.0.1
-LLMOBS_HTTP_PORT=$http_port
-LLMOBS_OTLP_GRPC_PORT=$grpc_port
-LLMOBS_OTLP_HTTP_PORT=$otlp_port
+CETRA_IMAGE=$image
+CETRA_BIND=127.0.0.1
+CETRA_HTTP_PORT=$http_port
+CETRA_OTLP_GRPC_PORT=$grpc_port
+CETRA_OTLP_HTTP_PORT=$otlp_port
 GARAGE_RPC_SECRET=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
 GARAGE_ADMIN_TOKEN=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
 GARAGE_ACCESS_KEY_ID=GK$(python3 -c 'import secrets; print(secrets.token_hex(12))')
 GARAGE_SECRET_ACCESS_KEY=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
 EOF
-cat >"$dir/llmobs.env" <<EOF
-LLMOBS_PUBLIC_URL=http://127.0.0.1:$http_port
-LLMOBS_INIT_ADMIN_EMAIL=smoke@example.com
-LLMOBS_INIT_ADMIN_PASSWORD=llmobs-smoke-1
-LLMOBS_INIT_ORG=Smoke
-LLMOBS_INIT_PROJECT=Smoke
-LLMOBS_INIT_SECRET_KEY=$key
-LLMOBS_STORAGE__FLUSH__MAX_AGE=5s
+cat >"$dir/cetra.env" <<EOF
+CETRA_PUBLIC_URL=http://127.0.0.1:$http_port
+CETRA_INIT_ADMIN_EMAIL=smoke@example.com
+CETRA_INIT_ADMIN_PASSWORD=cetra-smoke-1
+CETRA_INIT_ORG=Smoke
+CETRA_INIT_PROJECT=Smoke
+CETRA_INIT_SECRET_KEY=$key
+CETRA_STORAGE__FLUSH__MAX_AGE=5s
 EOF
 
 # Not `--wait`: garage-init is a one-shot container. smoke.sh waits for /readyz instead.
@@ -77,7 +77,7 @@ fi
 if [[ "$mode" == "s3" ]]; then
   # The span is flushed to Parquet in the bucket within flush.max_age (5 s here).
   # shellcheck disable=SC2016 # expanded by the container's shell
-  check='curl -sSf -H "Authorization: Bearer $GARAGE_ADMIN_TOKEN" "http://garage:3903/v2/GetBucketInfo?globalAlias=llmobs" | tr -d " \n" | grep -q "\"objects\":[1-9]"'
+  check='curl -sSf -H "Authorization: Bearer $GARAGE_ADMIN_TOKEN" "http://garage:3903/v2/GetBucketInfo?globalAlias=cetra" | tr -d " \n" | grep -q "\"objects\":[1-9]"'
   for _ in $(seq 1 60); do
     if compose run --rm --no-deps --entrypoint /bin/sh garage-init -c "$check" >/dev/null 2>&1; then
       echo "compose-smoke: objects written to the Garage bucket"

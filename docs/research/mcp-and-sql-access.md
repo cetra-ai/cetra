@@ -26,8 +26,8 @@ What H takes from them:
 - **Langfuse**: no raw SQL; a JSON metrics query API (1,000 rows max). Saved queries are dashboard widgets.
 - **Phoenix**: SQL through MCP only; no saved queries.
 
-llmobs already has the equivalent of these sandboxes in A2 (D95, D96, D-A2-1, D-A2-2). H adds owner-based sharing for saved queries (D-H-6), which none of them have.
+cetra already has the equivalent of these sandboxes in A2 (D95, D96, D-A2-1, D-A2-2). H adds owner-based sharing for saved queries (D-H-6), which none of them have.
 
 ## CLIs
 
-Phoenix `px` (trace and span get/list, `--format pretty|json|raw`), LangWatch `langwatch query run` (`--param`, `--start/--end`, `--format table|json|jsonl|csv`, keyset paging), MLflow `traces search|get` (`table|json`), Opik `export` (`json|csv`). H's `llmobs query` and `traces` follow the same shape (D-H-12).
+Phoenix `px` (trace and span get/list, `--format pretty|json|raw`), LangWatch `langwatch query run` (`--param`, `--start/--end`, `--format table|json|jsonl|csv`, keyset paging), MLflow `traces search|get` (`table|json`), Opik `export` (`json|csv`). H's `cetra query` and `traces` follow the same shape (D-H-12).

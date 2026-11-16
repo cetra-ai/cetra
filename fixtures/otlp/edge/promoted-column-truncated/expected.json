@@ -9,25 +9,25 @@
       "start_time": "2025-12-31T23:59:50.000000000Z",
       "end_time": "2025-12-31T23:59:51.000000000Z",
       "status": "unset",
-      "session_id": "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS…[llmobs: truncated, original 300 bytes]",
+      "session_id": "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS…[cetra: truncated, original 300 bytes]",
       "metadata": {
-        "note": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm…[llmobs: truncated, original 40 bytes]"
+        "note": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm…[cetra: truncated, original 40 bytes]"
       },
-      "request_model": "model-gggggggggggggggggggggggggg…[llmobs: truncated, original 46 bytes]",
+      "request_model": "model-gggggggggggggggggggggggggg…[cetra: truncated, original 46 bytes]",
       "cost_source": "none",
       "attributes": {
-        "gen_ai.request.model": "model-gggggggggggggggggggggggggg…[llmobs: truncated, original 46 bytes]",
-        "llmobs.metadata.note": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm…[llmobs: truncated, original 40 bytes]"
+        "cetra.metadata.note": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm…[cetra: truncated, original 40 bytes]",
+        "gen_ai.request.model": "model-gggggggggggggggggggggggggg…[cetra: truncated, original 46 bytes]"
       },
       "truncated": [
+        "cetra.metadata.note",
         "gen_ai.request.model",
-        "llmobs.metadata.note",
         "metadata.note",
         "request_model",
         "session_id"
       ],
       "conventions": [
-        "llmobs",
+        "cetra",
         "genai"
       ],
       "ingest_time": "2026-01-01T00:00:00.000000000Z",

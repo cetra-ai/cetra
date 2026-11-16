@@ -4,7 +4,7 @@ Implementation plan, split into small sub-phases. Each sub-phase is meant to be 
 
 **Read first:** `docs/mvp-decisions.md` (D1–D58), `docs/spec/README.md` (architecture, crate layout), `.cursor/rules/*.mdc` (no compatibility layers, no unnecessary abstractions).
 
-**Scope of step 1:** the repository layout, the Rust workspace with its 5 crates, the toolchain, lints, profiles, the dependency pins, the `llmobs` binary (prints its version, nothing else), cargo-deny, the justfile, the directory layout outside Rust, and the agent instructions.
+**Scope of step 1:** the repository layout, the Rust workspace with its 5 crates, the toolchain, lints, profiles, the dependency pins, the `cetra` binary (prints its version, nothing else), cargo-deny, the justfile, the directory layout outside Rust, and the agent instructions.
 
 **Not in step 1** (these are later Phase 0 steps):
 - Shared types and Arrow schemas in `core` (step 2).
@@ -32,11 +32,11 @@ Do not add placeholder modules, stub types or empty traits for those.
 ├── .gitignore                (P1)
 ├── .cursor/rules/            unchanged
 ├── crates/
-│   ├── core/                 package llmobs-core    (lib)
-│   ├── otel/                 package llmobs-otel    (lib)
-│   ├── storage/              package llmobs-storage (lib)
-│   ├── server/               package llmobs-server  (lib)
-│   └── cli/                  package llmobs-cli     (bin "llmobs")
+│   ├── core/                 package cetra-core    (lib)
+│   ├── otel/                 package cetra-otel    (lib)
+│   ├── storage/              package cetra-storage (lib)
+│   ├── server/               package cetra-server  (lib)
+│   └── cli/                  package cetra-cli     (bin "cetra")
 ├── web/README.md             (P9)
 ├── sdks/python/README.md     (P9)
 ├── sdks/typescript/README.md (P9)
@@ -48,12 +48,12 @@ Do not add placeholder modules, stub types or empty traits for those.
 ## Crate dependency graph (enforced from P4)
 
 ```
-llmobs-core  ◄── llmobs-otel
-     ▲       ◄── llmobs-storage
+cetra-core  ◄── cetra-otel
+     ▲       ◄── cetra-storage
      │                 ▲
-     └── llmobs-server ┘ ──► llmobs-otel
+     └── cetra-server ┘ ──► cetra-otel
                ▲
-         llmobs-cli
+         cetra-cli
 ```
 
 - `otel` and `storage` **must not** depend on each other. They are built in parallel by different sessions; the server glues them together (normalize → WAL).
@@ -73,7 +73,7 @@ llmobs-core  ◄── llmobs-otel
 4. Rewrite `.gitignore`:
    ```
    /target
-   /llmobs-data/
+   /cetra-data/
    node_modules/
    dist/
    .venv/
@@ -180,10 +180,10 @@ inefficient_to_string = "warn"
 
 [workspace.dependencies]
 # workspace crates
-llmobs-core = { path = "crates/core" }
-llmobs-otel = { path = "crates/otel" }
-llmobs-storage = { path = "crates/storage" }
-llmobs-server = { path = "crates/server" }
+cetra-core = { path = "crates/core" }
+cetra-otel = { path = "crates/otel" }
+cetra-storage = { path = "crates/storage" }
+cetra-server = { path = "crates/server" }
 
 # --- pinned families (must stay mutually compatible) ---
 datafusion = { version = "<latest>", default-features = false, features = [...] }  # see note
@@ -249,7 +249,7 @@ debug = true
 2. Each `Cargo.toml`:
    ```toml
    [package]
-   name = "llmobs-<x>"
+   name = "cetra-<x>"
    description = "<one line, see below>"
    version.workspace = true
    edition.workspace = true
@@ -261,24 +261,24 @@ debug = true
 
    [dependencies]
    # only workspace crates per the graph, e.g. for otel:
-   llmobs-core.workspace = true
+   cetra-core.workspace = true
    ```
 3. Dependencies per crate:
    - `core`: none.
-   - `otel`: `llmobs-core`.
-   - `storage`: `llmobs-core`.
-   - `server`: `llmobs-core`, `llmobs-otel`, `llmobs-storage`.
-   - `cli`: `llmobs-core`, `llmobs-server`.
+   - `otel`: `cetra-core`.
+   - `storage`: `cetra-core`.
+   - `server`: `cetra-core`, `cetra-otel`, `cetra-storage`.
+   - `cli`: `cetra-core`, `cetra-server`.
 4. `src/lib.rs` of each library: only a `//!` crate doc. Two to five lines giving the crate's responsibility, with a pointer to the spec section:
    - `core`: shared contracts — IDs, stored enums, branded names, message types, Span/Score structs, Arrow schemas and batch conversion; no config (spec 01, README §conventions, D59–D63).
    - `otel`: OTLP decoding, convention detection and normalization, media extraction, truncation, cost computation (spec 02).
    - `storage`: WAL, memtable, Parquet files, catalog, compaction, deletion, retention, media GC, DataFusion table providers, filter DSL and SQL sandbox (specs 03, 05).
    - `server`: HTTP/gRPC API, auth, metadata DB, evaluation, alerts, email, MCP (specs 04, 06–09).
-   - `cli`: the `llmobs` binary (spec 09 §CLI).
+   - `cli`: the `cetra` binary (spec 09 §CLI).
 5. `crates/cli/Cargo.toml` adds:
    ```toml
    [[bin]]
-   name = "llmobs"
+   name = "cetra"
    path = "src/main.rs"
    ```
 
@@ -289,13 +289,13 @@ debug = true
 **Acceptance:**
 - `cargo build --workspace` succeeds.
 - `cargo clippy --workspace --all-targets -- -D warnings` is clean.
-- `cargo tree -p llmobs-otel` does not contain `llmobs-storage`, and `cargo tree -p llmobs-storage` does not contain `llmobs-otel`.
+- `cargo tree -p cetra-otel` does not contain `cetra-storage`, and `cargo tree -p cetra-storage` does not contain `cetra-otel`.
 
 **Commit:** `Add the five workspace crates`
 
 ---
 
-## P5 — Minimal `llmobs` binary
+## P5 — Minimal `cetra` binary
 
 **Goal:** the binary runs, reports its version and uses mimalloc. Nothing else.
 
@@ -303,16 +303,16 @@ debug = true
 1. `crates/cli` dependencies: `clap`, `mimalloc` (workspace).
 2. `src/main.rs`:
    - `#[global_allocator] static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;`
-   - A clap `Parser` with `#[command(name = "llmobs", version, about = "LLM observability server")]` and a subcommand enum containing only `Version`. Running `llmobs version` and `llmobs --version` both print `llmobs <version>`.
+   - A clap `Parser` with `#[command(name = "cetra", version, about = "LLM observability server")]` and a subcommand enum containing only `Version`. Running `cetra version` and `cetra --version` both print `cetra <version>`.
    - Printing goes through `std::io::Write` on a locked stdout. Alternatively, put `#[allow(clippy::print_stdout)]` on the single function, with a comment explaining it is the CLI's output.
 3. Do **not** add `serve`, `admin` or other subcommands yet. Later steps add them together with their implementation.
 
 **Acceptance:**
-- `cargo run -p llmobs-cli -- --version` prints `llmobs 0.0.0`.
-- `cargo run -p llmobs-cli -- version` prints the same.
+- `cargo run -p cetra-cli -- --version` prints `cetra 0.0.0`.
+- `cargo run -p cetra-cli -- version` prints the same.
 - Clippy is clean with `-D warnings`.
 
-**Commit:** `Add minimal llmobs binary`
+**Commit:** `Add minimal cetra binary`
 
 ---
 
@@ -321,8 +321,8 @@ debug = true
 **Goal:** prove the test harness works so later sessions only add tests.
 
 **Do:**
-- In `crates/cli`, add one integration test, `tests/version.rs`, that runs the built binary with `--version` and asserts the output starts with `llmobs `.
-- Use `std::process::Command` with `env!("CARGO_BIN_EXE_llmobs")`. Do not add a test dependency for this.
+- In `crates/cli`, add one integration test, `tests/version.rs`, that runs the built binary with `--version` and asserts the output starts with `cetra `.
+- Use `std::process::Command` with `env!("CARGO_BIN_EXE_cetra")`. Do not add a test dependency for this.
 
 **Acceptance:** `cargo test --workspace` passes.
 
@@ -409,11 +409,11 @@ build:
 
 # Release build of the binary
 build-release:
-    cargo build --release -p llmobs-cli
+    cargo build --release -p cetra-cli
 
 # Run the binary with arguments, e.g. `just run --version`
 run *args:
-    cargo run -p llmobs-cli -- {{args}}
+    cargo run -p cetra-cli -- {{args}}
 
 # Everything CI runs for Rust
 check: fmt-check lint test deny
@@ -435,9 +435,9 @@ check: fmt-check lint test deny
 | File | Content |
 |---|---|
 | `web/README.md` | Web UI: Vite + React + TypeScript, TanStack Router/Query/Table, shadcn/ui + Tailwind, ECharts, pnpm. Built output is embedded into the binary with `memory-serve`. Spec: `docs/spec/11-ui.md`. Scaffolded in Phase 0 step 5. |
-| `sdks/python/README.md` | Python SDK `llmobs` (uv project, MIT license independent of the server, D… see spec 10). Thin layer over OpenTelemetry. Spec: `docs/spec/10-sdk.md`. Scaffolded in Phase 0 step 5. |
-| `sdks/typescript/README.md` | TypeScript SDK `llmobs` (pnpm package). Same spec. Scaffolded in Phase 0 step 5. |
-| `fixtures/otlp/README.md` | OTLP fixtures shared by the Rust golden tests (`llmobs-otel`) and the SDK integration tests: one directory per convention, a captured payload plus the expected normalized spans. Format defined in Phase 0 step 3. Spec: `docs/spec/02-ingestion.md` §Testing. |
+| `sdks/python/README.md` | Python SDK `cetra` (uv project, MIT license independent of the server, D… see spec 10). Thin layer over OpenTelemetry. Spec: `docs/spec/10-sdk.md`. Scaffolded in Phase 0 step 5. |
+| `sdks/typescript/README.md` | TypeScript SDK `cetra` (pnpm package). Same spec. Scaffolded in Phase 0 step 5. |
+| `fixtures/otlp/README.md` | OTLP fixtures shared by the Rust golden tests (`cetra-otel`) and the SDK integration tests: one directory per convention, a captured payload plus the expected normalized spans. Format defined in Phase 0 step 3. Spec: `docs/spec/02-ingestion.md` §Testing. |
 | `tools/README.md` | Developer tools that are not part of the product, e.g. `tools/capture/` (fixture capture from real instrumentations, Wave 1) and benchmark scripts. |
 
 **Acceptance:** the files exist; nothing else is added under these directories.
@@ -454,7 +454,7 @@ check: fmt-check lint test deny
 
 **Do:**
 1. Create `AGENTS.md` with these sections, concise (aim for under 150 lines):
-   - **Project:** one paragraph. llmobs is the working name; it is a Rust LLM observability platform (single binary, DataFusion + Parquet, SQLite).
+   - **Project:** one paragraph. cetra is the working name; it is a Rust LLM observability platform (single binary, DataFusion + Parquet, SQLite).
    - **Source of truth:**
      - `docs/mvp-decisions.md` (decisions D1…) and `docs/spec/` (numbered specs) define what to build.
      - `docs/research/competitors.md` explains why.
@@ -463,7 +463,7 @@ check: fmt-check lint test deny
      - Copy the substance of `.cursor/rules/no-compat-no-abstractions.mdc`: no compatibility layers, no single-implementation traits, no pass-through wrappers.
      - Reference implementations are in `/home/sebastien/github/{lmnr,phoenix,langfuse,langwatch,helicone,opik,mlflow}`. Read them to compare designs; never copy code from them.
      - All dependency versions are declared in the root `[workspace.dependencies]`; crates use `{ workspace = true }`.
-     - Error handling: each library crate defines its own error enum(s) with `thiserror`; `anyhow` is only allowed in `llmobs-cli`.
+     - Error handling: each library crate defines its own error enum(s) with `thiserror`; `anyhow` is only allowed in `cetra-cli`.
      - No `unwrap`/`expect` outside tests unless the invariant is documented in a comment next to it.
      - No `unsafe` (forbidden workspace-wide).
      - Time is `i64` nanoseconds since the Unix epoch (UTC) at the storage boundary; IDs follow spec README §conventions.
@@ -472,9 +472,9 @@ check: fmt-check lint test deny
    - **Layout and ownership:**
      - The crate graph from this plan (otel and storage never depend on each other).
      - Who owns which directory during parallel work: a session only edits the directories its brief names.
-     - Changes to `llmobs-core` shared types go through the contract owner, the coordinating session.
+     - Changes to `cetra-core` shared types go through the contract owner, the coordinating session.
    - **Commands:** `just check`, `just fmt`, `just lint`, `just test`, `just deny`, `just run …`. Required tools: rustup (the toolchain is pinned), `just`, `cargo-deny`. Later: `pnpm`, `uv`.
-   - **Naming:** crate prefix `llmobs-`, binary `llmobs`, env prefix `LLMOBS_`, attribute namespace `llmobs.*`. All of these will be renamed mechanically when the product gets its real name (D46).
+   - **Naming:** crate prefix `cetra-`, binary `cetra`, env prefix `CETRA_`, attribute namespace `cetra.*`. All of these will be renamed mechanically when the product gets its real name (D46).
    - **Commits:** small, imperative subject. Run `just check` before committing.
 2. Create the symlink `ln -s AGENTS.md CLAUDE.md`.
 3. Leave `.cursor/rules/` unchanged.
@@ -492,8 +492,8 @@ check: fmt-check lint test deny
 **Do (no new files):**
 1. From a clean checkout (`git clean -xdf` in a scratch clone), run `just check`.
 2. Confirm the layout matches the tree at the top of this document.
-3. Confirm `cargo tree -p llmobs-otel -e normal` and `cargo tree -p llmobs-storage -e normal` show only `llmobs-core` as a workspace dependency.
-4. Confirm `cargo run -p llmobs-cli --release -- --version` works.
+3. Confirm `cargo tree -p cetra-otel -e normal` and `cargo tree -p cetra-storage -e normal` show only `cetra-core` as a workspace dependency.
+4. Confirm `cargo run -p cetra-cli --release -- --version` works.
 
 **Report back:**
 - The exact pinned versions chosen: Rust toolchain, datafusion, arrow, parquet, object_store, tokio.

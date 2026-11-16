@@ -2,9 +2,9 @@
 
 use std::time::Duration;
 
+use cetra_core::ids::{OrgId, ProjectId};
+use cetra_storage::{AlertValue, AlertValueRequest, RunError, TimeWindow, alert_value};
 use futures::StreamExt;
-use llmobs_core::ids::{OrgId, ProjectId};
-use llmobs_storage::{AlertValue, AlertValueRequest, RunError, TimeWindow, alert_value};
 use uuid::Uuid;
 
 use crate::alerts::condition::measure;
@@ -286,12 +286,12 @@ async fn measure_rule(
 
 #[cfg(test)]
 mod tests {
-    use llmobs_core::enums::SpanStatus;
-    use llmobs_core::ids::{SpanId, TraceId};
-    use llmobs_core::span::Span;
+    use cetra_core::enums::SpanStatus;
+    use cetra_core::ids::{SpanId, TraceId};
+    use cetra_core::span::Span;
 
     use axum::http::Method;
-    use llmobs_eval::{Secret, sign_payload};
+    use cetra_eval::{Secret, sign_payload};
     use serde_json::{Value, json};
 
     use super::*;
@@ -999,7 +999,7 @@ mod tests {
 
         let signature = request
             .headers
-            .get("x-llmobs-signature")
+            .get("x-cetra-signature")
             .and_then(|value| value.to_str().ok())
             .expect("signature header")
             .to_owned();

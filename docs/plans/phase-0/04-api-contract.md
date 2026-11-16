@@ -2,7 +2,7 @@
 
 Implementation plan, split into small sub-phases. Each sub-phase is done by one agent in one go and ends with `just check` green and one commit.
 
-**Prerequisites:** steps 1–3 merged (`llmobs-core` types, the OTLP fixtures and `fixtures/otlp/prices.json`).
+**Prerequisites:** steps 1–3 merged (`cetra-core` types, the OTLP fixtures and `fixtures/otlp/prices.json`).
 
 **Read first:**
 - `AGENTS.md`
@@ -21,7 +21,7 @@ The Wave 1 UI track builds the trace list, trace view, sessions, users, dashboar
 2. realistic mock responses that are guaranteed to match those types.
 
 Step 4 delivers both, from Rust:
-- response/request types in `llmobs-server::api`, deriving `utoipa::ToSchema`;
+- response/request types in `cetra-server::api`, deriving `utoipa::ToSchema`;
 - the OpenAPI document assembled from them, committed as `crates/server/openapi.json` and kept up to date by a test (D69);
 - a few pure functions the handlers will need and that can be fully tested now: payload parsing (D70), span-tree assembly, parameter parsing;
 - an example project in `fixtures/api/` and the responses for it, checked by a test (D72).
@@ -29,7 +29,7 @@ Step 4 delivers both, from Rust:
 ## Scope
 
 **In:**
-- `utoipa` in `llmobs-core`: schemas for IDs, stored enums, canonical messages, `Score` (D71).
+- `utoipa` in `cetra-core`: schemas for IDs, stored enums, canonical messages, `Score` (D71).
 - `crates/server/src/api/`: the types, the pure functions, the OpenAPI document.
 - `crates/server/openapi.json` and its up-to-date test.
 - `fixtures/api/`: README, dataset, static responses, generated responses, manifest, media.
@@ -78,7 +78,7 @@ Error responses (all `application/problem+json`, schema `Problem`):
 - every operation with query parameters or a body (3, 5, 6, 7, 10, 11, 13, 15, 17, 18, 19, 21): 400;
 - `get_media`: also 416.
 
-Security: `get_auth_config` has none (`security: []`). Every other operation accepts either the `session_cookie` scheme (API key in cookie `llmobs_session`) or the `bearer` scheme (HTTP bearer: a PAT or an `sk` key). Build the cookie name from the brand macro (`concat!(llmobs_core::llmobs_name!(), "_session")`) so the rename (D46) stays mechanical.
+Security: `get_auth_config` has none (`security: []`). Every other operation accepts either the `session_cookie` scheme (API key in cookie `cetra_session`) or the `bearer` scheme (HTTP bearer: a PAT or an `sk` key). Build the cookie name from the brand macro (`concat!(cetra_core::cetra_name!(), "_session")`) so the rename (D46) stays mechanical.
 
 ## Final layout
 
@@ -113,10 +113,10 @@ fixtures/api/
 
 ## Rules for every type in `crates/server/src/api/`
 
-- Derive `Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema`. Responses also derive `Deserialize`: the example test and the future CLI client (`llmobs traces list`) read them.
+- Derive `Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema`. Responses also derive `Deserialize`: the example test and the future CLI client (`cetra traces list`) read them.
 - Field order = the order in this plan (it becomes the JSON order).
 - `Option<scalar>` fields: `#[serde(default, skip_serializing_if = "Option::is_none")]`. `Vec` and maps: always serialized, **no** `skip_serializing_if`, **no** `#[serde(default)]` on response types (so the schema marks them required).
-- Instants: `i64` nanoseconds with `#[serde(with = "llmobs_core::time_serde")]` and `#[schema(value_type = String, format = DateTime)]`. Durations (`*_ns`): plain `i64`.
+- Instants: `i64` nanoseconds with `#[serde(with = "cetra_core::time_serde")]` and `#[schema(value_type = String, format = DateTime)]`. Durations (`*_ns`): plain `i64`.
 - Maps: `BTreeMap` (sorted, deterministic).
 - Doc comment on every type and field: one sentence, citing the spec section where useful. utoipa turns them into `description`s, which end up in the TS types.
 - Enums: `#[serde(rename_all = "snake_case")]`; unit-only enums are closed sets.
@@ -143,7 +143,7 @@ Root `Cargo.toml` `[workspace.dependencies]`: `utoipa = { version = "6.0.0", fea
 | `SpanId` | manual | `string`, `pattern: ^[0-9a-fA-F]{16}$`, same description |
 | `ProjectId`, `OrgId` (the `uuid_id!` macro) | manual, in the macro | `string`, `format: uuid` |
 | every `stored_enum!` enum | add `utoipa::ToSchema` to the macro's derive list | string enum of the snake_case values (utoipa reads `rename_all`) |
-| `Role` (component name **`MessageRole`**), `Modality` (message) | manual | `string`; description lists the known values and says other strings are kept. The Rust type stays `llmobs_core::message::Role`; only the schema name is `MessageRole`, because the org role owns no `Role` component either (see O3) |
+| `Role` (component name **`MessageRole`**), `Modality` (message) | manual | `string`; description lists the known values and says other strings are kept. The Rust type stays `cetra_core::message::Role`; only the schema name is `MessageRole`, because the org role owns no `Role` component either (see O3) |
 | `Part` | manual | `oneOf` of 7 object schemas, see below |
 | `Message` | manual | object: `role` (ref `MessageRole`, required), `name` (string), `parts` (array of `Part`, required), `finish_reason` (string); `additionalProperties: true` |
 | `ScoreTarget` | derive | utoipa handles `#[serde(tag = "type")]`; check the output is a `oneOf` of three objects each with a `type` enum of one value |
@@ -165,7 +165,7 @@ Root `Cargo.toml` `[workspace.dependencies]`: `utoipa = { version = "6.0.0", fea
 
 ## O2 — API foundation: common types and payload parsing
 
-**Goal:** the module skeleton of `llmobs-server::api` with the types every operation shares, and `Payload`.
+**Goal:** the module skeleton of `cetra-server::api` with the types every operation shares, and `Payload`.
 
 ### Dependencies (`crates/server/Cargo.toml`)
 
@@ -225,7 +225,7 @@ pub enum Payload {
 | Type | Fields |
 |---|---|
 | `AuthConfig` | `setup_required: bool` (no user exists yet), `password_enabled: bool`, `signup: SignupPolicy`, `providers: Vec<AuthProvider>`, `smtp_enabled: bool`, `email_verification_required: bool` |
-| `SignupPolicy` | `Open`, `InviteOnly`, `Disabled` (spec 08 `LLMOBS_AUTH_SIGNUP`) |
+| `SignupPolicy` | `Open`, `InviteOnly`, `Disabled` (spec 08 `CETRA_AUTH_SIGNUP`) |
 | `AuthProvider` | `id: String` (`github`, `google`, `oidc:<name>`, as in `identities.provider`), `display_name: String` |
 | `Me` | `user: User`, `orgs: Vec<OrgMembership>` |
 | `User` | `id: Uuid`, `email: String`, `name: Option<String>`, `is_instance_admin: bool` |
@@ -300,10 +300,10 @@ Tests: one insta snapshot per type from a literal value (these lock the JSON sha
 
 `SpanEventView`: `time` (instant), `name: String`, `attributes: Value`. `SpanLinkView`: `trace_id`, `span_id`, `attributes: Value`. Absent stored attributes → `{}`.
 
-### Conversions (production code; the handlers will read `llmobs_core::Span` values)
+### Conversions (production code; the handlers will read `cetra_core::Span` values)
 
 - `impl From<&Span> for SpanSummary` and `impl From<Span> for SpanDetail`.
-- `duration_ns = end_time - start_time` (use `saturating_sub`; the producer guarantees order, but disk data is not trusted). `model = response_model.or(request_model)`. Check whether `llmobs-core` already exposes these computations (the Arrow conversion computes them); reuse them if public, otherwise compute here — do not change core in this sub-phase.
+- `duration_ns = end_time - start_time` (use `saturating_sub`; the producer guarantees order, but disk data is not trusted). `model = response_model.or(request_model)`. Check whether `cetra-core` already exposes these computations (the Arrow conversion computes them); reuse them if public, otherwise compute here — do not change core in this sub-phase.
 - Payloads: `input`/`output` become `Payload::from_stored(format, text)` when both the text and its format are present; text without format → `Payload::Text`; format without text → absent.
 - `request_params`, `system_instructions`, `tool_definitions`, event and link `attributes`: private helper `parse_json_or_string(text: String) -> Value` (parse, else `Value::String(text)`).
 
@@ -364,7 +364,7 @@ Each param field gets a doc comment (it becomes the parameter description), e.g.
 
 ### `api/scores.rs`
 
-- `ScoreListParams`: `target: Option<ScoreTargetKind>`, `trace_id: Option<TraceId>`, `span_id: Option<SpanId>`, `session_id: Option<String>`, `name: Option<String>`, `source: Option<ScoreSource>`, `from`, `to` (on `created_at`), `limit`, `cursor`. Responses are `Page<llmobs_core::score::Score>` (no new response type).
+- `ScoreListParams`: `target: Option<ScoreTargetKind>`, `trace_id: Option<TraceId>`, `span_id: Option<SpanId>`, `session_id: Option<String>`, `name: Option<String>`, `source: Option<ScoreSource>`, `from`, `to` (on `created_at`), `limit`, `cursor`. Responses are `Page<cetra_core::score::Score>` (no new response type).
 - Test that `trace_id=<hex>&span_id=<hex>&target=span&source=llm_judge` parses via `serde_urlencoded` (this exercises core's `Deserialize` for the IDs and enums from a query string).
 
 ### `api/schema.rs`
@@ -403,7 +403,7 @@ Each param field gets a doc comment (it becomes the parameter description), e.g.
 | `TtftP50`, `TtftP95` | `spans` (llm) | `group_by` value, or absent |
 | `LlmLatencyP50`, `LlmLatencyP95`, `CostByModel` | `spans` (llm) | model |
 | `ScoreAvg` | `scores` | score name |
-| `EvalCost` | `traces` with environment `llmobs-eval` | absent |
+| `EvalCost` | `traces` with environment `cetra-eval` | absent |
 
   Latencies and TTFT are in nanoseconds (as `f64`); costs in USD.
 - `ModelUsage`: `model: String`, `llm_count: i64`, `total_tokens: Option<i64>`, `cost_total: Option<f64>`. At most 10, by cost descending.
@@ -422,7 +422,7 @@ One insta snapshot per response type from a literal (sessions, users, schema, sa
 
 `pub fn openapi() -> utoipa::openapi::OpenApi`, built with the builder API:
 
-- `info`: title `concat!(llmobs_name!(), " API")`, version `env!("CARGO_PKG_VERSION")`, description one sentence pointing to spec 09. No license (D9 open). No `servers` (relative).
+- `info`: title `concat!(cetra_name!(), " API")`, version `env!("CARGO_PKG_VERSION")`, description one sentence pointing to spec 09. No license (D9 open). No `servers` (relative).
 - `tags`: `auth`, `projects`, `traces`, `spans`, `sessions`, `users`, `scores`, `schema`, `saved_views`, `metrics`, `media`, each with a one-line description.
 - `components.security_schemes`: `session_cookie` (API key in cookie, name from the brand macro), `bearer` (HTTP bearer, description "A personal access token (`pat-…`) or a secret key (`sk-…`)."). Global `security`: either scheme; `get_auth_config` overrides with `[]`.
 - `components.schemas`: every type of O2–O5 that appears in a request or response, plus the core types they reference (pulled in through `ToSchema::schemas`), plus the seven named pages: insert `("TracePage", <Page<TraceSummary> as PartialSchema>::schema())`, etc.
@@ -438,7 +438,7 @@ One insta snapshot per response type from a literal (sessions, users, schema, sa
 ### Contract file and test (`crates/server/tests/openapi.rs`)
 
 - Rendering: `serde_json::to_string_pretty(&openapi())` + `"\n"`.
-- `contract_file_is_up_to_date`: compare with `crates/server/openapi.json`. When the env var `LLMOBS_OPENAPI_WRITE=1` is set, write the file instead and pass. On mismatch, fail with a message naming `just openapi`.
+- `contract_file_is_up_to_date`: compare with `crates/server/openapi.json`. When the env var `CETRA_OPENAPI_WRITE=1` is set, write the file instead and pass. On mismatch, fail with a message naming `just openapi`.
 - `document_lint` (on the parsed JSON, not on Rust types, so it checks what clients see):
   1. the set of `(method, path, operation_id)` equals the 22 rows above, written out in the test (this locks the scope; adding an endpoint later means editing this list on purpose);
   2. every `$ref` anywhere resolves to an existing `#/components/schemas/…` entry;
@@ -455,7 +455,7 @@ One insta snapshot per response type from a literal (sessions, users, schema, sa
 ```
 # Regenerate crates/server/openapi.json
 openapi:
-    LLMOBS_OPENAPI_WRITE=1 cargo test -p llmobs-server --test openapi -- contract_file_is_up_to_date
+    CETRA_OPENAPI_WRITE=1 cargo test -p cetra-server --test openapi -- contract_file_is_up_to_date
 ```
 
 Read the generated `openapi.json` once by eye before committing: field descriptions present, required lists right (lists/maps required; options not), nullable `next_cursor`, enums complete.
@@ -495,7 +495,7 @@ Session and user ids are `[a-z0-9-]+` so they can be file names.
 
 ### `dataset/spans.json`
 
-A JSON array of `llmobs_core::Span` (exactly the format of the OTLP fixtures' `expected.json` spans), sorted by `(trace_id, start_time, span_id)`. All spans: `project_id` = the project, date 2026-01-01, `service_name` `support-bot`, `release` `v1.4.0`, `schema_version` 1, `ingest_time` = `end_time` + 500 ms, `conventions` `["genai"]`, environment `production` unless stated. Costs use `fixtures/otlp/prices.json` and the spec 02 formula; they are given below so nobody recomputes them differently.
+A JSON array of `cetra_core::Span` (exactly the format of the OTLP fixtures' `expected.json` spans), sorted by `(trace_id, start_time, span_id)`. All spans: `project_id` = the project, date 2026-01-01, `service_name` `support-bot`, `release` `v1.4.0`, `schema_version` 1, `ingest_time` = `end_time` + 500 ms, `conventions` `["genai"]`, environment `production` unless stated. Costs use `fixtures/otlp/prices.json` and the spec 02 formula; they are given below so nobody recomputes them differently.
 
 | Trace | Span | Parent | Kind, name | Start → end (10:mm:ss.mmm) | Status | Model, tokens (in/out/cache_read), cost in/out/total | Payloads |
 |---|---|---|---|---|---|---|---|
@@ -510,7 +510,7 @@ A JSON array of `llmobs_core::Span` (exactly the format of the OTLP fixtures' `e
 | T4 `…004` user `user-42`, no session, environment `staging` | S1 | — | chain `describe-image` | 20:00.000 → 20:03.000 | ok | — | input text "What does this shipping label say?", output text "It is addressed to warehouse 7."  |
 | | S2 | S1 | retriever `vector-search` | 20:00.010 → 20:00.210 | ok | — | input text "shipping label", output json array of 2 documents `{id, score, text}` |
 | | S3 | S1 | llm `chat gpt-4o-mini` | 20:00.250 → 20:02.950, ttft 600 ms | ok | 850/120/—; total 970; 0.00085 / 0.00048 / 0.00133 | input [user with text part + `uri` part `{modality: image, mime_type: image/png, uri: media://<png sha256>}`], output text; `media_refs` = [png sha256] |
-| T5 `…005` environment `llmobs-eval` (use the core constant's value), session `sess-001`, user `user-42` (so the default exclusion changes the session and user aggregates) | S1 | — | evaluator `judge helpfulness` | 01:00.000 → 01:01.500 | ok | — | attributes `llmobs.eval.target_trace_id` = T1, `llmobs.eval.evaluator_id` = `01900000-0000-7000-8000-000000000201` (attribute names from `llmobs_core::names`) |
+| T5 `…005` environment `cetra-eval` (use the core constant's value), session `sess-001`, user `user-42` (so the default exclusion changes the session and user aggregates) | S1 | — | evaluator `judge helpfulness` | 01:00.000 → 01:01.500 | ok | — | attributes `cetra.eval.target_trace_id` = T1, `cetra.eval.evaluator_id` = `01900000-0000-7000-8000-000000000201` (attribute names from `cetra_core::names`) |
 | | S2 | S1 | llm `chat gpt-4o-mini` | 01:00.020 → 01:01.480 | ok | 600/50/—; total 650; 0.0006 / 0.0002 / 0.0008 | messages in/out |
 | T6 `…006` no session, no user | S1 | `b1000000000000ff` (missing) | llm `chat claude-sonnet-4-5` | 30:00.000 → 30:02.000 | ok | 400/100/—; total 500; 0.0012 / 0.0015 / 0.0027 | messages in/out |
 
@@ -518,7 +518,7 @@ Every `llm` span with a model has `provider`, `request_model`, `response_model` 
 
 ### `dataset/scores.json`
 
-A JSON array of `llmobs_core::score::Score`, project as above, `deleted: false`, `ingest_time` = `updated_at`. Score ids `01900000-0000-7000-8000-0000000003NN`.
+A JSON array of `cetra_core::score::Score`, project as above, `deleted: false`, `ingest_time` = `updated_at`. Score ids `01900000-0000-7000-8000-0000000003NN`.
 
 | # | Target | Name | Value | Source | Notes |
 |---|---|---|---|---|---|
@@ -561,12 +561,12 @@ The decoded PNG bytes (the base64 string is in plan step 3, F6, and in that fixt
 - `canonical_json<T: Serialize>(&T) -> String`: pretty, 2 spaces, trailing `\n`.
 - **Reference aggregations**, written straight from spec 01/05/09 (test code: storage will implement the real ones; their outputs will later be compared with these files):
   - `trace_summary(spans: &[Span], scores: &[Score]) -> TraceSummary` for one complete trace: root = span without parent (if several, earliest by `(start_time, span_id)`); `name` = root's, else earliest span's; `status` = `error` if any span errors, else root's, else `unset`; session/user/environment/release = root's if set, else first non-null by `(start_time, span_id)`; `tags` = sorted distinct union; `metadata` = root's, plus keys from other spans (in start order) when absent; previews = root's, else first `llm` span's; counts; token sums and `cost_total` sum (`None` when every span is `None`); `models` = sorted distinct `model` values; `scores` = latest per name among non-deleted trace-target scores of this trace (greatest `updated_at`, then `score_id`), sorted by name.
-  - `is_default_visible(trace)`: environment ≠ `llmobs-eval` (core constant) and no `llmobs.experiment_id` metadata key (core constant).
+  - `is_default_visible(trace)`: environment ≠ `cetra-eval` (core constant) and no `cetra.experiment_id` metadata key (core constant).
   - `session_summary`, `user_summary` over visible trace summaries, as defined in spec 05/09.
 
 ### `crates/server/tests/api_examples.rs`
 
-**Generation** (`examples_are_up_to_date`): from the dataset, build every generated response and the manifest; with `LLMOBS_API_EXAMPLES_WRITE=1` write them (deleting stale files under `responses/` first), else compare file by file (missing, extra and different files all fail, naming `just api-examples`).
+**Generation** (`examples_are_up_to_date`): from the dataset, build every generated response and the manifest; with `CETRA_API_EXAMPLES_WRITE=1` write them (deleting stale files under `responses/` first), else compare file by file (missing, extra and different files all fail, naming `just api-examples`).
 
 | Operation | Query in manifest | File | Content |
 |---|---|---|---|
@@ -615,7 +615,7 @@ Plus manifest entries for the static files: `get_auth_config`, `get_me`, `list_p
 ```
 # Regenerate fixtures/api responses and manifest
 api-examples:
-    LLMOBS_API_EXAMPLES_WRITE=1 cargo test -p llmobs-server --test api_examples -- examples_are_up_to_date
+    CETRA_API_EXAMPLES_WRITE=1 cargo test -p cetra-server --test api_examples -- examples_are_up_to_date
 ```
 
 **Commit:** `fixtures: generate API example responses and manifest`

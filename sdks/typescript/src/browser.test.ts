@@ -8,7 +8,7 @@ const BASE_URL = "http://127.0.0.1:9";
 const FEEDBACK_URL = `${BASE_URL}/api/public/feedback`;
 const TRACE_ID = "0123456789abcdef0123456789abcdef";
 const SPAN_ID = "0123456789abcdef";
-const PUBLIC_KEY = "pk-llmobs-public";
+const PUBLIC_KEY = "pk-cetra-public";
 
 interface RecordedCall {
   url: string;
@@ -87,7 +87,7 @@ describe("feedback", () => {
     ["a baseUrl with a fragment", { baseUrl: "http://host/#f" }],
     ["a baseUrl with a bare query delimiter", { baseUrl: "http://host/?" }],
     ["a baseUrl with a bare fragment delimiter", { baseUrl: "http://host/#" }],
-    ["a public key without the pk prefix", { publicKey: "sk-llmobs-test" }],
+    ["a public key without the pk prefix", { publicKey: "sk-cetra-test" }],
     ["a too-short trace id", { traceId: "0123456789abcdef0123456789abcd" }],
     ["an uppercase trace id", { traceId: TRACE_ID.toUpperCase() }],
     ["a non-hex trace id", { traceId: `g${TRACE_ID.slice(1)}` }],

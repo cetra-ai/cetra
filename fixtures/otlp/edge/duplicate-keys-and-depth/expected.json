@@ -10,15 +10,15 @@
       "end_time": "2025-12-31T23:59:51.000000000Z",
       "status": "unset",
       "attributes": {
+        "cetra.normalize_warning": "[\"duplicate_key\",\"max_depth\"]",
         "color": "blue",
-        "llmobs.normalize_warning": "[\"duplicate_key\",\"max_depth\"]",
-        "tree": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[\"[llmobs: max depth]\"]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]"
+        "tree": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[\"[cetra: max depth]\"]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]"
       },
       "truncated": [
         "tree"
       ],
       "conventions": [
-        "llmobs"
+        "cetra"
       ],
       "ingest_time": "2026-01-01T00:00:00.000000000Z",
       "schema_version": 1

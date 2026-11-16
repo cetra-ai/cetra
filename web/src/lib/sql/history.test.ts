@@ -18,7 +18,7 @@ it("keeps the newest run first", () => {
   pushHistory(REF, { query: "A", params: {}, ranAt: T0, rows: 1 });
   pushHistory(REF, { query: "B", params: {}, ranAt: "2026-01-01T00:00:01.000Z" });
   expect(readHistory(REF).map((entry) => entry.query)).toEqual(["B", "A"]);
-  expect(localStorage.getItem("llmobs.sql.history.acme/support-bot")).not.toBeNull();
+  expect(localStorage.getItem("cetra.sql.history.acme/support-bot")).not.toBeNull();
 });
 
 it("replaces the newest entry when the same query and parameters run again", () => {
@@ -42,12 +42,12 @@ it("keeps at most fifty runs", () => {
 });
 
 it("reads malformed storage as no history and skips broken entries", () => {
-  localStorage.setItem("llmobs.sql.history.acme/support-bot", '"x"');
+  localStorage.setItem("cetra.sql.history.acme/support-bot", '"x"');
   expect(readHistory(REF)).toEqual([]);
-  localStorage.setItem("llmobs.sql.history.acme/support-bot", '{"a":1}');
+  localStorage.setItem("cetra.sql.history.acme/support-bot", '{"a":1}');
   expect(readHistory(REF)).toEqual([]);
   localStorage.setItem(
-    "llmobs.sql.history.acme/support-bot",
+    "cetra.sql.history.acme/support-bot",
     JSON.stringify([
       { params: {}, ranAt: T0 },
       { query: "K", ranAt: T0, params: { a: 1 } },

@@ -10,14 +10,14 @@ use std::sync::Arc;
 use arrow::array::{Array, AsArray, RecordBatch};
 use arrow::compute::{filter_record_batch, not, prep_null_mask_filter};
 use arrow::datatypes::{DataType, Schema, SchemaRef};
+use cetra_core::ids::{ProjectId, TraceId};
+use cetra_core::schema::{scores, spans, traces};
 use chrono::NaiveDate;
 use datafusion::common::ScalarValue;
 use datafusion::error::DataFusionError;
 use datafusion::logical_expr::{ColumnarValue, Operator};
 use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_expr::expressions::{BinaryExpr, Column, IsNotNullExpr, Literal, in_list};
-use llmobs_core::ids::{ProjectId, TraceId};
-use llmobs_core::schema::{scores, spans, traces};
 use uuid::Uuid;
 
 use crate::catalog::FileTable;
@@ -519,8 +519,8 @@ fn timestamp_timezone(schema: &SchemaRef, name: &str) -> Result<Option<Arc<str>>
 #[cfg(test)]
 mod tests {
     use arrow::array::Array;
-    use llmobs_core::schema::{scores_schema, spans_schema, traces_schema};
-    use llmobs_core::score::ScoreTarget;
+    use cetra_core::schema::{scores_schema, spans_schema, traces_schema};
+    use cetra_core::score::ScoreTarget;
 
     use super::*;
     use crate::test_support::{score_row, score_rows, span_row, span_rows, trace_batch};

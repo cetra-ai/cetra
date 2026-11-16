@@ -6,9 +6,9 @@ from typing import Any, Protocol
 
 import pytest
 
-from llmobs import ApiError, Client, Dataset
+from cetra import ApiError, Client, Dataset
 
-TEST_API_KEY = "sk-llmobs-test"
+TEST_API_KEY = "sk-cetra-test"
 DATASET_ID = "0190a000-0000-7000-8000-000000000001"
 PROJECT = "/api/v1/projects/current"
 JSON_HEADERS = {"Content-Type": "application/json"}

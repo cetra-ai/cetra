@@ -43,9 +43,9 @@ describe("withSpan", () => {
     }
     const spans = await finished(exporter);
     const byName = new Map(spans.map((span) => [span.name, span]));
-    expect(byName.get("default")?.attributes["llmobs.span.kind"]).toBe("chain");
+    expect(byName.get("default")?.attributes["cetra.span.kind"]).toBe("chain");
     for (const kind of kinds) {
-      expect(byName.get(`span-${kind}`)?.attributes["llmobs.span.kind"]).toBe(kind);
+      expect(byName.get(`span-${kind}`)?.attributes["cetra.span.kind"]).toBe(kind);
     }
   });
 
@@ -93,10 +93,10 @@ describe("withSpan", () => {
       return "not recorded";
     });
     const [span] = await finished(exporter);
-    expect(span?.attributes["llmobs.input"]).toBe('{"q":"hi"}');
-    expect(span?.attributes["llmobs.input.format"]).toBe("json");
-    expect(span?.attributes["llmobs.output"]).toBe('["b","a"]');
-    expect(span?.attributes["llmobs.output.format"]).toBe("json");
+    expect(span?.attributes["cetra.input"]).toBe('{"q":"hi"}');
+    expect(span?.attributes["cetra.input.format"]).toBe("json");
+    expect(span?.attributes["cetra.output"]).toBe('["b","a"]');
+    expect(span?.attributes["cetra.output.format"]).toBe("json");
   });
 
   it("records setInput from the handle, a string as text", async () => {
@@ -105,8 +105,8 @@ describe("withSpan", () => {
       span.setInput("plain");
     });
     const [span] = await finished(exporter);
-    expect(span?.attributes["llmobs.input"]).toBe("plain");
-    expect(span?.attributes["llmobs.input.format"]).toBe("text");
+    expect(span?.attributes["cetra.input"]).toBe("plain");
+    expect(span?.attributes["cetra.input.format"]).toBe("text");
   });
 
   it("records metadata from options and the handle, masked per value", async () => {
@@ -118,10 +118,10 @@ describe("withSpan", () => {
     });
     const [span] = await finished(exporter);
     const attributes = span?.attributes ?? {};
-    expect(attributes["llmobs.metadata.model"]).toBe("BGE");
-    expect(attributes["llmobs.metadata.seats"]).toBe(3);
-    expect(attributes["llmobs.metadata.obj"]).toBe('{"a":1}');
-    expect(attributes["llmobs.metadata.bad key!"]).toBeUndefined();
+    expect(attributes["cetra.metadata.model"]).toBe("BGE");
+    expect(attributes["cetra.metadata.seats"]).toBe(3);
+    expect(attributes["cetra.metadata.obj"]).toBe('{"a":1}');
+    expect(attributes["cetra.metadata.bad key!"]).toBeUndefined();
   });
 
   it("keeps metadata with captureContent: false, drops the payloads", async () => {
@@ -131,10 +131,10 @@ describe("withSpan", () => {
     });
     const [span] = await finished(exporter);
     const attributes = span?.attributes ?? {};
-    expect(attributes["llmobs.span.kind"]).toBe("chain");
-    expect(attributes["llmobs.input"]).toBeUndefined();
-    expect(attributes["llmobs.output"]).toBeUndefined();
-    expect(attributes["llmobs.metadata.model"]).toBe("bge");
+    expect(attributes["cetra.span.kind"]).toBe("chain");
+    expect(attributes["cetra.input"]).toBeUndefined();
+    expect(attributes["cetra.output"]).toBeUndefined();
+    expect(attributes["cetra.metadata.model"]).toBe("bge");
   });
 
   it("masks inputs and outputs; a failing mask fails closed", async () => {
@@ -145,9 +145,9 @@ describe("withSpan", () => {
       span.setOutput("out with secret");
     });
     const maskedAttributes = (await finished(masked.exporter))[0]?.attributes ?? {};
-    expect(maskedAttributes["llmobs.input"]).toBe("<secret>");
+    expect(maskedAttributes["cetra.input"]).toBe("<secret>");
     // The mask sees the whole value; this one replaces only whole strings.
-    expect(maskedAttributes["llmobs.output"]).toBe("<out with secret>");
+    expect(maskedAttributes["cetra.output"]).toBe("<out with secret>");
     const failing = startMemory({
       mask: () => {
         throw new Error("nope");
@@ -157,8 +157,8 @@ describe("withSpan", () => {
       span.setOutput("w");
     });
     const failedAttributes = (await finished(failing.exporter))[0]?.attributes ?? {};
-    expect(failedAttributes["llmobs.input"]).toBe("[llmobs: mask failed]");
-    expect(failedAttributes["llmobs.output"]).toBe("[llmobs: mask failed]");
+    expect(failedAttributes["cetra.input"]).toBe("[cetra: mask failed]");
+    expect(failedAttributes["cetra.output"]).toBe("[cetra: mask failed]");
   });
 
   it("records the exception, sets the error status and re-throws unchanged", async () => {
@@ -207,7 +207,7 @@ describe("withSpan", () => {
     });
     expect(value).toBe("v");
     const [span] = await finished(exporter);
-    expect(span?.attributes["llmobs.output"]).toBeUndefined();
+    expect(span?.attributes["cetra.output"]).toBeUndefined();
     expect(span?.status.code).toBe(SpanStatusCode.UNSET);
   });
 
@@ -243,9 +243,9 @@ describe("withSpan", () => {
     handle?.setOutput("late");
     handle?.setMetadata({ late: 1 });
     const [span] = await finished(exporter);
-    expect(span?.attributes["llmobs.input"]).toBeUndefined();
-    expect(span?.attributes["llmobs.output"]).toBeUndefined();
-    expect(span?.attributes["llmobs.metadata.late"]).toBeUndefined();
+    expect(span?.attributes["cetra.input"]).toBeUndefined();
+    expect(span?.attributes["cetra.output"]).toBeUndefined();
+    expect(span?.attributes["cetra.metadata.late"]).toBeUndefined();
   });
 
   it("nests a child under the running span across an await", async () => {

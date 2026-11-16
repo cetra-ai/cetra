@@ -2,7 +2,7 @@ import { expect, it } from "vitest";
 import authConfig from "../../../fixtures/api/static/auth-config.json";
 import { onlyProvider } from "./only-provider";
 
-const CLOUD = { id: "oidc:cloud", display_name: "llmobs Cloud" };
+const CLOUD = { id: "oidc:cloud", display_name: "cetra Cloud" };
 // The JSON import types `signup` as `string`; `AuthConfig` needs the union.
 const BASE = { ...authConfig, signup: "invite_only" as const };
 

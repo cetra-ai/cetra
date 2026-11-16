@@ -41,15 +41,15 @@
           },
           "spans": [
             {
-              "traceId": "f7214536163a0004b79753f24e677e4b",
-              "spanId": "840d4c6bdd5f0291",
+              "traceId": "ebfa89ad896db407943ee3414999fc95",
+              "spanId": "f2c905cf20aff218",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
               "name": "invocation",
               "kind": 1,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590369000000",
+              "endTimeUnixNano": "1767225590395000000",
               "attributes": [],
               "droppedAttributesCount": 0,
               "events": [],
@@ -59,15 +59,15 @@
               "status": null
             },
             {
-              "traceId": "f7214536163a0004b79753f24e677e4b",
-              "spanId": "ed21523796cb193e",
+              "traceId": "ebfa89ad896db407943ee3414999fc95",
+              "spanId": "431668de81ca57d7",
               "traceState": "",
-              "parentSpanId": "840d4c6bdd5f0291",
+              "parentSpanId": "f2c905cf20aff218",
               "flags": 256,
               "name": "invoke_agent weather_agent",
               "kind": 1,
-              "startTimeUnixNano": "1767225590002000000",
-              "endTimeUnixNano": "1767225590369000000",
+              "startTimeUnixNano": "1767225590015000000",
+              "endTimeUnixNano": "1767225590394000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",
@@ -102,15 +102,15 @@
               "status": null
             },
             {
-              "traceId": "f7214536163a0004b79753f24e677e4b",
-              "spanId": "17fedb9248e282fd",
+              "traceId": "ebfa89ad896db407943ee3414999fc95",
+              "spanId": "a3045a6bc7beead9",
               "traceState": "",
-              "parentSpanId": "ed21523796cb193e",
+              "parentSpanId": "431668de81ca57d7",
               "flags": 256,
               "name": "call_llm",
               "kind": 1,
-              "startTimeUnixNano": "1767225590039000000",
-              "endTimeUnixNano": "1767225590217000000",
+              "startTimeUnixNano": "1767225590072000000",
+              "endTimeUnixNano": "1767225590243000000",
               "attributes": [
                 {
                   "key": "gen_ai.system",
@@ -187,15 +187,15 @@
               "status": null
             },
             {
-              "traceId": "f7214536163a0004b79753f24e677e4b",
-              "spanId": "0df6935ab80b175a",
+              "traceId": "ebfa89ad896db407943ee3414999fc95",
+              "spanId": "f8d447c5a4ea7436",
               "traceState": "",
-              "parentSpanId": "17fedb9248e282fd",
+              "parentSpanId": "a3045a6bc7beead9",
               "flags": 256,
               "name": "generate_content gemini-2.5-flash",
               "kind": 1,
-              "startTimeUnixNano": "1767225590039000000",
-              "endTimeUnixNano": "1767225590212000000",
+              "startTimeUnixNano": "1767225590073000000",
+              "endTimeUnixNano": "1767225590238000000",
               "attributes": [
                 {
                   "key": "gen_ai.system",
@@ -272,15 +272,15 @@
               "status": null
             },
             {
-              "traceId": "f7214536163a0004b79753f24e677e4b",
-              "spanId": "6b53f2e65f282adc",
+              "traceId": "ebfa89ad896db407943ee3414999fc95",
+              "spanId": "dcab9fbc492d8a7c",
               "traceState": "",
-              "parentSpanId": "ed21523796cb193e",
+              "parentSpanId": "431668de81ca57d7",
               "flags": 256,
               "name": "execute_tool get_weather",
               "kind": 1,
-              "startTimeUnixNano": "1767225590214000000",
-              "endTimeUnixNano": "1767225590216000000",
+              "startTimeUnixNano": "1767225590241000000",
+              "endTimeUnixNano": "1767225590242000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",
@@ -357,15 +357,15 @@
               "status": null
             },
             {
-              "traceId": "f7214536163a0004b79753f24e677e4b",
-              "spanId": "8fc2213989d0dc7a",
+              "traceId": "ebfa89ad896db407943ee3414999fc95",
+              "spanId": "92e5d2c0a9917b7d",
               "traceState": "",
-              "parentSpanId": "ed21523796cb193e",
+              "parentSpanId": "431668de81ca57d7",
               "flags": 256,
               "name": "call_llm",
               "kind": 1,
-              "startTimeUnixNano": "1767225590218000000",
-              "endTimeUnixNano": "1767225590368000000",
+              "startTimeUnixNano": "1767225590244000000",
+              "endTimeUnixNano": "1767225590394000000",
               "attributes": [
                 {
                   "key": "gen_ai.system",
@@ -442,15 +442,15 @@
               "status": null
             },
             {
-              "traceId": "f7214536163a0004b79753f24e677e4b",
-              "spanId": "8e454473808e1c9f",
+              "traceId": "ebfa89ad896db407943ee3414999fc95",
+              "spanId": "46d908cdae41c038",
               "traceState": "",
-              "parentSpanId": "8fc2213989d0dc7a",
+              "parentSpanId": "92e5d2c0a9917b7d",
               "flags": 256,
               "name": "generate_content gemini-2.5-flash",
               "kind": 1,
-              "startTimeUnixNano": "1767225590218000000",
-              "endTimeUnixNano": "1767225590367000000",
+              "startTimeUnixNano": "1767225590244000000",
+              "endTimeUnixNano": "1767225590392000000",
               "attributes": [
                 {
                   "key": "gen_ai.system",

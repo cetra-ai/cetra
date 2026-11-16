@@ -4,7 +4,7 @@ from collections.abc import Callable, Sequence
 
 import pytest
 
-from llmobs._config import (
+from cetra._config import (
     ENV_API_KEY,
     ENV_BASE_URL,
     ENV_CAPTURE_CONTENT,
@@ -18,13 +18,13 @@ from llmobs._config import (
     ConfigError,
     resolve_config,
 )
-from llmobs._log import reset_warnings
+from cetra._log import reset_warnings
 
-KEY = "sk-llmobs-test"
-STORED_KEY = "sk-llmobs-super-secret-key-42"
+KEY = "sk-cetra-test"
+STORED_KEY = "sk-cetra-super-secret-key-42"
 BAD_KEY = "not-a-key-DISTINCTIVE"
 MISSING_KEY_MESSAGE = (
-    "llmobs: no API key; set LLMOBS_API_KEY, or LLMOBS_ENABLED=false to silence this; "
+    "cetra: no API key; set CETRA_API_KEY, or CETRA_ENABLED=false to silence this; "
     "tracing is disabled"
 )
 
@@ -263,12 +263,10 @@ def test_api_key_errors_do_not_echo_the_value() -> None:
     assert STORED_KEY not in repr(config)
     assert STORED_KEY not in str(config)
 
-    with pytest.raises(ConfigError, match="api_key: must start with sk-llmobs-") as argument_error:
+    with pytest.raises(ConfigError, match="api_key: must start with sk-cetra-") as argument_error:
         resolve_config(api_key=BAD_KEY, env={})
     assert BAD_KEY not in str(argument_error.value)
-    with pytest.raises(
-        ConfigError, match=f"{ENV_API_KEY}: must start with sk-llmobs-"
-    ) as env_error:
+    with pytest.raises(ConfigError, match=f"{ENV_API_KEY}: must start with sk-cetra-") as env_error:
         resolve_config(env={ENV_API_KEY: BAD_KEY})
     assert BAD_KEY not in str(env_error.value)
 
@@ -277,7 +275,7 @@ def test_api_key_errors_do_not_echo_the_value() -> None:
 def test_missing_api_key_warns_once_and_disables(
     source: dict[str, str], caplog: pytest.LogCaptureFixture
 ) -> None:
-    with caplog.at_level(logging.WARNING, logger="llmobs"):
+    with caplog.at_level(logging.WARNING, logger="cetra"):
         config = resolve_config(env=source)
         again = resolve_config(env=source)
     assert config.enabled is False
@@ -295,7 +293,7 @@ def test_missing_api_key_warns_once_and_disables(
         use_global_provider=False,
         export_filter=None,
     )
-    warnings = [record for record in caplog.records if record.name == "llmobs"]
+    warnings = [record for record in caplog.records if record.name == "cetra"]
     assert len(warnings) == 1
     assert warnings[0].levelno == logging.WARNING
     assert warnings[0].getMessage() == MISSING_KEY_MESSAGE
@@ -391,11 +389,11 @@ def test_sample_rate_rejects_a_bad_env_value() -> None:
 
 def test_environment_rejects_the_reserved_value() -> None:
     with pytest.raises(ConfigError, match="environment: is reserved") as argument_error:
-        resolve_config(api_key=KEY, environment="llmobs-eval", env={})
-    assert "llmobs-eval" not in str(argument_error.value)
+        resolve_config(api_key=KEY, environment="cetra-eval", env={})
+    assert "cetra-eval" not in str(argument_error.value)
     with pytest.raises(ConfigError, match=f"{ENV_ENVIRONMENT}: is reserved") as env_error:
-        resolve_config(api_key=KEY, env={ENV_ENVIRONMENT: "llmobs-eval"})
-    assert "llmobs-eval" not in str(env_error.value)
+        resolve_config(api_key=KEY, env={ENV_ENVIRONMENT: "cetra-eval"})
+    assert "cetra-eval" not in str(env_error.value)
 
 
 def test_release_falls_back_to_git_then_source() -> None:

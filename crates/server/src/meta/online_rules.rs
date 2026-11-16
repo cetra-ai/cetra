@@ -1,7 +1,7 @@
 //! `online_rules` rows (spec 04, D-I-30, D-I-32). `target`, `budget_period` and
 //! `paused_reason` are stored as text; a stored value outside its list is corrupt.
 
-use llmobs_core::ids::{OrgId, ProjectId};
+use cetra_core::ids::{OrgId, ProjectId};
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
@@ -646,7 +646,7 @@ fn optional_uuid(value: Option<String>, column: &'static str) -> Result<Option<U
 
 #[cfg(test)]
 mod tests {
-    use llmobs_core::ids::{OrgId, ProjectId};
+    use cetra_core::ids::{OrgId, ProjectId};
     use uuid::Uuid;
 
     use super::{

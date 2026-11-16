@@ -20,7 +20,7 @@ use crate::meta::members::org_members;
 use crate::meta::orgs::{org_by_id, orgs_of_user};
 use crate::meta::users::{normalize_email, user_by_email};
 use crate::routes::entitlements::OrgIdPath;
-use llmobs_core::ids::OrgId;
+use cetra_core::ids::OrgId;
 
 /// The internal membership routes. The control plane holds a `control_plane` token with
 /// scope `members`.

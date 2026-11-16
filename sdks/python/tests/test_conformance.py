@@ -1,6 +1,6 @@
 """Conformance tests: the SDK must emit the shared fixtures (plan F § P11, D-F-9).
 
-One test per ``fixtures/otlp/llmobs/sdk-*`` case: each runs its scenario row
+One test per ``fixtures/otlp/cetra/sdk-*`` case: each runs its scenario row
 through the in-memory pipeline, flushes, and compares the canonical export
 with the case's ``input.json`` as parsed JSON (never rewritten from here).
 """
@@ -15,13 +15,13 @@ from _conformance import canonical
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-import llmobs
-from llmobs._runtime import Runtime
+import cetra
+from cetra._runtime import Runtime
 
 Memory = tuple[InMemorySpanExporter, Callable[..., Runtime]]
 Spans = Callable[[InMemorySpanExporter], list[ReadableSpan]]
 
-_FIXTURES = Path(__file__).parents[3] / "fixtures" / "otlp" / "llmobs"
+_FIXTURES = Path(__file__).parents[3] / "fixtures" / "otlp" / "cetra"
 
 # The 70-byte 1x1 PNG of § Scenarios.
 _PNG_B64 = (
@@ -60,7 +60,7 @@ def test_observe_tool(memory: Memory, spans: Spans) -> None:
     exporter, start = memory
     start()
 
-    @llmobs.observe(kind="tool", name="search_docs")
+    @cetra.observe(kind="tool", name="search_docs")
     def search_docs(query: str, limit: int = 2) -> list[str]:
         return ["doc-1", "doc-2"]
 
@@ -72,11 +72,11 @@ def test_observe_nested(memory: Memory, spans: Spans) -> None:
     exporter, start = memory
     start()
 
-    @llmobs.observe(kind="retriever", name="retrieve")
+    @cetra.observe(kind="retriever", name="retrieve")
     def retrieve(question: str) -> list[dict[str, str]]:
         return [{"id": "d1"}]
 
-    @llmobs.observe(name="answer")
+    @cetra.observe(name="answer")
     def answer(question: str) -> str:
         retrieve(question)
         return "It is 42."
@@ -89,7 +89,7 @@ def test_observe_error(memory: Memory, spans: Spans) -> None:
     exporter, start = memory
     start()
 
-    @llmobs.observe(name="fails")
+    @cetra.observe(name="fails")
     def fails(x: int) -> None:
         raise ScenarioError("boom")
 
@@ -102,7 +102,7 @@ def test_generator_text(memory: Memory, spans: Spans) -> None:
     exporter, start = memory
     start()
 
-    @llmobs.observe(name="stream")
+    @cetra.observe(name="stream")
     def stream(prompt: str) -> Iterator[str]:
         yield "Hel"
         yield "lo"
@@ -115,7 +115,7 @@ def test_generator_json(memory: Memory, spans: Spans) -> None:
     exporter, start = memory
     start()
 
-    @llmobs.observe(name="numbers")
+    @cetra.observe(name="numbers")
     def numbers() -> Iterator[dict[str, int]]:
         yield {"n": 1}
         yield {"n": 2}
@@ -127,7 +127,7 @@ def test_generator_json(memory: Memory, spans: Spans) -> None:
 def test_span_manual(memory: Memory, spans: Spans) -> None:
     exporter, start = memory
     start()
-    with llmobs.span("rerank", kind="reranker", input=["a", "b"]) as s:
+    with cetra.span("rerank", kind="reranker", input=["a", "b"]) as s:
         s.set_output(["b", "a"])
         s.set_metadata(model="bge")
     assert_canonical(spans(exporter), "sdk-span-manual")
@@ -136,7 +136,7 @@ def test_span_manual(memory: Memory, spans: Spans) -> None:
 def test_llm_span(memory: Memory, spans: Spans) -> None:
     exporter, start = memory
     start()
-    with llmobs.llm_span(
+    with cetra.llm_span(
         "chat",
         provider="openai",
         model="gpt-4o-mini",
@@ -156,16 +156,16 @@ def test_context(memory: Memory, spans: Spans) -> None:
     exporter, start = memory
     start(environment="staging", release="1.2.3")
 
-    @llmobs.observe(name="lookup")
+    @cetra.observe(name="lookup")
     def lookup() -> None:
         return None
 
-    @llmobs.observe(name="turn")
+    @cetra.observe(name="turn")
     def turn() -> None:
         lookup()
         return None
 
-    with llmobs.context(
+    with cetra.context(
         session_id="chat-42",
         user_id="u-17",
         tags=["beta"],
@@ -179,7 +179,7 @@ def test_capture_off(memory: Memory, spans: Spans) -> None:
     exporter, start = memory
     start(capture_content=False)
 
-    @llmobs.observe(kind="tool", name="lookup")
+    @cetra.observe(kind="tool", name="lookup")
     def lookup(query: str) -> str:
         return "x"
 
@@ -191,7 +191,7 @@ def test_mask(memory: Memory, spans: Spans) -> None:
     exporter, start = memory
     start(mask=redact)
 
-    @llmobs.observe(name="notify")
+    @cetra.observe(name="notify")
     def notify(email: str) -> str:
         return "sent to alice@example.com"
 
@@ -203,7 +203,7 @@ def test_media_bytes(memory: Memory, spans: Spans) -> None:
     exporter, start = memory
     start()
 
-    @llmobs.observe(name="upload")
+    @cetra.observe(name="upload")
     def upload(data: bytes) -> str:
         return "ok"
 

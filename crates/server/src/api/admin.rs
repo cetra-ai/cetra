@@ -34,7 +34,7 @@ pub struct AdminUser {
     /// Linked provider ids, such as `github` or `oidc:okta`.
     pub providers: Vec<String>,
     /// When the account was created. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub created_at: i64,
 }

@@ -172,7 +172,7 @@ server is stopped (`LOCK`) and nothing appends.
 ## Verify
 
 ```bash
-cargo test -p llmobs-storage --all-features collect_orphans
+cargo test -p cetra-storage --all-features collect_orphans
 just check
 ```
 

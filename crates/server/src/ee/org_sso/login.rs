@@ -7,7 +7,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, Method};
 use axum::response::Response;
 use axum::routing::{get, post};
-use llmobs_core::ids::OrgId;
+use cetra_core::ids::OrgId;
 use serde::Deserialize;
 use sqlx::SqliteConnection;
 use uuid::Uuid;

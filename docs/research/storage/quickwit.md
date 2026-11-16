@@ -1,4 +1,4 @@
-# Quickwit storage layer: research notes for llmobs spec 03
+# Quickwit storage layer: research notes for cetra spec 03
 
 **Repo:** `/home/sebastien/travaux/quickwit`. Paths below are relative to `quickwit/` unless they start with `docs/`.
 
@@ -307,7 +307,7 @@ Isolation is at the **index** level. Each index has its own doc mapping, indexin
 | `fb6be52f12` | A wrong dedup key silently dropped data. |
 | `623b4d0728` | Jitter periodic retention so jobs don't stampede. |
 
-## 14. Recommendations for llmobs spec 03
+## 14. Recommendations for cetra spec 03
 
 **§1 WAL**
 - *Keep:* group commit with `fdatasync`. Quickwit acks before fsync (5 s window) and lists replication as unfinished, so our durability is stronger. Document the difference.

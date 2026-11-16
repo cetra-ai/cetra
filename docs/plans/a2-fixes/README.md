@@ -85,7 +85,7 @@ Background for these choices, measured on this repository in a 2 MiB thread (rel
   - Existing tests must keep passing unchanged unless the phase names the test and the new expectation.
 - **Docs.** Spec and decision text is given verbatim in each phase. Write it exactly; adjust only the surrounding punctuation if the context requires it.
 - **Checks.**
-  - `just check` must pass before the commit. Rust-only iterations may use `just check-rust` or `cargo test -p llmobs-storage <filter>`.
+  - `just check` must pass before the commit. Rust-only iterations may use `just check-rust` or `cargo test -p cetra-storage <filter>`.
   - Node is not on the non-interactive PATH on the dev machine: put the version from `.node-version` first on `PATH` before `just check`.
 - **Commit.** One commit per phase, with the subject from the table above. Add any trailer your own session instructions require.
 - **Report.** At the end, report:

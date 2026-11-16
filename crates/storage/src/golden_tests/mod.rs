@@ -14,9 +14,9 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use arrow::array::StringArray;
+use cetra_core::ids::ProjectId;
+use cetra_core::schema::spans;
 use chrono::NaiveDate;
-use llmobs_core::ids::ProjectId;
-use llmobs_core::schema::spans;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde_json::Value;
 use sqlx::sqlite::SqliteConnectOptions;
@@ -45,7 +45,7 @@ pub(super) const DELETION_TRACE: Uuid = Uuid::from_u128(0x018f_6b4e_7c1a_7c1a_8c
 pub(super) const DELETION_USER: Uuid = Uuid::from_u128(0x018f_6b4e_7c1a_7c1a_8c1a_0000_0000_00d2);
 
 /// The blob the scenario puts: 16 bytes.
-pub(super) const MEDIA: &[u8] = b"llmobs golden 16";
+pub(super) const MEDIA: &[u8] = b"cetra golden 16";
 
 /// The read cache entry the scenario writes (step 7 of the scenario).
 pub(super) const CACHE_NAME: &str = "golden-cache.parquet";
@@ -290,30 +290,30 @@ fn parquet_files(dir: &Path) -> Vec<PathBuf> {
     found
 }
 
-/// Writes the golden directory `LLMOBS_GOLDEN_OUT` names (an absolute path that must not exist),
+/// Writes the golden directory `CETRA_GOLDEN_OUT` names (an absolute path that must not exist),
 /// with its `expected.json`. Run by `just golden-dir <name>`, which passes the name's path.
 #[test]
 #[ignore = "writes a fixtures directory; run by just golden-dir <version>"]
 fn write_golden_dir() {
     let out = PathBuf::from(
-        std::env::var_os("LLMOBS_GOLDEN_OUT")
-            .expect("LLMOBS_GOLDEN_OUT names the directory to write"),
+        std::env::var_os("CETRA_GOLDEN_OUT")
+            .expect("CETRA_GOLDEN_OUT names the directory to write"),
     );
-    assert!(out.is_absolute(), "LLMOBS_GOLDEN_OUT is an absolute path");
-    assert!(!out.exists(), "LLMOBS_GOLDEN_OUT must not exist yet");
+    assert!(out.is_absolute(), "CETRA_GOLDEN_OUT is an absolute path");
+    assert!(!out.exists(), "CETRA_GOLDEN_OUT must not exist yet");
     // A golden directory is written by the build it is named after (`release-prep` has set the
     // version already); `scratch*` is for a look and is never released (R8.8).
     let name = out
         .file_name()
         .and_then(|name| name.to_str())
-        .expect("LLMOBS_GOLDEN_OUT ends in a UTF-8 directory name");
+        .expect("CETRA_GOLDEN_OUT ends in a UTF-8 directory name");
     assert!(
         name.starts_with("scratch") || name == env!("CARGO_PKG_VERSION"),
         "{name}: the workspace is {}; a golden directory is named after the version it is written by (or scratch*)",
         env!("CARGO_PKG_VERSION")
     );
-    fs::create_dir_all(out.parent().expect("LLMOBS_GOLDEN_OUT has a parent"))
-        .expect("create the parent of LLMOBS_GOLDEN_OUT");
+    fs::create_dir_all(out.parent().expect("CETRA_GOLDEN_OUT has a parent"))
+        .expect("create the parent of CETRA_GOLDEN_OUT");
     generate(&out);
     let (files, bytes) = dir_size(&out);
     println!(

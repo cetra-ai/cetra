@@ -43,7 +43,7 @@ restorable against the live bucket (D-N-20)".
 ## Verify
 
 ```bash
-cargo test -p llmobs-storage --all-features config
+cargo test -p cetra-storage --all-features config
 just check
 ```
 

@@ -1,5 +1,5 @@
 [package]
-name = "llmobs-ui"
+name = "cetra-ui"
 description = "The web UI, embedded at build time"
 version.workspace = true
 edition.workspace = true

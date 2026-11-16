@@ -57,7 +57,7 @@ pub struct ModelPrice {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     /// The row prices spans that started at or after this time. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub valid_from: i64,
     /// USD per 1M uncached input tokens.

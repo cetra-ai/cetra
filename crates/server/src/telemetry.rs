@@ -1,6 +1,6 @@
 //! Prometheus metrics served on `metrics_addr` (N M3, D-N-28, D-N-29).
 //!
-//! One root [`Registry`] holds the `process_*` gauges. Every `llmobs_*` metric is
+//! One root [`Registry`] holds the `process_*` gauges. Every `cetra_*` metric is
 //! registered on a sub-registry with [`PREFIX`], so one encode gives one document with a
 //! single `# EOF`. Labels take values from the fixed sets in this module only (D-N-29):
 //! never an org, project, user, key, email, model, URL, host or evaluator name.
@@ -27,16 +27,16 @@ use axum::extract::{MatchedPath, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::Response;
-use llmobs_storage::StorageStats;
-use llmobs_storage::error::{AppendError, MediaError};
+use cetra_storage::StorageStats;
+use cetra_storage::error::{AppendError, MediaError};
 
 use crate::api::alerts::ChannelKind;
 use crate::http::AppState;
 use crate::ingest::IngestError;
 use crate::ingest::body::BodyError;
 
-/// The prefix of every `llmobs_*` metric. The product rename (D46) changes this line.
-const PREFIX: &str = "llmobs";
+/// The prefix of every `cetra_*` metric. A rename of the product changes this line.
+const PREFIX: &str = "cetra";
 
 /// How long a queue count is reused, in nanoseconds of `state.clock`. Scrapes every second must
 /// not load `meta.db` each time.
@@ -55,7 +55,7 @@ fn advance(counter: &Counter, last: &AtomicU64, now: u64) {
     }
 }
 
-/// The float variant of [`advance`] for `llmobs_storage_flush_seconds_total`. `now_nanos` is a
+/// The float variant of [`advance`] for `cetra_storage_flush_seconds_total`. `now_nanos` is a
 /// cumulative total in nanoseconds; the growth is added to `counter` in seconds.
 fn advance_seconds(counter: &Counter<f64, AtomicU64>, last: &AtomicU64, now_nanos: u64) {
     let prev = last.fetch_max(now_nanos, Ordering::Relaxed);
@@ -87,41 +87,41 @@ struct StorageSeen {
 #[derive(Debug)]
 pub(crate) struct Telemetry {
     registry: Registry,
-    /// `llmobs_storage_memtable_bytes`, from `StorageHealth`.
+    /// `cetra_storage_memtable_bytes`, from `StorageHealth`.
     memtable_bytes: Gauge,
-    /// `llmobs_storage_memtable_hard_limit_bytes`, from `StorageHealth`.
+    /// `cetra_storage_memtable_hard_limit_bytes`, from `StorageHealth`.
     memtable_hard_limit_bytes: Gauge,
-    /// `llmobs_storage_failed{check}`: 1 while the flag is set.
+    /// `cetra_storage_failed{check}`: 1 while the flag is set.
     storage_failed: Family<CheckLabel, Gauge>,
-    /// `llmobs_storage_read_cache_hits_total`. Stays at 0 in local mode.
+    /// `cetra_storage_read_cache_hits_total`. Stays at 0 in local mode.
     read_cache_hits: Counter,
-    /// `llmobs_storage_read_cache_misses_total`. Stays at 0 in local mode.
+    /// `cetra_storage_read_cache_misses_total`. Stays at 0 in local mode.
     read_cache_misses: Counter,
-    /// `llmobs_storage_read_cache_bytes`.
+    /// `cetra_storage_read_cache_bytes`.
     read_cache_bytes: Gauge,
     /// The last hits total copied into [`Self::read_cache_hits`], so it only grows.
     read_cache_seen_hits: AtomicU64,
     /// The last misses total copied into [`Self::read_cache_misses`], so it only grows.
     read_cache_seen_misses: AtomicU64,
-    /// `llmobs_storage_disk_free_bytes`, from `StorageHealth`.
+    /// `cetra_storage_disk_free_bytes`, from `StorageHealth`.
     disk_free_bytes: Gauge,
-    /// `llmobs_storage_disk_min_free_bytes`, from `StorageHealth`.
+    /// `cetra_storage_disk_min_free_bytes`, from `StorageHealth`.
     disk_min_free_bytes: Gauge,
-    /// `llmobs_storage_wal_bytes{table}`, from `StorageStats`.
+    /// `cetra_storage_wal_bytes{table}`, from `StorageStats`.
     wal_bytes: Family<TableLabel, Gauge>,
-    /// `llmobs_storage_flushes_total{table,outcome}`, from `StorageStats`.
+    /// `cetra_storage_flushes_total{table,outcome}`, from `StorageStats`.
     storage_flushes: Family<FlushLabels, Counter>,
-    /// `llmobs_storage_flush_seconds_total{table}`, from `StorageStats`.
+    /// `cetra_storage_flush_seconds_total{table}`, from `StorageStats`.
     storage_flush_seconds: Family<TableLabel, Counter<f64, AtomicU64>>,
-    /// `llmobs_storage_compactions_total{outcome}`, from `StorageStats`.
+    /// `cetra_storage_compactions_total{outcome}`, from `StorageStats`.
     storage_compactions: Family<CompactionLabel, Counter>,
-    /// `llmobs_storage_compaction_bytes_written_total`, from `StorageStats`.
+    /// `cetra_storage_compaction_bytes_written_total`, from `StorageStats`.
     storage_compaction_bytes_written: Counter,
-    /// `llmobs_storage_gc_objects_deleted_total`, from `StorageStats`.
+    /// `cetra_storage_gc_objects_deleted_total`, from `StorageStats`.
     storage_gc_objects_deleted: Counter,
     /// The last storage totals copied into the storage counters above.
     storage_seen: StorageSeen,
-    /// `llmobs_eval_jobs{status}`, from `meta.db`, cached for [`EVAL_COUNT_TTL`].
+    /// `cetra_eval_jobs{status}`, from `meta.db`, cached for [`EVAL_COUNT_TTL`].
     eval_jobs: Family<EvalStatusLabel, Gauge>,
     /// The last queue count attempt and when it was made, in `state.clock` nanoseconds. The
     /// cache uses the app clock, not tokio's: a paused tokio clock auto-advances past the TTL
@@ -131,34 +131,34 @@ pub(crate) struct Telemetry {
     process_resident_memory_bytes: Gauge,
     /// `process_open_fds`. Linux only; left as it was elsewhere.
     process_open_fds: Gauge,
-    /// `llmobs_http_requests_total`
+    /// `cetra_http_requests_total`
     pub(crate) http_requests: Family<HttpLabels, Counter>,
-    /// `llmobs_http_request_duration_seconds`
+    /// `cetra_http_request_duration_seconds`
     pub(crate) http_request_duration_seconds: Family<HttpRouteLabels, Histogram, fn() -> Histogram>,
-    /// `llmobs_ingest_requests_total`
+    /// `cetra_ingest_requests_total`
     pub(crate) ingest_requests: Family<IngestLabels, Counter>,
-    /// `llmobs_ingest_spans_total`
+    /// `cetra_ingest_spans_total`
     pub(crate) ingest_spans: Family<ProtocolLabel, Counter>,
-    /// `llmobs_ingest_bytes_total`
+    /// `cetra_ingest_bytes_total`
     pub(crate) ingest_bytes: Family<ProtocolLabel, Counter>,
-    /// `llmobs_eval_jobs_finished_total`
+    /// `cetra_eval_jobs_finished_total`
     pub(crate) eval_jobs_finished: Family<EvalOutcomeLabel, Counter>,
-    /// `llmobs_eval_run_duration_seconds`
+    /// `cetra_eval_run_duration_seconds`
     pub(crate) eval_run_duration_seconds: Family<EvalKindLabel, Histogram, fn() -> Histogram>,
-    /// `llmobs_alert_evaluations_total`
+    /// `cetra_alert_evaluations_total`
     pub(crate) alert_evaluations: Family<AlertOutcomeLabel, Counter>,
-    /// `llmobs_alert_deliveries_total`
+    /// `cetra_alert_deliveries_total`
     pub(crate) alert_deliveries: Family<DeliveryLabels, Counter>,
-    /// `llmobs_emails_total`
+    /// `cetra_emails_total`
     pub(crate) emails: Family<EmailOutcomeLabel, Counter>,
 }
 
 impl Telemetry {
-    /// Builds the registry. `restore_mode` is set once, and `llmobs_build_info` is 1.
+    /// Builds the registry. `restore_mode` is set once, and `cetra_build_info` is 1.
     pub(crate) fn new(restore_mode: bool) -> Self {
         let mut registry = Registry::default();
 
-        // Root-level process metrics, without the `llmobs_` prefix (Prometheus convention).
+        // Root-level process metrics, without the `cetra_` prefix (Prometheus convention).
         let process_resident_memory_bytes = Gauge::default();
         let process_open_fds = Gauge::default();
         let process_start_time_seconds: Gauge = Gauge::default();
@@ -735,13 +735,13 @@ pub(crate) fn ingest_outcome(error: &IngestError) -> IngestOutcome {
     }
 }
 
-/// The `version` label of `llmobs_build_info`.
+/// The `version` label of `cetra_build_info`.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub(crate) struct VersionLabel {
     version: String,
 }
 
-/// The `check` label of `llmobs_storage_failed`.
+/// The `check` label of `cetra_storage_failed`.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub(crate) struct CheckLabel {
     pub(crate) check: StorageCheck,
@@ -753,26 +753,26 @@ pub(crate) struct TableLabel {
     pub(crate) table: Table,
 }
 
-/// `llmobs_storage_flushes_total` labels.
+/// `cetra_storage_flushes_total` labels.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub(crate) struct FlushLabels {
     pub(crate) table: Table,
     pub(crate) outcome: Outcome,
 }
 
-/// The `outcome` label of `llmobs_storage_compactions_total`.
+/// The `outcome` label of `cetra_storage_compactions_total`.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub(crate) struct CompactionLabel {
     pub(crate) outcome: CompactionOutcome,
 }
 
-/// The `status` label of `llmobs_eval_jobs`.
+/// The `status` label of `cetra_eval_jobs`.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub(crate) struct EvalStatusLabel {
     pub(crate) status: EvalStatus,
 }
 
-/// `llmobs_http_requests_total` labels.
+/// `cetra_http_requests_total` labels.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub(crate) struct HttpLabels {
     /// The axum route template, or `other` for requests that match no route.
@@ -781,7 +781,7 @@ pub(crate) struct HttpLabels {
     pub(crate) status: StatusClass,
 }
 
-/// `llmobs_http_request_duration_seconds` labels.
+/// `cetra_http_request_duration_seconds` labels.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub(crate) struct HttpRouteLabels {
     /// The axum route template, or `other` for requests that match no route.
@@ -789,7 +789,7 @@ pub(crate) struct HttpRouteLabels {
     pub(crate) method: Method,
 }
 
-/// `llmobs_ingest_requests_total` labels.
+/// `cetra_ingest_requests_total` labels.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub(crate) struct IngestLabels {
     pub(crate) protocol: Protocol,
@@ -802,32 +802,32 @@ pub(crate) struct ProtocolLabel {
     pub(crate) protocol: Protocol,
 }
 
-/// `llmobs_eval_jobs_finished_total` labels.
+/// `cetra_eval_jobs_finished_total` labels.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub(crate) struct EvalOutcomeLabel {
     pub(crate) outcome: EvalOutcome,
 }
 
-/// `llmobs_eval_run_duration_seconds` labels.
+/// `cetra_eval_run_duration_seconds` labels.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub(crate) struct EvalKindLabel {
     pub(crate) kind: EvalKind,
 }
 
-/// `llmobs_alert_evaluations_total` labels.
+/// `cetra_alert_evaluations_total` labels.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub(crate) struct AlertOutcomeLabel {
     pub(crate) outcome: Outcome,
 }
 
-/// `llmobs_alert_deliveries_total` labels.
+/// `cetra_alert_deliveries_total` labels.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub(crate) struct DeliveryLabels {
     pub(crate) channel: Channel,
     pub(crate) outcome: DeliveryOutcome,
 }
 
-/// `llmobs_emails_total` labels.
+/// `cetra_emails_total` labels.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub(crate) struct EmailOutcomeLabel {
     pub(crate) outcome: EmailOutcome,
@@ -909,7 +909,7 @@ pub(crate) enum Protocol {
     otlp_grpc,
 }
 
-/// The outcome label of `llmobs_ingest_requests_total`.
+/// The outcome label of `cetra_ingest_requests_total`.
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
 pub(crate) enum IngestOutcome {
@@ -923,7 +923,7 @@ pub(crate) enum IngestOutcome {
     disk_full,
 }
 
-/// The `check` label of `llmobs_storage_failed`.
+/// The `check` label of `cetra_storage_failed`.
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
 pub(crate) enum StorageCheck {
@@ -933,7 +933,7 @@ pub(crate) enum StorageCheck {
     catalog,
 }
 
-/// The `status` label of `llmobs_eval_jobs`.
+/// The `status` label of `cetra_eval_jobs`.
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
 pub(crate) enum EvalStatus {
@@ -941,7 +941,7 @@ pub(crate) enum EvalStatus {
     running,
 }
 
-/// The outcome label of `llmobs_eval_jobs_finished_total`: the final `eval_jobs` statuses.
+/// The outcome label of `cetra_eval_jobs_finished_total`: the final `eval_jobs` statuses.
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
 pub(crate) enum EvalOutcome {
@@ -950,7 +950,7 @@ pub(crate) enum EvalOutcome {
     skipped,
 }
 
-/// The `kind` label of `llmobs_eval_run_duration_seconds`.
+/// The `kind` label of `cetra_eval_run_duration_seconds`.
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
 pub(crate) enum EvalKind {
@@ -975,7 +975,7 @@ pub(crate) enum Table {
     scores,
 }
 
-/// The outcome label of `llmobs_storage_compactions_total`.
+/// The outcome label of `cetra_storage_compactions_total`.
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
 pub(crate) enum CompactionOutcome {
@@ -985,7 +985,7 @@ pub(crate) enum CompactionOutcome {
     conflict,
 }
 
-/// The `channel` label of `llmobs_alert_deliveries_total`.
+/// The `channel` label of `cetra_alert_deliveries_total`.
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
 pub(crate) enum Channel {
@@ -994,7 +994,7 @@ pub(crate) enum Channel {
     slack,
 }
 
-/// The `outcome` label of `llmobs_alert_deliveries_total`.
+/// The `outcome` label of `cetra_alert_deliveries_total`.
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
 pub(crate) enum DeliveryOutcome {
@@ -1002,7 +1002,7 @@ pub(crate) enum DeliveryOutcome {
     failed,
 }
 
-/// The `outcome` label of `llmobs_emails_total`.
+/// The `outcome` label of `cetra_emails_total`.
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
 pub(crate) enum EmailOutcome {
@@ -1029,7 +1029,7 @@ mod tests {
         })
     }
 
-    /// The value of a float series line, such as `llmobs_storage_flush_seconds_total{..} 0.5`.
+    /// The value of a float series line, such as `cetra_storage_flush_seconds_total{..} 0.5`.
     fn sample_f64(text: &str, series: &str) -> Option<f64> {
         text.lines().find_map(|line| {
             line.strip_prefix(series)?
@@ -1109,22 +1109,22 @@ mod tests {
         let app = TestApp::new().await;
         let text = render(&app).await;
         let build = format!(
-            "llmobs_build_info{{version=\"{}\"}}",
+            "cetra_build_info{{version=\"{}\"}}",
             env!("CARGO_PKG_VERSION")
         );
         assert_eq!(sample(&text, &build), Some(1), "{text}");
-        assert_eq!(sample(&text, "llmobs_restore_mode"), Some(0), "{text}");
+        assert_eq!(sample(&text, "cetra_restore_mode"), Some(0), "{text}");
         assert!(
-            text.contains("llmobs_storage_memtable_hard_limit_bytes "),
+            text.contains("cetra_storage_memtable_hard_limit_bytes "),
             "{text}"
         );
         assert_eq!(
-            sample(&text, "llmobs_storage_failed{check=\"catalog\"}"),
+            sample(&text, "cetra_storage_failed{check=\"catalog\"}"),
             Some(0),
             "{text}"
         );
         assert_eq!(
-            sample(&text, "llmobs_eval_jobs{status=\"queued\"}"),
+            sample(&text, "cetra_eval_jobs{status=\"queued\"}"),
             Some(0),
             "{text}"
         );
@@ -1147,8 +1147,8 @@ mod tests {
             .await
             .expect("flush");
 
-        let flushed = "llmobs_storage_flushes_total{table=\"spans\",outcome=\"ok\"}";
-        let seconds = "llmobs_storage_flush_seconds_total{table=\"spans\"}";
+        let flushed = "cetra_storage_flushes_total{table=\"spans\",outcome=\"ok\"}";
+        let seconds = "cetra_storage_flush_seconds_total{table=\"spans\"}";
         let first = render(&app).await;
         assert!(sample(&first, flushed).is_some_and(|n| n >= 1), "{first}");
         assert!(
@@ -1175,12 +1175,12 @@ mod tests {
         let app = TestApp::new().await;
         let text = render(&app).await;
         assert!(
-            sample(&text, "llmobs_storage_disk_free_bytes").is_some_and(|bytes| bytes > 0),
+            sample(&text, "cetra_storage_disk_free_bytes").is_some_and(|bytes| bytes > 0),
             "{text}"
         );
         // The test app sets `storage.min_free_bytes` to 0 (`test_support`).
         assert_eq!(
-            sample(&text, "llmobs_storage_disk_min_free_bytes"),
+            sample(&text, "cetra_storage_disk_min_free_bytes"),
             Some(0),
             "{text}"
         );
@@ -1197,7 +1197,7 @@ mod tests {
         app.commit_trace_at(&seeded.project, trace, 0, now).await;
         let text = render(&app).await;
         assert!(
-            sample(&text, "llmobs_storage_wal_bytes{table=\"spans\"}").is_some_and(|b| b > 0),
+            sample(&text, "cetra_storage_wal_bytes{table=\"spans\"}").is_some_and(|b| b > 0),
             "{text}"
         );
     }
@@ -1206,7 +1206,7 @@ mod tests {
     async fn restore_mode_gauge_is_one() {
         let app = TestApp::with_config(|config| config.restore_mode = true).await;
         let text = render(&app).await;
-        assert_eq!(sample(&text, "llmobs_restore_mode"), Some(1), "{text}");
+        assert_eq!(sample(&text, "cetra_restore_mode"), Some(1), "{text}");
     }
 
     #[tokio::test]
@@ -1215,7 +1215,7 @@ mod tests {
         let seeded = app.seed().await;
         let evaluator = create_webhook(&app, &seeded).await;
         enqueue(&app, &seeded, evaluator, "a1000000000000000000000000000081").await;
-        let queued = "llmobs_eval_jobs{status=\"queued\"}";
+        let queued = "cetra_eval_jobs{status=\"queued\"}";
         assert_eq!(sample(&render(&app).await, queued), Some(1));
 
         enqueue(&app, &seeded, evaluator, "a1000000000000000000000000000082").await;
@@ -1284,10 +1284,11 @@ mod tests {
             .send()
             .await;
         let text = render(&app).await;
-        let answered = "llmobs_http_requests_total{route=\"/api/auth/config\",method=\"GET\",status=\"2xx\"} 2";
+        let answered =
+            "cetra_http_requests_total{route=\"/api/auth/config\",method=\"GET\",status=\"2xx\"} 2";
         assert!(text.lines().any(|line| line == answered), "{text}");
         let unmatched =
-            "llmobs_http_requests_total{route=\"other\",method=\"GET\",status=\"4xx\"} 1";
+            "cetra_http_requests_total{route=\"other\",method=\"GET\",status=\"4xx\"} 1";
         assert!(text.lines().any(|line| line == unmatched), "{text}");
     }
 

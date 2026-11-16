@@ -7,9 +7,9 @@ use std::time::Duration;
 use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, patch, post};
-use llmobs_core::ids::{OrgId, ProjectId};
-use llmobs_eval::{Adapter, VariableMapping};
-use llmobs_storage::{MAX_MATCH_COUNT, MatchCountRequest, TimeWindow, ViewName, match_count};
+use cetra_core::ids::{OrgId, ProjectId};
+use cetra_eval::{Adapter, VariableMapping};
+use cetra_storage::{MAX_MATCH_COUNT, MatchCountRequest, TimeWindow, ViewName, match_count};
 use serde::Deserialize;
 use serde_json::Value;
 use sqlx::SqliteConnection;
@@ -652,7 +652,7 @@ async fn validate(
             RuleTarget::Span => ViewName::Spans,
         };
         let ctx = open_query(state, org, project, None).await?;
-        llmobs_storage::validate_filter(&ctx, view, text)?;
+        cetra_storage::validate_filter(&ctx, view, text)?;
     }
     Ok(())
 }
@@ -887,10 +887,10 @@ fn internal(error: impl std::error::Error + Send + Sync + 'static) -> ApiError {
 #[cfg(test)]
 mod tests {
     use axum::http::{Method, header};
-    use llmobs_core::enums::SpanStatus;
-    use llmobs_core::ids::{SpanId, TraceId};
-    use llmobs_core::span::Span;
-    use llmobs_otel::{PriceRow, PriceScope, exact_pattern};
+    use cetra_core::enums::SpanStatus;
+    use cetra_core::ids::{SpanId, TraceId};
+    use cetra_core::span::Span;
+    use cetra_otel::{PriceRow, PriceScope, exact_pattern};
     use serde_json::{Value, json};
 
     use super::*;
@@ -2266,7 +2266,7 @@ mod tests {
             &seeded.project,
             vec![
                 preview_span(1, 1, PREVIEW_NOW - HOUR_NS, SpanStatus::Ok, "production"),
-                preview_span(2, 1, PREVIEW_NOW - HOUR_NS, SpanStatus::Ok, "llmobs-eval"),
+                preview_span(2, 1, PREVIEW_NOW - HOUR_NS, SpanStatus::Ok, "cetra-eval"),
             ],
         )
         .await;
@@ -2274,7 +2274,7 @@ mod tests {
         let named = preview(
             &app,
             &seeded,
-            &json!({"target": "trace", "filter": "environment = 'llmobs-eval'"}),
+            &json!({"target": "trace", "filter": "environment = 'cetra-eval'"}),
         )
         .await;
         assert_eq!(named.status, 200, "{}", text(&named));

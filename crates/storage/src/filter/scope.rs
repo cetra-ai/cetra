@@ -4,12 +4,12 @@
 use std::ops::Not;
 use std::sync::Arc;
 
+use cetra_core::names::{environment, metadata_key};
+use cetra_core::schema::{spans, traces};
 use datafusion::error::DataFusionError;
 use datafusion::logical_expr::{
     Expr, Like, Operator, binary_expr, col, in_subquery, lit, not_in_subquery,
 };
-use llmobs_core::names::{environment, metadata_key};
-use llmobs_core::schema::{spans, traces};
 
 use super::FilterView;
 use crate::query_error::RunError;

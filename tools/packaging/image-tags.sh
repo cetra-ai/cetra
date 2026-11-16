@@ -3,7 +3,7 @@
 # <image>:<version> always; for a version without a pre-release part also <image>:<major>.<minor>,
 # <image>:<major> when major > 0, and <image>:latest.
 #
-# Usage: image-tags.sh <image> <version>, e.g. image-tags.sh ghcr.io/owner/llmobs 0.1.0
+# Usage: image-tags.sh <image> <version>, e.g. image-tags.sh ghcr.io/owner/cetra 0.1.0
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then

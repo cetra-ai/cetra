@@ -10,9 +10,9 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use cetra_storage::config::ObjectStoreUrl;
+use cetra_storage::{CopyCancel, CopyReport};
 use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
-use llmobs_storage::config::ObjectStoreUrl;
-use llmobs_storage::{CopyCancel, CopyReport};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -79,16 +79,16 @@ pub enum BackupError {
     MetaOnlyNeedsS3,
     /// The flush before the backup failed.
     #[error("flush: {0}")]
-    Flush(#[from] llmobs_storage::FlushNowError),
+    Flush(#[from] cetra_storage::FlushNowError),
     /// `VACUUM INTO` of `meta.db` failed.
     #[error("meta.db copy: {0}")]
     Meta(sqlx::Error),
     /// The catalog snapshot failed.
     #[error("catalog snapshot: {0}")]
-    Snapshot(#[from] llmobs_storage::SnapshotError),
+    Snapshot(#[from] cetra_storage::SnapshotError),
     /// Linking or copying the objects failed.
     #[error("objects: {0}")]
-    Objects(#[from] llmobs_storage::CopyObjectsError),
+    Objects(#[from] cetra_storage::CopyObjectsError),
     /// Writing the backup failed.
     #[error("writing the backup: {0}")]
     Io(#[from] io::Error),
@@ -467,7 +467,7 @@ fn manifest(parts: &ManifestParts<'_>) -> Value {
         .collect();
     json!({
         "format": FORMAT,
-        "llmobs_version": env!("CARGO_PKG_VERSION"),
+        "cetra_version": env!("CARGO_PKG_VERSION"),
         "created_at": rfc3339(parts.created),
         "mode": parts.mode,
         "object_store": parts.object_store,
@@ -499,9 +499,9 @@ async fn write_manifest(dir: &Path, manifest: &Value) -> Result<(), BackupError>
 
 #[cfg(test)]
 mod tests {
-    use llmobs_core::batch::spans_to_record_batch;
-    use llmobs_core::ids::ProjectId;
-    use llmobs_core::span::Span;
+    use cetra_core::batch::spans_to_record_batch;
+    use cetra_core::ids::ProjectId;
+    use cetra_core::span::Span;
 
     use super::*;
     use crate::config::Secret;
@@ -887,7 +887,7 @@ mod tests {
             objects_bytes: 3_221_225_472,
         });
         assert_eq!(manifest["format"], 1);
-        assert_eq!(manifest["llmobs_version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(manifest["cetra_version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(manifest["created_at"], "2026-11-14T21:04:05.123456789Z");
         assert_eq!(manifest["mode"], "meta-only");
         assert_eq!(manifest["object_store"], "s3");

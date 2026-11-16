@@ -10,12 +10,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arrow::record_batch::RecordBatch;
+use cetra_core::enums::{ScoreDataType, ScoreTargetKind, SpanKind};
+use cetra_core::schema::{scores, spans, traces};
 use datafusion::common::ScalarValue;
 use datafusion::functions_aggregate::expr_fn::{avg, count, sum};
 use datafusion::logical_expr::expr_fn::when;
 use datafusion::logical_expr::{Expr, LogicalPlan, col, in_subquery, lit};
-use llmobs_core::enums::{ScoreDataType, ScoreTargetKind, SpanKind};
-use llmobs_core::schema::{scores, spans, traces};
 
 use super::metrics::{f64_at, i64_at, internal, percentile, require};
 use super::{ListScope, present, scoped_traces};
@@ -385,11 +385,11 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use cetra_core::enums::{SpanKind, SpanStatus};
+    use cetra_core::names::{environment, metadata_key};
+    use cetra_core::score::{Score, ScoreTarget, ScoreValue};
+    use cetra_core::span::Span;
     use datafusion::execution::runtime_env::RuntimeEnv;
-    use llmobs_core::enums::{SpanKind, SpanStatus};
-    use llmobs_core::names::{environment, metadata_key};
-    use llmobs_core::score::{Score, ScoreTarget, ScoreValue};
-    use llmobs_core::span::Span;
 
     use super::*;
     use crate::test_support::{live_scores_table, score_row, span_row, spans_table, traces_table};

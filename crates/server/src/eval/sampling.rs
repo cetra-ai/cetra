@@ -1,11 +1,11 @@
 //! Deterministic sampling of rule targets (D-I-10).
 
-use llmobs_core::ids::{SpanId, TraceId};
+use cetra_core::ids::{SpanId, TraceId};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-/// A hash input, not an attribute name: the D46 rename must not change which targets are sampled.
-const SAMPLE_TAG: &[u8] = b"llmobs.sample.v1";
+/// A hash input, not an attribute name: changing it changes which targets are sampled.
+const SAMPLE_TAG: &[u8] = b"cetra.sample.v1";
 
 /// 2^64 as a float, the scale of a sampling rate.
 const TWO_POW_64: f64 = 18_446_744_073_709_551_616.0;
@@ -46,10 +46,10 @@ mod tests {
     const RULE: &str = "01900000-0000-7000-8000-000000000700";
     const TRACE: &str = "a1000000000000000000000000000001";
 
-    /// First 8 bytes of SHA-256(`llmobs.sample.v1` ‖ rule (16 bytes) ‖ trace (16 bytes)), big-endian.
-    /// Computed with: `python3 -c "import hashlib; d = hashlib.sha256(b'llmobs.sample.v1' +
+    /// First 8 bytes of SHA-256(`cetra.sample.v1` ‖ rule (16 bytes) ‖ trace (16 bytes)), big-endian.
+    /// Computed with: `python3 -c "import hashlib; d = hashlib.sha256(b'cetra.sample.v1' +
     /// bytes.fromhex('01900000000070008000000000000700') + bytes.fromhex('a1000000000000000000000000000001')).digest(); print(int.from_bytes(d[:8], 'big'))"`.
-    const H: u64 = 0x9d58_5dca_8e8c_6d91;
+    const H: u64 = 0xa8cc_2968_268d_0da5;
     // The margins of `sampling_is_pinned` must fit: 1e6 around H, away from both ends of the range.
     const _: () = assert!(H > 1_000_000 && u64::MAX - H > 1_000_000);
 

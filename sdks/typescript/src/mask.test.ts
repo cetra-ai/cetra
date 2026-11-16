@@ -52,7 +52,7 @@ describe("applyMask", () => {
     const debug = vi.spyOn(diag, "debug").mockImplementation(() => {});
     try {
       expect(applyMask("secret")).toBe(MASK_FAILED);
-      expect(debug).toHaveBeenCalledWith("llmobs: mask raised RangeError");
+      expect(debug).toHaveBeenCalledWith("cetra: mask raised RangeError");
     } finally {
       debug.mockRestore();
     }
@@ -138,12 +138,12 @@ describe("MaskingExporter", () => {
     expect(calls).toContainEqual([{ role: "user", content: EMAIL }]);
   });
 
-  it("passes llmobs spans through untouched", () => {
+  it("passes cetra spans through untouched", () => {
     const mask = vi.fn(redact);
     const { inner, exporter } = masking(mask);
     const provider = new TracerProvider();
-    const ours = provider.getTracer("llmobs").startSpan("notify", {
-      attributes: { "llmobs.input": JSON.stringify({ email: EMAIL }) },
+    const ours = provider.getTracer("cetra").startSpan("notify", {
+      attributes: { "cetra.input": JSON.stringify({ email: EMAIL }) },
     }) as Span;
     ours.end();
     const other = provider
@@ -186,11 +186,11 @@ describe("MaskingExporter", () => {
       "input.value": 42,
       "ai.response.object": [1, 2],
       "lmnr.span.input": true,
-      "llmobs.output": `sent to ${EMAIL}`,
+      "cetra.output": `sent to ${EMAIL}`,
     });
     exporter.export([span], () => {});
     expect(inner.getFinishedSpans()[0]?.attributes).toEqual({
-      "llmobs.output": "sent to [redacted]",
+      "cetra.output": "sent to [redacted]",
     });
   });
 
@@ -210,7 +210,7 @@ describe("MaskingExporter", () => {
         "input.value": MASK_FAILED,
         "gen_ai.output.messages": MASK_FAILED,
       });
-      expect(debug).toHaveBeenCalledWith("llmobs: mask raised RangeError");
+      expect(debug).toHaveBeenCalledWith("cetra: mask raised RangeError");
     } finally {
       debug.mockRestore();
     }
@@ -222,12 +222,12 @@ describe("MaskingExporter", () => {
     );
     const span = instrumentorSpan({
       "input.value": "{not json",
-      "llmobs.input": MESSAGES_JSON,
+      "cetra.input": MESSAGES_JSON,
     });
     exporter.export([span], () => {});
     expect(inner.getFinishedSpans()[0]?.attributes).toEqual({
       "input.value": "{NOT JSON",
-      "llmobs.input": MESSAGES_JSON,
+      "cetra.input": MESSAGES_JSON,
     });
   });
 
@@ -283,7 +283,7 @@ describe("MaskingExporter", () => {
       });
       expect(result?.code).toBe(ExportResultCode.FAILED);
       expect(warn).toHaveBeenCalledTimes(1);
-      expect(warn).toHaveBeenCalledWith("llmobs: masking failed; dropped 2 spans");
+      expect(warn).toHaveBeenCalledWith("cetra: masking failed; dropped 2 spans");
       expect(inner.getFinishedSpans()).toEqual([]);
     } finally {
       warn.mockRestore();

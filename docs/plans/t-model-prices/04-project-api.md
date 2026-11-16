@@ -98,7 +98,7 @@ pub struct ModelPrice {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     /// The row prices spans that started at or after this time. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub valid_from: i64,
     /// USD per 1M uncached input tokens.
@@ -209,7 +209,7 @@ An enum field in a params struct works as `EvalJobListParams.kind: Option<EvalJo
 
 ## 2. The write path (`prices.rs`, added below T3's code)
 
-Imports to add: `uuid::Uuid`, `llmobs_otel::{PriceScope, PriceTier, exact_pattern}`, `llmobs_eval::Adapter`, `crate::api::common::FieldError`, `crate::api::model_prices::{ModelPrice, ModelPriceInput, ModelPriceScope, ModelPriceTier}`, `crate::eval::budget::model_price`, `crate::eval::rule_check::Subject`, `crate::http::AppState`, `crate::meta::{connections, evaluators}`.
+Imports to add: `uuid::Uuid`, `cetra_otel::{PriceScope, PriceTier, exact_pattern}`, `cetra_eval::Adapter`, `crate::api::common::FieldError`, `crate::api::model_prices::{ModelPrice, ModelPriceInput, ModelPriceScope, ModelPriceTier}`, `crate::eval::budget::model_price`, `crate::eval::rule_check::Subject`, `crate::http::AppState`, `crate::meta::{connections, evaluators}`.
 
 ### Constants
 
@@ -467,7 +467,7 @@ Fixed ids (add to `fixtures/api/README.md` § Fixed identifiers, after the backf
 |---|---|
 | Model prices | `01900000-0000-7000-8000-000000000c00`, an org row `Llama 3.1 8B (local)` for `llama3\.1:8b`, any provider, 0 USD; `…0c01`, a project row `gpt-4o (negotiated)` for `gpt\-4o`, provider `openai`, from `2026-01-01T00:00:00.000000000Z`, input 2.0, output 8.0, cache read 1.0. `model-prices.json`, `model-price.json`, `model-price-resolution.json`, `org-model-prices.json` and `requests/model-price-create.json` use them |
 
-Files (times `2026-01-02T10:00:00.000000000Z` for created/updated). `tests/api_examples.rs`'s `roundtrip` compares the file text with the canonical JSON of the parsed value (pretty, struct field order, floats as Rust prints them: `0.0`, `2.0`), so do not hand-format: write the values below, run `cargo test -p llmobs-server --test api_examples static_files_match_their_types`, and copy the expected text from each failure into the file until it passes. Content:
+Files (times `2026-01-02T10:00:00.000000000Z` for created/updated). `tests/api_examples.rs`'s `roundtrip` compares the file text with the canonical JSON of the parsed value (pretty, struct field order, floats as Rust prints them: `0.0`, `2.0`), so do not hand-format: write the values below, run `cargo test -p cetra-server --test api_examples static_files_match_their_types`, and copy the expected text from each failure into the file until it passes. Content:
 - `static/model-prices.json`: a `ModelPricePage` with the project row `…0c01`, the org row `…0c00`, then two built-in rows copied from `crates/otel/prices/builtin.json` (`gpt-4o` provider `openai`, and `gpt-4o-mini` provider `openai`; copy their prices exactly, `tiers: []`, no id, no times), `next_cursor: null` (no static fixture carries a cursor; the generator checks only that the file round-trips).
 - `static/model-price.json`: the project row `…0c01` alone.
 - `static/model-price-resolution.json`: `{"price": <the project row …0c01>}` (the found case).
@@ -484,11 +484,11 @@ Under `## [Unreleased]` → `### Added`: `- Custom model prices per project: \`/
 ## Commands
 
 ```bash
-cargo test -p llmobs-server model_prices
+cargo test -p cetra-server model_prices
 ```
 
 ```bash
-cargo test -p llmobs-server prices
+cargo test -p cetra-server prices
 ```
 
 ```bash

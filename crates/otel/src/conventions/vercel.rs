@@ -4,7 +4,7 @@
 //! `ai.response.toolCalls` become one assistant message. On any other kind,
 //! `ai.response.text` stays text and `ai.response.object` follows rule 10.
 
-use llmobs_core::enums::SpanKind;
+use cetra_core::enums::SpanKind;
 use opentelemetry_proto::tonic::common::v1::AnyValue;
 use serde_json::{Map, Value as Json};
 

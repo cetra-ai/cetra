@@ -28,7 +28,7 @@ Also the deletion guard, the live-stream `resync` event and the metrics-cache in
 ## Read first
 
 - `crates/server/src/meta/deletions.rs` (M1): every function, `DeletionRow`, `RequestDetails`.
-- `llmobs_storage`:
+- `cetra_storage`:
   - `Storage::{query, register_deletion, deletion_status, drop_project, apply_deletions}`;
   - `Deletion`, `DeletionScope`, `DeletionStatus`, `QueryOptions`, `QueryContext::new`;
   - `filter_trace_ids`, `user_deletion_scope`, `eval_trace_ids`, `FilterDeletionRequest`, `MAX_FILTER_DELETION_TRACES`, `TimeWindow`;
@@ -142,7 +142,7 @@ impl MetricsCache {
 use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 
-use llmobs_core::ids::{ProjectId, TraceId};
+use cetra_core::ids::{ProjectId, TraceId};
 
 use crate::meta::{MetaDb, MetaError};
 
@@ -231,7 +231,7 @@ struct Attempt {
 }
 
 impl Deletions {
-    pub(crate) fn new() -> Self;   // filter_cap = llmobs_storage::MAX_FILTER_DELETION_TRACES
+    pub(crate) fn new() -> Self;   // filter_cap = cetra_storage::MAX_FILTER_DELETION_TRACES
     /// The filter cap in force (M4's POST count uses it too).
     pub(crate) fn filter_cap(&self) -> usize;
     #[cfg(test)]
@@ -386,7 +386,7 @@ async fn data_step(state: &AppState, row: &DeletionRow, now: i64) -> Result<(), 
 
    A `User` row always registers: its `user_id` covers spans even with no trace.
 3. `state.deletions.guard.add_traces(project, &traces, row.id, row.created_at)`.
-4. Build `llmobs_storage::Deletion { id: row.id, project, cutoff: row.created_at, scope }`:
+4. Build `cetra_storage::Deletion { id: row.id, project, cutoff: row.created_at, scope }`:
    - `TraceIds` and `Filter`: `scope = DeletionScope::Traces { trace_ids: traces }`;
    - `User`: `scope = DeletionScope::User { user_id, trace_ids: traces, session_ids: sessions }`.
 5. `state.storage.register_deletion(deletion).await`. `DeletionError` → `Step` per the table.
@@ -513,7 +513,7 @@ To build a span, take `dataset_span(0)`, then set `trace_id`, `span_id`, `parent
    - `trace_status(A) == 404` and `trace_status(B) == 200`.
    - `storage.deletion_status(id) == Pending`.
 2. `eval_traces_join_the_scope`:
-   - Trace A, plus trace E with `environment = Some("llmobs-eval")` and `metadata[EVAL_TARGET_TRACE_ID] = A`'s hex.
+   - Trace A, plus trace E with `environment = Some("cetra-eval")` and `metadata[EVAL_TARGET_TRACE_ID] = A`'s hex.
    - `trace_status(E) == 200` first. Then a `trace_ids` row for A, then `run_once`.
    - `trace_count == Some(2)`, `scope_traces` is `[A, E]` sorted, and `trace_status(E) == 404`.
 3. `filter_resolves_matching_traces`:
@@ -546,7 +546,7 @@ To build a span, take `dataset_span(0)`, then set `trace_id`, `span_id`, `parent
     - A `project` row (`Pending`, `request.name`/`slug`) → `run_once`.
     - The row is `applied` with `handed_over_at == applied_at == Some(now)`.
     - `project_by_id` is `None`; `SELECT COUNT(*) FROM api_keys WHERE project_id = ?` is 0.
-    - Appending to it fails: `app.state.storage.append_spans(project, batch)` with `batch = llmobs_core::batch::spans_to_record_batch(&[span]).unwrap()` (as `test_support/mod.rs` imports it; do not use `commit_spans`, which unwraps) returns `Err(AppendError::ProjectDropped)`.
+    - Appending to it fails: `app.state.storage.append_spans(project, batch)` with `batch = cetra_core::batch::spans_to_record_batch(&[span]).unwrap()` (as `test_support/mod.rs` imports it; do not use `commit_spans`, which unwraps) returns `Err(AppendError::ProjectDropped)`.
     - The seeded project is untouched: `trace_status(seeded, S) == 200`. (`trace_status(A)` is not checked: the project route is 404 once the row is gone, which proves nothing about storage.)
 13a. `drop_hook_logs_once`: wrap test 12's `run_once` in `capture_logs`; exactly one log line contains both `audit` and `project dropped` (storage logs its own non-audit `project dropped` line too; `capture_logs` prints targets, so filter on `audit`). A second `run_once` adds nothing (the row is applied).
 13b. `org_drop_includes_projects_created_late`: an org row whose `deletion_projects` lists only project P1, while the org also has P2 (inserted after the row, as a racing `create_project` would). `run_once` drops both: P2's row is gone and appending to P2 fails with `ProjectDropped`.

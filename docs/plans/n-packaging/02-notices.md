@@ -3,9 +3,9 @@
 Read [README.md](README.md) first, especially § Design › Licence notices.
 
 **Goal:** `just notices` writes `target/dist/THIRD-PARTY-NOTICES.md` (D-N-8). The file lists the
-licences of everything compiled into the `llmobs` binary:
+licences of everything compiled into the `cetra` binary:
 
-- the Rust crates of `llmobs-cli` for the three release targets, from `cargo about`;
+- the Rust crates of `cetra-cli` for the three release targets, from `cargo about`;
 - the JavaScript packages of the web UI, from `pnpm licenses list` and a small Node script that
   copies each package's licence file.
 
@@ -29,7 +29,7 @@ N3 puts the file in every archive and in the image. The file is generated, never
 private and are covered by `LICENSE`. Build and dev dependencies are not in the binary.
 
 ```toml
-# Third-party notices for the llmobs binary (D-N-8). Same allow-list as deny.toml [licenses] as
+# Third-party notices for the cetra binary (D-N-8). Same allow-list as deny.toml [licenses] as
 # track P's P1 writes it (docs/plans/p-entitlements/01-m1-open-core-license.md § P1).
 accepted = [
     "0BSD",
@@ -68,7 +68,7 @@ A Handlebars template. `{{{text}}}` has three braces so the licence text is not 
 ````handlebars
 # Third-party notices: Rust crates
 
-The `llmobs` binary includes the following Rust crates. Each licence text is
+The `cetra` binary includes the following Rust crates. Each licence text is
 followed by the crates it covers.
 
 {{#each licenses}}
@@ -129,7 +129,7 @@ packages.sort((a, b) => a.name.localeCompare(b.name));
 
 const out = [];
 out.push("# Third-party notices: web UI packages", "");
-out.push("The web UI embedded in the `llmobs` binary includes the following packages.", "");
+out.push("The web UI embedded in the `cetra` binary includes the following packages.", "");
 let missing = 0;
 for (const pkg of packages) {
   out.push(`## ${pkg.name} ${pkg.versions.join(", ")} (${pkg.license})`, "");
@@ -158,7 +158,7 @@ process.stderr.write(
 ```bash
 #!/usr/bin/env bash
 # Writes target/dist/THIRD-PARTY-NOTICES.md: the licences of the Rust crates and of the web
-# packages compiled into the `llmobs` binary (D-N-8). Needs cargo-about, node and pnpm, and
+# packages compiled into the `cetra` binary (D-N-8). Needs cargo-about, node and pnpm, and
 # `pnpm install` done (just js-install).
 set -euo pipefail
 
@@ -179,7 +179,7 @@ pnpm --dir web licenses list --prod --json | node tools/packaging/js-notices.mjs
 {
   echo "# Third-party notices"
   echo
-  echo "The \`llmobs\` binary contains third-party software. This file lists it with its licences:"
+  echo "The \`cetra\` binary contains third-party software. This file lists it with its licences:"
   echo "first the Rust crates, then the JavaScript packages of the embedded web UI."
   echo
   cat "$rust"

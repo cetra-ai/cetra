@@ -4,30 +4,30 @@
       "project_id": "01900000-0000-7000-8000-000000000001",
       "trace_id": "f8fa0000000000000000000000000001",
       "span_id": "f8fa000000000001",
-      "name": "abcdefghijklmnopqrstuvwxyz012345…[llmobs: truncated, original 36 bytes]",
+      "name": "abcdefghijklmnopqrstuvwxyz012345…[cetra: truncated, original 36 bytes]",
       "span_kind": "span",
       "start_time": "2025-12-31T23:59:50.000000000Z",
       "end_time": "2025-12-31T23:59:51.000000000Z",
       "status": "error",
-      "status_message": "ssssssssssssssssssssssssssssssss…[llmobs: truncated, original 40 bytes]",
+      "status_message": "ssssssssssssssssssssssssssssssss…[cetra: truncated, original 40 bytes]",
       "attributes": {
-        "note": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn…[llmobs: truncated, original 40 bytes]"
+        "note": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn…[cetra: truncated, original 40 bytes]"
       },
       "resource_attributes": {
-        "host.note": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr…[llmobs: truncated, original 40 bytes]"
+        "host.note": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr…[cetra: truncated, original 40 bytes]"
       },
       "events": [
         {
           "time": "2025-12-31T23:59:50.000000000Z",
-          "name": "event-name-is-longer-than-the-li…[llmobs: truncated, original 35 bytes]",
-          "attributes": "{\"msg\":\"mmmmmmmmmmmmmmmmmmmmmmmm…[llmobs: truncated, original 50 bytes]"
+          "name": "event-name-is-longer-than-the-li…[cetra: truncated, original 35 bytes]",
+          "attributes": "{\"msg\":\"mmmmmmmmmmmmmmmmmmmmmmmm…[cetra: truncated, original 50 bytes]"
         }
       ],
       "links": [
         {
           "trace_id": "f8fa00000000000000000000000000aa",
           "span_id": "f8fa0000000000aa",
-          "attributes": "{\"keep\":\"kkkkkkkkkkkkkkkkkkkkkkk…[llmobs: truncated, original 51 bytes]"
+          "attributes": "{\"keep\":\"kkkkkkkkkkkkkkkkkkkkkkk…[cetra: truncated, original 51 bytes]"
         }
       ],
       "truncated": [

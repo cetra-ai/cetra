@@ -2,7 +2,7 @@
 //!
 //! Spec 06 § `check` (D164).
 
-use llmobs_core::score::ScoreValue;
+use cetra_core::score::ScoreValue;
 use serde::de::IgnoredAny;
 use serde_json::Value;
 
@@ -306,7 +306,7 @@ mod tests {
     };
     use crate::config::{Check, ContainsMode, EvaluatorConfig};
     use crate::error::{CheckError, assert_no_payload};
-    use llmobs_core::score::ScoreValue;
+    use cetra_core::score::ScoreValue;
 
     fn input<'a>(output: Option<&'a Value>, expected: Option<&'a Value>) -> CheckInput<'a> {
         CheckInput { output, expected }

@@ -33,7 +33,7 @@ it("lists keys", async () => {
 
   const table = await screen.findByRole("table", { name: "API keys" });
   const row = within(table).getByRole("row", { name: /^CI\b/ });
-  expect(row).toHaveTextContent("sk-llmobs-EXAMPL…");
+  expect(row).toHaveTextContent("sk-cetra-EXAMPL…");
   expect(row).toHaveTextContent("Secret");
   expect(row).toHaveTextContent("ingest, read, write");
   expect(within(row).getAllByText("Never")).toHaveLength(2);
@@ -61,7 +61,7 @@ it("creates a secret key and shows it once", async () => {
   await waitFor(() => expect(body).toEqual({ kind: "secret", name: "CI" }));
   const secret = await screen.findByRole("dialog", { name: "Secret key created" });
   expect(within(secret).getByLabelText("Secret")).toHaveValue(
-    "sk-llmobs-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0",
+    "sk-cetra-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0",
   );
   expect(within(secret).getByRole("tab", { name: "OTel env vars" })).toBeInTheDocument();
   await user.click(within(secret).getByRole("button", { name: "Done" }));
@@ -75,7 +75,7 @@ it("creates a secret key and shows it once", async () => {
           .getAll()
           .map((mutation) => mutation.state.data ?? null),
       ),
-    ).not.toContain("sk-llmobs-EXAMPLE0"),
+    ).not.toContain("sk-cetra-EXAMPLE0"),
   );
 });
 
@@ -117,9 +117,9 @@ it("creates a public key without snippets", async () => {
             ...apiKeyCreated.key,
             kind: "public",
             scopes: ["feedback"],
-            prefix: "pk-llmobs-EXAMPL",
+            prefix: "pk-cetra-EXAMPL",
           },
-          secret: "pk-llmobs-EXAMPLE0EXAMPLE0EXAMPLE0",
+          secret: "pk-cetra-EXAMPLE0EXAMPLE0EXAMPLE0",
         },
         { status: 201 },
       );
@@ -252,7 +252,7 @@ it("loads more keys", async () => {
               ...ci,
               id: "01900000-0000-7000-8000-000000000202",
               name: "Staging",
-              prefix: "sk-llmobs-STAGIN",
+              prefix: "sk-cetra-STAGIN",
             },
           ],
           next_cursor: null,

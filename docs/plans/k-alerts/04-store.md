@@ -132,7 +132,7 @@ The schema version grows from `P` to `N` (migration numbers are contiguous, so `
 - `admin.rs`, test `schema_mismatch_names_the_versions`: `VALUES (P+1, 'future', …)` → `VALUES (N+1, 'future', …)` and `"this binary expects schema P, found P+1"` → `"this binary expects schema N, found N+1"`.
 - Find every literal with `grep -rn "_sqlx_migrations\|'future'\|expects schema" crates/server/src`. With the four migrations on `main` today (P = 4, N = 5, file `0005_alerts.sql`) they are: `meta/mod.rs` `assert_eq!(count, 4)` → `5`, `VALUES (5, 'future', …)` → `6`, `assert_eq!(found, 5)` → `6`, `assert_eq!(expected, 4)` → `5`; `admin.rs` `VALUES (5, 'future', …)` → `6` and `"this binary expects schema 4, found 5"` → `"… schema 5, found 6"`. If more migrations landed first, shift them the same way.
 
-Regenerate the snapshot: `INSTA_UPDATE=always cargo test -p llmobs-server schema_matches_the_snapshot`. `git diff crates/server/tests/snapshots/meta_schema.snap` must show only added blocks for the five tables, their nine explicit indexes and five `sqlite_autoindex_*` primary-key indexes. Anything else: STOP and report.
+Regenerate the snapshot: `INSTA_UPDATE=always cargo test -p cetra-server schema_matches_the_snapshot`. `git diff crates/server/tests/snapshots/meta_schema.snap` must show only added blocks for the five tables, their nine explicit indexes and five `sqlite_autoindex_*` primary-key indexes. Anything else: STOP and report.
 
 ## 2. `crypto.rs`
 
@@ -323,7 +323,7 @@ pub(crate) struct RulePatch {
 }
 ```
 
-`ChannelRow` implements `fmt::Debug` by hand, printing `id`, `kind` and `name` only (`finish_non_exhaustive`), so sealed bytes never reach a log. `ProjectId` is `llmobs_core::ids::ProjectId`; `ChannelKind`, `AlertState`, `AlertCondition` are from `crate::api::alerts`.
+`ChannelRow` implements `fmt::Debug` by hand, printing `id`, `kind` and `name` only (`finish_non_exhaustive`), so sealed bytes never reach a log. `ProjectId` is `cetra_core::ids::ProjectId`; `ChannelKind`, `AlertState`, `AlertCondition` are from `crate::api::alerts`.
 
 ### Functions (exactly these signatures)
 
@@ -345,7 +345,7 @@ pub(crate) async fn delete_rule(conn: &mut SqliteConnection, project_id: Project
 pub(crate) async fn count_enabled_org_rules(pool: &SqlitePool, org_id: OrgId) -> Result<i64, MetaError>;
 ```
 
-`count_enabled_org_rules`: `SELECT COUNT(*) FROM alert_rules r JOIN projects p ON p.id = r.project_id WHERE p.org_id = ? AND p.state = 'active' AND r.enabled = 1` (`OrgId` is `llmobs_core::ids::OrgId`, bound as `.to_string()`). Disabled rules and rules of projects being deleted do not count, so an org at its limit can keep disabled rules (D-K-14).
+`count_enabled_org_rules`: `SELECT COUNT(*) FROM alert_rules r JOIN projects p ON p.id = r.project_id WHERE p.org_id = ? AND p.state = 'active' AND r.enabled = 1` (`OrgId` is `cetra_core::ids::OrgId`, bound as `.to_string()`). Disabled rules and rules of projects being deleted do not count, so an org at its limit can keep disabled rules (D-K-14).
 
 Behaviour:
 
@@ -379,7 +379,7 @@ WHERE c.project_id = ? AND d.status IN ('sent', 'failed')
   - Return the reloaded row.
 - **`delete_rule`**: `DELETE … WHERE project_id = ? AND id = ?`; events, deliveries and links go by cascade.
 
-Imports: `std::collections::HashMap`, `std::fmt`, `llmobs_core::ids::{OrgId, ProjectId}`, `sqlx::{SqliteConnection, SqlitePool}`, `uuid::Uuid`, `super::{MetaError, unique_or}`, `crate::api::alerts::{AlertCondition, AlertState, ChannelKind}`.
+Imports: `std::collections::HashMap`, `std::fmt`, `cetra_core::ids::{OrgId, ProjectId}`, `sqlx::{SqliteConnection, SqlitePool}`, `uuid::Uuid`, `super::{MetaError, unique_or}`, `crate::api::alerts::{AlertCondition, AlertState, ChannelKind}`.
 
 Records: private `#[derive(Debug, sqlx::FromRow)] struct ChannelRecord` and `struct RuleRecord` with one field per selected column, named as the column: `String` for ids, texts and `kind`/`state`/`config`; `Vec<u8>` for `config_enc`; `i64` for `INTEGER NOT NULL`; `Option<i64>` for nullable integers; `Option<f64>` for `last_value`; `Option<String>` for `last_error` and `created_by`. Read them with `sqlx::query_as::<_, ChannelRecord>("SELECT id, project_id, kind, name, config_enc, target_hint, created_at, updated_at FROM notification_channels WHERE …")` (and the rule columns in table order for `RuleRecord`). Ids are stored as `id.to_string()` (hyphenated lower case), the form `Aad` uses.
 
@@ -413,11 +413,11 @@ just fmt
 ```
 
 ```bash
-cargo test -p llmobs-server meta::alerts
+cargo test -p cetra-server meta::alerts
 ```
 
 ```bash
-cargo test -p llmobs-server alerts::channel
+cargo test -p cetra-server alerts::channel
 ```
 
 ```bash

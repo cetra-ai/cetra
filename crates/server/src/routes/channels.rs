@@ -3,7 +3,7 @@
 use axum::extract::{Extension, State};
 use axum::http::{Method, StatusCode};
 use axum::routing::{delete, get, patch, post};
-use llmobs_core::ids::{OrgId, ProjectId};
+use cetra_core::ids::{OrgId, ProjectId};
 use serde::Deserialize;
 use sqlx::SqliteConnection;
 use uuid::Uuid;

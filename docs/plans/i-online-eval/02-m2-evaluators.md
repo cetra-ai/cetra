@@ -21,7 +21,7 @@ Implementation plan for milestone M2 of track I. It has 10 sub-phases, I2.1 to I
 
 When M2 is done:
 - project members create, edit and delete **evaluators** (LLM judge, check, webhook) under `/api/v1/projects/{project}/evaluators`, from scratch or from a built-in template. A webhook's URL, headers and signing secret are sealed.
-- `POST …/evaluators/test` runs an evaluator once, saved or not, on a stored trace or on literal variables. It writes the judge trace (environment `llmobs-eval`) and the judge usage, and returns the outcome. It writes no score.
+- `POST …/evaluators/test` runs an evaluator once, saved or not, on a stored trace or on literal variables. It writes the judge trace (environment `cetra-eval`) and the judge usage, and returns the outcome. It writes no score.
 - project members manage **score definitions**. Every score write is checked against the live definition of its name.
 - judge-trace spans no longer count as billable spans in `usage_daily.spans` (D-I-31), and `usage_daily.judge_*` is written.
 - the web has an "Evaluators" project page with an editor and a test panel, and a "Score definitions" project settings page.
@@ -33,14 +33,14 @@ When M2 is done:
 | # | Summary |
 |---|---|
 | D-I-16 | Each run has its own judge trace id. Failures before the evaluator runs write no judge trace. |
-| D-I-17 | The executor refuses a target trace that has a span in `llmobs-eval`. |
-| D-I-19 | `evaluators.connection_id` is derived from a judge's config. A webhook's `{signing_secret, url, headers}` is sealed in `secret_enc`; `config` keeps `{url_host, timeout_ms, header_names}`. `kind` is immutable. `version` increases on every change to config, output or sealed values. `WebhookConfig.secret_enc` is removed from `llmobs-eval`. |
+| D-I-17 | The executor refuses a target trace that has a span in `cetra-eval`. |
+| D-I-19 | `evaluators.connection_id` is derived from a judge's config. A webhook's `{signing_secret, url, headers}` is sealed in `secret_enc`; `config` keeps `{url_host, timeout_ms, header_names}`. `kind` is immutable. `version` increases on every change to config, output or sealed values. `WebhookConfig.secret_enc` is removed from `cetra-eval`. |
 | D-I-20 | `GET /evaluator-templates` lists E's built-in templates; the UI pre-fills the editor; there is no server-side create-from-template. |
 | D-I-21 | `POST /evaluators/test`: synchronous, no score, commits the judge trace, counts usage, answers outcome, variables (cut to 2 000 characters), prompt, usage and judge trace id. 10 per minute per user, shared with connection tests. |
 | D-I-23 | Trace loading: every column, roots and target always, then the earliest others, at most 5 000 spans and 64 MiB of payload, `truncated`; 30 s; at most 4 loads at once. |
 | D-I-24 | `ProjectPerm::ManageEvaluation` (role `member`, no API key) for writes; `View` for reads. |
 | D-I-26 | Score definitions: CRUD, `DELETE` archives, name unique among live definitions, writes checked against the live definition of their name, cached 10 s. An evaluator's output must fit a live definition of its name. |
-| D-I-31 | `Ingest::commit` counts only spans outside `llmobs-eval`. `Usage::add_judge` writes `usage_daily.judge_*`. |
+| D-I-31 | `Ingest::commit` counts only spans outside `cetra-eval`. `Usage::add_judge` writes `usage_daily.judge_*`. |
 
 ## Versions
 
@@ -82,7 +82,7 @@ crates/eval/src/config.rs             WebhookConfig without secret_enc (I2.1)
 crates/eval/tests/{runner,webhook}.rs  the `secret_enc: None` lines removed (I2.1)
 crates/eval/src/mapping/resolve.rs    pub Variables::iter (I2.1)
 crates/server/src/
-  ingest/mod.rs                       commit skips llmobs-eval spans in usage; Ingest::context (I2.1)
+  ingest/mod.rs                       commit skips cetra-eval spans in usage; Ingest::context (I2.1)
   usage.rs                            Usage::add_judge, judge columns in the flush (I2.1)
   auth/roles.rs                       ProjectPerm::ManageEvaluation (I2.2)
   crypto.rs                           ENCRYPTED_COLUMNS + ("evaluators", "secret_enc") (I2.2)
@@ -96,7 +96,7 @@ crates/server/src/
   scores.rs                           definition checks (I2.5)
   eval/definitions.rs                 DefinitionCache (I2.5)
   routes/score_definitions.rs         CRUD (I2.5)
-  eval/evaluator.rs                   stored ↔ llmobs_eval::Evaluator, validation, sealing (I2.6)
+  eval/evaluator.rs                   stored ↔ cetra_eval::Evaluator, validation, sealing (I2.6)
   routes/evaluators.rs                CRUD and templates (I2.6), test (I2.7)
   routes/connections.rs               DELETE 409 when evaluators use the connection (I2.6)
   eval/test_run.rs                    one synchronous run (I2.7)
@@ -123,11 +123,11 @@ crates/server/src/test_support/mock_webhook.rs   in-process webhook receiver for
 
 ### Evaluator contract
 
-JSON field names are exact. Times are RFC 3339 (`llmobs_core::time_serde`, and `crate::api::keys::optional_time` for optional times). Every `Option` field of every type has `#[serde(default, skip_serializing_if = "Option::is_none")]`. Requests are `#[serde(deny_unknown_fields)]`.
+JSON field names are exact. Times are RFC 3339 (`cetra_core::time_serde`, and `crate::api::keys::optional_time` for optional times). Every `Option` field of every type has `#[serde(default, skip_serializing_if = "Option::is_none")]`. Requests are `#[serde(deny_unknown_fields)]`.
 
 **`EvaluatorKind`**: `"llm_judge"` | `"check"` | `"webhook"` (`#[serde(rename_all = "snake_case")]`, `Copy`, with `as_str` and `from_name -> Option<Self>` like M1's enums).
 
-**`OutputScoreBody`**: `{name: string, data_type: ScoreDataType, categories?: string[]}`. It is the JSON of `llmobs_eval::OutputScore`; `ScoreDataType` is `llmobs_core::enums::ScoreDataType` (already a schema).
+**`OutputScoreBody`**: `{name: string, data_type: ScoreDataType, categories?: string[]}`. It is the JSON of `cetra_eval::OutputScore`; `ScoreDataType` is `cetra_core::enums::ScoreDataType` (already a schema).
 
 **`Evaluator`** (response), fields in this order:
 
@@ -258,7 +258,7 @@ Judge usage is added to `usage_daily` before the judge trace is committed. When 
 | Cause | Status | Code |
 |---|---|---|
 | body invalid | 400 | `bad_request` with `errors[]` |
-| the target trace has a span in `llmobs-eval` | 400 | `bad_request`, detail `target is an evaluation trace` |
+| the target trace has a span in `cetra-eval` | 400 | `bad_request`, detail `target is an evaluation trace` |
 | trace not found | 404 | `not_found` |
 | storage busy or timed out while loading | 503 | `busy` |
 | the judge trace could not be committed (storage busy, disk full) | 503 | `busy` |
@@ -310,7 +310,7 @@ Checks and webhooks only need equal types.
 
 ## I2.1 — Eval crate edits, billable spans and judge usage
 
-**Goal:** `llmobs-eval` has no `secret_enc` field and exposes `Variables::iter`. `commit` no longer counts judge spans as billable. `Usage::add_judge` exists, and the flush writes the judge columns. `Ingest::context` builds an `IngestContext`.
+**Goal:** `cetra-eval` has no `secret_enc` field and exposes `Variables::iter`. `commit` no longer counts judge spans as billable. `Usage::add_judge` exists, and the flush writes the judge columns. `Ingest::context` builds an `IngestContext`.
 
 **Edit only:** `crates/eval/src/config.rs`, `crates/eval/src/mapping/resolve.rs`, `crates/eval/src/lib.rs` (only if a re-export needs adjusting), `crates/eval/tests/runner.rs` and `crates/eval/tests/webhook.rs` (only the `secret_enc: None` lines), `crates/server/src/ingest/mod.rs`, `crates/server/src/usage.rs`, `docs/spec/04-metadata-db.md`, `docs/spec/06-evaluation.md`.
 
@@ -324,7 +324,7 @@ Checks and webhooks only need equal types.
 
 ### `Ingest::commit` and `Ingest::context` (`ingest/mod.rs`)
 
-- In `commit`, `usage.add(…)` counts billable spans: compute `let billable = spans.iter().filter(|span| span.environment.as_deref() != Some(EVAL_ENVIRONMENT)).count();` **before** `spans` is moved into the batch task, and pass it instead of `accepted`. `CommitReceipt.accepted` stays the number of appended spans. The reserved name is `llmobs_core::names::environment::EVAL` (the constant `ingest/environment.rs` uses). `ingest/mod.rs` declares a child `mod environment;`, so importing `llmobs_core::names::environment` there collides (E0255), and `environment::EVAL` would resolve to the child module. Import the constant under another name: `use llmobs_core::names::environment::EVAL as EVAL_ENVIRONMENT;`, and compare with `Some(EVAL_ENVIRONMENT)`; never with a string literal. Update the doc comment of `commit`: "…then counts the billable spans (every span outside the reserved evaluation environment, D-I-31) and the request bytes (D-G-30)."
+- In `commit`, `usage.add(…)` counts billable spans: compute `let billable = spans.iter().filter(|span| span.environment.as_deref() != Some(EVAL_ENVIRONMENT)).count();` **before** `spans` is moved into the batch task, and pass it instead of `accepted`. `CommitReceipt.accepted` stays the number of appended spans. The reserved name is `cetra_core::names::environment::EVAL` (the constant `ingest/environment.rs` uses). `ingest/mod.rs` declares a child `mod environment;`, so importing `cetra_core::names::environment` there collides (E0255), and `environment::EVAL` would resolve to the child module. Import the constant under another name: `use cetra_core::names::environment::EVAL as EVAL_ENVIRONMENT;`, and compare with `Some(EVAL_ENVIRONMENT)`; never with a string literal. Update the doc comment of `commit`: "…then counts the billable spans (every span outside the reserved evaluation environment, D-I-31) and the request bytes (D-G-30)."
 - Add:
 
 ```rust
@@ -364,12 +364,12 @@ Checks and webhooks only need equal types.
 
 ### Spec
 
-- `docs/spec/04-metadata-db.md` § Metering & instance: after the `usage_daily` DDL, add: "`spans` counts billable spans: spans in the reserved `llmobs-eval` environment (judge traces) are stored but not counted (D-I-31). Judge calls add their tokens and cost to `judge_input_tokens`, `judge_output_tokens` and `judge_cost_usd`."
+- `docs/spec/04-metadata-db.md` § Metering & instance: after the `usage_daily` DDL, add: "`spans` counts billable spans: spans in the reserved `cetra-eval` environment (judge traces) are stored but not counted (D-I-31). Judge calls add their tokens and cost to `judge_input_tokens`, `judge_output_tokens` and `judge_cost_usd`."
 - `docs/spec/06-evaluation.md` § Evaluators › Judge traces: in the sentence "`eval_jobs.cost_usd` and `usage_daily.judge_*` are updated too", append "; judge-trace spans are not billable units (D-I-31, D178)".
 
 ### Tests
 
-- `ingest/mod.rs` tests: `judge_spans_are_not_billable`. Commit a `Normalized` with three spans, two with `environment = Some(EVAL_ENVIRONMENT.to_owned())` (the test module imports the constant the same way, `use llmobs_core::names::environment::EVAL as EVAL_ENVIRONMENT;`) and one with `Some("production")`, through `Ingest::commit` (copy how the existing commit tests build `Normalized` and call `commit`). The receipt's `accepted == 3`; after `usage.flush`, `usage_daily.spans == 1`.
+- `ingest/mod.rs` tests: `judge_spans_are_not_billable`. Commit a `Normalized` with three spans, two with `environment = Some(EVAL_ENVIRONMENT.to_owned())` (the test module imports the constant the same way, `use cetra_core::names::environment::EVAL as EVAL_ENVIRONMENT;`) and one with `Some("production")`, through `Ingest::commit` (copy how the existing commit tests build `Normalized` and call `commit`). The receipt's `accepted == 3`; after `usage.flush`, `usage_daily.spans == 1`.
 - `usage.rs` tests:
   - `judge_usage_is_summed_and_flushed`: two `add_judge` calls on one day → after `flush`, the row has the summed tokens and the cost within `1e-12`;
   - `zero_judge_usage_adds_nothing`: no row;
@@ -436,7 +436,7 @@ CREATE UNIQUE INDEX score_definitions_live ON score_definitions(project_id, name
 - `open_existing_checks_the_file_and_the_version` inserts version `6`, and expects `found == 6`, `expected == 5`;
 - `admin.rs` `schema_mismatch_names_the_versions` inserts `6` and expects `"this binary expects schema 5, found 6"`.
 
-Regenerate the snapshot with `INSTA_UPDATE=always cargo test -p llmobs-server schema_matches_the_snapshot`. Its diff must add only the two tables, the two named indexes, and SQLite's automatic indexes for the primary keys and the `UNIQUE(project_id, name)`. Count them in the diff, and list them in the report.
+Regenerate the snapshot with `INSTA_UPDATE=always cargo test -p cetra-server schema_matches_the_snapshot`. Its diff must add only the two tables, the two named indexes, and SQLite's automatic indexes for the primary keys and the `UNIQUE(project_id, name)`. Count them in the diff, and list them in the report.
 
 ### `meta/evaluators.rs`
 
@@ -588,7 +588,7 @@ Register the module.
 
 ## I2.3 — Loading a trace for an evaluator
 
-**Goal:** storage can read every column of one trace's spans with D-I-23's caps, and the server turns them into `llmobs_core::Span`s.
+**Goal:** storage can read every column of one trace's spans with D-I-23's caps, and the server turns them into `cetra_core::Span`s.
 
 **Edit only:** `crates/storage/src/reads/traces.rs`, `crates/storage/src/reads/mod.rs`, `crates/storage/src/lib.rs` (re-exports), `crates/server/src/api/convert.rs`, `crates/server/src/eval/mod.rs`, `crates/server/src/eval/trace_load.rs` (new), `crates/server/src/http/mod.rs` (one field), `crates/server/src/serve.rs` and `crates/server/src/test_support/mod.rs` (that field's construction).
 
@@ -665,7 +665,7 @@ pub(crate) fn spans(batches: &[RecordBatch], project_id: ProjectId) -> Result<Ve
 
 Its body: for each batch with rows, `let columns = span_columns(batch)?;` then `columns.row(i, project_id)` for `i in 0..batch.num_rows()`.
 
-Test (in `trace_load.rs`, because it needs the real spans view): store three spans of one trace with `app.commit_spans(&seeded.project, spans)`, open a context with `crate::routes::read::open_query(&app.state, project_id, None).await`, read them with `llmobs_storage::trace_spans`, and check `convert::spans` returns the three spans with `name`, `start_time`, `input` and `metadata` equal to the stored ones. The existing `span` tests keep passing unchanged.
+Test (in `trace_load.rs`, because it needs the real spans view): store three spans of one trace with `app.commit_spans(&seeded.project, spans)`, open a context with `crate::routes::read::open_query(&app.state, project_id, None).await`, read them with `cetra_storage::trace_spans`, and check `convert::spans` returns the three spans with `name`, `start_time`, `input` and `metadata` equal to the stored ones. The existing `span` tests keep passing unchanged.
 
 ### `eval/trace_load.rs`
 
@@ -727,13 +727,13 @@ pub(crate) async fn load_trace(
 
 Steps:
 1. Acquire one permit of `state.trace_loads` with `tokio::time::timeout(READ_TIMEOUT, semaphore.acquire())`. A timeout → `LoadError::Busy`; a closed semaphore cannot happen, so map its error to `Busy` too.
-2. Open the query directly, not through `routes::read::open_query`, whose `ApiError` cannot be matched. `state.storage.query(project, llmobs_storage::QueryOptions { around }).await` returns `Result<ProjectQuery, llmobs_storage::error::QueryError>` (the error type lives in the `error` module, not at the crate root; `QueryOptions` and `RunError` are at the root): `QueryError::Busy` → `LoadError::Busy`, and `QueryError::DataFusion(e)` → `LoadError::Failed(RunError::Internal(e))`. Read `QueryError`'s variants in `crates/storage/src/error.rs` and map any other variant to `Failed` with its nearest `RunError`. Then `QueryContext::new(source, None)` returns `Result<QueryContext, RunError>`; an error → `LoadError::Failed`.
+2. Open the query directly, not through `routes::read::open_query`, whose `ApiError` cannot be matched. `state.storage.query(project, cetra_storage::QueryOptions { around }).await` returns `Result<ProjectQuery, cetra_storage::error::QueryError>` (the error type lives in the `error` module, not at the crate root; `QueryOptions` and `RunError` are at the root): `QueryError::Busy` → `LoadError::Busy`, and `QueryError::DataFusion(e)` → `LoadError::Failed(RunError::Internal(e))`. Read `QueryError`'s variants in `crates/storage/src/error.rs` and map any other variant to `Failed` with its nearest `RunError`. Then `QueryContext::new(source, None)` returns `Result<QueryContext, RunError>`; an error → `LoadError::Failed`.
 3. `trace_spans` with `max_spans: MAX_SPANS`, `max_required: MAX_REQUIRED` and `timeout: READ_TIMEOUT` (`crate::routes::read::READ_TIMEOUT`). `RunError::Timeout` → `Busy`; `RunError::TooLarge` (the query memory pool was exceeded) → `TooLarge`; other errors → `Failed`. More than `MAX_REQUIRED` required rows → `TooLarge`.
 4. Convert both parts with `convert::spans`.
 5. Both parts empty → `NotFound`.
 6. Deduplicate by `span_id`, keeping the row with the greatest `ingest_time` (a retried export can store a span twice).
 7. When `target_span` is set and no span has it → `NoTargetSpan`.
-8. Any span with `environment.as_deref() == Some(llmobs_core::names::environment::EVAL)` → `EvaluationTrace`.
+8. Any span with `environment.as_deref() == Some(cetra_core::names::environment::EVAL)` → `EvaluationTrace`.
 9. Order and cap with `fn cap(spans: Vec<Span>, target: Option<SpanId>, max_bytes: usize) -> Result<(Vec<Span>, bool), LoadError>` (the `bool` is "something was skipped"):
    - required spans (parentless or the target) first, then the others, each group by `(start_time, span_id)`;
    - payload bytes of a span = the lengths of `input`, `output`, `input_preview`, `output_preview`, `system_instructions`, `tool_definitions` and `request_params`, plus every key and value length in `attributes`, `metadata` and `resource_attributes`, plus the length of `serde_json::to_string(&span.events)` and of `serde_json::to_string(&span.links)` (both derive `Serialize`; a serialization error counts as 0);
@@ -818,7 +818,7 @@ Every field has a doc comment. Register both modules in `api/mod.rs`.
 Descriptions:
 - reads: "Any project member can read.";
 - writes and the test: "Project members and above. API keys cannot call it.";
-- `post_evaluator_test`, in addition: "Runs synchronously, writes the judge trace (environment `llmobs-eval`) and the judge usage, and writes no score. Shares the 10 per minute per user limit with connection tests.";
+- `post_evaluator_test`, in addition: "Runs synchronously, writes the judge trace (environment `cetra-eval`) and the judge usage, and writes no score. Shares the 10 per minute per user limit with connection tests.";
 - `delete_score_definition`: "Archives the definition; score writes stop being checked against it."
 
 Run `just openapi`.
@@ -860,7 +860,7 @@ Write each file in its struct's field order, with two-space indentation and a fi
   - `has_signing_secret` false, `version` 1, `created_by` `…0100`, times `2026-01-01T09:00:00.000000000Z`;
   - `next_cursor: null`.
 - `static/evaluator.json`: that evaluator.
-- `static/evaluator-templates.json`: the `{data: […]}` of `builtin_templates()`. Write the mapping once now, in `api/evaluators.rs`: `impl From<&llmobs_eval::JudgeTemplate> for EvaluatorTemplate` (`output` through `serde_json::to_value`, which cannot fail for `JudgeOutput`; map an error to `Value::Null`), and `pub fn builtin_template_list() -> EvaluatorTemplateList`. I2.6's handler calls that function. Generate the fixture by printing `serde_json::to_string_pretty(&builtin_template_list())` from a throwaway test, which you do not commit.
+- `static/evaluator-templates.json`: the `{data: […]}` of `builtin_templates()`. Write the mapping once now, in `api/evaluators.rs`: `impl From<&cetra_eval::JudgeTemplate> for EvaluatorTemplate` (`output` through `serde_json::to_value`, which cannot fail for `JudgeOutput`; map an error to `Value::Null`), and `pub fn builtin_template_list() -> EvaluatorTemplateList`. I2.6's handler calls that function. Generate the fixture by printing `serde_json::to_string_pretty(&builtin_template_list())` from a throwaway test, which you do not commit.
 - `static/evaluator-test-result.json`:
   - `{"ok": true, "value": {"data_type": "numeric", "value": 0.9}, "reason": "The answer addresses the question.", "prompt": "Rate how relevant …", "variables": {"input": "What is the refund window?", "output": "30 days."}, "usage": {"input_tokens": 120, "output_tokens": 18, "cost_usd": 0.00004}, "latency_ms": 840, "trace_truncated": false, "judge_trace_id": "e1000000000000000000000000000001"}`;
   - `value` is `ScoreValue`'s JSON (`{"data_type": …, "value": …}`), as in `requests/score-batch.json`.
@@ -937,7 +937,7 @@ At most 1 024 projects are cached; when full, clear the map first. Do not hold t
 
 - At the start of `write`, after reading `now`, load `let definitions = state.definitions.live(&state.meta, project.id, now).await?;` (a `MetaError` becomes `ApiError` through the existing `From`).
 - Pass `&definitions` into `check_item`, which appends the field errors of § Score definition checks when a live definition with `item.name` exists.
-- Add `pub(crate) fn fits_definition(output: &llmobs_eval::OutputScore, judge_output: Option<&llmobs_eval::JudgeOutput>, definition: &DefinitionRow) -> bool` (the evaluator rule of § Score definition checks) in `eval/definitions.rs`. I2.6 uses it, so give it an item-level `#[allow(dead_code)] // evaluator saves use it from I2.6 on`, and test it here.
+- Add `pub(crate) fn fits_definition(output: &cetra_eval::OutputScore, judge_output: Option<&cetra_eval::JudgeOutput>, definition: &DefinitionRow) -> bool` (the evaluator rule of § Score definition checks) in `eval/definitions.rs`. I2.6 uses it, so give it an item-level `#[allow(dead_code)] // evaluator saves use it from I2.6 on`, and test it here.
 
 ### Routes (`routes/score_definitions.rs`)
 
@@ -1044,7 +1044,7 @@ pub(crate) struct WebhookSecrets {
 
 /// A validated evaluator ready to store. No `Debug`: it holds the webhook secrets.
 pub(crate) struct Prepared {
-    pub(crate) evaluator: llmobs_eval::Evaluator,    // the parsed, validated value
+    pub(crate) evaluator: cetra_eval::Evaluator,    // the parsed, validated value
     pub(crate) config_json: String,                  // what `evaluators.config` stores (§ Storage of an evaluator)
     pub(crate) output_json: String,
     pub(crate) connection_id: Option<Uuid>,
@@ -1055,7 +1055,7 @@ pub(crate) struct Prepared {
 pub(crate) fn prepare(id: Uuid, name: &str, kind: EvaluatorKind, config: &serde_json::Value, output: &serde_json::Value, webhook_secret: Option<&str>, prefix: &str) -> Result<Prepared, Vec<FieldError>>;
 
 /// The runnable evaluator of a stored row: the config parsed back, plus the opened webhook values.
-pub(crate) fn load(secrets: &SecretBox, row: &EvaluatorRow) -> Result<(llmobs_eval::Evaluator, Option<WebhookSecrets>), EvaluatorError>;
+pub(crate) fn load(secrets: &SecretBox, row: &EvaluatorRow) -> Result<(cetra_eval::Evaluator, Option<WebhookSecrets>), EvaluatorError>;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum EvaluatorError {
@@ -1215,13 +1215,13 @@ Steps:
 4. **Variables:**
    - variables mode: `Variables::from_map(body.variables)`;
    - trace mode: `eval::trace_load::load_trace(state, project.id, trace_id, span_id, trace_start)`. Map `NotFound` and `NoTargetSpan` to 404, `EvaluationTrace` to the 400 of the error table, `Busy` to `ApiError::Unavailable { detail: "storage is busy" }`, and `TooLarge` to an `ok: false` answer with `class: permanent, message: "trace too large"`. `Failed` and `Convert` become `ApiError::Internal`.
-   - Then `llmobs_eval::resolve(&mapping, Some(&TraceData::new(&loaded.spans, span_id)), None)`. A `MappingError` becomes an `ok: false` answer with class `permanent` and the error's display, with no judge trace.
+   - Then `cetra_eval::resolve(&mapping, Some(&TraceData::new(&loaded.spans, span_id)), None)`. A `MappingError` becomes an `ok: false` answer with class `permanent` and the error's display, with no judge trace.
 5. **Rendered variables for the answer:** `variables.iter()`; a `Value::String` as itself, anything else `serde_json::to_string`; cut to 2 000 `char`s, plus `…`.
 6. **Prompt** (judges only): `PromptTemplate::compile(&config.prompt).and_then(|template| template.render(&variables))`. `Ok` → `prompt: Some`; an error leaves it out (the runner reports it).
 7. **Run:**
    - `judge_trace_id` = 16 bytes from `crate::auth::secret::random_bytes`, then `TraceId::from_bytes`, as M1's connection test does;
    - `let ingest = state.ingest.context(project, now)`, `let prices = state.ingest.prices()`;
-   - `state.eval_runner.run(RunInput { evaluator: &evaluator, variables: &variables, connection: connection.as_deref(), webhook_secret: <the signing secret as llmobs_eval::Secret>, target: EvalTarget { trace_id, span_id }, origin: EvalOrigin::Test, judge_trace_id, ingest: &ingest, prices: &prices })`;
+   - `state.eval_runner.run(RunInput { evaluator: &evaluator, variables: &variables, connection: connection.as_deref(), webhook_secret: <the signing secret as cetra_eval::Secret>, target: EvalTarget { trace_id, span_id }, origin: EvalOrigin::Test, judge_trace_id, ingest: &ingest, prices: &prices })`;
    - wrap the future in `Box::pin` if clippy reports `large_futures`;
    - measure `latency_ms` around it.
    - **Check evaluators:** run the whole call off the async workers (D-I-23: checks are CPU work). Capture `let handle = tokio::runtime::Handle::current();` and call `tokio::task::spawn_blocking(move || handle.block_on(async move { runner.run(RunInput { … }).await }))`. `spawn_blocking` needs `'static` owned data, so move in `Arc::clone(&state.eval_runner)` as `runner`, plus clones of the `Evaluator`, the `Variables`, the `IngestContext`, the `Arc<PriceTable>` and the ids, and build `RunInput` from them inside. A `JoinError` is `ApiError::Internal`. Judges and webhooks run directly on the async task.
@@ -1232,7 +1232,7 @@ Steps:
 9. **Commit the judge trace:**
    - `crate::ingest::commit_in_task(state, CommitTarget { org_id: project.org_id, project_id: project.id, request_bytes: 0, now_ns: now }, run.judge_trace, state.ingest.reserve_exact(0)?)`;
    - an `IngestError` becomes `ApiError` through the existing `From` (busy → 503);
-   - its spans are in `llmobs-eval`, so they add no billable span (I2.1).
+   - its spans are in `cetra-eval`, so they add no billable span (I2.1).
 10. **Answer** from `run.outcome`:
     - `Ok(outcome)` → `ok: true`, `value: Some(outcome.value)`, `reason: outcome.reason`;
     - `Err(error)` → `ok: false`, `error: Some({ class, message: error.to_string() })`.
@@ -1272,20 +1272,20 @@ Store a trace with `app.commit_spans(&seeded.project, vec![span])`, where `span`
 - `judge_test_on_a_trace`:
   - the mock answers `completion(r#"{"explanation": "Relevant.", "value": 0.9}"#)`;
   - the answer has `ok: true`, `value: {"data_type": "numeric", "value": 0.9}`, `reason: "Relevant."`, `variables.input` equal to the question, a `prompt` containing the question, `usage.input_tokens == 10`, `judge_trace_id` present;
-  - the judge trace is readable through `GET /traces/{judge_trace_id}`, and its spans have environment `llmobs-eval`;
+  - the judge trace is readable through `GET /traces/{judge_trace_id}`, and its spans have environment `cetra-eval`;
   - after `usage.flush`, `SELECT SUM(judge_input_tokens), SUM(spans) FROM usage_daily WHERE project_id = ?` gives `10` and `1` (sums, so a run across midnight UTC still passes) (the one target span stored with `commit_spans` counts; the judge trace's spans do not).
 - `test_with_literal_variables`.
 - `unsaved_evaluator_runs_without_saving`: no row in `evaluators` afterwards.
 - `check_test_runs_without_a_provider`: an `exact_match` check, variables `{output: "a", expected: "a"}` → `ok: true`, `value: {"data_type": "boolean", "value": true}`, no `usage`.
 - `mapping_error_has_no_judge_trace`: mapping `{input: "span.input"}` on a trace test without `span_id` → `ok: false`, class `permanent`, no `judge_trace_id`.
-- `evaluation_trace_is_refused`: a trace whose root is in `llmobs-eval` → 400.
+- `evaluation_trace_is_refused`: a trace whose root is in `cetra-eval` → 400.
 - `unknown_trace_is_404`.
 - `provider_failure_is_reported`: the mock answers 500 → `ok: false`, class `retryable`.
 - `long_variables_are_cut`: a 3 000-character output → the answered variable is 2 000 `char`s plus `…`.
 - `test_runs_are_rate_limited`: the 11th within a minute → 429.
 - `viewer_cannot_test` → 403.
 - `no_payload_in_logs`: with `capture_logs` (plain `#[tokio::test]`), the logs contain "evaluator tested" and neither the question nor the answer.
-- `webhook_test_signs_with_the_saved_secret`: `MockWebhook::start(200, json!({"value": 0.5}))`; save a numeric webhook evaluator with that URL and the secret `0123456789abcdef`; test it with `{evaluator_id, variables: {output: "x"}}` → `ok: true`, `value` 0.5; the mock saw one request whose `x-llmobs-signature` header starts with `t=` and contains `v1=`.
+- `webhook_test_signs_with_the_saved_secret`: `MockWebhook::start(200, json!({"value": 0.5}))`; save a numeric webhook evaluator with that URL and the secret `0123456789abcdef`; test it with `{evaluator_id, variables: {output: "x"}}` → `ok: true`, `value` 0.5; the mock saw one request whose `x-cetra-signature` header starts with `t=` and contains `v1=`.
 - `both_given_takes_the_saved_webhook_values`: the same saved webhook; test with `{evaluator_id, evaluator: {kind: "webhook", output_score: {name: "other", data_type: "numeric"}}, variables: {…}}` (no `config`, no `webhook_secret`) → the mock is called (the saved URL and secret were used), and the answer is `ok: true`.
 - `both_given_with_another_kind_is_400`: `evaluator.kind` `check` with a saved webhook id → 400 `evaluator.kind`.
 - `span_target_resolves_span_variables`: a trace with a root and a child; `span_id` the child, mapping `{output: "span.output"}`, an `exact_match` check → `variables.output` is the child's output.

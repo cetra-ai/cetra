@@ -8,8 +8,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use arrow::array::RecordBatch;
-use llmobs_core::ids::ProjectId;
-use llmobs_core::schema::{scores, spans, traces};
+use cetra_core::ids::ProjectId;
+use cetra_core::schema::{scores, spans, traces};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteRow};
