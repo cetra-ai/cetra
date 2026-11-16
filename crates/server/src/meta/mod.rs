@@ -4,6 +4,9 @@
 //! read-only connections serves reads. Migrations run only in [`MetaDb::open`]
 //! (`llmobs serve`). [`MetaDb::open_existing`] refuses a file whose latest
 //! migration is not this binary's.
+//!
+//! A migration that has been in a release is never edited; a change is a new migration, and a
+//! migration that does more than add is a format change (spec 04 § Format versions, D-R-34).
 #![cfg_attr(not(test), allow(dead_code))] // `llmobs serve` opens this from P5 on
 
 pub(crate) mod alerts;
@@ -34,6 +37,9 @@ pub(crate) mod score_definitions;
 pub(crate) mod usage;
 pub(crate) mod users;
 pub(crate) mod web_sessions;
+
+#[cfg(test)]
+mod migration_tests;
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
