@@ -21,10 +21,10 @@ use llmobs_core::schema::{scores, spans};
 use super::harness::Harness;
 use super::model::{ExpectedScore, ExpectedTrace, Model, ProjectModel};
 use super::observe::{
-    ALL_ROWS, LatestScore, ReadFailure, SessionRow, observe_alert, observe_filter_trace_ids,
-    observe_kpis, observe_latest, observe_scores, observe_scores_by_id, observe_sessions,
-    observe_span_detail, observe_spans, observe_trace_detail, observe_traces, observe_users,
-    window_of,
+    ALL_ROWS, LatestScore, ReadFailure, SessionRow, context, observe_alert,
+    observe_filter_trace_ids, observe_kpis, observe_latest, observe_scores, observe_scores_by_id,
+    observe_sessions, observe_span_detail, observe_spans, observe_trace_detail, observe_traces,
+    observe_users, window_of,
 };
 use super::ops::{SPANS, TRACES, score_key_space};
 use super::shape::{DAY_NS, P, ScoreKey, day, hex, midnight, score_id, span_id, trace_id};
@@ -138,36 +138,44 @@ pub(super) enum Observed {
 /// Runs `read` on one snapshot of `storage`, reading every page of it from that snapshot.
 pub(super) async fn observe(storage: &Storage, read: &Read) -> Result<Observed, ReadFailure> {
     Ok(match read {
-        Read::Spans(project) => Observed::Spans(observe_spans(storage, *project, MAX_PAGE).await?),
-        Read::Traces(project) => {
-            Observed::Traces(observe_traces(storage, *project, ALL_ROWS, MAX_PAGE).await?)
+        Read::Spans(project) => {
+            let ctx = context(storage, *project).await?;
+            Observed::Spans(observe_spans(&ctx, MAX_PAGE).await?)
         }
-        Read::Windowed(project) => Observed::Traces(
-            observe_traces(
-                storage,
-                *project,
-                ListScope {
-                    window: Some(window_of(days(1, 2))),
-                    include_eval: true,
-                    include_experiments: true,
-                },
-                MAX_PAGE,
+        Read::Traces(project) => {
+            let ctx = context(storage, *project).await?;
+            Observed::Traces(observe_traces(&ctx, ALL_ROWS, MAX_PAGE).await?)
+        }
+        Read::Windowed(project) => {
+            let ctx = context(storage, *project).await?;
+            Observed::Traces(
+                observe_traces(
+                    &ctx,
+                    ListScope {
+                        window: Some(window_of(days(1, 2))),
+                        include_eval: true,
+                        include_experiments: true,
+                    },
+                    MAX_PAGE,
+                )
+                .await?,
             )
-            .await?,
-        ),
-        Read::NoEval(project) => Observed::Traces(
-            observe_traces(
-                storage,
-                *project,
-                ListScope {
-                    window: None,
-                    include_eval: false,
-                    include_experiments: true,
-                },
-                MAX_PAGE,
+        }
+        Read::NoEval(project) => {
+            let ctx = context(storage, *project).await?;
+            Observed::Traces(
+                observe_traces(
+                    &ctx,
+                    ListScope {
+                        window: None,
+                        include_eval: false,
+                        include_experiments: true,
+                    },
+                    MAX_PAGE,
+                )
+                .await?,
             )
-            .await?,
-        ),
+        }
         Read::TraceDetail(project, trace) => Observed::TraceDetail(
             observe_trace_detail(storage, *project, *trace)
                 .await?
@@ -177,7 +185,8 @@ pub(super) async fn observe(storage: &Storage, read: &Read) -> Result<Observed, 
             Observed::SpanDetail(observe_span_detail(storage, *project, *trace, *span_no).await?)
         }
         Read::Scores(project) => {
-            Observed::Scores(observe_scores(storage, *project, MAX_PAGE).await?)
+            let ctx = context(storage, *project).await?;
+            Observed::Scores(observe_scores(&ctx, MAX_PAGE).await?)
         }
         Read::ScoresById(project, ids) => {
             Observed::Scores(observe_scores_by_id(storage, *project, ids).await?)
@@ -399,15 +408,19 @@ pub(super) fn check_dropped(h: &Harness, model: &Model, index: usize) {
     }
 }
 
-/// Reads in small pages return exactly the rows of one page, in the same order. Each page
-/// series is one read on one snapshot; the two series are two reads.
+/// Reads in small pages return exactly the rows of one page, in the same order. All six reads
+/// (spans, traces and scores, each in pages and in one page) run on one snapshot, so a background
+/// compaction between them cannot change what they see and the equality is exact.
 fn check_paging(h: &Harness, project: P, index: usize) {
     let storage = h.storage();
+    let ctx = h
+        .block_on(context(storage, project))
+        .expect("query context for the paging check");
     let paged = h
-        .block_on(observe_spans(storage, project, 7))
+        .block_on(observe_spans(&ctx, 7))
         .expect("span_list in pages of 7");
     let single = h
-        .block_on(observe_spans(storage, project, MAX_PAGE))
+        .block_on(observe_spans(&ctx, MAX_PAGE))
         .expect("span_list in one page");
     assert_eq!(
         paged, single,
@@ -421,10 +434,10 @@ fn check_paging(h: &Harness, project: P, index: usize) {
         "op {index}, project {project:?}: span rows are not in (start_time, span_id, trace_id) order"
     );
     let traces_paged = h
-        .block_on(observe_traces(storage, project, ALL_ROWS, 2))
+        .block_on(observe_traces(&ctx, ALL_ROWS, 2))
         .expect("trace_list in pages of 2");
     let traces_single = h
-        .block_on(observe_traces(storage, project, ALL_ROWS, MAX_PAGE))
+        .block_on(observe_traces(&ctx, ALL_ROWS, MAX_PAGE))
         .expect("trace_list in one page");
     assert_eq!(
         traces_paged, traces_single,
@@ -432,10 +445,10 @@ fn check_paging(h: &Harness, project: P, index: usize) {
     );
     // Session scores share one `created_at`, so pages of 2 cut through ties.
     let scores_paged = h
-        .block_on(observe_scores(storage, project, 2))
+        .block_on(observe_scores(&ctx, 2))
         .expect("score_list in pages of 2");
     let scores_single = h
-        .block_on(observe_scores(storage, project, MAX_PAGE))
+        .block_on(observe_scores(&ctx, MAX_PAGE))
         .expect("score_list in one page");
     assert_eq!(
         scores_paged, scores_single,

@@ -13,7 +13,9 @@ use proptest::strategy::Union;
 use super::check::{Read, check_observed, check_s3_audit, check_settled_files, days, observe};
 use super::harness::Harness;
 use super::model::{Model, ModelDeletion, ProjectModel, ScorePush, SpanCopy, SpanPush};
-use super::observe::{ReadFailure, observe_eval_trace_ids, observe_spans, observe_user_scope};
+use super::observe::{
+    ReadFailure, context, observe_eval_trace_ids, observe_spans, observe_user_scope,
+};
 use super::shape::{
     HOUR_NS, P, ScoreKey, Target, day, deletion_id, hex, midnight, score, score_created_at, span,
     trace_id,
@@ -1433,8 +1435,11 @@ mod tests {
 
     /// The span rows storage returns for `project` now.
     fn stored_spans(harness: &Harness, project: P) -> usize {
+        let ctx = harness
+            .block_on(context(harness.storage(), project))
+            .expect("query context on a project");
         harness
-            .block_on(observe_spans(harness.storage(), project, MAX_PAGE))
+            .block_on(observe_spans(&ctx, MAX_PAGE))
             .expect("span_list on a project")
             .len()
     }
