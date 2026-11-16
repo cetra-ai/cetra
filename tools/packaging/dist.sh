@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Builds the release archive of one target into target/dist (D-N-1, D-N-16):
 #
-#   target/dist/llmobs-<version>-<target>.tar.gz
-#     llmobs-<version>-<target>/llmobs                   the binary, debug info stripped
-#     llmobs-<version>-<target>/LICENSE                  the root LICENSE (MIT, names the ee dirs)
-#     llmobs-<version>-<target>/LICENSE-ELASTIC          crates/server/src/ee/LICENSE (ELv2)
-#     llmobs-<version>-<target>/THIRD-PARTY-NOTICES.md
+#   target/dist/cetra-<version>-<target>.tar.gz
+#     cetra-<version>-<target>/cetra                   the binary, debug info stripped
+#     cetra-<version>-<target>/LICENSE                  the root LICENSE (MIT, names the ee dirs)
+#     cetra-<version>-<target>/LICENSE-ELASTIC          crates/server/src/ee/LICENSE (ELv2)
+#     cetra-<version>-<target>/THIRD-PARTY-NOTICES.md
 #
 # and, for a Linux target, the Docker build context of that architecture,
 # target/dist/image/linux-<amd64|arm64>/ (image-context.sh, D-N-3).
@@ -49,16 +49,16 @@ for file in LICENSE crates/server/src/ee/LICENSE; do
 done
 
 version="$(tools/packaging/version.sh)"
-name="llmobs-${version}-${target}"
+name="cetra-${version}-${target}"
 
 rustup target add "$target"
 pnpm --dir web run build
-cargo auditable build --release --locked --target "$target" -p llmobs-cli
-bin="target/${target}/release/llmobs"
+cargo auditable build --release --locked --target "$target" -p cetra-cli
+bin="target/${target}/release/cetra"
 
 # The binary must run here and embed the UI (D-G-37).
 "$bin" version | grep -qx 'ui: embedded'
-"$bin" version | grep -qx "llmobs ${version}"
+"$bin" version | grep -qx "cetra ${version}"
 if [[ "$target" == *-linux-musl ]]; then
   # Static: no interpreter, no shared libraries (D-N-1).
   if ! file "$bin" | grep -q 'static'; then
@@ -73,15 +73,15 @@ tools/packaging/notices.sh
 stage="target/dist/${name}"
 rm -rf "$stage" "target/dist/${name}.tar.gz"
 mkdir -p "$stage"
-install -m 0755 "$bin" "$stage/llmobs"
+install -m 0755 "$bin" "$stage/cetra"
 # Drop the DWARF debug info (about 75 % of the file) but keep the symbol table, so backtraces
 # still name functions, and the `.dep-v0` section cargo auditable adds (D-N-16).
 if [[ "$target" == *-apple-darwin ]]; then
-  strip -S "$stage/llmobs"
+  strip -S "$stage/cetra"
 else
-  strip --strip-debug "$stage/llmobs"
+  strip --strip-debug "$stage/cetra"
 fi
-"$stage/llmobs" version | grep -qx 'ui: embedded'
+"$stage/cetra" version | grep -qx 'ui: embedded'
 install -m 0644 LICENSE "$stage/LICENSE"
 install -m 0644 crates/server/src/ee/LICENSE "$stage/LICENSE-ELASTIC"
 install -m 0644 target/dist/THIRD-PARTY-NOTICES.md "$stage/THIRD-PARTY-NOTICES.md"

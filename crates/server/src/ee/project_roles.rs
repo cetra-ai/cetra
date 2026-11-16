@@ -123,7 +123,7 @@ fn stored_override(role: ProjectRoleOverride) -> ProjectOverride {
 #[cfg(test)]
 mod tests {
     use axum::http::{Method, header};
-    use llmobs_core::ids::OrgId;
+    use cetra_core::ids::OrgId;
     use uuid::Uuid;
 
     use super::*;

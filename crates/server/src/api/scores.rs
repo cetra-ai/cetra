@@ -1,13 +1,13 @@
 //! Score list parameters and the score write contract.
 //!
-//! The list response is [`llmobs_core::score::Score`]. Spec 09 § Scores & annotations.
+//! The list response is [`cetra_core::score::Score`]. Spec 09 § Scores & annotations.
 //! Spec 06 § Scores and § End-user feedback; D-G-26 to D-G-28.
 
 use std::collections::BTreeMap;
 
-use llmobs_core::enums::{ScoreSource, ScoreTargetKind};
-use llmobs_core::ids::{SpanId, TraceId};
-use llmobs_core::score::{ScoreTarget, ScoreValue};
+use cetra_core::enums::{ScoreSource, ScoreTargetKind};
+use cetra_core::ids::{SpanId, TraceId};
+use cetra_core::score::{ScoreTarget, ScoreValue};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
@@ -151,7 +151,7 @@ pub struct ScoreListParams {
 
 #[cfg(test)]
 mod tests {
-    use llmobs_core::enums::{ScoreSource, ScoreTargetKind};
+    use cetra_core::enums::{ScoreSource, ScoreTargetKind};
 
     use super::ScoreListParams;
 

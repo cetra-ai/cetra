@@ -1,5 +1,5 @@
 //! The small filesystem of the resource tests (R5.1): a tmpfs in a private user and mount
-//! namespace, or a directory the operator mounted (`LLMOBS_TEST_SMALL_FS`). The case code gets
+//! namespace, or a directory the operator mounted (`CETRA_TEST_SMALL_FS`). The case code gets
 //! only the root path, and never knows which of the two it runs on.
 
 use std::fs::{self, File, OpenOptions};
@@ -20,14 +20,14 @@ use super::{model_steps, seed_ops, settle_and_check};
 pub(super) const SMALL_FS_BYTES: u64 = 64 << 20;
 
 const MIB: u64 = 1 << 20;
-/// `LLMOBS_TEST_SMALL_FS` must have at least this much free: ballast writes would be too slow.
+/// `CETRA_TEST_SMALL_FS` must have at least this much free: ballast writes would be too slow.
 const MIN_FREE: u64 = 48 * MIB;
 const MAX_FREE: u64 = 1 << 30;
 /// Set in the namespace child, which runs the case on its mount.
-const CHILD_ENV: &str = "LLMOBS_SMALL_FS_CHILD";
+const CHILD_ENV: &str = "CETRA_SMALL_FS_CHILD";
 /// `size=…,mode=0700`, and `nr_inodes=…` when set, for the child's mount.
-const OPTIONS_ENV: &str = "LLMOBS_SMALL_FS_OPTIONS";
-const MOUNTED_ENV: &str = "LLMOBS_TEST_SMALL_FS";
+const OPTIONS_ENV: &str = "CETRA_SMALL_FS_OPTIONS";
+const MOUNTED_ENV: &str = "CETRA_TEST_SMALL_FS";
 const CHILD_TIMEOUT: Duration = Duration::from_secs(300);
 /// The inode ballast gives up past this many files, so a bad `nr_inodes` cannot run for hours.
 const MAX_INODE_BALLAST: u64 = 1 << 22;
@@ -42,8 +42,8 @@ pub(super) struct SmallFs {
 
 /// Runs `case` with the root of a small, empty filesystem.
 ///
-/// - `LLMOBS_SMALL_FS_CHILD` set: this process is the namespace child; `case` runs on that mount.
-/// - `LLMOBS_TEST_SMALL_FS` set: `case` runs in a new directory under it.
+/// - `CETRA_SMALL_FS_CHILD` set: this process is the namespace child; `case` runs on that mount.
+/// - `CETRA_TEST_SMALL_FS` set: `case` runs in a new directory under it.
 /// - Neither: re-executes the test `name` inside `unshare -rm` over a fresh tmpfs and asserts that
 ///   it exited successfully.
 pub(super) fn on_small_fs(name: &str, fs: SmallFs, case: impl FnOnce(&Path)) {
@@ -79,7 +79,7 @@ fn run_in_namespace(name: &str, fs: SmallFs) {
             "-rm",
             "sh",
             "-c",
-            r#"mount -t tmpfs -o "$LLMOBS_SMALL_FS_OPTIONS" tmpfs "$LLMOBS_SMALL_FS_CHILD" && exec "$0" "$@""#,
+            r#"mount -t tmpfs -o "$CETRA_SMALL_FS_OPTIONS" tmpfs "$CETRA_SMALL_FS_CHILD" && exec "$0" "$@""#,
         ])
         .arg(&exe)
         .args([

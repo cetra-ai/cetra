@@ -6,8 +6,8 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::{Context, bail};
+use cetra_server::api::common::Problem;
 use clap::Args;
-use llmobs_server::api::common::Problem;
 use serde::Serialize;
 
 use crate::credentials;
@@ -42,13 +42,13 @@ impl FromStr for Token {
 /// Server and token flags shared by every API command.
 #[derive(Debug, Clone, Args)]
 pub(crate) struct ConnectionArgs {
-    /// Server URL. Defaults to the only server saved by `llmobs login`.
-    #[arg(long, env = "LLMOBS_URL", value_name = "URL")]
+    /// Server URL. Defaults to the only server saved by `cetra login`.
+    #[arg(long, env = "CETRA_URL", value_name = "URL")]
     pub(crate) url: Option<String>,
-    /// Personal access token. Defaults to the token `llmobs login` saved for the server. A value given as a flag is visible to other local users in the process list; prefer LLMOBS_TOKEN or `llmobs login`.
+    /// Personal access token. Defaults to the token `cetra login` saved for the server. A value given as a flag is visible to other local users in the process list; prefer CETRA_TOKEN or `cetra login`.
     #[arg(
         long,
-        env = "LLMOBS_TOKEN",
+        env = "CETRA_TOKEN",
         hide_env_values = true,
         value_name = "TOKEN"
     )]
@@ -82,7 +82,7 @@ pub(crate) fn resolve_target(
             server: credentials::server_url(url)?,
             token: token.clone(),
         },
-        (None, Some(_)) => bail!("--token needs --url (or LLMOBS_URL)"),
+        (None, Some(_)) => bail!("--token needs --url (or CETRA_URL)"),
         (Some(url), None) => {
             let server = credentials::server_url(url)?;
             let file = credentials::load(&credentials()?)?;
@@ -91,9 +91,7 @@ pub(crate) fn resolve_target(
                 .get(&server)
                 .filter(|saved| !saved.token.trim().is_empty())
                 .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "no saved token for {server}; run `llmobs login --url {server}`"
-                    )
+                    anyhow::anyhow!("no saved token for {server}; run `cetra login --url {server}`")
                 })?;
             Target {
                 server,
@@ -107,12 +105,12 @@ pub(crate) fn resolve_target(
             }
             let Some((server, saved)) = file.servers.iter().next() else {
                 bail!(
-                    "not logged in; run `llmobs login --url <URL>` or set LLMOBS_URL and LLMOBS_TOKEN"
+                    "not logged in; run `cetra login --url <URL>` or set CETRA_URL and CETRA_TOKEN"
                 );
             };
             credentials::check_server_url(server)?;
             if saved.token.trim().is_empty() {
-                bail!("no saved token for {server}; run `llmobs login --url {server}`");
+                bail!("no saved token for {server}; run `cetra login --url {server}`");
             }
             Target {
                 server: server.clone(),
@@ -150,7 +148,7 @@ impl ApiClient {
             .connect_timeout(Duration::from_secs(10))
             .read_timeout(Duration::from_secs(300))
             .redirect(reqwest::redirect::Policy::none())
-            .user_agent(concat!("llmobs-cli/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("cetra-cli/", env!("CARGO_PKG_VERSION")))
             .build()
             .context("building the http client")?;
         Ok(Self { http, target })
@@ -280,7 +278,7 @@ pub(crate) fn problem_error(
     server: &str,
 ) -> anyhow::Error {
     if status == reqwest::StatusCode::UNAUTHORIZED {
-        return anyhow::anyhow!("the server rejected the token; run `llmobs login --url {server}`");
+        return anyhow::anyhow!("the server rejected the token; run `cetra login --url {server}`");
     }
     if let Ok(problem) = serde_json::from_slice::<Problem>(body) {
         let code = serde_json::to_value(problem.code)
@@ -326,7 +324,7 @@ mod tests {
 
     fn saved_file(entries: &[(&str, &str)]) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("llmobs").join("credentials.toml");
+        let path = dir.path().join("cetra").join("credentials.toml");
         let mut file = credentials::CredentialsFile::default();
         for (server, token) in entries {
             file.servers.insert(
@@ -358,10 +356,7 @@ mod tests {
         assert_eq!(flags.token.expose(), "pat-x");
 
         let token_only = resolve_target(&args(None, Some("pat-x")), no_credentials).unwrap_err();
-        assert_eq!(
-            token_only.to_string(),
-            "--token needs --url (or LLMOBS_URL)"
-        );
+        assert_eq!(token_only.to_string(), "--token needs --url (or CETRA_URL)");
 
         let saved = resolve_target(&args(Some("http://h:1"), None), file).unwrap();
         assert_eq!(saved.token.expose(), "pat-saved");
@@ -369,7 +364,7 @@ mod tests {
         let missing = resolve_target(&args(Some("http://other:1"), None), file).unwrap_err();
         assert_eq!(
             missing.to_string(),
-            "no saved token for http://other:1; run `llmobs login --url http://other:1`"
+            "no saved token for http://other:1; run `cetra login --url http://other:1`"
         );
 
         let one = resolve_target(&args(None, None), file).unwrap();
@@ -380,7 +375,7 @@ mod tests {
         let not_logged_in = resolve_target(&args(None, None), || Ok(empty.clone())).unwrap_err();
         assert_eq!(
             not_logged_in.to_string(),
-            "not logged in; run `llmobs login --url <URL>` or set LLMOBS_URL and LLMOBS_TOKEN"
+            "not logged in; run `cetra login --url <URL>` or set CETRA_URL and CETRA_TOKEN"
         );
 
         let (_two_dir, two) = saved_file(&[("http://a:1", "pat-a"), ("http://b:1", "pat-b")]);
@@ -447,7 +442,7 @@ mod tests {
             let error = resolve_target(case, file).unwrap_err();
             assert_eq!(
                 error.to_string(),
-                "no saved token for http://h:1; run `llmobs login --url http://h:1`"
+                "no saved token for http://h:1; run `cetra login --url http://h:1`"
             );
         }
     }
@@ -521,7 +516,7 @@ mod tests {
         let rejected = problem_error(reqwest::StatusCode::UNAUTHORIZED, b"", "http://h:1");
         assert_eq!(
             rejected.to_string(),
-            "the server rejected the token; run `llmobs login --url http://h:1`"
+            "the server rejected the token; run `cetra login --url http://h:1`"
         );
 
         let bad_gateway = problem_error(reqwest::StatusCode::BAD_GATEWAY, b"oops", "http://h:1");
@@ -556,12 +551,12 @@ mod tests {
         assert!(token.is_hide_env_values_set());
         assert_eq!(
             token.get_env().and_then(|value| value.to_str()),
-            Some("LLMOBS_TOKEN")
+            Some("CETRA_TOKEN")
         );
     }
 
     #[test]
-    fn url_flag_reads_the_llmobs_url_env() {
+    fn url_flag_reads_the_cetra_url_env() {
         let command = crate::Cli::command();
         let query = command.find_subcommand("query").expect("query subcommand");
         let url = query
@@ -570,7 +565,7 @@ mod tests {
             .expect("url argument");
         assert_eq!(
             url.get_env().and_then(|value| value.to_str()),
-            Some("LLMOBS_URL")
+            Some("CETRA_URL")
         );
     }
 }

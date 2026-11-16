@@ -4,8 +4,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use llmobs_core::enums::{ScoreSource, ScoreTargetKind};
-use llmobs_core::score::Score;
+use cetra_core::enums::{ScoreSource, ScoreTargetKind};
+use cetra_core::score::Score;
 use utoipa::openapi::path::{
     HttpMethod, OperationBuilder, Parameter, ParameterBuilder, ParameterIn, PathItem, Paths,
     PathsBuilder,
@@ -121,7 +121,7 @@ use super::usage::{OrgUsage, UsageDay, UsageParams};
 use super::users::{EndUserDetail, EndUserSummary, UserListParams, UserSort};
 
 const PROJECT: &str = "/api/v1/projects/{project}";
-const COOKIE_NAME: &str = concat!(llmobs_core::llmobs_name!(), "_session");
+const COOKIE_NAME: &str = concat!(cetra_core::cetra_name!(), "_session");
 
 const AUTH_ERRORS: &[u16] = &[401, 403, 404, 429];
 const QUERY_ERRORS: &[u16] = &[400, 401, 403, 404, 429];
@@ -450,7 +450,7 @@ pub fn openapi() -> OpenApi {
     let mut document = OpenApiBuilder::new()
         .info(
             InfoBuilder::new()
-                .title(concat!(llmobs_core::llmobs_name!(), " API"))
+                .title(concat!(cetra_core::cetra_name!(), " API"))
                 .version(env!("CARGO_PKG_VERSION"))
                 .description(Some(
                     "Observability read API. The rules are in docs/spec/09-api.md.",
@@ -577,8 +577,8 @@ fn take_null_is_a_value(name: &str, schema: &mut RefOr<Schema>) -> BTreeMap<Stri
 
 fn d65_component_names() -> BTreeSet<String> {
     let mut names = BTreeSet::new();
-    names.insert(<llmobs_core::message::Message as ToSchema>::name().into_owned());
-    for name in llmobs_core::message::part_component_names() {
+    names.insert(<cetra_core::message::Message as ToSchema>::name().into_owned());
+    for name in cetra_core::message::part_component_names() {
         names.insert((*name).to_owned());
     }
     names
@@ -935,7 +935,7 @@ fn auth_paths(paths: PathsBuilder) -> PathsBuilder {
         "Start an OAuth or OIDC login",
     )
     .description(Some(
-        "Redirects to the provider and sets the `llmobs_oauth` cookie. `redirect` is kept when it \
+        "Redirects to the provider and sets the `cetra_oauth` cookie. `redirect` is kept when it \
          starts with `/`, does not start with `//` or `/\\`, is at most 1024 bytes, and contains \
          no ASCII control character. Otherwise the browser returns to `/`. An unknown provider is \
          404. When metadata cannot be loaded, the response redirects to \
@@ -1350,7 +1350,7 @@ fn org_sso_paths(paths: PathsBuilder) -> PathsBuilder {
         "Verify an email domain with its DNS TXT record",
     )
     .description(Some(
-        "Looks up `_llmobs-verify.<domain>` and verifies the domain when its value `llmobs-verify=<token>` is there (D-P-54, D-P-64). An already verified domain answers 200 without a lookup. A domain another org holds moves to this org only when the holder's record is gone from the answer. At most 10 lookups per minute per org. A failed lookup answers 503. Needs the Teams add-on or an enterprise licence (D-P-61). Owners only, session only.",
+        "Looks up `_cetra-verify.<domain>` and verifies the domain when its value `cetra-verify=<token>` is there (D-P-54, D-P-64). An already verified domain answers 200 without a lookup. A domain another org holds moves to this org only when the holder's record is gone from the answer. At most 10 lookups per minute per org. A failed lookup answers 503. Needs the Teams add-on or an enterprise licence (D-P-61). Owners only, session only.",
     ))
     .securities(Some(vec![SecurityRequirement::new("session", [] as [&str; 0])]))
     .parameters(Some(vec![
@@ -2550,7 +2550,7 @@ fn evaluator_paths(paths: PathsBuilder) -> PathsBuilder {
     .build();
     let test = operation("post_evaluator_test", "evaluation", "Run an evaluator once")
         .description(Some(
-            "Project members and above. API keys cannot call it. Runs synchronously, writes the judge trace (environment `llmobs-eval`) and the judge usage, and writes no score. Shares the 10 per minute per user limit with connection tests.",
+            "Project members and above. API keys cannot call it. Runs synchronously, writes the judge trace (environment `cetra-eval`) and the judge usage, and writes no score. Shares the 10 per minute per user limit with connection tests.",
         ))
         .parameters(Some(vec![project_param()]))
         .request_body(Some(json_body("EvaluatorTestRequest")))
@@ -3883,7 +3883,7 @@ fn media_paths(paths: PathsBuilder) -> PathsBuilder {
 
 const EXCLUSIONS: &str = concat!(
     "Evaluation traces (`environment = ",
-    llmobs_core::llmobs_name!("-eval"),
+    cetra_core::cetra_name!("-eval"),
     "`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set."
 );
 

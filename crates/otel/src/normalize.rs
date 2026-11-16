@@ -6,11 +6,11 @@
 
 use std::collections::BTreeMap;
 
-use llmobs_core::enums::SpanStatus;
-use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-use llmobs_core::media::MediaBlob;
-use llmobs_core::names::metadata_key;
-use llmobs_core::span::{Span, SpanEvent, SpanLink};
+use cetra_core::enums::SpanStatus;
+use cetra_core::ids::{ProjectId, SpanId, TraceId};
+use cetra_core::media::MediaBlob;
+use cetra_core::names::metadata_key;
+use cetra_core::span::{Span, SpanEvent, SpanLink};
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::common::v1::KeyValue;
 use opentelemetry_proto::tonic::resource::v1::Resource;
@@ -469,7 +469,7 @@ fn encode_attribute_object(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use llmobs_core::enums::{Convention, SpanKind};
+    use cetra_core::enums::{Convention, SpanKind};
     use opentelemetry_proto::tonic::common::v1::AnyValue;
     use opentelemetry_proto::tonic::common::v1::InstrumentationScope;
     use opentelemetry_proto::tonic::trace::v1::ResourceSpans;

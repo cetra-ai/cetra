@@ -8,8 +8,8 @@ use axum::extract::{Extension, State};
 use axum::http::Method;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use llmobs_core::ids::ProjectId;
-use llmobs_storage as storage;
+use cetra_core::ids::ProjectId;
+use cetra_storage as storage;
 use tokio::sync::OnceCell;
 
 use crate::api::convert;
@@ -263,9 +263,9 @@ mod tests {
     use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
     use axum::http::{Method, StatusCode};
-    use llmobs_core::batch::spans_to_record_batch;
-    use llmobs_core::ids::TraceId;
-    use llmobs_core::span::Span;
+    use cetra_core::batch::spans_to_record_batch;
+    use cetra_core::ids::TraceId;
+    use cetra_core::span::Span;
     use serde_json::Value as Json;
 
     use super::*;

@@ -21,11 +21,11 @@ it("opens both splits at their default ratios", async () => {
 
 it("restores stored ratios", async () => {
   localStorage.setItem(
-    "llmobs.split.traces",
+    "cetra.split.traces",
     JSON.stringify({ "traces-list": 30, "traces-detail": 70 }),
   );
   localStorage.setItem(
-    "llmobs.split.trace",
+    "cetra.split.trace",
     JSON.stringify({ "trace-tree": 65, "trace-detail": 35 }),
   );
   await renderApp(URL_WITH_TRACE);
@@ -39,7 +39,7 @@ it.each([
   ["out of range", JSON.stringify({ "traces-list": 0, "traces-detail": 100 })],
   ["wrong keys", JSON.stringify({ list: 30, detail: 70 })],
 ])("falls back to the default for a stored value that is %s", async (_label, raw) => {
-  localStorage.setItem("llmobs.split.traces", raw);
+  localStorage.setItem("cetra.split.traces", raw);
   await renderApp(URL_WITH_TRACE);
   await screen.findByRole("grid", { name: "Trace" });
   expect(size("traces-list")).toBe("40");

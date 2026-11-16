@@ -1,4 +1,4 @@
-//! `llmobs query`: one SQL statement through `POST /api/v1/projects/{project}/sql`
+//! `cetra query`: one SQL statement through `POST /api/v1/projects/{project}/sql`
 //! (spec 05 § SQL console, spec 09 § CLI, D-H-8, D-H-12, D101).
 
 use std::collections::BTreeMap;
@@ -16,7 +16,7 @@ use serde_json::{Map, Number, Value};
 use crate::client::{self, ApiClient, ConnectionArgs};
 use crate::output::{self, Column, Io};
 
-/// Output of `llmobs query`.
+/// Output of `cetra query`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum QueryFormat {
     /// Aligned columns.
@@ -45,7 +45,7 @@ pub(crate) struct QueryArgs {
     #[arg(long, value_name = "PATH")]
     pub(crate) file: Option<PathBuf>,
     /// Project UUID or org-slug/project-slug.
-    #[arg(long, env = "LLMOBS_PROJECT", value_name = "PROJECT")]
+    #[arg(long, env = "CETRA_PROJECT", value_name = "PROJECT")]
     pub(crate) project: String,
     /// A parameter value; repeat for each parameter. Int and Timestamp values that are all digits are sent as integers (Timestamp: epoch milliseconds).
     #[arg(long = "param", value_name = "NAME=VALUE")]
@@ -115,7 +115,7 @@ enum Body {
     Streamed(reqwest::Response),
 }
 
-/// `llmobs query`. `args` is borrowed; `now` anchors `--since`.
+/// `cetra query`. `args` is borrowed; `now` anchors `--since`.
 pub(crate) async fn run(
     args: &QueryArgs,
     credentials: impl FnOnce() -> anyhow::Result<PathBuf>,
@@ -628,7 +628,7 @@ mod tests {
     const PROJECT: &str = "01900000-0000-7000-8000-000000000001";
 
     fn query_args(argv: &[&str]) -> QueryArgs {
-        let mut full = vec!["llmobs", "query"];
+        let mut full = vec!["cetra", "query"];
         full.extend_from_slice(argv);
         match Cli::try_parse_from(full).unwrap().command {
             Command::Query(args) => *args,
@@ -793,7 +793,7 @@ mod tests {
     #[test]
     fn query_flags_are_validated_by_clap() {
         let kind = |argv: &[&str]| {
-            let mut full = vec!["llmobs", "query"];
+            let mut full = vec!["cetra", "query"];
             full.extend_from_slice(argv);
             Cli::try_parse_from(full).unwrap_err().kind()
         };
@@ -1544,7 +1544,7 @@ mod tests {
             "--url",
             server.url.as_str(),
             "--token",
-            "pat-llmobs-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "pat-cetra-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             "--project",
             server.project.as_str(),
         ]);
@@ -1554,7 +1554,7 @@ mod tests {
         assert_eq!(
             error.to_string(),
             format!(
-                "the server rejected the token; run `llmobs login --url {}`",
+                "the server rejected the token; run `cetra login --url {}`",
                 server.url
             )
         );

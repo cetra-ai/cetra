@@ -66,7 +66,7 @@ Golden: `PENDING` cases may now differ only in other fields. They remain pending
 
 `kind.rs`: `pub(crate) fn span_kind(bag: &mut AttrBag) -> SpanKind`. It follows spec 02 § Span kind in table order, so the first row with a decision wins, and the source attribute becomes Consumed. Decisions:
 
-- `llmobs.span.kind`: any valid `SpanKind` string (core's parser), verbatim. An invalid value gives no decision.
+- `cetra.span.kind`: any valid `SpanKind` string (core's parser), verbatim. An invalid value gives no decision.
 - `gen_ai.operation.name`: the N1 table, including the new rows. Any other value gives no decision.
 - `openinference.span.kind`, `ai.operationId`, `traceloop.span.kind`, `llm.request.type`, `langfuse.observation.type`, `lmnr.span.type`: as in the spec.
   - Vercel uses a suffix match on `ai.operationId`: `*.doGenerate` and `*.doStream` → `llm`; exact names for `ai.generateText`, `ai.streamText`, `ai.generateObject` and `ai.streamObject` → `chain`; `ai.toolCall` → `tool`; a prefix `ai.embed` → `embedding`.
@@ -76,13 +76,13 @@ Golden: `PENDING` cases may now differ only in other fields. They remain pending
 
 Add one hand-written fixture per new N1 row: `genai/operation-retrieval` (`retrieval` → `retriever`), `genai/operation-workflow` (`invoke_workflow` → `chain`) and `edge/tool-key-fallback` (`gen_ai.tool.name` only → `tool`). Keep each fixture minimal, with only the kind-relevant attributes. Their expected outputs may have to include fields that later sub-phases fill: for example, `gen_ai.operation.name` also fills `operation` in N7. If a new case can't pass yet, put it in `PENDING` and say why in the report.
 
-Unit tests: one per table row, plus "an invalid `llmobs.span.kind` falls through to the next row".
+Unit tests: one per table row, plus "an invalid `cetra.span.kind` falls through to the next row".
 
 ---
 
 ## N7 — Model, provider, operation, params and context
 
-**Edit only:** `crates/otel/src/{context.rs,fields.rs,normalize.rs,lib.rs}`, plus fixtures under `fixtures/otlp/{genai,llmobs,edge}/`.
+**Edit only:** `crates/otel/src/{context.rs,fields.rs,normalize.rs,lib.rs}`, plus fixtures under `fixtures/otlp/{genai,cetra,edge}/`.
 
 **Commit:** `otel: fill model, provider, request params and context fields`
 
@@ -99,13 +99,13 @@ Unit tests: one per table row, plus "an invalid `llmobs.span.kind` falls through
   - the result is a compact JSON object with sorted keys, or `None` when empty;
   - every source attribute becomes Consumed.
 - `session_id`, `user_id`, `tags`, `metadata`, `environment`, `release`, with the N1 tables. Rule 11: context keys consumed from a metadata-like source (`ai.telemetry.metadata.sessionId`, …) are not copied into `metadata`. Sibling keys go into `metadata` with the source prefix stripped. On a metadata key collision, the higher-precedence source wins.
-- Experiment linkage: `llmobs.experiment.id` and `llmobs.dataset_item.id` go into `metadata` under the reserved keys (core `metadata_key`).
+- Experiment linkage: `cetra.experiment.id` and `cetra.dataset_item.id` go into `metadata` under the reserved keys (core `metadata_key`).
 - `tags`: deduplicated, keeping first-occurrence order. Only the first source that yields tags is used.
 
 Rule 3: `provider`, `request_model`, `response_model`, `operation` and `request_params` are filled for **every** kind.
 
 Fixtures:
-- `llmobs/context-fields` (every `llmobs.*` context key, plus experiment linkage);
+- `cetra/context-fields` (every `cetra.*` context key, plus experiment linkage);
 - `genai/request-params` (several `gen_ai.request.*` keys of mixed types);
 - `edge/provider-aliases` (several spans: `openai.chat` via Vercel, `aws.bedrock` via GenAI, `xai` → `x_ai`, uppercase `OpenAI`);
 - `edge/tags-json-string` (tags as a JSON-array string, plus a CSV string that must stay in `attributes`).
@@ -139,7 +139,7 @@ Unit tests: one per table, plus the alias table.
 - **Total, rule 4.** A reported total, else `input + output` when both are known, else `None`.
 - **Modality subsets.** Never read them: they stay Unread.
 - **TTFT** (any kind; it's not usage).
-  - `llmobs.ttft_ns` (integer ns).
+  - `cetra.ttft_ns` (integer ns).
   - `gen_ai.response.time_to_first_chunk` (float seconds × 1e9, rounded, rejected if negative or not finite).
   - `ai.response.msToFirstChunk`, `ai.stream.msToFirstChunk` (ms × 1e6).
   - `langfuse.observation.completion_start_time`: an RFC 3339 string or integer ns, parsed with core's strict `parse_rfc3339`. `ttft = t − start_time`; when negative or unparseable, `None` and the attribute stays.

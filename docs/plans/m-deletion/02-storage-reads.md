@@ -2,7 +2,7 @@
 
 Read [README.md](README.md) first.
 
-**Goal:** three reads in `llmobs-storage` that the deletion worker uses to resolve a request's scope (spec 03 § 7, D-M-2, D-M-6):
+**Goal:** three reads in `cetra-storage` that the deletion worker uses to resolve a request's scope (spec 03 § 7, D-M-2, D-M-6):
 - `filter_trace_ids`: the trace ids that a traces-list filter, search and window match;
 - `user_deletion_scope`: the trace ids and session ids of one end user's spans ingested up to a cut-off;
 - `eval_trace_ids`: the evaluation (judge) traces whose target is in a set of traces.
@@ -28,7 +28,7 @@ They follow the existing reads in `crates/storage/src/reads/`. Each takes a `Que
 - `crates/storage/src/views/mod.rs`: `QueryContext` (`session()`, `view_schema(ViewName)`, `fail`), `TimeWindow`.
 - `crates/storage/src/test_support.rs`: `span_row`, `spans_table`, `traces_table`, `example_query`.
 - `crates/storage/src/reads/users.rs` tests: `context_of(spans)`.
-- `llmobs_core::schema::{spans, traces}` column names; `llmobs_core::names::{environment::EVAL, metadata_key::EVAL_TARGET_TRACE_ID}`; `llmobs_core::ids::TraceId` (derives `Copy, Eq, Hash, Ord`; `FromStr` accepts 32 hex digits of either case and rejects all zeros).
+- `cetra_core::schema::{spans, traces}` column names; `cetra_core::names::{environment::EVAL, metadata_key::EVAL_TARGET_TRACE_ID}`; `cetra_core::ids::TraceId` (derives `Copy, Eq, Hash, Ord`; `FromStr` accepts 32 hex digits of either case and rejects all zeros).
 
 The `spans` and `traces` views expose `trace_id` as 32 lowercase hex `Utf8`, `ingest_time` (spans) as `Timestamp(Nanosecond, "UTC")`, and `metadata` as a `Map<Utf8, Utf8>` (spec 05 § Views).
 
@@ -55,9 +55,9 @@ use datafusion::common::ScalarValue;
 use datafusion::error::DataFusionError;
 use datafusion::logical_expr::{col, lit};
 use futures::StreamExt;
-use llmobs_core::ids::TraceId;
-use llmobs_core::names::{environment, metadata_key};
-use llmobs_core::schema::{spans, traces};
+use cetra_core::ids::TraceId;
+use cetra_core::names::{environment, metadata_key};
+use cetra_core::schema::{spans, traces};
 
 use super::{ListScope, present, scoped_traces};
 use crate::filter::{FilterView, search};
@@ -240,13 +240,13 @@ Ok(UserDeletionScope {
 })
 ```
 
-`futures` is already a dependency of `llmobs-storage`.
+`futures` is already a dependency of `cetra-storage`.
 
 ### `eval_trace_ids`
 
 ```rust
-/// Evaluation traces (environment `llmobs-eval`) with a span whose
-/// `metadata['llmobs.eval.target_trace_id']` is one of `targets`. Ids already in `targets`
+/// Evaluation traces (environment `cetra-eval`) with a span whose
+/// `metadata['cetra.eval.target_trace_id']` is one of `targets`. Ids already in `targets`
 /// are not returned. One level only, not transitive: an eval trace of an eval trace is
 /// returned only when its own target is in `targets`. Sorted by bytes, no duplicates. One scan of the project's eval spans;
 /// the match against `targets` is done in memory, batch by batch, so a large `targets`
@@ -336,10 +336,10 @@ Copy the imports of the `reads/users.rs` tests that you need (`Span`, `QueryCont
    - It returns traces 2 and 4, sorted by bytes.
 2. `no_filter_and_no_search_take_the_whole_window`: same data, filter `None`, window `[0, 10_000)`. All 4 traces.
 3. `default_exclusions_apply`:
-   - Traces 5 and 6 are single root spans at 5_000 and 6_000. Trace 5 has `environment = Some("llmobs-eval")`. Trace 6 has `metadata["llmobs.experiment_id"] = "e1"`. A trace row takes its environment and metadata from its spans (`traces_table`), so these fields carry over.
+   - Traces 5 and 6 are single root spans at 5_000 and 6_000. Trace 5 has `environment = Some("cetra-eval")`. Trace 6 has `metadata["cetra.experiment_id"] = "e1"`. A trace row takes its environment and metadata from its spans (`traces_table`), so these fields carry over.
    - With both flags false, neither is returned.
    - With `include_eval: true`: trace 5, not 6. With `include_experiments: true`: trace 6, not 5.
-   - Filter `environment = 'llmobs-eval'` with both flags false returns trace 5: a filter that names `environment` lifts the eval exclusion.
+   - Filter `environment = 'cetra-eval'` with both flags false returns trace 5: a filter that names `environment` lifts the eval exclusion.
 4. `search_narrows_the_traces`: trace 3's span has `input` containing `refund please`. Search `refund`, window `[0, 10_000)`. Only trace 3.
 5. `limit_caps_the_ids`: traces 1–5, limit 3. Exactly 3 ids, all from the 5.
 6. `invalid_filter_is_invalid`: filter `name = ` gives `Err(RunError::Invalid(_))` (the parse error comes before the query; the window does not matter).
@@ -355,22 +355,22 @@ Copy the imports of the `reads/users.rs` tests that you need (`Span`, `QueryCont
 8. `user_scope_ignores_exclusions`: trace 4 is an eval-environment span of `u1` ingested at 100. With cut-off 200, trace 4 is in the scope.
 9. `user_scope_of_an_unknown_user_is_empty`: `user_id` `nobody`. Both lists are empty.
 10. `eval_traces_follow_their_targets`:
-    - Trace 10 has environment `llmobs-eval` and `metadata[EVAL_TARGET_TRACE_ID]` = trace 1's id in lowercase hex.
+    - Trace 10 has environment `cetra-eval` and `metadata[EVAL_TARGET_TRACE_ID]` = trace 1's id in lowercase hex.
     - Trace 11 is the same with trace 2's id in **uppercase**.
     - Trace 12 has environment `production` and a target of trace 1.
-    - Trace 13 has environment `llmobs-eval` and target `zz`.
-    - Trace 14 has environment `llmobs-eval` and a target of trace 10.
+    - Trace 13 has environment `cetra-eval` and target `zz`.
+    - Trace 14 has environment `cetra-eval` and a target of trace 10.
     - Targets `{1}` return `[10]`.
     - Targets `{1, 2}` return `[10, 11]`.
     - Targets `{1, 10}` return `[14]`: 10 is already a target, and 14 targets 10.
-    - Trace 15 has two spans with environment `llmobs-eval`: one with the target metadata (trace 3), one without. Targets `{3}` return `[15]` once.
+    - Trace 15 has two spans with environment `cetra-eval`: one with the target metadata (trace 3), one without. Targets `{3}` return `[15]` once.
 11. `eval_traces_of_no_targets_is_empty`: an empty set returns `[]`.
 
 The timeout branches are not unit-tested: a zero timeout against an in-memory table is not deterministic. They are the same `tokio::time::timeout` mapping as `trace_refresh`.
 
 ## Done when
 
-- [ ] The three functions, the two request/scope types and the constant are public and re-exported from `llmobs_storage`.
+- [ ] The three functions, the two request/scope types and the constant are public and re-exported from `cetra_storage`.
 - [ ] The 14 tests pass.
 - [ ] `just check` is green; one commit `Add the deletion scope reads`.
 - [ ] Report any deviation from this file.

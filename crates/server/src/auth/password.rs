@@ -72,10 +72,9 @@ impl Hasher {
     }
 
     async fn with_permits(permits: usize) -> Result<Self, AuthError> {
-        let dummy =
-            tokio::task::spawn_blocking(|| hash_password(b"llmobs dummy password verifier"))
-                .await
-                .map_err(|_| AuthError::PasswordHash)??;
+        let dummy = tokio::task::spawn_blocking(|| hash_password(b"cetra dummy password verifier"))
+            .await
+            .map_err(|_| AuthError::PasswordHash)??;
         Ok(Self {
             permits: Arc::new(Semaphore::new(permits)),
             dummy,
@@ -270,7 +269,7 @@ mod tests {
             check_policy("too-short", "ada@example.com"),
             Err(PolicyError::TooShort)
         );
-        assert!(check_policy("llmobs-ok1", "ada@example.com").is_ok());
+        assert!(check_policy("cetra-ok-1", "ada@example.com").is_ok());
         assert!(check_policy(&"é".repeat(10), "ada@example.com").is_ok());
         assert!(check_policy(&"e\u{301}".repeat(10), "ada@example.com").is_ok());
         assert!(check_policy(&"a".repeat(128), "ada@example.com").is_ok());
@@ -327,7 +326,7 @@ mod tests {
                     dummy,
                     verifies: AtomicU64::new(0),
                 };
-                limited.hash(&format!("llmobs-ok{index}")).await.unwrap();
+                limited.hash(&format!("cetra-ok{index}")).await.unwrap();
             }));
         }
         for task in tasks {

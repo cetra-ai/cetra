@@ -2,12 +2,12 @@
   "spans": [
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "97b6ccb437d1ded230a0dcfbefd527e9",
-      "span_id": "2f5d9de763d028a4",
+      "trace_id": "6b9a59326bf227819cff3849c1d9bacc",
+      "span_id": "4097194e34c540c5",
       "name": "GenerateContentStream",
       "span_kind": "llm",
       "start_time": "2025-12-31T23:59:50.000000000Z",
-      "end_time": "2025-12-31T23:59:50.191000000Z",
+      "end_time": "2025-12-31T23:59:50.177000000Z",
       "status": "ok",
       "service_name": "capture-app",
       "provider": "gcp.gen_ai",

@@ -11,12 +11,12 @@ from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.sdk.trace.id_generator import IdGenerator
 
-import llmobs._runtime as runtime_module
-from llmobs._config import ConfigError, resolve_config
-from llmobs._instrument import enable_for, resolve
-from llmobs._runtime import Runtime, install, uninstall
+import cetra._runtime as runtime_module
+from cetra._config import ConfigError, resolve_config
+from cetra._instrument import enable_for, resolve
+from cetra._runtime import Runtime, install, uninstall
 
-TEST_API_KEY = "sk-llmobs-test"
+TEST_API_KEY = "sk-cetra-test"
 TEST_BASE_URL = "http://127.0.0.1:9"
 
 # Minimal provider responses per request path (plan F § P10); the exact JSON

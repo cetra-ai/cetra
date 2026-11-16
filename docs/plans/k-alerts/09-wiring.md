@@ -1,4 +1,4 @@
-# K9 — Background loops in `llmobs serve`, end-to-end test
+# K9 — Background loops in `cetra serve`, end-to-end test
 
 **Commit subject:** `server: run the alert loops`
 
@@ -105,7 +105,7 @@ and use `tasks,` in the literal, and write `state: Some(state),` there (the last
 async fn rule_to_signed_webhook_end_to_end() { … }
 ```
 
-Imports: `std::time::Duration`, `axum::http::Method`, `llmobs_eval::{Secret, sign_payload}`, `crate::alerts::{AlertTiming, spawn_loops}`, `crate::test_support::hook_receiver::HookReceiver`. Requests: `app.request(Method::POST, &path).header("cookie", &seeded.cookie).json(&body).send().await` (as `routes/api_keys.rs` tests do).
+Imports: `std::time::Duration`, `axum::http::Method`, `cetra_eval::{Secret, sign_payload}`, `crate::alerts::{AlertTiming, spawn_loops}`, `crate::test_support::hook_receiver::HookReceiver`. Requests: `app.request(Method::POST, &path).header("cookie", &seeded.cookie).json(&body).send().await` (as `routes/api_keys.rs` tests do).
 
 1. `let app = TestApp::with_config(|config| config.security.allow_private_network_egress = true).await; let seeded = app.seed().await;`
 2. `let receiver = HookReceiver::start(vec![200]).await;`
@@ -114,7 +114,7 @@ Imports: `std::time::Duration`, `axum::http::Method`, `llmobs_eval::{Secret, sig
 5. Commit two traces with K7's `root_span` helper: `root_span(&app, 1, Duration::from_secs(10), false)` and `root_span(&app, 2, Duration::from_secs(10), true)`.
 6. `let tasks = crate::alerts::spawn_loops(&app.state, AlertTiming::TEST);` The manual clock does not move; the rule was never evaluated, so the first evaluation pass fires it, and the delivery pass sends it (its `next_attempt_at` is the same manual `now`).
 7. Wait up to 10 s, polling every 50 ms (`tokio::time::sleep`), until `receiver.received().len() == 1`. Then wait 300 ms more and assert it is still exactly 1 (the next evaluations are not due and the rule stays firing without a reminder).
-8. The request: path `/hook`; the body parses as JSON with `type "alert.fired"`, `rule.id` = the rule id, `count 2`, `value 0.5`; `Some(header)` equals `sign_payload(&Secret::new("0123456789abcdef".to_owned()), t, &body).as_deref()` where `t: i64` is the number between `t=` and `,` in the header; `x-llmobs-delivery` parses as a UUID equal to the delivery id of step 9.
+8. The request: path `/hook`; the body parses as JSON with `type "alert.fired"`, `rule.id` = the rule id, `count 2`, `value 0.5`; `Some(header)` equals `sign_payload(&Secret::new("0123456789abcdef".to_owned()), t, &body).as_deref()` where `t: i64` is the number between `t=` and `,` in the header; `x-cetra-delivery` parses as a UUID equal to the delivery id of step 9.
 9. GET `…/alert-rules/{rule id}` → `state "firing"`. GET `…/alert-rules/{rule id}/events` → a page whose `data` has one event with `kind "fired"` and `deliveries` of length 1 with `status "sent"` and `attempts 1`. (The delivery pass may write after the receiver records the request: poll this GET for up to 2 s until the status is `sent`.)
 10. `for task in tasks { task.abort(); let _ = task.await; }` (releases the state's clones before the test's temporary directory is dropped).
 
@@ -129,7 +129,7 @@ just fmt
 ```
 
 ```bash
-cargo test -p llmobs-server alerts::
+cargo test -p cetra-server alerts::
 ```
 
 ```bash
@@ -138,5 +138,5 @@ just check
 
 ## Done when
 
-- `llmobs serve` runs the three loops and stops them on shutdown.
-- The end-to-end test passes reliably (run it 5 times: `for i in 1 2 3 4 5; do cargo test -p llmobs-server rule_to_signed_webhook_end_to_end || break; done`); `just check` is green.
+- `cetra serve` runs the three loops and stops them on shutdown.
+- The end-to-end test passes reliably (run it 5 times: `for i in 1 2 3 4 5; do cargo test -p cetra-server rule_to_signed_webhook_end_to_end || break; done`); `just check` is green.

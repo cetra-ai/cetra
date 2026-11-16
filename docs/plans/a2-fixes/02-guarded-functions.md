@@ -426,5 +426,5 @@ Without the guard, step 1 returns `Ok` (checked on today's code), so this test f
 
 ## Done when
 
-- `cargo test -p llmobs-storage --lib` passes (the whole library: the guard is in every query's path).
+- `cargo test -p cetra-storage --lib` passes (the whole library: the guard is in every query's path).
 - `just check` passes.

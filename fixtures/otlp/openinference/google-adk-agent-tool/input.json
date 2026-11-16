@@ -41,15 +41,15 @@
           },
           "spans": [
             {
-              "traceId": "bf69bd8fe564558e5725ec3c43fd7961",
-              "spanId": "b51e8a163c84e871",
+              "traceId": "389843a22ec8713f581933c478f84ebc",
+              "spanId": "ac2e6b51bcdb4b3a",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
               "name": "invocation [capture-app]",
               "kind": 1,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590157000000",
+              "endTimeUnixNano": "1767225590154000000",
               "attributes": [
                 {
                   "key": "input.value",
@@ -105,15 +105,15 @@
               }
             },
             {
-              "traceId": "bf69bd8fe564558e5725ec3c43fd7961",
-              "spanId": "19b18e28fa7bbcdb",
+              "traceId": "389843a22ec8713f581933c478f84ebc",
+              "spanId": "b54f89f11d922a84",
               "traceState": "",
-              "parentSpanId": "b51e8a163c84e871",
+              "parentSpanId": "ac2e6b51bcdb4b3a",
               "flags": 256,
               "name": "agent_run [weather_agent]",
               "kind": 1,
               "startTimeUnixNano": "1767225590003000000",
-              "endTimeUnixNano": "1767225590156000000",
+              "endTimeUnixNano": "1767225590154000000",
               "attributes": [
                 {
                   "key": "agent.name",
@@ -163,15 +163,15 @@
               }
             },
             {
-              "traceId": "bf69bd8fe564558e5725ec3c43fd7961",
-              "spanId": "ee5f82a94d899a15",
+              "traceId": "389843a22ec8713f581933c478f84ebc",
+              "spanId": "f87e105b11f755f7",
               "traceState": "",
-              "parentSpanId": "19b18e28fa7bbcdb",
+              "parentSpanId": "b54f89f11d922a84",
               "flags": 256,
               "name": "call_llm",
               "kind": 1,
-              "startTimeUnixNano": "1767225590035000000",
-              "endTimeUnixNano": "1767225590118000000",
+              "startTimeUnixNano": "1767225590033000000",
+              "endTimeUnixNano": "1767225590115000000",
               "attributes": [
                 {
                   "key": "session.id",
@@ -407,15 +407,15 @@
               }
             },
             {
-              "traceId": "bf69bd8fe564558e5725ec3c43fd7961",
-              "spanId": "5283d8f4c01801b5",
+              "traceId": "389843a22ec8713f581933c478f84ebc",
+              "spanId": "62a5e7dad07d5e18",
               "traceState": "",
-              "parentSpanId": "19b18e28fa7bbcdb",
+              "parentSpanId": "b54f89f11d922a84",
               "flags": 256,
               "name": "execute_tool get_weather",
               "kind": 1,
-              "startTimeUnixNano": "1767225590115000000",
-              "endTimeUnixNano": "1767225590116000000",
+              "startTimeUnixNano": "1767225590113000000",
+              "endTimeUnixNano": "1767225590114000000",
               "attributes": [
                 {
                   "key": "session.id",
@@ -561,15 +561,15 @@
               }
             },
             {
-              "traceId": "bf69bd8fe564558e5725ec3c43fd7961",
-              "spanId": "f2a82072fc3104dd",
+              "traceId": "389843a22ec8713f581933c478f84ebc",
+              "spanId": "7a3227a929337c76",
               "traceState": "",
-              "parentSpanId": "19b18e28fa7bbcdb",
+              "parentSpanId": "b54f89f11d922a84",
               "flags": 256,
               "name": "call_llm",
               "kind": 1,
-              "startTimeUnixNano": "1767225590119000000",
-              "endTimeUnixNano": "1767225590155000000",
+              "startTimeUnixNano": "1767225590117000000",
+              "endTimeUnixNano": "1767225590152000000",
               "attributes": [
                 {
                   "key": "session.id",

@@ -257,10 +257,10 @@ Langfuse's server-side ingestion tests live in `packages/shared/src/server/otel/
 
 1. **Do not take over the global provider silently.**
    - Python: create a private `TracerProvider` by default, and register it globally only when none exists (Laminar's rule). Also offer `add_to(provider)` / a `SpanProcessor` export for apps that already run OTel (Langfuse TS style).
-   - TS: export `LlmobsSpanProcessor` as the primary API, plus a `register()` convenience.
-2. **Ship a default export filter and make it composable.** Our llmobs scope, any `gen_ai.*` attribute, and known LLM scopes (OpenInference, OpenLLMetry, Vercel `ai`, …), with boundary-aware prefix matching. Expose `is_default_export_span` so a user callback can extend the default instead of replacing it. Drop the span when the callback throws.
+   - TS: export `CetraSpanProcessor` as the primary API, plus a `register()` convenience.
+2. **Ship a default export filter and make it composable.** Our cetra scope, any `gen_ai.*` attribute, and known LLM scopes (OpenInference, OpenLLMetry, Vercel `ai`, …), with boundary-aware prefix matching. Expose `is_default_export_span` so a user callback can extend the default instead of replacing it. Drop the span when the callback throws.
 3. **Handle filtered-out parents.** Either mark the app root in the SDK (Langfuse `is_app_root`) or, better, have our ingestion re-parent orphans to the nearest exported ancestor. Decide this in spec 02 rather than leaving it to the SDK.
-4. **Exporter:** OTLP HTTP/protobuf with gzip on by default, one documented path, and `Authorization: Bearer sk-llmobs-…` (no gRPC; one binary). Send `x-llmobs-sdk-{name,version}` and a **wire/attribute-convention version header** from v1.
+4. **Exporter:** OTLP HTTP/protobuf with gzip on by default, one documented path, and `Authorization: Bearer sk-cetra-…` (no gRPC; one binary). Send `x-cetra-sdk-{name,version}` and a **wire/attribute-convention version header** from v1.
 5. **Batching:** a byte-aware batch processor (count *and* bytes, about 4–8 MiB per request), because LLM payloads are large. Keep OTel queue defaults, and drop oversized single spans with a logged id and size, never the content.
 6. **Lifecycle:**
    - `flush()` flushes only *our* processor and score queue, not the user's provider;
@@ -268,7 +268,7 @@ Langfuse's server-side ingestion tests live in `packages/shared/src/server/otel/
    - register at exit;
    - `register_at_fork` re-creates HTTP clients, queues and threads in the child;
    - document per-invocation `flush()` for serverless, and offer an immediate/simple-processor mode (TS `exportMode`).
-7. **A missing key gives a no-op client and a single warning**, never a raise (Laminar's raise is hostile in tests and CI). Add an `LLMOBS_TRACING_ENABLED=false` kill switch and honour `OTEL_SDK_DISABLED`.
+7. **A missing key gives a no-op client and a single warning**, never a raise (Laminar's raise is hostile in tests and CI). Add a`CETRA_TRACING_ENABLED=false` kill switch and honour `OTEL_SDK_DISABLED`.
 8. **Use one OTel context.** Do not build an isolated context like Laminar's. For threads, rely on `contextvars` and document or auto-enable `opentelemetry-instrumentation-threading` (an optional `instrument_threads=True`). Never monkey-patch `Thread.__init__` ourselves.
 9. **`observe` decorator:**
    - support `@observe` and `@observe(...)`, sync, async, generators and async generators, with context re-entered for each item (Langfuse's wrapper approach, including `aclose`, `close` and cancellation);
@@ -283,7 +283,7 @@ Langfuse's server-side ingestion tests live in `packages/shared/src/server/otel/
 12. **Truncate in the SDK** to a configurable per-attribute limit (Laminar uses 10 MB; ours should be smaller, e.g. 1 MiB) with an explicit truncation marker attribute. Raise the span attribute count limit **on our own provider's `SpanLimits`**, not through process env.
 13. **Errors:** set OTel status ERROR *and* `record_exception` (type, message, stacktrace event). Treat `CancelledError` as an error and record it as cancelled. Langfuse loses stack traces.
 14. **Propagation API:** a `propagate(session_id=, user_id=, tags=, metadata=)` context manager stored in the OTel context and stamped onto **every** span by our processor's `on_start`, third-party spans included. Also set it on the current span on entry. Validate lengths and drop with a warning. Baggage stays **opt-in** with a privacy warning.
-15. **Attribute names:** emit standard GenAI semconv for model, usage and cost wherever one exists (as Laminar does). Use the `llmobs.*` namespace (one constant) only for input, output, span kind, metadata.<k> and tags. Use `session.id` and `user.id`. Put environment and release on the **resource**, with a per-request override attribute. Fix the span-kind enum to match our data model (spec 01).
+15. **Attribute names:** emit standard GenAI semconv for model, usage and cost wherever one exists (as Laminar does). Use the `cetra.*` namespace (one constant) only for input, output, span kind, metadata.<k> and tags. Use `session.id` and `user.id`. Put environment and release on the **resource**, with a per-request override attribute. Fix the span-kind enum to match our data model (spec 01).
 16. **Masking:** offer one hook that runs at **export time** on every exported span's attributes. It should fail closed (drop the span, log its id), because it covers third-party spans too. An optional `mask(value)` can run at capture time on decorator input and output to avoid serializing secrets at all.
 17. **Scores:** do not route them through OTLP. Use a REST batch endpoint with a background queue (bounded, non-blocking, retry with backoff, flushed by `flush()`).
     - API: `score(trace_id=, span_id=, name=, value=, …)`, `score_current_span(...)`, `score_current_trace(...)`.

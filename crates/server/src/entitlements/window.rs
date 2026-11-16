@@ -1,7 +1,7 @@
 //! The org's data window on every read (D175, D-P-21, D-P-44).
 
-use llmobs_core::ids::OrgId;
-use llmobs_storage::QueryOptions;
+use cetra_core::ids::OrgId;
+use cetra_storage::QueryOptions;
 #[cfg(test)]
 use std::path::Path;
 

@@ -5,7 +5,7 @@
 //! Rendering keeps a string as itself, writes one line per message, and uses
 //! compact JSON for every other value.
 
-use llmobs_core::message::{Message, Modality, Part, Role};
+use cetra_core::message::{Message, Modality, Part, Role};
 use serde_json::Value;
 
 /// Parses `value` as a messages array.

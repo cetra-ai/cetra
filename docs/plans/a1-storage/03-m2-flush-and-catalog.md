@@ -39,7 +39,7 @@ M2 never removes an active file: no file becomes obsolete before M4/M5. So obsol
 | D87 | Files durable before active; staged objects; serialized compare-and-set commits. |
 | D89 / D91 | Providers expose stored schemas; `ProjectQuery` carries the providers, a `RuntimeEnv` and `target_partitions`; A2 builds the session. |
 | D90 | Nested `[storage]` config, human units. |
-| **D119 (new, M2.1)** | **S3 testing.** CI tests the S3 code paths through `object_store`'s `InMemory` store wrapped in a fault-injecting store. A MinIO integration test runs only when `LLMOBS_TEST_S3_ENDPOINT` is set. It is documented in `AGENTS.md` and run locally before merging storage changes that touch object writes. |
+| **D119 (new, M2.1)** | **S3 testing.** CI tests the S3 code paths through `object_store`'s `InMemory` store wrapped in a fault-injecting store. A MinIO integration test runs only when `CETRA_TEST_S3_ENDPOINT` is set. It is documented in `AGENTS.md` and run locally before merging storage changes that touch object writes. |
 
 User answers behind this plan: S3 is in M2, tested with MinIO opt-in; M2 is one PR.
 
@@ -124,7 +124,7 @@ crates/storage/
    - The `file://` default depends on `data_dir`, so it is resolved after deserialization, through a method like `object_store_url()`. Keep the field an `Option` in serde.
 3. Spec 12's configuration table: add `storage.object_store` (it already has a row; update it to the D90 form), `storage.s3.*`, `storage.flush.upload_concurrency` and `storage.query.metadata_cache_bytes`.
 4. Add D119 to `docs/mvp-decisions.md` (text in § Decisions).
-5. `AGENTS.md` § Tests: "`LLMOBS_TEST_S3_ENDPOINT` (with `LLMOBS_TEST_S3_BUCKET` and the `AWS_*` credentials) runs the storage MinIO test (D119)."
+5. `AGENTS.md` § Tests: "`CETRA_TEST_S3_ENDPOINT` (with `CETRA_TEST_S3_BUCKET` and the `AWS_*` credentials) runs the storage MinIO test (D119)."
 
 ### Tests
 
@@ -261,7 +261,7 @@ enum Kind { Local { root: PathBuf }, Remote }
 - `Objects::new(config)`:
   - **Local:** create `root` (fsync parents); `store` is `LocalFileSystem::new_with_prefix(root)`, used for reads only.
   - **S3:** `AmazonS3Builder::from_env()` with the config's bucket, region, endpoint, path style and `allow_http`, then `with_prefix` for the prefix (or `PrefixStore`).
-- `register(&self, runtime: &RuntimeEnv)`: registers `store` under a fixed URL (`llmobs://objects/` or similar) that the providers use in their `FileScanConfig`. Document the URL in one constant.
+- `register(&self, runtime: &RuntimeEnv)`: registers `store` under a fixed URL (`cetra://objects/` or similar) that the providers use in their `FileScanConfig`. Document the URL in one constant.
 - `table_file_path(table, project, day, level) -> (String, FileId)`: the § Conventions path with a fresh UUIDv7.
 - `put_durable(&self, path: &str, bytes: Bytes) -> Result<(), ObjectError>`:
   - **Local**, in `spawn_blocking`:
@@ -325,13 +325,13 @@ pub(crate) fn write_file(table: Table, level: u8, batches: &[Arc<RecordBatch>]) 
   Concatenate the batches, `lexsort_to_indices`, `take`. Declare the order with `WriterProperties::set_sorting_columns`, and only because the sort was done.
 - **Compression** zstd level 3. **Data pages** 1 MiB, max 20,000 rows per page. **Page index** on. **Statistics** page level for all scalar columns.
 - **Row groups:** call `flush()` on the `ArrowWriter` when its in-progress size reaches 64 MiB or 100,000 rows. Write in slices so the check happens between slices.
-- **Dictionary:** on for the columns spec 01 marks `(dict)`, off for every other column. Write the per-table list as a constant next to the writer properties, with a test that compares it with the names in `llmobs_core::schema`.
+- **Dictionary:** on for the columns spec 01 marks `(dict)`, off for every other column. Write the per-table list as a constant next to the writer properties, with a test that compares it with the names in `cetra_core::schema`.
 - **Bloom filters** (fpp 0.01):
   - `spans`: `trace_id`, `session_id`, `user_id`;
   - `scores`: `trace_id`, `score_id`.
 
   (`traces` comes in M3.)
-- **KV metadata:** `llmobs.table`, `llmobs.schema_version` (use `"1"` and say in a comment that it follows the stored schema version), `llmobs.level`, `llmobs.min_time`, `llmobs.max_time`, `llmobs.min_ingest_time`, `llmobs.max_ingest_time`.
+- **KV metadata:** `cetra.table`, `cetra.schema_version` (use `"1"` and say in a comment that it follows the stored schema version), `cetra.level`, `cetra.min_time`, `cetra.max_time`, `cetra.min_ingest_time`, `cetra.max_ingest_time`.
 - **`footer_size`:** the Parquet footer length plus 8 (the last 8 bytes of the file hold it).
 
 ### Tests
@@ -610,8 +610,8 @@ and never a deletion before the commit.
 
 ### MinIO (`tests/s3.rs`, opt-in, D119)
 
-Runs only when `LLMOBS_TEST_S3_ENDPOINT` is set; otherwise it returns at once and prints that it was skipped.
-- Use `LLMOBS_TEST_S3_BUCKET`, a unique prefix per run, and `AWS_*` credentials.
+Runs only when `CETRA_TEST_S3_ENDPOINT` is set; otherwise it returns at once and prints that it was skipped.
+- Use `CETRA_TEST_S3_BUCKET`, a unique prefix per run, and `AWS_*` credentials.
 - Steps:
   1. append, flush, query;
   2. reopen, query again;
@@ -622,7 +622,7 @@ Runs only when `LLMOBS_TEST_S3_ENDPOINT` is set; otherwise it returns at once an
 ### Done when
 
 - `just check` is green, and `just test` time grew by at most ~30 s over M1.
-- `LLMOBS_CRASH_ITERATIONS=300` passes locally. Report the time.
+- `CETRA_CRASH_ITERATIONS=300` passes locally. Report the time.
 
 **Commit:** `storage: add flush crash and durability tests`
 
@@ -649,7 +649,7 @@ Runs only when `LLMOBS_TEST_S3_ENDPOINT` is set; otherwise it returns at once an
 ## Report
 
 At the end of M2, report:
-- every public item of `llmobs-storage` that changed, against `00-design.md` § Public API;
+- every public item of `cetra-storage` that changed, against `00-design.md` § Public API;
 - the exact versions of the new dependencies, and anything cargo-deny reported;
 - the answers to the design's open questions (DataFusion's metadata cache and bloom filters; MinIO run);
 - measured numbers, rough is fine:

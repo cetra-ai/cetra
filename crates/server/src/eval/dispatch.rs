@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 
+use cetra_core::ids::ProjectId;
 use futures::FutureExt;
-use llmobs_core::ids::ProjectId;
 use sqlx::SqliteConnection;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
@@ -476,9 +476,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use axum::http::{Method, header};
-    use llmobs_core::enums::PayloadFormat;
-    use llmobs_core::ids::{SpanId, TraceId};
-    use llmobs_core::span::Span;
+    use cetra_core::enums::PayloadFormat;
+    use cetra_core::ids::{SpanId, TraceId};
+    use cetra_core::span::Span;
     use serde_json::{Value, json};
 
     use super::*;
@@ -991,9 +991,9 @@ mod tests {
             .await
             .expect("metrics render");
         for line in [
-            "llmobs_eval_jobs_finished_total{outcome=\"done\"} 1",
-            "llmobs_eval_jobs_finished_total{outcome=\"failed\"} 1",
-            "llmobs_eval_run_duration_seconds_count{kind=\"check\"} 1",
+            "cetra_eval_jobs_finished_total{outcome=\"done\"} 1",
+            "cetra_eval_jobs_finished_total{outcome=\"failed\"} 1",
+            "cetra_eval_run_duration_seconds_count{kind=\"check\"} 1",
         ] {
             assert!(
                 text.lines().any(|candidate| candidate == line),

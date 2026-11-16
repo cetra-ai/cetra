@@ -82,20 +82,20 @@ expression: protobuf
       "input_preview": "[\"a\",\"b\"]",
       "output_preview": "[\"b\",\"a\"]",
       "attributes": {
-        "llmobs.metadata.model": "bge",
-        "llmobs.span.kind": "reranker"
+        "cetra.metadata.model": "bge",
+        "cetra.span.kind": "reranker"
       },
       "resource_attributes": {
-        "telemetry.distro.name": "llmobs"
+        "telemetry.distro.name": "cetra"
       },
-      "scope_name": "llmobs",
+      "scope_name": "cetra",
       "scope_version": "0.0.0",
       "events": [],
       "links": [],
       "media_refs": [],
       "truncated": [],
       "conventions": [
-        "llmobs"
+        "cetra"
       ],
       "ingest_time": "[redacted]",
       "schema_version": 1

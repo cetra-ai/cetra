@@ -4,7 +4,7 @@ Tools that are not part of the product. Benchmark scripts live here too.
 
 ## Fixture capture (`tools/capture/`)
 
-`llmobs-capture` records the spans a real instrumentation library emits. A short Python or TypeScript program calls a local mock of the OpenAI, Anthropic and Gemini HTTP APIs and exports OTLP to a receiver in the same tool. The tool then writes `fixtures/otlp/<group>/<case>/case.json` and `input.json`.
+`cetra-capture` records the spans a real instrumentation library emits. A short Python or TypeScript program calls a local mock of the OpenAI, Anthropic and Gemini HTTP APIs and exports OTLP to a receiver in the same tool. The tool then writes `fixtures/otlp/<group>/<case>/case.json` and `input.json`.
 
 Scenarios live in `tools/capture/py/scenarios/<group>/<case>/` (uv) and `tools/capture/ts/scenarios/<group>/<case>/` (pnpm). Each directory holds `scenario.json` and the program.
 

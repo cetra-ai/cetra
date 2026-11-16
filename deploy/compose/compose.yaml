@@ -1,33 +1,33 @@
-# llmobs on one machine, data on a local volume (D-N-9).
-#   cp llmobs.env.example llmobs.env    # server settings: any LLMOBS_* key of spec 12
+# cetra on one machine, data on a local volume (D-N-9).
+#   cp cetra.env.example cetra.env    # server settings: any CETRA_* key of spec 12
 #   docker compose up -d
 # With S3-compatible object storage (a local Garage) for Parquet files and media:
 #   cp .env.example .env                # and set the Garage keys and secrets in it
 #   docker compose -f compose.yaml -f compose.s3.yaml up -d
 # Docs: docs/self-hosting/docker-compose.md
-name: llmobs
+name: cetra
 
 services:
-  llmobs:
-    image: ${LLMOBS_IMAGE:-ghcr.io/sebastiencs/llmobs:0.0.0}
+  cetra:
+    image: ${CETRA_IMAGE:-ghcr.io/cetra-ai/cetra:0.0.0}
     restart: unless-stopped
     # Shutdown drains requests (20 s) and flushes memtables (30 s) (spec 12 § Process lifecycle).
     stop_grace_period: 60s
     ports:
-      - "${LLMOBS_BIND:-127.0.0.1}:${LLMOBS_HTTP_PORT:-8080}:8080"
-      - "${LLMOBS_BIND:-127.0.0.1}:${LLMOBS_OTLP_GRPC_PORT:-4317}:4317"
-      - "${LLMOBS_BIND:-127.0.0.1}:${LLMOBS_OTLP_HTTP_PORT:-4318}:4318"
+      - "${CETRA_BIND:-127.0.0.1}:${CETRA_HTTP_PORT:-8080}:8080"
+      - "${CETRA_BIND:-127.0.0.1}:${CETRA_OTLP_GRPC_PORT:-4317}:4317"
+      - "${CETRA_BIND:-127.0.0.1}:${CETRA_OTLP_HTTP_PORT:-4318}:4318"
     # Server settings. Only variables present in the file reach the server: an empty
-    # LLMOBS_* variable is a set (and usually invalid) value, not an unset one.
+    # CETRA_* variable is a set (and usually invalid) value, not an unset one.
     env_file:
-      - path: llmobs.env
+      - path: cetra.env
         required: false
-    # Prometheus metrics (docs/self-hosting/monitoring.md): set LLMOBS_METRICS_ADDR in llmobs.env,
+    # Prometheus metrics (docs/self-hosting/monitoring.md): set CETRA_METRICS_ADDR in cetra.env,
     # for example 0.0.0.0:9464, and publish that port.
     volumes:
-      - llmobs-data:/data
+      - cetra-data:/data
     healthcheck:
-      test: ["CMD", "/usr/local/bin/llmobs", "health"]
+      test: ["CMD", "/usr/local/bin/cetra", "health"]
       interval: 30s
       timeout: 10s
       start_period: 120s
@@ -35,4 +35,4 @@ services:
       retries: 3
 
 volumes:
-  llmobs-data:
+  cetra-data:

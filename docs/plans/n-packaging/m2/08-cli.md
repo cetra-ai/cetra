@@ -1,23 +1,23 @@
-# B8 — `llmobs admin backup` and `llmobs admin gc-orphans`
+# B8 — `cetra admin backup` and `cetra admin gc-orphans`
 
 Read [00-design.md](00-design.md) first, especially § Design › Trigger and § Design › Restore
 (D-N-17, D-N-21).
 
-**Also (cross-track review X15):** `llmobs admin migrate [--config <file>]` requires `catalog.db`
+**Also (cross-track review X15):** `cetra admin migrate [--config <file>]` requires `catalog.db`
 (`AdminError::NoCatalog`) and `meta.db` (`AdminError::NoMetaDb`), then opens the storage with
 `Maintenance::open` **first** (the server must be stopped: a held `LOCK` maps to
 `AdminError::Locked` before `meta.db` is touched), then `meta.db` with `MetaDb::open`. That runs both
 databases' migrations (and B9's pre-migration copies); it then closes both and exits, printing `meta.db and catalog.db are at this version's
 schema`. A restore of an older backup runs it before `reapply-deletions`, so the server never starts
 on restored data before the deletions are re-applied. Test `migrate_on_a_stopped_server_succeeds` and
-`migrate_while_the_server_runs_is_refused`; spec 09 § CLI gets the row `| \`llmobs admin migrate\` |
+`migrate_while_the_server_runs_is_refused`; spec 09 § CLI gets the row `| \`cetra admin migrate\` |
 with the server stopped: run the migrations of \`meta.db\` and \`catalog.db\`, then exit (restores of
 older backups, D-N-22) |`.
 
 **Goal:**
-- `llmobs admin backup --to <dir> [--meta-only] [--config <file>]` asks the running server, through
+- `cetra admin backup --to <dir> [--meta-only] [--config <file>]` asks the running server, through
   `<data_dir>/admin.sock`, for a backup, and prints the report.
-- `llmobs admin gc-orphans [--min-age 1h] [--dry-run] [--config <file>]` opens the storage (the server
+- `cetra admin gc-orphans [--min-age 1h] [--dry-run] [--config <file>]` opens the storage (the server
   must be stopped), runs `collect_orphans`, prints the counts, and exits with status 1 when objects
   are missing.
 
@@ -50,7 +50,7 @@ Backup {
     /// Metadata only (S3-compatible object storage; objects stay in the bucket).
     #[arg(long)]
     meta_only: bool,
-    /// Config file. Overrides `LLMOBS_CONFIG`.
+    /// Config file. Overrides `CETRA_CONFIG`.
     #[arg(long)]
     config: Option<PathBuf>,
 },
@@ -65,7 +65,7 @@ GcOrphans {
     /// Required in S3 mode without `--dry-run`: deleting orphans there rolls the live bucket back.
     #[arg(long)]
     rollback_bucket: bool,
-    /// Config file. Overrides `LLMOBS_CONFIG`.
+    /// Config file. Overrides `CETRA_CONFIG`.
     #[arg(long)]
     config: Option<PathBuf>,
 },
@@ -82,7 +82,7 @@ intended.
 1. `load_config`. Resolve `to` to an absolute path against the current directory: the server
    process has another working directory.
 2. Connect a `tokio::net::UnixStream` to `config.data_dir.join(ADMIN_SOCKET)`. On `NotFound` or
-   `ConnectionRefused`, bail with `no running llmobs serve answers on <socket>; start it, or for a
+   `ConnectionRefused`, bail with `no running cetra serve answers on <socket>; start it, or for a
    stopped server copy the data directory (docs/self-hosting/backup.md)`.
 3. Write `serde_json::to_string(&AdminRequest::Backup { to, meta_only })` and `\n`. Read one line and
    parse an `AdminResponse`.
@@ -96,7 +96,7 @@ intended.
    For `meta-only`, the objects line reads `objects: 812 (3.0 GiB; in the bucket)`.
 5. On `Failed`, bail with `backup failed (<code>): <message>`.
 
-**`GcOrphans`:** call `llmobs_server::admin::gc_orphans(&config, min_age, dry_run)`. That function
+**`GcOrphans`:** call `cetra_server::admin::gc_orphans(&config, min_age, dry_run)`. That function
 opens `Maintenance::open(config.storage_config())`.
 - In S3 mode, without `--dry-run`, `--rollback-bucket` must be given, else a new
   `AdminError::RollbackNeedsConfirmation` (`in S3 mode this deletes every object written after the
@@ -107,10 +107,10 @@ opens `Maintenance::open(config.storage_config())`.
   then look like an orphan.
 - `OpenError::Locked { .. }` maps to the existing `AdminError::Locked`. Its message becomes `the
   server is running: stop it first`; update the rotate-key tests that assert the old text.
-- Any other `OpenError` maps to a new `AdminError::Storage(llmobs_storage::error::OpenError)`.
+- Any other `OpenError` maps to a new `AdminError::Storage(cetra_storage::error::OpenError)`.
 - It returns a server-side `pub struct GcOrphansReport { orphans, orphan_bytes, recent_unknown,
   missing, missing_media, dry_run }`, copied from `OrphanReport`. The CLI does not depend on
-  `llmobs-storage`.
+  `cetra-storage`.
 
 It then runs `collect_orphans`, calls `storage.shutdown().await`, and returns the `OrphanReport`.
 Update `admin.rs`'s module doc: it says these commands work while the server runs, which is no
@@ -129,26 +129,26 @@ incomplete (backup older than gc.grace, or objects/ not copied)`, and exit with 
 
 ### `docs/spec/09-api.md` § CLI
 
-Replace the row that lists `llmobs admin compact … · wal-inspect · gc-orphans` with:
+Replace the row that lists `cetra admin compact … · wal-inspect · gc-orphans` with:
 
 ```markdown
-| `llmobs admin backup --to <dir> [--meta-only]` | online backup of the running server through `<data_dir>/admin.sock`; the server writes `<dir>` (N M2, D-N-17–D-N-19) |
-| `llmobs admin gc-orphans [--min-age 1h] [--dry-run]` | with the server stopped: deletes objects the catalog does not know (older than `--min-age`) and reports objects it needs but the store lacks; exit 1 when some are missing (D-N-21) |
-| `llmobs admin compact --project … --day …` · `llmobs admin wal-inspect` | maintenance |
+| `cetra admin backup --to <dir> [--meta-only]` | online backup of the running server through `<data_dir>/admin.sock`; the server writes `<dir>` (N M2, D-N-17–D-N-19) |
+| `cetra admin gc-orphans [--min-age 1h] [--dry-run]` | with the server stopped: deletes objects the catalog does not know (older than `--min-age`) and reports objects it needs but the store lacks; exit 1 when some are missing (D-N-21) |
+| `cetra admin compact --project … --day …` · `cetra admin wal-inspect` | maintenance |
 ```
 
 ## Tests (`main.rs` test module)
 
-- `backup_parses`: `["llmobs","admin","backup","--to","/b"]` gives `meta_only == false`, and
+- `backup_parses`: `["cetra","admin","backup","--to","/b"]` gives `meta_only == false`, and
   `--meta-only` sets it.
 - `gc_orphans_parses_defaults`: `min_age` is 1 h by default, `--min-age 30m` gives 30 min, and
   `--dry-run` is parsed.
 - `backup_without_a_server_names_the_socket`: with a temp data dir and no server, `run_cli` returns an
   error whose text contains `admin.sock` and `docs/self-hosting/backup.md`.
 - `backup_through_a_running_server`: `TestServer` keeps its config private, so start a server the
-  way `TestServer::start` does internally: write an `llmobs.toml` in a short `tempfile::tempdir()`
+  way `TestServer::start` does internally: write a`cetra.toml` in a short `tempfile::tempdir()`
   (the socket path must stay under 108 bytes), then `serve::bind(config, None)`. Run
-  `run_cli(["llmobs","admin","backup","--to",<tmp>/backup,"--config",<toml>])`, and get `Ok`;
+  `run_cli(["cetra","admin","backup","--to",<tmp>/backup,"--config",<toml>])`, and get `Ok`;
   `<tmp>/backup/manifest.json` exists. Set `otlp_http_addr` and `grpc_addr` to `""` in the toml, as
   `TestServer` does.
 - `gc_orphans_refuses_a_data_dir_without_a_catalog`: on an empty temp data dir, it returns `Err`
@@ -168,8 +168,8 @@ Replace the row that lists `llmobs admin compact … · wal-inspect · gc-orphan
 ## Verify
 
 ```bash
-cargo test -p llmobs-cli --all-features backup
-cargo test -p llmobs-cli --all-features gc_orphans
+cargo test -p cetra-cli --all-features backup
+cargo test -p cetra-cli --all-features gc_orphans
 just check
 ```
 

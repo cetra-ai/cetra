@@ -127,26 +127,26 @@ expression: protobuf
       "input_preview": "hi",
       "output_preview": "hello",
       "attributes": {
+        "cetra.span.kind": "llm",
         "gen_ai.operation.name": "chat",
         "gen_ai.provider.name": "openai",
         "gen_ai.request.model": "gpt-4o-mini",
         "gen_ai.request.temperature": "0.2",
         "gen_ai.response.model": "gpt-4o-mini-2024-07-18",
         "gen_ai.usage.input_tokens": "12",
-        "gen_ai.usage.output_tokens": "3",
-        "llmobs.span.kind": "llm"
+        "gen_ai.usage.output_tokens": "3"
       },
       "resource_attributes": {
-        "telemetry.distro.name": "llmobs"
+        "telemetry.distro.name": "cetra"
       },
-      "scope_name": "llmobs",
+      "scope_name": "cetra",
       "scope_version": "0.0.0",
       "events": [],
       "links": [],
       "media_refs": [],
       "truncated": [],
       "conventions": [
-        "llmobs",
+        "cetra",
         "genai"
       ],
       "ingest_time": "[redacted]",

@@ -76,13 +76,13 @@ pub enum BackupError {
     #[error("--meta-only needs S3-compatible object storage; a local-mode backup must include its objects")]
     MetaOnlyNeedsS3,
     #[error("flush: {0}")]
-    Flush(#[from] llmobs_storage::FlushNowError),
+    Flush(#[from] cetra_storage::FlushNowError),
     #[error("meta.db copy: {0}")]
     Meta(sqlx::Error),
     #[error("catalog snapshot: {0}")]
-    Snapshot(#[from] llmobs_storage::SnapshotError),
+    Snapshot(#[from] cetra_storage::SnapshotError),
     #[error("objects: {0}")]
-    Objects(#[from] llmobs_storage::CopyObjectsError),
+    Objects(#[from] cetra_storage::CopyObjectsError),
     #[error("writing the backup: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -133,7 +133,7 @@ Steps (each maps to § Design › Consistency):
    `encryption_key = "file"`, otherwise `"environment"`.
 9. Write `manifest.json` exactly as § Backup layout and manifest shows:
    - `format: 1`;
-   - `llmobs_version: env!("CARGO_PKG_VERSION")`;
+   - `cetra_version: env!("CARGO_PKG_VERSION")`;
    - `created_at`: `chrono::Utc::now()` taken right after step 4 returns, in RFC 3339 with
      nanoseconds and `Z` (`to_rfc3339_opts(SecondsFormat::Nanos, true)`);
    - `mode`;
@@ -194,7 +194,7 @@ here.
 ## Verify
 
 ```bash
-cargo test -p llmobs-server --all-features backup
+cargo test -p cetra-server --all-features backup
 just check
 ```
 

@@ -2,8 +2,8 @@
 
 use std::time::Duration;
 
-use llmobs_core::ids::ProjectId;
-use llmobs_storage::{QueryContext, SqlRequest, TimeWindow};
+use cetra_core::ids::ProjectId;
+use cetra_storage::{QueryContext, SqlRequest, TimeWindow};
 use rmcp::model::JsonObject;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -1006,7 +1006,7 @@ mod tests {
         .await;
         assert!(matches!(
             result,
-            Err(ApiError::Sql(llmobs_storage::RunError::Timeout))
+            Err(ApiError::Sql(cetra_storage::RunError::Timeout))
         ));
     }
 
@@ -1282,7 +1282,7 @@ mod tests {
         ));
         assert!(matches!(
             required_window(Some(t(FROM)), Some(t(FROM))),
-            Err(ApiError::Query(llmobs_storage::RunError::InvalidRequest(_)))
+            Err(ApiError::Query(cetra_storage::RunError::InvalidRequest(_)))
         ));
         assert!(required_window(Some(t(FROM)), Some(t("2026-01-31T00:00:00Z"))).is_ok());
         assert!(matches!(

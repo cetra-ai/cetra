@@ -4,7 +4,7 @@
 
 H6 adds `POST /mcp`: the MCP server for coding agents (D-H-2, D-H-3, D-H-10, D-H-11). It speaks streamable HTTP through `rmcp` 3.10.0, stateless, with JSON responses. Only personal access tokens may call it (`Access::Pat`). Each token gets 60 requests per minute and 4 at a time. H6 ships the server and two tools, `list_projects` and `get_schema`; H7 and H8 add the other five tools to the same dispatcher.
 
-When H6 is done, an agent configured with `{"url": "http://<host>:8080/mcp", "headers": {"Authorization": "Bearer pat-llmobs-…"}}` can list its projects and read the schema.
+When H6 is done, an agent configured with `{"url": "http://<host>:8080/mcp", "headers": {"Authorization": "Bearer pat-cetra-…"}}` can list its projects and read the schema.
 
 ## Read first
 
@@ -37,7 +37,7 @@ You do not need to read the `rmcp` source: § rmcp API below is everything H6 us
 | `crates/server/src/http/access_suite.rs` | `Access::Pat` in `checked_routes`, `expected`, `assert_every_route_declares_access` |
 | `crates/server/src/http/error.rs` | `ApiError::problem` and a new `ApiError::log` become `pub(crate)` |
 | `crates/server/src/auth/limits.rs` | `McpLimits`, `McpGuard`, `Limits::mcp`, a test-only `McpLimits::in_flight` |
-| `crates/cli/src/main.rs` | `log_filter`: `llmobs serve` always caps `rmcp` at `warn`; one unit test |
+| `crates/cli/src/main.rs` | `log_filter`: `cetra serve` always caps `rmcp` at `warn`; one unit test |
 
 No OpenAPI change: `/mcp` is `documented: false`, like `/v1/traces` (README § Design → MCP server). No spec change.
 
@@ -99,7 +99,7 @@ rmcp = { version = "3.10.0", default-features = false, features = [
 ] }
 ```
 
-In `crates/server/Cargo.toml` `[dependencies]`, add `rmcp.workspace = true` after `hex.workspace = true`. Run `cargo build -p llmobs-server` once so `Cargo.lock` updates. `cargo deny` warns about duplicate versions (`multiple-versions = "warn"`); that is expected and not a failure. Any `deny` *error* is a STOP.
+In `crates/server/Cargo.toml` `[dependencies]`, add `rmcp.workspace = true` after `hex.workspace = true`. Run `cargo build -p cetra-server` once so `Cargo.lock` updates. `cargo deny` warns about duplicate versions (`multiple-versions = "warn"`); that is expected and not a failure. Any `deny` *error* is a STOP.
 
 ### 2. `ApiError::problem` and `ApiError::log` (`http/error.rs`)
 
@@ -617,7 +617,7 @@ impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new(
-                llmobs_core::names::PRODUCT,
+                cetra_core::names::PRODUCT,
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(INSTRUCTIONS)
@@ -678,7 +678,7 @@ Add `pub(crate) mod mcp;` after `pub(crate) mod live;`.
 
 ### 11. Cap rmcp's logs (`crates/cli/src/main.rs`)
 
-rmcp logs whole JSON-RPC requests and results (tool arguments, SQL text, payloads) at `debug` and `trace` (`rmcp` `service.rs` and `transport/streamable_http_server/tower.rs`). README § Conventions → Privacy and spec 12 say `llmobs serve` always adds `rmcp=warn` to the log filter, whatever `log.level` says. In `crates/cli/src/main.rs`, replace the first line of `init_tracing`
+rmcp logs whole JSON-RPC requests and results (tool arguments, SQL text, payloads) at `debug` and `trace` (`rmcp` `service.rs` and `transport/streamable_http_server/tower.rs`). README § Conventions → Privacy and spec 12 say `cetra serve` always adds `rmcp=warn` to the log filter, whatever `log.level` says. In `crates/cli/src/main.rs`, replace the first line of `init_tracing`
 
 ```rust
     let filter = EnvFilter::try_new(&log.level).context("loading config")?;
@@ -769,7 +769,7 @@ pub(crate) mod test_helpers {
     }
 
     /// Runs `future` under its own subscriber that keeps what production keeps: `info` and
-    /// above, `rmcp` at `warn` (the directive `llmobs serve` adds, step 11). Returns the
+    /// above, `rmcp` at `warn` (the directive `cetra serve` adds, step 11). Returns the
     /// formatted output. Use it, not `test_support::capture_logs` (which captures every level,
     /// rmcp's debug dumps included), for MCP log tests, on a current-thread runtime.
     pub(crate) async fn capture_info_logs<T>(future: impl std::future::Future<Output = T>) -> (T, String) {
@@ -830,7 +830,7 @@ Every test is `#[tokio::test(flavor = "multi_thread")]` except the two log tests
 
 | Test | Steps | Asserts |
 |---|---|---|
-| `initialize_negotiates_2025_11_25` | `rpc(&app, Some(&tok), {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}})` | 200; `content-type` = `application/json`; no `mcp-session-id` header; `result.protocolVersion` = `"2025-11-25"`; `result.serverInfo.name` = `llmobs_core::names::PRODUCT`; `result.serverInfo.version` = `env!("CARGO_PKG_VERSION")`; `result.capabilities.tools` = `{}`; `result.instructions` = `INSTRUCTIONS` |
+| `initialize_negotiates_2025_11_25` | `rpc(&app, Some(&tok), {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}})` | 200; `content-type` = `application/json`; no `mcp-session-id` header; `result.protocolVersion` = `"2025-11-25"`; `result.serverInfo.name` = `cetra_core::names::PRODUCT`; `result.serverInfo.version` = `env!("CARGO_PKG_VERSION")`; `result.capabilities.tools` = `{}`; `result.instructions` = `INSTRUCTIONS` |
 | `initialize_negotiates_older_and_unknown_versions` | for `v` in `2024-11-05`, `2025-03-26`, `2025-06-18`: `post_mcp(&app, Some(&tok), Some(v), &[], <initialize with protocolVersion v>)`; then `post_mcp(&app, Some(&tok), None, &[], <initialize with protocolVersion "2099-01-01">)` | each: 200 and `result.protocolVersion` = `v`; the unknown one: 200 and `"2025-11-25"` |
 | `initialized_notification_is_accepted` | `rpc` with `{"jsonrpc":"2.0","method":"notifications/initialized"}` | 202, empty body |
 | `tools_list_has_every_tool_read_only` | `rpc` `tools/list` | `result.tools[*].name` = `["list_projects", "get_schema"]`; every tool has `annotations.readOnlyHint` = `true` and `inputSchema.type` = `"object"`; `list_projects`'s `inputSchema.required` is absent; `get_schema`'s is `["project"]`; `result.resultType` is absent (pre-2026 result) |
@@ -848,7 +848,7 @@ In `stateless_2026_07_28_requests` (b), assert `result.tools[*].name` = `["list_
 | Test | Steps | Asserts |
 |---|---|---|
 | `only_personal_tokens_reach_mcp` | `tools/list` via `rpc` with: no bearer; `seeded.read_key`; `seeded.ingest_key`; `seeded.public_key`; `personal_token(seeded.user_id, false)`; `personal_token(seeded.user_id, true)`. Then two hand-built requests (headers as in `post_mcp`): the cookie `seeded.cookie` and no bearer; the cookie and the read PAT together | no bearer: 401 `unauthorized`; the three keys: 403 `forbidden`; both PATs: 200 with `result.tools`; cookie alone: 403 `forbidden`; cookie + PAT: 200 (the bearer wins, D140) |
-| `dead_tokens_are_unauthorized` | (a) bearer `pat-llmobs-` followed by 32 `A`; (b) a token from `personal_token(seeded.user_id, false)`, revoked before its first use: id from `personal_tokens::token_by_hash(app.state.meta.reader(), &secret::hash_token(&token)).await.unwrap().unwrap().id`, then `revoke_token(conn, seeded.user_id, id, now)` in `app.state.meta.write`; (c) an expired token: `let minted = secret::new_key(KeyKind::Personal).unwrap();` and `personal_tokens::insert_token(conn, NewToken { user_id: seeded.user_id, name: "old".to_owned(), prefix: minted.prefix.clone(), hash: minted.hash.clone(), scopes: vec![KeyScope::Read], expires_at: Some(now - 1) }, now)`; (d) a token of `app.add_member(&seeded, "gone@example.com", OrgRole::Member)` whose user is then disabled with `users::set_disabled(conn, member.id, Some(now), now)` | each: `tools/list` → 401 `unauthorized`. `now` is `app.state.clock.now_ns()` |
+| `dead_tokens_are_unauthorized` | (a) bearer `pat-cetra-` followed by 32 `A`; (b) a token from `personal_token(seeded.user_id, false)`, revoked before its first use: id from `personal_tokens::token_by_hash(app.state.meta.reader(), &secret::hash_token(&token)).await.unwrap().unwrap().id`, then `revoke_token(conn, seeded.user_id, id, now)` in `app.state.meta.write`; (c) an expired token: `let minted = secret::new_key(KeyKind::Personal).unwrap();` and `personal_tokens::insert_token(conn, NewToken { user_id: seeded.user_id, name: "old".to_owned(), prefix: minted.prefix.clone(), hash: minted.hash.clone(), scopes: vec![KeyScope::Read], expires_at: Some(now - 1) }, now)`; (d) a token of `app.add_member(&seeded, "gone@example.com", OrgRole::Member)` whose user is then disabled with `users::set_disabled(conn, member.id, Some(now), now)` | each: `tools/list` → 401 `unauthorized`. `now` is `app.state.clock.now_ns()` |
 
 **Limits**
 
@@ -883,17 +883,17 @@ In `stateless_2026_07_28_requests` (b), assert `result.tools[*].name` = `["list_
   - `fit_list_leaves_a_fitting_body_alone`: `{"items":[1,2,3],"truncated":false,"notes":[]}`, `max_chars` 1000 → `false`, body unchanged.
   - `fit_list_keeps_the_longest_prefix`: `{"items": [100 × "aaaaaaaaaa"], "truncated": false, "notes": []}`, `max_chars` 300, note `"cut"` → `true`; `truncated` = `true`; `notes` = `["cut"]`; the rendered body has ≤ 300 characters and the same body with one more item has more; the key order is `items`, `truncated`, `notes`.
   - `fit_list_can_empty_the_list`: one item of 1,000 `a`, `max_chars` 50 → `items` = `[]`, `truncated` = `true`.
-  - `failure_carries_code_message_and_position`: `failure(&ApiError::Query(RunError::Invalid(InvalidQuery { message: "unknown column x".to_owned(), position: Some(Position { line: 1, column: 8 }) })))` (`use llmobs_storage::{InvalidQuery, Position, RunError};`) → `is_error` = `Some(true)`, and the text, read with `result.content[0].as_text().map(|text| text.text.as_str())`, = `{"error":{"code":"invalid_filter","message":"unknown column x","position":{"line":1,"column":8}}}`; the same through `ApiError::Sql` gives the same text; `failure(&ApiError::NotFound)` → `{"error":{"code":"not_found","message":"Not Found"}}`.
+  - `failure_carries_code_message_and_position`: `failure(&ApiError::Query(RunError::Invalid(InvalidQuery { message: "unknown column x".to_owned(), position: Some(Position { line: 1, column: 8 }) })))` (`use cetra_storage::{InvalidQuery, Position, RunError};`) → `is_error` = `Some(true)`, and the text, read with `result.content[0].as_text().map(|text| text.text.as_str())`, = `{"error":{"code":"invalid_filter","message":"unknown column x","position":{"line":1,"column":8}}}`; the same through `ApiError::Sql` gives the same text; `failure(&ApiError::NotFound)` → `{"error":{"code":"not_found","message":"Not Found"}}`.
 
 The authorization suite (`every_route_against_every_principal`) must pass with `/mcp` in it.
 
 ## Commands
 
 ```bash
-cargo build -p llmobs-server
-cargo test -p llmobs-server mcp
-cargo test -p llmobs-server access
-cargo test -p llmobs-server limits
+cargo build -p cetra-server
+cargo test -p cetra-server mcp
+cargo test -p cetra-server access
+cargo test -p cetra-server limits
 export PATH="$HOME/.local/share/nvm/v26.13.0/bin:$PATH" && just check
 ```
 

@@ -3,8 +3,8 @@
 
 use std::collections::HashSet;
 
-use llmobs_core::ids::{ProjectId, TraceId};
-use llmobs_storage::{
+use cetra_core::ids::{ProjectId, TraceId};
+use cetra_storage::{
     FilterDeletionRequest, QueryContext, TimeWindow, eval_trace_ids, filter_trace_ids,
     user_deletion_scope,
 };

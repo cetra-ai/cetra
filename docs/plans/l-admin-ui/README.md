@@ -196,7 +196,7 @@ L1 also wraps the root route's `<Outlet />` in `<TooltipProvider>` (`web/src/rou
 
 | File | Export | What |
 |---|---|---|
-| `web/src/components/onboarding/snippets.ts` | `PLACEHOLDER_KEY = "sk-llmobs-…"`; `otelSnippet(origin, key = PLACEHOLDER_KEY)`, `pythonSnippet(…)`, `typescriptSnippet(…)`, `vercelSnippet(…)` | It gains the `key` parameter. `KEY` is renamed `PLACEHOLDER_KEY` and exported. |
+| `web/src/components/onboarding/snippets.ts` | `PLACEHOLDER_KEY = "sk-cetra-…"`; `otelSnippet(origin, key = PLACEHOLDER_KEY)`, `pythonSnippet(…)`, `typescriptSnippet(…)`, `vercelSnippet(…)` | It gains the `key` parameter. `KEY` is renamed `PLACEHOLDER_KEY` and exported. |
 | `web/src/components/onboarding/snippet-tabs.tsx` | `SnippetTabs` | `origin: string; apiKey?: string`. The tabs block that is in `panel.tsx` today, moved here. `OnboardingPanel` uses it. |
 | `web/src/components/copy-button.tsx` | `CopyButton` | It gains `onCopied?: () => void`, called after a successful clipboard write. |
 | `web/src/components/secret-dialog.tsx` | `SecretDialog` | `open: boolean; title: string; secret: string; description?: string; showSnippets?: boolean; onDone: () => void`. D-L-5's dialog. |
@@ -355,7 +355,7 @@ Then open `http://localhost:5173/acme/support-bot/settings/general` (port from V
 
 ## Real-server check (2026-11-15, full plan review L-3)
 
-D-L-2 said G's M5 would check these pages on the real server; it did not, so the web-fix session did it by hand: a debug `llmobs serve` (fresh data dir, `LLMOBS_PUBLIC_URL=http://localhost:5173`, no SMTP, no licence) behind `just web-dev-server`, driven in a browser.
+D-L-2 said G's M5 would check these pages on the real server; it did not, so the web-fix session did it by hand: a debug `cetra serve` (fresh data dir, `CETRA_PUBLIC_URL=http://localhost:5173`, no SMTP, no licence) behind `just web-dev-server`, driven in a browser.
 
 Checked and working: `/setup` from the logged setup URL (cookie set, lands on `/acme`); org General, Members (invite without SMTP shows the copyable link), project General (retention in days, then "keep forever" saved as `null`), API keys (create shows the secret once with snippets), project Members (Teams gate shown without a licence); `/account` (tokens list with expiry); `/admin/users`, `/admin/settings` (test email disabled without SMTP); a session ended behind the app's back sends the next navigation to `/login?redirect=…`; `/invite/<token>` signed out creates the account and joins as Member; a Member gets the "no access" page on `/admin` and API keys and disabled controls on org General; sign-out from the user menu; `/login` wrong password ("Incorrect email or password.") and success; `/reset` without SMTP explains the admin path; `/verify` with a bad token offers a new link; `/cli-auth` Authorize (token POSTed to the callback, 90-day expiry accepted by the server) and Cancel (`error=access_denied`).
 
@@ -368,5 +368,5 @@ Not checked: OAuth/OIDC sign-in and the `/login?error=` codes from a real provid
 ## Notes for other tracks
 
 - **G (coordinator):** D-L-2 amends D-G-19. G's M5 no longer builds `/login` or the 401 handling; it checks L's pages against the real server. If G's M5 lands before L5, it must not add a second login page; it waits for L or uses L's branch.
-- **H (CLI):** done. `llmobs login` sends `host` to `/cli-auth`, handles `error=access_denied` on the callback, and receives the token by form POST (D-L-9, spec 08). The token expires after 90 days.
+- **H (CLI):** done. `cetra login` sends `host` to `/cli-auth`, handles `error=access_denied` on the callback, and receives the token by form POST (D-L-9, spec 08). The token expires after 90 days.
 - **D owners (contract):** CG1, CG2, CG4 and CG5 above are closed; spec 09 and `openapi.json` match the server.

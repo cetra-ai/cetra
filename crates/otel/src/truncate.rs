@@ -6,10 +6,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use llmobs_core::message::{Message, Part, Role, messages_to_json};
-use llmobs_core::names::marker::TRUNCATED_MESSAGES_PREFIX;
-use llmobs_core::names::marker::TRUNCATED_STRING_SUFFIX_PREFIX;
-use llmobs_core::span::Span;
+use cetra_core::message::{Message, Part, Role, messages_to_json};
+use cetra_core::names::marker::TRUNCATED_MESSAGES_PREFIX;
+use cetra_core::names::marker::TRUNCATED_STRING_SUFFIX_PREFIX;
+use cetra_core::span::Span;
 use serde_json::{Map, Value as Json};
 
 use crate::payload::{Io, Payload};
@@ -472,7 +472,7 @@ fn string_marker(original_bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use llmobs_core::message::Role;
+    use cetra_core::message::Role;
 
     fn user(content: &str) -> Message {
         Message {
@@ -553,7 +553,7 @@ mod tests {
         };
         let json = messages_to_json(&kept);
         assert!(json.len() <= limit, "{json}");
-        assert!(json.contains("[llmobs: 3 messages truncated]"), "{json}");
+        assert!(json.contains("[cetra: 3 messages truncated]"), "{json}");
         assert!(json.contains("\"content\":\"rules\""), "{json}");
         assert!(json.contains("\"content\":\"hello\""), "{json}");
         assert!(json.contains("\"content\":\"end\""), "{json}");
@@ -568,7 +568,7 @@ mod tests {
         let kept = assemble(&fixture, &protected_indices(&fixture), 4);
         assert_eq!(
             messages_to_json(&kept).len(),
-            273,
+            272,
             "{}",
             messages_to_json(&kept)
         );
@@ -588,7 +588,7 @@ mod tests {
         let kept = assemble(&messages, &protected, 5);
         let json = messages_to_json(&kept);
         assert_eq!(
-            json.matches("[llmobs: 1 messages truncated]").count(),
+            json.matches("[cetra: 1 messages truncated]").count(),
             2,
             "{json}"
         );
@@ -616,7 +616,7 @@ mod tests {
         };
         assert_eq!(
             text,
-            "{\"query\":\"abcdefghijklmnopqrstuv…[llmobs: truncated, original 48 bytes]"
+            "{\"query\":\"abcdefghijklmnopqrstuv…[cetra: truncated, original 48 bytes]"
         );
     }
 
@@ -761,18 +761,18 @@ mod tests {
     fn event_names_and_link_attributes_are_cut() {
         let mut span = blank_span();
         span.events = vec![
-            llmobs_core::span::SpanEvent {
+            cetra_core::span::SpanEvent {
                 time: 0,
                 name: long('e'),
                 attributes: Some(format!("{{\"k\":\"{}\"}}", long('v'))),
             },
-            llmobs_core::span::SpanEvent {
+            cetra_core::span::SpanEvent {
                 time: 0,
                 name: "short".to_owned(),
                 attributes: None,
             },
         ];
-        span.links = vec![llmobs_core::span::SpanLink {
+        span.links = vec![cetra_core::span::SpanLink {
             trace_id: serde_json::from_str("\"f80a0000000000000000000000000002\"")
                 .expect("trace id"),
             span_id: serde_json::from_str("\"f80a000000000002\"").expect("span id"),

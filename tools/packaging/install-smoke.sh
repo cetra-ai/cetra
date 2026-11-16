@@ -22,9 +22,9 @@ trap cleanup EXIT
 
 mkdir -p "$dir/www" "$dir/bin"
 shopt -s nullglob
-archives=(target/dist/llmobs-"$version"-*.tar.gz)
+archives=(target/dist/cetra-"$version"-*.tar.gz)
 if (( ${#archives[@]} == 0 )); then
-  echo "install-smoke: no target/dist/llmobs-$version-*.tar.gz; run just dist <target> first" >&2
+  echo "install-smoke: no target/dist/cetra-$version-*.tar.gz; run just dist <target> first" >&2
   exit 1
 fi
 cp "${archives[@]}" "$dir/www/"
@@ -42,10 +42,10 @@ if ! curl -sf "http://127.0.0.1:$port/SHA256SUMS" >/dev/null; then
   exit 1
 fi
 
-LLMOBS_VERSION="$version" \
-LLMOBS_INSTALL_DIR="$dir/bin" \
-LLMOBS_DOWNLOAD_BASE="http://127.0.0.1:$port" \
+CETRA_VERSION="$version" \
+CETRA_INSTALL_DIR="$dir/bin" \
+CETRA_DOWNLOAD_BASE="http://127.0.0.1:$port" \
   sh deploy/install.sh
 
-"$dir/bin/llmobs" version | grep -qx "llmobs $version"
-echo "install-smoke: install.sh installed llmobs $version"
+"$dir/bin/cetra" version | grep -qx "cetra $version"
+echo "install-smoke: install.sh installed cetra $version"

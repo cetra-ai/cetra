@@ -1,0 +1,35 @@
+# `just helm-check` renders the chart with this file (every optional block on).
+publicUrl: https://cetra.example.com
+config:
+  storage:
+    flush:
+      max_age: 60s
+  auth:
+    signup: invite_only
+env:
+  - name: CETRA_LOG
+    value: debug
+secret:
+  values:
+    CETRA_SMTP_URL: smtps://user:password@smtp.example.com:465
+    CETRA_EMAIL_FROM: cetra <noreply@cetra.sh>
+ingress:
+  enabled: true
+  className: nginx
+  host: cetra.example.com
+  tls:
+    - secretName: cetra-tls
+      hosts: [cetra.example.com]
+persistence:
+  size: 50Gi
+  storageClassName: fast
+resources:
+  requests:
+    cpu: "1"
+    memory: 2Gi
+  limits:
+    memory: 8Gi
+podAnnotations:
+  example.com/team: observability
+nodeSelector:
+  kubernetes.io/os: linux

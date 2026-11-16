@@ -8,11 +8,11 @@ Track F of Wave 1 builds the tracing half of spec 10 in both SDKs:
 - `context(...)` / `withContext(...)` with optional W3C baggage;
 - `score(...)` over REST with a background queue;
 - payload serialization, the 1 MiB client-side truncation, `capture_content`, masking (also over instrumentor spans), sampling;
-- instrumentation wiring: OpenInference instrumentors by name in Python, instrumentor objects plus `llmobs/openai`, `llmobs/anthropic`, `llmobs/langchain` helpers in TypeScript;
+- instrumentation wiring: OpenInference instrumentors by name in Python, instrumentor objects plus `cetra/openai`, `cetra/anthropic`, `cetra/langchain` helpers in TypeScript;
 - the Vercel AI SDK helper `aiTelemetry()` and the browser `feedback()` entry point (TypeScript);
-- cross-language conformance fixtures in `fixtures/otlp/llmobs/sdk-*`, checked by both SDK test suites and by the Rust golden test.
+- cross-language conformance fixtures in `fixtures/otlp/cetra/sdk-*`, checked by both SDK test suites and by the Rust golden test.
 
-**Out of scope:** datasets, experiments, `Client`, `evaluate` (Wave 2); every server route (the score route is a request to the server track, § Requests); the normalizer (B1). The SDKs are tested against local mock HTTP servers and the shared fixtures; no test needs a running `llmobs serve`.
+**Out of scope:** datasets, experiments, `Client`, `evaluate` (Wave 2); every server route (the score route is a request to the server track, § Requests); the normalizer (B1). The SDKs are tested against local mock HTTP servers and the shared fixtures; no test needs a running `cetra serve`.
 
 The plan has **28 sub-phases**: two shared ones, then a Python track and a TypeScript track that run **in parallel**, then one closing review.
 
@@ -41,22 +41,22 @@ Settled with the user on 2026-11-12. F1 writes them into `docs/mvp-decisions.md`
 
 | # | Decision | Source |
 |---|---|---|
-| D-F-1 | **Key-scoped score route.** `POST /api/v1/scores` takes an `sk-llmobs-` key with the `ingest` scope; the project comes from the key. Body `{"scores": [ScoreCreate, …]}`, 1 to 1000 items (§ Score request). The SDKs send scores only there. The project-scoped `POST /api/v1/projects/{p}/scores` stays for PATs and the UI. | User |
+| D-F-1 | **Key-scoped score route.** `POST /api/v1/scores` takes an `sk-cetra-` key with the `ingest` scope; the project comes from the key. Body `{"scores": [ScoreCreate, …]}`, 1 to 1000 items (§ Score request). The SDKs send scores only there. The project-scoped `POST /api/v1/projects/{p}/scores` stays for PATs and the UI. | User |
 | D-F-2 | **SDK score ids.** Every `score()` call creates a new score with a UUIDv7 generated in the SDK; retries resend the same id, so they are idempotent. Passing `score_id` updates that score instead. SDK scores have `source = "sdk"` and carry `user_id` from the active `context()` when set. This replaces the server-derived id for SDK scores (spec 06 keeps it for clients that omit `score_id`). | User |
-| D-F-3 | **Missing API key: warn and run disabled.** When no API key is given (argument and `LLMOBS_API_KEY` both unset), `init()` logs one warning (`llmobs: no API key; set LLMOBS_API_KEY, or LLMOBS_ENABLED=false to silence this; tracing is disabled`) and the SDK runs in no-op mode. Every other invalid value, including a key without the `sk-llmobs-` prefix, still raises `ConfigError`. This changes D80 and spec 10 § Design rules 4 and § Configuration rule 11. | User |
+| D-F-3 | **Missing API key: warn and run disabled.** When no API key is given (argument and `CETRA_API_KEY` both unset), `init()` logs one warning (`cetra: no API key; set CETRA_API_KEY, or CETRA_ENABLED=false to silence this; tracing is disabled`) and the SDK runs in no-op mode. Every other invalid value, including a key without the `sk-cetra-` prefix, still raises `ConfigError`. This changes D80 and spec 10 § Design rules 4 and § Configuration rule 11. | User |
 | D-F-4 | **Provider modes.** Default: our own `TracerProvider`, never registered globally. `use_global_provider=True` (TS `useGlobalProvider: true`): Python adds our processor to the global SDK `TracerProvider` when one is set, otherwise registers ours as the global one; TypeScript (OTel JS 2.x providers cannot take processors after construction) registers ours as the global provider when none is set, otherwise logs one warning and stays private. Both SDKs expose `span_processor()` / `spanProcessor()`, our processor, for apps that build their own OTel pipeline. The OTel *context* is always the global one, so instrumentor spans nest under ours in both modes. `sample_rate` applies only to our own provider; in global mode with an existing provider a rate below 1 logs one warning and is ignored. | User, research |
-| D-F-5 | **Export filter.** With our own provider every span is exported (only our tracer and the instrumentors we bind create spans there). In global mode the default filter exports a span when its instrumentation scope is `llmobs` or `ai`, or one of its attribute keys starts with `llmobs.`, `gen_ai.`, `llm.`, `openinference.`, `ai.`, `traceloop.`, `langfuse.`, `lmnr.` or `gcp.vertex.agent.`, or is exactly `input.value` or `output.value`. A span without an instrumentation scope counts as not `llmobs`. `export_filter=` (TS `exportFilter`) replaces the rule in both modes; it gets the finished span and returns a boolean; if it raises, the span is exported. LLM spans whose parent was filtered out arrive as detached roots, which spec 01 already handles (`has_root = false`). | User, research (Langfuse) |
-| D-F-6 | **Masking and `capture_content`.** `mask` is applied at capture time to every value our SDK records (inputs, outputs, metadata values, LLM messages), before serialization. At export, an extra pass rewrites spans whose scope is **not** `llmobs`: for each attribute (span and event attributes) whose key is in the payload key list (§ Payload keys), `mask` gets the decoded value (JSON-parsed when the string is a JSON object or array, else the string) and the result is serialized back. With `capture_content=false`, our spans record no payload attributes and the export pass deletes those keys from other spans; the OpenInference instrumentors we create get their hide-inputs/hide-outputs options too. If `mask` raises, the value becomes `"[llmobs: mask failed]"` (fail closed) and one debug line is logged without the value. | User, research |
-| D-F-7 | **Instrumentation wiring.** Python: `instrument=["openai", …]` names from a fixed registry of OpenInference instrumentors (§ Python instrumentors); an unknown name or a missing package raises `ConfigError` naming the extra to install. TypeScript: `instrument: [...]` takes OTel instrumentation objects (anything with `setTracerProvider`, `enable` and `disable` functions); the subpath helpers `llmobs/openai`, `llmobs/anthropic`, `llmobs/langchain` build the OpenInference instrumentor and call `manuallyInstrument(module)`, so ESM works without loader flags. The OpenInference packages are optional peer dependencies. This replaces spec 10's TS `instrument: ["openai", "anthropic"]`. | User, research |
+| D-F-5 | **Export filter.** With our own provider every span is exported (only our tracer and the instrumentors we bind create spans there). In global mode the default filter exports a span when its instrumentation scope is `cetra` or `ai`, or one of its attribute keys starts with `cetra.`, `gen_ai.`, `llm.`, `openinference.`, `ai.`, `traceloop.`, `langfuse.`, `lmnr.` or `gcp.vertex.agent.`, or is exactly `input.value` or `output.value`. A span without an instrumentation scope counts as not `cetra`. `export_filter=` (TS `exportFilter`) replaces the rule in both modes; it gets the finished span and returns a boolean; if it raises, the span is exported. LLM spans whose parent was filtered out arrive as detached roots, which spec 01 already handles (`has_root = false`). | User, research (Langfuse) |
+| D-F-6 | **Masking and `capture_content`.** `mask` is applied at capture time to every value our SDK records (inputs, outputs, metadata values, LLM messages), before serialization. At export, an extra pass rewrites spans whose scope is **not** `cetra`: for each attribute (span and event attributes) whose key is in the payload key list (§ Payload keys), `mask` gets the decoded value (JSON-parsed when the string is a JSON object or array, else the string) and the result is serialized back. With `capture_content=false`, our spans record no payload attributes and the export pass deletes those keys from other spans; the OpenInference instrumentors we create get their hide-inputs/hide-outputs options too. If `mask` raises, the value becomes `"[cetra: mask failed]"` (fail closed) and one debug line is logged without the value. | User, research |
+| D-F-7 | **Instrumentation wiring.** Python: `instrument=["openai", …]` names from a fixed registry of OpenInference instrumentors (§ Python instrumentors); an unknown name or a missing package raises `ConfigError` naming the extra to install. TypeScript: `instrument: [...]` takes OTel instrumentation objects (anything with `setTracerProvider`, `enable` and `disable` functions); the subpath helpers `cetra/openai`, `cetra/anthropic`, `cetra/langchain` build the OpenInference instrumentor and call `manuallyInstrument(module)`, so ESM works without loader flags. The OpenInference packages are optional peer dependencies. This replaces spec 10's TS `instrument: ["openai", "anthropic"]`. | User, research |
 | D-F-8 | **TypeScript transport.** One `FetchTraceExporter` on every runtime (Node, Bun, Deno, edge): OTLP protobuf from `@opentelemetry/otlp-transformer`, gzip through `CompressionStream` when the runtime has it, `Authorization: Bearer`, retries on 429/502/503/504 and network errors. OTel JS is pinned to the 2.12 line (`@opentelemetry/sdk-trace` 2.12.0), because OpenInference JS still requires OTel JS 2.x; OTel JS 3.0 waits until it moves. | User |
-| D-F-9 | **Conformance fixtures.** Each SDK scenario has a case `fixtures/otlp/llmobs/sdk-<scenario>/` whose `input.json` is the canonical OTLP both SDKs must emit (§ Conformance) and whose `expected.json` is the normalized result. Both SDK test suites run the scenario and compare their canonicalized export with `input.json`; the Rust golden test normalizes the same `input.json`. This changes D121's "spec 10's SDK integration tests cover it": the shared fixtures do, and the integration suite against a real `llmobs serve` waits for the server tracks. | User |
-| D-F-10 | **Payload encoding.** Our payloads use `llmobs.input`/`llmobs.output` with `llmobs.input.format`/`llmobs.output.format`: a `str` result is recorded as is with format `text`; any other value is serialized with the tolerant encoder (§ Serialization) to compact JSON with format `json`. Strings over 1 MiB (UTF-8 bytes) are cut at a character boundary and get the server's marker `…[llmobs: truncated, original N bytes]`; a cut JSON value becomes format `text`. The SDKs set the OTel attribute count limit to 10 000 on their provider (flattened OpenInference messages exceed the default 128). | Spec 10, research |
+| D-F-9 | **Conformance fixtures.** Each SDK scenario has a case `fixtures/otlp/cetra/sdk-<scenario>/` whose `input.json` is the canonical OTLP both SDKs must emit (§ Conformance) and whose `expected.json` is the normalized result. Both SDK test suites run the scenario and compare their canonicalized export with `input.json`; the Rust golden test normalizes the same `input.json`. This changes D121's "spec 10's SDK integration tests cover it": the shared fixtures do, and the integration suite against a real `cetra serve` waits for the server tracks. | User |
+| D-F-10 | **Payload encoding.** Our payloads use `cetra.input`/`cetra.output` with `cetra.input.format`/`cetra.output.format`: a `str` result is recorded as is with format `text`; any other value is serialized with the tolerant encoder (§ Serialization) to compact JSON with format `json`. Strings over 1 MiB (UTF-8 bytes) are cut at a character boundary and get the server's marker `…[cetra: truncated, original N bytes]`; a cut JSON value becomes format `text`. The SDKs set the OTel attribute count limit to 10 000 on their provider (flattened OpenInference messages exceed the default 128). | Spec 10, research |
 | D-F-11 | **What `observe` records.** Python: the bound arguments with defaults applied, the first parameter dropped when it is named `self` or `cls`, `*args` as a list and `**kwargs` as an object under their parameter names. TypeScript: no arguments → no input; one argument → that value; more → a JSON array of them. Generator functions follow spec 10. They are detected when `observe` wraps the function: Python `inspect.isgeneratorfunction`/`isasyncgenfunction`; TypeScript `Object.prototype.toString.call(fn)` equal to `"[object GeneratorFunction]"` or `"[object AsyncGeneratorFunction]"`. Any other function is traced as a call, even when it returns a generator, an iterator, a stream or a promise of one: that call's output is not recorded when the (awaited) return value is a generator or async generator object, and the returned object is passed through untouched, never consumed. Other iterables and `ReadableStream`s are recorded as values by § Serialization. `capture_input` / `capture_output` (TS `captureInput` / `captureOutput`) default to true. | Research |
-| D-F-12 | **Context values live in the OTel context.** `context()` stores session id, user id, tags and metadata under one key of the OTel `Context`, so they follow `contextvars` / `AsyncLocalStorage` and `copy_context()`. Nested blocks merge: inner session/user win, tags are the union (outer first, no duplicates), metadata merges by key (inner wins). A span processor stamps them in `on_start` on every span of our provider, instrumentor spans included, together with `llmobs.environment` and `llmobs.release` from `init()`. Baggage stays opt-in (`propagate=True`). | Spec 10, research |
-| D-F-13 | **Manual LLM span attributes.** `llm_span` writes GenAI attributes: `gen_ai.operation.name = "chat"`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.response.model`, `gen_ai.request.<param>`, `gen_ai.input.messages`, `gen_ai.output.messages`, `gen_ai.system_instructions`, the `gen_ai.usage.*` token counts (inputs include cache), `llmobs.cost.total` for a reported cost and `llmobs.ttft_ns`, plus `llmobs.span.kind = "llm"`. Messages may be given in the canonical format or as the short form `{"role", "content": "<text>"}`, which the SDK converts to one text part. | Spec 01, 02 |
+| D-F-12 | **Context values live in the OTel context.** `context()` stores session id, user id, tags and metadata under one key of the OTel `Context`, so they follow `contextvars` / `AsyncLocalStorage` and `copy_context()`. Nested blocks merge: inner session/user win, tags are the union (outer first, no duplicates), metadata merges by key (inner wins). A span processor stamps them in `on_start` on every span of our provider, instrumentor spans included, together with `cetra.environment` and `cetra.release` from `init()`. Baggage stays opt-in (`propagate=True`). | Spec 10, research |
+| D-F-13 | **Manual LLM span attributes.** `llm_span` writes GenAI attributes: `gen_ai.operation.name = "chat"`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.response.model`, `gen_ai.request.<param>`, `gen_ai.input.messages`, `gen_ai.output.messages`, `gen_ai.system_instructions`, the `gen_ai.usage.*` token counts (inputs include cache), `cetra.cost.total` for a reported cost and `cetra.ttft_ns`, plus `cetra.span.kind = "llm"`. Messages may be given in the canonical format or as the short form `{"role", "content": "<text>"}`, which the SDK converts to one text part. | Spec 01, 02 |
 | D-F-14 | **Threads (Python).** The SDK does not patch `threading` or executors. The README documents `contextvars.copy_context().run(fn)` and OTel's threading instrumentor. | User |
 | D-F-15 | **Init is once per process.** Any `init()` call after the first (whatever the first one did: enabled, disabled, or missing key) logs one warning and changes nothing. Python re-creates the score queue's worker thread in a forked child (`os.register_at_fork`); OTel's batch processor already does the same for spans. | Research |
-| D-F-16 | **Browser feedback.** `llmobs/browser` exports only `feedback({ baseUrl, publicKey, traceId, spanId?, name?, value, comment? })`, which posts spec 06's end-user feedback body to `POST {baseUrl}/api/public/feedback` with `Authorization: Bearer <pk-llmobs-…>`. It imports nothing from OTel and resolves to `{ ok: boolean }`, never throwing. | User, spec 06 |
+| D-F-16 | **Browser feedback.** `cetra/browser` exports only `feedback({ baseUrl, publicKey, traceId, spanId?, name?, value, comment? })`, which posts spec 06's end-user feedback body to `POST {baseUrl}/api/public/feedback` with `Authorization: Bearer <pk-cetra-…>`. It imports nothing from OTel and resolves to `{ ok: boolean }`, never throwing. | User, spec 06 |
 
 ## Shared contract
 
@@ -66,28 +66,28 @@ Everything in this section is identical in both SDKs. Tests in P11 and T13 prove
 
 | Constant | Value |
 |---|---|
-| Instrumentation scope name of our spans | `llmobs` |
+| Instrumentation scope name of our spans | `cetra` |
 | Scope version | the SDK version (`__version__` / `VERSION`) |
-| Resource attributes we add | `telemetry.distro.name = "llmobs"`, `telemetry.distro.version = <SDK version>` |
+| Resource attributes we add | `telemetry.distro.name = "cetra"`, `telemetry.distro.version = <SDK version>` |
 | `service.name` and other resource attributes | Python: OTel's `Resource.create`, which reads `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` from `os.environ`. TypeScript: `OTEL_SERVICE_NAME` from the config's env source only (`OTEL_RESOURCE_ATTRIBUTES` is not read). This is a known difference (§ Language differences) |
 | OTLP traces URL | `<base_url>/v1/traces` |
 | Score URL | `<base_url>/api/v1/scores` |
 | Feedback URL (browser) | `<baseUrl>/api/public/feedback` |
 | Auth header | `Authorization: Bearer <key>` |
-| OTel context key for context values | Python `opentelemetry.context.create_key("llmobs.context")`; TS `createContextKey("llmobs.context")` |
+| OTel context key for context values | Python `opentelemetry.context.create_key("cetra.context")`; TS `createContextKey("cetra.context")` |
 
 ### Span attributes
 
 | Key | Type | Written by | Value |
 |---|---|---|---|
-| `llmobs.span.kind` | string | `observe`, `span`, `llm_span` | one of `llm`, `embedding`, `tool`, `agent`, `chain`, `retriever`, `reranker`, `guardrail`, `evaluator`, `span`; default `chain`; `llm_span` writes `llm` |
-| `llmobs.input` / `llmobs.output` | string | `observe`, `span` | § Serialization |
-| `llmobs.input.format` / `llmobs.output.format` | string | same | `text` or `json` (never `messages` from the SDK) |
-| `llmobs.session.id`, `llmobs.user.id` | string | context processor | from `context()`, else from baggage |
-| `llmobs.tags` | string array | context processor | merged tags; omitted when empty |
-| `llmobs.metadata.<key>` | string, bool, int or double | context processor, `set_metadata` | a `str` stays a string; `bool` → bool; an integer within ±(2^53−1) → int; a finite float → double; anything else → compact JSON string from § Serialization |
-| `llmobs.environment`, `llmobs.release` | string | context processor | from `init()`, when set |
-| `gen_ai.*`, `llmobs.cost.total`, `llmobs.ttft_ns` | see D-F-13 | `llm_span` | § LLM span |
+| `cetra.span.kind` | string | `observe`, `span`, `llm_span` | one of `llm`, `embedding`, `tool`, `agent`, `chain`, `retriever`, `reranker`, `guardrail`, `evaluator`, `span`; default `chain`; `llm_span` writes `llm` |
+| `cetra.input` / `cetra.output` | string | `observe`, `span` | § Serialization |
+| `cetra.input.format` / `cetra.output.format` | string | same | `text` or `json` (never `messages` from the SDK) |
+| `cetra.session.id`, `cetra.user.id` | string | context processor | from `context()`, else from baggage |
+| `cetra.tags` | string array | context processor | merged tags; omitted when empty |
+| `cetra.metadata.<key>` | string, bool, int or double | context processor, `set_metadata` | a `str` stays a string; `bool` → bool; an integer within ±(2^53−1) → int; a finite float → double; anything else → compact JSON string from § Serialization |
+| `cetra.environment`, `cetra.release` | string | context processor | from `init()`, when set |
+| `gen_ai.*`, `cetra.cost.total`, `cetra.ttft_ns` | see D-F-13 | `llm_span` | § LLM span |
 
 **Programming errors raise.** An invalid `kind` given to `observe`/`span`, or an invalid `provider`/`model` given to `llm_span`, raises `ValueError` (Python) / `TypeError` (TS) when the API is called (decoration time for `observe`), before the user function runs. These are the only cases where the SDK raises after `init()` (F1 amends spec 10 rule 4). Re-entering an already entered Python `context` object is a no-op logged at debug level.
 
@@ -120,10 +120,10 @@ One function per SDK, `serialize(value) -> (text, format)`, used for every paylo
    - `BaseException` → `{"type": <class name>, "message": str(e)}` | `Error` → `{"type": e.name, "message": e.message}`.
    - functions, classes, modules, generators, coroutines → the last rule (`repr`) | `function` and `symbol`: as an object property → omitted; as an array item → `null`; at the top level → `String(value)` (JSON.stringify semantics).
    - Anything else → `repr(value)` | `String(value)`; if that raises → `"<unserializable TYPE>"` with the type name.
-3. **Depth:** the top-level container is at depth 1; a container that would be at depth 33 is replaced by the string `"[llmobs: max depth]"`. Containers are: Python `dict`/`Mapping`, `list`, `tuple`, `set`, `frozenset`, dataclass instances, `model_dump` results; TypeScript objects, arrays, `Map`, `Set` and non-byte typed arrays. Scalars never count.
-4. **Cycles:** a container that is already on the current path is replaced by `"[llmobs: cycle]"` (shared, non-cyclic references are serialized each time).
+3. **Depth:** the top-level container is at depth 1; a container that would be at depth 33 is replaced by the string `"[cetra: max depth]"`. Containers are: Python `dict`/`Mapping`, `list`, `tuple`, `set`, `frozenset`, dataclass instances, `model_dump` results; TypeScript objects, arrays, `Map`, `Set` and non-byte typed arrays. Scalars never count.
+4. **Cycles:** a container that is already on the current path is replaced by `"[cetra: cycle]"` (shared, non-cyclic references are serialized each time).
 5. **Lone surrogates:** Python first replaces unpaired surrogate code points in every string with U+FFFD (`s.encode("utf-16", "surrogatepass").decode("utf-16", "replace")`), which is what TypeScript's `TextEncoder` does.
-6. **Truncation:** after encoding, if the UTF-8 length of the text exceeds 1 048 576 bytes, cut it at the largest character boundary ≤ 1 048 576 bytes and append `…[llmobs: truncated, original N bytes]` (N = the original UTF-8 length, decimal); the format becomes `text`.
+6. **Truncation:** after encoding, if the UTF-8 length of the text exceeds 1 048 576 bytes, cut it at the largest character boundary ≤ 1 048 576 bytes and append `…[cetra: truncated, original N bytes]` (N = the original UTF-8 length, decimal); the format becomes `text`.
 7. `serialize` never raises. If an unexpected error escapes the rules above, the result is `("<unserializable TYPE>", "text")`. A conversion failure replaces the failing *value* in place with the `"<unserializable TYPE>"` JSON string — the last row of rule 2 at any depth, and likewise a failing accessor deeper inside a container — so only a failure of the top-level value itself yields the rule-7 tuple (X1).
 
 ### LLM span
@@ -132,7 +132,7 @@ One function per SDK, `serialize(value) -> (text, format)`, used for every paylo
 
 | Option / setter | Attribute | Notes |
 |---|---|---|
-| (always) | `llmobs.span.kind = "llm"`, `gen_ai.operation.name = "chat"` | |
+| (always) | `cetra.span.kind = "llm"`, `gen_ai.operation.name = "chat"` | |
 | `provider` (required, non-empty string) | `gen_ai.provider.name` | written as given |
 | `model` (required, non-empty string) | `gen_ai.request.model` | |
 | `params` (mapping of string → scalar) | `gen_ai.request.<key>` | only `str`, `bool`, `int`, finite `float` values; others skipped |
@@ -141,9 +141,9 @@ One function per SDK, `serialize(value) -> (text, format)`, used for every paylo
 | `set_output_messages` / `setOutputMessages` | `gen_ai.output.messages` | messages JSON |
 | `set_response_model(m)` | `gen_ai.response.model` | |
 | `set_usage(input_tokens=, output_tokens=, cache_read_tokens=, cache_write_tokens=, reasoning_tokens=)` | `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.cache_read.input_tokens`, `gen_ai.usage.cache_creation.input_tokens`, `gen_ai.usage.reasoning.output_tokens` | ints ≥ 0 only; others skipped; `None` skipped. `input_tokens` includes cache tokens (GenAI semantics) |
-| `set_cost(total_usd)` | `llmobs.cost.total` | finite float ≥ 0 |
-| `record_first_token()` / `recordFirstToken()` | `llmobs.ttft_ns` | now − span start, ns, int; only the first call counts |
-| `set_metadata(**kv)` | `llmobs.metadata.<k>` | as above |
+| `set_cost(total_usd)` | `cetra.cost.total` | finite float ≥ 0 |
+| `record_first_token()` / `recordFirstToken()` | `cetra.ttft_ns` | now − span start, ns, int; only the first call counts |
+| `set_metadata(**kv)` | `cetra.metadata.<k>` | as above |
 
 **Messages JSON.** The list is masked, then each message is converted:
 - an object with a `parts` key → kept as is;
@@ -155,11 +155,11 @@ Then the list goes through § Serialization (always JSON, so `json` format is ir
 
 ### Payload keys (export-time masking and `capture_content=false`)
 
-Exact keys: `llmobs.input`, `llmobs.output`, `gen_ai.input.messages`, `gen_ai.output.messages`, `gen_ai.system_instructions`, `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`, `input.value`, `output.value`, `traceloop.entity.input`, `traceloop.entity.output`, `ai.prompt`, `ai.prompt.messages`, `ai.response.text`, `ai.response.object`, `ai.response.toolCalls`, `ai.toolCall.args`, `ai.toolCall.result`, `langfuse.observation.input`, `langfuse.observation.output`, `langfuse.trace.input`, `langfuse.trace.output`, `lmnr.span.input`, `lmnr.span.output`.
+Exact keys: `cetra.input`, `cetra.output`, `gen_ai.input.messages`, `gen_ai.output.messages`, `gen_ai.system_instructions`, `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`, `input.value`, `output.value`, `traceloop.entity.input`, `traceloop.entity.output`, `ai.prompt`, `ai.prompt.messages`, `ai.response.text`, `ai.response.object`, `ai.response.toolCalls`, `ai.toolCall.args`, `ai.toolCall.result`, `langfuse.observation.input`, `langfuse.observation.output`, `langfuse.trace.input`, `langfuse.trace.output`, `lmnr.span.input`, `lmnr.span.output`.
 
 Prefixes (any key that starts with one): `llm.input_messages.`, `llm.output_messages.`, `gen_ai.prompt.`, `gen_ai.completion.`.
 
-Only string values are masked; a non-string value under a payload key is deleted when masking is on (and when `capture_content=false`). Span attributes and event attributes are both processed. Spans whose scope name is `llmobs` are skipped (already masked at capture). With neither `mask` nor `capture_content=false`, the pass is not installed.
+Only string values are masked; a non-string value under a payload key is deleted when masking is on (and when `capture_content=false`). Span attributes and event attributes are both processed. Spans whose scope name is `cetra` are skipped (already masked at capture). With neither `mask` nor `capture_content=false`, the pass is not installed.
 
 ### Score request
 
@@ -174,20 +174,20 @@ Only string values are masked; a non-string value under a payload key is deleted
 ```
 
 - `target`: `{"type": "span", "trace_id", "span_id"}` when `span_id` is given (then `trace_id` is required), else `{"type": "trace", "trace_id"}` when `trace_id` is given, else `{"type": "session", "session_id"}`. Ids are lowercase hex; `session_id` must be a non-empty string.
-- `value`: the existing `llmobs_core::ScoreValue` JSON (spec 01 § Score): `{"data_type":"numeric","value":0.8}`, `{"data_type":"boolean","value":true}`, `{"data_type":"categorical","value":{"label":"good"}}`, `{"data_type":"text","value":"…"}`; Python `bool` / TS `boolean` → `boolean`; `int`/`float` / `number` → `numeric` (must be finite); `str` / `string` → `categorical` with `{"label": s}`, or `text` when `data_type="text"` is passed. `data_type` may also force `numeric`, `boolean` or `categorical` and must match the value's type.
+- `value`: the existing `cetra_core::ScoreValue` JSON (spec 01 § Score): `{"data_type":"numeric","value":0.8}`, `{"data_type":"boolean","value":true}`, `{"data_type":"categorical","value":{"label":"good"}}`, `{"data_type":"text","value":"…"}`; Python `bool` / TS `boolean` → `boolean`; `int`/`float` / `number` → `numeric` (must be finite); `str` / `string` → `categorical` with `{"label": s}`, or `text` when `data_type="text"` is passed. `data_type` may also force `numeric`, `boolean` or `categorical` and must match the value's type.
 - `reason`, `user_id` (from the active context unless passed), `metadata` (string values only; other values are serialized to compact JSON) are omitted when absent.
-- Invalid input: log the warning `llmobs: score not queued: <reason>` (no values) and return `None`/`undefined`; nothing is queued. Reasons, checked in this order: `empty name`, `no target`, `span_id without trace_id`, `invalid trace_id`, `invalid span_id`, `invalid session_id`, `invalid score_id`, `non-finite value`, `data_type mismatch`.
+- Invalid input: log the warning `cetra: score not queued: <reason>` (no values) and return `None`/`undefined`; nothing is queued. Reasons, checked in this order: `empty name`, `no target`, `span_id without trace_id`, `invalid trace_id`, `invalid span_id`, `invalid session_id`, `invalid score_id`, `non-finite value`, `data_type mismatch`.
 - `score()` returns the `score_id` string when queued.
-- Response handling: `2xx` → done. `429`, any `5xx` and network errors/timeouts (10 s per attempt) → retry the same batch up to 3 more times, waiting `Retry-After` when it is a non-negative integer number of seconds (capped at 30), else 1 s, 2 s, 4 s (an HTTP-date `Retry-After` uses the default), then drop with `llmobs: score batch failed after retries; dropped <n> scores`. Any other status → drop at once with `llmobs: score batch rejected with status <code>; dropped <n> scores`.
+- Response handling: `2xx` → done. `429`, any `5xx` and network errors/timeouts (10 s per attempt) → retry the same batch up to 3 more times, waiting `Retry-After` when it is a non-negative integer number of seconds (capped at 30), else 1 s, 2 s, 4 s (an HTTP-date `Retry-After` uses the default), then drop with `cetra: score batch failed after retries; dropped <n> scores`. Any other status → drop at once with `cetra: score batch rejected with status <code>; dropped <n> scores`.
 
 ### Conformance
 
-`fixtures/otlp/llmobs/sdk-<scenario>/input.json` holds the **canonical OTLP** of one scenario. A test converts what the SDK exported into canonical form and compares it, as parsed JSON, with `input.json`.
+`fixtures/otlp/cetra/sdk-<scenario>/input.json` holds the **canonical OTLP** of one scenario. A test converts what the SDK exported into canonical form and compares it, as parsed JSON, with `input.json`.
 
 Canonical form of an `ExportTraceServiceRequest`:
 1. **Ids.** Spans are ordered by creation: the tests use a sequential id generator, so sorting by the original span id gives creation order. Trace ids and span ids are then **remapped by rank of first appearance** in that order: the k-th distinct trace id becomes `"%032x" % k`, the k-th span becomes `"%016x" % k` (k from 1). `parentSpanId` uses the same mapping and is omitted for roots (and when the parent is not among the exported spans).
 2. **Times.** Span `n` (1-based creation index) gets `startTimeUnixNano = 1767225590000000000 + n·1 000 000` and `endTimeUnixNano = 1767225590000000000 + (1000 − n)·1 000 000`, as decimal strings (2025-12-31T23:59:50Z plus milliseconds). Every event of span `n` gets `timeUnixNano` = that span's end.
-3. **Shape.** The whole document is exactly `{"resourceSpans": [{"resource": {"attributes": [...]}, "scopeSpans": [{"scope": {"name": "llmobs", "version": "0.0.0"}, "spans": [...]}]}]}` with nothing else at any level (no `schemaUrl`, no dropped counts). `resource.attributes` keep only `service.name` (the tests set `OTEL_SERVICE_NAME=conformance`) and `telemetry.distro.name`; the scope version is replaced by `"0.0.0"`.
+3. **Shape.** The whole document is exactly `{"resourceSpans": [{"resource": {"attributes": [...]}, "scopeSpans": [{"scope": {"name": "cetra", "version": "0.0.0"}, "spans": [...]}]}]}` with nothing else at any level (no `schemaUrl`, no dropped counts). `resource.attributes` keep only `service.name` (the tests set `OTEL_SERVICE_NAME=conformance`) and `telemetry.distro.name`; the scope version is replaced by `"0.0.0"`.
 4. **Span fields kept:** `traceId`, `spanId`, `parentSpanId` (non-roots), `name`, `kind` (integer; our spans are `1`, INTERNAL), `startTimeUnixNano`, `endTimeUnixNano`, `attributes`, `events` (omitted when empty), `status` (dropped when `code` is absent or 0; `message` dropped when empty or absent; so `{"code": 1}` ok, `{"code": 2, "message": …}` error). Everything else (`flags`, `traceState`, dropped counts, `links` when empty, `schemaUrl`) is removed.
 5. **Attributes** (span, event, resource) are sorted by key. `AnyValue`s use the OTLP/JSON encoding: `stringValue`, `boolValue`, `intValue` as a decimal **string** (convert numbers), `doubleValue` as a number, `arrayValue: {"values": [...]}`.
 6. **Exception events:** name `exception`; attributes reduced to `exception.message` and `exception.type`. The scenarios raise an error class named `ScenarioError` in both languages.
@@ -197,7 +197,7 @@ The canonicalizer is test code in each SDK (P11, T13); it is described here so b
 
 ### Scenarios
 
-Every scenario runs with `api_key="sk-llmobs-test"`, `base_url="http://127.0.0.1:9"` and no environment/release unless the row says otherwise, through the SDK's real pipeline with the inner OTLP exporter replaced by an in-memory one (P3, T4 define the test seam), then `flush()`. The TypeScript calls are spelled out under the table.
+Every scenario runs with `api_key="sk-cetra-test"`, `base_url="http://127.0.0.1:9"` and no environment/release unless the row says otherwise, through the SDK's real pipeline with the inner OTLP exporter replaced by an in-memory one (P3, T4 define the test seam), then `flush()`. The TypeScript calls are spelled out under the table.
 
 | Case `sdk-…` | Calls | Spans (creation order) |
 |---|---|---|
@@ -206,10 +206,10 @@ Every scenario runs with `api_key="sk-llmobs-test"`, `base_url="http://127.0.0.1
 | `observe-error` | `@observe(name="fails") def fails(x)` raises `ScenarioError("boom")`; called with `1` | 1 `fails`: kind `chain`, input `{"x":1}` json, no output, status `{"code":2,"message":"ScenarioError: boom"}`, one `exception` event (`exception.message = "boom"`, `exception.type = "ScenarioError"`) |
 | `generator-text` | `@observe(name="stream") def stream(prompt)` yields `"Hel"`, `"lo"`; called with `"hi"` and fully consumed | 1 `stream`: input `{"prompt":"hi"}` json, output `Hello` text, status unset |
 | `generator-json` | `@observe(name="numbers") def numbers()` yields `{"n": 1}`, `{"n": 2}`; fully consumed | 1 `numbers`: input `{}` json, output `[{"n":1},{"n":2}]` json |
-| `span-manual` | `with span("rerank", kind="reranker", input=["a", "b"]) as s: s.set_output(["b", "a"]); s.set_metadata(model="bge")` | 1 `rerank`: kind `reranker`, input `["a","b"]` json, output `["b","a"]` json, `llmobs.metadata.model = "bge"` |
+| `span-manual` | `with span("rerank", kind="reranker", input=["a", "b"]) as s: s.set_output(["b", "a"]); s.set_metadata(model="bge")` | 1 `rerank`: kind `reranker`, input `["a","b"]` json, output `["b","a"]` json, `cetra.metadata.model = "bge"` |
 | `llm-span` | `with llm_span("chat", provider="openai", model="gpt-4o-mini", input_messages=[{"role": "system", "content": "Be brief."}, {"role": "user", "content": "hi"}], params={"temperature": 0.2}) as s: s.set_output_messages([{"role": "assistant", "content": "hello", "finish_reason": "stop"}]); s.set_response_model("gpt-4o-mini-2024-07-18"); s.set_usage(input_tokens=12, output_tokens=3)` | 1 `chat`: kind `llm`, `gen_ai.operation.name = "chat"`, `gen_ai.provider.name = "openai"`, `gen_ai.request.model`, `gen_ai.request.temperature = 0.2` (double), `gen_ai.response.model`, `gen_ai.input.messages`, `gen_ai.output.messages`, `gen_ai.usage.input_tokens = 12`, `gen_ai.usage.output_tokens = 3` |
-| `context` | `init(…, environment="staging", release="1.2.3")`; `with context(session_id="chat-42", user_id="u-17", tags=["beta"], metadata={"plan": "pro", "seats": 3}):` call `@observe(name="turn") def turn()` which calls `@observe(name="lookup") def lookup()`; both return `None` | 1 `turn` and 2 `lookup` (parent 1), each with `llmobs.session.id`, `llmobs.user.id`, `llmobs.tags = ["beta"]`, `llmobs.metadata.plan = "pro"`, `llmobs.metadata.seats = 3` (int), `llmobs.environment`, `llmobs.release`; input `{}` json; output `null` json |
-| `capture-off` | `init(…, capture_content=False)`; `@observe(kind="tool", name="lookup") def lookup(query)` returns `"x"`; called with `"q"` | 1 `lookup`: only `llmobs.span.kind = "tool"` |
+| `context` | `init(…, environment="staging", release="1.2.3")`; `with context(session_id="chat-42", user_id="u-17", tags=["beta"], metadata={"plan": "pro", "seats": 3}):` call `@observe(name="turn") def turn()` which calls `@observe(name="lookup") def lookup()`; both return `None` | 1 `turn` and 2 `lookup` (parent 1), each with `cetra.session.id`, `cetra.user.id`, `cetra.tags = ["beta"]`, `cetra.metadata.plan = "pro"`, `cetra.metadata.seats = 3` (int), `cetra.environment`, `cetra.release`; input `{}` json; output `null` json |
+| `capture-off` | `init(…, capture_content=False)`; `@observe(kind="tool", name="lookup") def lookup(query)` returns `"x"`; called with `"q"` | 1 `lookup`: only `cetra.span.kind = "tool"` |
 | `mask` | `init(…, mask=redact)` where `redact` replaces every string equal to `"alice@example.com"` (recursively in dicts/lists) with `"[redacted]"`; `@observe(name="notify") def notify(email)` returns `"sent to alice@example.com"`; called with `"alice@example.com"` | 1 `notify`: input `{"email":"[redacted]"}` json, output `sent to alice@example.com` text (the mask replaces whole equal strings only) |
 | `media-bytes` | `@observe(name="upload") def upload(data: bytes)` returns `"ok"`; called with the 70-byte PNG below | 1 `upload`: input `{"data":"data:application/octet-stream;base64,<b64>"}` json, output `ok` text. `case.json` sets `settings.media_min_bytes = 1` so the server extracts it (as `application/octet-stream`: the SDK declares that type and the server sniffs only when none is declared) |
 
@@ -240,7 +240,7 @@ Known, accepted differences that the fixtures do not cover. The SDK READMEs list
 - **Integral floats.** JavaScript has one number type, and OTel JS encodes an integral number as `intValue`. So Python `params={"temperature": 1.0}`, `set_cost(1.0)` or metadata `2.0` give a double, TypeScript gives an int. Python always converts `set_cost`'s argument with `float()`. The server reads both (spec 02 rule 20).
 - **Large integers.** Python ints beyond ±(2^53−1) inside JSON payloads are written as JSON numbers; TypeScript `bigint` becomes a decimal string. As attributes (metadata) both write a JSON string.
 - **Resource attributes:** see § Names.
-- **Exporter environment.** Python's `OTLPSpanExporter` also merges `OTEL_EXPORTER_OTLP_HEADERS` / `OTEL_EXPORTER_OTLP_TRACES_HEADERS` from the environment into its request headers, so headers meant for another OTLP backend are sent to llmobs too; TypeScript sends only ours. The Python README warns about it.
+- **Exporter environment.** Python's `OTLPSpanExporter` also merges `OTEL_EXPORTER_OTLP_HEADERS` / `OTEL_EXPORTER_OTLP_TRACES_HEADERS` from the environment into its request headers, so headers meant for another OTLP backend are sent to cetra too; TypeScript sends only ours. The Python README warns about it.
 - **Abandoned generators.** A half-consumed Python sync generator that is garbage-collected ends its span with status ok; TypeScript (no finalizer) and Python async generators leave it unexported.
 
 ### Python instrumentors
@@ -249,18 +249,18 @@ Known, accepted differences that the fixtures do not cover. The SDK READMEs list
 
 | Name | Extra | Module | Class | Distribution (min version) |
 |---|---|---|---|---|
-| `openai` | `llmobs[openai]` | `openinference.instrumentation.openai` | `OpenAIInstrumentor` | `openinference-instrumentation-openai>=0.1.69` |
-| `anthropic` | `llmobs[anthropic]` | `openinference.instrumentation.anthropic` | `AnthropicInstrumentor` | `openinference-instrumentation-anthropic>=3.3.0` |
-| `langchain` | `llmobs[langchain]` | `openinference.instrumentation.langchain` | `LangChainInstrumentor` | `openinference-instrumentation-langchain>=0.1.82` |
-| `llama-index` | `llmobs[llama-index]` | `openinference.instrumentation.llama_index` | `LlamaIndexInstrumentor` | `openinference-instrumentation-llama-index>=4.7.1` |
-| `litellm` | `llmobs[litellm]` | `openinference.instrumentation.litellm` | `LiteLLMInstrumentor` | `openinference-instrumentation-litellm>=0.1.53` |
-| `google-genai` | `llmobs[google-genai]` | `openinference.instrumentation.google_genai` | `GoogleGenAIInstrumentor` | `openinference-instrumentation-google-genai>=1.5.1` |
-| `bedrock` | `llmobs[bedrock]` | `openinference.instrumentation.bedrock` | `BedrockInstrumentor` | `openinference-instrumentation-bedrock>=0.1.63` |
-| `openai-agents` | `llmobs[openai-agents]` | `openinference.instrumentation.openai_agents` | `OpenAIAgentsInstrumentor` | `openinference-instrumentation-openai-agents>=2.7.1` |
-| `crewai` | `llmobs[crewai]` | `openinference.instrumentation.crewai` | `CrewAIInstrumentor` | `openinference-instrumentation-crewai>=1.1.23` |
-| `dspy` | `llmobs[dspy]` | `openinference.instrumentation.dspy` | `DSPyInstrumentor` | `openinference-instrumentation-dspy>=0.1.50` |
+| `openai` | `cetra-sdk[openai]` | `openinference.instrumentation.openai` | `OpenAIInstrumentor` | `openinference-instrumentation-openai>=0.1.69` |
+| `anthropic` | `cetra-sdk[anthropic]` | `openinference.instrumentation.anthropic` | `AnthropicInstrumentor` | `openinference-instrumentation-anthropic>=3.3.0` |
+| `langchain` | `cetra-sdk[langchain]` | `openinference.instrumentation.langchain` | `LangChainInstrumentor` | `openinference-instrumentation-langchain>=0.1.82` |
+| `llama-index` | `cetra-sdk[llama-index]` | `openinference.instrumentation.llama_index` | `LlamaIndexInstrumentor` | `openinference-instrumentation-llama-index>=4.7.1` |
+| `litellm` | `cetra-sdk[litellm]` | `openinference.instrumentation.litellm` | `LiteLLMInstrumentor` | `openinference-instrumentation-litellm>=0.1.53` |
+| `google-genai` | `cetra-sdk[google-genai]` | `openinference.instrumentation.google_genai` | `GoogleGenAIInstrumentor` | `openinference-instrumentation-google-genai>=1.5.1` |
+| `bedrock` | `cetra-sdk[bedrock]` | `openinference.instrumentation.bedrock` | `BedrockInstrumentor` | `openinference-instrumentation-bedrock>=0.1.63` |
+| `openai-agents` | `cetra-sdk[openai-agents]` | `openinference.instrumentation.openai_agents` | `OpenAIAgentsInstrumentor` | `openinference-instrumentation-openai-agents>=2.7.1` |
+| `crewai` | `cetra-sdk[crewai]` | `openinference.instrumentation.crewai` | `CrewAIInstrumentor` | `openinference-instrumentation-crewai>=1.1.23` |
+| `dspy` | `cetra-sdk[dspy]` | `openinference.instrumentation.dspy` | `DSPyInstrumentor` | `openinference-instrumentation-dspy>=0.1.50` |
 
-`llmobs[all]` installs every one. P10 verifies the module and class names of `openai` and `anthropic` with real imports; the other eight are checked by P10's import test only when installed (§ P10).
+`cetra-sdk[all]` installs every one. P10 verifies the module and class names of `openai` and `anthropic` with real imports; the other eight are checked by P10's import test only when installed (§ P10).
 
 ### Dependency pins
 
@@ -284,12 +284,12 @@ Peer ranges are the only non-exact versions (a peer needs a range); say so in th
 
 | # | To | What |
 |---|---|---|
-| R1 | The server track that adds score writes (coordinator assigns) | Implement D-F-1: `POST /api/v1/scores` for `sk` keys with the `ingest` scope, body § Score request, 1–1000 items, `200` on success; add the request types (`ScoreCreate`, `ScoreBatch`) to `llmobs-core`'s OpenAPI with a `fixtures/api` example identical to the body above. Until then the SDKs are tested against mocks only. |
+| R1 | The server track that adds score writes (coordinator assigns) | Implement D-F-1: `POST /api/v1/scores` for `sk` keys with the `ingest` scope, body § Score request, 1–1000 items, `200` on success; add the request types (`ScoreCreate`, `ScoreBatch`) to `cetra-core`'s OpenAPI with a `fixtures/api` example identical to the body above. Until then the SDKs are tested against mocks only. |
 | R2 | Coordinator | Spec 06 § Scores: SDK scores carry a client id (D-F-2); the deterministic id applies only when `score_id` is omitted. F1 writes the spec text; the server track implements it. |
 
 ## Repository conventions this plan relies on
 
 - `just check-py` = `uv sync --locked`, `ruff format --check`, `ruff check`, `mypy` (strict), `pytest` (warnings are errors).
 - `just check-ts` = Biome, `tsc` (two configs), Vitest, `tsdown`, `publint`, `attw --profile esm-only`.
-- Rust golden tests read `fixtures/otlp/**` (`cargo test -p llmobs-otel`), and `just fixtures-check` validates fixtures.
+- Rust golden tests read `fixtures/otlp/**` (`cargo test -p cetra-otel`), and `just fixtures-check` validates fixtures.
 - Logs and error messages never contain payloads, keys, emails or attribute values (AGENTS.md § Privacy). Every log line in this plan lists what it may contain.

@@ -11,13 +11,13 @@ use std::sync::Arc;
 
 use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
+use cetra_core::schema::traces;
 use datafusion::error::DataFusionError;
 use datafusion::execution::SessionState;
 use datafusion::functions::expr_fn::coalesce;
 use datafusion::functions_aggregate::expr_fn::{count, count_distinct, max, min, sum};
 use datafusion::logical_expr::{LogicalPlan, col, in_subquery, lit};
 use datafusion::prelude::DataFrame;
-use llmobs_core::schema::traces;
 
 use super::cursor::{after, assemble, decode, order_by};
 use super::{ListScope, Page, SortOrder, present, scoped_traces};
@@ -324,12 +324,12 @@ mod tests {
     use arrow::datatypes::Float64Type;
     use arrow::json::{ArrayWriter, WriterBuilder};
     use arrow::record_batch::RecordBatch;
+    use cetra_core::names::environment;
+    use cetra_core::schema::{traces, traces_schema};
+    use cetra_core::span::Span;
     use datafusion::datasource::MemTable;
     use datafusion::logical_expr::{col, lit};
     use datafusion::prelude::DataFrame;
-    use llmobs_core::names::environment;
-    use llmobs_core::schema::{traces, traces_schema};
-    use llmobs_core::span::Span;
     use serde_json::Value;
 
     use super::{

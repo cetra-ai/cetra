@@ -12,10 +12,10 @@ use std::time::Duration;
 
 use arrow::array::{Array, ListArray, RecordBatch, StringArray};
 use bytes::Bytes;
+use cetra_core::ids::ProjectId;
 use datafusion::error::DataFusionError;
 use datafusion::execution::context::{SessionConfig, SessionContext};
 use datafusion::execution::runtime_env::RuntimeEnv;
-use llmobs_core::ids::ProjectId;
 
 use crate::catalog::Committer;
 use crate::error::{MediaError, QueryError};
@@ -301,7 +301,7 @@ mod tests {
     use std::time::Duration;
 
     use bytes::Bytes;
-    use llmobs_core::ids::ProjectId;
+    use cetra_core::ids::ProjectId;
     use sha2::{Digest, Sha256};
     use uuid::Uuid;
 

@@ -188,7 +188,7 @@ M = major, m = minor.
 
 **M13 · U7: split ratios and their persistence are untested.**
 - Where: `web/src/components/trace/split-pane.tsx:8-12` and `:48-53`.
-- What happens: no test reads or seeds `llmobs.split.traces` or `llmobs.split.trace`, or asserts the 40/55 defaults or the fallback for a malformed value.
+- What happens: no test reads or seeds `cetra.split.traces` or `cetra.split.trace`, or asserts the 40/55 defaults or the fallback for a malformed value.
 - Fix: add one test that seeds the values in `localStorage` and asserts the panel sizes.
 
 **M14 · Cross-cutting: `just check-web` fails under CPU load** (see § Flaky tests). The suite's timing assumptions are too tight. This is a CI-reliability defect, not a product bug.

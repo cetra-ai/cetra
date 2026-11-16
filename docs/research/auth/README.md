@@ -14,7 +14,7 @@ Nov 2026. Per-product notes: [langfuse.md](langfuse.md), [phoenix.md](phoenix.md
 
 ## Adopt
 
-1. **Credentials cannot mint credentials** (Phoenix 19). API keys and PATs can't be created, listed or revoked with a PAT or an API key; only a web session can. `llmobs login` already gets its PAT through the browser.
+1. **Credentials cannot mint credentials** (Phoenix 19). API keys and PATs can't be created, listed or revoked with a PAT or an API key; only a web session can. `cetra login` already gets its PAT through the browser.
 2. **Assign roles ≤ your own** (Langfuse). An admin can't invite or promote anyone to owner.
 3. **Org role `none`** (Langfuse). A user can be limited to a few projects, and new projects stay hidden by default.
 4. **Per-provider trust for email linking** (LangWatch domain verification, Phoenix's refusal to link). See gap G1.
@@ -22,7 +22,7 @@ Nov 2026. Per-product notes: [langfuse.md](langfuse.md), [phoenix.md](phoenix.md
 6. **Refuse multi-tenant issuers** for generic OIDC (Entra `common`/`organizations`/`consumers`). The `iss` must equal the configured issuer exactly.
 7. **IdP group/role mapping with a strict mode** (Phoenix): post-MVP, but keep `auto_provision` shaped so it can grow into this.
 8. **Rotation with a "previous key" window** (LangWatch `CREDENTIALS_SECRET_PREVIOUS`). Our single-transaction re-encrypt is simpler and fine for SQLite. Keep it.
-9. **Fallback admin rule** (LangWatch). When `LLMOBS_AUTH_DISABLE_PASSWORD` is set, `llmobs admin reset-password` and an instance admin still work if the IdP is down. The spec already says the CLI works; state it in the UI too.
+9. **Fallback admin rule** (LangWatch). When `CETRA_AUTH_DISABLE_PASSWORD` is set, `cetra admin reset-password` and an instance admin still work if the IdP is down. The spec already says the CLI works; state it in the UI too.
 
 ## Avoid
 
@@ -49,9 +49,9 @@ Nov 2026. Per-product notes: [langfuse.md](langfuse.md), [phoenix.md](phoenix.md
 
 **G5. `auto_provision` with no `allowed_domains`** lets anyone who can register at the IdP into the org as `member`. Either require `allowed_domains` (or a group claim) with `auto_provision`, or log a startup warning.
 
-**G6. `LLMOBS_AUTH_ENFORCE_SSO_DOMAINS` doesn't name a provider.** Is a GitHub login with a matching email acceptable? It should map each domain to one provider: `domain → provider id`.
+**G6. `CETRA_AUTH_ENFORCE_SSO_DOMAINS` doesn't name a provider.** Is a GitHub login with a matching email acceptable? It should map each domain to one provider: `domain → provider id`.
 
-**G7. Setup page race.** On an internet-exposed fresh instance, the first visitor becomes instance admin (the same issue exists in LangWatch and Langfuse). Proposal: `POST /api/auth/setup` requires a one-time setup token printed to the log at startup (Jenkins-style), or listening on loopback only until setup is done. The headless `LLMOBS_INIT_*` path bypasses it.
+**G7. Setup page race.** On an internet-exposed fresh instance, the first visitor becomes instance admin (the same issue exists in LangWatch and Langfuse). Proposal: `POST /api/auth/setup` requires a one-time setup token printed to the log at startup (Jenkins-style), or listening on loopback only until setup is done. The headless `CETRA_INIT_*` path bypasses it.
 
 **G8. Login CSRF and unauthenticated endpoints.** The Origin check applies only to "cookie-authenticated requests", so `/login`, `/signup`, `/setup`, `/password/*` and `/invites/*/accept` are not covered (login CSRF). Apply the Origin check to every state-changing `/api/auth/*` request.
 
@@ -61,9 +61,9 @@ Nov 2026. Per-product notes: [langfuse.md](langfuse.md), [phoenix.md](phoenix.md
 
 **G11. The 60 s auth cache holds roles.** A PAT resolves to a user whose role may be lowered or removed. Either cache only `hash → user_id` and resolve roles live, or invalidate the cache on membership changes. Add a test for "removed from org → PAT denied immediately".
 
-**G12. The API key `prefix` is useless as specified.** "First 12 chars" of `sk-llmobs-…` shows only 2 random characters. Use the type prefix plus 6–8 random characters, and say how the UI disambiguates.
+**G12. The API key `prefix` is useless as specified.** "First 12 chars" of `sk-cetra-…` shows only 2 random characters. Use the type prefix plus 6–8 random characters, and say how the UI disambiguates.
 
-**G13. `LLMOBS_INIT_SECRET_KEY`** must be validated: right prefix, right length, base62. Weak or known values must be refused. Say what happens if the env changes after first start (ignored, with a warning).
+**G13. `CETRA_INIT_SECRET_KEY`** must be validated: right prefix, right length, base62. Weak or known values must be refused. Say what happens if the env changes after first start (ignored, with a warning).
 
 **G14. LLM connection and channel edits (Langfuse CVE-2026-41487).** 09 has `PATCH …/llm-connections/{id}` and `POST …/{id}/test`. Rules:
 - Changing `base_url`, `adapter` or `extra_headers` requires resubmitting the secret.
@@ -112,19 +112,19 @@ Rule: every referenced id is loaded with `AND project_id = ?` (or `org_id`). Add
 
 **G26. Sessions revoked by other events.** Reset revokes sessions. Password change, email change, disable, and "log out other sessions" should too. `web_sessions.id` is the hash; the UI needs a non-secret id to list and revoke sessions.
 
-**G27. OIDC state cookie key.** "Signed cookie": with which key? Derive per-purpose keys from `LLMOBS_ENCRYPTION_KEY` with HKDF labels (Phoenix): cookie signing, encryption, check value. The cookie must be `SameSite=Lax` (not Strict, or the IdP redirect drops it) and `HttpOnly`, with a ~10 min lifetime, single use.
+**G27. OIDC state cookie key.** "Signed cookie": with which key? Derive per-purpose keys from `CETRA_ENCRYPTION_KEY` with HKDF labels (Phoenix): cookie signing, encryption, check value. The cookie must be `SameSite=Lax` (not Strict, or the IdP redirect drops it) and `HttpOnly`, with a ~10 min lifetime, single use.
 
 **G28. AAD should name the column.** AAD = row id alone allows swapping `secret_enc` and `extra_headers_enc` within a row. Use `table || column || id`.
 
-**G29. `secret.key` next to the data.** A backup of `<data_dir>` contains both the key and the ciphertext. Document this and recommend `LLMOBS_ENCRYPTION_KEY` from a secret store in production.
+**G29. `secret.key` next to the data.** A backup of `<data_dir>` contains both the key and the ciphertext. Document this and recommend `CETRA_ENCRYPTION_KEY` from a secret store in production.
 
 **G30. SQLite `COLLATE NOCASE` is ASCII-only and not Postgres-portable** (04 claims the common subset). Store a normalised lowercase email in its own column with a plain `UNIQUE`.
 
-**G31. Contradiction with D43.** `docs/mvp-decisions.md` D43 names `AUTH_DISABLE_SIGNUP` and "first user = owner", while 08 uses `LLMOBS_AUTH_SIGNUP=open|invite_only|disabled` and makes the first user an instance admin and org owner. Align D43.
+**G31. Contradiction with D43.** `docs/mvp-decisions.md` D43 names `AUTH_DISABLE_SIGNUP` and "first user = owner", while 08 uses `CETRA_AUTH_SIGNUP=open|invite_only|disabled` and makes the first user an instance admin and org owner. Align D43.
 
 **G32. Audit events vs the privacy rule.** Failed logins for unknown emails can't log a user id, and emails must not be logged. Log a keyed hash of the email, or nothing.
 
-**G33. `LLMOBS_PUBLIC_URL` defaults to `http://localhost:8080`** (12). Behind a TLS proxy with the default, the Origin check rejects every browser request and cookies lack `Secure`. Fail loudly at startup, or show a clear error, when the request `Host` doesn't match the public URL.
+**G33. `CETRA_PUBLIC_URL` defaults to `http://localhost:8080`** (12). Behind a TLS proxy with the default, the Origin check rejects every browser request and cookies lack `Secure`. Fail loudly at startup, or show a clear error, when the request `Host` doesn't match the public URL.
 
 ## Test cases the plan should include
 
@@ -148,7 +148,7 @@ Credentials:
 13. Revocation and disable: a revoked key works ≤ 60 s. A disabled user's PAT and session fail immediately. A removed member's PAT fails immediately.
 14. Keys in query strings are rejected on `/api`, `/mcp` and SSE. Bearer plus cookie: the cookie is ignored.
 15. Hashes only: after creation, no API response, log line or DB column contains the plaintext key. Read the DB in the test.
-16. The `LLMOBS_INIT_SECRET_KEY` value is validated. Init runs once, in one transaction: a crash mid-init leaves an empty DB.
+16. The `CETRA_INIT_SECRET_KEY` value is validated. Init runs once, in one transaction: a crash mid-init leaves an empty DB.
 
 Web:
 17. The Origin check covers `/login`, `/signup`, `/setup`, `/password/*` and invite accept. A cookie request with a foreign or absent `Origin`, or a non-JSON content type, is rejected.

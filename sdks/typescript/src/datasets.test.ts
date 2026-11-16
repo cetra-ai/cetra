@@ -6,8 +6,8 @@ import { BASE, FakeRest, inOrder, type RecordedRequest } from "./rest.test-helpe
 
 function clientFor(rest: FakeRest): Client {
   return new Client({
-    apiKey: "sk-llmobs-test",
-    baseUrl: "http://llmobs.test",
+    apiKey: "sk-cetra-test",
+    baseUrl: "http://cetra.test",
     fetch: rest.fetch,
     sleep: rest.sleep,
   });

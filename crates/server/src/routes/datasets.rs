@@ -12,8 +12,8 @@ use axum::extract::{DefaultBodyLimit, Extension, Multipart, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
-use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-use llmobs_eval::{TraceData, VariableMapping, resolve};
+use cetra_core::ids::{ProjectId, SpanId, TraceId};
+use cetra_eval::{TraceData, VariableMapping, resolve};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sqlx::{SqliteConnection, SqlitePool};
@@ -3260,7 +3260,7 @@ mod tests {
 
     /// A multipart body with a `file` part and an optional `mapping` part.
     fn multipart(file_name: &str, file: &[u8], mapping: Option<&str>) -> (String, Vec<u8>) {
-        const BOUNDARY: &str = "llmobs-test-boundary";
+        const BOUNDARY: &str = "cetra-test-boundary";
         let mut body = Vec::new();
         body.extend_from_slice(
             format!(

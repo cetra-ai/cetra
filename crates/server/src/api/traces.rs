@@ -1,16 +1,14 @@
 //! Trace and span response types.
 //!
 //! Spec 09 § Observability data and § Response shapes. `duration_ns` and `model` are computed here;
-//! [`llmobs_core::span::Span`] does not store them (D60).
+//! [`cetra_core::span::Span`] does not store them (D60).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use llmobs_core::enums::{
-    Convention, CostSource, PayloadFormat, ScoreSource, SpanKind, SpanStatus,
-};
-use llmobs_core::ids::{SpanId, TraceId};
-use llmobs_core::score::ScoreValue;
-use llmobs_core::span::{Span, SpanEvent, SpanLink};
+use cetra_core::enums::{Convention, CostSource, PayloadFormat, ScoreSource, SpanKind, SpanStatus};
+use cetra_core::ids::{SpanId, TraceId};
+use cetra_core::score::ScoreValue;
+use cetra_core::span::{Span, SpanEvent, SpanLink};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use utoipa::{IntoParams, ToSchema};
@@ -52,11 +50,11 @@ pub struct TraceSummary {
     /// Root span name, or the earliest span's name when there is no root.
     pub name: String,
     /// Earliest span start, nanoseconds since the Unix epoch. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub start_time: i64,
     /// Latest span end, nanoseconds since the Unix epoch. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub end_time: i64,
     /// `end_time - start_time`, nanoseconds.
@@ -135,11 +133,11 @@ pub struct SpanSummary {
     /// Kind of work.
     pub span_kind: SpanKind,
     /// Start, nanoseconds since the Unix epoch. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub start_time: i64,
     /// End, nanoseconds since the Unix epoch. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub end_time: i64,
     /// `end_time - start_time`, nanoseconds. Saturates on overflow.
@@ -238,7 +236,7 @@ pub struct TraceDetail {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct SpanEventView {
     /// Event time, nanoseconds since the Unix epoch. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub time: i64,
     /// Event name.
@@ -277,11 +275,11 @@ pub struct SpanDetail {
     /// Kind of work.
     pub span_kind: SpanKind,
     /// Start, nanoseconds since the Unix epoch. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub start_time: i64,
     /// End, nanoseconds since the Unix epoch. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub end_time: i64,
     /// `end_time - start_time`, nanoseconds. Saturates on overflow.
@@ -400,7 +398,7 @@ pub struct SpanDetail {
     /// Conventions detected on the span.
     pub conventions: Vec<Convention>,
     /// Server receive time, nanoseconds since the Unix epoch. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub ingest_time: i64,
     /// Normalization version of this row.
@@ -834,9 +832,9 @@ pub struct SpanListParams {
 mod tests {
     use std::collections::{BTreeMap, HashMap, HashSet};
 
-    use llmobs_core::enums::{PayloadFormat, SpanKind, SpanStatus};
-    use llmobs_core::ids::{SpanId, TraceId};
-    use llmobs_core::span::{Span, SpanEvent, SpanLink};
+    use cetra_core::enums::{PayloadFormat, SpanKind, SpanStatus};
+    use cetra_core::ids::{SpanId, TraceId};
+    use cetra_core::span::{Span, SpanEvent, SpanLink};
     use serde::Serialize;
     use serde_json::Value;
 

@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use llmobs_core::ids::ProjectId;
-use llmobs_core::span::Span;
+use cetra_core::ids::ProjectId;
+use cetra_core::span::Span;
 use tokio::sync::{broadcast, watch};
 use uuid::Uuid;
 

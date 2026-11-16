@@ -1,27 +1,27 @@
-//! `llmobs projects list`: every project the caller can read, across their orgs (spec 09
+//! `cetra projects list`: every project the caller can read, across their orgs (spec 09
 //! § Orgs, projects, members, keys; D-H-12).
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use cetra_server::api::account::{OrgMembership, OrgRole, Project};
+use cetra_server::api::common::Page;
 use clap::{Args, Subcommand};
-use llmobs_server::api::account::{OrgMembership, OrgRole, Project};
-use llmobs_server::api::common::Page;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::client::{self, ApiClient, ConnectionArgs};
 use crate::output::{self, Column, Io, ListFormat};
 
-/// `llmobs projects …`.
+/// `cetra projects …`.
 #[derive(Debug, Subcommand)]
 pub(crate) enum ProjectsCommand {
     /// List every project you can read, across your orgs.
     List(ProjectListArgs),
 }
 
-/// `llmobs projects list`.
+/// `cetra projects list`.
 #[derive(Debug, Args)]
 pub(crate) struct ProjectListArgs {
     /// Output format.
@@ -46,7 +46,7 @@ struct ListedProject {
     role: Option<String>,
 }
 
-/// Runs `llmobs projects …`. Credentials are read only when the target needs them.
+/// Runs `cetra projects …`. Credentials are read only when the target needs them.
 pub(crate) async fn run(
     command: &ProjectsCommand,
     credentials: impl FnOnce() -> anyhow::Result<PathBuf>,
@@ -168,9 +168,9 @@ mod tests {
     use super::*;
     use crate::test_server::{BrokenPipe, Canned, TestServer};
 
-    /// `llmobs projects …` parsed from `argv` (after `projects`).
+    /// `cetra projects …` parsed from `argv` (after `projects`).
     fn projects_args(argv: &[&str]) -> ProjectsCommand {
-        let mut full = vec!["llmobs", "projects"];
+        let mut full = vec!["cetra", "projects"];
         full.extend_from_slice(argv);
         match crate::Cli::try_parse_from(full).unwrap().command {
             crate::Command::Projects { command } => *command,

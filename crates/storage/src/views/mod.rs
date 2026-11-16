@@ -344,11 +344,8 @@ pub(crate) fn duration_ms(duration_ns: Expr) -> Expr {
 
 /// `CAST(end_time AS BIGINT) - CAST(start_time AS BIGINT)`.
 pub(crate) fn duration_ns_from_bounds() -> Expr {
-    cast(col(llmobs_core::schema::traces::END_TIME), DataType::Int64)
-        - cast(
-            col(llmobs_core::schema::traces::START_TIME),
-            DataType::Int64,
-        )
+    cast(col(cetra_core::schema::traces::END_TIME), DataType::Int64)
+        - cast(col(cetra_core::schema::traces::START_TIME), DataType::Int64)
 }
 
 #[derive(Clone, Copy)]
@@ -406,8 +403,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use arrow::array::{Array, AsArray, RecordBatch};
+    use cetra_core::time_serde::parse_rfc3339;
     use chrono::{DateTime, SecondsFormat, Utc};
-    use llmobs_core::time_serde::parse_rfc3339;
     use serde_json::{Value, json};
 
     use super::*;

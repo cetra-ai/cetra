@@ -5,5 +5,5 @@
     "02 § Normalization rules / 18",
     "02 § Normalization rules / 19"
   ],
-  "notes": "A client-sent llmobs.normalize_warning is replaced by the normalizer's warning array."
+  "notes": "A client-sent cetra.normalize_warning is replaced by the normalizer's warning array."
 }

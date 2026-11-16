@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use llmobs_core::ids::OrgId;
+use cetra_core::ids::OrgId;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
@@ -418,7 +418,7 @@ fn names_json(names: &[String]) -> Result<String, MetaError> {
 
 #[cfg(test)]
 mod tests {
-    use llmobs_core::ids::OrgId;
+    use cetra_core::ids::OrgId;
     use uuid::Uuid;
 
     use super::{ConnectionFields, ConnectionRow};

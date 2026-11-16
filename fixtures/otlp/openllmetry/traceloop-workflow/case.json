@@ -12,7 +12,7 @@
       "opentelemetry-semantic-conventions-ai": "0.5.1",
       "traceloop-sdk": "0.62.4"
     },
-    "captured_at": "2026-11-11T12:54:56Z"
+    "captured_at": "2026-11-16T08:54:52Z"
   },
   "spec_refs": [
     "02 § Convention detection",

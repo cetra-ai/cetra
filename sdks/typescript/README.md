@@ -1,7 +1,7 @@
-# llmobs for TypeScript
+# cetra for TypeScript
 
-The `llmobs` package (MIT, ESM only) is the TypeScript SDK of
-[llmobs](../../docs/spec/10-sdk.md), an open-source LLM observability platform.
+The `cetra` package (MIT, ESM only) is the TypeScript SDK of
+[cetra](../../docs/spec/10-sdk.md), an open-source LLM observability platform.
 It is a thin layer over OpenTelemetry: tracing goes out as OTLP/HTTP protobuf,
 scores and feedback over a small REST surface. Runs on Node ≥ 22.12, Bun, Deno
 and edge runtimes (D77) — one `fetch`-based transport everywhere.
@@ -9,7 +9,7 @@ and edge runtimes (D77) — one `fetch`-based transport everywhere.
 ## Install
 
 ```sh
-pnpm add llmobs
+pnpm add @cetra-ai/sdk
 ```
 
 The instrumentation helpers need their OpenInference packages (optional peers,
@@ -22,12 +22,12 @@ pnpm add @arizeai/openinference-instrumentation-openai openai
 ## Quick start
 
 ```ts
-import { flush, init, observe } from "llmobs";
+import { flush, init, observe } from "@cetra-ai/sdk";
 ```
 
 <!-- readme:quick-start -->
 ```ts
-init({ apiKey: process.env.LLMOBS_API_KEY });
+init({ apiKey: process.env.CETRA_API_KEY });
 const searchDocs = observe(({ query }: { query: string }) => `results for ${query}`, {
   kind: "tool",
   name: "search_docs",
@@ -37,25 +37,25 @@ await flush();
 ```
 
 `init()` is once per process: a second call logs one warning and changes
-nothing (D-F-15). Without an API key (argument and `LLMOBS_API_KEY` both
-unset) it warns once and runs disabled; `LLMOBS_ENABLED=false` silences the
+nothing (D-F-15). Without an API key (argument and `CETRA_API_KEY` both
+unset) it warns once and runs disabled; `CETRA_ENABLED=false` silences the
 warning.
 
 ## Configuration
 
-| Option              | Env                      | Default                           |
-| ------------------- | ------------------------ | --------------------------------- |
-| `apiKey`            | `LLMOBS_API_KEY`         | unset → one warning, SDK disabled |
-| `baseUrl`           | `LLMOBS_BASE_URL`        | `http://localhost:8080`           |
-| `environment`       | `LLMOBS_ENVIRONMENT`     | unset                             |
-| `release`           | `LLMOBS_RELEASE`         | unset                             |
-| `captureContent`    | `LLMOBS_CAPTURE_CONTENT` | `true`                            |
-| `sampleRate`        | `LLMOBS_SAMPLE_RATE`     | `1` (trace-id ratio sampler)      |
-| `useGlobalProvider` | —                        | `false`                           |
-| `instrument`        | —                        | `[]`                              |
-| `mask`              | —                        | none                              |
-| `exportFilter`      | —                        | none                              |
-| `enabled`           | `LLMOBS_ENABLED`         | `true` (no-op mode when `false`)  |
+| Option              | Env                     | Default                           |
+| ------------------- | ----------------------- | --------------------------------- |
+| `apiKey`            | `CETRA_API_KEY`         | unset → one warning, SDK disabled |
+| `baseUrl`           | `CETRA_BASE_URL`        | `http://localhost:8080`           |
+| `environment`       | `CETRA_ENVIRONMENT`     | unset                             |
+| `release`           | `CETRA_RELEASE`         | unset                             |
+| `captureContent`    | `CETRA_CAPTURE_CONTENT` | `true`                            |
+| `sampleRate`        | `CETRA_SAMPLE_RATE`     | `1` (trace-id ratio sampler)      |
+| `useGlobalProvider` | —                       | `false`                           |
+| `instrument`        | —                       | `[]`                              |
+| `mask`              | —                       | none                              |
+| `exportFilter`      | —                       | none                              |
+| `enabled`           | `CETRA_ENABLED`         | `true` (no-op mode when `false`)  |
 
 An explicit argument wins over the env var, which wins over the default. Env
 values are trimmed; an empty value counts as unset. An invalid value throws a
@@ -105,7 +105,7 @@ withLlmSpan(
 );
 ```
 
-`withLlmSpan` writes the GenAI attributes (`gen_ai.*`), `llmobs.span.kind =
+`withLlmSpan` writes the GenAI attributes (`gen_ai.*`), `cetra.span.kind =
 "llm"` and, through the handle, the response model, usage, cost
 (`setCost(totalUsd)`) and time-to-first-token (`recordFirstToken()`).
 Messages may be the canonical `{ role, parts }` format or the short
@@ -150,16 +150,16 @@ label (or `dataType: "text"`). `user_id` comes from the active
 
 ## Datasets and experiments
 
-`new llmobs.Client()` is the REST client for datasets and experiments. It reads
+`new cetra.Client()` is the REST client for datasets and experiments. It reads
 `apiKey` and `baseUrl` the way `init()` does (argument, then
-`LLMOBS_API_KEY` / `LLMOBS_BASE_URL`, then the default), and throws
+`CETRA_API_KEY` / `CETRA_BASE_URL`, then the default), and throws
 `ConfigError` without a key. Unlike tracing and scores, its calls reject on
 failure (see [Errors](#errors)).
 
 ### Datasets
 
 ```ts
-import { Client } from "llmobs";
+import { Client } from "@cetra-ai/sdk";
 
 const client = new Client(); // the key and URL come from the environment
 
@@ -197,9 +197,9 @@ await client.datasets.delete("faq-v1"); // the dataset and its items
 run, and stores the results on the server. It needs `init()` first.
 
 ```ts
-import { evaluate, init, type Score } from "llmobs";
+import { evaluate, init, type Score } from "@cetra-ai/sdk";
 
-init(); // the key comes from LLMOBS_API_KEY
+init(); // the key comes from CETRA_API_KEY
 
 function exact({ output, expected }: { output: unknown; expected: unknown }): boolean {
   return String(output).trim() === (expected as { a: string }).a.trim();
@@ -280,14 +280,14 @@ OpenInference instrumentation and patch the module by hand, so ESM works
 without loader flags:
 
 ```ts
-import { openai } from "llmobs/openai";
+import { openai } from "@cetra-ai/sdk/openai";
 import OpenAI from "openai";
 
 init({ apiKey, instrument: [openai(OpenAI)] });
 ```
 
-The same shape exists as `llmobs/anthropic` (takes the `Anthropic` class from
-`@anthropic-ai/sdk`) and `llmobs/langchain` (takes the LangChain global from
+The same shape exists as `cetra/anthropic` (takes the `Anthropic` class from
+`@anthropic-ai/sdk`) and `cetra/langchain` (takes the LangChain global from
 `@langchain/core`). The OpenInference packages are optional peers. Pass the
 helpers' `captureContent` the same value as `init`'s.
 
@@ -300,7 +300,7 @@ metadata.
 <!-- readme:ai-telemetry -->
 ```ts
 // Pass `telemetry` as `experimental_telemetry` to the Vercel AI SDK; the
-// tracer it hands out is the llmobs one, so AI spans land in llmobs.
+// tracer it hands out is the cetra one, so AI spans land in cetra.
 const telemetry = aiTelemetry({ sessionId: "chat-42", functionId: "chat" });
 telemetry.tracer?.startSpan("ai.chat").end();
 ```
@@ -329,7 +329,7 @@ always the global one, so instrumentor spans nest under ours.
 - `spanProcessor()` returns our span processor, for apps that build their own
   OTel pipeline and add it to their provider.
 - `exportFilter(span)` replaces the default export rule (which, in global
-  mode, keeps spans whose scope is `llmobs` or `ai` or that carry known
+  mode, keeps spans whose scope is `cetra` or `ai` or that carry known
   LLM attribute prefixes).
 - `tracerProvider()` returns the provider in use.
 
@@ -339,7 +339,7 @@ always the global one, so instrumentor spans nest under ours.
 LLM messages) before serialization, and at export time on payload keys of
 other spans (instrumentor spans included). It gets the decoded value and must
 return a new one; a string stays a string, anything else is serialized back.
-If it throws, the value becomes `"[llmobs: mask failed]"` (fail closed).
+If it throws, the value becomes `"[cetra: mask failed]"` (fail closed).
 
 `captureContent: false` records no payload attributes on our spans and
 deletes the payload keys from other spans; token counts, models and costs
@@ -378,15 +378,15 @@ export default {
 
 ## Browser feedback
 
-The `llmobs/browser` subpath imports nothing from OpenTelemetry; it posts an
-end-user feedback score with a public key (`pk-llmobs-…`) and never throws:
+The `cetra/browser` subpath imports nothing from OpenTelemetry; it posts an
+end-user feedback score with a public key (`pk-cetra-…`) and never throws:
 
 ```ts
-import { feedback } from "llmobs/browser";
+import { feedback } from "@cetra-ai/sdk/browser";
 
 const { ok } = await feedback({
-  baseUrl: "https://llmobs.example.org",
-  publicKey: "pk-llmobs-…",
+  baseUrl: "https://cetra.example.org",
+  publicKey: "pk-cetra-…",
   traceId, // 32 hex chars, from traceparent or your app
   value: 1,
 });
@@ -419,5 +419,5 @@ const { ok } = await feedback({
 
 Logs and warnings never contain payloads (prompts, completions, attribute
 values), API keys or email addresses — ids, sizes and counts only. An invalid
-score logs `llmobs: score not queued: <reason>` with the reason, never the
+score logs `cetra: score not queued: <reason>` with the reason, never the
 value. The API key never appears in errors or serialized config.

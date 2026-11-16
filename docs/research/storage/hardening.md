@@ -35,9 +35,9 @@ The durability milestone (plan `docs/plans/r-hardening/02-m2-durability.md`, dec
 
 | Date | Commit | Command | Mode | Duration | Result |
 |---|---|---|---|---|---|
-| 2026-11-15 | 7a7bae5 | `LLMOBS_HOOK_CRASH_CASES=52 cargo test -p llmobs-storage --all-features --lib -- --ignored --exact model_tests::hook_crash::every_model_hook_crash_reads_back` | debug, local | 102 s | pass: 52 cases, 44 aborted at their hook point, 8 completed without reaching it (cases 14, 18, 19, 41 to 45); 26 lossy cases among them |
+| 2026-11-15 | 7a7bae5 | `CETRA_HOOK_CRASH_CASES=52 cargo test -p cetra-storage --all-features --lib -- --ignored --exact model_tests::hook_crash::every_model_hook_crash_reads_back` | debug, local | 102 s | pass: 52 cases, 44 aborted at their hook point, 8 completed without reaching it (cases 14, 18, 19, 41 to 45); 26 lossy cases among them |
 | 2026-11-15 | 7a7bae5 | the same, default count (25) | debug, local | 52.8 s | pass: 25 cases, 22 aborted, 3 completed (14, 18, 19) |
-| | | R2.9 long run, R2.10 with `LLMOBS_LOSSY_SEEDS=10`, R2.11 with `LLMOBS_HOOK_CRASH_CASES=500`, `just lazyfs` three times, the GitHub FUSE probe | | | pending (R2.14) |
+| | | R2.9 long run, R2.10 with `CETRA_LOSSY_SEEDS=10`, R2.11 with `CETRA_HOOK_CRASH_CASES=500`, `just lazyfs` three times, the GitHub FUSE probe | | | pending (R2.14) |
 
 ### Findings
 
@@ -102,10 +102,10 @@ What the S3 mode covers:
 
 | Date | Commit | Command | Mode | Duration | Result |
 |---|---|---|---|---|---|
-| 2026-11-15 | R4.5 | `LLMOBS_MODEL_S3_CASES=8 cargo test -p llmobs-storage --all-features --lib model_tests::storage_matches_the_model_on_s3` | debug, in-memory bucket | 32.7 s | pass |
-| 2026-11-15 | R4.5 | `LLMOBS_MODEL_S3_CASES=50 LLMOBS_MODEL_S3_STATS=1 cargo test -p llmobs-storage --all-features --lib model_tests::storage_matches_the_model_on_s3` | debug, in-memory bucket | 279.5 s | pass: 50 cases, 51 injected faults, 446 puts, 325 multipart completes, 29 aborts, 11 abandoned uploads, 0 `FaultyRead` errors |
-| 2026-11-15 | R4.5 | `LLMOBS_MODEL_S3_CASES=4 cargo test -p llmobs-storage --all-features --lib model_tests::storage_matches_the_model_on_s3`, nine runs | debug, in-memory bucket | 5.7 s to 98 s (8 of 9 under 45 s) | pass; the default is now 4. At 8 cases five runs took 10 s to 103 s. A shutdown whose flush fails under faults waits out its 30 s grace period |
-| 2026-11-15 | R4.5 review | `LLMOBS_MODEL_S3_CASES=8 cargo test -p llmobs-storage --all-features --lib model_tests::storage_matches_the_model_on_s3`, six runs, after the 3 s calm arm and the 25 s window | debug, in-memory bucket | 11 s to 32 s | pass; the default is 8 again |
+| 2026-11-15 | R4.5 | `CETRA_MODEL_S3_CASES=8 cargo test -p cetra-storage --all-features --lib model_tests::storage_matches_the_model_on_s3` | debug, in-memory bucket | 32.7 s | pass |
+| 2026-11-15 | R4.5 | `CETRA_MODEL_S3_CASES=50 CETRA_MODEL_S3_STATS=1 cargo test -p cetra-storage --all-features --lib model_tests::storage_matches_the_model_on_s3` | debug, in-memory bucket | 279.5 s | pass: 50 cases, 51 injected faults, 446 puts, 325 multipart completes, 29 aborts, 11 abandoned uploads, 0 `FaultyRead` errors |
+| 2026-11-15 | R4.5 | `CETRA_MODEL_S3_CASES=4 cargo test -p cetra-storage --all-features --lib model_tests::storage_matches_the_model_on_s3`, nine runs | debug, in-memory bucket | 5.7 s to 98 s (8 of 9 under 45 s) | pass; the default is now 4. At 8 cases five runs took 10 s to 103 s. A shutdown whose flush fails under faults waits out its 30 s grace period |
+| 2026-11-15 | R4.5 review | `CETRA_MODEL_S3_CASES=8 cargo test -p cetra-storage --all-features --lib model_tests::storage_matches_the_model_on_s3`, six runs, after the 3 s calm arm and the 25 s window | debug, in-memory bucket | 11 s to 32 s | pass; the default is 8 again |
 | | | `just model-s3 200` (the first row planned) | release | | deferred (long run) |
 | | | Garage: a lifecycle rule with `AbortIncompleteMultipartUpload` applied and read back (R4.9, `docs/self-hosting/s3.md`) | | | pending (external; needs a Garage server) |
 
@@ -128,7 +128,7 @@ What the tests cover:
 Environment:
 - **Small filesystem:** an unprivileged `unshare -rm` 64 MiB tmpfs. On Ubuntu 24.04 and later the
   namespace is refused unless `sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0` is set
-  (until the next reboot). Tmpfs misses what a disk does: `fdatasync` is a no-op, so a sync never reports `ENOSPC`, and `remount,size=` fails in the namespace, so the tests free space by removing a ballast file. The ext4 loop device (`LLMOBS_TEST_SMALL_FS`) is not run yet.
+  (until the next reboot). Tmpfs misses what a disk does: `fdatasync` is a no-op, so a sync never reports `ENOSPC`, and `remount,size=` fails in the namespace, so the tests free space by removing a ballast file. The ext4 loop device (`CETRA_TEST_SMALL_FS`) is not run yet.
 - **Memory:** a systemd user scope (`systemd-run --user`). Its limit is honoured by the query pool from R5.6, not before.
 - **Cgroup namespace:** the sandbox this plan was written in has a `/proc/self/cgroup` path that starts with `/../..`, which the sysinfo reader cannot resolve. The memory probe (`child_sees_the_scope_limit`) reports whether it applies.
 
@@ -136,7 +136,7 @@ Environment:
 
 | Date | Commit | Command | Mode | Duration | Result |
 |---|---|---|---|---|---|
-| 2026-11-15 | 4c8fe6a | `cargo test -p llmobs-storage --all-features --lib writes_check_free_disk_now`, before the fix | debug | 0.02 s | fail: a block was written on a stale measurement |
+| 2026-11-15 | 4c8fe6a | `cargo test -p cetra-storage --all-features --lib writes_check_free_disk_now`, before the fix | debug | 0.02 s | fail: a block was written on a stale measurement |
 | 2026-11-15 | 4c8fe6a | same, after the fix | debug | 0.02 s | pass |
 | 2026-11-15 | 4c8fe6a | `read_cache` unit tests | debug | 1.5 s | pass: 19 tests, 1 ignored |
 | 2026-11-15 | uncommitted: check per call | D7 under `unshare -rm`, `--ignored --exact` | debug, 64 MiB tmpfs | 5.4 s | fail: sampler minimum 2.7 MiB, below `min_free - 1 MiB` |
@@ -147,7 +147,7 @@ Environment:
 | 2026-11-15 | a1f5ce5 + 16927ae | `just resources` | release | 372 s | 15/15 pass |
 | 2026-11-15 | a1f5ce5 + 16927ae | `resources-memory` small profile, a systemd scope per limit | release | | see Measured limits. The small profile ran in an instrumented copy (sampler thread), not the committed code |
 | earlier | a1f5ce5 | `resources-memory-min defaults` (vm-report-1) | release | 400.7 s | 8 GiB passes, peak RSS 7.40 GiB |
-| | | `just resources` three times, `LLMOBS_TEST_SMALL_FS` on an ext4 loop device, descriptor limits 1024 and 512 | | | pending: one `just resources` run only; the ext4 loop device and the 1024/512 limits were not run |
+| | | `just resources` three times, `CETRA_TEST_SMALL_FS` on an ext4 loop device, descriptor limits 1024 and 512 | | | pending: one `just resources` run only; the ext4 loop device and the 1024/512 limits were not run |
 | 2026-11-15 | a1f5ce5 + 16927ae | `peak_at_the_default_limit` (soft limit 65,536, 30 s, 4 appenders, 4 query loops) | | 30 s load | peak 189 (116 in the first run), baseline 16 to 17. Peak composition from an instrumented copy |
 | 2026-11-15 | a1f5ce5 + 16927ae | `a_low_limit_gives_errors_not_panics`, limits 256, 128, 64, 32 | | 20 s each | all run, no panic, no wedge |
 | 2026-11-15 | a1f5ce5 + 16927ae | `opening_under_a_low_limit_is_a_clean_error`, limits 64, 32, 16, 8 | | | 64, 32 and 16 open; 8 fails cleanly (`io`) |
@@ -174,12 +174,12 @@ Environment:
 
 **M5-7, most resident memory during ingest is outside the memory budgets (open).** In an ingest-only run the process grows about 70 MiB/s while the memtable stays at 50 to 130 MiB and is flushed. The accounted pools (memtable at most 130 MiB, query pool at most about 170 MiB) do not explain it. glibc arenas account for a large part (`MALLOC_ARENA_MAX=2` halves the peak). Not located. The next step is a heap profile (dhat or jemalloc profiling). Not fixed.
 
-**M5-8, the memory test measures glibc, the shipped binary uses mimalloc (D56, open).** The storage test binary uses glibc malloc, and `crates/cli/src/main.rs` sets mimalloc. The memory numbers above are glibc numbers. The earlier mimalloc build was no better (killed at 2 GiB, 3.0 GiB anon at 4 GiB). The fix is to set the same allocator in the memory test (a dev-dependency and `#[global_allocator]` in the test cfg, as the llmobs-m5 experiment did), then re-measure. Not done.
+**M5-8, the memory test measures glibc, the shipped binary uses mimalloc (D56, open).** The storage test binary uses glibc malloc, and `crates/cli/src/main.rs` sets mimalloc. The memory numbers above are glibc numbers. The earlier mimalloc build was no better (killed at 2 GiB, 3.0 GiB anon at 4 GiB). The fix is to set the same allocator in the memory test (a dev-dependency and `#[global_allocator]` in the test cfg, as the cetra-m5 experiment did), then re-measure. Not done.
 
 ### Requests
 
 - **Track N, `docs/self-hosting/`** (not edited in M5): a sizing section with the memory minimum and small profile, `min_free_bytes` and the descriptor limit; `LimitNOFILE=` in the systemd unit at the recommended value, and an optional `MemoryMax=` (honoured by the query pool since R5.6); Helm `values.yaml` resource requests and limits at the documented minimum.
-- **Server and CLI:** `llmobs serve` raises its soft `RLIMIT_NOFILE` to the hard limit at start, as Go programs do, and logs both values (decided, Q2). This is the coordinator's to assign.
+- **Server and CLI:** `cetra serve` raises its soft `RLIMIT_NOFILE` to the hard limit at start, as Go programs do, and logs both values (decided, Q2). This is the coordinator's to assign.
 - **`/readyz`:** no change requested. It already returns 503 when the WAL has failed (`crates/server/src/http/health.rs`, from `spans_wal_failed`), and spec 12 lists the free-disk check. Revisit it only if the WAL rotation decision changes what counts as a WAL failure.
 - **The 422 text:** R5.2 changed `RunError::TooLarge` to "the query needed more memory or temporary disk space than allowed". The server still says "needed more memory than allowed" in `crates/server/src/http/error.rs`, `crates/server/src/alerts/evaluate.rs`, `crates/server/src/api/openapi.rs` and `crates/server/openapi.json`, and `docs/spec/05-query.md` says "needed more memory than the cap". Add "or temporary disk space" to each.
 - **WAL rotation (coordinator, Q3):** a proposed decision is written out in `docs/plans/r-hardening/05-m5-resources.md` § R5.8, with the provisional sentence now in spec 03 § 1. The coordinator numbers and records it. Until then `wal/writer.rs` is unchanged.
@@ -244,7 +244,7 @@ Checked on `main` 30bed18 and `claude/r-m3-fuzzing`, before M8. Every persisted 
 |---|---|---|---|
 | **WAL segment** | `wal/<table>/<first seq, 20 digits>.wal` (`wal/mod.rs::segment_name`) | **None.** No segment header: a segment is records only (`wal/segment.rs::SegmentWriter::create` writes nothing). The spec 12 sentence "the WAL carries a version byte in each segment header" is not true. | A record with `kind != 1` is `Decoded::Invalid` (`wal/record.rs`). In the **last** segment `replay.rs::scan_segment` treats that as a torn tail and **truncates it** (`truncate_tail`): an older binary erases a newer binary's records. Earlier segments: `WalError::Corrupt` (the open fails), or a skip with `--wal-skip-corrupt`. A payload that is not one batch of the table's current schema is `Corrupt` too (`read_batch`). |
 | **WAL record** | inside a segment, `wal/record.rs` | `kind` byte (1 = row batch, 2 reserved). Header 17 bytes (`HEADER_LEN`): `u32 payload_len`, `u32 crc32c`, `u64 seq`, `u8 kind`. Payload: an Arrow IPC stream, LZ4-frame compressed, one batch. Cap: `MAX_PAYLOAD` 256 MiB. | As above. On `claude/r-m3-fuzzing` (to merge before M8): `MAX_DECODED_BYTES` 1 GiB declared decompressed bytes per record, LZ4 ratio bound 256 plus 64 bytes of slack per buffer, **LZ4_FRAME only** (D-R-25 there). These are part of what a v1 record is. |
-| **Parquet file** | `objects/tables/<table>/project=<id>/day=<YYYY-MM-DD>/<level>-<uuidv7>.parquet` (`objects.rs::table_file_path`) | KV metadata written by `parquet.rs::file_metadata`: `llmobs.table`, `llmobs.schema_version` (`"1"`), `llmobs.level`, `llmobs.min_time`, `llmobs.max_time`, `llmobs.min_ingest_time`, `llmobs.max_ingest_time`. **`llmobs.schema_version` is the row normalization version (spec 01), not a file-format version.** | **No code reads any of these keys** (the catalog holds the same bounds). Extra columns are ignored by DataFusion's schema adapter (spec 03 §3). A changed column type or a missing required column is a read error, which makes the file a suspect (`verify.rs::may_be_corrupt`); `verify_file` then finds it corrupt and **quarantines it**: a newer file that is not corrupt would be hidden from queries. |
+| **Parquet file** | `objects/tables/<table>/project=<id>/day=<YYYY-MM-DD>/<level>-<uuidv7>.parquet` (`objects.rs::table_file_path`) | KV metadata written by `parquet.rs::file_metadata`: `cetra.table`, `cetra.schema_version` (`"1"`), `cetra.level`, `cetra.min_time`, `cetra.max_time`, `cetra.min_ingest_time`, `cetra.max_ingest_time`. **`cetra.schema_version` is the row normalization version (spec 01), not a file-format version.** | **No code reads any of these keys** (the catalog holds the same bounds). Extra columns are ignored by DataFusion's schema adapter (spec 03 §3). A changed column type or a missing required column is a read error, which makes the file a suspect (`verify.rs::may_be_corrupt`); `verify_file` then finds it corrupt and **quarantines it**: a newer file that is not corrupt would be hidden from queries. |
 | **`catalog.db`** | `<data_dir>/catalog.db`, SQLite WAL mode, `synchronous=FULL` | `sqlx` migrations `0001`–`0007` in `crates/storage/migrations/catalog/`, tracked in `_sqlx_migrations` (version, checksum). Copies keep their number: `catalog.db.pre-m<N>` (`catalog/db.rs::pre_migration_copy`, D-N-22). | An applied migration the binary does not know: `sqlx` `MigrateError::VersionMissing`, so the open fails with `CatalogError::Migrate` and a message about a missing migration, before any write (no pre-migration copy: `applied >= expected`). An edited migration file: `VersionMismatch` (checksum). A TEXT value the binary does not know (`data_files.state`, `table_name`, `deletions.kind`, `projects.state`): `CatalogError::Corrupt` while loading. **No marker for a change that adds no migration**, such as a new meaning for a column. |
 | **Catalog snapshot** | `Storage::snapshot_catalog` (`snapshot.rs`), `VACUUM INTO` | Same as `catalog.db`. | Same. The backup `manifest.json` is track N's, not storage's. |
 | **Object paths** | `data_files.path` (relative path, never parsed), `media/<project>/<sha256 hex>` (`objects.rs::media_path`) | None. | A path is opaque to readers; a *new layout* only applies to new files. |

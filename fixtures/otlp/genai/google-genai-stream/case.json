@@ -11,7 +11,7 @@
       "opentelemetry-sdk": "1.45.2",
       "opentelemetry-util-genai": "1.1b0"
     },
-    "captured_at": "2026-11-15T01:03:04Z"
+    "captured_at": "2026-11-16T08:54:03Z"
   },
   "spec_refs": [
     "02 § Convention detection",

@@ -1,7 +1,7 @@
 //! Remote puts against a real S3-compatible server (D119).
 //!
-//! Skipped unless `LLMOBS_TEST_S3_ENDPOINT` is set. Also set
-//! `LLMOBS_TEST_S3_BUCKET`, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`.
+//! Skipped unless `CETRA_TEST_S3_ENDPOINT` is set. Also set
+//! `CETRA_TEST_S3_BUCKET`, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`.
 //! The bucket must exist.
 //!
 //! Any S3-compatible server works. The `minio/minio` image is no longer
@@ -9,43 +9,43 @@
 //! `--tmpfs` gives it a writable `/data`):
 //!
 //! ```text
-//! docker run --rm --name llmobs-s3 -p 7070:7070 --tmpfs /data:rw,mode=1777,size=2g -e ROOT_ACCESS_KEY=llmobs -e ROOT_SECRET_KEY=llmobs-secret -e VGW_BACKEND=posix -e VGW_BACKEND_ARGS=/data -e VGW_ARGS="--port :7070" versity/versitygw:v1.11.0
+//! docker run --rm --name cetra-s3 -p 7070:7070 --tmpfs /data:rw,mode=1777,size=2g -e ROOT_ACCESS_KEY=cetra -e ROOT_SECRET_KEY=cetra-secret -e VGW_BACKEND=posix -e VGW_BACKEND_ARGS=/data -e VGW_ARGS="--port :7070" versity/versitygw:v1.11.0
 //! ```
 //!
 //! Create the bucket with curl's built-in request signing:
 //!
 //! ```text
-//! curl --aws-sigv4 "aws:amz:us-east-1:s3" --user llmobs:llmobs-secret -X PUT http://127.0.0.1:7070/llmobs-test
+//! curl --aws-sigv4 "aws:amz:us-east-1:s3" --user cetra:cetra-secret -X PUT http://127.0.0.1:7070/cetra-test
 //! ```
 //!
 //! Then run:
 //!
 //! ```text
-//! LLMOBS_TEST_S3_ENDPOINT=http://127.0.0.1:7070 LLMOBS_TEST_S3_BUCKET=llmobs-test AWS_ACCESS_KEY_ID=llmobs AWS_SECRET_ACCESS_KEY=llmobs-secret cargo test -p llmobs-storage --test s3 -- --nocapture
+//! CETRA_TEST_S3_ENDPOINT=http://127.0.0.1:7070 CETRA_TEST_S3_BUCKET=cetra-test AWS_ACCESS_KEY_ID=cetra AWS_SECRET_ACCESS_KEY=cetra-secret cargo test -p cetra-storage --test s3 -- --nocapture
 //! ```
 //!
-//! A remote provider needs its region and addressing style: `LLMOBS_TEST_S3_REGION` (default
-//! `us-east-1`) and `LLMOBS_TEST_S3_PATH_STYLE` (default `true`; `false` for Hetzner, see
+//! A remote provider needs its region and addressing style: `CETRA_TEST_S3_REGION` (default
+//! `us-east-1`) and `CETRA_TEST_S3_PATH_STYLE` (default `true`; `false` for Hetzner, see
 //! `docs/self-hosting/s3.md`).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use llmobs_storage::QueryOptions;
+use cetra_storage::QueryOptions;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
 use arrow::array::{Array, StringArray};
 use bytesize::ByteSize;
-use datafusion::execution::context::{SessionConfig, SessionContext};
-use futures::TryStreamExt;
-use llmobs_core::batch::spans_to_record_batch;
-use llmobs_core::enums::{SpanKind, SpanStatus};
-use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-use llmobs_core::span::Span;
-use llmobs_storage::config::{
+use cetra_core::batch::spans_to_record_batch;
+use cetra_core::enums::{SpanKind, SpanStatus};
+use cetra_core::ids::{ProjectId, SpanId, TraceId};
+use cetra_core::span::Span;
+use cetra_storage::config::{
     FlushConfig, MemtableConfig, ObjectStoreUrl, QueryConfig, S3Config, StorageConfig, WalConfig,
 };
-use llmobs_storage::{ProjectQuery, Storage};
+use cetra_storage::{ProjectQuery, Storage};
+use datafusion::execution::context::{SessionConfig, SessionContext};
+use futures::TryStreamExt;
 use object_store::aws::AmazonS3Builder;
 use object_store::{ObjectStore, ObjectStoreExt};
 use sqlx::ConnectOptions;
@@ -57,12 +57,12 @@ fn project() -> ProjectId {
     "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().unwrap()
 }
 
-/// The region and addressing style of the server under test (`LLMOBS_TEST_S3_REGION`, default
-/// `us-east-1`; `LLMOBS_TEST_S3_PATH_STYLE`, default `true`).
+/// The region and addressing style of the server under test (`CETRA_TEST_S3_REGION`, default
+/// `us-east-1`; `CETRA_TEST_S3_PATH_STYLE`, default `true`).
 fn region_and_path_style() -> (String, bool) {
-    let region = std::env::var("LLMOBS_TEST_S3_REGION").unwrap_or_else(|_| "us-east-1".to_owned());
+    let region = std::env::var("CETRA_TEST_S3_REGION").unwrap_or_else(|_| "us-east-1".to_owned());
     let path_style = !matches!(
-        std::env::var("LLMOBS_TEST_S3_PATH_STYLE").as_deref(),
+        std::env::var("CETRA_TEST_S3_PATH_STYLE").as_deref(),
         Ok("false")
     );
     (region, path_style)
@@ -273,11 +273,11 @@ async fn delete_prefix(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn s3_flush_round_trip() {
-    let Ok(endpoint) = std::env::var("LLMOBS_TEST_S3_ENDPOINT") else {
-        println!("skipped: LLMOBS_TEST_S3_ENDPOINT is not set");
+    let Ok(endpoint) = std::env::var("CETRA_TEST_S3_ENDPOINT") else {
+        println!("skipped: CETRA_TEST_S3_ENDPOINT is not set");
         return;
     };
-    let bucket = std::env::var("LLMOBS_TEST_S3_BUCKET").expect("LLMOBS_TEST_S3_BUCKET");
+    let bucket = std::env::var("CETRA_TEST_S3_BUCKET").expect("CETRA_TEST_S3_BUCKET");
     let (region, path_style) = region_and_path_style();
     let prefix = format!("m29-{}", now_ms());
     let dir = tempfile::tempdir().unwrap();

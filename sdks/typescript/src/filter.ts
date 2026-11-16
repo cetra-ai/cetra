@@ -3,17 +3,17 @@
  *
  * Only used in global mode, where the provider we registered may also carry
  * spans from unrelated instrumentations: a span is exported when its scope is
- * ours (`llmobs`) or the Vercel AI SDK's (`ai`), or when one of its attribute
+ * ours (`cetra`) or the Vercel AI SDK's (`ai`), or when one of its attribute
  * keys belongs to a known LLM schema. `exportFilter` replaces this rule.
  */
 
 import type { ReadableSpan } from "@opentelemetry/sdk-trace";
 
 /** Scope names whose spans are always ours to export. */
-const EXPORTED_SCOPES: ReadonlySet<string> = new Set(["llmobs", "ai"]);
+const EXPORTED_SCOPES: ReadonlySet<string> = new Set(["cetra", "ai"]);
 
 const ATTRIBUTE_PREFIXES: readonly string[] = [
-  "llmobs.",
+  "cetra.",
   "gen_ai.",
   "llm.",
   "openinference.",

@@ -17,6 +17,7 @@ mod common;
 
 use std::collections::HashMap;
 
+use cetra_core::ids::{ProjectId, TraceId};
 use common::corpus::Corpus;
 use common::machine::{physical_disk, strip_subvolume};
 use common::payload::{
@@ -24,7 +25,6 @@ use common::payload::{
 };
 use common::rng::Rng;
 use common::s3::S3Env;
-use llmobs_core::ids::{ProjectId, TraceId};
 use serde_json::Value;
 
 #[test]
@@ -105,8 +105,8 @@ fn s3_env_reads_region_and_style() {
     assert!(S3Env::from_lookup(env(&[])).is_none());
 
     let defaults = S3Env::from_lookup(env(&[
-        ("LLMOBS_TEST_S3_ENDPOINT", "http://127.0.0.1:7070"),
-        ("LLMOBS_TEST_S3_BUCKET", "llmobs-bench"),
+        ("CETRA_TEST_S3_ENDPOINT", "http://127.0.0.1:7070"),
+        ("CETRA_TEST_S3_BUCKET", "cetra-bench"),
     ]))
     .unwrap();
     assert_eq!(defaults.region, "us-east-1");
@@ -114,21 +114,21 @@ fn s3_env_reads_region_and_style() {
 
     let hetzner = S3Env::from_lookup(env(&[
         (
-            "LLMOBS_TEST_S3_ENDPOINT",
+            "CETRA_TEST_S3_ENDPOINT",
             "https://fsn1.your-objectstorage.com",
         ),
-        ("LLMOBS_TEST_S3_BUCKET", "acme-prod"),
-        ("LLMOBS_TEST_S3_REGION", "fsn1"),
-        ("LLMOBS_TEST_S3_PATH_STYLE", "false"),
+        ("CETRA_TEST_S3_BUCKET", "acme-prod"),
+        ("CETRA_TEST_S3_REGION", "fsn1"),
+        ("CETRA_TEST_S3_PATH_STYLE", "false"),
     ]))
     .unwrap();
     assert_eq!(hetzner.region, "fsn1");
     assert!(!hetzner.path_style);
 
     let zero = S3Env::from_lookup(env(&[
-        ("LLMOBS_TEST_S3_ENDPOINT", "http://127.0.0.1:7070"),
-        ("LLMOBS_TEST_S3_BUCKET", "llmobs-bench"),
-        ("LLMOBS_TEST_S3_PATH_STYLE", "0"),
+        ("CETRA_TEST_S3_ENDPOINT", "http://127.0.0.1:7070"),
+        ("CETRA_TEST_S3_BUCKET", "cetra-bench"),
+        ("CETRA_TEST_S3_PATH_STYLE", "0"),
     ]))
     .unwrap();
     assert!(!zero.path_style);
@@ -137,19 +137,19 @@ fn s3_env_reads_region_and_style() {
 #[test]
 fn describe_hides_remote_targets() {
     let local = S3Env::from_lookup(env(&[
-        ("LLMOBS_TEST_S3_ENDPOINT", "http://127.0.0.1:7070"),
-        ("LLMOBS_TEST_S3_BUCKET", "llmobs-bench"),
+        ("CETRA_TEST_S3_ENDPOINT", "http://127.0.0.1:7070"),
+        ("CETRA_TEST_S3_BUCKET", "cetra-bench"),
     ]))
     .unwrap();
-    assert!(local.describe("trace-bench").contains("llmobs-bench"));
+    assert!(local.describe("trace-bench").contains("cetra-bench"));
     assert!(local.describe("trace-bench").contains("127.0.0.1:7070"));
 
     let remote = S3Env::from_lookup(env(&[
         (
-            "LLMOBS_TEST_S3_ENDPOINT",
+            "CETRA_TEST_S3_ENDPOINT",
             "https://fsn1.your-objectstorage.com",
         ),
-        ("LLMOBS_TEST_S3_BUCKET", "acme-prod"),
+        ("CETRA_TEST_S3_BUCKET", "acme-prod"),
     ]))
     .unwrap();
     let text = remote.describe("trace-bench");
@@ -447,9 +447,9 @@ fn column_sizes_reads_parquet_metadata() {
 #[test]
 fn describe_shows_an_ipv6_loopback_target() {
     let local = S3Env::from_lookup(env(&[
-        ("LLMOBS_TEST_S3_ENDPOINT", "http://[::1]:7070"),
-        ("LLMOBS_TEST_S3_BUCKET", "llmobs-bench"),
+        ("CETRA_TEST_S3_ENDPOINT", "http://[::1]:7070"),
+        ("CETRA_TEST_S3_BUCKET", "cetra-bench"),
     ]))
     .unwrap();
-    assert!(local.describe("trace-bench").contains("llmobs-bench"));
+    assert!(local.describe("trace-bench").contains("cetra-bench"));
 }

@@ -10,11 +10,11 @@ use std::time::Duration;
 
 use arbitrary::{Arbitrary, Unstructured};
 use bytes::Bytes;
+use cetra_core::ids::ProjectId;
+use cetra_core::schema::{scores, spans};
 use chrono::NaiveDate;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
-use llmobs_core::ids::ProjectId;
-use llmobs_core::schema::{scores, spans};
 use object_store::memory::InMemory;
 use object_store::path::Path as ObjectPath;
 use object_store::{GetOptions, GetRange, ObjectStore, ObjectStoreExt, PutPayload};
@@ -109,7 +109,7 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("llmobs-fuzz-{}", Uuid::now_v7()));
+        let path = std::env::temp_dir().join(format!("cetra-fuzz-{}", Uuid::now_v7()));
         // Harness setup, not input-dependent.
         std::fs::create_dir_all(&path).expect("create the fuzz scratch directory");
         Self(path)

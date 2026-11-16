@@ -121,7 +121,7 @@ mod tests {
 
     use super::*;
     use crate::test_support::{TestApp, TestResponse};
-    use llmobs_core::ids::{OrgId, ProjectId};
+    use cetra_core::ids::{OrgId, ProjectId};
 
     /// Nanoseconds of an RFC 3339 instant.
     fn at(rfc3339: &str) -> i64 {

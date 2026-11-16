@@ -106,7 +106,7 @@ impl PauseReason {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct RuleSpend {
     /// Start of the current UTC day or month.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub period_start: i64,
     /// Cost of the finished jobs in the period, in USD.
@@ -181,11 +181,11 @@ pub struct OnlineRule {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_by: Option<Uuid>,
     /// Creation time. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub created_at: i64,
     /// Last change time. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub updated_at: i64,
 }
@@ -356,11 +356,11 @@ pub struct OnlineRulePreview {
     /// More than 10 000 matched.
     pub capped: bool,
     /// The window that was counted. RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub from: i64,
     /// The end of the window that was counted. RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub to: i64,
 }

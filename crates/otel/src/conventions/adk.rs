@@ -7,8 +7,8 @@
 //! one message, and `finish_reason` is copied onto it. On a tool span,
 //! `tool_call_args` and `tool_response` are JSON.
 
-use llmobs_core::enums::SpanKind;
-use llmobs_core::message::Message;
+use cetra_core::enums::SpanKind;
+use cetra_core::message::Message;
 use serde_json::{Map, Value as Json};
 
 use crate::convert::{gemini_contents, gemini_system_instruction};
@@ -225,8 +225,8 @@ mod tests {
     use crate::bag::AttrBag;
     use crate::payload::{Payload, ReadContext};
     use crate::warn::Warnings;
-    use llmobs_core::enums::SpanKind;
-    use llmobs_core::message::messages_to_json;
+    use cetra_core::enums::SpanKind;
+    use cetra_core::message::messages_to_json;
     use opentelemetry_proto::tonic::common::v1::any_value::Value;
     use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
 

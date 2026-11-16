@@ -2,7 +2,7 @@
 //!
 //! Spec 08 § Sign-up policy and § Authorization, spec 09 § Endpoints.
 
-use llmobs_core::ids::{OrgId, ProjectId};
+use cetra_core::ids::{OrgId, ProjectId};
 use serde::Deserializer;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -15,7 +15,7 @@ use uuid::Uuid;
 pub struct AuthConfig {
     /// No user exists yet, so the UI shows the setup page.
     pub setup_required: bool,
-    /// Password login is enabled for everyone. False when `LLMOBS_AUTH_DISABLE_PASSWORD` is
+    /// Password login is enabled for everyone. False when `CETRA_AUTH_DISABLE_PASSWORD` is
     /// set; instance admins then still sign in with a password at `/login?password=1` (D-S-4).
     pub password_enabled: bool,
     /// Who may create an account after bootstrap.
@@ -38,7 +38,7 @@ pub struct AuthConfig {
 
 /// Who may register after the first user exists.
 ///
-/// Spec 08 `LLMOBS_AUTH_SIGNUP`.
+/// Spec 08 `CETRA_AUTH_SIGNUP`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SignupPolicy {
@@ -147,7 +147,7 @@ pub struct Project {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<OrgRole>,
     /// Creation time, nanoseconds since the Unix epoch. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub created_at: i64,
 }

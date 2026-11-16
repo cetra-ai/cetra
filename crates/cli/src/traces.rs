@@ -1,4 +1,4 @@
-//! `llmobs traces`: list traces, and show one as a span tree, through the project's trace routes
+//! `cetra traces`: list traces, and show one as a span tree, through the project's trace routes
 //! (spec 09 § Observability data, D-H-12).
 
 use std::fmt::Write as _;
@@ -7,18 +7,18 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
+use cetra_core::enums::SpanStatus;
+use cetra_core::ids::TraceId;
+use cetra_server::api::common::Page;
+use cetra_server::api::traces::{TraceDetail, TraceSummary};
 use chrono::{DateTime, Utc};
 use clap::{Args, Subcommand, ValueEnum};
-use llmobs_core::enums::SpanStatus;
-use llmobs_core::ids::TraceId;
-use llmobs_server::api::common::Page;
-use llmobs_server::api::traces::{TraceDetail, TraceSummary};
 
 use crate::client::{self, ApiClient, ConnectionArgs};
 use crate::output::{self, Column, Io, ListFormat};
 use crate::query;
 
-/// `llmobs traces …`.
+/// `cetra traces …`.
 #[derive(Debug, Subcommand)]
 pub(crate) enum TracesCommand {
     /// List traces, newest first by default.
@@ -84,11 +84,11 @@ pub(crate) enum TraceFormat {
     Json,
 }
 
-/// `llmobs traces list`.
+/// `cetra traces list`.
 #[derive(Debug, Args)]
 pub(crate) struct TraceListArgs {
     /// Project UUID or org-slug/project-slug.
-    #[arg(long, env = "LLMOBS_PROJECT", value_name = "PROJECT")]
+    #[arg(long, env = "CETRA_PROJECT", value_name = "PROJECT")]
     pub(crate) project: String,
     /// Filter DSL over the traces view (spec 05), for example "status = 'error'".
     #[arg(long, value_name = "DSL")]
@@ -130,14 +130,14 @@ pub(crate) struct TraceListArgs {
     pub(crate) connection: ConnectionArgs,
 }
 
-/// `llmobs traces get`.
+/// `cetra traces get`.
 #[derive(Debug, Args)]
 pub(crate) struct TraceGetArgs {
     /// Trace id, 32 hex digits.
     #[arg(value_name = "TRACE_ID")]
     pub(crate) trace_id: String,
     /// Project UUID or org-slug/project-slug.
-    #[arg(long, env = "LLMOBS_PROJECT", value_name = "PROJECT")]
+    #[arg(long, env = "CETRA_PROJECT", value_name = "PROJECT")]
     pub(crate) project: String,
     /// When the trace happened, RFC 3339 or epoch milliseconds; speeds up the lookup.
     #[arg(long, value_name = "TIME")]
@@ -149,7 +149,7 @@ pub(crate) struct TraceGetArgs {
     pub(crate) connection: ConnectionArgs,
 }
 
-/// Runs `llmobs traces …`. Credentials are read only when the target needs them.
+/// Runs `cetra traces …`. Credentials are read only when the target needs them.
 pub(crate) async fn run(
     command: &TracesCommand,
     credentials: impl FnOnce() -> anyhow::Result<PathBuf>,
@@ -398,7 +398,7 @@ mod tests {
 
     /// The `traces …` command of `argv`.
     fn traces_args(argv: &[&str]) -> TracesCommand {
-        let mut full = vec!["llmobs", "traces"];
+        let mut full = vec!["cetra", "traces"];
         full.extend_from_slice(argv);
         match crate::Cli::try_parse_from(full).unwrap().command {
             crate::Command::Traces { command } => *command,
@@ -605,12 +605,12 @@ mod tests {
         use clap::error::ErrorKind;
         let kind = |argv: &[&str]| crate::Cli::try_parse_from(argv).err().map(|e| e.kind());
         assert_eq!(
-            kind(&["llmobs", "traces", "list", "--project", "p", "--limit", "0"]),
+            kind(&["cetra", "traces", "list", "--project", "p", "--limit", "0"]),
             Some(ErrorKind::ValueValidation)
         );
         assert_eq!(
             kind(&[
-                "llmobs",
+                "cetra",
                 "traces",
                 "list",
                 "--project",
@@ -622,7 +622,7 @@ mod tests {
         );
         assert_eq!(
             kind(&[
-                "llmobs",
+                "cetra",
                 "traces",
                 "list",
                 "--project",
@@ -636,7 +636,7 @@ mod tests {
         );
         assert_eq!(
             kind(&[
-                "llmobs",
+                "cetra",
                 "traces",
                 "list",
                 "--project",
@@ -650,7 +650,7 @@ mod tests {
         );
         assert_eq!(
             kind(&[
-                "llmobs",
+                "cetra",
                 "traces",
                 "list",
                 "--project",

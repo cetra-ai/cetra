@@ -1,15 +1,15 @@
 //! What our S3 code relies on, probed against a real provider (R4.8, spec 03 §2 and §10, D119).
 //!
-//! Every probe is `#[ignore]`d and skips (prints and returns) unless `LLMOBS_TEST_S3_ENDPOINT` is
+//! Every probe is `#[ignore]`d and skips (prints and returns) unless `CETRA_TEST_S3_ENDPOINT` is
 //! set. Run them against a provider with:
 //!
 //! ```text
-//! cargo test --release -p llmobs-storage --all-features --test s3_probe -- --ignored --nocapture
+//! cargo test --release -p cetra-storage --all-features --test s3_probe -- --ignored --nocapture
 //! ```
 //!
-//! Environment: `LLMOBS_TEST_S3_ENDPOINT`, `LLMOBS_TEST_S3_BUCKET`, `AWS_ACCESS_KEY_ID`,
-//! `AWS_SECRET_ACCESS_KEY`, `LLMOBS_TEST_S3_REGION` (default `us-east-1`),
-//! `LLMOBS_TEST_S3_PATH_STYLE` (default `true`; `false` for Hetzner). `LLMOBS_TEST_S3_EXPECT_LIFECYCLE=1`
+//! Environment: `CETRA_TEST_S3_ENDPOINT`, `CETRA_TEST_S3_BUCKET`, `AWS_ACCESS_KEY_ID`,
+//! `AWS_SECRET_ACCESS_KEY`, `CETRA_TEST_S3_REGION` (default `us-east-1`),
+//! `CETRA_TEST_S3_PATH_STYLE` (default `true`; `false` for Hetzner). `CETRA_TEST_S3_EXPECT_LIFECYCLE=1`
 //! makes `lifecycle_rule_present` assert that the abort rule exists.
 //!
 //! Each probe works under a prefix `probe-<ms>/` and deletes it at the end. Each prints one line,
@@ -44,17 +44,17 @@ struct Probe {
 }
 
 impl Probe {
-    /// `None`, after a line saying so, when `LLMOBS_TEST_S3_ENDPOINT` is unset.
+    /// `None`, after a line saying so, when `CETRA_TEST_S3_ENDPOINT` is unset.
     fn from_env() -> Option<Self> {
-        let Ok(endpoint) = std::env::var("LLMOBS_TEST_S3_ENDPOINT") else {
-            println!("skipped: LLMOBS_TEST_S3_ENDPOINT is not set");
+        let Ok(endpoint) = std::env::var("CETRA_TEST_S3_ENDPOINT") else {
+            println!("skipped: CETRA_TEST_S3_ENDPOINT is not set");
             return None;
         };
-        let bucket = std::env::var("LLMOBS_TEST_S3_BUCKET").expect("LLMOBS_TEST_S3_BUCKET");
+        let bucket = std::env::var("CETRA_TEST_S3_BUCKET").expect("CETRA_TEST_S3_BUCKET");
         let region =
-            std::env::var("LLMOBS_TEST_S3_REGION").unwrap_or_else(|_| "us-east-1".to_owned());
+            std::env::var("CETRA_TEST_S3_REGION").unwrap_or_else(|_| "us-east-1".to_owned());
         let path_style = !matches!(
-            std::env::var("LLMOBS_TEST_S3_PATH_STYLE").as_deref(),
+            std::env::var("CETRA_TEST_S3_PATH_STYLE").as_deref(),
             Ok("false")
         );
         let store = AmazonS3Builder::from_env()
@@ -168,7 +168,7 @@ fn curl_credentials(key: &str, secret: &str) -> String {
 /// `read_after_write`: a fresh key is readable at once, with its bytes and its size. Flush then query
 /// and `verify_file`'s `head` rely on it (spec 03 §10).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "needs LLMOBS_TEST_S3_ENDPOINT; see the module docs"]
+#[ignore = "needs CETRA_TEST_S3_ENDPOINT; see the module docs"]
 async fn read_after_write() {
     let Some(probe) = Probe::from_env() else {
         return;
@@ -212,7 +212,7 @@ async fn read_after_write_checks(probe: &Probe) -> Result<(), String> {
 
 /// `delete_missing_is_ok`: GC deletes idempotently, so a key that was never written is no error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "needs LLMOBS_TEST_S3_ENDPOINT; see the module docs"]
+#[ignore = "needs CETRA_TEST_S3_ENDPOINT; see the module docs"]
 async fn delete_missing_is_ok() {
     let Some(probe) = Probe::from_env() else {
         return;
@@ -227,7 +227,7 @@ async fn delete_missing_is_ok() {
 /// `head_after_delete_is_not_found`: GC's `delete_len` and verification's missing-object rule
 /// (spec 03 §10) rely on `NotFound` after a delete.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "needs LLMOBS_TEST_S3_ENDPOINT; see the module docs"]
+#[ignore = "needs CETRA_TEST_S3_ENDPOINT; see the module docs"]
 async fn head_after_delete_is_not_found() {
     let Some(probe) = Probe::from_env() else {
         return;
@@ -260,7 +260,7 @@ async fn head_after_delete_checks(probe: &Probe) -> Result<(), String> {
 /// `list_after_write`: a listing shows every key written under a prefix, each once. N's
 /// `collect_orphans` and the audit rely on it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "needs LLMOBS_TEST_S3_ENDPOINT; see the module docs"]
+#[ignore = "needs CETRA_TEST_S3_ENDPOINT; see the module docs"]
 async fn list_after_write() {
     let Some(probe) = Probe::from_env() else {
         return;
@@ -303,7 +303,7 @@ async fn list_after_write_checks(probe: &Probe) -> Result<(), String> {
 /// `abort_after_complete_keeps_the_object`: an abort after `complete` does not remove the object.
 /// R4.3's fix relies on it: a failed `complete` is aborted, and the object it may have created stays.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "needs LLMOBS_TEST_S3_ENDPOINT; see the module docs"]
+#[ignore = "needs CETRA_TEST_S3_ENDPOINT; see the module docs"]
 async fn abort_after_complete_keeps_the_object() {
     let Some(probe) = Probe::from_env() else {
         return;
@@ -357,7 +357,7 @@ async fn abort_after_complete_checks(probe: &Probe) -> Result<(), String> {
 /// `multipart_part_sizes`: parts of 16 MiB (our size) complete. The probe also sends a 4 MiB part
 /// that is not the last one and prints whether the provider refuses it (`EntityTooSmall`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "needs LLMOBS_TEST_S3_ENDPOINT; see the module docs"]
+#[ignore = "needs CETRA_TEST_S3_ENDPOINT; see the module docs"]
 async fn multipart_part_sizes() {
     let Some(probe) = Probe::from_env() else {
         return;
@@ -419,7 +419,7 @@ async fn multipart_part_size_checks(probe: &Probe) -> Result<(), String> {
 /// `multipart_part_count`: 40 parts of 5 MiB (above our 32 parts of 16 MiB for a 512 MiB file)
 /// complete.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "needs LLMOBS_TEST_S3_ENDPOINT; see the module docs"]
+#[ignore = "needs CETRA_TEST_S3_ENDPOINT; see the module docs"]
 async fn multipart_part_count() {
     let Some(probe) = Probe::from_env() else {
         return;
@@ -453,7 +453,7 @@ async fn multipart_part_count_checks(probe: &Probe) -> Result<(), String> {
 /// `conditional_put`: information for a future multi-node catalog (spec 03 §11). Storage does not use
 /// `PutMode::Create` today, so the probe only prints what the provider answers to a second create.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "needs LLMOBS_TEST_S3_ENDPOINT; see the module docs"]
+#[ignore = "needs CETRA_TEST_S3_ENDPOINT; see the module docs"]
 async fn conditional_put() {
     let Some(probe) = Probe::from_env() else {
         return;
@@ -485,7 +485,7 @@ async fn conditional_put() {
 /// `incomplete_upload_is_listed`: an upload that is started and not completed is listed by
 /// `ListMultipartUploads`, and gone once aborted. The lifecycle rule relies on the listing being real.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "needs LLMOBS_TEST_S3_ENDPOINT; see the module docs"]
+#[ignore = "needs CETRA_TEST_S3_ENDPOINT; see the module docs"]
 async fn incomplete_upload_is_listed() {
     let Some(probe) = Probe::from_env() else {
         return;
@@ -529,9 +529,9 @@ async fn incomplete_upload_checks(probe: &Probe) -> Result<(), String> {
 }
 
 /// `lifecycle_rule_present`: prints the bucket's lifecycle configuration. With
-/// `LLMOBS_TEST_S3_EXPECT_LIFECYCLE=1` it asserts the abort rule exists (`docs/self-hosting/s3.md`).
+/// `CETRA_TEST_S3_EXPECT_LIFECYCLE=1` it asserts the abort rule exists (`docs/self-hosting/s3.md`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "needs LLMOBS_TEST_S3_ENDPOINT; see the module docs"]
+#[ignore = "needs CETRA_TEST_S3_ENDPOINT; see the module docs"]
 async fn lifecycle_rule_present() {
     let Some(probe) = Probe::from_env() else {
         return;
@@ -544,7 +544,7 @@ async fn lifecycle_rule_present() {
         "lifecycle_rule_present",
         format!("GET ?lifecycle answered {status}: {}", body.trim()),
     );
-    if std::env::var("LLMOBS_TEST_S3_EXPECT_LIFECYCLE").is_ok_and(|value| value == "1") {
+    if std::env::var("CETRA_TEST_S3_EXPECT_LIFECYCLE").is_ok_and(|value| value == "1") {
         assert!(
             has_rule,
             "the bucket has no AbortIncompleteMultipartUpload rule (answered {status})"

@@ -11,10 +11,10 @@ use std::time::Duration;
 use arrow::array::{Array, ArrayRef, AsArray, RecordBatch};
 use arrow::compute::cast;
 use arrow::datatypes::{DataType, Float64Type, Int64Type};
+use cetra_core::ids::{ProjectId, TraceId};
+use cetra_core::schema::traces;
+use cetra_storage::{Storage, trace_detail};
 use chrono::{DateTime, NaiveDate};
-use llmobs_core::ids::{ProjectId, TraceId};
-use llmobs_core::schema::traces;
-use llmobs_storage::{Storage, trace_detail};
 
 use super::driver::context;
 use super::failures::{FailureKind, Failures};
@@ -233,7 +233,7 @@ fn string_at(batch: &RecordBatch, name: &str) -> Result<Option<String>, String> 
 fn compare(
     hex: &str,
     summary: &TraceSummary,
-    detail: &llmobs_storage::TraceDetailData,
+    detail: &cetra_storage::TraceDetailData,
 ) -> Vec<String> {
     let mut out = Vec::new();
     let row = &detail.trace;
@@ -329,7 +329,7 @@ async fn detail(
     project: usize,
     trace: TraceId,
     around: i64,
-) -> Result<Option<llmobs_storage::TraceDetailData>, String> {
+) -> Result<Option<cetra_storage::TraceDetailData>, String> {
     let hex = trace.to_hex();
     let project_id: ProjectId = super::driver::project_id(project);
     let mut last = Err(String::new());

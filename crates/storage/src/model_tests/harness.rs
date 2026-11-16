@@ -12,7 +12,7 @@ use object_store::memory::InMemory;
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt};
 
-use llmobs_core::ids::ProjectId;
+use cetra_core::ids::ProjectId;
 
 use super::shape::{HOUR_NS, P, day, midnight};
 use crate::Storage;

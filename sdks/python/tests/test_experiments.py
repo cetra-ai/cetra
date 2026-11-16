@@ -15,12 +15,12 @@ from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import StatusCode
 
-import llmobs
-from llmobs import ApiError, Client, ConfigError, Dataset, Score
-from llmobs import _experiments as experiments
-from llmobs._datasets import DatasetItem
-from llmobs._experiments import ExperimentResult, Run, _error_text
-from llmobs._runtime import Runtime
+import cetra
+from cetra import ApiError, Client, ConfigError, Dataset, Score
+from cetra import _experiments as experiments
+from cetra._datasets import DatasetItem
+from cetra._experiments import ExperimentResult, Run, _error_text
+from cetra._runtime import Runtime
 
 Memory = tuple[InMemorySpanExporter, Callable[..., Runtime]]
 Spans = Callable[[InMemorySpanExporter], list[ReadableSpan]]
@@ -32,9 +32,9 @@ DATASET_ID = "d1"
 JSON_HEADERS = {"Content-Type": "application/json"}
 PROBLEM_HEADERS = {"Content-Type": "application/problem+json"}
 SCORE_PAUSE = (
-    "llmobs: the monthly units cap paused score uploads; experiment scores are being dropped"
+    "cetra: the monthly units cap paused score uploads; experiment scores are being dropped"
 )
-SAMPLE_RATE = "llmobs: sample_rate is below 1; some experiment runs will have no trace and no score"
+SAMPLE_RATE = "cetra: sample_rate is below 1; some experiment runs will have no trace and no score"
 
 
 def make_items(count: int) -> list[dict[str, Any]]:
@@ -160,8 +160,8 @@ def fake(http_recorder: HttpRecorder) -> FakeApi:
 
 
 def test_evaluate_needs_init(http_recorder: HttpRecorder, fake: FakeApi) -> None:
-    with pytest.raises(ConfigError, match=r"llmobs\.init"):
-        llmobs.evaluate(dataset="faq", task=double)
+    with pytest.raises(ConfigError, match=r"cetra\.init"):
+        cetra.evaluate(dataset="faq", task=double)
     assert http_recorder.requests == []
 
 
@@ -189,7 +189,7 @@ def test_bad_arguments_raise_before_any_request(
     start(base_url=http_recorder.url)
     arguments: dict[str, Any] = {"dataset": "faq", "task": double, **options}
     with pytest.raises((ValueError, TypeError)):
-        llmobs.evaluate(**arguments)
+        cetra.evaluate(**arguments)
     assert http_recorder.requests == []
 
 
@@ -198,7 +198,7 @@ def test_create_body_and_default_name(
 ) -> None:
     _, start = memory
     start(base_url=http_recorder.url)
-    llmobs.evaluate(dataset="faq", task=double, metadata={"model": "m"}, repetitions=2)
+    cetra.evaluate(dataset="faq", task=double, metadata={"model": "m"}, repetitions=2)
     body = json.loads(sent(http_recorder, "POST", "/experiments")[0])
     assert body["name"].startswith("faq ")
     assert body["dataset"] == "faq"
@@ -216,7 +216,7 @@ def test_dataset_object_sends_its_id_and_version(
     pinned = Dataset(
         id=DATASET_ID, name="faq", description=None, version=2, items=(), _client=client
     )
-    llmobs.evaluate(dataset=pinned, task=double)
+    cetra.evaluate(dataset=pinned, task=double)
     body = json.loads(sent(http_recorder, "POST", "/experiments")[0])
     assert body["dataset"] == DATASET_ID
     assert body["dataset_version"] == 2
@@ -229,7 +229,7 @@ def test_items_are_paged_with_the_pinned_version(
     _, start = memory
     start(base_url=http_recorder.url)
     fake.items = make_items(1001)
-    result = llmobs.evaluate(dataset="faq", task=double)
+    result = cetra.evaluate(dataset="faq", task=double)
     queries = [
         parse_qs(path.partition("?")[2])
         for method, path, _h, _b in http_recorder.requests
@@ -247,11 +247,11 @@ def test_each_run_is_its_own_trace_with_the_linkage(
     fake.items = make_items(2)
 
     def traced(value: int) -> int:
-        with llmobs.span("inner"):
+        with cetra.span("inner"):
             pass
         return value
 
-    result = llmobs.evaluate(
+    result = cetra.evaluate(
         dataset="faq", task=traced, experiment_name="exp", repetitions=2, concurrency=1
     )
     finished = spans(exporter)
@@ -268,9 +268,9 @@ def test_each_run_is_its_own_trace_with_the_linkage(
         assert child.parent.span_id in root_ids
     for span in finished:
         assert span.attributes is not None
-        assert span.attributes["llmobs.experiment.id"] == EXPERIMENT_ID
-        assert span.attributes["llmobs.environment"] == "experiment"
-    item_ids = {span.attributes["llmobs.dataset_item.id"] for span in roots if span.attributes}
+        assert span.attributes["cetra.experiment.id"] == EXPERIMENT_ID
+        assert span.attributes["cetra.environment"] == "experiment"
+    item_ids = {span.attributes["cetra.dataset_item.id"] for span in roots if span.attributes}
     assert item_ids == {"item-0", "item-1"}
     assert [run.repetition for run in result.runs] == [0, 1, 0, 1]
 
@@ -281,13 +281,13 @@ def test_caller_context_does_not_leak(
     exporter, start = memory
     start(base_url=http_recorder.url)
     fake.items = make_items(1)
-    with llmobs.context(session_id="caller-session"), llmobs.span("caller"):
-        llmobs.evaluate(dataset="faq", task=double, experiment_name="exp")
+    with cetra.context(session_id="caller-session"), cetra.span("caller"):
+        cetra.evaluate(dataset="faq", task=double, experiment_name="exp")
     roots = [span for span in spans(exporter) if span.name == "exp"]
     assert len(roots) == 1
     assert roots[0].parent is None
     assert roots[0].attributes is not None
-    assert "llmobs.session.id" not in roots[0].attributes
+    assert "cetra.session.id" not in roots[0].attributes
 
 
 def test_task_with_two_parameters_receives_the_item(
@@ -299,7 +299,7 @@ def test_task_with_two_parameters_receives_the_item(
     def with_item(value: int, item: DatasetItem) -> str:
         return item.id
 
-    result = llmobs.evaluate(dataset="faq", task=with_item)
+    result = cetra.evaluate(dataset="faq", task=with_item)
     assert [run.output for run in result.runs] == ["item-0", "item-1", "item-2"]
 
 
@@ -319,7 +319,7 @@ def test_task_error_is_recorded_per_run(
     def record(output: object) -> None:
         scored.append(output)
 
-    result = llmobs.evaluate(dataset="faq", task=failing, scorers=[record])
+    result = cetra.evaluate(dataset="faq", task=failing, scorers=[record])
     assert result.error_count == 1
     failed = [run for run in result.runs if run.error is not None]
     assert failed[0].error == "KeyError: 'x'"
@@ -343,7 +343,7 @@ def test_scorer_arguments_are_chosen_by_name(
     def with_trace(trace_id: object, item: object) -> None:
         seen.append({"trace_id": trace_id, "item": item})
 
-    result = llmobs.evaluate(dataset="faq", task=double, scorers=[exact, uses_all, with_trace])
+    result = cetra.evaluate(dataset="faq", task=double, scorers=[exact, uses_all, with_trace])
     assert result.runs[0].scores["exact"].value is True
     assert set(seen[0]) == {"input", "output", "expected", "metadata", "trace_id", "item"}
     assert seen[0]["output"] == 0
@@ -373,7 +373,7 @@ def test_scorer_return_types_and_score_bodies(
         return None
 
     scorers = [boolean_score, numeric_score, categorical_score, rich_score, nothing]
-    result = llmobs.evaluate(dataset="faq", task=double, scorers=scorers)
+    result = cetra.evaluate(dataset="faq", task=double, scorers=scorers)
     first = result.runs[0].scores
     assert first["boolean_score"] == Score(value=True, data_type="boolean")
     assert first["numeric_score"] == Score(value=0.5, data_type="numeric")
@@ -413,14 +413,14 @@ def test_scorer_errors_are_counted_and_logged_once(
     def not_finite(output: object) -> float:
         return float("nan")
 
-    with caplog.at_level(logging.WARNING, logger="llmobs"):
-        result = llmobs.evaluate(
+    with caplog.at_level(logging.WARNING, logger="cetra"):
+        result = cetra.evaluate(
             dataset="faq", task=double, scorers=[bad, not_finite], repetitions=2
         )
     assert result.scorer_errors == {"bad": 4, "not_finite": 4}
-    messages = [record.getMessage() for record in caplog.records if record.name == "llmobs"]
-    assert messages.count("llmobs: scorer 0 failed (RuntimeError)") == 1
-    assert messages.count("llmobs: scorer 1 failed (ValueError)") == 1
+    messages = [record.getMessage() for record in caplog.records if record.name == "cetra"]
+    assert messages.count("cetra: scorer 0 failed (RuntimeError)") == 1
+    assert messages.count("cetra: scorer 1 failed (ValueError)") == 1
 
 
 def test_results_are_batched_by_500(
@@ -429,7 +429,7 @@ def test_results_are_batched_by_500(
     _, start = memory
     start(base_url=http_recorder.url)
     fake.items = make_items(1200)
-    llmobs.evaluate(dataset="faq", task=double)
+    cetra.evaluate(dataset="faq", task=double)
     posts = sent(http_recorder, "POST", "/items")
     sizes = [len(json.loads(body)["results"]) for body in posts]
     assert sizes == [500, 500, 200]
@@ -458,7 +458,7 @@ def test_results_are_batched_by_bytes(
     def big(value: int) -> str:
         return "x" * 200_000
 
-    llmobs.evaluate(dataset="faq", task=big)
+    cetra.evaluate(dataset="faq", task=big)
     posts = sent(http_recorder, "POST", "/items")
     sizes = [len(json.loads(body)["results"]) for body in posts]
     assert sizes[0] == 167  # 32 MiB / 200,002 bytes per row
@@ -471,7 +471,7 @@ def test_repetitions_are_zero_based(
     _, start = memory
     start(base_url=http_recorder.url)
     fake.items = make_items(1)
-    llmobs.evaluate(dataset="faq", task=double, repetitions=3, concurrency=1)
+    cetra.evaluate(dataset="faq", task=double, repetitions=3, concurrency=1)
     rows = [
         row for body in sent(http_recorder, "POST", "/items") for row in json.loads(body)["results"]
     ]
@@ -483,7 +483,7 @@ def test_create_is_not_retried(memory: Memory, http_recorder: HttpRecorder, fake
     start(base_url=http_recorder.url)
     fake.queue("create", 503)
     with pytest.raises(ApiError) as raised:
-        llmobs.evaluate(dataset="faq", task=double)
+        cetra.evaluate(dataset="faq", task=double)
     assert raised.value.status == 503
     assert len(sent(http_recorder, "POST", "/experiments")) == 1
     assert sent(http_recorder, "POST", "/items") == []
@@ -496,7 +496,7 @@ def test_finish_is_retried(memory: Memory, http_recorder: HttpRecorder, fake: Fa
     sleeps: list[float] = []
     client = Client(api_key=TEST_API_KEY, base_url=http_recorder.url)
     client._sleep = sleeps.append
-    llmobs.evaluate(dataset="faq", task=double, client=client)
+    cetra.evaluate(dataset="faq", task=double, client=client)
     assert len(sent(http_recorder, "POST", "/finish")) == 2
     assert sleeps == [1.0]
 
@@ -510,9 +510,9 @@ def test_score_pause_warns_and_keeps_running(
     _, start = memory
     runtime = start(base_url=http_recorder.url)
     runtime.scores._quota.on_402("60")
-    with caplog.at_level(logging.WARNING, logger="llmobs"):
-        result = llmobs.evaluate(dataset="faq", task=double, scorers=[exact])
-    messages = [record.getMessage() for record in caplog.records if record.name == "llmobs"]
+    with caplog.at_level(logging.WARNING, logger="cetra"):
+        result = cetra.evaluate(dataset="faq", task=double, scorers=[exact])
+    messages = [record.getMessage() for record in caplog.records if record.name == "cetra"]
     assert messages.count(SCORE_PAUSE) == 1
     assert len(sent(http_recorder, "POST", "/items")) == 1
     assert len(sent(http_recorder, "POST", "/finish")) == 1
@@ -528,12 +528,12 @@ def test_output_is_truncated(memory: Memory, http_recorder: HttpRecorder, fake: 
     def huge(value: int) -> str:
         return "x" * 300_000
 
-    llmobs.evaluate(dataset="faq", task=huge)
+    cetra.evaluate(dataset="faq", task=huge)
     row = json.loads(sent(http_recorder, "POST", "/items")[0])["results"][0]
     output = row["output"]
     # The first 260,000 bytes of the JSON text: the opening quote and 259,999 x.
     assert output[:260_000] == '"' + "x" * 259_999
-    assert output.endswith("…[llmobs: truncated, original 300002 bytes]")
+    assert output.endswith("…[cetra: truncated, original 300002 bytes]")
 
 
 def test_upload_failure_finishes_with_an_error_and_raises(
@@ -544,7 +544,7 @@ def test_upload_failure_finishes_with_an_error_and_raises(
     fake.items = make_items(501)
     fake.queue("items", 200, 422)
     with pytest.raises(ApiError) as raised:
-        llmobs.evaluate(dataset="faq", task=double)
+        cetra.evaluate(dataset="faq", task=double)
     assert raised.value.status == 422
     finishes = sent(http_recorder, "POST", "/finish")
     assert len(finishes) == 1
@@ -556,7 +556,7 @@ def test_finish_failure_raises(memory: Memory, http_recorder: HttpRecorder, fake
     start(base_url=http_recorder.url)
     fake.queue("finish", 409)
     with pytest.raises(ApiError) as raised:
-        llmobs.evaluate(dataset="faq", task=double)
+        cetra.evaluate(dataset="faq", task=double)
     assert raised.value.status == 409
 
 
@@ -621,7 +621,7 @@ def test_aevaluate_runs_async_tasks_and_scorers(
     start(base_url=http_recorder.url)
     fake.items = make_items(2)
     result = asyncio.run(
-        llmobs.aevaluate(
+        cetra.aevaluate(
             dataset="faq",
             task=async_double,
             scorers=[async_exact],
@@ -637,7 +637,7 @@ def test_aevaluate_runs_async_tasks_and_scorers(
     assert len(roots) == 2
     for root in roots:
         assert root.attributes is not None
-        assert root.attributes["llmobs.environment"] == "experiment"
+        assert root.attributes["cetra.environment"] == "experiment"
 
 
 def test_sample_rate_below_one_warns_once(
@@ -648,10 +648,10 @@ def test_sample_rate_below_one_warns_once(
 ) -> None:
     _, start = memory
     start(base_url=http_recorder.url, sample_rate=0.5)
-    with caplog.at_level(logging.WARNING, logger="llmobs"):
-        llmobs.evaluate(dataset="faq", task=double)
-        llmobs.evaluate(dataset="faq", task=double)
-    messages = [record.getMessage() for record in caplog.records if record.name == "llmobs"]
+    with caplog.at_level(logging.WARNING, logger="cetra"):
+        cetra.evaluate(dataset="faq", task=double)
+        cetra.evaluate(dataset="faq", task=double)
+    messages = [record.getMessage() for record in caplog.records if record.name == "cetra"]
     assert messages.count(SAMPLE_RATE) == 1
 
 
@@ -671,8 +671,8 @@ def test_no_payload_in_logs(
     def leaky_scorer(output: object) -> float:
         raise ValueError("secret-canary-2")
 
-    with caplog.at_level(logging.DEBUG, logger="llmobs"):
-        result = llmobs.evaluate(dataset="faq", task=leaky_task, scorers=[leaky_scorer])
+    with caplog.at_level(logging.DEBUG, logger="cetra"):
+        result = cetra.evaluate(dataset="faq", task=leaky_task, scorers=[leaky_scorer])
     assert result.error_count == 1
     assert all("secret-canary" not in record.getMessage() for record in caplog.records)
 
@@ -686,7 +686,7 @@ def test_version_0_dataset_omits_dataset_version(
     empty = Dataset(
         id=DATASET_ID, name="faq", description=None, version=0, items=(), _client=client
     )
-    llmobs.evaluate(dataset=empty, task=double)
+    cetra.evaluate(dataset=empty, task=double)
     body = json.loads(sent(http_recorder, "POST", "/experiments")[0])
     assert "dataset_version" not in body
 
@@ -702,7 +702,7 @@ def test_sync_scorer_returning_an_awaitable_raises_type_error(
         return async_exact(output, output)
 
     with pytest.raises(TypeError, match="use aevaluate"):
-        llmobs.evaluate(dataset="faq", task=double, scorers=[returns_coroutine])
+        cetra.evaluate(dataset="faq", task=double, scorers=[returns_coroutine])
     finishes = [json.loads(body) for body in sent(http_recorder, "POST", "/finish")]
     assert finishes == [{"error": "TypeError"}]
 
@@ -756,7 +756,7 @@ def test_failing_item_page_finishes_with_an_error_and_raises(
     fake.items = make_items(1001)
     fake.queue("pages", 422)
     with pytest.raises(ApiError) as raised:
-        llmobs.evaluate(dataset="faq", task=double)
+        cetra.evaluate(dataset="faq", task=double)
     assert raised.value.status == 422
     finishes = [json.loads(body) for body in sent(http_recorder, "POST", "/finish")]
     assert finishes == [{"error": "ApiError"}]
@@ -778,7 +778,7 @@ def test_unexpected_worker_error_finishes_with_an_error_and_raises(
 
     monkeypatch.setattr(experiments._Uploader, "add", broken_add)
     with pytest.raises(RuntimeError, match="unexpected"):
-        llmobs.evaluate(dataset="faq", task=double, concurrency=2)
+        cetra.evaluate(dataset="faq", task=double, concurrency=2)
     finishes = [json.loads(body) for body in sent(http_recorder, "POST", "/finish")]
     assert finishes == [{"error": "RuntimeError"}]
 
@@ -798,7 +798,7 @@ def test_aevaluate_unexpected_worker_error_finishes_and_raises(
 
     monkeypatch.setattr(experiments._Uploader, "add", broken_add)
     with pytest.raises(RuntimeError, match="unexpected"):
-        asyncio.run(llmobs.aevaluate(dataset="faq", task=async_double, concurrency=2))
+        asyncio.run(cetra.aevaluate(dataset="faq", task=async_double, concurrency=2))
     finishes = [json.loads(body) for body in sent(http_recorder, "POST", "/finish")]
     assert finishes == [{"error": "RuntimeError"}]
 
@@ -821,7 +821,7 @@ def test_at_most_concurrency_runs_are_in_flight(
             state["now"] -= 1
         return value
 
-    result = llmobs.evaluate(dataset="faq", task=slow, concurrency=2)
+    result = cetra.evaluate(dataset="faq", task=slow, concurrency=2)
     assert len(result.runs) == 8
     assert 1 <= state["peak"] <= 2
 
@@ -841,6 +841,6 @@ def test_aevaluate_at_most_concurrency_runs_are_in_flight(
         state["now"] -= 1
         return value
 
-    result = asyncio.run(llmobs.aevaluate(dataset="faq", task=slow, concurrency=2))
+    result = asyncio.run(cetra.aevaluate(dataset="faq", task=slow, concurrency=2))
     assert len(result.runs) == 8
     assert 1 <= state["peak"] <= 2

@@ -30,13 +30,13 @@ import {
   TracerProvider,
 } from "@opentelemetry/sdk-trace";
 
-import { type Config, type LlmobsOptions, resolveConfig } from "./config.js";
+import { type CetraOptions, type Config, resolveConfig } from "./config.js";
 import { FetchTraceExporter } from "./exporter.js";
 import { VERSION } from "./index.js";
 import { disableInstrumentations, enableInstrumentations } from "./instrument.js";
 import { debug, resetWarningsForTests, warnOnce } from "./log.js";
 import { MaskingExporter } from "./mask.js";
-import { LlmobsSpanProcessor } from "./processor.js";
+import { CetraSpanProcessor } from "./processor.js";
 import { QuotaState } from "./quota.js";
 import { ScoreQueue } from "./scores.js";
 import { type FetchLike, runtimeGlobals } from "./web.js";
@@ -45,7 +45,7 @@ export class Runtime {
   readonly config: Config;
   readonly provider: TracerProvider;
   readonly ownsProvider: boolean;
-  readonly processor: LlmobsSpanProcessor;
+  readonly processor: CetraSpanProcessor;
   /** The background score queue (§ Score request). */
   readonly scores: ScoreQueue;
   readonly tracer: Tracer;
@@ -54,7 +54,7 @@ export class Runtime {
   private constructor(
     config: Config,
     provider: TracerProvider,
-    processor: LlmobsSpanProcessor,
+    processor: CetraSpanProcessor,
     scores: ScoreQueue,
   ) {
     this.config = config;
@@ -64,7 +64,7 @@ export class Runtime {
     this.ownsProvider = true;
     this.processor = processor;
     this.scores = scores;
-    this.tracer = provider.getTracer("llmobs", VERSION);
+    this.tracer = provider.getTracer("cetra", VERSION);
   }
 
   static create(
@@ -86,7 +86,7 @@ export class Runtime {
     if (config.useGlobalProvider && !registerGlobal) {
       warnOnce(
         "global-provider-exists",
-        "llmobs: a global tracer provider is already registered; llmobs keeps its own provider. Add spanProcessor() to your provider to send its spans to llmobs",
+        "cetra: a global tracer provider is already registered; cetra keeps its own provider. Add spanProcessor() to your provider to send its spans to cetra",
       );
     }
     // D-P-34: one 402 pause shared by the trace exporter and the score queue.
@@ -116,7 +116,7 @@ export class Runtime {
             mask: config.mask,
             captureContent: config.captureContent,
           });
-    const processor = new LlmobsSpanProcessor(exporter, {
+    const processor = new CetraSpanProcessor(exporter, {
       environment: config.environment,
       release: config.release,
       exportFilter: config.exportFilter,
@@ -126,7 +126,7 @@ export class Runtime {
     const provider = new TracerProvider({
       resource: defaultResource().merge(
         resourceFromAttributes({
-          "telemetry.distro.name": "llmobs",
+          "telemetry.distro.name": "cetra",
           "telemetry.distro.version": VERSION,
           ...(config.serviceName ? { "service.name": config.serviceName } : {}),
         }),
@@ -164,7 +164,7 @@ export class Runtime {
         await this.provider.shutdown();
       }
     } catch (error) {
-      debug(`llmobs: shutdown failed: ${errorName(error)}`);
+      debug(`cetra: shutdown failed: ${errorName(error)}`);
     }
   }
 }
@@ -174,9 +174,9 @@ let initCalled = false;
 // resetForTests never clears this: the listener stays for the process lifetime.
 let beforeExitRegistered = false;
 
-export function init(options?: LlmobsOptions): void {
+export function init(options?: CetraOptions): void {
   if (initCalled) {
-    warnOnce("init-twice", "llmobs: init() was already called; this call is ignored");
+    warnOnce("init-twice", "cetra: init() was already called; this call is ignored");
     return;
   }
   // Set before anything else, so whatever the first init() did (installed a
@@ -192,7 +192,7 @@ export function init(options?: LlmobsOptions): void {
     installRuntime(runtime);
     enableInstrumentations(runtime);
   } catch (error) {
-    debug(`llmobs: runtime startup failed: ${errorName(error)}`);
+    debug(`cetra: runtime startup failed: ${errorName(error)}`);
     return;
   }
   const process = runtimeGlobals().process;

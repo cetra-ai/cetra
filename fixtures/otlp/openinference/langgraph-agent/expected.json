@@ -2,12 +2,12 @@
   "spans": [
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "01d88a7e4bcd41f492baf3694116060a",
-      "span_id": "8aa129e8474d6203",
+      "trace_id": "69d24452fa30e1f336fa2ba592a53ca4",
+      "span_id": "f2d733f1d6443987",
       "name": "LangGraph",
       "span_kind": "chain",
       "start_time": "2025-12-31T23:59:50.000000000Z",
-      "end_time": "2025-12-31T23:59:50.087000000Z",
+      "end_time": "2025-12-31T23:59:50.091000000Z",
       "status": "ok",
       "service_name": "capture-app",
       "metadata": {
@@ -40,13 +40,13 @@
     },
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "01d88a7e4bcd41f492baf3694116060a",
-      "span_id": "66616a7eb6dcfb41",
-      "parent_span_id": "8aa129e8474d6203",
+      "trace_id": "69d24452fa30e1f336fa2ba592a53ca4",
+      "span_id": "3d7e2a660fb9a942",
+      "parent_span_id": "f2d733f1d6443987",
       "name": "model",
       "span_kind": "chain",
       "start_time": "2025-12-31T23:59:50.001000000Z",
-      "end_time": "2025-12-31T23:59:50.046000000Z",
+      "end_time": "2025-12-31T23:59:50.049000000Z",
       "status": "ok",
       "service_name": "capture-app",
       "metadata": {
@@ -84,13 +84,13 @@
     },
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "01d88a7e4bcd41f492baf3694116060a",
-      "span_id": "ff61144d7b4194be",
-      "parent_span_id": "66616a7eb6dcfb41",
+      "trace_id": "69d24452fa30e1f336fa2ba592a53ca4",
+      "span_id": "a2b6610f0f5da1c2",
+      "parent_span_id": "3d7e2a660fb9a942",
       "name": "ChatOpenAI",
       "span_kind": "llm",
-      "start_time": "2025-12-31T23:59:50.002000000Z",
-      "end_time": "2025-12-31T23:59:50.043000000Z",
+      "start_time": "2025-12-31T23:59:50.003000000Z",
+      "end_time": "2025-12-31T23:59:50.047000000Z",
       "status": "ok",
       "service_name": "capture-app",
       "metadata": {
@@ -155,57 +155,13 @@
     },
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "01d88a7e4bcd41f492baf3694116060a",
-      "span_id": "4a7b7ae41292ecfd",
-      "parent_span_id": "8aa129e8474d6203",
-      "name": "tools",
-      "span_kind": "chain",
-      "start_time": "2025-12-31T23:59:50.047000000Z",
-      "end_time": "2025-12-31T23:59:50.049000000Z",
-      "status": "ok",
-      "service_name": "capture-app",
-      "metadata": {
-        "langgraph_checkpoint_ns": "tools:b726c3b3-053c-2c40-87b0-bf6c2a02f2fa",
-        "langgraph_node": "tools",
-        "langgraph_path": "[\"__pregel_push\",0,false]",
-        "langgraph_step": "2",
-        "langgraph_triggers": "[\"__pregel_push\"]",
-        "ls_integration": "langchain_create_agent"
-      },
-      "input": "[{\"name\":\"get_weather\",\"args\":{\"city\":\"Paris\"},\"id\":\"call_weather_1\",\"type\":\"tool_call\"}]",
-      "input_format": "json",
-      "output": "{\"messages\":[{\"type\":\"tool\",\"data\":{\"content\":\"{\\\"temperature_c\\\": 18, \\\"conditions\\\": \\\"sunny\\\", \\\"city\\\": \\\"Paris\\\"}\",\"additional_kwargs\":{},\"response_metadata\":{},\"type\":\"tool\",\"name\":\"get_weather\",\"id\":\"00000000-0000-0000-0000-00000000000c\",\"tool_call_id\":\"call_weather_1\",\"artifact\":null,\"status\":\"success\"}}]}",
-      "output_format": "json",
-      "input_preview": "[{\"name\":\"get_weather\",\"args\":{\"city\":\"Paris\"},\"id\":\"call_weather_1\",\"type\":\"tool_call\"}]",
-      "output_preview": "{\"messages\":[{\"type\":\"tool\",\"data\":{\"content\":\"{\\\"temperature_c\\\": 18, \\\"conditions\\\": \\\"sunny\\\", \\\"city\\\": \\\"Paris\\\"}\",\"additional_kwargs\":{},\"response_metadata\":{},\"type\":\"tool\",\"name\":\"get_weather\",\"id\":\"00000000-0000-0000-0000-00000000000c\",\"tool_call_id\":\"call_weather_1\",\"artifact\":null,\"status\":\"success\"}}]}",
-      "attributes": {
-        "input.mime_type": "application/json",
-        "metadata": "{\"ls_integration\": \"langchain_create_agent\", \"langgraph_step\": 2, \"langgraph_node\": \"tools\", \"langgraph_triggers\": [\"__pregel_push\"], \"langgraph_path\": [\"__pregel_push\", 0, false], \"langgraph_checkpoint_ns\": \"tools:b726c3b3-053c-2c40-87b0-bf6c2a02f2fa\"}",
-        "openinference.span.kind": "CHAIN",
-        "output.mime_type": "application/json"
-      },
-      "resource_attributes": {
-        "telemetry.sdk.language": "python",
-        "telemetry.sdk.name": "opentelemetry",
-        "telemetry.sdk.version": "1.45.2"
-      },
-      "scope_name": "openinference.instrumentation.langchain",
-      "scope_version": "0.1.81",
-      "conventions": [
-        "openinference"
-      ],
-      "ingest_time": "2026-01-01T00:00:00.000000000Z",
-      "schema_version": 1
-    },
-    {
-      "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "01d88a7e4bcd41f492baf3694116060a",
-      "span_id": "6c7e8e80a4035d36",
-      "parent_span_id": "4a7b7ae41292ecfd",
+      "trace_id": "69d24452fa30e1f336fa2ba592a53ca4",
+      "span_id": "ed7198b6bd7fe0fb",
+      "parent_span_id": "ed9a8b85cd74189a",
       "name": "get_weather",
       "span_kind": "tool",
-      "start_time": "2025-12-31T23:59:50.048000000Z",
-      "end_time": "2025-12-31T23:59:50.048000000Z",
+      "start_time": "2025-12-31T23:59:50.051000000Z",
+      "end_time": "2025-12-31T23:59:50.052000000Z",
       "status": "ok",
       "service_name": "capture-app",
       "metadata": {
@@ -244,13 +200,57 @@
     },
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "01d88a7e4bcd41f492baf3694116060a",
-      "span_id": "078c4236ac479098",
-      "parent_span_id": "8aa129e8474d6203",
+      "trace_id": "69d24452fa30e1f336fa2ba592a53ca4",
+      "span_id": "ed9a8b85cd74189a",
+      "parent_span_id": "f2d733f1d6443987",
+      "name": "tools",
+      "span_kind": "chain",
+      "start_time": "2025-12-31T23:59:50.051000000Z",
+      "end_time": "2025-12-31T23:59:50.053000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "metadata": {
+        "langgraph_checkpoint_ns": "tools:b726c3b3-053c-2c40-87b0-bf6c2a02f2fa",
+        "langgraph_node": "tools",
+        "langgraph_path": "[\"__pregel_push\",0,false]",
+        "langgraph_step": "2",
+        "langgraph_triggers": "[\"__pregel_push\"]",
+        "ls_integration": "langchain_create_agent"
+      },
+      "input": "[{\"name\":\"get_weather\",\"args\":{\"city\":\"Paris\"},\"id\":\"call_weather_1\",\"type\":\"tool_call\"}]",
+      "input_format": "json",
+      "output": "{\"messages\":[{\"type\":\"tool\",\"data\":{\"content\":\"{\\\"temperature_c\\\": 18, \\\"conditions\\\": \\\"sunny\\\", \\\"city\\\": \\\"Paris\\\"}\",\"additional_kwargs\":{},\"response_metadata\":{},\"type\":\"tool\",\"name\":\"get_weather\",\"id\":\"00000000-0000-0000-0000-00000000000c\",\"tool_call_id\":\"call_weather_1\",\"artifact\":null,\"status\":\"success\"}}]}",
+      "output_format": "json",
+      "input_preview": "[{\"name\":\"get_weather\",\"args\":{\"city\":\"Paris\"},\"id\":\"call_weather_1\",\"type\":\"tool_call\"}]",
+      "output_preview": "{\"messages\":[{\"type\":\"tool\",\"data\":{\"content\":\"{\\\"temperature_c\\\": 18, \\\"conditions\\\": \\\"sunny\\\", \\\"city\\\": \\\"Paris\\\"}\",\"additional_kwargs\":{},\"response_metadata\":{},\"type\":\"tool\",\"name\":\"get_weather\",\"id\":\"00000000-0000-0000-0000-00000000000c\",\"tool_call_id\":\"call_weather_1\",\"artifact\":null,\"status\":\"success\"}}]}",
+      "attributes": {
+        "input.mime_type": "application/json",
+        "metadata": "{\"ls_integration\": \"langchain_create_agent\", \"langgraph_step\": 2, \"langgraph_node\": \"tools\", \"langgraph_triggers\": [\"__pregel_push\"], \"langgraph_path\": [\"__pregel_push\", 0, false], \"langgraph_checkpoint_ns\": \"tools:b726c3b3-053c-2c40-87b0-bf6c2a02f2fa\"}",
+        "openinference.span.kind": "CHAIN",
+        "output.mime_type": "application/json"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.langchain",
+      "scope_version": "0.1.81",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 1
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "69d24452fa30e1f336fa2ba592a53ca4",
+      "span_id": "01892e8e0a6e3426",
+      "parent_span_id": "f2d733f1d6443987",
       "name": "model",
       "span_kind": "chain",
-      "start_time": "2025-12-31T23:59:50.050000000Z",
-      "end_time": "2025-12-31T23:59:50.086000000Z",
+      "start_time": "2025-12-31T23:59:50.054000000Z",
+      "end_time": "2025-12-31T23:59:50.090000000Z",
       "status": "ok",
       "service_name": "capture-app",
       "metadata": {
@@ -288,13 +288,13 @@
     },
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "01d88a7e4bcd41f492baf3694116060a",
-      "span_id": "ca9858e8f202f17a",
-      "parent_span_id": "078c4236ac479098",
+      "trace_id": "69d24452fa30e1f336fa2ba592a53ca4",
+      "span_id": "195ffc03c3897c49",
+      "parent_span_id": "01892e8e0a6e3426",
       "name": "ChatOpenAI",
       "span_kind": "llm",
-      "start_time": "2025-12-31T23:59:50.051000000Z",
-      "end_time": "2025-12-31T23:59:50.085000000Z",
+      "start_time": "2025-12-31T23:59:50.055000000Z",
+      "end_time": "2025-12-31T23:59:50.089000000Z",
       "status": "ok",
       "service_name": "capture-app",
       "metadata": {

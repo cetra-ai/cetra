@@ -66,7 +66,7 @@ export function queueExperimentScore(
 ): string | undefined {
   const failure = invalidReason(options);
   if (failure !== undefined) {
-    warn(`llmobs: score not queued: ${failure}`);
+    warn(`cetra: score not queued: ${failure}`);
     return undefined;
   }
   const scoreId = mintScoreId();
@@ -108,7 +108,7 @@ export function score(options: ScoreOptions): string | undefined {
   }
   const failure = invalidReason(options);
   if (failure !== undefined) {
-    warn(`llmobs: score not queued: ${failure}`);
+    warn(`cetra: score not queued: ${failure}`);
     return undefined;
   }
   const scoreId = options.scoreId !== undefined ? options.scoreId.toLowerCase() : mintScoreId();
@@ -243,7 +243,7 @@ function scoreMetadata(
 
 function mintScoreId(): string | undefined {
   if (runtimeGlobals().crypto === undefined) {
-    warnOnce("no-crypto", "llmobs: crypto is not available; scores are not queued");
+    warnOnce("no-crypto", "cetra: crypto is not available; scores are not queued");
     return undefined;
   }
   return uuid7();
@@ -340,7 +340,7 @@ export class ScoreQueue {
     this.dropped += 1;
     const now = this.now();
     if (now - this.droppedWarnedAt >= DROP_WARN_INTERVAL_MILLIS) {
-      warn(`llmobs: score buffer full; dropped ${String(this.dropped)} scores in the last minute`);
+      warn(`cetra: score buffer full; dropped ${String(this.dropped)} scores in the last minute`);
       this.droppedWarnedAt = now;
       this.dropped = 0;
     }
@@ -434,19 +434,19 @@ export class ScoreQueue {
         }
         if (status !== undefined && status !== 429 && status < 500) {
           warn(
-            `llmobs: score batch rejected with status ${String(status)}; dropped ${String(count)} scores`,
+            `cetra: score batch rejected with status ${String(status)}; dropped ${String(count)} scores`,
           );
           return;
         }
         if (attempt + 1 >= MAX_ATTEMPTS) {
-          warn(`llmobs: score batch failed after retries; dropped ${String(count)} scores`);
+          warn(`cetra: score batch failed after retries; dropped ${String(count)} scores`);
           return;
         }
         await this.sleep(waitMillis(retryAfter, attempt));
       }
     } catch (error) {
       // sendBatch never rejects (flush awaits it); counts only in the message.
-      debug(`llmobs: score batch dropped: ${error instanceof Error ? error.name : typeof error}`);
+      debug(`cetra: score batch dropped: ${error instanceof Error ? error.name : typeof error}`);
     }
   }
 }

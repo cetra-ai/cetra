@@ -18,13 +18,13 @@
       "total_tokens": 65,
       "cost_source": "none",
       "attributes": {
+        "cetra.normalize_warning": "[\"input_excludes_cache\"]",
         "gen_ai.operation.name": "chat",
         "gen_ai.request.model": "custom-model",
         "gen_ai.usage.cache_read.input_tokens": "40",
         "gen_ai.usage.cache_write.input_tokens": "10",
         "gen_ai.usage.input_tokens": "10",
-        "gen_ai.usage.output_tokens": "5",
-        "llmobs.normalize_warning": "[\"input_excludes_cache\"]"
+        "gen_ai.usage.output_tokens": "5"
       },
       "conventions": [
         "genai"

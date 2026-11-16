@@ -453,8 +453,8 @@ mod tests {
         TestApp, TestResponse, assert_logs_clean, capture_logs, license_key, license_key_until,
     };
 
-    const PASSWORD: &str = "llmobs-ok1";
-    const REPLACEMENT: &str = "llmobs-ok2";
+    const PASSWORD: &str = "cetra-ok-1";
+    const REPLACEMENT: &str = "cetra-ok-2";
 
     async fn admin() -> (TestApp, String, SetupResponse) {
         admin_with(|_| {}).await
@@ -891,7 +891,7 @@ mod tests {
                 port: 587,
                 credentials: Some(("mailer".to_owned(), secret)),
             });
-            config.email_from = Some("llmobs <noreply@example.com>".to_owned());
+            config.email_from = Some("cetra <noreply@example.com>".to_owned());
         })
         .await;
         bootstrap::prepare(&app.state).await.unwrap();
@@ -925,7 +925,7 @@ mod tests {
         assert!(settings.smtp_enabled);
         assert_eq!(
             settings.email_from.as_deref(),
-            Some("llmobs <noreply@example.com>")
+            Some("cetra <noreply@example.com>")
         );
         assert!(settings.providers.is_empty());
         assert!(settings.password_enabled);

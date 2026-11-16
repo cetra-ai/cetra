@@ -126,7 +126,7 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          tarballs=("$RUNNER_TEMP"/llmobs-*.tgz)
+          tarballs=("$RUNNER_TEMP"/cetra-ai-sdk-*.tgz)
           if (( ${#tarballs[@]} != 1 )); then
             printf 'expected one tarball, found %s\n' "${#tarballs[@]}"
             exit 1

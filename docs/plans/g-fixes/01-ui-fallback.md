@@ -142,7 +142,7 @@ In the line that starts `- Content-Security-Policy on the UI:`, replace the quot
 In the first paragraph, replace the sentence `Built output embedded in the binary with `memory-serve` (brotli/gzip precompressed, ETags, SPA fallback).` with:
 
 ```
-Built output embedded in the binary by the `llmobs-ui` crate (gzip precompressed, ETags, SPA fallback; D-G-35). Every path that is not a file serves the app, including ids with a dot such as an email address.
+Built output embedded in the binary by the `cetra-ui` crate (gzip precompressed, ETags, SPA fallback; D-G-35). Every path that is not a file serves the app, including ids with a dot such as an email address.
 ```
 
 ### `docs/mvp-decisions.md`, row D-G-35
@@ -155,5 +155,5 @@ Missing `/assets/*` files are `404`. Another missing path is `404` only when its
 
 ## Done when
 
-- `cargo test -p llmobs-ui` passes, with the five tests above.
+- `cargo test -p cetra-ui` passes, with the five tests above.
 - `just check` passes.

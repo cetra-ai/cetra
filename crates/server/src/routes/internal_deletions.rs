@@ -84,7 +84,7 @@ mod tests {
         ActorKind, DeletionState, NewDeletion, RequestDetails, insert_deletion, mark_applied,
     };
     use crate::test_support::{TestApp, TestResponse};
-    use llmobs_core::ids::{OrgId, ProjectId};
+    use cetra_core::ids::{OrgId, ProjectId};
 
     /// Inserts one deletion of `kind` in `project` (a project for `project` and `trace_ids`), and
     /// applies it at `applied_at` when given. Returns its id.

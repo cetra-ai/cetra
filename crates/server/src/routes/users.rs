@@ -3,7 +3,7 @@
 use axum::extract::{Extension, State};
 use axum::http::Method;
 use axum::routing::get;
-use llmobs_storage as storage;
+use cetra_storage as storage;
 use serde::Deserialize;
 
 use crate::api::common::{ExclusionParams, Page};

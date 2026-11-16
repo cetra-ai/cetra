@@ -54,7 +54,7 @@ expression: "serde_json::to_string_pretty(&full_span()).unwrap()"
   "resource_attributes": {
     "host.name": "\"api\""
   },
-  "scope_name": "llmobs",
+  "scope_name": "cetra",
   "scope_version": "0.0.0",
   "events": [
     {
@@ -74,10 +74,10 @@ expression: "serde_json::to_string_pretty(&full_span()).unwrap()"
     "abababababababababababababababababababababababababababababababab"
   ],
   "truncated": [
-    "llmobs.input"
+    "cetra.input"
   ],
   "conventions": [
-    "llmobs",
+    "cetra",
     "genai"
   ],
   "ingest_time": "2026-11-09T10:12:05.123456789Z",

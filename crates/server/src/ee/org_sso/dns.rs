@@ -164,17 +164,17 @@ fn txt_string(txt: &TXT) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-/// `_llmobs-verify.<domain>`.
+/// `_cetra-verify.<domain>`.
 pub(crate) fn record_name(domain: &str) -> String {
     format!(
         "{}.{domain}",
-        concat!("_", llmobs_core::llmobs_name!("-verify"))
+        concat!("_", cetra_core::cetra_name!("-verify"))
     )
 }
 
-/// `llmobs-verify=<token>`.
+/// `cetra-verify=<token>`.
 pub(crate) fn record_value(token: &str) -> String {
-    format!("{}={token}", llmobs_core::llmobs_name!("-verify"))
+    format!("{}={token}", cetra_core::cetra_name!("-verify"))
 }
 
 /// A new token: 16 random bytes as 32 lowercase hex characters.
@@ -192,8 +192,8 @@ mod tests {
 
     #[test]
     fn record_name_and_value_use_the_product_prefix() {
-        assert_eq!(record_name("acme.test"), "_llmobs-verify.acme.test");
-        assert_eq!(record_value("ab"), "llmobs-verify=ab");
+        assert_eq!(record_name("acme.test"), "_cetra-verify.acme.test");
+        assert_eq!(record_value("ab"), "cetra-verify=ab");
     }
 
     #[test]
@@ -212,14 +212,14 @@ mod tests {
     #[tokio::test]
     async fn fixed_resolver_returns_what_was_set() {
         let resolver = TxtResolver::fixed();
-        resolver.set("acme.test", &["llmobs-verify=ab"]);
+        resolver.set("acme.test", &["cetra-verify=ab"]);
         assert_eq!(
             resolver.txt("acme.test").await.unwrap(),
-            vec!["llmobs-verify=ab".to_owned()]
+            vec!["cetra-verify=ab".to_owned()]
         );
         assert_eq!(
             resolver.txt("acme.test.").await.unwrap(),
-            vec!["llmobs-verify=ab".to_owned()]
+            vec!["cetra-verify=ab".to_owned()]
         );
         assert!(resolver.txt("other.test").await.unwrap().is_empty());
 

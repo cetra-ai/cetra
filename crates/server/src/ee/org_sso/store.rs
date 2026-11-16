@@ -3,7 +3,7 @@
 
 use std::fmt;
 
-use llmobs_core::ids::OrgId;
+use cetra_core::ids::OrgId;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
@@ -621,7 +621,7 @@ pub(crate) async fn routes(
 
 #[cfg(test)]
 mod tests {
-    use llmobs_core::ids::OrgId;
+    use cetra_core::ids::OrgId;
     use uuid::Uuid;
 
     use super::*;

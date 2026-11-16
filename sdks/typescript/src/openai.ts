@@ -2,7 +2,7 @@
  * The OpenAI helper (D-F-7): builds the OpenInference instrumentation for the
  * OpenAI SDK and patches the module by hand, so ESM works without loader
  * flags. Pass the result to `init({ instrument: [...] })`; the patch is active
- * immediately, but spans reach llmobs only once `init` has bound our tracer
+ * immediately, but spans reach cetra only once `init` has bound our tracer
  * provider.
  *
  * `captureContent` defaults to `true` and is not re-read by `init`: pass the

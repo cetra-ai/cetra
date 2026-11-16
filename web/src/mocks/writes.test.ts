@@ -132,7 +132,7 @@ it("creates a public key", async () => {
   expect(key.kind).toBe("public");
   expect(key.scopes).toEqual(["feedback"]);
   expect(key.name).toBe("Web");
-  expect(response.json?.secret).toMatch(/^pk-llmobs-/);
+  expect(response.json?.secret).toMatch(/^pk-cetra-/);
 });
 
 it("omits the name of an unnamed key", async () => {

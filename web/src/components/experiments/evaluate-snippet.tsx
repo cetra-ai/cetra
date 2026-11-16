@@ -4,9 +4,9 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 const DEFAULT_DATASET = "my-dataset";
 
 function pythonSnippet(name: string): string {
-  return `import llmobs
+  return `import cetra
 
-llmobs.init()  # LLMOBS_API_KEY: a secret key with the ingest, read and write scopes
+cetra.init()  # CETRA_API_KEY: a secret key with the ingest, read and write scopes
 
 def task(input):
     return my_app(input)
@@ -14,17 +14,17 @@ def task(input):
 def exact(output, expected):
     return output == expected
 
-result = llmobs.evaluate(dataset=${name}, task=task, scorers=[exact])
+result = cetra.evaluate(dataset=${name}, task=task, scorers=[exact])
 print(result.summary())
 `;
 }
 
 function typescriptSnippet(name: string): string {
-  return `import * as llmobs from "llmobs";
+  return `import * as cetra from "@cetra-ai/sdk";
 
-llmobs.init(); // LLMOBS_API_KEY: a secret key with the ingest, read and write scopes
+cetra.init(); // CETRA_API_KEY: a secret key with the ingest, read and write scopes
 
-const result = await llmobs.evaluate({
+const result = await cetra.evaluate({
   dataset: ${name},
   task: async (input) => myApp(input),
   scorers: [function exact({ output, expected }) { return output === expected; }],

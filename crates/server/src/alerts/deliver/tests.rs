@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
-use llmobs_core::ids::OrgId;
-use llmobs_core::names::PRODUCT;
-use llmobs_eval::{Secret, sign_payload};
+use cetra_core::ids::OrgId;
+use cetra_core::names::PRODUCT;
+use cetra_eval::{Secret, sign_payload};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -306,11 +306,11 @@ async fn webhook_is_signed_and_identified() {
     assert_eq!(header(request, "x-team"), Some("core"));
     let delivery_text = delivery.to_string();
     assert_eq!(
-        header(request, "x-llmobs-delivery"),
+        header(request, "x-cetra-delivery"),
         Some(delivery_text.as_str())
     );
     let expected = sign_payload(&Secret::new(SECRET.to_owned()), NOW / SECOND, &request.body);
-    assert_eq!(header(request, "x-llmobs-signature"), expected.as_deref());
+    assert_eq!(header(request, "x-cetra-signature"), expected.as_deref());
 }
 
 #[tokio::test]
@@ -430,7 +430,7 @@ async fn deliver_once_retries_then_fails() {
         .await
         .expect("metrics render");
     let failed = format!(
-        "llmobs_alert_deliveries_total{{channel=\"webhook\",outcome=\"failed\"}} {MAX_ATTEMPTS}"
+        "cetra_alert_deliveries_total{{channel=\"webhook\",outcome=\"failed\"}} {MAX_ATTEMPTS}"
     );
     assert!(text.lines().any(|line| line == failed), "{text}");
 }
@@ -457,7 +457,7 @@ async fn deliver_once_sends() {
         .render(&app.state)
         .await
         .expect("metrics render");
-    let sent = "llmobs_alert_deliveries_total{channel=\"webhook\",outcome=\"sent\"} 1";
+    let sent = "cetra_alert_deliveries_total{channel=\"webhook\",outcome=\"sent\"} 1";
     assert!(text.lines().any(|line| line == sent), "{text}");
     assert_eq!(
         deliver_once(&app.state, NOW + SECOND).await.expect("pass"),
@@ -491,8 +491,8 @@ async fn email_delivery_sends_to_each_recipient() {
         .await
         .expect("metrics render");
     for line in [
-        "llmobs_emails_total{outcome=\"sent\"} 2",
-        "llmobs_alert_deliveries_total{channel=\"email\",outcome=\"sent\"} 1",
+        "cetra_emails_total{outcome=\"sent\"} 2",
+        "cetra_alert_deliveries_total{channel=\"email\",outcome=\"sent\"} 1",
     ] {
         assert!(
             text.lines().any(|candidate| candidate == line),

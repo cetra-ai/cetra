@@ -480,7 +480,7 @@ That is about 5k lines in `message_processing/` alone.
    - Offer an explicit "attach to the existing global provider" mode.
    - Never silently attach the way LangWatch Python does, and never silently no-op the way LangWatch TS does. Pick one documented behaviour and keep it identical in Python and TS.
 3. **Filter exported spans by instrumentation scope at the processor (`on_end`), not the exporter.** The default export set is our tracer plus known GenAI instrumentation scopes plus anything under a span we created. Document what happens to dropped parents, and re-parent rather than orphan. LangWatch's `excludeHttpRequests` exporter filter can leave children pointing at missing parents.
-4. **Unconfigured means a no-op with a single warning.** Never default to a cloud URL (Opik), a local store (MLflow), or a throw at import or config time (Opik TS `validateConfig`). Provide `LLMOBS_ENABLED=false` / a runtime toggle that is checked per call, as Opik's `is_tracing_active` is.
+4. **Unconfigured means a no-op with a single warning.** Never default to a cloud URL (Opik), a local store (MLflow), or a throw at import or config time (Opik TS `validateConfig`). Provide `CETRA_ENABLED=false` / a runtime toggle that is checked per call, as Opik's `is_tracing_active` is.
 5. **Generators and streams: copy Opik's semantics.**
    - The span starts lazily.
    - It is current *only* while the generator body runs: attach and detach the OTel context around each `next`/`anext`.
@@ -501,11 +501,11 @@ That is about 5k lines in `message_processing/` alone.
    - NaN/Inf → null (LangWatch);
    - never `deepcopy` user objects (LangWatch);
    - never call side-effecting `__str__` on known stream types (MLflow).
-10. **Truncate client-side with a visible marker,** e.g. `{"llmobs.truncated": true, "original_bytes": N}`, at a configurable per-attribute limit, so a single span cannot exceed our OTLP request limit. LangWatch's "server owns sizing" pushes the failure to ingestion. Pick limits that match spec 02 truncation.
+10. **Truncate client-side with a visible marker,** e.g. `{"cetra.truncated": true, "original_bytes": N}`, at a configurable per-attribute limit, so a single span cannot exceed our OTLP request limit. LangWatch's "server owns sizing" pushes the failure to ingestion. Pick limits that match spec 02 truncation.
 11. **Put trace-level context (session, user, tags, metadata) in a ContextVar / AsyncLocalStorage scope and stamp it on *every* span at start via a SpanProcessor `on_start`, as attributes.**
     - Opik, LangWatch and MLflow all keep it on the root or trace entity only. That breaks when the root is not ours (OTel parent from HTTP), when spans are exported before the root ends, or when spans are filtered.
     - For cross-process propagation, also offer W3C baggage, not Opik-style custom headers.
-12. **No thread-global fallbacks** (LangWatch's `main_thread_langwatch_trace` list). Provide helpers to propagate context into executors: `llmobs.wrap(fn)` / `copy_context().run`, and document thread pools.
+12. **No thread-global fallbacks** (LangWatch's `main_thread_langwatch_trace` list). Provide helpers to propagate context into executors: `cetra.wrap(fn)` / `copy_context().run`, and document thread pools.
 13. **Do not silence OTel context warnings** (MLflow). Design attach/detach so they never fire, and test async-generator and cross-task cases explicitly. Opik's `copy_context` LangChain case is the canonical test.
 14. **Scores travel over a separate REST endpoint (spec 09), batched and asynchronous, with client-generated UUIDv7 ids so they are idempotent on retry** (Opik).
     - Allow scoring a span or trace that has not been exported yet, because the target id is known client-side.
@@ -515,7 +515,7 @@ That is about 5k lines in `message_processing/` alone.
     - Long-running spans can be a later concern.
 16. **Lifecycle.**
     - Python: `atexit` `force_flush` with a bounded timeout (Opik's default is unbounded), and `os.register_at_fork` to rebuild our processor in children (Opik's tracing queue lacks it).
-    - TS: explicit `await llmobs.flush()` / `shutdown()`, plus optional `beforeExit` hooks that never call `process.exit` and never swallow signals (LangWatch's careful re-raise logic is the model).
+    - TS: explicit `await cetra.flush()` / `shutdown()`, plus optional `beforeExit` hooks that never call `process.exit` and never swallow signals (LangWatch's careful re-raise logic is the model).
     - Keep the core free of `node:*` imports so edge and serverless can bring their own provider; put the Node setup in a subpath export (LangWatch `./observability/node`).
 17. **Masking hook.** A single `mask(span_attributes) -> attributes` callback (MLflow `span_processors`, Opik anonymizers), applied in our processor before export, plus capture modes `all|input|output|none` (LangWatch TS).
 18. **Privacy in SDK logs.** Never log arguments or outputs on error paths (Opik logs `(args, kwargs)`). Log function name and span id only, in line with the AGENTS.md privacy rule.

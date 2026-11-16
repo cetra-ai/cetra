@@ -1,7 +1,7 @@
 //! The scores and traces of one experiment, for its results and comparison (D-J-13).
 //!
 //! The `scores` view holds live scores only. Experiment scores carry `experiment_id`
-//! (D-J-12); experiment traces carry `metadata['llmobs.experiment_id']` (spec 02 § Context
+//! (D-J-12); experiment traces carry `metadata['cetra.experiment_id']` (spec 02 § Context
 //! fields). Default exclusions do not apply.
 
 use std::time::Duration;
@@ -10,12 +10,12 @@ use arrow::array::{Array, ArrayRef, AsArray, Float64Array, Int64Array, StringArr
 use arrow::compute::cast;
 use arrow::datatypes::{DataType, Float64Type, Int64Type};
 use arrow::error::ArrowError;
+use cetra_core::names::metadata_key;
+use cetra_core::schema::{scores, traces};
 use datafusion::common::ScalarValue;
 use datafusion::error::DataFusionError;
 use datafusion::logical_expr::{Expr, col, lit};
 use futures::StreamExt;
-use llmobs_core::names::metadata_key;
-use llmobs_core::schema::{scores, traces};
 
 use crate::query_error::{RunError, classify};
 use crate::views::{QueryContext, ViewName};
@@ -81,7 +81,7 @@ pub async fn experiment_scores(
     }
 }
 
-/// Traces whose merged `metadata['llmobs.experiment_id']` is `experiment`, in no order.
+/// Traces whose merged `metadata['cetra.experiment_id']` is `experiment`, in no order.
 ///
 /// `since` is a lower bound on `start_time`, as for [`experiment_scores`].
 ///
@@ -303,10 +303,10 @@ fn bad_row() -> RunError {
 mod tests {
     use std::time::Duration;
 
-    use llmobs_core::enums::SpanStatus;
-    use llmobs_core::names::metadata_key;
-    use llmobs_core::score::{Score, ScoreValue};
-    use llmobs_core::span::Span;
+    use cetra_core::enums::SpanStatus;
+    use cetra_core::names::metadata_key;
+    use cetra_core::score::{Score, ScoreValue};
+    use cetra_core::span::Span;
 
     use super::{ExperimentScore, ExperimentTrace, RunError, experiment_scores, experiment_traces};
     use crate::test_support::{

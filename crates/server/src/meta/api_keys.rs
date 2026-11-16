@@ -1,7 +1,7 @@
 //! `api_keys` rows (spec 04).
 #![cfg_attr(not(test), allow(dead_code))]
 
-use llmobs_core::ids::ProjectId;
+use cetra_core::ids::ProjectId;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 

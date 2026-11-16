@@ -21,16 +21,16 @@ use axum::body::{Body, Bytes};
 use axum::extract::ConnectInfo;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode};
 use bytesize::ByteSize;
-use http_body_util::BodyExt;
-use llmobs_core::batch::{scores_to_record_batch, spans_to_record_batch};
-use llmobs_core::ids::{OrgId, ProjectId, SpanId, TraceId};
-use llmobs_core::names::PRODUCT;
-use llmobs_core::score::Score;
-use llmobs_core::span::Span;
-use llmobs_storage::config::{
+use cetra_core::batch::{scores_to_record_batch, spans_to_record_batch};
+use cetra_core::ids::{OrgId, ProjectId, SpanId, TraceId};
+use cetra_core::names::PRODUCT;
+use cetra_core::score::Score;
+use cetra_core::span::Span;
+use cetra_storage::config::{
     AnchorConfig, FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
 };
-use llmobs_storage::{MediaBlob, ProjectQuery, QueryContext, Storage};
+use cetra_storage::{MediaBlob, ProjectQuery, QueryContext, Storage};
+use http_body_util::BodyExt;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sqlx::SqliteConnection;
@@ -90,7 +90,7 @@ pub(crate) fn sign_token(payload: &serde_json::Value) -> String {
 
 /// Signs the bytes `payload` as a `dev-1` token, whatever they are (not necessarily JSON).
 pub(crate) fn sign_raw(payload: &[u8]) -> String {
-    llmobs_token::sign_raw(&dev_signing_key(), "dev-1", payload).expect("dev key signs")
+    cetra_token::sign_raw(&dev_signing_key(), "dev-1", payload).expect("dev key signs")
 }
 
 /// A `dev-1` licence listing `features`, issued 2025-01-01, active until 2099-01-01.
@@ -312,7 +312,7 @@ impl TestApp {
         .await
         .expect("check value");
         let eval_runner = Arc::new(
-            llmobs_eval::EvalRunner::new(llmobs_eval::EgressPolicy {
+            cetra_eval::EvalRunner::new(cetra_eval::EgressPolicy {
                 allow_private_network: config.security.allow_private_network_egress,
                 restore_mode: config.restore_mode,
             })
@@ -340,7 +340,7 @@ impl TestApp {
         if let Some(issuer) = google_issuer {
             providers.retarget_google(issuer);
         }
-        let prices = llmobs_otel::PriceTable::new(llmobs_otel::builtin_price_rows())
+        let prices = cetra_otel::PriceTable::new(cetra_otel::builtin_price_rows())
             .expect("built-in price table");
         let ingest = crate::ingest::Ingest::new(
             &config.ingest,
@@ -362,7 +362,7 @@ impl TestApp {
         .expect("stored org tokens load");
         let eval = crate::eval::EvalQueue::new(config.eval.workers);
         let org_sso = crate::ee::org_sso::OrgSso::new(
-            llmobs_eval::EgressPolicy {
+            cetra_eval::EgressPolicy {
                 allow_private_network: config.security.allow_private_network_egress,
                 restore_mode: config.restore_mode,
             },
@@ -457,11 +457,11 @@ pub(crate) struct Seeded {
     pub(crate) org_id: OrgId,
     pub(crate) project: ProjectRow,
     pub(crate) cookie: String,
-    /// `sk-llmobs-…` with `["ingest"]`.
+    /// `sk-cetra-…` with `["ingest"]`.
     pub(crate) ingest_key: String,
-    /// `sk-llmobs-…` with `["read"]`.
+    /// `sk-cetra-…` with `["read"]`.
     pub(crate) read_key: String,
-    /// `pk-llmobs-…` with `["feedback"]`.
+    /// `pk-cetra-…` with `["feedback"]`.
     pub(crate) public_key: String,
 }
 
@@ -571,7 +571,7 @@ impl TestApp {
 pub(crate) struct Member {
     /// `users.id`.
     pub(crate) id: Uuid,
-    /// `llmobs_session=…`, ready for a `cookie` header.
+    /// `cetra_session=…`, ready for a `cookie` header.
     pub(crate) cookie: String,
 }
 
@@ -769,7 +769,7 @@ impl TestApp {
             .unwrap();
     }
 
-    /// A `sk-llmobs-…` key with `["read", "write"]` on `seeded.project`, as its plaintext.
+    /// A `sk-cetra-…` key with `["read", "write"]` on `seeded.project`, as its plaintext.
     pub(crate) async fn write_key(&self, seeded: &Seeded) -> String {
         let key = secret::new_key(KeyKind::Secret).unwrap();
         let plaintext = key.plaintext.clone();
@@ -886,10 +886,10 @@ impl TestApp {
                     request_bytes: 0,
                     now_ns: self.state.clock.now_ns(),
                 },
-                llmobs_otel::Normalized {
+                cetra_otel::Normalized {
                     spans,
                     media: Vec::new(),
-                    rejections: llmobs_otel::Rejections::default(),
+                    rejections: cetra_otel::Rejections::default(),
                 },
             )
             .await
@@ -975,7 +975,7 @@ async fn insert_key(
 }
 
 /// A session for `user_id`, started through `sso_org`'s provider when given, as a `cookie`
-/// header value (`llmobs_session=<token>`): the `Set-Cookie` value up to its first `;`.
+/// header value (`cetra_session=<token>`): the `Set-Cookie` value up to its first `;`.
 pub(crate) async fn session_cookie_via(
     app: &TestApp,
     user_id: Uuid,
@@ -1537,13 +1537,13 @@ pub(crate) async fn org_sso_app_with(
 }
 
 /// The OTLP key the tests send with, also the project key of [`with_init`].
-pub(crate) const OTLP_KEY: &str = "sk-llmobs-0123456789ABCDEFGHIJKLMNOPQRSTUV";
+pub(crate) const OTLP_KEY: &str = "sk-cetra-0123456789ABCDEFGHIJKLMNOPQRSTUV";
 
 /// A server config with `init` set, so `bind` seeds an admin, an org, a project and [`OTLP_KEY`].
 pub(crate) fn with_init(mut config: ServerConfig) -> ServerConfig {
     config.init = serde_json::from_value(serde_json::json!({
         "admin_email": "ada@example.com",
-        "admin_password": "llmobs-ok1",
+        "admin_password": "cetra-ok-1",
         "org": "Acme",
         "project": "Support bot",
         "secret_key": OTLP_KEY,

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-use llmobs_server::api::openapi::openapi;
+use cetra_server::api::openapi::openapi;
 
 const OPERATIONS: &[(&str, &str, &str)] = &[
     (
@@ -1178,7 +1178,7 @@ fn document_lint() {
 }
 
 fn openapi_write_requested() -> bool {
-    write_requested("LLMOBS_OPENAPI_WRITE")
+    write_requested("CETRA_OPENAPI_WRITE")
 }
 
 fn write_requested(name: &str) -> bool {
@@ -1303,7 +1303,7 @@ fn assert_exclusions(document: &Value) {
         "list_users",
         "stream_traces",
     ];
-    const TEXT: &str = "Evaluation traces (`environment = llmobs-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.";
+    const TEXT: &str = "Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.";
     let mut found = BTreeSet::new();
     let Some(paths) = document["paths"].as_object() else {
         panic!("paths");

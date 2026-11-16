@@ -9,7 +9,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{MethodRouter, get};
 use axum::{Router, middleware};
-use llmobs_core::ids::{OrgId, ProjectId};
+use cetra_core::ids::{OrgId, ProjectId};
 
 use super::AppState;
 use super::error::ApiError;

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, PoisonError, RwLock};
 
-use llmobs_core::ids::OrgId;
+use cetra_core::ids::OrgId;
 
 use crate::api::org_sso::JitRole;
 use crate::auth::oidc::{IdpHttp, OidcProvider};
@@ -103,10 +103,10 @@ impl OrgSso {
     ///
     /// Returns [`OrgSsoError::Client`] when the HTTP client cannot be built.
     pub(crate) fn new(
-        policy: llmobs_eval::EgressPolicy,
+        policy: cetra_eval::EgressPolicy,
         dns: dns::TxtResolver,
     ) -> Result<Self, OrgSsoError> {
-        let client = llmobs_eval::identity_http_client(policy).map_err(|_| OrgSsoError::Client)?;
+        let client = cetra_eval::identity_http_client(policy).map_err(|_| OrgSsoError::Client)?;
         Ok(Self {
             index: RwLock::new(Arc::new(Index::default())),
             reload_lock: tokio::sync::Mutex::new(()),
@@ -614,10 +614,10 @@ mod tests {
     #[tokio::test]
     async fn the_fixed_dns_answers_through_the_test_app() {
         let app = TestApp::new().await;
-        app.dns_txt("acme.test", &["llmobs-verify=0123"]);
+        app.dns_txt("acme.test", &["cetra-verify=0123"]);
         assert_eq!(
             app.state.org_sso.dns.txt("acme.test").await.expect("txt"),
-            vec!["llmobs-verify=0123".to_owned()]
+            vec!["cetra-verify=0123".to_owned()]
         );
         app.dns_fail(true);
         assert!(app.state.org_sso.dns.txt("acme.test").await.is_err());

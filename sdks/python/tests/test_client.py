@@ -6,9 +6,9 @@ from typing import Protocol
 
 import pytest
 
-from llmobs import ApiError, Client, ConfigError, Dataset
+from cetra import ApiError, Client, ConfigError, Dataset
 
-TEST_API_KEY = "sk-llmobs-test"
+TEST_API_KEY = "sk-cetra-test"
 DEAD_URL = "http://127.0.0.1:9"  # nothing listens here: connection refused at once
 DATASET_ID = "0190a000-0000-7000-8000-000000000001"
 JSON_HEADERS = {"Content-Type": "application/json"}
@@ -38,7 +38,7 @@ def api(http_recorder: Recorder) -> tuple[Client, list[float]]:
 
 
 def test_client_needs_a_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("LLMOBS_API_KEY", raising=False)
+    monkeypatch.delenv("CETRA_API_KEY", raising=False)
     with pytest.raises(ConfigError) as excinfo:
         Client()
     assert str(excinfo.value) == "api_key: required"

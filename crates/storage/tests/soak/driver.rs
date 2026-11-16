@@ -8,19 +8,19 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use arrow::array::RecordBatch;
-use chrono::{DateTime, NaiveDate, Utc};
-use llmobs_core::batch::{scores_to_record_batch, spans_to_record_batch};
-use llmobs_core::enums::ScoreSource;
-use llmobs_core::ids::{ProjectId, TraceId};
-use llmobs_core::score::{Score, ScoreTarget, ScoreValue};
-use llmobs_core::span::Span;
-use llmobs_storage::error::AppendError;
-use llmobs_storage::{
+use cetra_core::batch::{scores_to_record_batch, spans_to_record_batch};
+use cetra_core::enums::ScoreSource;
+use cetra_core::ids::{ProjectId, TraceId};
+use cetra_core::score::{Score, ScoreTarget, ScoreValue};
+use cetra_core::span::Span;
+use cetra_storage::error::AppendError;
+use cetra_storage::{
     Bucket, BucketWidth, Deletion, DeletionScope, DeletionStatus, ListScope, MetricsRequest,
     QueryContext, QueryOptions, ScoreListRequest, SessionListRequest, SessionSort, SortOrder,
     Storage, TimeWindow, TraceListRequest, TraceSort, metrics, score_list, session_list,
     trace_detail, trace_list,
 };
+use chrono::{DateTime, NaiveDate, Utc};
 use tokio::sync::watch;
 use uuid::Uuid;
 

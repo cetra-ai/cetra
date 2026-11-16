@@ -1,4 +1,4 @@
-The llmobs source code is licensed under the MIT License below, except for the
+The cetra source code is licensed under the MIT License below, except for the
 contents of these directories, which are licensed under the Elastic License 2.0
 (see the LICENSE file in each of them):
 
@@ -9,7 +9,7 @@ contents of these directories, which are licensed under the Elastic License 2.0
 
 MIT License
 
-Copyright (c) 2026 the llmobs authors
+Copyright (c) 2026 the cetra authors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

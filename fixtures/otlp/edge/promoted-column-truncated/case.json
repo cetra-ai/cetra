@@ -1,5 +1,5 @@
 {
-  "description": "Cuts the promoted string columns (session_id, a metadata value and request_model) that are longer than max_attribute_bytes. A llmobs.session.id over 256 bytes is a consumed attribute that is removed, so only its promoted column holds it.",
+  "description": "Cuts the promoted string columns (session_id, a metadata value and request_model) that are longer than max_attribute_bytes. A cetra.session.id over 256 bytes is a consumed attribute that is removed, so only its promoted column holds it.",
   "origin": "hand_written",
   "spec_refs": [
     "02 § Truncation",

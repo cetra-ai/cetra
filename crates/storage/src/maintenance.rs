@@ -1,6 +1,6 @@
 //! Offline maintenance of a data directory (N M2, D-N-21, D-N-22).
 //!
-//! `llmobs admin gc-orphans` and `llmobs admin migrate` open the directory through
+//! `cetra admin gc-orphans` and `cetra admin migrate` open the directory through
 //! [`Maintenance`], not [`crate::Storage`]. It takes `LOCK` and migrates
 //! `catalog.db` (with its pre-migration copy), and nothing else: no WAL replay, no
 //! startup collection, no temporary-file or spill cleanup, no background task. A
@@ -53,7 +53,7 @@ impl Maintenance {
         remote: Option<(Arc<dyn ObjectStore>, PutSizes)>,
     ) -> Result<Self, OpenError> {
         // `gc-orphans` must delete even when the server's config is in restore mode
-        // (D-N-34): the drill runs it with the same `llmobs.toml`.
+        // (D-N-34): the drill runs it with the same `cetra.toml`.
         let config = StorageConfig {
             delete_objects: true,
             ..config
@@ -105,9 +105,9 @@ mod tests {
     use std::time::Duration;
 
     use bytes::Bytes;
+    use cetra_core::ids::ProjectId;
     use chrono::NaiveDate;
     use futures::TryStreamExt;
-    use llmobs_core::ids::ProjectId;
     use object_store::memory::InMemory;
     use object_store::prefix::PrefixStore;
     use object_store::{ObjectStore, ObjectStoreExt, path::Path as ObjectPath};
@@ -181,7 +181,7 @@ mod tests {
 
     /// A store wrapped the way the S3 store is: a bucket with a key prefix.
     fn prefixed_store() -> Arc<dyn ObjectStore> {
-        Arc::new(PrefixStore::new(InMemory::new(), "backups/llmobs"))
+        Arc::new(PrefixStore::new(InMemory::new(), "backups/cetra"))
     }
 
     fn day() -> NaiveDate {

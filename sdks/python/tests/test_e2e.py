@@ -1,7 +1,7 @@
-"""End-to-end: the SDK against a running ``llmobs serve`` (``just e2e``, D-G-20).
+"""End-to-end: the SDK against a running ``cetra serve`` (``just e2e``, D-G-20).
 
-``tools/e2e/run.sh`` starts the server and sets ``LLMOBS_E2E_BASE_URL`` and
-``LLMOBS_E2E_API_KEY``; without them the test is skipped.
+``tools/e2e/run.sh`` starts the server and sets ``CETRA_E2E_BASE_URL`` and
+``CETRA_E2E_API_KEY``; without them the test is skipped.
 """
 
 import os
@@ -12,11 +12,11 @@ from typing import Any
 import pytest
 import requests
 
-import llmobs
+import cetra
 
 pytestmark = [
     pytest.mark.e2e,
-    pytest.mark.skipif(not os.environ.get("LLMOBS_E2E_BASE_URL"), reason="needs just e2e"),
+    pytest.mark.skipif(not os.environ.get("CETRA_E2E_BASE_URL"), reason="needs just e2e"),
 ]
 
 POLL_LIMIT_S = 10.0
@@ -44,21 +44,21 @@ def _poll(url: str, key: str, ready: Callable[[dict[str, Any]], bool]) -> dict[s
 
 
 def test_traced_function_and_score_read_back_through_the_api() -> None:
-    base_url = os.environ["LLMOBS_E2E_BASE_URL"]
-    key = os.environ["LLMOBS_E2E_API_KEY"]
-    llmobs.init(api_key=key, base_url=base_url)
+    base_url = os.environ["CETRA_E2E_BASE_URL"]
+    key = os.environ["CETRA_E2E_API_KEY"]
+    cetra.init(api_key=key, base_url=base_url)
     trace_ids: list[str | None] = []
 
-    @llmobs.observe(name="e2e-py")
+    @cetra.observe(name="e2e-py")
     def traced() -> str:
-        trace_ids.append(llmobs.current_trace_id())
+        trace_ids.append(cetra.current_trace_id())
         return "ok"
 
     assert traced() == "ok"
     trace_id = trace_ids[0]
     assert trace_id is not None
-    assert llmobs.score(name="e2e", value=1.0, trace_id=trace_id) is not None
-    llmobs.shutdown()
+    assert cetra.score(name="e2e", value=1.0, trace_id=trace_id) is not None
+    cetra.shutdown()
 
     trace = _poll(
         f"{base_url}/api/v1/projects/current/traces/{trace_id}",
@@ -89,11 +89,11 @@ def _experiment_ready(body: dict[str, Any]) -> bool:
 
 
 def test_dataset_experiment_round_trip() -> None:
-    base_url = os.environ["LLMOBS_E2E_BASE_URL"]
-    key = os.environ["LLMOBS_E2E_API_KEY"]
-    llmobs.init(api_key=key, base_url=base_url)
-    client = llmobs.Client(api_key=key, base_url=base_url)
-    dataset = client.datasets.create(f"e2e-py-{llmobs.uuid7()}")
+    base_url = os.environ["CETRA_E2E_BASE_URL"]
+    key = os.environ["CETRA_E2E_API_KEY"]
+    cetra.init(api_key=key, base_url=base_url)
+    client = cetra.Client(api_key=key, base_url=base_url)
+    dataset = client.datasets.create(f"e2e-py-{cetra.uuid7()}")
     try:
         dataset = dataset.add_items(
             [
@@ -105,7 +105,7 @@ def test_dataset_experiment_round_trip() -> None:
         def exact(output: str, expected: str) -> bool:
             return output == expected
 
-        result = llmobs.evaluate(
+        result = cetra.evaluate(
             dataset=dataset,
             task=lambda item: item["q"].upper(),
             scorers=[exact],
@@ -119,5 +119,5 @@ def test_dataset_experiment_round_trip() -> None:
             ready=_experiment_ready,
         )
     finally:
-        llmobs.shutdown()
+        cetra.shutdown()
         client.datasets.delete(dataset.id)

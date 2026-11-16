@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use llmobs_core::ids::{SpanId, TraceId};
+use cetra_core::ids::{SpanId, TraceId};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
@@ -131,11 +131,11 @@ pub struct EvalJob {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latency_ms: Option<u64>,
     /// Earliest time the job may run. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub not_before: i64,
     /// Creation time. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub created_at: i64,
     /// Time the job finished. Omitted while it is queued or running.

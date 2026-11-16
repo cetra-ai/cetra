@@ -1,4 +1,4 @@
-# T1 — `PriceTable::layered` in `llmobs-otel`
+# T1 — `PriceTable::layered` in `cetra-otel`
 
 **Commit subject:** `otel: layer custom price rows over a shared table`
 
@@ -185,7 +185,7 @@ Named cases:
 ## Commands
 
 ```bash
-cargo test -p llmobs-otel cost
+cargo test -p cetra-otel cost
 ```
 
 ```bash
@@ -194,7 +194,7 @@ just check
 
 ## Done when
 
-- The 13 tests pass, and every existing `llmobs-otel` test passes unchanged (golden fixtures included).
+- The 13 tests pass, and every existing `cetra-otel` test passes unchanged (golden fixtures included).
 - `PriceTable::layered`, `rows` and `base` are public and documented; `total_rows` and `ranked_lookup` are private.
 - `just check` is green.
 

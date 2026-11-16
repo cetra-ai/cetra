@@ -17,11 +17,11 @@ Fixtures used in this file (all under `fixtures/api/`):
 | `get_auth_config` | `GET /api/auth/config` | `static/auth-config.json`: `setup_required: false`, `password_enabled: true`, `signup: "invite_only"`, providers `github` ("GitHub") and `oidc:okta` ("Okta"), `smtp_enabled: false` |
 | `get_me` | `GET /api/auth/me` | `static/me.json`: Ada, instance admin, owner of `acme` |
 | `post_login` | `POST /api/auth/login` | `static/me.json` (200) |
-| `post_setup` | `POST /api/auth/setup` | `static/setup-response.json` (201): org `acme`, project `support-bot` ("Support bot"), `secret_key` `sk-llmobs-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0` |
+| `post_setup` | `POST /api/auth/setup` | `static/setup-response.json` (201): org `acme`, project `support-bot` ("Support bot"), `secret_key` `sk-cetra-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0` |
 | `list_traces` | `GET /api/v1/projects/{project}/traces` | `responses/traces.json` (non-empty) when `include_eval` is absent |
 | `post_org` | `POST /api/v1/orgs` | `static/org.json` (`OrgMembership`, slug `acme`) |
 | `post_project` | `POST /api/v1/orgs/{org}/projects` | `static/project.json` (slug `support-bot`, name "Support bot") |
-| `post_api_key` | `POST /api/v1/projects/{project}/api-keys` | `static/api-key-created.json` (`secret` `sk-llmobs-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0`) |
+| `post_api_key` | `POST /api/v1/projects/{project}/api-keys` | `static/api-key-created.json` (`secret` `sk-cetra-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0`) |
 | `post_logout`, `post_email_verify_resend` | | no fixture (`204`) |
 
 `web/src/routeTree.gen.ts` is git-ignored: `pnpm gen:routes` regenerates it after a route file is added, and it is never committed. Every phase also sets the README's `Status:` line (README § Conventions), so `docs/plans/l-admin-ui/README.md` (first line only) is in every **Edit only** list.
@@ -124,7 +124,7 @@ import { problemMessage, problemOf } from "@/api/problem";
 import type { OAuthErrorCode } from "@/lib/search/auth";
 
 export const NO_SIGN_IN_METHOD =
-  "No sign-in method is configured on this server. An instance admin can create an account with `llmobs admin create-user`.";
+  "No sign-in method is configured on this server. An instance admin can create an account with `cetra admin create-user`.";
 
 export const RATE_LIMITED = "Too many attempts. Wait a minute and try again.";
 
@@ -977,11 +977,11 @@ Two notes on `getByLabelText`:
    - Assert:
      - the body equals `{ setup_token: "tok123", email: "ada@example.com", password: "correct horse battery", org_name: "Acme", project_name: "Support bot", name: "Ada Example" }` (use `toEqual`; key order does not matter);
      - `await screen.findByRole("heading", { name: "Send your first trace" })`;
-     - `expect(screen.getByLabelText("Secret key")).toHaveValue("sk-llmobs-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0")`;
+     - `expect(screen.getByLabelText("Secret key")).toHaveValue("sk-cetra-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0")`;
      - the link "Go to project" has `href` `/acme/support-bot/traces`;
      - `await screen.findByText("First trace received")`, because the fixture traces list is not empty;
      - the token left the URL: `await waitFor(() => expect(router.state.location.href).toBe("/setup"))` (`router` from `renderApp`), and the "Send your first trace" heading is still shown;
-     - the mutation cache holds neither the secret nor the request that carried the password and the setup token: `const { queryClient } = await renderApp(…)` at the start, then `await waitFor(() => expect(JSON.stringify(queryClient.getMutationCache().getAll().map((m) => ({ data: m.state.data ?? null, variables: m.state.variables ?? null }))).not.toContain("sk-llmobs-EXAMPLE0"))`, and the same string not containing `"correct horse battery"` nor `"tok123"`. `reset()` alone would leave all three for the default 5 minutes.
+     - the mutation cache holds neither the secret nor the request that carried the password and the setup token: `const { queryClient } = await renderApp(…)` at the start, then `await waitFor(() => expect(JSON.stringify(queryClient.getMutationCache().getAll().map((m) => ({ data: m.state.data ?? null, variables: m.state.variables ?? null }))).not.toContain("sk-cetra-EXAMPLE0"))`, and the same string not containing `"correct horse battery"` nor `"tok123"`. `reset()` alone would leave all three for the default 5 minutes.
 6. `it("leaves the name out when it is empty")`: same as 5 without a name. The body has no `name` key (`expect(body).not.toHaveProperty("name")`).
 7. `it("shows the server's field errors")`:
    - The setup handler returns `problemResponse(400, "bad_request", { errors: [{ field: "password", message: "password is too common" }] })`.
@@ -1660,8 +1660,8 @@ A response that fails once and then succeeds is a closure counter: `let n = 0; c
      - `projectCalls` equals `[{ org: "acme", body: { name: "Support bot" } }]`;
      - `keyCalls` equals `[{ project: "acme/support-bot", body: { kind: "secret", name: "Default" } }]`;
      - `await screen.findByRole("heading", { name: "Send your first trace" })`;
-     - `expect(screen.getByLabelText("Secret key")).toHaveValue("sk-llmobs-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0")`;
-     - the key mutation left TanStack's cache entirely, data and variables: with `queryClient` from `renderApp`, `await waitFor(() => expect(JSON.stringify(queryClient.getMutationCache().getAll().map((m) => ({ data: m.state.data ?? null, variables: m.state.variables ?? null }))).not.toContain("sk-llmobs-EXAMPLE0"))`, and the same string not containing `"name":"Default"` (the request that made the key). `reset()` alone would leave both for the default 5 minutes.
+     - `expect(screen.getByLabelText("Secret key")).toHaveValue("sk-cetra-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0")`;
+     - the key mutation left TanStack's cache entirely, data and variables: with `queryClient` from `renderApp`, `await waitFor(() => expect(JSON.stringify(queryClient.getMutationCache().getAll().map((m) => ({ data: m.state.data ?? null, variables: m.state.variables ?? null }))).not.toContain("sk-cetra-EXAMPLE0"))`, and the same string not containing `"name":"Default"` (the request that made the key). `reset()` alone would leave both for the default 5 minutes.
 2. `it("does not create the org again when the project fails")`:
    - `handlers({ project })`, where `project` returns `problemResponse(503, "busy")` on the first call and the fixture after.
    - Submit once. `expect(await screen.findByRole("alert")).toHaveTextContent("Service Unavailable")`, "Organization name" is disabled with the description "Created.", and the button reads "Try again".

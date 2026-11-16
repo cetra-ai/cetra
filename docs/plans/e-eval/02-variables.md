@@ -27,7 +27,7 @@ pub struct VariableMapping(BTreeMap<String, Expr>);
 
 - `Expr::parse(text: &str) -> Result<Expr, MappingError>`. A hand-written parser over the grammar of D162 (no parser crate):
   - the source prefix first;
-  - `metadata.<key>` and `attributes.<key>`: the key runs to the first `$`, or to a final `?`, or to the end. It must be non-empty and may contain dots (`llmobs.eval.rule_id` is a valid key);
+  - `metadata.<key>` and `attributes.<key>`: the key runs to the first `$`, or to a final `?`, or to the end. It must be non-empty and may contain dots (`cetra.eval.rule_id` is a valid key);
   - `span[name="…"]`: a double-quoted string with `\"` and `\\` escapes; `span[kind="…"]`: a `SpanKind` stored value (`llm`, `retriever`, …; use the enum's `FromStr`);
   - an optional JSONPath suffix starting at `$`, parsed with `JsonPath::parse` (RFC 9535);
   - an optional final `?`.
@@ -53,7 +53,7 @@ pub struct VariableMapping(BTreeMap<String, Expr>);
 - Payloads are decoded as in E7 (by `PayloadFormat`; put the decoding helper in `mapping/mod.rs` now so E7 reuses it). A payload renders with `text::render_value` (below). Whitespace runs (newlines included) collapse to one space. Each payload is cut to 2 000 characters with `…` appended when cut. An absent payload renders as `-`.
 - The total is capped at 60 000 characters: stop before the line that would cross it, and append `[… n more spans]` with the count of spans not written. Characters are Unicode scalar values (`chars()`), and cutting never splits one.
 
-**`text.rs`** gains `pub(crate) fn render_value(&Value) -> String` (D163), which E8's formatter reuses: string → as is; messages → one line per message, `role: ` followed by its parts: text as is, image `[image]`, audio `[audio]`, file `[file]`, tool call `tool_call name(arguments as compact JSON)`, tool result `tool_result: <content rendered>`; check `llmobs_core::message::Part` for the exact variants and map each one; null → `""`; any other JSON → compact JSON.
+**`text.rs`** gains `pub(crate) fn render_value(&Value) -> String` (D163), which E8's formatter reuses: string → as is; messages → one line per message, `role: ` followed by its parts: text as is, image `[image]`, audio `[audio]`, file `[file]`, tool call `tool_call name(arguments as compact JSON)`, tool result `tool_result: <content rendered>`; check `cetra_core::message::Part` for the exact variants and map each one; null → `""`; any other JSON → compact JSON.
 
 **Tests:** a three-level tree with siblings out of order; long payload cut with `…`; total cap with the `[… n more spans]` line and its count; multi-byte characters at the cut; a cycle (`a → b → a`) renders each span once; `render_value` for every `Part` variant; an `insta` snapshot of one realistic agent trace (agent → llm → tool → llm).
 

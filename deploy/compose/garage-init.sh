@@ -1,6 +1,6 @@
 #!/bin/sh
 # One-shot setup of the single-node Garage of compose.s3.yaml through its admin API (v2):
-# a layout with this node, the access key from .env, and the bucket `llmobs` with read and
+# a layout with this node, the access key from .env, and the bucket `cetra` with read and
 # write for that key. Safe to run again: each step checks what already exists (D-N-9).
 set -eu
 
@@ -41,14 +41,14 @@ fi
 
 if ! call GET "/v2/GetKeyInfo?id=${GARAGE_ACCESS_KEY_ID}" >/dev/null 2>&1; then
   call POST /v2/ImportKey \
-    "{\"accessKeyId\":\"${GARAGE_ACCESS_KEY_ID}\",\"secretAccessKey\":\"${GARAGE_SECRET_ACCESS_KEY}\",\"name\":\"llmobs\"}" >/dev/null
+    "{\"accessKeyId\":\"${GARAGE_ACCESS_KEY_ID}\",\"secretAccessKey\":\"${GARAGE_SECRET_ACCESS_KEY}\",\"name\":\"cetra\"}" >/dev/null
   echo "garage-init: access key imported"
 fi
 
-bucket="$(call GET '/v2/GetBucketInfo?globalAlias=llmobs' 2>/dev/null | tr -d ' \n' | grep -o '"id":"[0-9a-f]\{64\}"' | head -n1 | cut -d'"' -f4 || true)"
+bucket="$(call GET '/v2/GetBucketInfo?globalAlias=cetra' 2>/dev/null | tr -d ' \n' | grep -o '"id":"[0-9a-f]\{64\}"' | head -n1 | cut -d'"' -f4 || true)"
 if [ -z "$bucket" ]; then
-  bucket="$(call POST /v2/CreateBucket '{"globalAlias":"llmobs"}' | tr -d ' \n' | grep -o '"id":"[0-9a-f]\{64\}"' | head -n1 | cut -d'"' -f4)"
-  echo "garage-init: bucket llmobs created"
+  bucket="$(call POST /v2/CreateBucket '{"globalAlias":"cetra"}' | tr -d ' \n' | grep -o '"id":"[0-9a-f]\{64\}"' | head -n1 | cut -d'"' -f4)"
+  echo "garage-init: bucket cetra created"
 fi
 
 call POST /v2/AllowBucketKey \

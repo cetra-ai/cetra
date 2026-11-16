@@ -27,7 +27,7 @@ One day (2026-03-05) of steady ingest under the default policy shape:
 
 ## Result
 
-From `cargo test -p llmobs-storage write_amplification -- --nocapture`:
+From `cargo test -p cetra-storage write_amplification -- --nocapture`:
 
 ```
 write amplification: flushed 3131358 B, rewritten 4857589 B, wa 1.55, L1 files before close 6, spans files after 1

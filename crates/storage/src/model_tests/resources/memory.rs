@@ -41,11 +41,11 @@ const KIB: usize = 1 << 10;
 const TMPFS_MAGIC: i128 = 0x0102_1994;
 
 /// Parent-to-child environment: the data directory, the limit in bytes, the profile.
-const DIR_ENV: &str = "LLMOBS_MEMORY_CHILD_DIR";
-const LIMIT_ENV: &str = "LLMOBS_MEMORY_CHILD_LIMIT";
-const PROFILE_ENV: &str = "LLMOBS_MEMORY_CHILD_PROFILE";
+const DIR_ENV: &str = "CETRA_MEMORY_CHILD_DIR";
+const LIMIT_ENV: &str = "CETRA_MEMORY_CHILD_LIMIT";
+const PROFILE_ENV: &str = "CETRA_MEMORY_CHILD_PROFILE";
 /// Set by the user of `minimum_memory`: the profile it searches.
-const SEARCH_PROFILE_ENV: &str = "LLMOBS_MEMORY_PROFILE";
+const SEARCH_PROFILE_ENV: &str = "CETRA_MEMORY_PROFILE";
 const CHILD_TIMEOUT: Duration = Duration::from_secs(600);
 const FILL_LIMIT: Duration = Duration::from_secs(60);
 const LOAD_LIMIT: Duration = Duration::from_secs(60);
@@ -94,7 +94,7 @@ impl Profile {
     }
 }
 
-/// Every default budget, for `data_dir`: what `llmobs serve` runs with. Only the timers change,
+/// Every default budget, for `data_dir`: what `cetra serve` runs with. Only the timers change,
 /// so the run exercises everything within a minute.
 fn defaults_config(data_dir: &Path) -> StorageConfig {
     StorageConfig {
@@ -190,7 +190,7 @@ pub(super) fn target_dir() -> PathBuf {
         .to_path_buf()
 }
 
-/// Runs the child under `MemoryMax=limit`, `MemorySwapMax=0`. `Ok` holds every `LLMOBS_MEMORY`
+/// Runs the child under `MemoryMax=limit`, `MemorySwapMax=0`. `Ok` holds every `CETRA_MEMORY`
 /// line the child printed, when it finished; `Err(Killed)` when the kernel killed it.
 fn run_limited(profile: Profile, limit: u64) -> Result<String, Killed> {
     // The data directory is on disk, not tmpfs: tmpfs pages would count against the cgroup and
@@ -219,10 +219,10 @@ fn run_limited(profile: Profile, limit: u64) -> Result<String, Killed> {
         stdout,
         stderr,
     } = run_to_end(&mut command, CHILD_TIMEOUT);
-    let lines = marked_lines(&stdout, "LLMOBS_MEMORY");
+    let lines = marked_lines(&stdout, "CETRA_MEMORY");
     if status.signal() == Some(9) || status.code() == Some(137) {
         println!(
-            "LLMOBS_MEMORY profile={} limit={limit} killed=true",
+            "CETRA_MEMORY profile={} limit={limit} killed=true",
             profile.name()
         );
         return Err(Killed);
@@ -238,17 +238,17 @@ fn run_limited(profile: Profile, limit: u64) -> Result<String, Killed> {
     }
     assert!(
         !lines.is_empty(),
-        "the memory child printed no LLMOBS_MEMORY line:\n{}",
+        "the memory child printed no CETRA_MEMORY line:\n{}",
         tail(&stdout, 40)
     );
     Ok(lines.join("\n"))
 }
 
-/// A fresh directory under `target/llmobs-resources`, removed when the returned guard drops. It is
+/// A fresh directory under `target/cetra-resources`, removed when the returned guard drops. It is
 /// on disk (not tmpfs), so its pages are reclaimable (R5.6).
 pub(super) fn data_dir_under_target() -> tempfile::TempDir {
-    let root = target_dir().join("llmobs-resources");
-    fs::create_dir_all(&root).expect("create target/llmobs-resources");
+    let root = target_dir().join("cetra-resources");
+    fs::create_dir_all(&root).expect("create target/cetra-resources");
     let dir = tempfile::TempDir::new_in(&root).expect("a data directory under target/");
     let stat = rustix::fs::statfs(dir.path()).expect("statfs of the data directory");
     assert_ne!(
@@ -531,11 +531,11 @@ fn probe() {
         .find(|line| line.starts_with("0::"))
         .unwrap_or("none")
         .to_owned();
-    println!("LLMOBS_MEMORY profile=probe total={total} cgroup={cgroup}");
+    println!("CETRA_MEMORY profile=probe total={total} cgroup={cgroup}");
 }
 
 /// The child of every memory run. Ignored: it runs only when `run_limited` starts it, and returns
-/// at once without `LLMOBS_MEMORY_CHILD_DIR`.
+/// at once without `CETRA_MEMORY_CHILD_DIR`.
 #[test]
 #[ignore = "a child process of the memory runs (run_limited); run by just resources-memory"]
 fn child_run() {
@@ -544,12 +544,12 @@ fn child_run() {
     };
     crate::test_support::no_core_dumps();
     let limit: u64 = std::env::var(LIMIT_ENV)
-        .expect("LLMOBS_MEMORY_CHILD_LIMIT is set")
+        .expect("CETRA_MEMORY_CHILD_LIMIT is set")
         .parse()
-        .expect("LLMOBS_MEMORY_CHILD_LIMIT is a byte count");
+        .expect("CETRA_MEMORY_CHILD_LIMIT is a byte count");
     let profile =
-        Profile::parse(&std::env::var(PROFILE_ENV).expect("LLMOBS_MEMORY_CHILD_PROFILE is set"))
-            .expect("LLMOBS_MEMORY_CHILD_PROFILE is defaults, small or probe");
+        Profile::parse(&std::env::var(PROFILE_ENV).expect("CETRA_MEMORY_CHILD_PROFILE is set"))
+            .expect("CETRA_MEMORY_CHILD_PROFILE is defaults, small or probe");
     if profile == Profile::Probe {
         probe();
         return;
@@ -559,7 +559,7 @@ fn child_run() {
     // follows, so the run still tests every other budget.
     let hidden = crate::memory::default_total_memory() > limit / 2 + MIB;
     if hidden {
-        println!("LLMOBS_MEMORY note=limit-not-visible");
+        println!("CETRA_MEMORY note=limit-not-visible");
     }
     let data_root = PathBuf::from(dir);
     let parallelism = thread::available_parallelism().map_or(2, usize::from);
@@ -630,7 +630,7 @@ fn child_run() {
     h.restart();
     check_full(&h, &mut model, 500);
     println!(
-        "LLMOBS_MEMORY profile={} limit={limit} peak_rss={} appends_ok={} backpressure={} \
+        "CETRA_MEMORY profile={} limit={limit} peak_rss={} appends_ok={} backpressure={} \
          disk_full={} queries_ok={} busy={} too_large={} timeout={}",
         profile.name(),
         peak_rss(),
@@ -670,14 +670,14 @@ fn small_profile_at_its_minimum() {
 
 /// Finds the smallest limit a profile survives: runs it at decreasing limits until the first kill,
 /// then bisects twice between the last pass and that kill. Takes tens of minutes; check the free
-/// RAM (`free -g`) first. The profile is `LLMOBS_MEMORY_PROFILE` (`defaults` by default).
+/// RAM (`free -g`) first. The profile is `CETRA_MEMORY_PROFILE` (`defaults` by default).
 #[test]
 #[ignore = "takes tens of minutes and writes gigabytes; run by just resources-memory-min"]
 fn minimum_memory() {
     let profile = match std::env::var(SEARCH_PROFILE_ENV) {
         Ok(name) => Profile::parse(&name)
             .filter(|profile| *profile != Profile::Probe)
-            .expect("LLMOBS_MEMORY_PROFILE is defaults or small"),
+            .expect("CETRA_MEMORY_PROFILE is defaults or small"),
         Err(_) => Profile::Defaults,
     };
     let limits: Vec<u64> = match profile {
@@ -695,7 +695,7 @@ fn minimum_memory() {
             }
             Err(Killed) => {
                 println!(
-                    "LLMOBS_MEMORY_SEARCH profile={} limit={limit} killed",
+                    "CETRA_MEMORY_SEARCH profile={} limit={limit} killed",
                     profile.name()
                 );
                 kill = Some(limit);
@@ -721,7 +721,7 @@ fn minimum_memory() {
                     }
                     Err(Killed) => {
                         println!(
-                            "LLMOBS_MEMORY_SEARCH profile={} limit={mid} killed",
+                            "CETRA_MEMORY_SEARCH profile={} limit={mid} killed",
                             profile.name()
                         );
                         lo = mid;
@@ -732,7 +732,7 @@ fn minimum_memory() {
         }
     };
     println!(
-        "LLMOBS_MEMORY_MIN profile={} smallest_passing_limit={smallest}",
+        "CETRA_MEMORY_MIN profile={} smallest_passing_limit={smallest}",
         profile.name()
     );
 }

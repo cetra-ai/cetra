@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use cetra_core::ids::{OrgId, ProjectId};
 use chrono::{DateTime, Days, NaiveDate};
-use llmobs_core::ids::{OrgId, ProjectId};
 
 use crate::http::AppState;
 use crate::meta::MetaError;
@@ -117,8 +117,8 @@ pub(crate) async fn apply_now(state: &AppState, project: ProjectId, days: u32) {
 #[cfg(test)]
 mod tests {
     use axum::http::{Method, StatusCode};
-    use llmobs_core::ids::{OrgId, ProjectId, SpanId, TraceId};
-    use llmobs_core::span::Span;
+    use cetra_core::ids::{OrgId, ProjectId, SpanId, TraceId};
+    use cetra_core::span::Span;
 
     use super::*;
     use crate::meta::entitlements::record_window_end;

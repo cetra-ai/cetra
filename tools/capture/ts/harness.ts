@@ -25,9 +25,9 @@ export function setup(): NodeTracerProvider {
 }
 
 export function mockUrl(pathSuffix = ""): string {
-  const base = process.env.LLMOBS_CAPTURE_MOCK_URL;
+  const base = process.env.CETRA_CAPTURE_MOCK_URL;
   if (base === undefined) {
-    throw new Error("LLMOBS_CAPTURE_MOCK_URL is unset");
+    throw new Error("CETRA_CAPTURE_MOCK_URL is unset");
   }
   return base + pathSuffix;
 }
@@ -38,13 +38,13 @@ export async function finish(
 ): Promise<void> {
   await provider.forceFlush();
   await provider.shutdown();
-  const listed = process.env.LLMOBS_CAPTURE_LIBRARIES;
-  const metaPath = process.env.LLMOBS_CAPTURE_META;
+  const listed = process.env.CETRA_CAPTURE_LIBRARIES;
+  const metaPath = process.env.CETRA_CAPTURE_META;
   if (listed === undefined) {
-    throw new Error("LLMOBS_CAPTURE_LIBRARIES is unset");
+    throw new Error("CETRA_CAPTURE_LIBRARIES is unset");
   }
   if (metaPath === undefined) {
-    throw new Error("LLMOBS_CAPTURE_META is unset");
+    throw new Error("CETRA_CAPTURE_META is unset");
   }
   const libraries: Record<string, string> = {};
   for (const name of listed.split(",")) {

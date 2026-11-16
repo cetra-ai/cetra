@@ -41,15 +41,15 @@
           },
           "spans": [
             {
-              "traceId": "22418bbd3a7a5b165d112ec4068c535e",
-              "spanId": "75ead2aacc019cf9",
+              "traceId": "e9db035315d03b06ccf7b3b43007343a",
+              "spanId": "77b40b55fd6cc248",
               "traceState": "",
               "parentSpanId": "",
               "flags": 257,
               "name": "ai.generateText",
               "kind": 1,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590104000000",
+              "endTimeUnixNano": "1767225590113000000",
               "attributes": [
                 {
                   "key": "operation.name",
@@ -210,15 +210,15 @@
               "status": null
             },
             {
-              "traceId": "22418bbd3a7a5b165d112ec4068c535e",
-              "spanId": "3a5fda6c51c9a3c4",
+              "traceId": "e9db035315d03b06ccf7b3b43007343a",
+              "spanId": "05891274105aa4a9",
               "traceState": "",
-              "parentSpanId": "75ead2aacc019cf9",
+              "parentSpanId": "77b40b55fd6cc248",
               "flags": 257,
               "name": "ai.generateText.doGenerate",
               "kind": 1,
-              "startTimeUnixNano": "1767225590002000000",
-              "endTimeUnixNano": "1767225590060000000",
+              "startTimeUnixNano": "1767225590003000000",
+              "endTimeUnixNano": "1767225590067000000",
               "attributes": [
                 {
                   "key": "operation.name",
@@ -463,15 +463,15 @@
               "status": null
             },
             {
-              "traceId": "22418bbd3a7a5b165d112ec4068c535e",
-              "spanId": "2341cf6dfbc9c12f",
+              "traceId": "e9db035315d03b06ccf7b3b43007343a",
+              "spanId": "ddca01a3649a8582",
               "traceState": "",
-              "parentSpanId": "75ead2aacc019cf9",
+              "parentSpanId": "77b40b55fd6cc248",
               "flags": 257,
               "name": "ai.toolCall",
               "kind": 1,
-              "startTimeUnixNano": "1767225590063000000",
-              "endTimeUnixNano": "1767225590065000000",
+              "startTimeUnixNano": "1767225590071000000",
+              "endTimeUnixNano": "1767225590074000000",
               "attributes": [
                 {
                   "key": "operation.name",
@@ -548,15 +548,15 @@
               "status": null
             },
             {
-              "traceId": "22418bbd3a7a5b165d112ec4068c535e",
-              "spanId": "37e95d2502b1cedc",
+              "traceId": "e9db035315d03b06ccf7b3b43007343a",
+              "spanId": "34d5cb605261754b",
               "traceState": "",
-              "parentSpanId": "75ead2aacc019cf9",
+              "parentSpanId": "77b40b55fd6cc248",
               "flags": 257,
               "name": "ai.generateText.doGenerate",
               "kind": 1,
-              "startTimeUnixNano": "1767225590067000000",
-              "endTimeUnixNano": "1767225590103000000",
+              "startTimeUnixNano": "1767225590075000000",
+              "endTimeUnixNano": "1767225590112000000",
               "attributes": [
                 {
                   "key": "operation.name",

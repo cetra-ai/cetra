@@ -520,7 +520,7 @@ mod tests {
             let read = crate::compaction::slice::time_values(
                 Arc::clone(&store),
                 &files,
-                llmobs_core::schema::spans::START_TIME,
+                cetra_core::schema::spans::START_TIME,
             )
             .await;
             assert!(read.is_err(), "the start times do not read");

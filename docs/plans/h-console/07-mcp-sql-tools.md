@@ -77,7 +77,7 @@ pub(crate) fn cut(text: &str, max: usize) -> Option<String> {
 
 use std::time::Duration;
 
-use llmobs_storage::{QueryContext, SqlRequest, TimeWindow};
+use cetra_storage::{QueryContext, SqlRequest, TimeWindow};
 use rmcp::model::JsonObject;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -240,7 +240,7 @@ Body:
 
 1. `let args: ListSavedViewsArguments = arguments(raw)?;` (an unknown `kind` fails here: `invalid arguments: unknown variant `…`, expected one of …`).
 2. `let access = user_project(state, user, &args.project, ProjectPerm::View).await?;`
-3. `views_body(state, access.project.id, user, args.kind, MAX_VIEWS).await` — steps 3–7 live in a private `async fn views_body(state: &AppState, project: ProjectId, user: &AuthUser, kind: Option<SavedViewKind>, max_views: usize) -> Result<Value, ApiError>` so a test can pass a small `max_views`. In it: `let page = saved_views::list_visible(state.meta.reader(), project, Viewer::User(user.id), kind, max_views, None).await?;` (`ProjectId` is `llmobs_core::ids::ProjectId`).
+3. `views_body(state, access.project.id, user, args.kind, MAX_VIEWS).await` — steps 3–7 live in a private `async fn views_body(state: &AppState, project: ProjectId, user: &AuthUser, kind: Option<SavedViewKind>, max_views: usize) -> Result<Value, ApiError>` so a test can pass a small `max_views`. In it: `let page = saved_views::list_visible(state.meta.reader(), project, Viewer::User(user.id), kind, max_views, None).await?;` (`ProjectId` is `cetra_core::ids::ProjectId`).
 4. Each row: first cut its state's top-level string values longer than `CELL_CUT` (same rule as `cut_cells`, on `row.state`; remember whether anything was cut), then `json!({"id": row.id.to_string(), "kind": saved_views::kind_str(row.kind), "name": row.name, "shared": row.shared, "owned": row.owner_user_id == Some(user.id), "is_default": row.is_default, "state": Value::Object(row.state)})`.
 5. Notes, in order: when `page.next_cursor.is_some()`: `format!("more than {max_views} saved views; only the first {max_views} are listed")`; when a state value was cut: `"saved-view state values longer than 2000 characters were cut"`.
 6. Body keys in order: `views`, `truncated` (`page.next_cursor.is_some()`), `notes`.
@@ -256,7 +256,7 @@ Append to the `vec!` in `tool_list`, after `get_schema`, in this order:
         tool(
             super::sql::QUERY_SQL,
             "Run a SQL query",
-            "Run one read-only SQL query (SELECT, WITH, UNION, VALUES or EXPLAIN) over the views traces, spans, sessions and scores; get_schema lists their columns. `from` and `to` are required and at most 30 days apart: they bound start_time on spans and traces and created_at on scores, in every part of the query; sessions are built from the windowed traces. No rows are hidden: evaluation traces (environment 'llmobs-eval') and experiment traces are included. Returns columns, rows, row_count, truncated and notes; string cells longer than 2000 characters are cut.",
+            "Run one read-only SQL query (SELECT, WITH, UNION, VALUES or EXPLAIN) over the views traces, spans, sessions and scores; get_schema lists their columns. `from` and `to` are required and at most 30 days apart: they bound start_time on spans and traces and created_at on scores, in every part of the query; sessions are built from the windowed traces. No rows are hidden: evaluation traces (environment 'cetra-eval') and experiment traces are included. Returns columns, rows, row_count, truncated and notes; string cells longer than 2000 characters are cut.",
             json!({
                 "type": "object",
                 "properties": {
@@ -331,7 +331,7 @@ Expected column types: `trace_id` and `name` of the `traces` view print as `Utf8
 | `query_sql_reports_sql_errors` | (a) `DELETE FROM traces`; (b) `SELEC 1`; (c) `SELECT 1 / 0 AS x` (A2's own test `division_by_zero_is_a_failed_query` shows this is `RunError::Failed`) | (a) error `invalid_filter` / `only SELECT queries are allowed`; (b) `is_error`, `code` `invalid_filter`, a non-empty `message`, and `error.position.line` = 1 with `error.position.column` ≥ 1; (c) `is_error`, `code` `query_failed` |
 | `query_sql_needs_a_visible_project` | `project` `"acme/nope"` | body = `{"error":{"code":"not_found","message":"Not Found"}}` |
 | `query_sql_works_for_a_viewer_with_a_read_token` | `let viewer = app.add_member(&seeded, "viewer@example.com", OrgRole::Viewer).await;` with `app.personal_token(viewer.id, false)`; `SELECT 1 AS one` | not an error; `rows` = `[{"one":1}]` |
-| `run_query_times_out` | no tool call: `let window = required_window(Some(t(FROM)), Some(t(TO))).unwrap();` with `fn t(s: &str) -> TimeParam { serde_json::from_value(Value::String(s.to_owned())).unwrap() }`; `let ctx = open_query_windowed(&app.state, seeded.project.id, Some(window)).await.unwrap();` then `run_query(&ctx, <a 9-way CROSS JOIN of spans, a … i, with count(*)>, &Map::new(), 10, Duration::from_millis(100), 20_000).await`. The join (14⁹ ≈ 20 billion rows) runs for minutes, so the 100 ms limit always expires first; a tiny limit on a fast query is a race the query can win on its first poll | `Err(ApiError::Sql(llmobs_storage::RunError::Timeout))` (match with `matches!`); as a tool error it is code `query_timeout` (`output::failure`, already tested in H6) |
+| `run_query_times_out` | no tool call: `let window = required_window(Some(t(FROM)), Some(t(TO))).unwrap();` with `fn t(s: &str) -> TimeParam { serde_json::from_value(Value::String(s.to_owned())).unwrap() }`; `let ctx = open_query_windowed(&app.state, seeded.project.id, Some(window)).await.unwrap();` then `run_query(&ctx, <a 9-way CROSS JOIN of spans, a … i, with count(*)>, &Map::new(), 10, Duration::from_millis(100), 20_000).await`. The join (14⁹ ≈ 20 billion rows) runs for minutes, so the 100 ms limit always expires first; a tiny limit on a fast query is a race the query can win on its first poll | `Err(ApiError::Sql(cetra_storage::RunError::Timeout))` (match with `matches!`); as a tool error it is code `query_timeout` (`output::failure`, already tested in H6) |
 
 `503 busy` (admission control) comes from `From<QueryError> for ApiError`, which the HTTP read routes already test; H7 adds no test for it.
 
@@ -387,7 +387,7 @@ Then orphan view 6: `sqlx::query("UPDATE saved_views SET owner_user_id = NULL WH
 ## Commands
 
 ```bash
-cargo test -p llmobs-server mcp
+cargo test -p cetra-server mcp
 export PATH="$HOME/.local/share/nvm/v26.13.0/bin:$PATH" && just check
 ```
 

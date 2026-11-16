@@ -23,7 +23,7 @@ Phase 06 adds the event counters, and phase 07 adds the storage counters and the
 
 **Commit:** `Serve Prometheus metrics on metrics_addr`
 
-**Needs:** 03, because `llmobs_restore_mode` reads `config.restore_mode`. 04 is not needed.
+**Needs:** 03, because `cetra_restore_mode` reads `config.restore_mode`. 04 is not needed.
 
 ## Read first
 
@@ -57,15 +57,15 @@ prometheus-client = "0.26.0"
 pub metrics_addr: Option<SocketAddr>,
 ```
 
-- `LLMOBS_METRICS_ADDR` works, as for the other top-level addresses.
+- `CETRA_METRICS_ADDR` works, as for the other top-level addresses.
 - Validation: when set, it must differ from `http_addr`, `otlp_http_addr` and `grpc_addr` ("must differ from …", like the existing checks).
-- `docs/spec/12-operations.md` § Configuration gets the row: `metrics_addr` (`LLMOBS_METRICS_ADDR`), default unset (off), "Prometheus `/metrics`; no authentication, bind it to a private address (D-N-28)".
+- `docs/spec/12-operations.md` § Configuration gets the row: `metrics_addr` (`CETRA_METRICS_ADDR`), default unset (off), "Prometheus `/metrics`; no authentication, bind it to a private address (D-N-28)".
 
 ### `telemetry.rs`
 
 **Structure.**
 - `pub(crate) struct Telemetry` owns one root `prometheus_client::registry::Registry` (`Registry::default()`) and one field per metric of the 00-design table.
-- `const PREFIX: &str = "llmobs";`. Register the `process_*` gauges on the root, and every other metric on `root.sub_registry_with_prefix(PREFIX)`. `render` encodes the root once, which gives a single `# EOF`.
+- `const PREFIX: &str = "cetra";`. Register the `process_*` gauges on the root, and every other metric on `root.sub_registry_with_prefix(PREFIX)`. `render` encodes the root once, which gives a single `# EOF`.
 - **Names:**
   - counters are registered without `_total`, e.g. `register("http_requests", …)`;
   - build info is `Family<VersionLabel, Gauge>` named `build_info`;
@@ -92,9 +92,9 @@ Every enum's variants are exactly the values listed in the 00-design table.
   - `build_info` is set to 1 with `version = env!("CARGO_PKG_VERSION")` (use `Info` or a `Family<VersionLabel, Gauge>`);
   - `restore_mode` is set once.
 - `pub(crate) async fn render(&self, state: &AppState) -> String`. It refreshes the scrape-time gauges, then encodes:
-  - `storage.health()`: `memtable_bytes`, `memtable_hard_limit`, and the four `llmobs_storage_failed{check}` values;
+  - `storage.health()`: `memtable_bytes`, `memtable_hard_limit`, and the four `cetra_storage_failed{check}` values;
   - `storage.read_cache_stats()`: when `Some`, set the two counters with `inc_by(new - old)` and the bytes gauge. Keep the last seen totals in two `AtomicU64` fields, so the counters stay monotonic;
-  - `llmobs_eval_jobs{status}`, from the cached count (below);
+  - `cetra_eval_jobs{status}`, from the cached count (below);
   - `process_*` (below).
 
 **The eval queue count.**
@@ -124,32 +124,32 @@ Every enum's variants are exactly the values listed in the 00-design table.
 - `metrics_addr` is `None` by default and for `""`.
 - `"127.0.0.1:9464"` parses.
 - Equal to `http_addr` → the "must differ" error.
-- `LLMOBS_METRICS_ADDR` sets it.
+- `CETRA_METRICS_ADDR` sets it.
 
 **`telemetry.rs`:**
 - `render_lists_the_base_metrics`: on a `TestApp` state, `render` contains:
-  - `llmobs_build_info{version="<CARGO_PKG_VERSION>"} 1`;
-  - `llmobs_restore_mode 0`;
-  - `llmobs_storage_memtable_hard_limit_bytes`;
-  - `llmobs_storage_failed{check="catalog"} 0`;
-  - `llmobs_eval_jobs{status="queued"} 0`;
+  - `cetra_build_info{version="<CARGO_PKG_VERSION>"} 1`;
+  - `cetra_restore_mode 0`;
+  - `cetra_storage_memtable_hard_limit_bytes`;
+  - `cetra_storage_failed{check="catalog"} 0`;
+  - `cetra_eval_jobs{status="queued"} 0`;
   - `# EOF`.
-- `restore_mode_gauge_is_one`: `Telemetry::new(true)` renders `llmobs_restore_mode 1`.
-- `eval_queue_count_is_cached`: insert one queued job the way the eval tests do. `render` shows `llmobs_eval_jobs{status="queued"} 1`. Insert another and render again within 10 s: still 1. With `tokio::time::pause()`, advance 11 s: 2.
+- `restore_mode_gauge_is_one`: `Telemetry::new(true)` renders `cetra_restore_mode 1`.
+- `eval_queue_count_is_cached`: insert one queued job the way the eval tests do. `render` shows `cetra_eval_jobs{status="queued"} 1`. Insert another and render again within 10 s: still 1. With `tokio::time::pause()`, advance 11 s: 2.
 - `labels_carry_no_tenant_data`: render after a seeded app has ingested a span (`app.seed()` plus one ingest, as other tests do). The output contains neither the org slug, the project id, nor the user email from the seed.
 - `process_metrics_on_linux` (`#[cfg(target_os = "linux")]`): `process_open_fds` > 0 and `process_resident_memory_bytes` > 0.
 
 **`serve.rs`:** `metrics_listener_serves_and_stops`.
 - Start through `bind` with `metrics_addr = "127.0.0.1:0"`.
-- `GET /metrics` on `metrics_local_addr` is 200 with the OpenMetrics content type and contains `llmobs_build_info`.
+- `GET /metrics` on `metrics_local_addr` is 200 with the OpenMetrics content type and contains `cetra_build_info`.
 - `GET /` there is 404.
-- `GET /metrics` on the main `http_addr` is **not** the metrics document: it gets the UI fallback or a 404, whichever the main router gives today; assert it lacks `llmobs_build_info`.
+- `GET /metrics` on the main `http_addr` is **not** the metrics document: it gets the UI fallback or a 404, whichever the main router gives today; assert it lacks `cetra_build_info`.
 - After `shutdown`, connecting to the metrics port fails.
 
 ## Verify
 
 ```bash
-cargo test -p llmobs-server --all-features metrics telemetry
+cargo test -p cetra-server --all-features metrics telemetry
 just deny
 just check
 ```

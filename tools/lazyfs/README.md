@@ -30,7 +30,7 @@ LazyFS has no releases. The check is pinned to commit
 ## Commands
 
 ```bash
-tools/lazyfs/lazyfs.sh build   # clone into ${LLMOBS_LAZYFS_HOME:-~/.cache/llmobs/lazyfs}, build
+tools/lazyfs/lazyfs.sh build   # clone into ${CETRA_LAZYFS_HOME:-~/.cache/cetra/lazyfs}, build
 tools/lazyfs/lazyfs.sh probe   # mount, sync some files, drop unsynced data, print what is left
 tools/lazyfs/lazyfs.sh run     # mount, run the crash children and a short ingest, unmount
 just lazyfs                    # build, then run
@@ -51,8 +51,8 @@ mounts LazyFS on `W/mnt` over `W/root`, and unmounts on exit.
   mount, with a power loss after each kill. Its `acked.log` is `sync_data`'d per line, so
   what the parent expects survives the clear.
 
-Both tests read `LLMOBS_LAZYFS_DIR`, `LLMOBS_LAZYFS_FIFO` and `LLMOBS_LAZYFS_DONE`, or
-`LLMOBS_CRASH_DIR_ROOT` and `LLMOBS_CRASH_CLEAR_CACHE=<fifo>:<done fifo>`. The script sets them.
+Both tests read `CETRA_LAZYFS_DIR`, `CETRA_LAZYFS_FIFO` and `CETRA_LAZYFS_DONE`, or
+`CETRA_CRASH_DIR_ROOT` and `CETRA_CRASH_CLEAR_CACHE=<fifo>:<done fifo>`. The script sets them.
 Neither path may contain `:`.
 
 ## Reading a failure

@@ -138,8 +138,8 @@ def _scope_name(resources: list[dict[str, Any]]) -> str:
     """Rule 3: the scope name of the exported spans."""
     scoped = resources[0].get("scopeSpans", [])
     if scoped:
-        return str(scoped[0].get("scope", {}).get("name", "llmobs"))
-    return "llmobs"
+        return str(scoped[0].get("scope", {}).get("name", "cetra"))
+    return "cetra"
 
 
 def _hex_id(encoded: str) -> str:

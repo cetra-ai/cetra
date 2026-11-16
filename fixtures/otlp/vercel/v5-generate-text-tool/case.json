@@ -11,7 +11,7 @@
       "@opentelemetry/sdk-trace-node": "2.12.0",
       "ai": "5.0.285"
     },
-    "captured_at": "2026-11-11T11:58:08Z"
+    "captured_at": "2026-11-16T08:54:55Z"
   },
   "spec_refs": [
     "02 § Convention detection",

@@ -14,14 +14,14 @@ use arrow::array::{
 };
 use arrow::compute::cast;
 use arrow::datatypes::{DataType, TimeUnit};
-use llmobs_core::enums::{
+use cetra_core::enums::{
     Convention, CostSource, PayloadFormat, ScoreDataType, ScoreSource, ScoreTargetKind, SpanKind,
     SpanStatus,
 };
-use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-use llmobs_core::schema::{event_field, link_field, scores, spans, traces};
-use llmobs_core::score::{Score, ScoreTarget, ScoreValue};
-use llmobs_core::span::{Span, SpanEvent, SpanLink};
+use cetra_core::ids::{ProjectId, SpanId, TraceId};
+use cetra_core::schema::{event_field, link_field, scores, spans, traces};
+use cetra_core::score::{Score, ScoreTarget, ScoreValue};
+use cetra_core::span::{Span, SpanEvent, SpanLink};
 use uuid::Uuid;
 
 use super::metrics::{
@@ -1046,7 +1046,7 @@ fn score_batch(batch: &RecordBatch, project_id: ProjectId) -> Result<Vec<Score>,
 
 /// The API dashboard response. Storage names map variant by variant.
 pub(crate) fn metrics_response(
-    data: llmobs_storage::MetricsData,
+    data: cetra_storage::MetricsData,
     from: i64,
     to: i64,
     group_by: Option<MetricsGroupBy>,
@@ -1094,8 +1094,8 @@ pub(crate) fn metrics_response(
     }
 }
 
-fn kpi_metric(name: llmobs_storage::KpiName) -> KpiMetric {
-    use llmobs_storage::KpiName;
+fn kpi_metric(name: cetra_storage::KpiName) -> KpiMetric {
+    use cetra_storage::KpiName;
     match name {
         KpiName::Traces => KpiMetric::Traces,
         KpiName::ErrorRate => KpiMetric::ErrorRate,
@@ -1105,8 +1105,8 @@ fn kpi_metric(name: llmobs_storage::KpiName) -> KpiMetric {
     }
 }
 
-fn metric_name(name: llmobs_storage::SeriesName) -> MetricName {
-    use llmobs_storage::SeriesName;
+fn metric_name(name: cetra_storage::SeriesName) -> MetricName {
+    use cetra_storage::SeriesName;
     match name {
         SeriesName::Traces => MetricName::Traces,
         SeriesName::Errors => MetricName::Errors,
@@ -1132,7 +1132,7 @@ fn metric_name(name: llmobs_storage::SeriesName) -> MetricName {
 /// The API catalog of views and functions. Storage names map variant by variant.
 pub(crate) fn schema_response() -> SchemaResponse {
     SchemaResponse {
-        views: llmobs_storage::view_catalog()
+        views: cetra_storage::view_catalog()
             .into_iter()
             .chain(crate::datasets::sql_views::catalog())
             .map(|view| ViewSchema {
@@ -1150,7 +1150,7 @@ pub(crate) fn schema_response() -> SchemaResponse {
                     .collect(),
             })
             .collect(),
-        functions: llmobs_storage::function_catalog()
+        functions: cetra_storage::function_catalog()
             .into_iter()
             .map(|function| FunctionSchema {
                 name: function.name.to_owned(),
@@ -1163,9 +1163,9 @@ pub(crate) fn schema_response() -> SchemaResponse {
     }
 }
 
-fn view_name(name: llmobs_storage::ViewName) -> super::schema::ViewName {
+fn view_name(name: cetra_storage::ViewName) -> super::schema::ViewName {
     use super::schema::ViewName as Api;
-    use llmobs_storage::ViewName;
+    use cetra_storage::ViewName;
     match name {
         ViewName::Traces => Api::Traces,
         ViewName::Spans => Api::Spans,
@@ -1176,8 +1176,8 @@ fn view_name(name: llmobs_storage::ViewName) -> super::schema::ViewName {
     }
 }
 
-fn column_type(kind: llmobs_storage::ColumnKind) -> ColumnType {
-    use llmobs_storage::ColumnKind;
+fn column_type(kind: cetra_storage::ColumnKind) -> ColumnType {
+    use cetra_storage::ColumnKind;
     match kind {
         ColumnKind::String => ColumnType::String,
         ColumnKind::Integer => ColumnType::Integer,
@@ -1193,7 +1193,7 @@ fn column_type(kind: llmobs_storage::ColumnKind) -> ColumnType {
 #[cfg(test)]
 mod tests {
     use arrow::datatypes::{FieldRef, Fields, Schema};
-    use llmobs_storage::{
+    use cetra_storage::{
         QueryContext, ScoreTargets, SortOrder as StorageSortOrder, SpanListRequest, SpanSort,
         TraceListRequest, TraceSort,
     };
@@ -1214,7 +1214,7 @@ mod tests {
     }
 
     async fn trace_rows(ctx: &QueryContext, include_eval: bool) -> Vec<TraceSummary> {
-        let page = llmobs_storage::trace_list(
+        let page = cetra_storage::trace_list(
             ctx,
             TraceListRequest {
                 filter: None,
@@ -1233,8 +1233,8 @@ mod tests {
         trace_summaries(&page.batches).unwrap()
     }
 
-    async fn span_page(ctx: &QueryContext) -> llmobs_storage::Page {
-        llmobs_storage::span_list(
+    async fn span_page(ctx: &QueryContext) -> cetra_storage::Page {
+        cetra_storage::span_list(
             ctx,
             SpanListRequest {
                 filter: None,
@@ -1329,7 +1329,7 @@ mod tests {
             "a1000000000000000000000000000003",
         ];
         let batches =
-            llmobs_storage::latest_scores(&ctx, ScoreTargets::Traces(&targets), READ_TIMEOUT)
+            cetra_storage::latest_scores(&ctx, ScoreTargets::Traces(&targets), READ_TIMEOUT)
                 .await
                 .unwrap();
         let briefs = score_briefs(&batches).unwrap();

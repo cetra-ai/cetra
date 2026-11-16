@@ -11,7 +11,7 @@ import type { Instrumentation } from "./instrument.js";
 import { warnOnce } from "./log.js";
 import { hasHttpAuthority, runtimeGlobals } from "./web.js";
 
-const ENV_PREFIX = "LLMOBS_";
+const ENV_PREFIX = "CETRA_";
 const ENV_API_KEY = `${ENV_PREFIX}API_KEY`;
 const ENV_BASE_URL = `${ENV_PREFIX}BASE_URL`;
 const ENV_ENVIRONMENT = `${ENV_PREFIX}ENVIRONMENT`;
@@ -22,9 +22,9 @@ const ENV_ENABLED = `${ENV_PREFIX}ENABLED`;
 // OTel's own name, read from the same env source (README § Names).
 const ENV_SERVICE_NAME = "OTEL_SERVICE_NAME";
 
-const KEY_PREFIX = "sk-llmobs-";
-// Reserved evaluation environment. llmobs_core::names::environment::EVAL
-const RESERVED_ENVIRONMENT = "llmobs-eval";
+const KEY_PREFIX = "sk-cetra-";
+// Reserved evaluation environment. cetra_core::names::environment::EVAL
+const RESERVED_ENVIRONMENT = "cetra-eval";
 const DEFAULT_BASE_URL = "http://localhost:8080";
 const TRUE_WORDS = new Set(["true", "1", "yes", "on"]);
 const FALSE_WORDS = new Set(["false", "0", "no", "off"]);
@@ -59,7 +59,7 @@ export interface Config {
   readonly instrument: readonly Instrumentation[];
 }
 
-export interface LlmobsOptions {
+export interface CetraOptions {
   apiKey?: string;
   baseUrl?: string;
   environment?: string;
@@ -89,7 +89,7 @@ interface ResolvedFields {
 }
 
 /** Resolve SDK options. An explicit argument wins, then the env var, then the default. */
-export function resolveConfig(options: LlmobsOptions = {}, env?: Env): Config {
+export function resolveConfig(options: CetraOptions = {}, env?: Env): Config {
   const raw = options as Record<string, unknown>;
   const source = env ?? defaultEnv();
   const enabled = resolveBool("enabled", ENV_ENABLED, raw.enabled, source, true);
@@ -101,7 +101,7 @@ export function resolveConfig(options: LlmobsOptions = {}, env?: Env): Config {
     // D-F-3: a missing key warns once and runs disabled; nothing else is validated.
     warnOnce(
       "missing-api-key",
-      "llmobs: no API key; set LLMOBS_API_KEY, or LLMOBS_ENABLED=false to silence this; tracing is disabled",
+      "cetra: no API key; set CETRA_API_KEY, or CETRA_ENABLED=false to silence this; tracing is disabled",
     );
     return finish(disabled());
   }

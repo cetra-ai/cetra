@@ -20,7 +20,7 @@ Implementation plan for milestone M1 of track G, split into sub-phases. Each sub
 
 ## What M1 is, and what it is not
 
-When M1 is done, an OTel exporter pointed at `llmobs serve` with an `sk-llmobs-` key that has the `ingest` scope gets `200` from `POST /v1/traces` on port 8080 or 4318, and its spans and media are durable in storage and queryable through `Storage::query`.
+When M1 is done, an OTel exporter pointed at `cetra serve` with an `sk-cetra-` key that has the `ingest` scope gets `200` from `POST /v1/traces` on port 8080 or 4318, and its spans and media are durable in storage and queryable through `Storage::query`.
 
 **Out of scope:** read endpoints (M2); gRPC, score writes, feedback, usage counters (M3); the live bus and SSE (M4); the UI (M5); per-org rate limits (track N); custom prices (D-G-10). M1 adds none of their fields, types or routes.
 
@@ -34,7 +34,7 @@ When M1 is done, an OTel exporter pointed at `llmobs serve` with an `sk-llmobs-`
 | D-G-4 | Both body sizes capped at `ingest.max_request_bytes`; span count → `413`; unknown type or encoding → `415`. |
 | D-G-5 | `ingest.max_inflight_bytes` budget, refused at once with `503`. |
 | D-G-6 | Success is `ExportTraceServiceResponse` in the request's encoding; errors are problem+json; `/v1/traces` is not in the OpenAPI document. |
-| D-G-7 | `llmobs-eval` → `llmobs-eval-external` plus the `reserved_environment` warning, in `accept` only. |
+| D-G-7 | `cetra-eval` → `cetra-eval-external` plus the `reserved_environment` warning, in `accept` only. |
 | D-G-8 | `accept` then `commit`. |
 | D-G-9 | `put_media` (≤ 4 at a time) before `append_spans`; a media failure appends nothing. |
 | D-G-10 | Built-in prices in `RwLock<Arc<PriceTable>>`. |
@@ -49,7 +49,7 @@ Add each to the root `[workspace.dependencies]` (with a one-line comment saying 
 |---|---|---|---|
 | `flate2` | `1.1.11` (locked), `default-features = false, features = ["zlib-rs"]` | server | `gzip` and `deflate` request bodies; `zlib-rs` is the backend parquet already uses (`flate2-zlib-rs`), so no `miniz_oxide` is added. Confirm the feature name with `cargo info flate2@1.1.11` |
 | `zstd` | `0.13.4` (locked), `default-features = false` | server | `zstd` request bodies |
-| `http-body-util` | workspace entry exists (`0.1.5`) | server | `Limited` body reads. Update the root entry's comment, which says it is only a dev-dependency of `llmobs-capture` |
+| `http-body-util` | workspace entry exists (`0.1.5`) | server | `Limited` body reads. Update the root entry's comment, which says it is only a dev-dependency of `cetra-capture` |
 | `bytesize` | workspace entry exists | server (move from dev to normal) | `[ingest]`, `[media]` sizes (D90) |
 | `bytes` | workspace entry exists | server | request bodies, media bytes |
 | `prost` | workspace entry exists | server | `ExportTraceServiceResponse::encode_to_vec` |
@@ -163,7 +163,7 @@ crates/server/src/
 
    `default_otlp_http_addr()` returns `Some(0.0.0.0:4318)`. `deserialize_optional_socket_addr` reads a string: empty (after trimming) → `None`, otherwise parsed like `deserialize_socket_addr`, error text `"invalid socket address"`.
 
-3. Add the alias `("LLMOBS_OTLP_HTTP_ADDR", "otlp_http_addr")` to `ALIASES`. Check that an empty env value reaches the deserializer as an empty string (figment's `parse_env_value` may turn `""` into something else); if it does not, special-case `otlp_http_addr` in `env_value` the way secret paths are kept as strings, and say so in the report.
+3. Add the alias `("CETRA_OTLP_HTTP_ADDR", "otlp_http_addr")` to `ALIASES`. Check that an empty env value reaches the deserializer as an empty string (figment's `parse_env_value` may turn `""` into something else); if it does not, special-case `otlp_http_addr` in `env_value` the way secret paths are kept as strings, and say so in the report.
 
 4. Remove `ingest` from the doc comment of `ServerConfig` that lists keys "for later work", since it is now a field. Keep gRPC in that list.
 
@@ -182,15 +182,15 @@ crates/server/src/
 
    The `u32::MAX` bound exists because the in-flight budget is a `tokio::sync::Semaphore` whose `try_acquire_many_owned` takes a `u32` (G1.6).
 
-6. Add `impl IngestConfig { pub(crate) fn limits(&self, media: &MediaConfig) -> llmobs_otel::IngestLimits }` mapping `max_attribute_bytes`, `media.min_bytes`, `media.max_bytes` to `IngestLimits` (`usize` conversions are safe after validation; use `usize::try_from(…).unwrap_or(usize::MAX)` so no `expect` is needed).
+6. Add `impl IngestConfig { pub(crate) fn limits(&self, media: &MediaConfig) -> cetra_otel::IngestLimits }` mapping `max_attribute_bytes`, `media.min_bytes`, `media.max_bytes` to `IngestLimits` (`usize` conversions are safe after validation; use `usize::try_from(…).unwrap_or(usize::MAX)` so no `expect` is needed).
 
 7. Update every `ServerConfig { … }` literal with `otlp_http_addr: None` (tests must not bind 4318), `ingest: IngestConfig::default()`, `media: MediaConfig::default()`.
 
 ### Tests (in `config.rs`)
 
 - No `[ingest]`/`[media]` → every default above; `otlp_http_addr` is `Some(0.0.0.0:4318)`.
-- TOML `[ingest] max_request_bytes = "2MiB"` and env `LLMOBS_INGEST__MAX_SPANS_PER_REQUEST=10` both apply.
-- `otlp_http_addr = ""` and `LLMOBS_OTLP_HTTP_ADDR=` give `None`; `"127.0.0.1:9999"` parses; `"nope"` fails with `invalid socket address`.
+- TOML `[ingest] max_request_bytes = "2MiB"` and env `CETRA_INGEST__MAX_SPANS_PER_REQUEST=10` both apply.
+- `otlp_http_addr = ""` and `CETRA_OTLP_HTTP_ADDR=` give `None`; `"127.0.0.1:9999"` parses; `"nope"` fails with `invalid socket address`.
 - An unknown key under `[ingest]` and under `[media]` fails.
 - Each row of the validation table fails with its `key: reason`, and the message does not contain the rejected value.
 
@@ -280,11 +280,11 @@ crates/server/src/
        pub(crate) org_id: OrgId,
        pub(crate) project: ProjectRow,
        pub(crate) cookie: String,
-       /// `sk-llmobs-…` with `["ingest"]`.
+       /// `sk-cetra-…` with `["ingest"]`.
        pub(crate) ingest_key: String,
-       /// `sk-llmobs-…` with `["read"]`.
+       /// `sk-cetra-…` with `["read"]`.
        pub(crate) read_key: String,
-       /// `pk-llmobs-…` with `["feedback"]`.
+       /// `pk-cetra-…` with `["feedback"]`.
        pub(crate) public_key: String,
    }
 
@@ -382,7 +382,7 @@ Rules:
 
 ### Done when
 
-`just check` is green; `cargo tree -d -p llmobs-server` shows no second `flate2` or `zstd`.
+`just check` is green; `cargo tree -d -p cetra-server` shows no second `flate2` or `zstd`.
 
 **Commit:** `server: read and decompress OTLP request bodies`
 
@@ -398,7 +398,7 @@ Rules:
 
 ```rust
 /// Body and content type of a `200` for `/v1/traces` (spec 02 § Endpoints).
-pub(crate) fn export_response(format: BodyFormat, rejections: &llmobs_otel::Rejections) -> (HeaderValue /* content type */, Vec<u8>);
+pub(crate) fn export_response(format: BodyFormat, rejections: &cetra_otel::Rejections) -> (HeaderValue /* content type */, Vec<u8>);
 ```
 
 - No rejection (`rejections.total() == 0`): `partial_success` is absent. Protobuf: `ExportTraceServiceResponse { partial_success: None }.encode_to_vec()` (empty bytes). JSON: `{}`.
@@ -409,7 +409,7 @@ pub(crate) fn export_response(format: BodyFormat, rejections: &llmobs_otel::Reje
 
 ```rust
 /// The OTLP-only rewrite of D-G-7. Returns how many spans were rewritten.
-pub(crate) fn rewrite_reserved_environment(spans: &mut [llmobs_core::span::Span]) -> usize;
+pub(crate) fn rewrite_reserved_environment(spans: &mut [cetra_core::span::Span]) -> usize;
 ```
 
 For each span with `environment == Some(names::environment::EVAL)`: set it to `names::environment::EVAL_EXTERNAL`; read `attributes[names::metadata_key::NORMALIZE_WARNING]` as a JSON array of strings (absent, or not a JSON array of strings, counts as empty: the normalizer always writes a valid one, so this is defensive), add `"reserved_environment"`, sort, deduplicate, and write it back with `serde_json::to_string` (compact, as the normalizer writes it). Define `const RESERVED_ENVIRONMENT: &str = "reserved_environment";` in this module.
@@ -417,7 +417,7 @@ For each span with `environment == Some(names::environment::EVAL)`: set it to `n
 ### Tests
 
 - `otlp.rs`: both formats with and without rejections. Decode the protobuf output with `ExportTraceServiceResponse::decode` and check the fields; parse the JSON and check `rejectedSpans` is the string `"4"` (`edge/rejected-ids` rejects 4 spans; check its `expected.json`) and `errorMessage` equals `Rejections::message()`. Build the `Rejections` by normalizing a tiny request with a bad span id (see `fixtures/otlp/edge/rejected-ids/input.json`), since `Rejections` has no public constructor.
-- `environment.rs`: a span with `llmobs-eval` and no warning attribute gets `["reserved_environment"]`; one with `["end_before_start"]` gets `["end_before_start","reserved_environment"]`; one already carrying the code is not duplicated; `production`, `None` and `llmobs-eval-external` are untouched; the return value counts rewrites.
+- `environment.rs`: a span with `cetra-eval` and no warning attribute gets `["reserved_environment"]`; one with `["end_before_start"]` gets `["end_before_start","reserved_environment"]`; one already carrying the code is not duplicated; `production`, `None` and `cetra-eval-external` are untouched; the return value counts rewrites.
 
 ### Done when
 
@@ -472,11 +472,11 @@ pub(crate) struct CommitReceipt {
 pub(crate) enum IngestError {
     #[error("{0:?}")] Body(BodyError),
     #[error("too many spans in one request")] TooManySpans,
-    #[error("invalid OTLP payload")] Decode(#[source] llmobs_otel::DecodeError),
+    #[error("invalid OTLP payload")] Decode(#[source] cetra_otel::DecodeError),
     #[error("ingest budget is full")] Busy,
     #[error("storage refused the append")] Append(#[source] AppendError),
     #[error("storage refused a media blob")] Media(#[source] MediaError),
-    #[error("could not build the span batch")] Batch(#[source] llmobs_core::error::CoreError),
+    #[error("could not build the span batch")] Batch(#[source] cetra_core::error::CoreError),
     #[error("normalized media has an invalid hash")] MediaHash,
     #[error("ingest task failed")] Join(#[source] tokio::task::JoinError),
 }
@@ -549,10 +549,10 @@ impl Ingest {
 5. A `JoinError` → `IngestError::Join`.
 
 `commit`, in order:
-1. Convert each `llmobs_core::media::MediaBlob` to `llmobs_storage::MediaBlob`: `hex::decode` the 64-char `sha256` into `[u8; 32]` (wrong length or bad hex → `MediaHash`), `Bytes::from(blob.bytes)`, same `mime_type`.
+1. Convert each `cetra_core::media::MediaBlob` to `cetra_storage::MediaBlob`: `hex::decode` the 64-char `sha256` into `[u8; 32]` (wrong length or bad hex → `MediaHash`), `Bytes::from(blob.bytes)`, same `mime_type`.
 2. Put them with `futures::stream::iter(blobs).map(|b| storage.put_media(target.project_id, b)).buffer_unordered(4)`, stopping at the first error (`try_collect` or a loop over `next()`); error → `IngestError::Media`. Nothing is appended after a media error.
 3. If `normalized.spans` is empty, return `CommitReceipt { accepted: 0, media }` without appending.
-4. Build the batch with `llmobs_core::batch::spans_to_record_batch(&normalized.spans)` inside `spawn_blocking` (a 50 000-span batch takes milliseconds); error → `Batch`.
+4. Build the batch with `cetra_core::batch::spans_to_record_batch(&normalized.spans)` inside `spawn_blocking` (a 50 000-span batch takes milliseconds); error → `Batch`.
 5. `storage.append_spans(target.project_id, batch).await`; error → `Append`.
 6. Return the receipt.
 
@@ -561,16 +561,16 @@ impl Ingest {
 ### Wiring
 
 - `AppInner` gains `pub(crate) ingest: crate::ingest::Ingest`.
-- `serve::bind` builds it after `meta.db` opens: `PriceTable::new(builtin_price_rows())`; an error → release storage and `meta.db` as the other early errors do, and return a new `ServeError::Prices(#[source] llmobs_otel::PriceError)` with message `"built-in price table"`.
+- `serve::bind` builds it after `meta.db` opens: `PriceTable::new(builtin_price_rows())`; an error → release storage and `meta.db` as the other early errors do, and return a new `ServeError::Prices(#[source] cetra_otel::PriceError)` with message `"built-in price table"`.
 - `TestApp::open` builds it the same way (`expect` is fine there).
 
 ### Tests (in `ingest/mod.rs`, using `TestApp` and `seed()`)
 
-- `accept` on `fixtures/otlp/genai/` any one case's `input.json` (protobuf: decode the JSON with `llmobs_otel::decode_json`, re-encode with `prost::Message::encode_to_vec`) returns the same `Normalized` as calling `normalize` directly with the same context and table.
+- `accept` on `fixtures/otlp/genai/` any one case's `input.json` (protobuf: decode the JSON with `cetra_otel::decode_json`, re-encode with `prost::Message::encode_to_vec`) returns the same `Normalized` as calling `normalize` directly with the same context and table.
 - `accept` with JSON and each compression gives the same result.
 - `TooManySpans`: an `IngestConfig` with `max_spans_per_request = 2` and a 3-span request.
 - Budget: with `max_inflight_bytes = max_request_bytes = 1 KiB`, hold one `Reservation` for `Content-Length: 600`; a second `reserve(Some(600), Identity)` returns `Busy`; after dropping the first, it succeeds. `reserve(None, Identity)` reserves the whole 1 KiB and `accept` gives back all but the raw length (a following `reserve(Some(1000), …)` after `accept` of a 20-byte body still fails only while the 20 bytes are held: check with `budget.available_permits()`). With 2 KiB of budget, a 100-byte gzip body that decompresses to 4 KiB returns `Busy`.
-- `commit` stores media before the spans: ingest `fixtures/otlp/llmobs/sdk-media-bytes` (with `media.min_bytes` = 1 B in the config), then `storage.get_media(project, &sha, None)` returns the bytes and their MIME type, and the `spans` provider holds the span with that `media_refs` entry.
+- `commit` stores media before the spans: ingest `fixtures/otlp/cetra/sdk-media-bytes` (with `media.min_bytes` = 1 B in the config), then `storage.get_media(project, &sha, None)` returns the bytes and their MIME type, and the `spans` provider holds the span with that `media_refs` entry.
 - `commit` with a blob whose `sha256` does not match its bytes returns `Media(HashMismatch)` and appends nothing (scan the project: 0 rows).
 - `commit` with no spans and no media returns `accepted: 0` and appends nothing.
 - A blob with a 300-byte MIME type (build `Normalized` by hand) → `Media(Invalid { .. })` → `400`, nothing appended.
@@ -644,8 +644,8 @@ Build requests with `app.request(Method::POST, "/v1/traces").header("authorizati
 - **415:** `text/plain`; `content-encoding: br`.
 - **400:** garbage protobuf; malformed JSON; a gzip header with garbage. The `detail` contains none of the body bytes (use a body containing `SECRET-BODY-MARKER` and assert it is absent from the response and from the logs, with `assert_logs_clean`).
 - **401/403/404:** no `Authorization` (401); an unknown `sk` key (401); a `read`-only key (403); a `pk` key (403); a session cookie with `Origin` (403); an `ingest` key used once, then its project set to `deleting` (404; a key never used before would get 401, see G1.3).
-- **503 (budget):** with `max_inflight_bytes` = `max_request_bytes` = 64 KiB, hold a permit by calling `state.ingest.accept` directly with a 40 KiB request and keeping the `Accepted`, then send a 40 KiB HTTP request → `503`, `retry-after: 1`, code `busy`; after dropping the `Accepted`, the same request → `200`. Storage backpressure is not forced over HTTP: storage's fault hooks are private to `llmobs-storage`, and `storage.flush.max_bytes` must stay below `memtable.hard_limit`, so a flush always starts first. Its mapping is tested in G1.6.
-- **Reserved environment:** a span with `deployment.environment.name = "llmobs-eval"` is stored with `environment = "llmobs-eval-external"` and the warning code.
+- **503 (budget):** with `max_inflight_bytes` = `max_request_bytes` = 64 KiB, hold a permit by calling `state.ingest.accept` directly with a 40 KiB request and keeping the `Accepted`, then send a 40 KiB HTTP request → `503`, `retry-after: 1`, code `busy`; after dropping the `Accepted`, the same request → `200`. Storage backpressure is not forced over HTTP: storage's fault hooks are private to `cetra-storage`, and `storage.flush.max_bytes` must stay below `memtable.hard_limit`, so a flush always starts first. Its mapping is tested in G1.6.
+- **Reserved environment:** a span with `deployment.environment.name = "cetra-eval"` is stored with `environment = "cetra-eval-external"` and the warning code.
 - **Logs:** the `info` line contains the route template `/v1/traces`, the project id and the span count, and no key, header value or attribute value (`assert_logs_clean` with the key and an attribute value as needles).
 - **Access suite:** `/v1/traces` now appears in `checked_routes()`; the suite passes. Its `call` sends `POST` with the JSON body `{}`; allowed callers get `200`.
 
@@ -659,7 +659,7 @@ Build requests with `app.request(Method::POST, "/v1/traces").header("authorizati
 
 ## G1.8 — The OTLP/HTTP port (4318)
 
-**Goal:** `llmobs serve` also listens on `otlp_http_addr` with only `/v1/traces` (D-G-21).
+**Goal:** `cetra serve` also listens on `otlp_http_addr` with only `/v1/traces` (D-G-21).
 
 **Edit:** `crates/server/src/http/mod.rs`, `crates/server/src/serve.rs`, `crates/cli/src/login.rs` (its test config).
 
@@ -672,12 +672,12 @@ Build requests with `app.request(Method::POST, "/v1/traces").header("authorizati
    - `Running` gains `pub otlp_local_addr: Option<SocketAddr>` and holds the second server's `JoinHandle` and shutdown sender;
    - `shutdown` signals both, drains both within the same `DRAIN` budget (`tokio::join!` the two `drain` calls), then continues as today (background tasks, `last_used`, storage, `meta.db`). Report the first error of the two.
    - `Drop for Running` aborts both server tasks.
-3. `crates/cli/src/login.rs` (around line 490) writes a test `llmobs.toml` with only `http_addr = "127.0.0.1:0"` and then calls `serve::bind`; with the new default it would bind the real 4318. Add `otlp_http_addr = ""` to that TOML.
+3. `crates/cli/src/login.rs` (around line 490) writes a test `cetra.toml` with only `http_addr = "127.0.0.1:0"` and then calls `serve::bind`; with the new default it would bind the real 4318. Add `otlp_http_addr = ""` to that TOML.
 4. The startup order of D137 stays: storage, `meta.db`, prices, bootstrap, then the binds. A failed second bind releases everything, so `LOCK` is free after `Err`.
 
 ### Tests (in `serve.rs`, over TCP like `healthz_over_tcp_and_shutdown_releases_the_lock`)
 
-- With `otlp_http_addr = Some(127.0.0.1:0)` and `config.init` set (`admin_email`, `admin_password`, `org`, `project`, and `secret_key` = a valid `sk-llmobs-` + 32 base62 characters; bootstrap gives it the full scopes, `ingest` included): `POST /v1/traces` on the OTLP port with that key answers `200`; `GET /healthz` on the OTLP port answers `404`; the same `POST` on the main port answers `200`.
+- With `otlp_http_addr = Some(127.0.0.1:0)` and `config.init` set (`admin_email`, `admin_password`, `org`, `project`, and `secret_key` = a valid `sk-cetra-` + 32 base62 characters; bootstrap gives it the full scopes, `ingest` included): `POST /v1/traces` on the OTLP port with that key answers `200`; `GET /healthz` on the OTLP port answers `404`; the same `POST` on the main port answers `200`.
 - With `otlp_http_addr = None`: `Running.otlp_local_addr` is `None` and only one listener exists. The same through TOML: `ServerConfig` loaded from `otlp_http_addr = ""` binds no second listener.
 - A port already in use for `otlp_http_addr` fails `bind` with `ServeError::Bind` naming that address, and a following `bind` on the same data dir succeeds (the lock was released).
 - Shutdown with both listeners open releases the lock (the existing lock test, with the OTLP listener on).

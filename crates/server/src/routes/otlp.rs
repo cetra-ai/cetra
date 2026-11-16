@@ -10,7 +10,7 @@ use axum::extract::{Extension, State};
 use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
-use llmobs_core::ids::ProjectId;
+use cetra_core::ids::ProjectId;
 
 use crate::auth::roles::KeyScope;
 use crate::entitlements::units::check_cap;
@@ -172,24 +172,24 @@ fn log_refusal(project: ProjectId, error: &IngestError, started: Instant) {
         IngestError::Decode(_) => "decode",
         IngestError::Busy => "budget",
         IngestError::Append(append) => match append {
-            llmobs_storage::error::AppendError::Backpressure => "backpressure",
-            llmobs_storage::error::AppendError::WalFailed => "wal_failed",
-            llmobs_storage::error::AppendError::ShuttingDown => "shutting_down",
-            llmobs_storage::error::AppendError::DiskFull => "disk_full",
-            llmobs_storage::error::AppendError::ProjectDropped => "project_dropped",
-            llmobs_storage::error::AppendError::InvalidBatch { .. } => return,
+            cetra_storage::error::AppendError::Backpressure => "backpressure",
+            cetra_storage::error::AppendError::WalFailed => "wal_failed",
+            cetra_storage::error::AppendError::ShuttingDown => "shutting_down",
+            cetra_storage::error::AppendError::DiskFull => "disk_full",
+            cetra_storage::error::AppendError::ProjectDropped => "project_dropped",
+            cetra_storage::error::AppendError::InvalidBatch { .. } => return,
         },
         IngestError::Media(media) => match media {
-            llmobs_storage::error::MediaError::Invalid { .. } => "invalid_media",
-            llmobs_storage::error::MediaError::ProjectDropped => "project_dropped",
-            llmobs_storage::error::MediaError::DiskFull => "disk_full",
-            llmobs_storage::error::MediaError::Object(_)
-            | llmobs_storage::error::MediaError::Catalog(_)
-            | llmobs_storage::error::MediaError::Query(_) => "storage_unavailable",
-            llmobs_storage::error::MediaError::HashMismatch
-            | llmobs_storage::error::MediaError::NotFound
-            | llmobs_storage::error::MediaError::InvalidRange
-            | llmobs_storage::error::MediaError::Fault => return,
+            cetra_storage::error::MediaError::Invalid { .. } => "invalid_media",
+            cetra_storage::error::MediaError::ProjectDropped => "project_dropped",
+            cetra_storage::error::MediaError::DiskFull => "disk_full",
+            cetra_storage::error::MediaError::Object(_)
+            | cetra_storage::error::MediaError::Catalog(_)
+            | cetra_storage::error::MediaError::Query(_) => "storage_unavailable",
+            cetra_storage::error::MediaError::HashMismatch
+            | cetra_storage::error::MediaError::NotFound
+            | cetra_storage::error::MediaError::InvalidRange
+            | cetra_storage::error::MediaError::Fault => return,
         },
         IngestError::Batch(_) | IngestError::MediaHash | IngestError::Join(_) => return,
     };
@@ -211,8 +211,8 @@ mod tests {
     use axum::http::{Method, StatusCode};
     use bytes::Bytes;
     use bytesize::ByteSize;
+    use cetra_otel::{IngestContext, PriceTable, builtin_price_rows, decode_json, normalize};
     use datafusion::prelude::SessionContext;
-    use llmobs_otel::{IngestContext, PriceTable, builtin_price_rows, decode_json, normalize};
     use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceResponse;
     use prost::Message;
     use serde_json::Value;
@@ -644,7 +644,7 @@ mod tests {
 
         let unknown = post_traces(
             &app,
-            "sk-llmobs-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "sk-cetra-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             "application/json",
             plain_export(1),
         )
@@ -746,14 +746,14 @@ mod tests {
     async fn the_reserved_environment_is_rewritten_and_warned() {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
-        let resource = "\"resource\":{\"attributes\":[{\"key\":\"deployment.environment.name\",\"value\":{\"stringValue\":\"llmobs-eval\"}}]},";
+        let resource = "\"resource\":{\"attributes\":[{\"key\":\"deployment.environment.name\",\"value\":{\"stringValue\":\"cetra-eval\"}}]},";
         let body = export_json(resource, &[span_json(0, "")]);
         let response = post_traces(&app, &seeded.ingest_key, "application/json", body)
             .send()
             .await;
         assert_eq!(response.status, StatusCode::OK);
         let rows = stored_rows(&app, seeded.project.id).await;
-        assert!(rows.contains("llmobs-eval-external"), "{rows}");
+        assert!(rows.contains("cetra-eval-external"), "{rows}");
         assert!(rows.contains("reserved_environment"), "{rows}");
     }
 
@@ -967,18 +967,18 @@ mod tests {
         assert!(
             has_line(
                 &text,
-                "llmobs_ingest_requests_total{protocol=\"otlp_http\",outcome=\"ok\"} 1"
+                "cetra_ingest_requests_total{protocol=\"otlp_http\",outcome=\"ok\"} 1"
             ),
             "{text}"
         );
         assert!(
-            has_line(&text, "llmobs_ingest_spans_total{protocol=\"otlp_http\"} 2"),
+            has_line(&text, "cetra_ingest_spans_total{protocol=\"otlp_http\"} 2"),
             "{text}"
         );
         assert!(
             has_line(
                 &text,
-                &format!("llmobs_ingest_bytes_total{{protocol=\"otlp_http\"}} {len}")
+                &format!("cetra_ingest_bytes_total{{protocol=\"otlp_http\"}} {len}")
             ),
             "{text}"
         );
@@ -1006,14 +1006,14 @@ mod tests {
         assert!(
             has_line(
                 &text,
-                "llmobs_ingest_requests_total{protocol=\"otlp_http\",outcome=\"invalid\"} 1"
+                "cetra_ingest_requests_total{protocol=\"otlp_http\",outcome=\"invalid\"} 1"
             ),
             "{text}"
         );
         assert!(
             !text
                 .lines()
-                .any(|line| line.starts_with("llmobs_ingest_spans_total{")),
+                .any(|line| line.starts_with("cetra_ingest_spans_total{")),
             "{text}"
         );
     }

@@ -4,7 +4,7 @@
 use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, post};
-use llmobs_core::ids::OrgId;
+use cetra_core::ids::OrgId;
 
 use crate::api::account::OrgRole;
 use crate::api::deletions::Deletion;

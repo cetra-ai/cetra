@@ -20,7 +20,7 @@ Read [README.md](README.md) first. Independent of the other phases.
   - `pub(crate) struct Reservation(OwnedSemaphorePermit);` — the request's budget.
   - `pub(crate) async fn commit(&self, storage: &Storage, usage: &Usage, live: &LiveBus, target: CommitTarget, normalized: Normalized) -> Result<CommitReceipt, IngestError>`: stores media, appends spans, then `live.publish(…)`, then `usage.add(…)`.
   - `IngestError::Join(tokio::task::JoinError)` exists (`"ingest task failed"`).
-  - Tests (`mod tests`) have the helpers `target(&app, &project) -> CommitTarget`, `accepted_fixture(&app, &project, "llmobs/<case>/input.json") -> Normalized`, `stored_spans(&app, project_id) -> usize`.
+  - Tests (`mod tests`) have the helpers `target(&app, &project) -> CommitTarget`, `accepted_fixture(&app, &project, "cetra/<case>/input.json") -> Normalized`, `stored_spans(&app, project_id) -> usize`.
 - `crates/server/src/routes/otlp.rs` (HTTP) and `crates/server/src/ingest/grpc.rs` (`async fn export_request(state: &AppState, …)`) both do:
 
   ```rust
@@ -162,7 +162,7 @@ In `Running::shutdown`, make this the first statement inside `if let Some(state)
 
 1. `a_commit_finishes_after_its_request_is_dropped` (`#[tokio::test(flavor = "multi_thread")]`):
    - `let app = TestApp::new().await; let seeded = app.seed().await;`
-   - `let normalized = accepted_fixture(&app, &seeded.project, "llmobs/sdk-observe-nested/input.json").await; let spans = normalized.spans.len(); assert!(spans > 0);`
+   - `let normalized = accepted_fixture(&app, &seeded.project, "cetra/sdk-observe-nested/input.json").await; let spans = normalized.spans.len(); assert!(spans > 0);`
    - `let mut bus = app.state.live.subscribe();` (a receiver must exist, or `publish` builds nothing).
    - `let reservation = app.state.ingest.reserve_exact(1).expect("budget");`
    - Poll the commit **once** and drop it, as a disconnecting client does: `let _polled = tokio::time::timeout(Duration::ZERO, commit_in_task(&app.state, target(&app, &seeded.project), normalized, reservation)).await;` (tokio's `timeout` polls the future before checking the deadline; keep the `_polled` binding, so clippy sees no unused value, and do not assert on it).
@@ -188,6 +188,6 @@ Add right after the D-G-37 row:
 
 ## Done when
 
-- `cargo test -p llmobs-server ingest` passes, with the two tests above.
-- `cargo test -p llmobs-server routes::otlp` and `cargo test -p llmobs-server ingest::grpc` pass unchanged.
+- `cargo test -p cetra-server ingest` passes, with the two tests above.
+- `cargo test -p cetra-server routes::otlp` and `cargo test -p cetra-server ingest::grpc` pass unchanged.
 - `just check` passes.

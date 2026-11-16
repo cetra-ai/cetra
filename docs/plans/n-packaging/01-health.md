@@ -1,8 +1,8 @@
-# N1 — `llmobs health`
+# N1 — `cetra health`
 
 Read [README.md](README.md) first.
 
-**Goal:** `llmobs health [--url <url>]` sends `GET <url>/readyz` and exits 0 on a `200` answer.
+**Goal:** `cetra health [--url <url>]` sends `GET <url>/readyz` and exits 0 on a `200` answer.
 Otherwise, or if no answer comes within 5 s, it prints the reason on stderr and exits 1. The image's
 `HEALTHCHECK` (N4) and the compose healthcheck (N5) call it: the distroless image has no curl
 (D-N-4). The default URL is `http://127.0.0.1:8080`, which is `http_addr`'s default port on
@@ -14,7 +14,7 @@ loopback.
 
 Spec 09 § CLI already lists the command (the plan commit added it).
 
-**Commit:** `Add llmobs health`
+**Commit:** `Add cetra health`
 
 **Tools:** the usual `just check` toolchain.
 
@@ -30,7 +30,7 @@ Spec 09 § CLI already lists the command (the plan commit added it).
 ## `crates/cli/src/health.rs` (new)
 
 ```rust
-//! `llmobs health`: the container healthcheck (D-N-4). The distroless image has no curl, so
+//! `cetra health`: the container healthcheck (D-N-4). The distroless image has no curl, so
 //! Docker's `HEALTHCHECK` and compose's `healthcheck` run this command.
 
 use std::time::Duration;
@@ -48,7 +48,7 @@ pub(crate) async fn check(url: &str) -> anyhow::Result<()> {
     let http = reqwest::Client::builder()
         .timeout(TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
-        .user_agent(concat!("llmobs-cli/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("cetra-cli/", env!("CARGO_PKG_VERSION")))
         .build()
         .context("building the http client")?;
     let target = format!("{}/readyz", url.trim_end_matches('/'));
@@ -135,9 +135,9 @@ mod tests {
                Command::Health { url } => url,
                other => panic!("unexpected command {other:?}"),
            };
-           assert_eq!(url_of(&["llmobs", "health"]), "http://127.0.0.1:8080");
+           assert_eq!(url_of(&["cetra", "health"]), "http://127.0.0.1:8080");
            assert_eq!(
-               url_of(&["llmobs", "health", "--url", "http://10.0.0.1:9000"]),
+               url_of(&["cetra", "health", "--url", "http://10.0.0.1:9000"]),
                "http://10.0.0.1:9000"
            );
        }
@@ -150,7 +150,7 @@ stderr. Do not add a separate exit path.
 
 ```bash
 just check
-cargo run -q -p llmobs-cli -- health; echo "exit=$?"
+cargo run -q -p cetra-cli -- health; echo "exit=$?"
 ```
 
 The second command, with no server running, prints `GET http://127.0.0.1:8080/readyz: …` and
@@ -161,4 +161,4 @@ The second command, with no server running, prints `GET http://127.0.0.1:8080/re
 
 - [ ] `crates/cli/src/health.rs` exists with the 4 tests, and `main.rs` has the variant, the arm
       and `health_parses_with_and_without_url`.
-- [ ] `just check` passes. One commit: `Add llmobs health`.
+- [ ] `just check` passes. One commit: `Add cetra health`.

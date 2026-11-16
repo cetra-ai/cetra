@@ -6,11 +6,11 @@ use std::fmt;
 use std::time::Duration;
 
 use arrow::record_batch::RecordBatch;
-use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-use llmobs_core::names::environment::EVAL;
-use llmobs_core::span::Span;
-use llmobs_storage::error::QueryError;
-use llmobs_storage::{QueryContext, RunError, TraceSpansRequest, trace_spans};
+use cetra_core::ids::{ProjectId, SpanId, TraceId};
+use cetra_core::names::environment::EVAL;
+use cetra_core::span::Span;
+use cetra_storage::error::QueryError;
+use cetra_storage::{QueryContext, RunError, TraceSpansRequest, trace_spans};
 use serde::Serialize;
 
 use crate::api::convert::{self, ConvertError};
@@ -293,7 +293,7 @@ fn payload_bytes(span: &Span) -> usize {
 mod tests {
     use std::collections::BTreeMap;
 
-    use llmobs_storage::{TraceSpansRequest, trace_spans};
+    use cetra_storage::{TraceSpansRequest, trace_spans};
 
     use super::*;
     use crate::routes::read::open_query;

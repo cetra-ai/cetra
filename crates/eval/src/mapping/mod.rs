@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 
-use llmobs_core::enums::{PayloadFormat, SpanKind};
+use cetra_core::enums::{PayloadFormat, SpanKind};
 use serde_json::Value;
 use serde_json_path::JsonPath;
 
@@ -354,7 +354,7 @@ fn valid_variable_name(name: &str) -> bool {
 mod tests {
     use super::{Expr, ItemField, Source, SpanField, SpanSelector, TraceField, VariableMapping};
     use crate::error::{MappingError, assert_no_payload};
-    use llmobs_core::enums::SpanKind;
+    use cetra_core::enums::SpanKind;
     use serde_json::{Value, json};
     use serde_json_path::JsonPath;
 
@@ -386,8 +386,8 @@ mod tests {
                 None,
             ),
             (
-                "trace.metadata.llmobs.eval.rule_id",
-                Source::Trace(TraceField::Metadata("llmobs.eval.rule_id".to_owned())),
+                "trace.metadata.cetra.eval.rule_id",
+                Source::Trace(TraceField::Metadata("cetra.eval.rule_id".to_owned())),
                 false,
                 None,
             ),
@@ -410,19 +410,19 @@ mod tests {
                 None,
             ),
             (
-                "span.metadata.llmobs.eval.rule_id",
+                "span.metadata.cetra.eval.rule_id",
                 Source::Span(
                     SpanSelector::Target,
-                    SpanField::Metadata("llmobs.eval.rule_id".to_owned()),
+                    SpanField::Metadata("cetra.eval.rule_id".to_owned()),
                 ),
                 false,
                 None,
             ),
             (
-                "span.attributes.llmobs.eval.rule_id",
+                "span.attributes.cetra.eval.rule_id",
                 Source::Span(
                     SpanSelector::Target,
-                    SpanField::Attributes("llmobs.eval.rule_id".to_owned()),
+                    SpanField::Attributes("cetra.eval.rule_id".to_owned()),
                 ),
                 false,
                 None,
@@ -463,8 +463,8 @@ mod tests {
             ("expected", Source::Expected, false, None),
             ("item.input", Source::Item(ItemField::Input), false, None),
             (
-                "item.metadata.llmobs.eval.rule_id",
-                Source::Item(ItemField::Metadata("llmobs.eval.rule_id".to_owned())),
+                "item.metadata.cetra.eval.rule_id",
+                Source::Item(ItemField::Metadata("cetra.eval.rule_id".to_owned())),
                 false,
                 None,
             ),

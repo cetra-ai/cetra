@@ -41,15 +41,15 @@
           },
           "spans": [
             {
-              "traceId": "981f0ab2d3042624bc5d46fc1d8a6bf7",
-              "spanId": "e9410536d9b35ae8",
+              "traceId": "b414fb03ba77af0d2bdc720ece7917fe",
+              "spanId": "cf77bfb5f7bf932e",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
               "name": "CreateEmbeddings",
               "kind": 1,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590035000000",
+              "endTimeUnixNano": "1767225590036000000",
               "attributes": [
                 {
                   "key": "llm.system",

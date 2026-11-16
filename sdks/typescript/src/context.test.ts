@@ -28,11 +28,11 @@ describe("withContext", () => {
     const spans = await finished(exporter);
     expect(spans.map((span) => span.name).sort()).toEqual(["child", "parent"]);
     for (const span of spans) {
-      expect(span.attributes["llmobs.session.id"]).toBe("s-1");
-      expect(span.attributes["llmobs.user.id"]).toBe("u-1");
-      expect(span.attributes["llmobs.tags"]).toEqual(["beta"]);
-      expect(span.attributes["llmobs.metadata.plan"]).toBe("pro");
-      expect(span.attributes["llmobs.environment"]).toBe("staging");
+      expect(span.attributes["cetra.session.id"]).toBe("s-1");
+      expect(span.attributes["cetra.user.id"]).toBe("u-1");
+      expect(span.attributes["cetra.tags"]).toEqual(["beta"]);
+      expect(span.attributes["cetra.metadata.plan"]).toBe("pro");
+      expect(span.attributes["cetra.environment"]).toBe("staging");
     }
   });
 
@@ -44,7 +44,7 @@ describe("withContext", () => {
     });
     const [span] = await finished(exporter);
     expect(span?.name).toBe("ext");
-    expect(span?.attributes["llmobs.session.id"]).toBe("s-1");
+    expect(span?.attributes["cetra.session.id"]).toBe("s-1");
   });
 
   it("merges nested blocks and restores the outer values on exit", async () => {
@@ -67,18 +67,18 @@ describe("withContext", () => {
     const spans = await finished(exporter);
     const byName = new Map(spans.map((span) => [span.name, span]));
     const nested = byName.get("nested")?.attributes ?? {};
-    expect(nested["llmobs.session.id"]).toBe("inner");
-    expect(nested["llmobs.user.id"]).toBe("u-1");
-    expect(nested["llmobs.tags"]).toEqual(["a", "b", "c"]);
-    expect(nested["llmobs.metadata.k"]).toBe("inner");
-    expect(nested["llmobs.metadata.onlyOuter"]).toBe(1);
+    expect(nested["cetra.session.id"]).toBe("inner");
+    expect(nested["cetra.user.id"]).toBe("u-1");
+    expect(nested["cetra.tags"]).toEqual(["a", "b", "c"]);
+    expect(nested["cetra.metadata.k"]).toBe("inner");
+    expect(nested["cetra.metadata.onlyOuter"]).toBe(1);
     const outerSpan = byName.get("outer-span")?.attributes ?? {};
-    expect(outerSpan["llmobs.session.id"]).toBe("outer");
-    expect(outerSpan["llmobs.tags"]).toEqual(["a", "b"]);
-    expect(outerSpan["llmobs.metadata.k"]).toBe("outer");
+    expect(outerSpan["cetra.session.id"]).toBe("outer");
+    expect(outerSpan["cetra.tags"]).toEqual(["a", "b"]);
+    expect(outerSpan["cetra.metadata.k"]).toBe("outer");
     const after = byName.get("after")?.attributes ?? {};
-    expect(after["llmobs.session.id"]).toBeUndefined();
-    expect(after["llmobs.metadata.k"]).toBeUndefined();
+    expect(after["cetra.session.id"]).toBeUndefined();
+    expect(after["cetra.metadata.k"]).toBeUndefined();
     expect(currentValues().sessionId).toBeUndefined();
   });
 
@@ -97,8 +97,8 @@ describe("withContext", () => {
     ]);
     const spans = await finished(exporter);
     const byName = new Map(spans.map((span) => [span.name, span]));
-    expect(byName.get("slow")?.attributes["llmobs.session.id"]).toBe("one");
-    expect(byName.get("fast")?.attributes["llmobs.session.id"]).toBe("two");
+    expect(byName.get("slow")?.attributes["cetra.session.id"]).toBe("one");
+    expect(byName.get("fast")?.attributes["cetra.session.id"]).toBe("two");
   });
 
   it("sets only the two baggage keys, only with propagate", () => {
@@ -119,9 +119,9 @@ describe("withContext", () => {
               ?.getAllEntries()
               .sort(([a], [b]) => (a < b ? -1 : 1)) ?? [];
           expect(entries).toEqual([
+            ["cetra.session.id", { value: "s-1" }],
+            ["cetra.user.id", { value: "u-1" }],
             ["correlation-id", { value: "c-1" }],
-            ["llmobs.session.id", { value: "s-1" }],
-            ["llmobs.user.id", { value: "u-1" }],
           ]);
         },
       );
@@ -132,8 +132,8 @@ describe("withContext", () => {
     const { exporter, runtime } = startMemory();
     const baggage = propagation
       .createBaggage()
-      .setEntry("llmobs.session.id", { value: "bag-s" })
-      .setEntry("llmobs.user.id", { value: "bag-u" });
+      .setEntry("cetra.session.id", { value: "bag-s" })
+      .setEntry("cetra.user.id", { value: "bag-u" });
     context.with(propagation.setBaggage(ROOT_CONTEXT, baggage), () => {
       runtime.tracer.startSpan("from-baggage").end();
       withContext({ sessionId: "ctx-s" }, () => {
@@ -142,9 +142,9 @@ describe("withContext", () => {
     });
     const spans = await finished(exporter);
     const byName = new Map(spans.map((span) => [span.name, span]));
-    expect(byName.get("from-baggage")?.attributes["llmobs.session.id"]).toBe("bag-s");
-    expect(byName.get("from-baggage")?.attributes["llmobs.user.id"]).toBe("bag-u");
-    expect(byName.get("wins")?.attributes["llmobs.session.id"]).toBe("ctx-s");
+    expect(byName.get("from-baggage")?.attributes["cetra.session.id"]).toBe("bag-s");
+    expect(byName.get("from-baggage")?.attributes["cetra.user.id"]).toBe("bag-u");
+    expect(byName.get("wins")?.attributes["cetra.session.id"]).toBe("ctx-s");
   });
 
   it("drops invalid options silently, keeping a string tags as one tag", async () => {
@@ -166,11 +166,11 @@ describe("withContext", () => {
     const spans = await finished(exporter);
     const byName = new Map(spans.map((span) => [span.name, span]));
     const junk = byName.get("junk")?.attributes ?? {};
-    expect(junk["llmobs.session.id"]).toBeUndefined();
-    expect(junk["llmobs.user.id"]).toBeUndefined();
-    expect(junk["llmobs.tags"]).toEqual(["b"]);
-    expect(junk["llmobs.metadata.m"]).toBeUndefined();
-    expect(byName.get("one-tag")?.attributes["llmobs.tags"]).toEqual(["solo"]);
+    expect(junk["cetra.session.id"]).toBeUndefined();
+    expect(junk["cetra.user.id"]).toBeUndefined();
+    expect(junk["cetra.tags"]).toEqual(["b"]);
+    expect(junk["cetra.metadata.m"]).toBeUndefined();
+    expect(byName.get("one-tag")?.attributes["cetra.tags"]).toEqual(["solo"]);
   });
 
   it("runs fn without a runtime and returns its value, a promise included", () => {
@@ -208,16 +208,16 @@ describe("metadata attributes", () => {
       );
       const [span] = await finished(exporter);
       const attributes = span?.attributes ?? {};
-      expect(attributes["llmobs.metadata.seats"]).toBe(3);
-      expect(attributes["llmobs.metadata.ratio"]).toBe(0.5);
-      expect(attributes["llmobs.metadata.flag"]).toBe(true);
-      expect(attributes["llmobs.metadata.obj"]).toBe('{"a":1}');
+      expect(attributes["cetra.metadata.seats"]).toBe(3);
+      expect(attributes["cetra.metadata.ratio"]).toBe(0.5);
+      expect(attributes["cetra.metadata.flag"]).toBe(true);
+      expect(attributes["cetra.metadata.obj"]).toBe('{"a":1}');
       // Not a safe integer, so a JSON string; JS prints the shortest
       // round-trip decimal (Python would print the exact digits).
-      expect(attributes["llmobs.metadata.big"]).toBe("1152921504606847000");
-      expect(attributes["llmobs.metadata.bad key!"]).toBeUndefined();
+      expect(attributes["cetra.metadata.big"]).toBe("1152921504606847000");
+      expect(attributes["cetra.metadata.bad key!"]).toBeUndefined();
       // Once per key, length only, never the key itself.
-      expect(debug).toHaveBeenCalledWith("llmobs: metadata key of length 8 skipped");
+      expect(debug).toHaveBeenCalledWith("cetra: metadata key of length 8 skipped");
       expect(debug).toHaveBeenCalledTimes(1);
     } finally {
       debug.mockRestore();
@@ -232,7 +232,7 @@ describe("metadata attributes", () => {
       runtime.tracer.startSpan("m").end();
     });
     const [span] = await finished(exporter);
-    expect(span?.attributes["llmobs.metadata.note"]).toBe("QUIET");
+    expect(span?.attributes["cetra.metadata.note"]).toBe("QUIET");
   });
 });
 
@@ -283,8 +283,8 @@ describe("the context key", () => {
     const byName = new Map(spans.map((span) => [span.name, span]));
     const g2 = byName.get("g2")?.attributes ?? {};
     expect(byName.has("g1")).toBe(true);
-    expect(g2["llmobs.session.id"]).toBeUndefined();
-    expect(g2["llmobs.tags"]).toBeUndefined();
-    expect(g2["llmobs.metadata.length"]).toBeUndefined();
+    expect(g2["cetra.session.id"]).toBeUndefined();
+    expect(g2["cetra.tags"]).toBeUndefined();
+    expect(g2["cetra.metadata.length"]).toBeUndefined();
   });
 });

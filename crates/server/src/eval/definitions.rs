@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use llmobs_core::ids::ProjectId;
-use llmobs_eval::{JudgeOutput, OutputScore};
+use cetra_core::ids::ProjectId;
+use cetra_eval::{JudgeOutput, OutputScore};
 
 use crate::meta::score_definitions::{DefinitionRow, list_definitions};
 use crate::meta::{MetaDb, MetaError};
@@ -141,9 +141,9 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use llmobs_core::enums::ScoreDataType;
-    use llmobs_core::ids::{OrgId, ProjectId};
-    use llmobs_eval::{JudgeOutput, OutputScore};
+    use cetra_core::enums::ScoreDataType;
+    use cetra_core::ids::{OrgId, ProjectId};
+    use cetra_eval::{JudgeOutput, OutputScore};
     use uuid::Uuid;
 
     use super::{DefinitionCache, fits_definition};

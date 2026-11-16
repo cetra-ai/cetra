@@ -3,7 +3,7 @@
 //! Drives `Storage` at a steady rate for hours: ingest, scores, deletions,
 //! retention and queries run at the same time, and background compaction stays
 //! on. Every minute one JSON line of resource and lag samples goes to
-//! `<out>/samples.jsonl`. Run by `just soak`, configured by `LLMOBS_SOAK_*`.
+//! `<out>/samples.jsonl`. Run by `just soak`, configured by `CETRA_SOAK_*`.
 //!
 //! R7.5 writes the samples and the failures. The pass/fail rules, the
 //! sampled-trace oracle and the settle step come in R7.6.
@@ -41,6 +41,8 @@ use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use cetra_core::ids::TraceId;
+use cetra_storage::Storage;
 use common::corpus::{CORPUS_FILE, CORPUS_SHA256, Corpus};
 use common::machine::machine;
 use common::payload::Payloads;
@@ -50,8 +52,6 @@ use common::s3::S3Env;
 use config::{QueryKind, SoakConfig, parse_mix, prepare_data_dir};
 use driver::{Shared, is_sampled};
 use failures::FailureKind;
-use llmobs_core::ids::TraceId;
-use llmobs_storage::Storage;
 use redact::Redactor;
 use registry::check_sample;
 use rules::{EndChecks, Limits, Verdict};
@@ -81,7 +81,7 @@ struct FailuresOut {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[ignore = "run by hand: LLMOBS_SOAK_DIR and LLMOBS_SOAK_OUT, see `just soak`"]
+#[ignore = "run by hand: CETRA_SOAK_DIR and CETRA_SOAK_OUT, see `just soak`"]
 async fn soak() {
     let config = SoakConfig::from_env().expect("the soak configuration");
     // The corpus is read before any directory is touched or the clock starts.
@@ -90,7 +90,7 @@ async fn soak() {
     if out.exists() {
         assert!(
             out.read_dir().unwrap().next().is_none(),
-            "LLMOBS_SOAK_OUT must be missing or empty"
+            "CETRA_SOAK_OUT must be missing or empty"
         );
     } else {
         std::fs::create_dir_all(&out).unwrap();
@@ -712,8 +712,8 @@ fn parse_mix_reads_weights() {
 #[test]
 fn config_defaults() {
     let lookup = |name: &str| match name {
-        "LLMOBS_SOAK_DIR" => Some("/home/tester/soak".to_owned()),
-        "LLMOBS_SOAK_OUT" => Some("/home/tester/soak-out".to_owned()),
+        "CETRA_SOAK_DIR" => Some("/home/tester/soak".to_owned()),
+        "CETRA_SOAK_OUT" => Some("/home/tester/soak-out".to_owned()),
         _ => None,
     };
     let config = SoakConfig::from_lookup(lookup).unwrap();
@@ -731,8 +731,8 @@ fn config_defaults() {
     assert_eq!(config.mix.len(), 6);
 
     let tmp = |name: &str| match name {
-        "LLMOBS_SOAK_DIR" => Some("/tmp/x".to_owned()),
-        "LLMOBS_SOAK_OUT" => Some("/home/tester/soak-out".to_owned()),
+        "CETRA_SOAK_DIR" => Some("/tmp/x".to_owned()),
+        "CETRA_SOAK_OUT" => Some("/home/tester/soak-out".to_owned()),
         _ => None,
     };
     assert!(
@@ -768,7 +768,7 @@ fn prepare_refuses_unmarked_dirs() {
 
 #[test]
 fn proc_status_parses() {
-    let excerpt = "Name:\tllmobs\nVmPeak:\t 900000 kB\nVmRSS:\t  123456 kB\nVmHWM:\t  200000 kB\nThreads:\t42\n";
+    let excerpt = "Name:\tcetra\nVmPeak:\t 900000 kB\nVmRSS:\t  123456 kB\nVmHWM:\t  200000 kB\nThreads:\t42\n";
     assert_eq!(
         sample::parse_status(excerpt),
         (123_456 * 1024, 200_000 * 1024, 42)
@@ -881,7 +881,7 @@ fn unacknowledged_trace_is_not_deleted() {
 
 #[test]
 fn cpu_fields_follow_the_command_name() {
-    let stat = "123 (llmobs (soak)) S 1 1 1 0 -1 0 0 0 0 0 250 50 0 0 20 0 42";
+    let stat = "123 (cetra (soak)) S 1 1 1 0 -1 0 0 0 0 0 250 50 0 0 20 0 42";
     assert!((sample::parse_cpu(stat) - 3.0).abs() < 1e-9);
 }
 
@@ -927,9 +927,9 @@ fn short_series_is_skipped() {
 fn rule_config(hours: &str) -> SoakConfig {
     let hours = hours.to_owned();
     SoakConfig::from_lookup(move |name| match name {
-        "LLMOBS_SOAK_DIR" => Some("/home/tester/soak".to_owned()),
-        "LLMOBS_SOAK_OUT" => Some("/home/tester/soak-out".to_owned()),
-        "LLMOBS_SOAK_HOURS" => Some(hours.clone()),
+        "CETRA_SOAK_DIR" => Some("/home/tester/soak".to_owned()),
+        "CETRA_SOAK_OUT" => Some("/home/tester/soak-out".to_owned()),
+        "CETRA_SOAK_HOURS" => Some(hours.clone()),
         _ => None,
     })
     .expect("a config")

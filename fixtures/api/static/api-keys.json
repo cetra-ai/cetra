@@ -4,7 +4,7 @@
       "id": "01900000-0000-7000-8000-000000000200",
       "kind": "secret",
       "name": "CI",
-      "prefix": "sk-llmobs-EXAMPL",
+      "prefix": "sk-cetra-EXAMPL",
       "scopes": [
         "ingest",
         "read",

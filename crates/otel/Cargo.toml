@@ -1,5 +1,5 @@
 [package]
-name = "llmobs-otel"
+name = "cetra-otel"
 description = "OTLP decoding, convention detection, normalization, and cost"
 version.workspace = true
 edition.workspace = true
@@ -12,7 +12,7 @@ workspace = true
 
 [dependencies]
 base64.workspace = true
-llmobs-core.workspace = true
+cetra-core.workspace = true
 opentelemetry-proto.workspace = true
 prost.workspace = true
 regex.workspace = true

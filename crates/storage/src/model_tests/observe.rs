@@ -25,8 +25,8 @@ use crate::reads::{
 };
 use crate::views::{QueryContext, TimeWindow};
 use crate::{RunError, Storage};
-use llmobs_core::ids::TraceId;
-use llmobs_core::schema::{scores, spans, traces};
+use cetra_core::ids::TraceId;
+use cetra_core::schema::{scores, spans, traces};
 use std::collections::HashSet;
 
 /// Time allowed for each read request.
@@ -554,7 +554,7 @@ fn latest_from_batch(batch: &RecordBatch, row: usize) -> Result<LatestScore, Rea
     })
 }
 
-/// A column of `batch` by name. The view names are the constants of `llmobs_core::schema`.
+/// A column of `batch` by name. The view names are the constants of `cetra_core::schema`.
 fn column<'a>(batch: &'a RecordBatch, name: &str) -> &'a arrow::array::ArrayRef {
     batch
         .column_by_name(name)

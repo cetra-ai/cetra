@@ -57,8 +57,8 @@ function AdminSettingsPage() {
     <>
       <h2 className="text-lg font-medium">Settings</h2>
       <p className="text-sm text-muted-foreground">
-        These come from the server's configuration and can't be changed here. Edit llmobs.toml or
-        the LLMOBS_* environment variables, then restart the server.
+        These come from the server's configuration and can't be changed here. Edit cetra.toml or the
+        CETRA_* environment variables, then restart the server.
       </p>
       <dl
         aria-label="Instance settings"
@@ -109,7 +109,7 @@ function AdminSettingsPage() {
         reason={
           data.smtp_enabled
             ? undefined
-            : "Email is not configured. Set LLMOBS_SMTP_URL and restart the server."
+            : "Email is not configured. Set CETRA_SMTP_URL and restart the server."
         }
       >
         <Button

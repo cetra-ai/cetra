@@ -35,7 +35,7 @@ Each must print at least one line. Otherwise STOP and report.
 
 ## Conventions for every sub-phase
 
-- Time is `i64` nanoseconds; JSON times are RFC 3339 with 9 digits (`llmobs_core::time_serde`, optional ones `crate::api::keys::optional_time`), as in `crates/server/src/api/score_definitions.rs`.
+- Time is `i64` nanoseconds; JSON times are RFC 3339 with 9 digits (`cetra_core::time_serde`, optional ones `crate::api::keys::optional_time`), as in `crates/server/src/api/score_definitions.rs`.
 - IDs are `Uuid::now_v7()`, stored as `TEXT` (`id.to_string()`); trace ids are stored as their 16 raw bytes (`trace.as_bytes().to_vec()`), read back with `TraceId::from_slice`, and are lowercase hex in JSON (`TraceId` serializes so).
 - Errors are `ApiError`; field errors use `FieldError { field, message, position: None }` with JSON paths (`results[3].repetition`).
 - Logs: ids, counts and sizes only. Never an experiment name, a description, metadata, an output, an error text or an item's content.
@@ -503,7 +503,7 @@ In `meta/experiments.rs`. Each test opens a test database, creates an org, a pro
 
 **Commit subject:** `server: link scores to experiments`
 
-`ScoreCreate` gains `experiment_id` and `dataset_item_id` (D-J-12). `llmobs-core`'s `Score` already has both fields; it is not changed.
+`ScoreCreate` gains `experiment_id` and `dataset_item_id` (D-J-12). `cetra-core`'s `Score` already has both fields; it is not changed.
 
 ### Files
 
@@ -560,7 +560,7 @@ grep -rn "ScoreCreate {" crates/ --include=*.rs
 
 Each uses `TestApp::new()`, `seed()`, and inserts one experiment of the seeded project with `meta::experiments::insert_tx` through `app.state.meta.write` (a dataset first, through M1's store or SQL).
 
-1. `experiment_fields_are_stored`: `write` one trace score with both fields through `Writer::Sdk { key_id }`; read it back with `llmobs_storage::score_list` (as the existing storage-read tests here do) and assert `experiment_id` and `dataset_item_id` columns equal the ids (as hyphenated lowercase text).
+1. `experiment_fields_are_stored`: `write` one trace score with both fields through `Writer::Sdk { key_id }`; read it back with `cetra_storage::score_list` (as the existing storage-read tests here do) and assert `experiment_id` and `dataset_item_id` columns equal the ids (as hyphenated lowercase text).
 2. `experiment_fields_go_together`: only `experiment_id` → `400`, field `scores[0].experiment_id`, message `experiment_id and dataset_item_id go together`.
 3. `experiment_scores_need_a_trace_target`: both on a span target → `400`, field `scores[0].target`.
 4. `unknown_experiment_is_refused`: a random `experiment_id` → `400`, `scores[0].experiment_id`, `unknown experiment`; an experiment of another project → the same.
@@ -578,7 +578,7 @@ Each uses `TestApp::new()`, `seed()`, and inserts one experiment of the seeded p
 
 **Commit subject:** `storage: read an experiment's scores and traces`
 
-Two reads in `llmobs-storage` (D-J-13). They follow the existing reads: a `QueryContext`, a timeout, `RunError`, and plain structs as `alerts.rs` and `metrics.rs` return. They apply no default exclusions (an experiment's traces are what they read).
+Two reads in `cetra-storage` (D-J-13). They follow the existing reads: a `QueryContext`, a timeout, `RunError`, and plain structs as `alerts.rs` and `metrics.rs` return. They apply no default exclusions (an experiment's traces are what they read).
 
 ### Files (edit only these)
 
@@ -594,7 +594,7 @@ Two reads in `llmobs-storage` (D-J-13). They follow the existing reads: a `Query
 - `crates/storage/src/reads/deletions.rs`: `eval_trace_ids`/`eval_scan` (the `metadata['<key>']` expression built with `ctx.session().state().create_logical_expr(…, ctx.view_schema(ViewName::…))`, `execute_stream`, the `utf8` helper and `ctx.fail`).
 - `crates/storage/src/views/catalog.rs` `TRACES` and `SCORES`: the view columns (`trace_id` is lowercase hex `Utf8` in both views; `duration_ns` `Int64`, `error_count` `Int64`, `cost_total` `Float64` nullable on `traces`; `experiment_id`, `dataset_item_id` `Utf8` nullable, `value_num` `Float64` nullable, `value_str` `Utf8` nullable, `deleted` `Boolean` on `scores`).
 - `crates/storage/src/test_support.rs`: `score_row`, `live_scores_table`, `span_row`, `spans_table`, `traces_table`, `example_query`.
-- `llmobs_core::names::metadata_key::EXPERIMENT_ID` (`llmobs.experiment_id`), `llmobs_core::schema::{scores, traces}`.
+- `cetra_core::names::metadata_key::EXPERIMENT_ID` (`cetra.experiment_id`), `cetra_core::schema::{scores, traces}`.
 
 ### Code
 
@@ -602,7 +602,7 @@ Two reads in `llmobs-storage` (D-J-13). They follow the existing reads: a `Query
 //! The scores and traces of one experiment, for its results and comparison (D-J-13).
 //!
 //! The `scores` view holds live scores only. Experiment scores carry `experiment_id`
-//! (D-J-12); experiment traces carry `metadata['llmobs.experiment_id']` (spec 02 § Context
+//! (D-J-12); experiment traces carry `metadata['cetra.experiment_id']` (spec 02 § Context
 //! fields). Default exclusions do not apply.
 
 /// Most score rows [`experiment_scores`] returns (CG-J2).
@@ -648,7 +648,7 @@ pub async fn experiment_scores(
     timeout: Duration,
 ) -> Result<Vec<ExperimentScore>, RunError>;
 
-/// Traces whose merged `metadata['llmobs.experiment_id']` is `experiment`, in no order.
+/// Traces whose merged `metadata['cetra.experiment_id']` is `experiment`, in no order.
 ///
 /// # Errors
 ///
@@ -667,7 +667,7 @@ Implementation:
 - Wrap the body in `tokio::time::timeout(timeout, …)` exactly as `score_list` does.
 - `since` (nanoseconds) is a lower time bound that lets DataFusion prune files: `experiment_scores` adds `col(scores::CREATED_AT).gt_eq(<since as the column's timestamp literal>)` and `experiment_traces` adds the same on `traces`' `start_time` (build the literal as `score_list`'s window does for `created_at`, and as `trace_list` does for `start_time`). The server passes the experiment's `created_at − CLOCK_SKEW_NS` (J3.5), because span start times and UUIDv7 score ids come from client clocks.
 - `experiment_scores`: `ctx.session().table("scores")`, filter `col(scores::EXPERIMENT_ID).eq(lit(id)).and(col(scores::DELETED).eq(lit(false)))`, select `trace_id, dataset_item_id, name, data_type, value_num, value_str`, `limit(0, Some(MAX_EXPERIMENT_SCORES + 1))`, `execute_stream`, decode each batch with `as_string::<i32>()` / `as_primitive::<Float64Type>()` (cast to `Utf8` first with the `utf8` helper pattern of `deletions.rs` if the column is a view or dictionary type). Rows with a null `trace_id` are skipped. More than the cap: the error.
-- `experiment_traces`: build `metadata['llmobs.experiment_id']` over `ctx.view_schema(ViewName::Traces)` as `eval_scan` does over spans; filter it `.eq(lit(id))`; select `trace_id, cost_total, duration_ns, error_count`; same limit, stream and cap.
+- `experiment_traces`: build `metadata['cetra.experiment_id']` over `ctx.view_schema(ViewName::Traces)` as `eval_scan` does over spans; filter it `.eq(lit(id))`; select `trace_id, cost_total, duration_ns, error_count`; same limit, stream and cap.
 - The window of `QueryContext` (D101, `visible_from`) applies through the views; nothing else.
 
 Re-export from `reads/mod.rs`: `pub use experiments::{ExperimentScore, ExperimentTrace, MAX_EXPERIMENT_SCORES, MAX_EXPERIMENT_TRACES, experiment_scores, experiment_traces};`, and the same names in `lib.rs`.
@@ -679,14 +679,14 @@ A local `fn context_of(spans: &[Span], scores: &[Score]) -> QueryContext` builds
 1. `scores_of_one_experiment`: scores `score_row(1, 0, …)` with `experiment_id = Some(E1)`, `dataset_item_id = Some(item)`, `value = Numeric(0.5)`; `score_row(2, 1, …)` with `E2`; `score_row(3, 2, …)` with none. `experiment_scores(E1)` returns exactly the first, with `trace_id` the 32-hex text of trace 0, `data_type "numeric"`, `value_num Some(0.5)`.
 2. `deleted_and_replaced_scores_are_not_returned`: score 1 with `E1`, then a newer version of it with `deleted = true` → empty.
 3. `categorical_scores_carry_the_label`: `ScoreValue::Categorical { label: "good", value: Some(1.0) }` → `value_str Some("good")`, `value_num Some(1.0)`.
-4. `traces_of_one_experiment`: spans of trace 0 with `metadata["llmobs.experiment_id"] = E1` and `cost_total Some(0.25)` on one span, `status` error on another; trace 1 with `E2`; trace 2 without. `experiment_traces(E1)` returns one row: trace 0, `cost_total Some(0.25)` (the merged trace cost), `error_count 1`, `duration_ns` = the trace's `end − start`.
+4. `traces_of_one_experiment`: spans of trace 0 with `metadata["cetra.experiment_id"] = E1` and `cost_total Some(0.25)` on one span, `status` error on another; trace 1 with `E2`; trace 2 without. `experiment_traces(E1)` returns one row: trace 0, `cost_total Some(0.25)` (the merged trace cost), `error_count 1`, `duration_ns` = the trace's `end − start`.
 5. `bad_id_is_invalid_request`: `experiment_scores(ctx, "nope", …)` is `RunError::InvalidRequest`.
 6. `no_match_is_empty`: an unknown UUID → empty vectors from both.
 7. `since_bounds_both_reads`: the scores and traces of test 1 and test 4 with `since` one nanosecond after their `created_at` / `start_time` → empty; with `since` equal to it → the rows.
 
 ### Done when
 
-- The 7 tests pass; `cargo test -p llmobs-storage reads::experiments` passes; `just check` is green.
+- The 7 tests pass; `cargo test -p cetra-storage reads::experiments` passes; `just check` is green.
 
 ---
 
@@ -749,7 +749,7 @@ pub struct Experiment {
     pub result_count: i64,
     pub status: ExperimentStatus,
     pub error: Option<String>,
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub created_at: i64,
     /// Optional time, as `api/score_definitions.rs` writes one.
@@ -900,7 +900,7 @@ Helper `async fn seeded_dataset(app, seeded) -> Uuid`: creates a dataset `faq` (
 12b. `roles_and_tokens`: a viewer session gets 403 on create (`ManageDatasets` needs member); a read-write personal access token of a member creates (201); a read-only personal access token gets 403 on create (as `http/access.rs` refuses a read-only PAT on a non-GET; use the PAT helper `test_support` already has, e.g. `personal_token`).
 13. `logs_carry_no_content` (`#[tokio::test]`): capture logs (`capture_logs` from `test_support`) around create (name `secret-name-1`, metadata value `secret-meta-1`), results (output `secret-output-1`, error `secret-error-1`) and finish; none of the four strings appears.
 
-The access suite (`http/access_suite.rs`) picks up the new routes by itself; run it (`cargo test -p llmobs-server access_suite`) and fix nothing but real failures. If it fails because a body is required, STOP and report.
+The access suite (`http/access_suite.rs`) picks up the new routes by itself; run it (`cargo test -p cetra-server access_suite`) and fix nothing but real failures. If it fails because a body is required, STOP and report.
 
 ### Done when
 
@@ -928,7 +928,7 @@ The access suite (`http/access_suite.rs`) picks up the new routes by itself; run
 ```rust
 /// One score of a result row.
 pub struct ResultScore {
-    pub data_type: ScoreDataType,          // llmobs_core::enums::ScoreDataType
+    pub data_type: ScoreDataType,          // cetra_core::enums::ScoreDataType
     pub value_num: Option<f64>,
     pub value_str: Option<String>,
 }
@@ -1040,7 +1040,7 @@ pub struct CompareParams {
 }
 ```
 
-`any_json` is `crate::api::common::any_json` (M1). The design calls `ResultScore` `ScoreValue`; it is renamed because `llmobs_core::score::ScoreValue` already exists in the OpenAPI document. Report it. Check `ScoreDataType` is a `ToSchema` already registered (it is used by score definitions); if it is not, STOP.
+`any_json` is `crate::api::common::any_json` (M1). The design calls `ResultScore` `ScoreValue`; it is renamed because `cetra_core::score::ScoreValue` already exists in the OpenAPI document. Report it. Check `ScoreDataType` is a `ToSchema` already registered (it is used by score definitions); if it is not, STOP.
 
 ### Aggregation (`experiments/mod.rs`, pure functions)
 
@@ -1053,8 +1053,8 @@ pub(crate) struct Loaded {
     pub(crate) experiment: ExperimentRow,
     /// The light projection of every result, ordered by item, repetition (D-J-13).
     pub(crate) keys: Vec<meta::experiments::ResultKey>,
-    pub(crate) scores: Vec<llmobs_storage::ExperimentScore>,
-    pub(crate) traces: Vec<llmobs_storage::ExperimentTrace>,
+    pub(crate) scores: Vec<cetra_storage::ExperimentScore>,
+    pub(crate) traces: Vec<cetra_storage::ExperimentTrace>,
 }
 ```
 
@@ -1099,7 +1099,7 @@ pub(crate) fn compare(loaded: &[Loaded], texts: &[Vec<meta::experiments::ResultR
 | GET | `…/experiments/{id}/results` | View | `get_results` |
 | GET | `…/experiments/compare` | View | `compare_experiments` |
 
-`async fn load(state, access, row: ExperimentRow, ctx: &QueryContext, deadline: Deadline) -> Result<Loaded, ApiError>`: `meta::experiments::result_keys(reader, row.id)`, `llmobs_storage::experiment_scores(ctx, &row.id.to_string(), row.created_at.saturating_sub(CLOCK_SKEW_NS), deadline.remaining()?)` and `experiment_traces(…)` with the same bound. Open the context once per request with `routes::read::open_query(&state, org, project, None)` and `Deadline::start()`; map a storage `RunError` with `ApiError::from` (as `routes/traces.rs` does).
+`async fn load(state, access, row: ExperimentRow, ctx: &QueryContext, deadline: Deadline) -> Result<Loaded, ApiError>`: `meta::experiments::result_keys(reader, row.id)`, `cetra_storage::experiment_scores(ctx, &row.id.to_string(), row.created_at.saturating_sub(CLOCK_SKEW_NS), deadline.remaining()?)` and `experiment_traces(…)` with the same bound. Open the context once per request with `routes::read::open_query(&state, org, project, None)` and `Deadline::start()`; map a storage `RunError` with `ApiError::from` (as `routes/traces.rs` does).
 
 - `get_results`: `get` (404); `load`; `summary`; parse the cursor; `results_page(reader, id, after, errors_only, limit + 1)`; `result_rows` on the kept rows; answer `ExperimentResults`.
 - `compare_experiments`: split `ids` on `,`, trim, parse each as a UUID (400 field `ids`, `ids must be 2 to 4 experiment ids`), 2–4 distinct ids (a repeated id: the same message); `threshold` default 0.1, must be finite and in `0..=1000` (400 field `threshold`, `threshold must be 0 to 1000`; `NaN`, `inf`, negative and over 1000 are refused); `get_many` (any missing or hidden → 404); all must share one `dataset_id` that is `Some` (400 field `ids`, `the experiments must use the same dataset`); keep request order; `load` each; `compare_items`; `item_rows` for each experiment; `compare`.
@@ -1128,7 +1128,7 @@ Unit tests in `experiments/mod.rs` (no database), with a builder `fn loaded(rows
 
 HTTP tests in `routes/experiments.rs` (data through the real store and `app.commit_spans` / `scores::write`):
 
-12. `results_join_scores_and_traces`: create an experiment on `faq` (3 items); commit one span per item with `metadata["llmobs.experiment_id"] = <id>`, `environment = Some("experiment")`, `cost_total = Some(0.01)`, `ingest_time = now`; write a boolean score `exact` per trace with the experiment and item ids (`scores::write` with `Writer::Api`); post three results with those traces; `GET …/results` → `result_count 3`, `scores[0].name == "exact"`, `cost_total` ≈ 0.03, each row has `scores.exact`.
+12. `results_join_scores_and_traces`: create an experiment on `faq` (3 items); commit one span per item with `metadata["cetra.experiment_id"] = <id>`, `environment = Some("experiment")`, `cost_total = Some(0.01)`, `ingest_time = now`; write a boolean score `exact` per trace with the experiment and item ids (`scores::write` with `Writer::Api`); post three results with those traces; `GET …/results` → `result_count 3`, `scores[0].name == "exact"`, `cost_total` ≈ 0.03, each row has `scores.exact`.
 12b. `results_pages_over_http`: 5 results, 2 with errors; `?limit=2` gives a cursor that returns the next 2, then the last with `next_cursor: null`; `?errors_only=true` returns 2; `?cursor=x` → 400.
 13. `compare_needs_the_same_dataset`: two experiments on two datasets → 400 field `ids`; one id → 400; five ids → 400; the same id twice (`ids=a,a`) → 400 field `ids`; a malformed id (`ids=a,nope`) → 400 field `ids`; an unknown id → 404.
 13b. `compare_threshold_bounds`: `threshold=-0.1`, `threshold=1000.5`, `threshold=NaN` and `threshold=inf` → 400 field `threshold`; `threshold=0` and `threshold=1000` → 200.
@@ -1286,7 +1286,7 @@ The sandbox accepts a registered name as a table (it reads `registered_view_name
 
 ### Catalog
 
-`convert::schema_response()`: `views` = storage's `view_catalog()` followed by `crate::datasets::sql_views::catalog()`, mapped the same way. Then hand-edit `fixtures/api/static/schema.json`: append the two view objects after `scores`, with the exact names, column types (`string`, `integer`, `timestamp`, `json`), `nullable` values and descriptions of `catalog()`. `cargo test -p llmobs-server schema_is_the_static_fixture` must pass; `just api-examples` checks the same file.
+`convert::schema_response()`: `views` = storage's `view_catalog()` followed by `crate::datasets::sql_views::catalog()`, mapped the same way. Then hand-edit `fixtures/api/static/schema.json`: append the two view objects after `scores`, with the exact names, column types (`string`, `integer`, `timestamp`, `json`), `nullable` values and descriptions of `catalog()`. `cargo test -p cetra-server schema_is_the_static_fixture` must pass; `just api-examples` checks the same file.
 
 `crates/storage/src/views/catalog.rs` test `catalog_matches_the_schema_fixture`: before comparing, keep only the fixture views whose `name` is not `experiment_items` or `dataset_items` (a one-line `filter` with a comment: "The server owns these two views' catalog (D93, D-J-15)."). No other storage change.
 
@@ -1408,7 +1408,7 @@ Helper `async fn copy_of(app, project, trace: TraceId) -> (Uuid /*item*/, Uuid /
 These are reported to the coordinator of the J plan; the plan above already follows them.
 
 1. `CreateExperimentResponse` holds `items: Vec<DatasetItem>` and `next_cursor` flat instead of `items: Page<DatasetItem>` (no OpenAPI name for a nested generic page).
-2. The per-row score type is `ResultScore`, not `ScoreValue` (name clash with `llmobs_core::score::ScoreValue`).
+2. The per-row score type is `ResultScore`, not `ScoreValue` (name clash with `cetra_core::score::ScoreValue`).
 3. The derived score id of an experiment score uses `experiment_id` alone as its author (spec 06 said `experiment_id + dataset_item_id`; the trace already identifies the item and repetition). The plan PR amended spec 06; J3.2 checks it.
 4. `crates/server` needs `datafusion` as a normal dependency (it was a dev-dependency) to build the views' `MemTable`s; no version change.
 5. `fixtures/api/static/schema.json` gains the server views, so storage's `catalog_matches_the_schema_fixture` must skip them (one test line in `crates/storage`).

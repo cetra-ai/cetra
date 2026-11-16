@@ -57,7 +57,7 @@ CREATE INDEX model_prices_project ON model_prices(project_id) WHERE project_id I
 
 The schema-version tests (`open_twice_is_idempotent`, `open_existing_checks_the_file_and_the_version` in `meta/mod.rs`, `schema_mismatch_names_the_versions` in `admin.rs`) read `crate::meta::expected_version()`, so they need no edit.
 
-Regenerate the snapshot: `INSTA_UPDATE=always cargo test -p llmobs-server schema_matches_the_snapshot`. `git diff crates/server/tests/snapshots/meta_schema.snap` must show only an added block for `model_prices`, its two explicit indexes and one `sqlite_autoindex_model_prices_1`. Anything else: STOP and report.
+Regenerate the snapshot: `INSTA_UPDATE=always cargo test -p cetra-server schema_matches_the_snapshot`. `git diff crates/server/tests/snapshots/meta_schema.snap` must show only an added block for `model_prices`, its two explicit indexes and one `sqlite_autoindex_model_prices_1`. Anything else: STOP and report.
 
 ## 2. `meta/model_prices.rs`
 
@@ -72,7 +72,7 @@ Right after the module doc, add:
 
 `just lint` runs clippy on all targets with `-D warnings`, so code without a non-test caller fails without it (the same device as g-spine's first phases).
 
-Imports: `llmobs_core::ids::{OrgId, ProjectId}`, `llmobs_otel::{PriceRow, PriceScope, PriceTier}`, `sqlx::{SqliteConnection, SqlitePool}`, `uuid::Uuid`, `super::{MetaError, unique_or}`.
+Imports: `cetra_core::ids::{OrgId, ProjectId}`, `cetra_otel::{PriceRow, PriceScope, PriceTier}`, `sqlx::{SqliteConnection, SqlitePool}`, `uuid::Uuid`, `super::{MetaError, unique_or}`.
 
 ### Constants
 
@@ -214,7 +214,7 @@ The insert and update ignore `row.scope`: the scope comes from `project`. `row.v
 
 ### Tests (`#[cfg(test)] mod tests`, with `crate::meta::test_db()`)
 
-Helpers: create an org (`insert_org`) with two projects (`insert_project`), and a second org with one project, inside `db.write`. A `fn price(name: &str, provider: Option<&str>) -> PriceRow` builds `PriceRow { scope: PriceScope::Org, model_name: name.into(), match_pattern: llmobs_otel::exact_pattern(name), provider: provider.map(Into::into), valid_from: 0, price_input: Some(1.0), price_output: Some(2.0), price_cache_read: None, price_cache_write: None, price_reasoning: None, tiers: None }` (`exact_pattern` is T1's; the server does not depend on `regex`).
+Helpers: create an org (`insert_org`) with two projects (`insert_project`), and a second org with one project, inside `db.write`. A `fn price(name: &str, provider: Option<&str>) -> PriceRow` builds `PriceRow { scope: PriceScope::Org, model_name: name.into(), match_pattern: cetra_otel::exact_pattern(name), provider: provider.map(Into::into), valid_from: 0, price_input: Some(1.0), price_output: Some(2.0), price_cache_read: None, price_cache_write: None, price_reasoning: None, tiers: None }` (`exact_pattern` is T1's; the server does not depend on `regex`).
 
 1. `insert_get_round_trip_for_both_scopes`: insert an org row and a project row with tiers `[PriceTier { min_input_tokens: 200_000, price_input: Some(2.0), price_output: None, price_cache_read: None, price_cache_write: None, price_reasoning: None }]`; `get_tx` returns them with `scope` `Org` and `Project`, the same fields, `created_at == updated_at == now`.
 2. `get_respects_the_scope`: the project row is `None` through `get_tx(org, None, id)` and through the other project; the org row is `None` through `get_tx(org, Some(project), id)`; any row is `None` through the second org.
@@ -231,7 +231,7 @@ Helpers: create an org (`insert_org`) with two projects (`insert_project`), and 
 ## Commands
 
 ```bash
-cargo test -p llmobs-server model_prices
+cargo test -p cetra-server model_prices
 ```
 
 ```bash

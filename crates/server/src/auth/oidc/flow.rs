@@ -20,7 +20,7 @@ use crate::meta::identities::{self, identity_user};
 use crate::meta::users::EmailVerifiedVia;
 use crate::meta::users::{self, NewUser, normalize_email};
 use crate::meta::{MetaError, invites, members, orgs, personal_tokens, web_sessions};
-use llmobs_core::ids::OrgId;
+use cetra_core::ids::OrgId;
 
 /// Why `GET /authorize` did not redirect to the provider.
 pub(crate) enum StartError {

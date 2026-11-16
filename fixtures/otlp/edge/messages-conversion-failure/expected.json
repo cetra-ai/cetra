@@ -13,7 +13,7 @@
       "input_format": "json",
       "input_preview": "{\"not\":\"messages\"}",
       "attributes": {
-        "llmobs.normalize_error": "messages:genai:input"
+        "cetra.normalize_error": "messages:genai:input"
       },
       "conventions": [
         "genai"

@@ -9,7 +9,7 @@
 
 import { type FetchLike, getFetch, hasHttpAuthority, utf8Encode } from "./web.js";
 
-const PUBLIC_KEY_PREFIX = "pk-llmobs-";
+const PUBLIC_KEY_PREFIX = "pk-cetra-";
 const TRACE_ID = /^[0-9a-f]{32}$/;
 const SPAN_ID = /^[0-9a-f]{16}$/;
 /** Spec 06: the feedback payload is at most 4 KiB. */

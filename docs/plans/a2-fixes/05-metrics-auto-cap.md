@@ -84,5 +84,5 @@ If `TimeWindow::new` rejects one of these windows, use the widest window it acce
 
 ## Done when
 
-- `cargo test -p llmobs-storage --lib reads::metrics` passes.
+- `cargo test -p cetra-storage --lib reads::metrics` passes.
 - `just check` passes.

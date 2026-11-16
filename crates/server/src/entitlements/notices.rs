@@ -3,7 +3,7 @@
 //! Each notice is one `usage_notices` row per org, month and threshold, so it is sent once.
 //! The owners get one email, for the highest threshold newly recorded.
 
-use llmobs_core::ids::OrgId;
+use cetra_core::ids::OrgId;
 
 use crate::api::entitlements::UsageNotice;
 use crate::auth::OrgRole;
@@ -172,10 +172,7 @@ mod tests {
         let sent = wait_for_sent(&app, 1).await;
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].to, "ada@example.com");
-        assert_eq!(
-            sent[0].subject,
-            "llmobs: Acme used 80% of its monthly units"
-        );
+        assert_eq!(sent[0].subject, "cetra: Acme used 80% of its monthly units");
         assert!(
             sent[0]
                 .text
@@ -195,7 +192,7 @@ mod tests {
         assert_eq!(sent.len(), 2);
         assert_eq!(
             sent[1].subject,
-            "llmobs: Acme used 100% of its monthly units"
+            "cetra: Acme used 100% of its monthly units"
         );
         assert!(sent[1].text.contains("reached its 100 monthly units"));
         assert_eq!(recorded_rows(&app).await, 2);
@@ -224,7 +221,7 @@ mod tests {
         assert_eq!(app.sent().len(), 1, "{sent:?}");
         assert_eq!(
             app.sent()[0].subject,
-            "llmobs: Acme used 100% of its monthly units"
+            "cetra: Acme used 100% of its monthly units"
         );
         assert_eq!(recorded_rows(&app).await, 2);
     }
@@ -320,7 +317,7 @@ mod tests {
             &serde_json::json!({"units_included": 100, "units_cap": 100}),
         );
         // A second org whose notice insert always fails.
-        let broken = llmobs_core::ids::OrgId::new_v7();
+        let broken = cetra_core::ids::OrgId::new_v7();
         app.state
             .meta
             .write(move |conn| {

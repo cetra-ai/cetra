@@ -74,7 +74,7 @@ export PATH=$HOME/.local/share/nvm/v26.13.0/bin:$PATH
 just check
 ```
 
-Focused runs: `cargo test -p llmobs-server datasets`, `cargo test -p llmobs-server --test openapi`, `cargo test -p llmobs-server --test api_examples`.
+Focused runs: `cargo test -p cetra-server datasets`, `cargo test -p cetra-server --test openapi`, `cargo test -p cetra-server --test api_examples`.
 
 ## Parallel work
 
@@ -404,7 +404,7 @@ Helper: `fn mapping(pairs: &[(&str, &str)]) -> ImportMapping`. Assert on `parsed
 
 ### Done when
 
-- `cargo test -p llmobs-server datasets::import` passes and `just check` is green (including `cargo deny`).
+- `cargo test -p cetra-server datasets::import` passes and `just check` is green (including `cargo deny`).
 - `git diff Cargo.toml` adds `csv` and `"multipart"` only.
 
 ---
@@ -668,7 +668,7 @@ Helpers (in the test module):
 fn multipart(file_name: &str, file: &[u8], mapping: Option<&str>) -> (String, Vec<u8>);  // (content type, body)
 ```
 
-Build it by hand: boundary `llmobs-test-boundary`; each part `--{b}\r\nContent-Disposition: form-data; name="file"; filename="{file_name}"\r\nContent-Type: application/octet-stream\r\n\r\n{bytes}\r\n`; the mapping part with `name="mapping"` and `Content-Type: application/json`; the end `--{b}--\r\n`. Content type `multipart/form-data; boundary=llmobs-test-boundary`.
+Build it by hand: boundary `cetra-test-boundary`; each part `--{b}\r\nContent-Disposition: form-data; name="file"; filename="{file_name}"\r\nContent-Type: application/octet-stream\r\n\r\n{bytes}\r\n`; the mapping part with `name="mapping"` and `Content-Type: application/json`; the end `--{b}--\r\n`. Content type `multipart/form-data; boundary=cetra-test-boundary`.
 
 Create the dataset with M1's route (`POST …/datasets`, `{"name": "faq"}`) or M1's test helper. Paths: `format!("/api/v1/projects/{}/datasets/faq/import?format=csv", seeded.project.id)`.
 
@@ -816,7 +816,7 @@ Read the streamed body with `TestResponse`'s body text (as the SQL export tests 
 
 **Commit subject:** `server: add dataset items from traces`
 
-Adds `POST …/datasets/{dataset}/items/from-trace` (D-J-8, D-J-9) and a public helper in `llmobs-eval` that names the trace root.
+Adds `POST …/datasets/{dataset}/items/from-trace` (D-J-8, D-J-9) and a public helper in `cetra-eval` that names the trace root.
 
 ### Read first
 
@@ -843,7 +843,7 @@ Adds `POST …/datasets/{dataset}/items/from-trace` (D-J-8, D-J-9) and a public 
 | `CHANGELOG.md` | `Added` lines for M2 |
 | `docs/roadmap.md` | J's status |
 
-### 1. `TraceData::root_span_id` (`llmobs-eval`)
+### 1. `TraceData::root_span_id` (`cetra-eval`)
 
 In `impl<'a> TraceData<'a>`:
 
@@ -859,7 +859,7 @@ pub fn root_span_id(&self) -> Option<SpanId> {
 
 Test in `resolve.rs` `mod tests`: `root_span_id_is_the_trace_root` — with the module's existing span builders, a parentless span and a child: the parentless span's id; an empty slice: `None`.
 
-Track J may add this public function to `llmobs-eval`: it adds no dependency between crates (the server already depends on `llmobs-eval`).
+Track J may add this public function to `cetra-eval`: it adds no dependency between crates (the server already depends on `cetra-eval`).
 
 ### 2. Type
 
@@ -989,7 +989,7 @@ Every test loads the example data: `app.load_example_dataset(seeded.project.id).
 ### Done when
 
 - The tests pass; `just check` is green.
-- `cargo test -p llmobs-eval root_span_id` passes.
+- `cargo test -p cetra-eval root_span_id` passes.
 - `openapi.json` has `post_dataset_item_from_trace`; the manifest lists it.
 - `CHANGELOG.md` and `docs/roadmap.md` are updated.
 

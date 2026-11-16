@@ -133,10 +133,10 @@ with
 
 ### 4. `AuthConfig.password_enabled` (`api/account.rs`)
 
-Replace its doc comment `/// Password login is enabled. False when \`LLMOBS_AUTH_DISABLE_PASSWORD\` is set.` with:
+Replace its doc comment `/// Password login is enabled. False when \`CETRA_AUTH_DISABLE_PASSWORD\` is set.` with:
 
 ```rust
-    /// Password login is enabled for everyone. False when `LLMOBS_AUTH_DISABLE_PASSWORD` is
+    /// Password login is enabled for everyone. False when `CETRA_AUTH_DISABLE_PASSWORD` is
     /// set; instance admins then still sign in with a password at `/login?password=1` (D-S-4).
 ```
 
@@ -159,8 +159,8 @@ Put them in the second test module (the one with `login_body` and `insert_accoun
 
 3. Replace `reset_is_forbidden_when_password_login_is_disabled` with `only_instance_admins_reset_a_password_when_password_login_is_off`:
    - A malformed token (`"nope"`) answers 400 with detail `invalid or expired link` (the token is checked before the account now).
-   - Issue a reset token for Ada (non-admin) the way the org SSO test does (`crate::auth::secret::new_opaque_token()`, then `crate::meta::password_resets::insert_reset(conn, &hash, ada, now, now + 3_600_000_000_000)` in `app.state.meta.write`). `POST /api/auth/password/reset` with it and `"new-llmobs-1"` answers 403 `forbidden`; Ada's login with `PASSWORD` still answers 403 (her password did not change, D-S-3).
-   - Issue a token for the admin the same way. The reset answers 204; the admin's login with `"new-llmobs-1"` answers 200, and with `PASSWORD` answers 401.
+   - Issue a reset token for Ada (non-admin) the way the org SSO test does (`crate::auth::secret::new_opaque_token()`, then `crate::meta::password_resets::insert_reset(conn, &hash, ada, now, now + 3_600_000_000_000)` in `app.state.meta.write`). `POST /api/auth/password/reset` with it and `"new-cetra-1"` answers 403 `forbidden`; Ada's login with `PASSWORD` still answers 403 (her password did not change, D-S-3).
+   - Issue a token for the admin the same way. The reset answers 204; the admin's login with `"new-cetra-1"` answers 200, and with `PASSWORD` answers 401.
 
 4. `forgot_password_is_forbidden_when_password_login_is_disabled` stays as it is (D-S-3). Add to it: after `make_instance_admin` on an inserted `root@example.com` account, `post_forgot(&app, "root@example.com")` also answers 403 and sends nothing.
 
@@ -192,7 +192,7 @@ and rename the test to `password_change_rejects_a_weak_password_and_a_disabled_l
 
 ### 7. Spec 08
 
-1. § Sign-up policy, the `LLMOBS_AUTH_DISABLE_PASSWORD` row's meaning becomes:
+1. § Sign-up policy, the `CETRA_AUTH_DISABLE_PASSWORD` row's meaning becomes:
 
    ```markdown
    Hide and refuse password login/sign-up (SSO only). Instance admins keep password login, password change and reset through a link, at `/login?password=1` (D-S-3, D-S-4); "forgot password", password sign-up, invite sign-up and setup stay refused for everyone. The CLI admin commands still work.
@@ -211,14 +211,14 @@ Under `## [Unreleased]` → `### Changed`, add:
 ```markdown
 - Auth: with `auth.disable_password = true`, instance admins can still sign in with their
   password at `/login?password=1`, change it, and set it from a reset link
-  (`llmobs admin reset-password`) (D-S-3).
+  (`cetra admin reset-password`) (D-S-3).
 ```
 
 ## Check
 
 ```bash
-cargo test -p llmobs-server routes::auth
-cargo test -p llmobs-server routes::me
+cargo test -p cetra-server routes::auth
+cargo test -p cetra-server routes::me
 just openapi
 just check
 ```

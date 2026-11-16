@@ -2,17 +2,17 @@
 //! payloads since track R M7 (R7.3).
 //!
 //! Ingest rate, the flush drain and compaction throughput, on local disk or on
-//! S3 (`LLMOBS_TEST_S3_ENDPOINT`, as `tests/s3.rs` reads it). The spans are the
+//! S3 (`CETRA_TEST_S3_ENDPOINT`, as `tests/s3.rs` reads it). The spans are the
 //! traces of `common::payload`: real oasst2 text (`just fetch-corpus`), with the
 //! structure of the captured fixtures. Run by hand in `--release`:
 //!
 //! ```bash
-//! LLMOBS_INGEST_BENCH_DIR=/path/to/empty/dir cargo test --release \
-//!   -p llmobs-storage --test ingest_bench -- --ignored --nocapture
+//! CETRA_INGEST_BENCH_DIR=/path/to/empty/dir cargo test --release \
+//!   -p cetra-storage --test ingest_bench -- --ignored --nocapture
 //! ```
 //!
-//! `LLMOBS_INGEST_BENCH_DIR` is emptied first. `LLMOBS_INGEST_BENCH_SECS`
-//! (default 60) is the ingest time and `LLMOBS_INGEST_BENCH_WRITERS` (default 8)
+//! `CETRA_INGEST_BENCH_DIR` is emptied first. `CETRA_INGEST_BENCH_SECS`
+//! (default 60) is the ingest time and `CETRA_INGEST_BENCH_WRITERS` (default 8)
 //! the number of appending tasks. With S3 the objects go under a fresh
 //! `ingest-bench-<uuidv7>` prefix, which is deleted at the end.
 //!
@@ -40,21 +40,21 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arrow::array::RecordBatch;
 use bytesize::ByteSize;
+use cetra_core::batch::spans_to_record_batch;
+use cetra_core::enums::SpanKind;
+use cetra_core::ids::{ProjectId, TraceId};
+use cetra_core::span::Span;
+use cetra_storage::config::{
+    CompactionConfig, FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
+};
+use cetra_storage::error::AppendError;
+use cetra_storage::{CompactionReport, Storage};
 use common::corpus::Corpus;
 use common::machine::{dir_bytes, machine};
 use common::parquet_stats::{Sizes, active_spans_files, column_sizes};
 use common::payload::{self, Payloads, span_payload_bytes};
 use common::rng::mix;
 use common::s3::S3Env;
-use llmobs_core::batch::spans_to_record_batch;
-use llmobs_core::enums::SpanKind;
-use llmobs_core::ids::{ProjectId, TraceId};
-use llmobs_core::span::Span;
-use llmobs_storage::config::{
-    CompactionConfig, FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
-};
-use llmobs_storage::error::AppendError;
-use llmobs_storage::{CompactionReport, Storage};
 
 const BATCH_SPANS: usize = 1_000;
 const HOUR_NS: i64 = 3_600 * 1_000_000_000;
@@ -261,15 +261,15 @@ async fn print_compression(dir: &Path, arrow_bytes: u64, when: &str) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[ignore = "run by hand: LLMOBS_INGEST_BENCH_DIR=<empty dir> cargo test --release --test ingest_bench -- --ignored --nocapture"]
+#[ignore = "run by hand: CETRA_INGEST_BENCH_DIR=<empty dir> cargo test --release --test ingest_bench -- --ignored --nocapture"]
 async fn ingest_benchmark() {
     let dir =
-        PathBuf::from(std::env::var("LLMOBS_INGEST_BENCH_DIR").expect("LLMOBS_INGEST_BENCH_DIR"));
-    let secs: u64 = std::env::var("LLMOBS_INGEST_BENCH_SECS")
+        PathBuf::from(std::env::var("CETRA_INGEST_BENCH_DIR").expect("CETRA_INGEST_BENCH_DIR"));
+    let secs: u64 = std::env::var("CETRA_INGEST_BENCH_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(60);
-    let writers: usize = std::env::var("LLMOBS_INGEST_BENCH_WRITERS")
+    let writers: usize = std::env::var("CETRA_INGEST_BENCH_WRITERS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(8);

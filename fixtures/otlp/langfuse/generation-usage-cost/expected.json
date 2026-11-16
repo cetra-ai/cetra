@@ -2,12 +2,12 @@
   "spans": [
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "ebfb55d6ad2563b827f75a448a9e5031",
-      "span_id": "1594771b40d5170b",
+      "trace_id": "92a416362586da65a20d34bf1d8ece4a",
+      "span_id": "3ade816607d3d14b",
       "name": "weather-generation",
       "span_kind": "llm",
       "start_time": "2025-12-31T23:59:50.000000000Z",
-      "end_time": "2025-12-31T23:59:50.054000000Z",
+      "end_time": "2025-12-31T23:59:50.060000000Z",
       "status": "unset",
       "service_name": "capture-app",
       "request_model": "gpt-4o-mini-2024-07-18",
@@ -20,7 +20,7 @@
       "cost_output": 2.0,
       "cost_total": 3.0,
       "cost_source": "reported",
-      "ttft_ns": 54000000,
+      "ttft_ns": 60000000,
       "request_params": "{\"max_tokens\":64,\"temperature\":0}",
       "input": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"What's the weather in Paris?\"}]}]",
       "input_format": "messages",
@@ -30,7 +30,7 @@
       "output_preview": "It is 18 °C and sunny in Paris.",
       "attributes": {
         "langfuse.internal.is_app_root": "true",
-        "langfuse.observation.completion_start_time": "\"2025-12-31T23:59:50.054000Z\"",
+        "langfuse.observation.completion_start_time": "\"2025-12-31T23:59:50.060000Z\"",
         "langfuse.observation.cost_details": "{\"input\": 1.0, \"output\": 2.0, \"total\": 3.0}",
         "langfuse.observation.model.name": "gpt-4o-mini-2024-07-18",
         "langfuse.observation.model.parameters": "{\"temperature\": 0, \"max_tokens\": 64}",

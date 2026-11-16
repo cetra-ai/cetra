@@ -44,13 +44,13 @@ M3's worker does the rest.
 
 ## Types
 
-`crates/server/src/api/deletions.rs` (`pub` items, like the other `api` modules, since `llmobs_server::api` is public and the example tests use it):
+`crates/server/src/api/deletions.rs` (`pub` items, like the other `api` modules, since `cetra_server::api` is public and the example tests use it):
 
 ```rust
 //! Deletion request and response types (spec 09 § Pricing & GDPR, D-M-2).
 
-use llmobs_core::ids::{OrgId, ProjectId};
-use llmobs_core::time_serde;
+use cetra_core::ids::{OrgId, ProjectId};
+use cetra_core::time_serde;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -359,7 +359,7 @@ async fn create_deletion(
    - `Filter { filter, search, from, to, include_eval, include_experiments }`:
      - `let window = TimeWindow::new(from.ns(), to.ns())?;`. The `RunError` becomes `400 bad_request` through `From<RunError>`;
      - `filter` and `search` are kept only when they hold a non-whitespace character: `.filter(|text| !text.trim().is_empty())`. The stored text is not trimmed;
-     - count: `let ctx = crate::routes::read::open_query(&state, access.project.id, None).await?;`, then `let ids = llmobs_storage::filter_trace_ids(&ctx, FilterDeletionRequest { filter: filter.as_deref(), search: search.as_deref(), window, include_eval, include_experiments, limit: state.deletions.filter_cap() + 1, timeout: READ_TIMEOUT }).await?;` (with `filter`/`search` already reduced to non-blank text). An invalid filter is `400 invalid_filter`, a timeout `422 query_timeout`, busy `503`. If `ids.len() > state.deletions.filter_cap()` → `Err(ApiError::TooManyTraces)`;
+     - count: `let ctx = crate::routes::read::open_query(&state, access.project.id, None).await?;`, then `let ids = cetra_storage::filter_trace_ids(&ctx, FilterDeletionRequest { filter: filter.as_deref(), search: search.as_deref(), window, include_eval, include_experiments, limit: state.deletions.filter_cap() + 1, timeout: READ_TIMEOUT }).await?;` (with `filter`/`search` already reduced to non-blank text). An invalid filter is `400 invalid_filter`, a timeout `422 query_timeout`, busy `503`. If `ids.len() > state.deletions.filter_cap()` → `Err(ApiError::TooManyTraces)`;
      - `request` sets `filter`, `search`, `from: Some(from.ns())`, `to: Some(to.ns())`, `include_eval: Some(include_eval)`, `include_experiments: Some(include_experiments)`.
    - `User { user_id }`: `1..=MAX_USER_ID_BYTES` bytes (`user_id.len()`), else `field_error("user_id", "user_id must be 1 to 255 bytes")`. `request` is the default.
 4. `let id = Uuid::now_v7(); let now = state.clock.now_ns();`. `store::NewDeletion { id, org_id: access.project.org_id, project_id: Some(access.project.id), kind, user_id /* Some for User only */, request, actor_kind, actor_id, state: store::DeletionState::Resolving, created_at: now }`.
@@ -467,7 +467,7 @@ Every file under `fixtures/api/static` must be listed in the manifest (`every_fi
 `crates/server/tests/api_examples.rs`:
 - in `static_files_match_their_types`, add `roundtrip::<Page<Deletion>>("static/deletions.json");`, `roundtrip::<Deletion>("static/deletion.json");`, `roundtrip::<DeletionPreview>("static/deletion-preview.json");`;
 - in `generated_files_roundtrip`'s `match`, add the arms `"list_deletions" => roundtrip::<Page<Deletion>>(&example.file)`, `"get_deletion" | "create_deletion" => roundtrip::<Deletion>(&example.file)`, `"preview_deletion" => roundtrip::<DeletionPreview>(&example.file)` (its catch-all panics on unknown operations);
-- add `use llmobs_server::api::deletions::{Deletion, DeletionPreview};`.
+- add `use cetra_server::api::deletions::{Deletion, DeletionPreview};`.
 
 Run `just api-examples` to regenerate `manifest.json`.
 

@@ -1,7 +1,7 @@
 //! `org_members` and `project_members` (spec 04).
 #![cfg_attr(not(test), allow(dead_code))]
 
-use llmobs_core::ids::{OrgId, ProjectId};
+use cetra_core::ids::{OrgId, ProjectId};
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 

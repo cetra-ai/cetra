@@ -1,4 +1,4 @@
-//! `llmobs login` and `llmobs logout` (spec 08, D140).
+//! `cetra login` and `cetra logout` (spec 08, D140).
 //!
 //! The callback server accepts two requests with a matching `state`. The first is the
 //! browser's form POST to `/callback`, whose body carries the `token`. The second is the
@@ -28,8 +28,8 @@ const HEAD_LIMIT: usize = 8192;
 /// The largest form body the callback accepts. A token form is far smaller.
 const BODY_LIMIT: usize = 8192;
 
-const PAGE: &str = "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>llmobs</title></head><body><p>You're signed in. Return to the terminal.</p></body></html>";
-const CANCELLED_PAGE: &str = "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>llmobs</title></head><body><p>Sign-in cancelled. You can close this window.</p></body></html>";
+const PAGE: &str = "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>cetra</title></head><body><p>You're signed in. Return to the terminal.</p></body></html>";
+const CANCELLED_PAGE: &str = "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>cetra</title></head><body><p>Sign-in cancelled. You can close this window.</p></body></html>";
 
 /// What one callback request means for the wait.
 #[derive(Debug, PartialEq)]
@@ -47,10 +47,10 @@ struct Head {
     content_length: Option<usize>,
 }
 
-/// `llmobs login`. `output` receives the browser URL, one line.
+/// `cetra login`. `output` receives the browser URL, one line.
 ///
 /// The token the browser creates expires after 90 days. When it does, run
-/// `llmobs login` again.
+/// `cetra login` again.
 ///
 /// # Errors
 ///
@@ -88,7 +88,7 @@ pub(crate) async fn login(
     Ok(())
 }
 
-/// `llmobs logout`. Removes the saved server even when the revoke call fails.
+/// `cetra logout`. Removes the saved server even when the revoke call fails.
 ///
 /// # Errors
 ///
@@ -151,7 +151,7 @@ fn new_state() -> anyhow::Result<String> {
 
 fn is_personal_token(token: &str) -> bool {
     let mut prefix = String::from("pat-");
-    prefix.push_str(llmobs_core::names::PRODUCT);
+    prefix.push_str(cetra_core::names::PRODUCT);
     prefix.push('-');
     let Some(tail) = token.strip_prefix(&prefix) else {
         return false;
@@ -489,7 +489,7 @@ mod tests {
     fn example_token() -> String {
         format!(
             "pat-{}-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0",
-            llmobs_core::names::PRODUCT
+            cetra_core::names::PRODUCT
         )
     }
 
@@ -522,11 +522,11 @@ mod tests {
     #[test]
     fn a_personal_token_has_the_pat_shape() {
         let tail = "EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0";
-        let token = format!("pat-{}-{tail}", llmobs_core::names::PRODUCT);
+        let token = format!("pat-{}-{tail}", cetra_core::names::PRODUCT);
         assert!(is_personal_token(&token));
         assert!(!is_personal_token(&format!(
             "sk-{}-{tail}",
-            llmobs_core::names::PRODUCT
+            cetra_core::names::PRODUCT
         )));
     }
 
@@ -557,7 +557,7 @@ mod tests {
     #[tokio::test]
     async fn login_refuses_a_url_with_credentials_before_printing() {
         let dir = tempfile::tempdir().unwrap();
-        let credentials = dir.path().join("llmobs").join("credentials.toml");
+        let credentials = dir.path().join("cetra").join("credentials.toml");
         let mut printed = Vec::new();
         let error = login("http://user:pw@h", true, &credentials, &mut printed)
             .await
@@ -737,7 +737,7 @@ mod tests {
     #[tokio::test]
     async fn login_saves_a_token_and_logout_revokes_it() {
         let dir = std::env::temp_dir().join(format!(
-            "llmobs-login-{}-{}",
+            "cetra-login-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -746,7 +746,7 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         let data = dir.join("data");
-        let config_path = dir.join("llmobs.toml");
+        let config_path = dir.join("cetra.toml");
         fs::write(
             &config_path,
             format!(
@@ -755,8 +755,8 @@ mod tests {
             ),
         )
         .unwrap();
-        let config = llmobs_server::config::ServerConfig::load(Some(&config_path)).unwrap();
-        let running = llmobs_server::serve::bind(config, None).await.unwrap();
+        let config = cetra_server::config::ServerConfig::load(Some(&config_path)).unwrap();
+        let running = cetra_server::serve::bind(config, None).await.unwrap();
         let server = format!("http://{}", running.local_addr);
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
@@ -784,7 +784,7 @@ mod tests {
             .0
             .to_owned();
 
-        let credentials = dir.join("llmobs").join("credentials.toml");
+        let credentials = dir.join("cetra").join("credentials.toml");
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let server_for_login = server.clone();
         let credentials_for_login = credentials.clone();

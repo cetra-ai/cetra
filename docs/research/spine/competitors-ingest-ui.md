@@ -125,7 +125,7 @@ Paths are relative to each repo: Phoenix = `/home/sebastien/github/phoenix`, Lam
 - Langfuse: a 512 MiB body limit, with comments about container OOM from parse amplification. OTLP logs sent to the traces URL cause 6 wasted worker attempts, so validation moved to the edge. Midnight-UTC out-of-order events cause duplicates, so ingestion delay is added around 23:45-00:15 (`processEventBatch.ts:55-62`). S3 throttling needed a special 503 + `Retry-After` path.
 - All three: none returns a real OTLP `partial_success` for a valid-but-rejected subset. Only Langfuse and Phoenix distinguish retryable vs fatal HTTP codes clearly (503 vs 4xx).
 
-## Takeaways for llmobs
+## Takeaways for cetra
 
 - Ack only after the WAL write (fsync policy per D-decision). This beats Phoenix (ack before decode) and matches Langfuse's "durable before 200". A local WAL gives Langfuse's guarantee without S3 + Redis.
 - Do decode and normalization before the ack, so malformed data gets a 4xx instead of silent loss. Phoenix's post-ack decode is the anti-pattern. Reject the whole batch with a clear message for structural errors (Langfuse's id validation, with a hint for logs sent to the traces URL).

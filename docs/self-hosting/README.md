@@ -1,6 +1,6 @@
-# Self-hosting llmobs
+# Self-hosting cetra
 
-llmobs is one binary, `llmobs`, that serves the web UI, the API, OTLP ingestion and MCP. It keeps
+cetra is one binary, `cetra`, that serves the web UI, the API, OTLP ingestion and MCP. It keeps
 its data in one directory (the WAL, `catalog.db`, `meta.db`, `secret.key`, and the Parquet files
 and media unless they go to an S3-compatible bucket). One process owns that directory: run exactly
 one instance per data directory.
@@ -30,5 +30,5 @@ Then:
 
 Licences: the core is MIT; the `ee` directories are under the Elastic License 2.0 and their
 features stay locked without a licence key (`LICENSE` in each archive and in
-`/usr/share/doc/llmobs/` of the image). Third-party licences are in `THIRD-PARTY-NOTICES.md`
+`/usr/share/doc/cetra/` of the image). Third-party licences are in `THIRD-PARTY-NOTICES.md`
 next to them.

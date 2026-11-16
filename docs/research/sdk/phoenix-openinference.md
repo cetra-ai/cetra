@@ -386,14 +386,14 @@ Python changelog: `phoenix/packages/phoenix-otel/CHANGELOG.md`. TS changelog: `p
 
 1. **One processor default: batch.** Make batching the default in both SDKs, with a simple/sync mode only for tests and notebooks. Do not repeat Phoenix's Python/TS split.
 2. **OTLP over HTTP + protobuf only, in both SDKs.** Do not infer gRPC from URL shape. Take one base URL and append `/v1/traces` when it is missing (canonicalize trailing slashes). Accept a full traces URL as-is.
-3. **Small, documented env chain.** `LLMOBS_ENDPOINT`, then `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (verbatim), then `OTEL_EXPORTER_OTLP_ENDPOINT` (+`/v1/traces`), then localhost. Log once, at info level, which source won. One name per setting, with no aliases (our no-compat rule).
-4. **Auth as a single `Authorization: Bearer sk-llmobs-…` header** built from `api_key` or `LLMOBS_API_KEY`. Explicit headers win case-insensitively. Never print header values; mask them like Phoenix's `****`.
-5. **Project as a resource attribute is a trap.** It forces one project per provider and leads to hacks like `dangerously_using_project`. Either derive the project from the API key server-side (a key is scoped to a project), or accept a per-span `llmobs.project` override. Decide this in the spec.
+3. **Small, documented env chain.** `CETRA_ENDPOINT`, then `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (verbatim), then `OTEL_EXPORTER_OTLP_ENDPOINT` (+`/v1/traces`), then localhost. Log once, at info level, which source won. One name per setting, with no aliases (our no-compat rule).
+4. **Auth as a single `Authorization: Bearer sk-cetra-…` header** built from `api_key` or `CETRA_API_KEY`. Explicit headers win case-insensitively. Never print header values; mask them like Phoenix's `****`.
+5. **Project as a resource attribute is a trap.** It forces one project per provider and leads to hacks like `dangerously_using_project`. Either derive the project from the API key server-side (a key is scoped to a project), or accept a per-span `cetra.project` override. Decide this in the spec.
 6. **Global registration.** Python: set the global provider only when none is set, and warn clearly when one exists. TS: never `disable()` the user's globals by default. Document "add our processor to your provider" as the first-class coexistence path, using our own processor class, not a private-field hack.
 7. **Don't touch SDK private internals.** No banner introspection or editing of `_span_processors`. Keep a reference to our own processor instead. Phoenix broke three times on this.
 8. **Raise the attribute count limit to about 10k on our provider, in both languages**, unless the user set OTel limits. Flattened messages overflow 128. Verify that the TS default really drops attributes and fix it there too.
 9. **Context attributes via OTel context values, applied by a span processor's `on_start`**, not only by a tracer wrapper. That way `session.id`, `user.id`, tags and metadata land on *every* span, including spans from third-party OTel instrumentors. This closes Phoenix's main gap. Make the context managers decorator-capable, including (async) generators with a rolling context.
-10. **Metadata as typed attributes, not one JSON string.** Prefer `llmobs.metadata.<key>` scalars, and merge nested scopes instead of replacing them. Tags are a string array.
+10. **Metadata as typed attributes, not one JSON string.** Prefer `cetra.metadata.<key>` scalars, and merge nested scopes instead of replacing them. Tags are a string array.
 11. **Decorators.**
     - Bind the signature, apply defaults and exclude `self`/`cls`.
     - Choose one rule for single arguments (Phoenix unwraps for chain but not for tool or llm, which is inconsistent) and use it everywhere.
@@ -402,7 +402,7 @@ Python changelog: `phoenix/packages/phoenix-otel/CHANGELOG.md`. TS changelog: `p
     - Always set ERROR status and record the exception.
     - Output set manually inside the body wins.
 12. **Resolve the tracer at call time** in TS wrappers and Python decorators, so module-level decorated functions follow provider changes and test providers.
-13. **Masking in the SDK, before the sampler and before export.** Use typed config with env overrides (`LLMOBS_HIDE_INPUTS`/`OUTPUTS`/`MESSAGES`…). Use lazy values so redacted payloads are never serialized. Use a single redaction token. Logs never contain payloads (our privacy rule).
+13. **Masking in the SDK, before the sampler and before export.** Use typed config with env overrides (`CETRA_HIDE_INPUTS`/`OUTPUTS`/`MESSAGES`…). Use lazy values so redacted payloads are never serialized. Use a single redaction token. Logs never contain payloads (our privacy rule).
 14. **Size controls.** Cap base64 media inline (about 32k characters) and offload or redact larger media. Our server already handles media (spec 02); decide whether the SDK strips or forwards it. Add an optional per-attribute length cap (`OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT` respected) so a single huge prompt cannot blow the OTLP request limit.
 15. **Scores over REST, asynchronous by default, with server-side retry until the span arrives.** Keep a sync option that returns IDs and reports a missing span. Use an upsert key `(name, span_id, identifier)`. Reference spans by hex span ID, and also by trace ID to avoid cross-trace ambiguity. Provide a `capture_span_context`-style helper to get the IDs of auto-instrumented spans.
 16. **Ship a cryptographic ID generator** that `random.seed` cannot influence. The convention is UUIDv7 for entities; OTel trace and span IDs stay random.
@@ -412,4 +412,4 @@ Python changelog: `phoenix/packages/phoenix-otel/CHANGELOG.md`. TS changelog: `p
     - Avoid ESM-only hard dependencies in a dual package.
 18. **Optional auto-instrumentation via entry-point discovery** in Python, with an allow-list and per-instrumentor failure isolation (a log line, not a crash). Rely on `BaseInstrumentor`'s singleton for idempotence.
 19. **Testing.** Expose a test helper: a provider plus an in-memory exporter fixture for users. Golden-test our SDK output against the shared `fixtures/otlp/` files so the SDK and server normalization agree on keys.
-20. **Prefer OpenInference attribute names on the wire, or translate them at ingest.** Phoenix translates Vercel AI SDK spans client-side in a span processor; we normalize server-side (spec 02), so our SDK stays thin. Only our own `llmobs.*` additions are new.
+20. **Prefer OpenInference attribute names on the wire, or translate them at ingest.** Phoenix translates Vercel AI SDK spans client-side in a span processor; we normalize server-side (spec 02), so our SDK stays thin. Only our own `cetra.*` additions are new.

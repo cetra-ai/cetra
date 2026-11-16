@@ -5,8 +5,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use cetra_core::ids::ProjectId;
 use chrono::NaiveDate;
-use llmobs_core::ids::ProjectId;
 
 /// Storage-side project state readers and jobs need: retention watermarks
 /// (spec 03 §8) and dropped projects (spec 03 §7).

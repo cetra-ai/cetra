@@ -23,13 +23,13 @@ Storage already does the work (spec 03 § 8): it obsoletes whole days before the
 ## Read first
 
 - `docs/spec/03-storage.md` § 8.
-- `llmobs_storage::Storage::apply_retention(project, keep_from: NaiveDate) -> Result<RetentionReport, StorageError>` and `RetentionReport { files, bytes, keep_from }`.
+- `cetra_storage::Storage::apply_retention(project, keep_from: NaiveDate) -> Result<RetentionReport, StorageError>` and `RetentionReport { files, bytes, keep_from }`.
 - `crates/server/src/routes/projects.rs`: `create_project`, `update_project`, `checked_retention`, `ProjectPatch`.
 - `crates/server/src/meta/projects.rs`: `project_row` (which checks `1..=36_500` inline) and `encode_retention`.
 - `crates/server/src/auth/principal.rs`: `session_user`.
 - `crates/server/src/serve.rs`: the `tasks` list (after M3 it holds `spawn_deletions` before `spawn_usage`).
 - `crates/server/src/test_support/mod.rs`: `add_project(seeded, slug, retention_days)`, `commit_spans`, `dataset_span`, `capture_logs`, the manual clock (`2026-01-01T00:00:00Z`).
-- `chrono` 0.4 is already a dependency of `llmobs-server`.
+- `chrono` 0.4 is already a dependency of `cetra-server`.
 
 ## Code
 
@@ -41,7 +41,7 @@ Storage already does the work (spec 03 § 8): it obsoletes whole days before the
 use std::time::Duration;
 
 use chrono::{DateTime, Days, NaiveDate};
-use llmobs_core::ids::ProjectId;
+use cetra_core::ids::ProjectId;
 
 use crate::http::AppState;
 use crate::meta::MetaError;
@@ -173,7 +173,7 @@ const RETENTION_PLAN: &str = "data retention management is part of the Pro plan"
 
 - `create_project`: when `body.retention_days` is a number and `!may_manage_retention(&state, access.org.id)` → `Err(ApiError::PlanRequired { detail: RETENTION_PLAN })`, before the write.
 - `update_project`: when `body.retention_days` is `Some(Some(_))` (a number) and `!may_manage_retention(&state, access.project.org_id)` → the same, before the write. `null` ("keep forever") is never gated (D-M-16).
-- `routes/projects.rs` needs `use llmobs_core::ids::OrgId;` at the top (today only its test module imports it).
+- `routes/projects.rs` needs `use cetra_core::ids::OrgId;` at the top (today only its test module imports it).
 
 The `false` branch cannot be reached until P changes the body; it is tested through `ApiError::PlanRequired`'s mapping (test 9).
 

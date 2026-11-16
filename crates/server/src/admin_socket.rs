@@ -1,8 +1,8 @@
-//! The local control socket of `llmobs serve` (N M2, D-N-17).
+//! The local control socket of `cetra serve` (N M2, D-N-17).
 //!
 //! `<data_dir>/admin.sock` answers one request per connection: the client writes
 //! one JSON line and reads one JSON line back, then the server closes the
-//! connection. `llmobs admin backup` is the only client in M2.
+//! connection. `cetra admin backup` is the only client in M2.
 //!
 //! The socket is bound as `admin.tmp`, made `0600`, then renamed, so it never
 //! exists under its real name with a wider mode. A connecting process is accepted

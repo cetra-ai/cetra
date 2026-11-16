@@ -52,7 +52,7 @@ async function settlesAt(router: AppRouter, pathname: string) {
   });
 }
 
-const CLOUD = { id: "oidc:cloud", display_name: "llmobs Cloud" };
+const CLOUD = { id: "oidc:cloud", display_name: "cetra Cloud" };
 
 function onlyCloud(overrides: Partial<typeof authConfig> = {}) {
   withConfig({ password_enabled: false, providers: [CLOUD], ...overrides });
@@ -500,14 +500,14 @@ it("starts the only provider at once, keeping the redirect", async () => {
   onlyCloud();
   const { replaced, navigated } = recordNavigation();
   const { router } = await renderApp("/login?redirect=%2Facme%2Fsupport-bot%2Ftraces");
-  expect(await screen.findByText("Redirecting to llmobs Cloud…")).toBeInTheDocument();
+  expect(await screen.findByText("Redirecting to cetra Cloud…")).toBeInTheDocument();
   await waitFor(() =>
     expect(replaced).toEqual([
       "/api/auth/authorize/oidc%3Acloud?redirect=%2Facme%2Fsupport-bot%2Ftraces",
     ]),
   );
   expect(navigated).toEqual([]);
-  expect(screen.getByRole("link", { name: "Continue with llmobs Cloud" })).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Continue with cetra Cloud" })).toBeInTheDocument();
   expect(screen.queryByLabelText("Email")).toBeNull();
   expect(router.state.location.pathname).toBe("/login");
 });
@@ -534,7 +534,7 @@ it("shows a provider error instead of starting the provider again", async () => 
   const { replaced } = recordNavigation();
   await renderApp("/login?error=signup_closed");
   expect(await screen.findByRole("alert")).toHaveTextContent(oauthErrorMessage("signup_closed"));
-  expect(screen.getByRole("link", { name: "Continue with llmobs Cloud" })).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Continue with cetra Cloud" })).toBeInTheDocument();
   expect(replaced).toEqual([]);
 });
 
@@ -544,7 +544,7 @@ it("does not start the provider right after signing out", async () => {
   const { replaced } = recordNavigation();
   await renderApp("/login?signed_out=1");
   expect(await screen.findByRole("status")).toHaveTextContent("You're signed out.");
-  expect(screen.getByRole("link", { name: "Continue with llmobs Cloud" })).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Continue with cetra Cloud" })).toBeInTheDocument();
   expect(replaced).toEqual([]);
 });
 

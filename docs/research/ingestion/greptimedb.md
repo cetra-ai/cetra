@@ -1,4 +1,4 @@
-# GreptimeDB OTLP trace ingestion — research notes for llmobs B1 (`llmobs-otel`, spec 02)
+# GreptimeDB OTLP trace ingestion — research notes for cetra B1 (`cetra-otel`, spec 02)
 
 Repo: `/home/sebastien/travaux/greptimedb`. Local checkout HEAD `edbcb8224` (2026-09-21). Code citations are from that checkout, with paths relative to `src/` unless they start with `tests-integration/` or `Cargo.toml`. History comes from `gh search issues/commits --repo GreptimeTeam/greptimedb`. The GitHub API rate limit cut the commit search short, so the commit list in §9 is partial.
 
@@ -96,12 +96,12 @@ Vocabulary: a *pipeline* (`PipelineWay`) selects the storage shape. For traces, 
 - Bugs still present at HEAD (my reading, not filed as far as I found): the v0 `u64` underflow (`v0.rs:113`); the v1 unchecked `u64 as i64` (`v1.rs:368`); no ID validation (`span.rs:217-224`); a 400 body with `code: 0` (`http/otlp.rs:364`); three different bytes encodings (§2); and the README/v2 events disagreement (§2).
 - TODOs: events, links and link attributes should become "Map/List in the future" (`span.rs:48-49, 73, 147`). v2 events wait on `ARRAY(JSON2)` (`README.md:89`).
 
-## 10. Recommendations for llmobs B1
+## 10. Recommendations for cetra B1
 
 **Adopt**
 - **Upstream `opentelemetry-proto` prost types as the input contract**, not a hand-written model. Our `normalize(resource, scope, span, settings)` should take `&Resource`, `&InstrumentationScope` and `&Span` from that crate. GreptimeDB has had no decode bugs on protobuf.
 - **Share resource and scope data per group, and borrow per span.** GreptimeDB had to add `Arc` sharing later (#9253). With a pure function taking references, we get that by design. Precompute resource-derived fields (`service_name`, `environment`, `release`) once per `ResourceSpans`.
-- **Partial success from the start**, rejecting per span and never per batch (#7875). Rejection reasons should be a closed enum (`InvalidTraceId`, `InvalidSpanId`, …) returned by `llmobs-otel`. The handler crate turns them into a **bounded and deduplicated** message: at most N distinct entries, a count per reason, a "+K suppressed" tail, and no attribute values in it. That matches our privacy rule, which is stricter than GreptimeDB's 16-char excerpts.
+- **Partial success from the start**, rejecting per span and never per batch (#7875). Rejection reasons should be a closed enum (`InvalidTraceId`, `InvalidSpanId`, …) returned by `cetra-otel`. The handler crate turns them into a **bounded and deduplicated** message: at most N distinct entries, a count per reason, a "+K suppressed" tail, and no attribute values in it. That matches our privacy rule, which is stricter than GreptimeDB's 16-char excerpts.
 - **Saturating duration math and an explicit timestamp policy.** Clamp `end < start` to a duration of 0 (do not reject), and return an error instead of wrapping on `u64 > i64::MAX`. Add a fixture for each case.
 - **A decompressed-size limit enforced while reading the body** (GreptimeDB gets this from axum's `DefaultBodyLimit` after `RequestDecompressionLayer`). This belongs in the server crate, but the spec 02 413 rule depends on it.
 - **A CI ingest benchmark** that tracks spans/s and rejection counters (#8631), once B1 is done.

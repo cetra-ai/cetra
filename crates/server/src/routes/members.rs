@@ -283,7 +283,7 @@ fn may_remove_other(actor: OrgRole, target: OrgRole) -> bool {
 
 async fn find_member(
     state: &AppState,
-    org_id: llmobs_core::ids::OrgId,
+    org_id: cetra_core::ids::OrgId,
     user: Uuid,
 ) -> Result<MemberRow, ApiError> {
     let members = members::org_members(state.meta.reader(), org_id).await?;
@@ -345,7 +345,7 @@ fn forbidden() -> ApiError {
 #[cfg(test)]
 mod tests {
     use axum::http::{Method, header};
-    use llmobs_core::ids::OrgId;
+    use cetra_core::ids::OrgId;
     use serde_json::Value;
 
     use super::*;

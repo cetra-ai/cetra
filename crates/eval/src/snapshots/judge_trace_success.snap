@@ -12,13 +12,13 @@ expression: "&normalized.spans"
     "start_time": "2025-12-31T23:59:58.500000000Z",
     "end_time": "2026-01-01T00:00:00.000000000Z",
     "status": "unset",
-    "service_name": "llmobs-eval",
-    "environment": "llmobs-eval",
+    "service_name": "cetra-eval",
+    "environment": "cetra-eval",
     "metadata": {
-      "llmobs.eval.evaluator_id": "01900000-0000-7000-8000-000000000010",
-      "llmobs.eval.rule_id": "01900000-0000-7000-8000-000000000020",
-      "llmobs.eval.target_span_id": "00f067aa0ba902b7",
-      "llmobs.eval.target_trace_id": "4bf92f3577b34da6a3ce929d0e0e4736"
+      "cetra.eval.evaluator_id": "01900000-0000-7000-8000-000000000010",
+      "cetra.eval.rule_id": "01900000-0000-7000-8000-000000000020",
+      "cetra.eval.target_span_id": "00f067aa0ba902b7",
+      "cetra.eval.target_trace_id": "4bf92f3577b34da6a3ce929d0e0e4736"
     },
     "input": "{\"output\":\"hello\"}",
     "input_format": "json",
@@ -27,17 +27,17 @@ expression: "&normalized.spans"
     "input_preview": "{\"output\":\"hello\"}",
     "output_preview": "{\"value\":0.8,\"reason\":\"clear\"}",
     "attributes": {
-      "llmobs.environment": "llmobs-eval",
-      "llmobs.metadata.llmobs.eval.evaluator_id": "01900000-0000-7000-8000-000000000010",
-      "llmobs.metadata.llmobs.eval.rule_id": "01900000-0000-7000-8000-000000000020",
-      "llmobs.metadata.llmobs.eval.target_span_id": "00f067aa0ba902b7",
-      "llmobs.metadata.llmobs.eval.target_trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
-      "llmobs.span.kind": "evaluator"
+      "cetra.environment": "cetra-eval",
+      "cetra.metadata.cetra.eval.evaluator_id": "01900000-0000-7000-8000-000000000010",
+      "cetra.metadata.cetra.eval.rule_id": "01900000-0000-7000-8000-000000000020",
+      "cetra.metadata.cetra.eval.target_span_id": "00f067aa0ba902b7",
+      "cetra.metadata.cetra.eval.target_trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "cetra.span.kind": "evaluator"
     },
-    "scope_name": "llmobs-eval",
+    "scope_name": "cetra-eval",
     "scope_version": "0.0.0",
     "conventions": [
-      "llmobs"
+      "cetra"
     ],
     "ingest_time": "2026-01-01T00:00:00.000000000Z",
     "schema_version": 1
@@ -52,8 +52,8 @@ expression: "&normalized.spans"
     "start_time": "2025-12-31T23:59:58.500000000Z",
     "end_time": "2026-01-01T00:00:00.000000000Z",
     "status": "unset",
-    "service_name": "llmobs-eval",
-    "environment": "llmobs-eval",
+    "service_name": "cetra-eval",
+    "environment": "cetra-eval",
     "provider": "openai",
     "request_model": "gpt-4o",
     "response_model": "gpt-4o",
@@ -75,6 +75,8 @@ expression: "&normalized.spans"
     "input_preview": "Grade the answer.",
     "output_preview": "0.8",
     "attributes": {
+      "cetra.environment": "cetra-eval",
+      "cetra.span.kind": "llm",
       "gen_ai.operation.name": "chat",
       "gen_ai.provider.name": "openai",
       "gen_ai.request.model": "gpt-4o",
@@ -83,14 +85,12 @@ expression: "&normalized.spans"
       "gen_ai.usage.cache_write.input_tokens": "0",
       "gen_ai.usage.input_tokens": "1000",
       "gen_ai.usage.output_tokens": "100",
-      "gen_ai.usage.reasoning.output_tokens": "0",
-      "llmobs.environment": "llmobs-eval",
-      "llmobs.span.kind": "llm"
+      "gen_ai.usage.reasoning.output_tokens": "0"
     },
-    "scope_name": "llmobs-eval",
+    "scope_name": "cetra-eval",
     "scope_version": "0.0.0",
     "conventions": [
-      "llmobs",
+      "cetra",
       "genai"
     ],
     "ingest_time": "2026-01-01T00:00:00.000000000Z",

@@ -15,10 +15,10 @@ Alerts are core (MIT), not `ee/` code: the Free plan includes one alert rule (D1
 **Track I's M1** (`docs/plans/i-online-eval/01-m1-secrets-connections.md`) is merged on `main`. K uses what it added:
 - `crates/server/src/crypto.rs`: `SecretBox` (`seal`, `open`), `Aad { table, column, row_id }`, `CryptoError`, and `ENCRYPTED_COLUMNS` with its test `encrypted_columns_cover_the_schema`;
 - `AppInner.secrets: crate::crypto::SecretBox`;
-- the `llmobs-eval` dependency in `crates/server/Cargo.toml`, and `config.security.allow_private_network_egress`;
+- the `cetra-eval` dependency in `crates/server/Cargo.toml`, and `config.security.allow_private_network_egress`;
 - `crate::test_support::TestApp::with_config`.
 
-- `AppInner.eval_runner: Arc<llmobs_eval::EvalRunner>`, built from that policy (also in `TestApp`).
+- `AppInner.eval_runner: Arc<cetra_eval::EvalRunner>`, built from that policy (also in `TestApp`).
 
 K4 still checks that `crates/server/src/crypto.rs` has `pub(crate) struct SecretBox` and `pub(crate) const ENCRYPTED_COLUMNS`, and stops otherwise.
 
@@ -35,14 +35,14 @@ K4 still checks that `crates/server/src/crypto.rs` has `pub(crate) struct Secret
 | File | Sub-phase |
 |---|---|
 | [01-storage-read.md](01-storage-read.md) | K1 `alert_value` and `check_alert_filter`: one storage read per evaluation |
-| [02-egress.md](02-egress.md) | K2 public egress client and payload signature in `llmobs-eval` |
+| [02-egress.md](02-egress.md) | K2 public egress client and payload signature in `cetra-eval` |
 | [03-types.md](03-types.md) | K3 condition and channel config types, with validation |
 | [04-store.md](04-store.md) | K4 migration, `meta::alerts` store, `ProjectPerm::ManageAlerts`, sealed channel config |
 | [05-channels-api.md](05-channels-api.md) | K5 channel routes, OpenAPI, fixtures |
 | [06-rules-api.md](06-rules-api.md) | K6 rule routes, event history, the plan limit check, OpenAPI, fixtures |
 | [07-evaluate.md](07-evaluate.md) | K7 the evaluation step and the state machine (manual clock) |
 | [08-deliver.md](08-deliver.md) | K8 messages, delivery with retries, test send, pruning |
-| [09-wiring.md](09-wiring.md) | K9 background loops in `llmobs serve`, end-to-end test |
+| [09-wiring.md](09-wiring.md) | K9 background loops in `cetra serve`, end-to-end test |
 | [10-web-channels.md](10-web-channels.md) | K10 API helpers and the Channels settings page |
 | [11-web-alerts.md](11-web-alerts.md) | K11 Alerts nav entry, rules list, rule detail with history |
 | [12-web-editor.md](12-web-editor.md) | K12 rule editor with the preview chart, dev write mocks, closeout |
@@ -92,7 +92,7 @@ every 10 s: deliver_once(state, now)
 every hour: prune_once(state, now): events older than 90 days, finished deliveries older than 30 days
 ```
 
-Slack and the webhook go through `llmobs_eval::EgressClient` (K2, lent by `state.eval_runner.egress()`), the SSRF-guarded client. Email goes through `crate::email::Mailer` with a new `alert` template. Delivery is at least once: a crash between the send and the status write sends again. The webhook carries `X-Llmobs-Delivery: <delivery id>` so a receiver can drop duplicates.
+Slack and the webhook go through `cetra_eval::EgressClient` (K2, lent by `state.eval_runner.egress()`), the SSRF-guarded client. Email goes through `crate::email::Mailer` with a new `alert` template. Delivery is at least once: a crash between the send and the status write sends again. The webhook carries `X-Cetra-Delivery: <delivery id>` so a receiver can drop duplicates.
 
 ### Modules (end state)
 
@@ -136,10 +136,10 @@ The user settled these on 2026-11-14. They are written in `docs/mvp-decisions.md
 | D-K-5 | **Channels are per project**, as spec 04. A rule may use only its own project's channels; deleting a channel removes it from every rule. Limits: 20 channels and 100 rules per project, 10 channels per rule. Names are 1–100 characters, unique per project among channels and among rules. (User's choice.) |
 | D-K-6 | **Channel configs are sealed and write-only.** `slack`: `{url}`, an `https` URL. `webhook`: `{url, secret, headers}`, an `http` or `https` URL, a signing secret of 16–256 characters (required, unlike spec 07's optional one), at most 10 extra headers. `email`: `{recipients}`, 1–20 addresses. The whole JSON is sealed in `config_enc`. Responses show `target_hint` and never the URL path, the secret or header values: Slack `hooks.slack.com/…/abcd` (host, then `/…/` and the URL's last 4 characters), webhook the host with its port when present, email the first address plus ` +N` for the others. Email recipients are returned in full to project members (`recipients`); webhook responses list `header_names`. A PATCH may change the name and the config fields; `kind` is immutable; an absent field keeps its value. |
 | D-K-7 | **Delivery.** Each (event, channel) is a `notification_deliveries` row, sent by a loop every 10 s, at most 4 at once, 10 s timeout per send. Retryable failures (timeouts, connection errors, HTTP 408, 429 and 5xx, SMTP connection, TLS and authentication failures) wait `min(30 s · 2^(attempts−1), 1 h)` and give up after 8 attempts. Permanent failures (address denied by the egress guard, other 4xx, a bad address, email without SMTP, a config that no longer opens) fail at once. A channel is never disabled automatically; the UI shows its last finished delivery (status, time, error), and "Send test" sends one message synchronously and shows the result. An email delivery sends one message per recipient; a retry sends to every recipient again. (User's choice.) |
-| D-K-8 | **Messages.** Slack gets a Block Kit message; the webhook gets spec 07's JSON (amended: `event_id`, `count`, `window_from`, `window_to`, `rule_url`, no `group`), signed like the webhook evaluator (`X-Llmobs-Signature: t=<unix>,v1=<hex>`), plus `X-Llmobs-Delivery`; email uses the new `alert` template. All carry two links from `public_url`: the rule page `/<org>/<project>/alerts/<rule id>` and the trace list over the event's window with the rule's filter. |
+| D-K-8 | **Messages.** Slack gets a Block Kit message; the webhook gets spec 07's JSON (amended: `event_id`, `count`, `window_from`, `window_to`, `rule_url`, no `group`), signed like the webhook evaluator (`X-Cetra-Signature: t=<unix>,v1=<hex>`), plus `X-Cetra-Delivery`; email uses the new `alert` template. All carry two links from `public_url`: the rule page `/<org>/<project>/alerts/<rule id>` and the trace list over the event's window with the rule's filter. |
 | D-K-9 | **Permissions.** A new `ProjectPerm::ManageAlerts`: role `member`, API keys cannot use it, not session-only (spec 08). Reads (`GET` rules, events, channels) use `ProjectPerm::View`. "Send test" needs `ManageAlerts`. (User's choice.) |
 | D-K-10 | **History retention.** An hourly prune deletes events older than 90 days (their deliveries go with them) and `sent`/`failed` deliveries older than 30 days. This replaces spec 03's "alert events are kept". (User's choice.) |
-| D-K-11 | **Two additions outside `crates/server`.** `llmobs-storage` gets `alert_value`, one aggregate query per evaluation, because the dashboard `metrics` read runs nine collects and has no sample count. `llmobs-eval` makes its egress client public (`EgressClient`, lent by `EvalRunner::egress`) and exposes `sign_payload`, so alert deliveries share the SSRF guard and the signature format. (User's choice.) |
+| D-K-11 | **Two additions outside `crates/server`.** `cetra-storage` gets `alert_value`, one aggregate query per evaluation, because the dashboard `metrics` read runs nine collects and has no sample count. `cetra-eval` makes its egress client public (`EgressClient`, lent by `EvalRunner::egress`) and exposes `sign_payload`, so alert deliveries share the SSRF guard and the signature format. (User's choice.) |
 | D-K-12 | **No online-judge pause alerts.** Spec 07's built-in pseudo-alert for paused judge rules is dropped from K; track I shows pauses as banners (D-I-14). |
 | D-K-13 | **The rule editor previews over buckets as wide as the window.** It calls `GET /metrics` with `bucket` equal to the rule's window (`24h` uses `1d`), over 24 h for windows up to 1 h, 3 days for `6h`, and 14 days for `24h`, and draws the threshold as a horizontal line. `latency_p95` with `target: llm_span` has no preview (the dashboard splits it by model). |
 | D-K-14 | **One plan-limit check for alert rules (D178).** Creating an enabled rule, and re-enabling a disabled one, call `alerts::quota::check_rule_quota(count_enabled_org_rules(org), alerts::quota::rule_limit(state, org))`. Over the limit is `403` with the new problem code `plan_limit` and a detail naming the limit ("Your plan allows 1 enabled alert rule."); the UI shows it with an upgrade line. Only enabled rules of active projects count: on purpose, so an org at its limit can keep disabled rules (D178 says "1 alert rule"; K reads it as one enabled rule). Existing rules are never disabled by K. `rule_limit` returns `None` (no limit) (`Option<u64>`) until track P's M4 replaces its body with `entitlements::of(state, org_id).limits.max_alert_rules` (D179); it is the only code P changes for alerts. The count is read before the write, so two concurrent creates can end one rule over; accepted. |
@@ -154,7 +154,7 @@ The user settled these on 2026-11-14. They are written in `docs/mvp-decisions.md
 
 ## Conventions
 
-- **Time**: `i64` nanoseconds in Rust and `meta.db`; RFC 3339 strings with 9 fractional digits in JSON (`llmobs_core::time_serde`, as the existing API types).
+- **Time**: `i64` nanoseconds in Rust and `meta.db`; RFC 3339 strings with 9 fractional digits in JSON (`cetra_core::time_serde`, as the existing API types).
 - **IDs**: rules, channels, events and deliveries are UUIDv7 (`Uuid::now_v7()`), stored as `TEXT` like every other `meta.db` id.
 - **Errors**: problem+json through `crate::http::error::ApiError`. Field errors name the JSON field path, e.g. `condition.threshold`.
 - **Privacy**: logs carry rule, channel, event and delivery ids, the channel kind, attempt numbers and error classes. Never a URL, a header value, a secret, an email address, a rule name or a filter (AGENTS.md § Privacy).
@@ -171,7 +171,7 @@ export PATH=$HOME/.local/share/nvm/v26.13.0/bin:$PATH
 just check
 ```
 
-`just check` must pass before every commit. When a sub-phase changes the API contract, run `just openapi` first and commit `crates/server/openapi.json` and `web/src/api/schema.gen.ts`. Focused runs while working: `cargo test -p llmobs-storage alert`, `cargo test -p llmobs-eval egress`, `cargo test -p llmobs-server alerts`, `pnpm --dir web test -- alerts`.
+`just check` must pass before every commit. When a sub-phase changes the API contract, run `just openapi` first and commit `crates/server/openapi.json` and `web/src/api/schema.gen.ts`. Focused runs while working: `cargo test -p cetra-storage alert`, `cargo test -p cetra-eval egress`, `cargo test -p cetra-server alerts`, `pnpm --dir web test -- alerts`.
 
 ## Report
 

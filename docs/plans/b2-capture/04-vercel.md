@@ -50,9 +50,9 @@ See [README.md](README.md) and the common rules in [03-genai-openinference.md](0
   - `setup()` registers a `NodeTracerProvider` globally, with one `SimpleSpanProcessor(new OTLPTraceExporter())`. The exporter reads the environment set by the runner.
   - `finish()`:
     - force-flushes and shuts down the provider;
-    - for each name in `LLMOBS_CAPTURE_LIBRARIES`, reads `node_modules/<aliases[name] ?? name>/package.json`;
+    - for each name in `CETRA_CAPTURE_LIBRARIES`, reads `node_modules/<aliases[name] ?? name>/package.json`;
     - checks that its `name` field equals the library name;
-    - writes `{"libraries": {name: version}}` to `LLMOBS_CAPTURE_META`.
+    - writes `{"libraries": {name: version}}` to `CETRA_CAPTURE_META`.
 
     So `scenario.json` lists real package names (`ai`, `@ai-sdk/openai`), and the program passes `{ai: "ai-v5", "@ai-sdk/openai": "@ai-sdk/openai-v5"}`.
 

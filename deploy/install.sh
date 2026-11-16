@@ -1,18 +1,18 @@
 #!/bin/sh
-# Installs the llmobs binary from a GitHub release (D-N-15):
-#   curl -fsSL https://github.com/sebastiencs/llmobs/releases/latest/download/install.sh | sh
+# Installs the cetra binary from a GitHub release (D-N-15):
+#   curl -fsSL https://github.com/cetra-ai/cetra/releases/latest/download/install.sh | sh
 #
 # Environment:
-#   LLMOBS_VERSION        version to install, e.g. 0.1.0 (default: the latest release)
-#   LLMOBS_INSTALL_DIR    where to put `llmobs` (default: $HOME/.local/bin)
-#   LLMOBS_DOWNLOAD_BASE  base URL of the release files (default: the GitHub release of
-#                         LLMOBS_VERSION); tests point it at a local server
+#   CETRA_VERSION        version to install, e.g. 0.1.0 (default: the latest release)
+#   CETRA_INSTALL_DIR    where to put `cetra` (default: $HOME/.local/bin)
+#   CETRA_DOWNLOAD_BASE  base URL of the release files (default: the GitHub release of
+#                         CETRA_VERSION); tests point it at a local server
 #
-# Downloads llmobs-<version>-<target>.tar.gz and SHA256SUMS, checks the archive's checksum,
+# Downloads cetra-<version>-<target>.tar.gz and SHA256SUMS, checks the archive's checksum,
 # and copies the binary. Linux x86_64 and aarch64 (static) and macOS arm64 only.
 set -eu
 
-repo="https://github.com/sebastiencs/llmobs"
+repo="https://github.com/cetra-ai/cetra"
 
 fail() {
   echo "install.sh: $*" >&2
@@ -33,10 +33,10 @@ case "$os/$machine" in
   Linux/x86_64 | Linux/amd64) target=x86_64-unknown-linux-musl ;;
   Linux/aarch64 | Linux/arm64) target=aarch64-unknown-linux-musl ;;
   Darwin/arm64) target=aarch64-apple-darwin ;;
-  *) fail "no llmobs binary for $os $machine; use the Docker image instead" ;;
+  *) fail "no cetra binary for $os $machine; use the Docker image instead" ;;
 esac
 
-version="${LLMOBS_VERSION:-}"
+version="${CETRA_VERSION:-}"
 if [ -z "$version" ]; then
   # /releases/latest redirects to /releases/tag/v<version>.
   url="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$repo/releases/latest")" ||
@@ -48,13 +48,13 @@ if [ -z "$version" ]; then
 fi
 version="${version#v}"
 
-if [ -z "${LLMOBS_INSTALL_DIR:-}" ] && [ -z "${HOME:-}" ]; then
-  fail "HOME is not set; set LLMOBS_INSTALL_DIR"
+if [ -z "${CETRA_INSTALL_DIR:-}" ] && [ -z "${HOME:-}" ]; then
+  fail "HOME is not set; set CETRA_INSTALL_DIR"
 fi
 
-base="${LLMOBS_DOWNLOAD_BASE:-$repo/releases/download/v$version}"
-name="llmobs-$version-$target"
-dir="${LLMOBS_INSTALL_DIR:-$HOME/.local/bin}"
+base="${CETRA_DOWNLOAD_BASE:-$repo/releases/download/v$version}"
+name="cetra-$version-$target"
+dir="${CETRA_INSTALL_DIR:-$HOME/.local/bin}"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT INT TERM
@@ -76,13 +76,13 @@ fi
 
 tar -xzf "$tmp/$name.tar.gz" -C "$tmp"
 mkdir -p "$dir"
-cp "$tmp/$name/llmobs" "$dir/llmobs.tmp"
-chmod 0755 "$dir/llmobs.tmp"
-mv "$dir/llmobs.tmp" "$dir/llmobs"
+cp "$tmp/$name/cetra" "$dir/cetra.tmp"
+chmod 0755 "$dir/cetra.tmp"
+mv "$dir/cetra.tmp" "$dir/cetra"
 
-echo "Installed llmobs $version to $dir/llmobs"
+echo "Installed cetra $version to $dir/cetra"
 case ":$PATH:" in
   *":$dir:"*) ;;
-  *) echo "Add $dir to your PATH to run llmobs." ;;
+  *) echo "Add $dir to your PATH to run cetra." ;;
 esac
 echo "Licences: LICENSE, LICENSE-ELASTIC and THIRD-PARTY-NOTICES.md in $base/$name.tar.gz"

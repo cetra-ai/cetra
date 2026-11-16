@@ -57,7 +57,7 @@ export function LicenseCard() {
         </dd>
       </dl>
       <p className="text-sm text-muted-foreground">
-        Set the key with LLMOBS_LICENSE_KEY and restart the server.
+        Set the key with CETRA_LICENSE_KEY and restart the server.
       </p>
     </section>
   );

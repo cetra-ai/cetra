@@ -237,10 +237,10 @@ function filterSpans(
   query: Query,
 ): Schema<"SpanSummary">[] {
   return spans.filter((span) => {
-    if (!query.includeEval && span.environment === "llmobs-eval") {
+    if (!query.includeEval && span.environment === "cetra-eval") {
       return false;
     }
-    if (!query.includeExperiments && span.metadata["llmobs.experiment_id"] !== undefined) {
+    if (!query.includeExperiments && span.metadata["cetra.experiment_id"] !== undefined) {
       return false;
     }
     if (!inRange(span.start_time, query.from, query.to)) {
@@ -764,7 +764,7 @@ function spanDetailFrom(span: Schema<"SpanSummary">): Schema<"SpanDetail"> {
     resource_attributes: {},
     schema_version: 1,
     truncated: [],
-    scope_name: "llmobs",
+    scope_name: "cetra",
   };
 }
 

@@ -11,14 +11,14 @@ from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
 from opentelemetry.trace import Tracer
 
-import llmobs
-from llmobs._quota import QuotaPauseExporter, QuotaState, quota_session
-from llmobs._runtime import Runtime
+import cetra
+from cetra._quota import QuotaPauseExporter, QuotaState, quota_session
+from cetra._runtime import Runtime
 
 # 2027-01-15T08:00:00Z: the wall clock the warnings are checked against.
 WALL = 1_800_000_000.0
 PAUSE_WARNING = (
-    "llmobs: the organization reached its monthly units cap; telemetry is dropped until %s "
+    "cetra: the organization reached its monthly units cap; telemetry is dropped until %s "
     "(retrying at most every hour)"
 )
 
@@ -50,8 +50,8 @@ def score_posts(recorder: Recorder) -> int:
     return sum(1 for _, path, _, _ in recorder.requests if path == "/api/v1/scores")
 
 
-def llmobs_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
-    return [record.getMessage() for record in caplog.records if record.name == "llmobs"]
+def cetra_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [record.getMessage() for record in caplog.records if record.name == "cetra"]
 
 
 def otlp_tracer(recorder: Recorder, state: QuotaState) -> Tracer:
@@ -121,14 +121,14 @@ def test_unusable_retry_after_pauses_one_hour(
 def test_one_warning_per_pause_with_the_utc_reset_instant(
     caplog: pytest.LogCaptureFixture, clock: FakeClock, state: QuotaState
 ) -> None:
-    with caplog.at_level(logging.WARNING, logger="llmobs"):
+    with caplog.at_level(logging.WARNING, logger="cetra"):
         state.on_402("60")
         state.on_402("60")
-        assert llmobs_warnings(caplog) == [PAUSE_WARNING % "2027-01-15T08:01:00Z"]
+        assert cetra_warnings(caplog) == [PAUSE_WARNING % "2027-01-15T08:01:00Z"]
 
         clock.now = 60.0
         state.on_402("60")
-        assert llmobs_warnings(caplog) == [
+        assert cetra_warnings(caplog) == [
             PAUSE_WARNING % "2027-01-15T08:01:00Z",
             PAUSE_WARNING % "2027-01-15T08:02:00Z",
         ]
@@ -137,9 +137,9 @@ def test_one_warning_per_pause_with_the_utc_reset_instant(
 def test_warning_shows_the_raw_retry_after_while_the_pause_is_capped(
     caplog: pytest.LogCaptureFixture, state: QuotaState, clock: FakeClock
 ) -> None:
-    with caplog.at_level(logging.WARNING, logger="llmobs"):
+    with caplog.at_level(logging.WARNING, logger="cetra"):
         state.on_402("86400")
-        assert llmobs_warnings(caplog) == [PAUSE_WARNING % "2027-01-16T08:00:00Z"]
+        assert cetra_warnings(caplog) == [PAUSE_WARNING % "2027-01-16T08:00:00Z"]
 
     clock.now = 3599.0
     assert state.paused()
@@ -150,10 +150,10 @@ def test_warning_shows_the_raw_retry_after_while_the_pause_is_capped(
 def test_huge_retry_after_does_not_raise_and_pauses_one_hour(
     caplog: pytest.LogCaptureFixture, state: QuotaState, clock: FakeClock
 ) -> None:
-    with caplog.at_level(logging.WARNING, logger="llmobs"):
+    with caplog.at_level(logging.WARNING, logger="cetra"):
         state.on_402("9" * 5000)
         state.on_402("9" * 30)
-        assert llmobs_warnings(caplog) == [PAUSE_WARNING % "2027-01-15T09:00:00Z"]
+        assert cetra_warnings(caplog) == [PAUSE_WARNING % "2027-01-15T09:00:00Z"]
 
     clock.now = 3599.0
     assert state.paused()
@@ -164,9 +164,9 @@ def test_huge_retry_after_does_not_raise_and_pauses_one_hour(
 def test_signed_or_spaced_retry_after_pauses_one_hour(
     caplog: pytest.LogCaptureFixture, state: QuotaState, clock: FakeClock
 ) -> None:
-    with caplog.at_level(logging.WARNING, logger="llmobs"):
+    with caplog.at_level(logging.WARNING, logger="cetra"):
         state.on_402("+5")
-        assert llmobs_warnings(caplog) == [PAUSE_WARNING % "2027-01-15T09:00:00Z"]
+        assert cetra_warnings(caplog) == [PAUSE_WARNING % "2027-01-15T09:00:00Z"]
 
     clock.now = 3599.0
     assert state.paused()
@@ -184,13 +184,13 @@ def test_concurrent_402s_warn_once_per_pause(
         barrier.wait()
         state.on_402("60")
 
-    with caplog.at_level(logging.WARNING, logger="llmobs"):
+    with caplog.at_level(logging.WARNING, logger="cetra"):
         workers = [threading.Thread(target=hit) for _ in range(threads)]
         for worker in workers:
             worker.start()
         for worker in workers:
             worker.join()
-        assert llmobs_warnings(caplog) == [PAUSE_WARNING % "2027-01-15T08:01:00Z"]
+        assert cetra_warnings(caplog) == [PAUSE_WARNING % "2027-01-15T08:01:00Z"]
 
 
 class _FailingExporter(SpanExporter):
@@ -220,13 +220,13 @@ def test_score_402_pauses_the_trace_exporter(
     recorder, runtime = score_runtime
     recorder.queue_response(402, {"Retry-After": "60"}, b"")
 
-    with caplog.at_level(logging.WARNING, logger="llmobs"):
-        llmobs.score(name="quality", value=1.0, trace_id="a" * 32)
+    with caplog.at_level(logging.WARNING, logger="cetra"):
+        cetra.score(name="quality", value=1.0, trace_id="a" * 32)
         runtime.flush()
         assert score_posts(recorder) == 1
 
         # The paused score queue drops this one without a request.
-        llmobs.score(name="quality", value=0.5, trace_id="a" * 32)
+        cetra.score(name="quality", value=0.5, trace_id="a" * 32)
         runtime.flush()
         assert score_posts(recorder) == 1
 
@@ -235,6 +235,6 @@ def test_score_402_pauses_the_trace_exporter(
         assert trace_posts(recorder) == 0
 
         # The 402 gets no non-retryable-status warning, only the pause warning.
-        warnings = llmobs_warnings(caplog)
+        warnings = cetra_warnings(caplog)
         assert len(warnings) == 1
-        assert warnings[0].startswith("llmobs: the organization reached its monthly units cap")
+        assert warnings[0].startswith("cetra: the organization reached its monthly units cap")

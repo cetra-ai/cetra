@@ -11,10 +11,10 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use bytesize::ByteSize;
-use llmobs_core::enums::{SpanKind, SpanStatus};
-use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-use llmobs_core::score::{Score, ScoreTarget, ScoreValue};
-use llmobs_core::span::Span;
+use cetra_core::enums::{SpanKind, SpanStatus};
+use cetra_core::ids::{ProjectId, SpanId, TraceId};
+use cetra_core::score::{Score, ScoreTarget, ScoreValue};
+use cetra_core::span::Span;
 use sha2::{Digest, Sha256};
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{Connection, SqliteConnection};
@@ -211,7 +211,7 @@ fn chat(
         llm.input = Some(input.to_owned());
         llm.output = Some(output.to_owned());
         llm.attributes
-            .insert("llmobs.golden".to_owned(), "1".to_owned());
+            .insert("cetra.golden".to_owned(), "1".to_owned());
     }
 
     let mut spans = vec![root, llm];

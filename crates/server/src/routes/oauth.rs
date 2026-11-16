@@ -189,7 +189,7 @@ mod tests {
     use std::time::Duration;
 
     use axum::http::{Method, StatusCode, header};
-    use llmobs_core::ids::OrgId;
+    use cetra_core::ids::OrgId;
     use serde_json::json;
     use uuid::Uuid;
 
@@ -208,7 +208,7 @@ mod tests {
 
     use crate::test_support::oauth::*;
 
-    const PASSWORD: &str = "llmobs-ok1";
+    const PASSWORD: &str = "cetra-ok-1";
 
     fn secret(value: &str) -> Secret<String> {
         serde_json::from_str(&format!("\"{value}\"")).expect("secret")

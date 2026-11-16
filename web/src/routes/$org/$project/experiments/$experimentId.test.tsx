@@ -169,7 +169,7 @@ it("shows the snippet while waiting", async () => {
   await renderApp(EXPERIMENT_URL);
 
   expect(await screen.findByText("Waiting for results")).toBeInTheDocument();
-  expect(screen.getByText(/llmobs\.evaluate\(/, { selector: "code" })).toBeInTheDocument();
+  expect(screen.getByText(/cetra\.evaluate\(/, { selector: "code" })).toBeInTheDocument();
 });
 
 it("hides the repetition column for one repetition", async () => {

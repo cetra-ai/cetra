@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use llmobs_core::score::ScoreValue;
+use cetra_core::score::ScoreValue;
 use serde_json::{Map, Value};
 
 use crate::config::JudgeOutput;
@@ -312,7 +312,7 @@ pub(crate) fn normalize_label(label: &str) -> String {
 mod tests {
     use std::collections::BTreeMap;
 
-    use llmobs_core::score::ScoreValue;
+    use cetra_core::score::ScoreValue;
     use serde_json::{Value, json};
 
     use super::{Answer, EXPLANATION_CHARS, RawAnswer, answer_schema, parse_answer};

@@ -1,7 +1,7 @@
 //! Daily usage read back from `usage_daily` (spec 04 § Metering, D-P-42).
 
+use cetra_core::ids::OrgId;
 use chrono::NaiveDate;
-use llmobs_core::ids::OrgId;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 

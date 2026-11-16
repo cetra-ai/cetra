@@ -266,7 +266,7 @@
           "name": "environment",
           "column_type": "string",
           "nullable": true,
-          "description": "Deployment environment. llmobs-eval is reserved for evaluator runs."
+          "description": "Deployment environment. cetra-eval is reserved for evaluator runs."
         },
         {
           "name": "release",

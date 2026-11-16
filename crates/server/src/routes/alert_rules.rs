@@ -8,7 +8,7 @@ use axum::http::{Method, StatusCode};
 use axum::routing::{delete, get, patch, post};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use llmobs_core::ids::OrgId;
+use cetra_core::ids::OrgId;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -341,7 +341,7 @@ fn checked_cooldown(value: i64) -> Result<i64, ApiError> {
 /// The channel ids of the project, sorted. A rule has at most 10, none twice, all its own.
 async fn checked_channels(
     state: &AppState,
-    project: llmobs_core::ids::ProjectId,
+    project: cetra_core::ids::ProjectId,
     ids: &[Uuid],
 ) -> Result<Vec<Uuid>, ApiError> {
     if ids.len() > alerts::MAX_RULE_CHANNELS {
@@ -366,7 +366,7 @@ async fn checked_channels(
 async fn checked_condition(
     state: &AppState,
     org: OrgId,
-    project: llmobs_core::ids::ProjectId,
+    project: cetra_core::ids::ProjectId,
     condition: AlertCondition,
 ) -> Result<AlertCondition, ApiError> {
     let condition = normalize_condition(condition).map_err(|errors| ApiError::BadRequest {
@@ -375,7 +375,7 @@ async fn checked_condition(
     })?;
     if let Some(text) = &condition.filter {
         let ctx = open_query(state, org, project, None).await?;
-        llmobs_storage::validate_filter(&ctx, llmobs_storage::ViewName::Traces, text)?;
+        cetra_storage::validate_filter(&ctx, cetra_storage::ViewName::Traces, text)?;
     }
     Ok(condition)
 }
@@ -531,7 +531,7 @@ mod tests {
 
     async fn insert_channel(
         app: &TestApp,
-        project: llmobs_core::ids::ProjectId,
+        project: cetra_core::ids::ProjectId,
         name: &str,
     ) -> Uuid {
         let id = Uuid::now_v7();

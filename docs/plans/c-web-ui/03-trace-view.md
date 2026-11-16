@@ -185,7 +185,7 @@ Canonical messages (spec 01 § Canonical message format, schema `Message` / `Par
 
 `lib/media.ts`:
 - `mediaUrl(projectRef, uri)`: `media://<sha256>` → `/api/v1/projects/<encoded ref>/media/<sha256>`;
-- `llmobs:dropped` → `undefined`;
+- `cetra:dropped` → `undefined`;
 - other URIs (`https:`, `data:`) are returned as is. **External URLs are never loaded automatically** (no network calls, spec 11).
 
 `MediaView`:
@@ -193,7 +193,7 @@ Canonical messages (spec 01 § Canonical message format, schema `Message` / `Par
 - **audio:** `<audio controls preload="none">`.
 - **PDF** and other types: a `MediaChip` (icon, MIME type, short SHA) linking to the media URL in a new tab.
 - **external `https:` URIs:** a chip with the URL text and a "Load" button.
-- **`llmobs:dropped`:** a muted chip "Media dropped at ingest (too large, N MB)".
+- **`cetra:dropped`:** a muted chip "Media dropped at ingest (too large, N MB)".
 - **`blob` parts** (inline base64 below the extraction threshold): render from a `data:` URL built from `content` and `mime_type`. The base64 is never shown as text.
 
 The Chat tab is the default tab when the span has `messages` input or output (U16 order).
@@ -203,7 +203,7 @@ The Chat tab is the default tab when the span has `messages` input or output (U1
 - a tool call and its response are linked (build a span with `server.use`);
 - reasoning is collapsed;
 - system instructions are collapsed with a line count;
-- `llmobs:dropped` shows the dropped chip;
+- `cetra:dropped` shows the dropped chip;
 - an external URL is not loaded until "Load" is clicked;
 - `mediaUrl` encodes the project ref.
 

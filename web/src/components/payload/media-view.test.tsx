@@ -5,7 +5,7 @@ import { MediaView } from "@/components/payload/media-view";
 it("shows a dropped chip with the size in megabytes", () => {
   render(
     <MediaView
-      part={{ type: "uri", uri: "llmobs:dropped", reason: "too_large", size: 32_000_000 }}
+      part={{ type: "uri", uri: "cetra:dropped", reason: "too_large", size: 32_000_000 }}
       projectRef="acme/bot"
     />,
   );

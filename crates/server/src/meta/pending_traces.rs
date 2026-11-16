@@ -1,6 +1,6 @@
 //! `pending_traces` rows: the persisted copy of the trigger's in-memory map (D-I-8).
 
-use llmobs_core::ids::{ProjectId, TraceId};
+use cetra_core::ids::{ProjectId, TraceId};
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
@@ -105,7 +105,7 @@ fn parse_project(value: &str) -> Result<ProjectId, MetaError> {
 
 #[cfg(test)]
 mod tests {
-    use llmobs_core::ids::{OrgId, ProjectId, TraceId};
+    use cetra_core::ids::{OrgId, ProjectId, TraceId};
 
     use super::{PendingRow, load_pending, write_pending};
     use crate::meta::orgs::insert_org;

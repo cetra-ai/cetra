@@ -302,7 +302,7 @@ Later sub-phases add `pub(crate) mod evaluate;`, `message;`, `deliver;` here.
 ```rust
 //! Rule condition defaults and checks (D-K-2).
 
-use llmobs_storage::AlertMeasure;
+use cetra_storage::AlertMeasure;
 
 use crate::api::alerts::{AlertCondition, AlertMetric, LatencyTarget, ScoreAggregation};
 use crate::api::common::FieldError;
@@ -399,8 +399,8 @@ pub(crate) const RESERVED_HEADERS: &[&str] = &[
     "content-length",
     "host",
     "user-agent",
-    "x-llmobs-signature",
-    "x-llmobs-delivery",
+    "x-cetra-signature",
+    "x-cetra-delivery",
 ];
 
 /// The decrypted configuration of one channel. Never logged: [`fmt::Debug`] prints the kind only.
@@ -463,7 +463,7 @@ Field errors use `position: None`. For each kind:
 ### Tests (`#[cfg(test)] mod tests`)
 
 1. `slack_url_must_be_https`: `http://hooks.slack.com/x` → one `url` error `"must use https"`; `not a url` → `"must be a valid URL"`; `format!("https://hooks.slack.com/{}", "a".repeat(2049 - 24))` (2 049 bytes) → `"at most 2048 bytes"`; `https://hooks.slack.com/services/T/B/abcd` → ok.
-2. `webhook_checks_secret_and_headers`: secret of 15 characters → `secret` error; 16 → ok; 257 → error. Headers: 11 entries → `"at most 10 headers"`; `{"X-Llmobs-Signature": "v"}` → `"header is set by the server"`; `{"bad name": "v"}` → `"invalid header name"`; `{"X-Ok": "line\nbreak"}` → `"invalid header value"`, and the message does not contain `"line"`; `{"X-Team": "core"}` → ok.
+2. `webhook_checks_secret_and_headers`: secret of 15 characters → `secret` error; 16 → ok; 257 → error. Headers: 11 entries → `"at most 10 headers"`; `{"X-Cetra-Signature": "v"}` → `"header is set by the server"`; `{"bad name": "v"}` → `"invalid header name"`; `{"X-Ok": "line\nbreak"}` → `"invalid header value"`, and the message does not contain `"line"`; `{"X-Team": "core"}` → ok.
 3. `webhook_allows_http`: `http://10.0.0.1:9000/hook` validates (the egress guard decides at send time, not here).
 4. `email_recipients`: `[]` → `"at least one recipient"`; 21 valid addresses (`(0..21).map(|i| format!("u{i}@x.io"))`) → `"at most 20 recipients"`; `["not-an-address"]` → `"invalid email address"`; `["A@x.io","a@x.io"]` → `"duplicate recipient"`; `["a@x.io"]` → ok.
 5. `errors_are_collected_together`: a webhook with a bad URL and a short secret → two errors, `url` then `secret`.
@@ -475,7 +475,7 @@ Field errors use `position: None`. For each kind:
 ## Commands
 
 ```bash
-cargo test -p llmobs-server alerts::
+cargo test -p cetra-server alerts::
 ```
 
 ```bash

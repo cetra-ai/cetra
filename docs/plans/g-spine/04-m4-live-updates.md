@@ -43,7 +43,7 @@ When M4 is done, the UI's live mode works against the real server:
 - **Errors and panics.** No `unwrap()`/`expect()` outside tests (locks: `.lock().unwrap_or_else(PoisonError::into_inner)`). Handlers return `ApiError`. No arithmetic that can overflow on network input (use `saturating_*`).
 - **Privacy.** Never log filter or search text, span content, or a key. Log project ids, counts, `RunError::kind()` or a fixed text.
 - **Tests.** `TestApp` + `seed()`, `#[tokio::test(flavor = "multi_thread")]`, except tests using `assert_logs_clean`, which use `#[tokio::test(flavor = "current_thread")]` (the log capture is per thread). Every wait has a timeout. Read stream events with the G4.3 helpers that skip `ping`.
-- **Names.** Storage items as `llmobs_storage::…`.
+- **Names.** Storage items as `cetra_storage::…`.
 - **STOP rules.** Stop and report without committing when the plan is wrong about the code in a way you cannot resolve without guessing, or an earlier milestone's test fails for a reason outside your change.
 - **Commit.** One commit, the subject given, no trailer lines.
 - **Report.** Branch and worktree path; commit hash; what you did; deviations and why; new dependencies (none are expected); anything unverified.
@@ -156,7 +156,7 @@ let body = futures::stream::unfold(rx, |mut rx| async move {
 
 ### Tests (`reads/traces.rs` test module, on the `test_support` dataset — `fixtures/api/dataset`)
 
-- Ids of traces `a1…01`, `a1…03`, `a1…05`, defaults → rows for 01 and 03 (05 is `llmobs-eval`); with `include_eval` → 01, 03, 05.
+- Ids of traces `a1…01`, `a1…03`, `a1…05`, defaults → rows for 01 and 03 (05 is `cetra-eval`); with `include_eval` → 01, 03, 05.
 - Filter `name = 'answer-question'` with ids 01, 03 → only 03.
 - Search `delivery` (only trace 02's span text has it: "Can I change the delivery address?") with window `[2026-01-01T10:05:00Z, 2026-01-01T10:06:00Z)` and ids 01, 02 → only 02; the same search with window `[10:00:00, 10:01:00)` → none.
 - Empty ids with filter `name = 'x'` → `Ok(vec![])`; empty ids with filter `name =` → `RunError::Invalid`.
@@ -226,7 +226,7 @@ let body = futures::stream::unfold(rx, |mut rx| async move {
 3. **Commit publishes.** `Ingest::commit(&self, storage: &Storage, usage: &Usage, live: &LiveBus, target: CommitTarget, normalized: Normalized)`. In the `spawn_blocking` closure keep the spans: `spans_to_record_batch(&spans).map(|batch| (batch, spans))` (the `IngestError::Batch` mapping is unchanged). Inside the branch where spans were appended, right after `append_spans` succeeds: `live.publish(target.project_id, &spans);`. Callers: `routes/otlp.rs`, `ingest/grpc.rs`, and the ingest tests in `ingest/mod.rs` (pass `&app.state.live`).
 4. **Shutdown.** At the very start of `Running::shutdown`, before any shutdown signal (HTTP, OTLP/HTTP, gRPC): `if let Some(state) = &self.state { state.live.close(); }`.
 5. **Test helpers** in `test_support` (G4.3 and G4.4 use them):
-   - `pub(crate) async fn commit_spans(&self, project: &ProjectRow, spans: Vec<Span>)`: `self.state.ingest.commit(&self.state.storage, &self.state.usage, &self.state.live, CommitTarget { org_id: project.org_id, project_id: project.id, request_bytes: 0, now_ns: self.state.clock.now_ns() }, Normalized { spans, media: Vec::new(), rejections: Rejections::default() }).await.unwrap()` (check `Rejections` has `Default`; if not, build it the way `llmobs_otel` tests do).
+   - `pub(crate) async fn commit_spans(&self, project: &ProjectRow, spans: Vec<Span>)`: `self.state.ingest.commit(&self.state.storage, &self.state.usage, &self.state.live, CommitTarget { org_id: project.org_id, project_id: project.id, request_bytes: 0, now_ns: self.state.clock.now_ns() }, Normalized { spans, media: Vec::new(), rejections: Rejections::default() }).await.unwrap()` (check `Rejections` has `Default`; if not, build it the way `cetra_otel` tests do).
    - `pub(crate) fn dataset_span(index: usize) -> Span`: the `index`-th span of `fixtures/api/dataset/spans.json` (factor the file reading out of `load_example_dataset`). Tests clone it and set `project_id`, `trace_id`, `span_id`, `parent_span_id: None`, `name`, `input`, `environment`, `start_time`/`end_time` as they need.
 
 ### Tests (`live.rs`)
@@ -298,7 +298,7 @@ Spans are added with `app.commit_spans(&seeded.project, vec![span])`, where `spa
 
 1. Route `GET /api/v1/projects/{project}/traces/stream` in `streams.rs`'s `routes()` (before the span stream row), `ProjectPerm::View`, `documented: true`. Handler `stream_traces(State, Extension<Principal>, Extension<ProjectAccess>, error::Query<TraceStreamParams>, HeaderMap)`:
    1. `slot = take_slot(..)?`; `bus = state.live.subscribe()` (before validation, so no event is missed; both drop on a validation error).
-   2. Validate (D-G-22): `ctx = open_query(&state, project_id, None).await?`; `llmobs_storage::trace_refresh(&ctx, TraceRefreshRequest { filter: params.filter.as_deref(), search: None, trace_ids: &[], include_eval: params.include_eval, include_experiments: params.include_experiments, timeout: READ_TIMEOUT }).await?` — an invalid filter is `ApiError::Query` → `400 invalid_filter`. Drop `ctx`.
+   2. Validate (D-G-22): `ctx = open_query(&state, project_id, None).await?`; `cetra_storage::trace_refresh(&ctx, TraceRefreshRequest { filter: params.filter.as_deref(), search: None, trace_ids: &[], include_eval: params.include_eval, include_experiments: params.include_experiments, timeout: READ_TIMEOUT }).await?` — an invalid filter is `ApiError::Query` → `400 invalid_filter`. Drop `ctx`.
    3. Spawn `run_trace_stream(storage: Arc<Storage>, project_id, params, has_last_event_id, bus, closed, timing, slot, tx)`; return `sse_response(rx)`.
 2. **`run_trace_stream`** keeps `pending: HashMap<TraceId, (i64, i64)>` (min and max `start_time` of the arriving spans per trace), `last_id: u64`, and `matched: HashSet<TraceId>` (used only when `params.search` is set and not blank).
    - Send `resync()` first when `Last-Event-ID` was sent.
@@ -323,7 +323,7 @@ Spans are committed with `app.commit_spans` as in G4.3 (`dataset_span(0)` clones
 - Open `…/traces/stream` → 200; commit one span of new trace `a1…0a` → `next_non_ping(3 s)` is `trace` with that `trace_id`, `span_count` 1 and `id` set; commit a second span of it → `trace` with `span_count` 2 (merged, D-G-13).
 - `?filter=name%20%3D%20'never'` → no non-ping event within 500 ms after a commit.
 - `?filter=name%20%3D` (invalid) → 400 `invalid_filter`, not a stream.
-- Exclusions: a span with `environment: Some("llmobs-eval")` → nothing within 500 ms; with `?include_eval=true` → its `trace`.
+- Exclusions: a span with `environment: Some("cetra-eval")` → nothing within 500 ms; with `?include_eval=true` → its `trace`.
 - Search (D-C-5): `?search=needle-x` → a span named `needle-x tool` sends its trace; a later span of the same trace named `plain` sends it again (matched); a span of another trace named `plain` sends nothing.
 - Overflow: one `commit_spans` call with 1 100 spans of 1 100 distinct traces → a `resync` event within 3 s.
 - `Last-Event-ID` → first event `resync`; `app.state.live.close()` → `body_closed(1 s)`.

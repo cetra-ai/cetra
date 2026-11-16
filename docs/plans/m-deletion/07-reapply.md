@@ -2,9 +2,9 @@
 
 Read [README.md](README.md) first, especially § Design › Audit (D-M-9).
 
-**Goal:** `llmobs admin reapply-deletions --from <data_dir>` copies, from another data directory's `meta.db`, every deletion the current `meta.db` does not have, with its scope, as an **open** row. The running (or next) `llmobs serve` then registers or drops it again through M3's worker.
+**Goal:** `cetra admin reapply-deletions --from <data_dir>` copies, from another data directory's `meta.db`, every deletion the current `meta.db` does not have, with its scope, as an **open** row. The running (or next) `cetra serve` then registers or drops it again through M3's worker.
 
-This is how a backup restore keeps erasures done after the backup. It also covers a rollback (cross-track review X18): the old binary runs on the restored pre-upgrade `meta.db` and reapplies from the kept directory, which the newer binary already migrated, so a **newer** source is read as it is, by column name (`MetaDb::open_existing_or_newer`). Migrations only add, so the columns this binary reads are there; a missing one fails with `AdminError::Database`, and a row this binary cannot decode is named as for any corrupt row. Before restoring, the operator keeps the old data directory (or a copy of its `meta.db`). After the restore, they start `llmobs serve` once if the backup is from an older version (the source must be at this binary's schema or a newer one; see below), then run this command with `--from` pointing at the old directory. Spec 12 § Backups says so (the plan commit updated it, and spec 09 § CLI lists the command).
+This is how a backup restore keeps erasures done after the backup. It also covers a rollback (cross-track review X18): the old binary runs on the restored pre-upgrade `meta.db` and reapplies from the kept directory, which the newer binary already migrated, so a **newer** source is read as it is, by column name (`MetaDb::open_existing_or_newer`). Migrations only add, so the columns this binary reads are there; a missing one fails with `AdminError::Database`, and a row this binary cannot decode is named as for any corrupt row. Before restoring, the operator keeps the old data directory (or a copy of its `meta.db`). After the restore, they start `cetra serve` once if the backup is from an older version (the source must be at this binary's schema or a newer one; see below), then run this command with `--from` pointing at the old directory. Spec 12 § Backups says so (the plan commit updated it, and spec 09 § CLI lists the command).
 
 The command opens only `meta.db` files, never storage, so it works whether the server runs or not.
 
@@ -97,7 +97,7 @@ New `AdminError` variants (in `admin.rs`):
 #[error("no meta.db in the --from directory")]
 SourceNotInitialized,
 /// The `--from` database is at an older schema version. A newer one is read as it is.
-#[error("the --from meta.db has schema {found}, older than this binary's {expected}; run `llmobs serve` on a copy of it first")]
+#[error("the --from meta.db has schema {found}, older than this binary's {expected}; run `cetra serve` on a copy of it first")]
 SourceSchema {
     /// Migration version embedded in this binary.
     expected: i64,
@@ -125,13 +125,13 @@ Against a running server, the copied rows are picked up by the worker's next 2 s
 
 ```rust
 /// Re-open the deletions of another data directory that this one lacks (after a backup restore).
-/// Both `meta.db` files must be at this binary's schema; run `llmobs serve` once on a restored older backup first.
+/// Both `meta.db` files must be at this binary's schema; run `cetra serve` once on a restored older backup first.
 ReapplyDeletions {
     /// The data directory whose `meta.db` holds the deletions to re-apply (for example the
     /// directory as it was before the restore).
     #[arg(long)]
     from: PathBuf,
-    /// Config file. Overrides `LLMOBS_CONFIG`.
+    /// Config file. Overrides `CETRA_CONFIG`.
     #[arg(long)]
     config: Option<PathBuf>,
 },
@@ -145,7 +145,7 @@ AdminCommand::ReapplyDeletions { from, config } => {
     let report = admin::reapply_deletions(&loaded, &from).await.context("re-applying deletions")?;
     writeln!(
         io::stdout().lock(),
-        "Re-opened {} deletions ({} failed ones copied for the record, {} already present). `llmobs serve` applies them.",
+        "Re-opened {} deletions ({} failed ones copied for the record, {} already present). `cetra serve` applies them.",
         report.reopened, report.failed_copied, report.present
     )?;
 }
@@ -154,8 +154,8 @@ AdminCommand::ReapplyDeletions { from, config } => {
 Change the `Admin` variant's doc comment from "Manage users and the encryption key in this data directory." to "Admin operations on this data directory (users, encryption key, deletions).". There is no `--help` snapshot to update.
 
 CLI tests, in `crates/cli/src/main.rs`'s test module:
-- `reapply_deletions_on_a_missing_database_names_serve`: copy `list_users_on_a_missing_database_names_serve` (temp dir plus an `llmobs.toml` with `data_dir`), run the CLI with `["llmobs", "admin", "reapply-deletions", "--from", <another existing temp dir>, "--config", <path>]` the way that test runs it, and assert the `{error:#}` text contains "run `llmobs serve` once to create the database" (the target is opened first);
-- `reapply_deletions_requires_from`: `Cli::try_parse_from(["llmobs", "admin", "reapply-deletions"]).is_err()`, and `["llmobs", "admin", "reapply-deletions", "--from", "/x"]` parses to `Command::Admin { command: AdminCommand::ReapplyDeletions { .. } }`.
+- `reapply_deletions_on_a_missing_database_names_serve`: copy `list_users_on_a_missing_database_names_serve` (temp dir plus a`cetra.toml` with `data_dir`), run the CLI with `["cetra", "admin", "reapply-deletions", "--from", <another existing temp dir>, "--config", <path>]` the way that test runs it, and assert the `{error:#}` text contains "run `cetra serve` once to create the database" (the target is opened first);
+- `reapply_deletions_requires_from`: `Cli::try_parse_from(["cetra", "admin", "reapply-deletions"]).is_err()`, and `["cetra", "admin", "reapply-deletions", "--from", "/x"]` parses to `Command::Admin { command: AdminCommand::ReapplyDeletions { .. } }`.
 
 ## Tests
 
@@ -191,5 +191,5 @@ In `admin.rs` tests. The target is `ready_config()`; the source is a second `tem
 
 ## Done when
 
-- [ ] `llmobs admin reapply-deletions --from <dir>` exists and prints the report.
+- [ ] `cetra admin reapply-deletions --from <dir>` exists and prints the report.
 - [ ] The 6 admin tests and the 2 CLI tests pass; `just check` is green; one commit `Add admin reapply-deletions`.

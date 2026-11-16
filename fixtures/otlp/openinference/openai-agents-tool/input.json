@@ -41,15 +41,15 @@
           },
           "spans": [
             {
-              "traceId": "76f368acf285e583c171752c2ed19ad7",
-              "spanId": "7b3bf3f37ab53947",
+              "traceId": "6481a5ab40ab6492a444edeac3c8d313",
+              "spanId": "40b46eee6afd1991",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
               "name": "Agent workflow",
               "kind": 1,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590178000000",
+              "endTimeUnixNano": "1767225590206000000",
               "attributes": [
                 {
                   "key": "openinference.span.kind",
@@ -69,15 +69,15 @@
               }
             },
             {
-              "traceId": "76f368acf285e583c171752c2ed19ad7",
-              "spanId": "eb24ef516dcf4fa4",
+              "traceId": "6481a5ab40ab6492a444edeac3c8d313",
+              "spanId": "82637cd0b67aa302",
               "traceState": "",
-              "parentSpanId": "7b3bf3f37ab53947",
+              "parentSpanId": "40b46eee6afd1991",
               "flags": 256,
               "name": "Agent workflow",
               "kind": 1,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590178000000",
+              "endTimeUnixNano": "1767225590205000000",
               "attributes": [
                 {
                   "key": "openinference.span.kind",
@@ -97,15 +97,15 @@
               }
             },
             {
-              "traceId": "76f368acf285e583c171752c2ed19ad7",
-              "spanId": "bf93f46c62524283",
+              "traceId": "6481a5ab40ab6492a444edeac3c8d313",
+              "spanId": "b6f9e594a575d1d7",
               "traceState": "",
-              "parentSpanId": "eb24ef516dcf4fa4",
+              "parentSpanId": "82637cd0b67aa302",
               "flags": 256,
               "name": "weather",
               "kind": 1,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590177000000",
+              "endTimeUnixNano": "1767225590204000000",
               "attributes": [
                 {
                   "key": "graph.node.id",
@@ -137,15 +137,15 @@
               }
             },
             {
-              "traceId": "76f368acf285e583c171752c2ed19ad7",
-              "spanId": "7bb78bf5922b9093",
+              "traceId": "6481a5ab40ab6492a444edeac3c8d313",
+              "spanId": "f7be581426487156",
               "traceState": "",
-              "parentSpanId": "bf93f46c62524283",
+              "parentSpanId": "b6f9e594a575d1d7",
               "flags": 256,
               "name": "turn",
               "kind": 1,
               "startTimeUnixNano": "1767225590001000000",
-              "endTimeUnixNano": "1767225590139000000",
+              "endTimeUnixNano": "1767225590166000000",
               "attributes": [
                 {
                   "key": "openinference.span.kind",
@@ -165,15 +165,15 @@
               }
             },
             {
-              "traceId": "76f368acf285e583c171752c2ed19ad7",
-              "spanId": "dd2e1a97a902792b",
+              "traceId": "6481a5ab40ab6492a444edeac3c8d313",
+              "spanId": "cb3c78ff842e3722",
               "traceState": "",
-              "parentSpanId": "7bb78bf5922b9093",
+              "parentSpanId": "f7be581426487156",
               "flags": 256,
               "name": "response",
               "kind": 1,
               "startTimeUnixNano": "1767225590001000000",
-              "endTimeUnixNano": "1767225590134000000",
+              "endTimeUnixNano": "1767225590161000000",
               "attributes": [
                 {
                   "key": "llm.system",
@@ -313,15 +313,15 @@
               }
             },
             {
-              "traceId": "76f368acf285e583c171752c2ed19ad7",
-              "spanId": "d038b876b2c372c4",
+              "traceId": "6481a5ab40ab6492a444edeac3c8d313",
+              "spanId": "9259ae61be918190",
               "traceState": "",
-              "parentSpanId": "7bb78bf5922b9093",
+              "parentSpanId": "f7be581426487156",
               "flags": 256,
               "name": "get_weather",
               "kind": 1,
-              "startTimeUnixNano": "1767225590137000000",
-              "endTimeUnixNano": "1767225590138000000",
+              "startTimeUnixNano": "1767225590164000000",
+              "endTimeUnixNano": "1767225590165000000",
               "attributes": [
                 {
                   "key": "tool.name",
@@ -383,15 +383,15 @@
               }
             },
             {
-              "traceId": "76f368acf285e583c171752c2ed19ad7",
-              "spanId": "ed299bd22fe1f19c",
+              "traceId": "6481a5ab40ab6492a444edeac3c8d313",
+              "spanId": "ccad5923e23edac4",
               "traceState": "",
-              "parentSpanId": "bf93f46c62524283",
+              "parentSpanId": "b6f9e594a575d1d7",
               "flags": 256,
               "name": "turn",
               "kind": 1,
-              "startTimeUnixNano": "1767225590140000000",
-              "endTimeUnixNano": "1767225590177000000",
+              "startTimeUnixNano": "1767225590167000000",
+              "endTimeUnixNano": "1767225590204000000",
               "attributes": [
                 {
                   "key": "openinference.span.kind",
@@ -411,15 +411,15 @@
               }
             },
             {
-              "traceId": "76f368acf285e583c171752c2ed19ad7",
-              "spanId": "6bb37497e0ee55a8",
+              "traceId": "6481a5ab40ab6492a444edeac3c8d313",
+              "spanId": "aff59dd441d87937",
               "traceState": "",
-              "parentSpanId": "ed299bd22fe1f19c",
+              "parentSpanId": "ccad5923e23edac4",
               "flags": 256,
               "name": "response",
               "kind": 1,
-              "startTimeUnixNano": "1767225590140000000",
-              "endTimeUnixNano": "1767225590175000000",
+              "startTimeUnixNano": "1767225590167000000",
+              "endTimeUnixNano": "1767225590202000000",
               "attributes": [
                 {
                   "key": "llm.system",
