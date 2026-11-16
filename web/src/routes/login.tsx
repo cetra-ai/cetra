@@ -1,6 +1,6 @@
 import { useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute, Link, redirect, useNavigate } from "@tanstack/react-router";
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 import { authConfigQuery, clearUserData } from "@/api/auth";
 import { $api } from "@/api/client";
 import { fieldErrors, problemMessage, problemOf } from "@/api/problem";
@@ -19,8 +19,9 @@ import { FormSuccess } from "@/components/form/form-success";
 import { SubmitButton } from "@/components/form/submit-button";
 import { TextField } from "@/components/form/text-field";
 import { Button } from "@/components/ui/button";
-import { navigateExternal } from "@/lib/external-navigation";
-import { ssoAuthorizeHref } from "@/lib/redirect";
+import { navigateExternal, replaceExternal } from "@/lib/external-navigation";
+import { onlyProvider } from "@/lib/only-provider";
+import { authorizeHref, ssoAuthorizeHref } from "@/lib/redirect";
 import { parseLoginSearch } from "@/lib/search/auth";
 
 export const Route = createFileRoute("/login")({
@@ -54,6 +55,16 @@ function LoginPage() {
   // Email first when the server routes SSO domains and this is not the instance
   // admins' `?password=1` path (D-P-60).
   const emailFirst = config.sso_discovery && !search.password;
+  // R7 (D-S-5, D-S-6): with one provider and no password, leave for it at once, except on
+  // the instance admins' form, after a failed provider login, and right after signing out.
+  const only = onlyProvider(config);
+  const startNow =
+    only !== undefined && !search.password && search.error === undefined && !search.signed_out;
+  const startHref =
+    only === undefined ? undefined : authorizeHref(only.id, { redirect: search.redirect });
+  // The password form also shows on `?password=1` when password sign-in is off: it is the
+  // instance admins' way in (D-S-4).
+  const showPassword = config.password_enabled || search.password === true;
   // Only read while `emailFirst`, so it may start at "email" on every page load.
   const [step, setStep] = useState<"email" | "password">("email");
   const [redirecting, setRedirecting] = useState(false);
@@ -66,6 +77,15 @@ function LoginPage() {
   const login = $api.useMutation("post", "/api/auth/login", { gcTime: 0 });
   const resend = $api.useMutation("post", "/api/auth/email/verify/resend");
   const discover = $api.useMutation("post", "/api/auth/sso/discover");
+  // `replace`: Back from the provider must not land here and leave again (D-S-5). The ref
+  // keeps a re-run of the effect from starting a second login.
+  const started = useRef(false);
+  useEffect(() => {
+    if (startNow && startHref !== undefined && !started.current) {
+      started.current = true;
+      replaceExternal(startHref);
+    }
+  }, [startNow, startHref]);
   const serverFieldErrors = fieldErrors(login.error);
   const needsVerification = problemOf(login.error)?.code === "email_not_verified";
 
@@ -119,9 +139,22 @@ function LoginPage() {
     );
   }
 
+  if (startNow && only !== undefined) {
+    return (
+      <AuthLayout title="Sign in" description={`Redirecting to ${only.display_name}…`}>
+        <ProviderButtons providers={[only]} redirect={search.redirect} />
+      </AuthLayout>
+    );
+  }
+
   return (
     <AuthLayout
       title="Sign in"
+      description={
+        !config.password_enabled && search.password
+          ? "Password sign-in is for instance admins."
+          : undefined
+      }
       footer={
         config.password_enabled || config.signup === "open" ? (
           <>
@@ -145,6 +178,7 @@ function LoginPage() {
       }
     >
       <FormError message={search.error ? oauthErrorMessage(search.error) : undefined} />
+      <FormSuccess message={search.signed_out ? "You're signed out." : undefined} />
       {emailFirst && step === "email" ? (
         <form noValidate onSubmit={onDiscover} className="flex flex-col gap-4">
           <TextField
@@ -172,8 +206,8 @@ function LoginPage() {
       ) : (
         <>
           <ProviderButtons providers={config.providers} redirect={search.redirect} />
-          {config.providers.length > 0 && config.password_enabled ? <OrDivider /> : null}
-          {config.password_enabled ? (
+          {config.providers.length > 0 && showPassword ? <OrDivider /> : null}
+          {showPassword ? (
             <form noValidate onSubmit={onSubmit} className="flex flex-col gap-4">
               <TextField
                 id="email"
@@ -234,8 +268,17 @@ function LoginPage() {
               <SubmitButton pending={login.isPending}>Sign in</SubmitButton>
             </form>
           ) : null}
-          {!config.password_enabled && config.providers.length === 0 ? (
+          {!showPassword && config.providers.length === 0 ? (
             <p className="text-sm">{NO_SIGN_IN_METHOD}</p>
+          ) : null}
+          {!config.password_enabled && !search.password && config.providers.length > 0 ? (
+            <Link
+              to="/login"
+              search={{ password: true, redirect: search.redirect }}
+              className={AUTH_LINK_CLASS}
+            >
+              Instance admin? Sign in with a password
+            </Link>
           ) : null}
           {emailFirst ? (
             <Button

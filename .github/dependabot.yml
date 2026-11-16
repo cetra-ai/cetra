@@ -66,6 +66,25 @@ updates:
           - minor
           - patch
 
+  - package-ecosystem: cargo
+    # The fuzz crate (track R M3). Its shared crates come from the root lock through
+    # `just fuzz-lock`; Dependabot updates only the exact libfuzzer-sys pin.
+    directory: /fuzz
+    allow:
+      - dependency-name: "libfuzzer-sys"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:00"
+      timezone: Etc/UTC
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+    commit-message:
+      prefix: deps
+
   - package-ecosystem: npm
     directory: /
     ignore:
@@ -73,6 +92,14 @@ updates:
       # which TypeScript 7 does not ship. Remove when openapi-typescript supports it.
       - dependency-name: "typescript"
         update-types: ["version-update:semver-major"]
+      # OTel JS stays on the 2.12 line until OpenInference JS supports 3.0 (D-F-8).
+      # otlp-transformer 0.300+ and @opentelemetry/api 1.10+ belong to the 3.x line.
+      - dependency-name: "@opentelemetry/*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@opentelemetry/otlp-transformer"
+        versions: [">=0.300.0"]
+      - dependency-name: "@opentelemetry/api"
+        versions: [">=1.10.0"]
     schedule:
       interval: weekly
       day: monday

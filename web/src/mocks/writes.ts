@@ -24,11 +24,13 @@ import inviteCreatedDocument from "../../../fixtures/api/static/invite-created.j
 import llmConnectionDocument from "../../../fixtures/api/static/llm-connection.json";
 import llmConnectionTestDocument from "../../../fixtures/api/static/llm-connection-test.json";
 import meDocument from "../../../fixtures/api/static/me.json";
+import modelPriceDocument from "../../../fixtures/api/static/model-price.json";
 import onlineRuleDocument from "../../../fixtures/api/static/online-rule.json";
 import onlineRulePreviewDocument from "../../../fixtures/api/static/online-rule-preview.json";
 import onlineRuleResumedDocument from "../../../fixtures/api/static/online-rule-resumed.json";
 import orgDocument from "../../../fixtures/api/static/org.json";
 import orgMembersDocument from "../../../fixtures/api/static/org-members.json";
+import orgModelPricesDocument from "../../../fixtures/api/static/org-model-prices.json";
 import orgSsoDocument from "../../../fixtures/api/static/org-sso.json";
 import personalTokenCreatedDocument from "../../../fixtures/api/static/personal-token-created.json";
 import projectDocument from "../../../fixtures/api/static/project.json";
@@ -114,6 +116,17 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     method: "post",
     path: "/api/v1/orgs/{org}/llm-connections/{id}/test",
   },
+  { operationId: "post_org_model_price", method: "post", path: "/api/v1/orgs/{org}/models" },
+  {
+    operationId: "patch_org_model_price",
+    method: "patch",
+    path: "/api/v1/orgs/{org}/models/{id}",
+  },
+  {
+    operationId: "delete_org_model_price",
+    method: "delete",
+    path: "/api/v1/orgs/{org}/models/{id}",
+  },
   { operationId: "post_project", method: "post", path: "/api/v1/orgs/{org}/projects" },
   { operationId: "patch_project", method: "patch", path: "/api/v1/projects/{project}" },
   { operationId: "delete_project", method: "delete", path: "/api/v1/projects/{project}" },
@@ -178,6 +191,17 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     operationId: "delete_score_definition",
     method: "delete",
     path: "/api/v1/projects/{project}/score-definitions/{id}",
+  },
+  { operationId: "post_model_price", method: "post", path: "/api/v1/projects/{project}/models" },
+  {
+    operationId: "patch_model_price",
+    method: "patch",
+    path: "/api/v1/projects/{project}/models/{id}",
+  },
+  {
+    operationId: "delete_model_price",
+    method: "delete",
+    path: "/api/v1/projects/{project}/models/{id}",
   },
   { operationId: "post_admin_user", method: "post", path: "/api/v1/admin/users" },
   { operationId: "patch_admin_user", method: "patch", path: "/api/v1/admin/users/{id}" },
@@ -426,6 +450,11 @@ const RESPONSES: Record<string, Respond> = {
     HttpResponse.json({ ...llmConnectionDocument, ...named(body) }),
   delete_llm_connection: () => noContent(),
   post_llm_connection_test: () => HttpResponse.json(llmConnectionTestDocument),
+  post_org_model_price: ({ body }) =>
+    HttpResponse.json({ ...orgModelPricesDocument.data[0], ...priced(body) }, { status: 201 }),
+  patch_org_model_price: ({ body, params }) =>
+    HttpResponse.json({ ...orgModelPricesDocument.data[0], ...priced(body), id: params.id }),
+  delete_org_model_price: () => noContent(),
   post_project: ({ body }) =>
     HttpResponse.json(
       {
@@ -508,6 +537,11 @@ const RESPONSES: Record<string, Respond> = {
   patch_score_definition: ({ body }) =>
     HttpResponse.json({ ...scoreDefinitionDocument, ...named(body) }),
   delete_score_definition: () => noContent(),
+  post_model_price: ({ body }) =>
+    HttpResponse.json({ ...modelPriceDocument, ...priced(body) }, { status: 201 }),
+  patch_model_price: ({ body, params }) =>
+    HttpResponse.json({ ...modelPriceDocument, ...priced(body), id: params.id }),
+  delete_model_price: () => noContent(),
 
   post_admin_user: ({ body }) => {
     const { name: _name, ...unnamedUser } = adminUserCreatedDocument.user;
@@ -683,6 +717,12 @@ function trimmed(value: unknown): string | undefined {
 /** The connection fixture's overrides, with `name` from the body when it is a string. */
 function named(body: Record<string, unknown>): { name: string } | Record<string, never> {
   return typeof body.name === "string" ? { name: body.name } : {};
+}
+
+/** The price fixture's overrides, with the trimmed `model_name` from the body when it is one. */
+function priced(body: Record<string, unknown>): { model_name: string } | Record<string, never> {
+  const name = trimmed(body.model_name);
+  return name ? { model_name: name } : {};
 }
 
 const TITLES: Record<400 | 404, string> = { 400: "Bad Request", 404: "Not Found" };

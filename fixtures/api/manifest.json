@@ -694,6 +694,14 @@
     "file": "static/llm-connections.json"
   },
   {
+    "operation_id": "list_models",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/model-prices.json"
+  },
+  {
     "operation_id": "list_online_rules",
     "path_params": {},
     "query": {},
@@ -730,6 +738,16 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/org-members.json"
+  },
+  {
+    "operation_id": "list_org_model_prices",
+    "path_params": {
+      "org": "acme"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/org-model-prices.json"
   },
   {
     "operation_id": "list_orgs",
@@ -991,6 +1009,14 @@
     "file": "static/me.json"
   },
   {
+    "operation_id": "post_model_price",
+    "path_params": {},
+    "query": {},
+    "status": 201,
+    "content_type": "application/json",
+    "file": "static/model-price.json"
+  },
+  {
     "operation_id": "post_online_rule",
     "path_params": {},
     "query": {},
@@ -1065,6 +1091,17 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/deletion-preview.json"
+  },
+  {
+    "operation_id": "resolve_model_price",
+    "path_params": {},
+    "query": {
+      "model": "gpt-4o",
+      "provider": "openai"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/model-price-resolution.json"
   },
   {
     "operation_id": "run_sql",

@@ -284,15 +284,16 @@ mod tests {
     use crate::CopyCancel;
     use crate::QueryOptions;
     use crate::Storage;
-    use crate::catalog::FileTable;
+    use crate::catalog::{FileTable, now_ns};
     use crate::compaction::job::tests::{at, config_in, flush_cycle, project, quiet_compaction};
-    use crate::config::ObjectStoreUrl;
-    use crate::error::{CopyObjectsError, SnapshotError};
+    use crate::config::{CompactionConfig, ObjectStoreUrl};
+    use crate::error::{AppendError, CopyObjectsError, SnapshotError};
     use crate::media::MediaBlob;
     use crate::objects::Objects;
     use crate::test_support::{score_row, score_rows, span_row, span_rows};
     use crate::wal::{Table, spans_at};
     use object_store::memory::InMemory;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn blob_of(bytes: &'static [u8]) -> MediaBlob {
         let bytes = Bytes::from_static(bytes);
@@ -839,5 +840,235 @@ mod tests {
 
         drop(held);
         storage.shutdown().await.unwrap();
+    }
+
+    /// The gate holds media collection while a snapshot lives: the collection
+    /// waits, and the blob stays until the snapshot is dropped.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_gate_holds_media_collection() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_in(dir.path(), quiet_compaction(8), Duration::from_secs(3_600));
+        let storage = Arc::new(Storage::open(config).await.unwrap());
+        let blob = blob_of(b"unreferenced-media");
+        let key = Objects::media_path(project(), &hex::encode(blob.sha256));
+        storage.put_media(project(), blob).await.unwrap();
+
+        let target = dir.path().join("catalog-copy.db");
+        let snapshot = storage.snapshot_catalog(&target).await.unwrap();
+        // A year on: the blob's `last_seen_at` is past the grace period.
+        let later = now_ns() + 365 * 24 * 3_600 * 1_000_000_000;
+        let collector = {
+            let storage = Arc::clone(&storage);
+            tokio::spawn(async move { storage.collect_media(later).await })
+        };
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !collector.is_finished(),
+            "media collection ran while a snapshot was held"
+        );
+        assert!(object_on_disk(dir.path(), &key), "the blob was deleted");
+
+        drop(snapshot);
+        let report = collector.await.unwrap().unwrap();
+        assert_eq!(report.deleted, 1, "{report:?}");
+        assert!(!object_on_disk(dir.path(), &key), "the blob survived");
+        Arc::try_unwrap(storage)
+            .unwrap_or_else(|_| panic!("storage still shared"))
+            .shutdown()
+            .await
+            .unwrap();
+    }
+
+    /// A quarantined file leaves the snapshot, and a drop then retires it: it
+    /// becomes an obsolete row that is never in `retired`, so only the gate
+    /// protects it during a backup. Every object the snapshot lists still
+    /// exists while the snapshot lives, through a verify pass, a drop and an
+    /// obsolete collection.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_gate_holds_a_quarantined_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_in(dir.path(), quiet_compaction(8), Duration::from_secs(3_600));
+        let storage = Storage::open(config.clone()).await.unwrap();
+        let storage = flush_cycle(&config, storage, spans_at(&[1, 2])).await;
+        let victim = storage.catalog_files(Table::Spans)[0].clone();
+        let (victim_id, victim_path) = (victim.id, victim.path.clone());
+        // Truncate the object: its size no longer matches the catalog.
+        let object = dir.path().join("objects").join(&victim_path);
+        let bytes = std::fs::read(&object).unwrap();
+        std::fs::write(&object, &bytes[..bytes.len() - 1]).unwrap();
+        assert_eq!(storage.verify_queue().suspect([victim_id], now_ns()), 1);
+
+        let target = dir.path().join("catalog-copy.db");
+        let snapshot = storage.snapshot_catalog(&target).await.unwrap();
+        let report = storage.verify_pass().await;
+        assert_eq!(report.quarantined, 1, "{report:?}");
+        // The drop retires the quarantined file (obsolete row, never in `retired`).
+        storage.drop_project(project()).await.unwrap();
+
+        let storage = Arc::new(storage);
+        let collector = {
+            let storage = Arc::clone(&storage);
+            tokio::spawn(async move { storage.collect_obsolete(Duration::ZERO).await })
+        };
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        for object in &snapshot.objects {
+            assert!(
+                object_on_disk(dir.path(), &object.key),
+                "{} was deleted under a snapshot",
+                object.key
+            );
+        }
+
+        drop(snapshot);
+        collector.await.unwrap().unwrap();
+        Arc::try_unwrap(storage)
+            .unwrap_or_else(|_| panic!("storage still shared"))
+            .shutdown()
+            .await
+            .unwrap();
+    }
+
+    /// A copy taken while commits and compactions run lists exactly the active
+    /// files the snapshot holds, and every object it lists exists while the
+    /// snapshot lives. The listed files stay in use through the snapshot's
+    /// retired references, so this test does not isolate the gate.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_snapshot_matches_its_copy_under_concurrent_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let compaction = CompactionConfig {
+            interval: Duration::from_millis(100),
+            l0_files: 2,
+            ..CompactionConfig::default()
+        };
+        let config = config_in(dir.path(), compaction, Duration::from_millis(100));
+        let storage = Arc::new(Storage::open(config).await.unwrap());
+        let stop = Arc::new(AtomicBool::new(false));
+        let appender = {
+            let storage = Arc::clone(&storage);
+            let stop = Arc::clone(&stop);
+            tokio::spawn(async move {
+                let mut start = 0_i64;
+                while !stop.load(Ordering::SeqCst) {
+                    storage
+                        .append_spans(project(), spans_at(&[start]))
+                        .await
+                        .unwrap();
+                    start += 1;
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+        };
+
+        // Obsolete-file GC runs too: a file the snapshot lists that a later
+        // compaction obsoletes must stay on disk while the snapshot lives
+        // (kept by the retired references, not the gate).
+        let collecting = {
+            let storage = Arc::clone(&storage);
+            let stop = Arc::clone(&stop);
+            tokio::spawn(async move {
+                while !stop.load(Ordering::SeqCst) {
+                    storage.collect_obsolete(Duration::ZERO).await.unwrap();
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+        };
+
+        for round in 0..20 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let target = dir.path().join(format!("copy-{round}.db"));
+            let snapshot = storage.snapshot_catalog(&target).await.unwrap();
+
+            let mut connection = sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&target)
+                .read_only(true)
+                .connect()
+                .await
+                .unwrap();
+            let mut copied: Vec<String> =
+                sqlx::query_scalar("SELECT path FROM data_files WHERE state = 'active'")
+                    .fetch_all(&mut connection)
+                    .await
+                    .unwrap();
+            drop(connection);
+            copied.sort();
+            let mut listed: Vec<String> = snapshot
+                .objects
+                .iter()
+                .map(|object| object.key.clone())
+                .filter(|key| key.starts_with("tables/"))
+                .collect();
+            listed.sort();
+            assert_eq!(
+                copied, listed,
+                "round {round}: the copy and the snapshot differ"
+            );
+            for object in &snapshot.objects {
+                assert!(
+                    object_on_disk(dir.path(), &object.key),
+                    "round {round}: {} is gone",
+                    object.key
+                );
+            }
+            assert!(
+                snapshot.flushed_seq[0] <= storage.committer.flushed_seq(Table::Spans).await,
+                "round {round}: the copy is ahead of the committer"
+            );
+            drop(snapshot);
+        }
+
+        stop.store(true, Ordering::SeqCst);
+        appender.await.unwrap();
+        collecting.await.unwrap();
+        Arc::try_unwrap(storage)
+            .unwrap_or_else(|_| panic!("storage still shared"))
+            .shutdown()
+            .await
+            .unwrap();
+    }
+
+    /// A drop during a snapshot returns within a second and refuses appends;
+    /// its media stays until the snapshot is gone, then the GC step deletes it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn drop_project_during_a_snapshot_returns_and_finishes_later() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_in(dir.path(), quiet_compaction(8), Duration::from_secs(3_600));
+        let storage = Arc::new(Storage::open(config).await.unwrap());
+        let blob = blob_of(b"held-by-the-snapshot");
+        let key = Objects::media_path(project(), &hex::encode(blob.sha256));
+        storage.put_media(project(), blob).await.unwrap();
+
+        let target = dir.path().join("catalog-copy.db");
+        let snapshot = storage.snapshot_catalog(&target).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), storage.drop_project(project()))
+            .await
+            .expect("the drop waited for the snapshot")
+            .unwrap();
+        let refused = storage
+            .append_spans(project(), spans_at(&[1]))
+            .await
+            .unwrap_err();
+        assert_eq!(refused, AppendError::ProjectDropped);
+        assert!(object_on_disk(dir.path(), &key), "the media was deleted");
+
+        // The GC step waits for the gate while the snapshot lives.
+        let finishing = {
+            let storage = Arc::clone(&storage);
+            tokio::spawn(async move { storage.media.finish_drops().await })
+        };
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !finishing.is_finished(),
+            "the drop finished while a snapshot was held"
+        );
+        assert!(object_on_disk(dir.path(), &key), "the media was deleted");
+
+        drop(snapshot);
+        finishing.await.unwrap();
+        assert!(!object_on_disk(dir.path(), &key), "the media survived");
+        Arc::try_unwrap(storage)
+            .unwrap_or_else(|_| panic!("storage still shared"))
+            .shutdown()
+            .await
+            .unwrap();
     }
 }

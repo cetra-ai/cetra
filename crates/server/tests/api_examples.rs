@@ -40,6 +40,7 @@ use llmobs_server::api::invites::{CreatedInvite, Invite, InvitePreview};
 use llmobs_server::api::keys::{ApiKey, CreatedApiKey, CreatedPersonalToken, PersonalToken};
 use llmobs_server::api::members::{OrgMember, ProjectMember};
 use llmobs_server::api::metrics::MetricsResponse;
+use llmobs_server::api::model_prices::{ModelPrice, ModelPriceInput, ModelPriceResolution};
 use llmobs_server::api::online_rules::{
     CreateOnlineRuleRequest, OnlineRule, OnlineRulePage, OnlineRulePreview,
     OnlineRulePreviewRequest, UpdateOnlineRuleRequest,
@@ -429,6 +430,10 @@ fn static_files_match_their_types() {
     roundtrip::<ExperimentComparison>("static/experiment-comparison.json");
     roundtrip::<Page<ScoreDefinition>>("static/score-definitions.json");
     roundtrip::<ScoreDefinition>("static/score-definition.json");
+    roundtrip::<Page<ModelPrice>>("static/model-prices.json");
+    roundtrip::<Page<ModelPrice>>("static/org-model-prices.json");
+    roundtrip::<ModelPrice>("static/model-price.json");
+    roundtrip::<ModelPriceResolution>("static/model-price-resolution.json");
     roundtrip::<OnlineRulePage>("static/online-rules.json");
     roundtrip::<OnlineRule>("static/online-rule.json");
     roundtrip::<OnlineRule>("static/online-rule-resumed.json");
@@ -458,6 +463,11 @@ fn request_examples_match_their_types_and_the_openapi_document() {
     roundtrip::<FromTraceRequest>("requests/dataset-from-trace.json");
     roundtrip::<ExperimentResultsRequest>("requests/experiment-results.json");
     roundtrip::<CreateOnlineRuleRequest>("requests/online-rule-create.json");
+    // `ModelPriceInput` has no `Serialize`, so it is only deserialized.
+    let price_text = fs::read_to_string(api_dir().join("requests/model-price-create.json"))
+        .unwrap_or_else(|error| panic!("{error}"));
+    serde_json::from_str::<ModelPriceInput>(&price_text)
+        .unwrap_or_else(|error| panic!("requests/model-price-create.json: {error}"));
     // `UpdateOnlineRuleRequest` has no `Serialize`, so it is only deserialized.
     let update_text = fs::read_to_string(api_dir().join("requests/online-rule-update.json"))
         .unwrap_or_else(|error| panic!("{error}"));
@@ -522,6 +532,7 @@ fn request_examples_match_their_types_and_the_openapi_document() {
             "requests/experiment-results.json",
         ),
         ("post_backfill", "requests/backfill-create.json"),
+        ("post_model_price", "requests/model-price-create.json"),
         ("post_backfill_estimate", "requests/backfill-estimate.json"),
     ];
     let mut failures = Vec::new();
@@ -639,6 +650,10 @@ fn generated_files_roundtrip() {
             "get_saved_view" => roundtrip::<SavedView>(&example.file),
             "list_score_definitions" => roundtrip::<Page<ScoreDefinition>>(&example.file),
             "post_score_definition" => roundtrip::<ScoreDefinition>(&example.file),
+            "list_models" => roundtrip::<Page<ModelPrice>>(&example.file),
+            "list_org_model_prices" => roundtrip::<Page<ModelPrice>>(&example.file),
+            "resolve_model_price" => roundtrip::<ModelPriceResolution>(&example.file),
+            "post_model_price" => roundtrip::<ModelPrice>(&example.file),
             "list_online_rules" => roundtrip::<OnlineRulePage>(&example.file),
             "get_online_rule" | "post_online_rule" | "post_online_rule_resume" => {
                 roundtrip::<OnlineRule>(&example.file);

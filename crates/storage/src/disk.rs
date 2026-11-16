@@ -289,6 +289,7 @@ pub(crate) fn spawn(disk: Arc<Disk>, cache: Option<Arc<ReadCache>>) -> DiskHandl
 
 /// A disk manager that spills under `dir`, as the query runtime's does.
 #[cfg(test)]
+#[allow(clippy::expect_used)] // a test helper: a disk manager over an existing directory cannot fail
 pub(crate) fn test_spill(dir: &Path) -> Arc<DiskManager> {
     use datafusion::execution::disk_manager::{DiskManagerBuilder, DiskManagerMode};
     Arc::new(

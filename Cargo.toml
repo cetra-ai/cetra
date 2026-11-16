@@ -15,6 +15,7 @@ license = "MIT"
 unsafe_code = "forbid"
 missing_debug_implementations = "warn"
 unreachable_pub = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
 unused_qualifications = "warn"
 
 [workspace.lints.clippy]
@@ -77,6 +78,10 @@ parquet = { version = "59.2", default-features = false, features = [
     "flate2-zlib-rs",
 ] }
 object_store = "0.13"
+# Structured fuzz inputs (track R M3). Storage uses it under cfg(fuzzing) and in tests.
+arbitrary = { version = "1.5.0", features = ["derive"] }
+# Bounded LZ4 frame check of WAL IPC buffers (track R M3). The version and features arrow-ipc uses.
+lz4_flex = { version = "0.14.0", default-features = false, features = ["std", "frame"] }
 # catalog.db (D39). `macros` exists for `sqlx::migrate!` only. Queries use the
 # runtime API, not `query!`, so no `DATABASE_URL` is required. `sqlite` bundles
 # SQLite so the binary does not need a system library.
@@ -151,7 +156,7 @@ bytes = "1.12"
 futures = "0.3.34"
 strum = { version = "0.28.0", features = ["derive"] }
 insta = { version = "1.49.0", features = ["json"] }
-jsonschema = { version = "0.60.2", default-features = false }
+jsonschema = { version = "0.61.0", default-features = false }
 anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
@@ -166,7 +171,7 @@ bytesize = { version = "2.7.0", features = ["serde"] }
 # `[storage]` durations, for example `"120s"` (D90).
 humantime-serde = "1.1.1"
 # Total memory for the query pool default (spec 03 §6).
-sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
+sysinfo = { version = "0.40.1", default-features = false, features = ["system"] }
 # Free disk for the disk-full check (spec 03 §10).
 rustix = { version = "1.1.6", default-features = false, features = ["std", "fs"] }
 # Same prost as `opentelemetry-proto` 0.33.1 (`Cargo.lock`). Decode only; no `derive`.
@@ -234,7 +239,7 @@ http-body-util = "0.1.5"
 # `zlib-rs` is the backend parquet already uses, so no `miniz_oxide` is added.
 flate2 = { version = "1.1.11", default-features = false, features = ["zlib-rs"] }
 # zstd OTLP request bodies. Same version as `parquet`'s pin (`Cargo.lock`). Default features stay off.
-zstd = { version = "0.13.4", default-features = false }
+zstd = { version = "0.14.3", default-features = false }
 
 [profile.dev]
 debug = "line-tables-only"

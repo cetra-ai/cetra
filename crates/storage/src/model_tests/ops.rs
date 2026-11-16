@@ -1378,7 +1378,7 @@ pub(super) fn flushed(harness: &Harness, model: &mut Model) {
 }
 
 /// `Crash`: this life's records replay after the reopen.
-fn crashed(harness: &Harness, model: &mut Model) {
+pub(super) fn crashed(harness: &Harness, model: &mut Model) {
     model
         .spans_wal
         .crashed(segment_count(harness, Table::Spans));

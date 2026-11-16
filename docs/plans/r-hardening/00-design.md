@@ -177,21 +177,18 @@ Every concurrent read must equal the model **before or after** each op in flight
 
 ### M8 — Format stability
 
-The rule, written into spec 03 (new § Format versions), D-R-12:
-- **Format surfaces:** the WAL record format and segment names; the Parquet schemas and KV metadata (`llmobs.schema_version`); the `catalog.db` schema; the object layout and paths; the read-cache layout.
-- **Not a format change:** adding a nullable Parquet column (spec 03 §3 Schema evolution) and a new `catalog.db` migration that only adds. Anything else is a format change. Examples: a new WAL `kind`, a changed sort order or column type, a renamed path, a changed checksum.
-- **Before the first public release:** no constraint (no users, `AGENTS.md`).
-- **From the first public release:** a format change needs:
-  - a format version bump in the surface's own marker;
-  - an open-time migration with tests;
-  - an `### Upgrade notes` line (D-N-5).
+The rule, written into spec 03 (new § 12 Format versions), D-R-12 and D-R-26 to D-R-32:
+- **Format surfaces:** the WAL segment header and record format; the Parquet schemas and KV metadata; the `catalog.db` schema and its data-directory marker; the object layout and paths; the read-cache layout (pinned, not versioned).
+- **One `FORMAT_VERSION`** for the whole directory, stored in `catalog.db`'s `user_version`, in every WAL segment header (new) and in every Parquet file as `llmobs.format_version` (new; `llmobs.schema_version` stays the row normalization version).
+- **Not a format change:** adding a nullable Parquet column (spec 03 §3 Schema evolution) and a new `catalog.db` migration that only adds. Anything else is a format change. Examples: a new WAL `kind`, a changed sort order or column type, a renamed path, a changed checksum, a new value of a catalog TEXT enum.
+- **Before the first public release:** no constraint (no users, `AGENTS.md`). Directories written before M8 are refused, not migrated; that includes stored benchmark and soak datasets (`trace_bench`'s, M7's), which must be regenerated.
+- **From the first public release:** a format change needs a `FORMAT_VERSION` bump, readers or an open-time migration for what the previous release wrote, tests against the previous releases' golden directories, and an `### Upgrade notes` line (D-N-5).
+- **Downgrade:** a newer directory, a newer WAL segment or an unknown catalog migration is refused before anything is changed (an older binary used to truncate a newer WAL tail and quarantine a newer Parquet file).
+- **Golden directories:** `just golden-dir <version>` writes a small data directory (three projects, one dropped; every table; an applied and a pending deletion; a retention watermark; L0 and L1 files; an obsolete file; a media blob; WAL tail records; a cache entry) as a plain tree `fixtures/storage/golden/<version>/` with `expected.json`, at most 1 MiB. None is committed before the first stable tag; until then the test generates one into a temp dir and checks it. A test opens a copy of each with the current code, compares the public reads with `expected.json`, then writes and compacts on it. The reads are the server's `reads` functions called directly, not the M1 oracle's wrappers.
+- **Which directories CI keeps (user):** the 0.x directories until 1.0. 1.0 may drop them, with an upgrade note to pass through the last 0.x first. From 1.0, every release's directory stays. `fixtures/storage/golden/RELEASES` lists them and `just check-golden` guards deletions.
+- **Release step.** Producing `fixtures/storage/golden/<version>/` is a step of N's release process: `release-prep` runs `just golden-dir`, and `release-verify` checks that the directory exists. M8 asks the coordinating session to add it to N's scripts (cross-track review X21).
 
-  `just golden-dir` writes a small data directory (two projects, every table, a pending and an applied deletion, a retention watermark, L0 and L1 files, WAL tail records). Each release commits its directory as `fixtures/storage/golden/<version>.tar.zst`. A CI test unpacks every one, opens it with the current binary, and checks the M1 model's reads against its `expected.json`.
-- **Which directories CI keeps (user):** the 0.x directories until 1.0. 1.0 may drop them, with an upgrade note to pass through the last 0.x first. From 1.0, every release's directory stays.
-
-- **Release step.** Producing `fixtures/storage/golden/<version>.tar.zst` is a step of N's release process: `release-prep` runs `just golden-dir`, and `release-verify` checks that the directory exists. M8 asks the coordinating session to add it to N's scripts (cross-track review X21).
-
-**Held (cross-track review X30).** The trigger for "first public release" is being settled by the coordinator and the user in a plain-numbered decision, because Q's cloud cells may hold data that must survive before any public tag, and spec 12 § Upgrades disagrees today. D-R-12 and M8 follow that decision: M8's plan is written, and scheduled before that trigger, once it is made. Until then the golden-dir tooling is not built.
+Plan: `08-m8-format.md`. The first-release trigger is settled by D185 (the first public release tag); M8 lands before it.
 
 ## Cross-cutting rules
 

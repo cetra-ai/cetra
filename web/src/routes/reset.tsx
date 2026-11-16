@@ -35,10 +35,10 @@ export const Route = createFileRoute("/reset")({
 function ResetPage() {
   const { token } = Route.useSearch();
   const { data: config } = useSuspenseQuery(authConfigQuery);
-  if (!config.password_enabled) {
+  if (!config.password_enabled && token === undefined) {
     return (
       <AuthLayout
-        title={token !== undefined ? "Set a new password" : "Reset your password"}
+        title="Reset your password"
         description="Password sign-in is disabled on this server. Sign in with your identity provider."
         footer={
           <Link to="/login" className={AUTH_LINK_CLASS}>
@@ -51,7 +51,7 @@ function ResetPage() {
     );
   }
   return token !== undefined ? (
-    <NewPassword token={token} />
+    <NewPassword token={token} passwordEnabled={config.password_enabled} />
   ) : (
     <ForgotPassword smtpEnabled={config.smtp_enabled} />
   );
@@ -188,8 +188,11 @@ function resetFormError(error: unknown): string | undefined {
   return problemMessage(error, "Something went wrong. Try again.");
 }
 
-function NewPassword({ token }: { token: string }) {
+function NewPassword({ token, passwordEnabled }: { token: string; passwordEnabled: boolean }) {
   const queryClient = useQueryClient();
+  // With password sign-in off, only instance admins get a reset link through (D-S-3): their
+  // way in is the password form, not the provider the login page would start.
+  const loginSearch = passwordEnabled ? {} : { password: true as const };
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [clientErrors, setClientErrors] = useState<PasswordProblems>({});
@@ -232,13 +235,15 @@ function NewPassword({ token }: { token: string }) {
         title="Password updated"
         description="Your password is set, and you were signed out everywhere. Sign in with your new password."
         footer={
-          <Link to="/login" className={AUTH_LINK_CLASS}>
+          <Link to="/login" search={loginSearch} className={AUTH_LINK_CLASS}>
             Back to sign in
           </Link>
         }
       >
         <Button asChild>
-          <Link to="/login">Sign in</Link>
+          <Link to="/login" search={loginSearch}>
+            Sign in
+          </Link>
         </Button>
       </AuthLayout>
     );
@@ -248,7 +253,7 @@ function NewPassword({ token }: { token: string }) {
     <AuthLayout
       title="Set a new password"
       footer={
-        <Link to="/login" className={AUTH_LINK_CLASS}>
+        <Link to="/login" search={loginSearch} className={AUTH_LINK_CLASS}>
           Back to sign in
         </Link>
       }
@@ -267,7 +272,7 @@ function NewPassword({ token }: { token: string }) {
         <FormError message={formError} />
         {formError === SSO_RESET_MESSAGE ? (
           <p>
-            <Link to="/login" className={AUTH_LINK_CLASS}>
+            <Link to="/login" search={loginSearch} className={AUTH_LINK_CLASS}>
               Go to sign in
             </Link>
           </p>

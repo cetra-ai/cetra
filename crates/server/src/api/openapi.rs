@@ -88,6 +88,10 @@ use super::keys::{
 };
 use super::members::{OrgMember, ProjectMember, SetProjectOverrideRequest, UpdateOrgMemberRequest};
 use super::metrics::{MetricsBucket, MetricsGroupBy, MetricsParams, MetricsResponse};
+use super::model_prices::{
+    ModelPrice, ModelPriceInput, ModelPriceListParams, ModelPriceResolution,
+    ModelPriceResolveParams, ModelPriceScope, ModelPriceTier,
+};
 use super::online_rules::{
     BudgetPeriod, CreateOnlineRuleRequest, JobCounts, OnlineRule, OnlineRulePage,
     OnlineRulePreview, OnlineRulePreviewRequest, PauseReason, RuleSpend, RuleTarget,
@@ -342,6 +346,12 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<ScoreDelta>();
     set.insert::<ScoreDeltas>();
     set.insert::<ExperimentComparison>();
+    set.insert::<ModelPriceScope>();
+    set.insert::<ModelPriceTier>();
+    set.insert::<ModelPrice>();
+    set.insert::<ModelPriceInput>();
+    set.insert::<ModelPriceResolution>();
+    set.insert_page::<ModelPrice>("ModelPricePage");
     set.insert::<ChannelKind>();
     set.insert::<DeliveryStatus>();
     set.insert::<ChannelDelivery>();
@@ -480,6 +490,7 @@ pub fn openapi() -> OpenApi {
                 "experiments",
                 "Experiments run by the SDK and their results.",
             ),
+            tag("model_prices", "Custom and built-in model prices"),
             tag("schema", "Filter and SQL catalog."),
             tag("saved_views", "Saved list views and SQL queries."),
             tag("sql", "SQL console over the project's views."),
@@ -806,6 +817,8 @@ fn paths() -> Paths {
     let paths = score_definition_paths(paths);
     let paths = dataset_paths(paths);
     let paths = experiment_paths(paths);
+    let paths = model_price_paths(paths);
+    let paths = org_model_price_paths(paths);
     let paths = saved_view_paths(paths);
     let paths = sql_paths(paths);
     let paths = deletion_paths(paths);
@@ -1656,7 +1669,7 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
         "End a user's sessions and personal tokens",
     )
     .description(Some(
-        "Needs a `control_plane` bearer token with the `users` scope. The user is named by its OIDC subject at the control plane's provider (`entitlements.control_plane_provider`). Deletes the user's web sessions and revokes its personal tokens; the user can sign in again. An instance admin cannot be managed (403 `forbidden`). An unknown subject answers 404.",
+        "Needs a `control_plane` bearer token with the `users` scope. The user is named by its OIDC subject at the control plane's provider (`entitlements.control_plane_provider`), or, when no identity has that subject, by its email if that user has no identity at that provider (D-S-9). The email is checked only then (400 for an invalid one). Deletes the user's web sessions and revokes its personal tokens; the user can sign in again. An instance admin cannot be managed (403 `forbidden`). An unknown user answers 404.",
     ))
     .securities(Some(internal_user_security()))
     .request_body(Some(json_body("InternalUserRef")))
@@ -1674,7 +1687,7 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
         "Disable a user",
     )
     .description(Some(
-        "Needs a `control_plane` bearer token with the `users` scope. Revokes the user's sessions and personal tokens, as `revoke` does, and sets the user disabled. Unlike the instance admin's disable, the last owner of an org may be disabled: the org stays. An instance admin cannot be managed (403 `forbidden`). An unknown subject answers 404.",
+        "Needs a `control_plane` bearer token with the `users` scope. The user is named by its OIDC subject at the control plane's provider (`entitlements.control_plane_provider`), or, when no identity has that subject, by its email if that user has no identity at that provider (D-S-9). The email is checked only then (400 for an invalid one). Revokes the user's sessions and personal tokens, as `revoke` does, and sets the user disabled. Unlike the instance admin's disable, the last owner of an org may be disabled: the org stays. An instance admin cannot be managed (403 `forbidden`). An unknown user answers 404.",
     ))
     .securities(Some(internal_user_security()))
     .request_body(Some(json_body("InternalUserRef")))
@@ -1692,7 +1705,7 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
         "Delete a user",
     )
     .description(Some(
-        "Needs a `control_plane` bearer token with the `users` scope. Deletes the user in one transaction. Its invites and API keys stay, without their creator. Orgs where the user was the only owner stay, without an owner, and are listed in `sole_owner_of` for the control plane to resolve. An unknown subject answers 200 with an empty list, so a retry is safe. An instance admin cannot be managed (403 `forbidden`).",
+        "Needs a `control_plane` bearer token with the `users` scope. The user is named by its OIDC subject at the control plane's provider (`entitlements.control_plane_provider`), or, when no identity has that subject, by its email if that user has no identity at that provider (D-S-9). The email is checked only then (400 for an invalid one). Deletes the user in one transaction. Its invites and API keys stay, without their creator. Orgs where the user was the only owner stay, without an owner, and are listed in `sole_owner_of` for the control plane to resolve. An unknown user answers 200 with an empty list, so a retry is safe. An instance admin cannot be managed (403 `forbidden`).",
     ))
     .securities(Some(internal_user_security()))
     .request_body(Some(json_body("InternalUserRef")))
@@ -2813,6 +2826,184 @@ fn backfill_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/online-rules/{{id}}/backfills/estimate"),
             PathItem::new(HttpMethod::Post, estimate),
+        )
+}
+
+fn model_price_paths(paths: PathsBuilder) -> PathsBuilder {
+    let id = path_uuid("id", "Price row id.");
+    let read = "Any project member can read; a `read` API key too.";
+    let write = "Project admins. API keys cannot call it. A PATCH replaces the whole row. A write that would leave a budgeted online rule without a price is 409.";
+    let list = operation("list_models", "model_prices", "List model prices")
+        .description(Some(read))
+        .parameters(Some(with_query::<ModelPriceListParams>(vec![
+            project_param(),
+        ])))
+        .responses(responses(
+            "200",
+            json_named(
+                "ModelPricePage",
+                "One page of the project's effective price table.",
+            ),
+            QUERY_ERRORS,
+        ))
+        .build();
+    let resolve = operation(
+        "resolve_model_price",
+        "model_prices",
+        "Resolve the price of a model",
+    )
+    .description(Some(read))
+    .parameters(Some(with_query::<ModelPriceResolveParams>(vec![
+        project_param(),
+    ])))
+    .responses(responses(
+        "200",
+        json_of::<ModelPriceResolution>("The row that prices the model now, or none."),
+        QUERY_ERRORS,
+    ))
+    .build();
+    let create = operation(
+        "post_model_price",
+        "model_prices",
+        "Create a project model price",
+    )
+    .description(Some(write))
+    .parameters(Some(vec![project_param()]))
+    .request_body(Some(json_body("ModelPriceInput")))
+    .responses(responses(
+        "201",
+        json_of::<ModelPrice>("The created price."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    let patch = operation(
+        "patch_model_price",
+        "model_prices",
+        "Replace a project model price",
+    )
+    .description(Some(write))
+    .parameters(Some(vec![project_param(), id.clone()]))
+    .request_body(Some(json_body("ModelPriceInput")))
+    .responses(responses(
+        "200",
+        json_of::<ModelPrice>("The replaced price."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    let delete = operation(
+        "delete_model_price",
+        "model_prices",
+        "Delete a project model price",
+    )
+    .description(Some(write))
+    .parameters(Some(vec![project_param(), id]))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new().description("Deleted.").build(),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    paths
+        .path(
+            format!("{PROJECT}/models"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/models/resolve"),
+            PathItem::new(HttpMethod::Get, resolve),
+        )
+        .path(
+            format!("{PROJECT}/models"),
+            PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/models/{{id}}"),
+            PathItem::new(HttpMethod::Patch, patch),
+        )
+        .path(
+            format!("{PROJECT}/models/{{id}}"),
+            PathItem::new(HttpMethod::Delete, delete),
+        )
+}
+
+fn org_model_price_paths(paths: PathsBuilder) -> PathsBuilder {
+    let org = path_string("org", "Org UUID or slug.");
+    let id = path_uuid("id", "Price row id.");
+    let read = "Any org member can read.";
+    let write = "Org admins and owners. A PATCH replaces the whole row. A write that would leave a budgeted online rule of any project of the org without a price is 409.";
+    let list = operation(
+        "list_org_model_prices",
+        "model_prices",
+        "List org model prices",
+    )
+    .description(Some(read))
+    .parameters(Some(vec![org.clone()]))
+    .responses(responses(
+        "200",
+        json_named(
+            "ModelPricePage",
+            "The org's own price rows (at most 500), without paging.",
+        ),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    let create = operation(
+        "post_org_model_price",
+        "model_prices",
+        "Create an org model price",
+    )
+    .description(Some(write))
+    .parameters(Some(vec![org.clone()]))
+    .request_body(Some(json_body("ModelPriceInput")))
+    .responses(responses(
+        "201",
+        json_of::<ModelPrice>("The created price."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    let patch = operation(
+        "patch_org_model_price",
+        "model_prices",
+        "Replace an org model price",
+    )
+    .description(Some(write))
+    .parameters(Some(vec![org.clone(), id.clone()]))
+    .request_body(Some(json_body("ModelPriceInput")))
+    .responses(responses(
+        "200",
+        json_of::<ModelPrice>("The replaced price."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    let delete = operation(
+        "delete_org_model_price",
+        "model_prices",
+        "Delete an org model price",
+    )
+    .description(Some(write))
+    .parameters(Some(vec![org, id]))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new().description("Deleted.").build(),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    paths
+        .path(
+            "/api/v1/orgs/{org}/models",
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            "/api/v1/orgs/{org}/models",
+            PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            "/api/v1/orgs/{org}/models/{id}",
+            PathItem::new(HttpMethod::Patch, patch),
+        )
+        .path(
+            "/api/v1/orgs/{org}/models/{id}",
+            PathItem::new(HttpMethod::Delete, delete),
         )
 }
 

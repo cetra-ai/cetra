@@ -41,6 +41,40 @@ async function fillAndSubmit(user: UserEvent, email: string, password: string) {
   await user.click(screen.getByRole("button", { name: "Sign in" }));
 }
 
+type AppRouter = Awaited<ReturnType<typeof renderApp>>["router"];
+
+// Waits for the navigation to finish loading, not just to start: a load still running when the
+// file's environment is torn down rejects outside any test.
+async function settlesAt(router: AppRouter, pathname: string) {
+  await waitFor(() => {
+    expect(router.state.status).toBe("idle");
+    expect(router.state.resolvedLocation?.pathname).toBe(pathname);
+  });
+}
+
+const CLOUD = { id: "oidc:cloud", display_name: "llmobs Cloud" };
+
+function onlyCloud(overrides: Partial<typeof authConfig> = {}) {
+  withConfig({ password_enabled: false, providers: [CLOUD], ...overrides });
+}
+
+function recordNavigation() {
+  const replaced: string[] = [];
+  const navigated: string[] = [];
+  setExternalNavigator({
+    navigate: (url) => {
+      navigated.push(url);
+    },
+    replace: (url) => {
+      replaced.push(url);
+    },
+    submit: () => {
+      throw new Error("the login page never posts a form");
+    },
+  });
+  return { replaced, navigated };
+}
+
 it("signs in and returns to the redirect target", async () => {
   signedOut();
   const bodies = loginSucceeds();
@@ -48,7 +82,7 @@ it("signs in and returns to the redirect target", async () => {
     "/login?redirect=%2Facme%2Fsupport-bot%2Ftraces",
   );
   await fillAndSubmit(user, "ada@example.com", "correct horse battery");
-  await waitFor(() => expect(router.state.location.pathname).toBe("/acme/support-bot/traces"));
+  await settlesAt(router, "/acme/support-bot/traces");
   expect(bodies).toEqual([{ email: "ada@example.com", password: "correct horse battery" }]);
   // gcTime 0: once the page has unmounted, TanStack drops the mutation, whose variables
   // hold the password and whose data holds the signed-in user.
@@ -73,14 +107,14 @@ it("goes home after signing in without a redirect", async () => {
   loginSucceeds();
   const { router, user } = await renderApp("/login");
   await fillAndSubmit(user, "ada@example.com", "correct horse battery");
-  await waitFor(() => expect(router.state.location.pathname).toBe("/acme"));
+  await settlesAt(router, "/acme");
 });
 
 it("sends the user to setup when the server needs it", async () => {
   signedOut();
   withConfig({ setup_required: true });
   const { router } = await renderApp("/login");
-  await waitFor(() => expect(router.state.location.pathname).toBe("/setup"));
+  await settlesAt(router, "/setup");
   expect(screen.getByText(/Open the setup link printed in the server log/)).toBeInTheDocument();
 });
 
@@ -94,7 +128,8 @@ it("ignores an unsafe redirect", async () => {
   );
   await fillAndSubmit(user, "ada@example.com", "correct horse battery");
   // The app stays on its origin and lands on the default page, not on the given redirect.
-  await waitFor(() => expect(router.state.location.href).toBe("/acme"));
+  await settlesAt(router, "/acme");
+  expect(router.state.location.href).toBe("/acme");
 });
 
 it("sends a user who is already signed in to the redirect target", async () => {
@@ -228,7 +263,7 @@ it("submits with Enter", async () => {
   await user.type(screen.getByLabelText("Email"), "ada@example.com");
   await user.type(screen.getByLabelText("Password"), "correct horse battery{Enter}");
   expect(bodies).toHaveLength(1);
-  await waitFor(() => expect(router.state.location.pathname).toBe("/acme"));
+  await settlesAt(router, "/acme");
 });
 
 it("explains a rate-limited resend", async () => {
@@ -377,6 +412,9 @@ it("sends an SSO email to its org's identity provider", async () => {
     navigate: (url) => {
       navigated.push(url);
     },
+    replace: () => {
+      throw new Error("the SSO login never replaces the page");
+    },
     submit: () => {
       throw new Error("the SSO login never posts a form");
     },
@@ -402,7 +440,7 @@ it("shows the password form for another email and goes back on request", async (
   await user.type(await screen.findByLabelText("Password"), "correct horse battery");
   expect(screen.getByLabelText("Email")).toHaveValue("ada@example.com");
   await user.click(screen.getByRole("button", { name: "Sign in" }));
-  await waitFor(() => expect(router.state.location.pathname).toBe("/acme"));
+  await settlesAt(router, "/acme");
   expect(bodies).toEqual([{ email: "ada@example.com", password: "correct horse battery" }]);
 });
 
@@ -456,3 +494,117 @@ it.each(["seat_limit", "sso_required", "sso_unavailable"] as const)(
     expect(await screen.findByRole("alert")).toHaveTextContent(oauthErrorMessage(code));
   },
 );
+
+it("starts the only provider at once, keeping the redirect", async () => {
+  signedOut();
+  onlyCloud();
+  const { replaced, navigated } = recordNavigation();
+  const { router } = await renderApp("/login?redirect=%2Facme%2Fsupport-bot%2Ftraces");
+  expect(await screen.findByText("Redirecting to llmobs Cloud…")).toBeInTheDocument();
+  await waitFor(() =>
+    expect(replaced).toEqual([
+      "/api/auth/authorize/oidc%3Acloud?redirect=%2Facme%2Fsupport-bot%2Ftraces",
+    ]),
+  );
+  expect(navigated).toEqual([]);
+  expect(screen.getByRole("link", { name: "Continue with llmobs Cloud" })).toBeInTheDocument();
+  expect(screen.queryByLabelText("Email")).toBeNull();
+  expect(router.state.location.pathname).toBe("/login");
+});
+
+it("shows the instance admins' password form on password=1", async () => {
+  signedOut();
+  onlyCloud();
+  const { replaced } = recordNavigation();
+  const bodies = loginSucceeds();
+  const { router, user } = await renderApp("/login?password=1");
+  expect(await screen.findByText("Password sign-in is for instance admins.")).toBeInTheDocument();
+  await fillAndSubmit(user, "root@example.com", "correct horse battery");
+  await waitFor(() =>
+    expect(bodies).toEqual([{ email: "root@example.com", password: "correct horse battery" }]),
+  );
+  expect(replaced).toEqual([]);
+  expect(screen.queryByRole("link", { name: "Forgot password?" })).toBeNull();
+  await settlesAt(router, "/acme");
+});
+
+it("shows a provider error instead of starting the provider again", async () => {
+  signedOut();
+  onlyCloud();
+  const { replaced } = recordNavigation();
+  await renderApp("/login?error=signup_closed");
+  expect(await screen.findByRole("alert")).toHaveTextContent(oauthErrorMessage("signup_closed"));
+  expect(screen.getByRole("link", { name: "Continue with llmobs Cloud" })).toBeInTheDocument();
+  expect(replaced).toEqual([]);
+});
+
+it("does not start the provider right after signing out", async () => {
+  signedOut();
+  onlyCloud();
+  const { replaced } = recordNavigation();
+  await renderApp("/login?signed_out=1");
+  expect(await screen.findByRole("status")).toHaveTextContent("You're signed out.");
+  expect(screen.getByRole("link", { name: "Continue with llmobs Cloud" })).toBeInTheDocument();
+  expect(replaced).toEqual([]);
+});
+
+it("links instance admins to the password form", async () => {
+  signedOut();
+  onlyCloud();
+  const { replaced } = recordNavigation();
+  const { router, user } = await renderApp("/login?error=provider_error");
+  await user.click(
+    await screen.findByRole("link", { name: "Instance admin? Sign in with a password" }),
+  );
+  expect(await screen.findByLabelText("Password")).toBeInTheDocument();
+  await waitFor(() => {
+    expect(router.state.status).toBe("idle");
+    expect(router.state.resolvedLocation?.search).toEqual({ password: true });
+  });
+  expect(replaced).toEqual([]);
+});
+
+it("shows the password form on password=1 under org SSO", async () => {
+  signedOut();
+  onlyCloud({ sso_discovery: true });
+  const { replaced } = recordNavigation();
+  await renderApp("/login?password=1");
+  expect(await screen.findByLabelText("Password")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Continue" })).toBeNull();
+  expect(replaced).toEqual([]);
+});
+
+it("keeps the buttons with two providers", async () => {
+  signedOut();
+  withConfig({ password_enabled: false });
+  const { replaced } = recordNavigation();
+  await renderApp("/login");
+  expect(await screen.findByRole("link", { name: "Continue with GitHub" })).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Continue with Okta" })).toBeInTheDocument();
+  expect(
+    await screen.findByRole("link", { name: "Instance admin? Sign in with a password" }),
+  ).toBeInTheDocument();
+  expect(replaced).toEqual([]);
+});
+
+it("keeps the email step under org SSO", async () => {
+  signedOut();
+  onlyCloud({ sso_discovery: true });
+  const { replaced } = recordNavigation();
+  await renderApp("/login");
+  expect(await screen.findByRole("button", { name: "Continue" })).toBeInTheDocument();
+  expect(screen.getByLabelText("Email")).toBeInTheDocument();
+  expect(replaced).toEqual([]);
+});
+
+it("keeps the password form when password sign-in is on", async () => {
+  signedOut();
+  withConfig({ providers: [CLOUD] });
+  const { replaced } = recordNavigation();
+  await renderApp("/login");
+  expect(await screen.findByLabelText("Password")).toBeInTheDocument();
+  expect(
+    screen.queryByRole("link", { name: "Instance admin? Sign in with a password" }),
+  ).toBeNull();
+  expect(replaced).toEqual([]);
+});

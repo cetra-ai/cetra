@@ -1,0 +1,53 @@
+{
+  "data": [
+    {
+      "id": "01900000-0000-7000-8000-000000000c01",
+      "scope": "project",
+      "model_name": "gpt-4o (negotiated)",
+      "match_pattern": "gpt\\-4o",
+      "provider": "openai",
+      "valid_from": "2026-01-01T00:00:00.000000000Z",
+      "price_input": 2.0,
+      "price_output": 8.0,
+      "price_cache_read": 1.0,
+      "tiers": [],
+      "created_at": "2026-01-02T10:00:00.000000000Z",
+      "updated_at": "2026-01-02T10:00:00.000000000Z"
+    },
+    {
+      "id": "01900000-0000-7000-8000-000000000c00",
+      "scope": "org",
+      "model_name": "Llama 3.1 8B (local)",
+      "match_pattern": "llama3\\.1:8b",
+      "valid_from": "1970-01-01T00:00:00.000000000Z",
+      "price_input": 0.0,
+      "price_output": 0.0,
+      "tiers": [],
+      "created_at": "2026-01-02T10:00:00.000000000Z",
+      "updated_at": "2026-01-02T10:00:00.000000000Z"
+    },
+    {
+      "scope": "builtin",
+      "model_name": "gpt-4o",
+      "match_pattern": "gpt\\-4o",
+      "provider": "openai",
+      "valid_from": "1970-01-01T00:00:00.000000000Z",
+      "price_input": 2.5,
+      "price_output": 10.0,
+      "price_cache_read": 1.25,
+      "tiers": []
+    },
+    {
+      "scope": "builtin",
+      "model_name": "gpt-4o-mini",
+      "match_pattern": "gpt\\-4o\\-mini",
+      "provider": "openai",
+      "valid_from": "1970-01-01T00:00:00.000000000Z",
+      "price_input": 0.15,
+      "price_output": 0.6,
+      "price_cache_read": 0.075,
+      "tiers": []
+    }
+  ],
+  "next_cursor": null
+}

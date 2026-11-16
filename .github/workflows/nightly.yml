@@ -1,0 +1,83 @@
+name: Nightly
+
+# Outside ci-ok (track R M3): the fuzz targets run for 10 minutes each. A failed run opens or
+# updates one issue labelled `nightly`.
+on:
+  schedule:
+    - cron: "23 2 * * *" # 02:23 UTC daily; off the hour to avoid the scheduler rush
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: short
+  # The fuzz scratch directories live on tmpfs (track R M3).
+  TMPDIR: /dev/shm
+
+jobs:
+  fuzz:
+    name: fuzz (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    # The first workflow_dispatch run sets this from the measured build (track R M3, R3.7).
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - wal_record
+          - wal_replay
+          - parquet_file
+          - read_cache_block
+          - catalog_rows
+          - filter_dsl
+          - otlp_http_protobuf
+          - otlp_http_json
+          - otlp_grpc
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/rust # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+        with:
+          cache: "false"
+      - run: just fuzz-toolchain
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-fuzz@0.13.2
+      - run: just fuzz-ci ${{ matrix.target }} 600
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: |
+            target/fuzz-new/${{ matrix.target }}
+            fuzz/artifacts/${{ matrix.target }}
+          if-no-files-found: ignore
+          retention-days: 14
+
+  report:
+    needs: [fuzz]
+    if: failure()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: just@1.59.0
+      - run: just nightly-issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
