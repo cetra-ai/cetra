@@ -392,6 +392,14 @@ async fn wal_rows_of_a_dropped_project_never_reach_a_file() {
     storage.shutdown().await.unwrap();
 }
 
+struct ReleaseOnDrop(crate::hooks::Hooks, HookPoint);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        self.0.release(self.1);
+    }
+}
+
 // 4. The append gate: an append in flight holds the drop until it returns, and
 //    the append itself is acknowledged. Run 10 times.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -402,6 +410,7 @@ async fn the_drop_waits_for_an_append_in_flight() {
         let storage = Arc::new(Storage::open(config).await.unwrap());
         let hooks = storage.hooks().clone();
         hooks.hold(HookPoint::AfterWalSync);
+        let _release = ReleaseOnDrop(hooks.clone(), HookPoint::AfterWalSync);
         let time = at(0, 0, 0);
         let append = {
             let storage = Arc::clone(&storage);
@@ -443,10 +452,15 @@ async fn the_drop_waits_for_an_append_in_flight() {
 async fn a_flush_prepared_before_the_drop_conflicts() {
     for _ in 0..10 {
         let dir = tempfile::tempdir().unwrap();
-        let config = config_in(dir.path(), quiet_compaction(8), Duration::from_millis(100));
+        // No age-triggered flush: `flush_now` freezes both appends at once, so
+        // a slow machine cannot split them across two flushes.
+        let config = config_in(dir.path(), quiet_compaction(8), Duration::from_secs(3_600));
         let storage = Arc::new(Storage::open(config.clone()).await.unwrap());
         let hooks = storage.hooks().clone();
         hooks.hold(HookPoint::FlushAfterWrite);
+        // A parked flush blocks a runtime worker, so a failed assertion below
+        // must release it or the runtime never shuts down (a silent hang).
+        let _release = ReleaseOnDrop(hooks.clone(), HookPoint::FlushAfterWrite);
         let time = at(0, 0, 0);
         storage
             .append_spans(project(), span_batch(project(), 1, time))
@@ -456,6 +470,10 @@ async fn a_flush_prepared_before_the_drop_conflicts() {
             .append_spans(kept_project(), span_batch(kept_project(), 1, time))
             .await
             .unwrap();
+        let flushing = {
+            let storage = Arc::clone(&storage);
+            tokio::spawn(async move { storage.flush_now(Duration::from_secs(60)).await })
+        };
         wait_at(&storage, HookPoint::FlushAfterWrite);
         // The parked flush prepared a spans file and a traces file per project.
         let staged = storage.staged_paths().await.unwrap();
@@ -466,7 +484,11 @@ async fn a_flush_prepared_before_the_drop_conflicts() {
             let storage = Arc::clone(&storage);
             tokio::spawn(async move { storage.drop_project(project()).await })
         };
-        dropping.await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(30), dropping)
+            .await
+            .expect("the drop never returned while a flush was parked after its write")
+            .unwrap()
+            .unwrap();
         hooks.release(HookPoint::FlushAfterWrite);
 
         // The first commit was refused and its staged rows stayed; the retry
@@ -510,11 +532,20 @@ async fn a_flush_prepared_before_the_drop_conflicts() {
             scalar(&storage, kept_project(), "SELECT count(*) FROM spans").await,
             1
         );
-        Arc::try_unwrap(storage)
-            .unwrap_or_else(|_| panic!("storage still shared"))
-            .shutdown()
+        tokio::time::timeout(Duration::from_secs(30), flushing)
             .await
+            .expect("flush_now never returned after the flush retry committed")
+            .unwrap()
             .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            Arc::try_unwrap(storage)
+                .unwrap_or_else(|_| panic!("storage still shared"))
+                .shutdown(),
+        )
+        .await
+        .expect("shutdown never returned")
+        .unwrap();
     }
 }
 
