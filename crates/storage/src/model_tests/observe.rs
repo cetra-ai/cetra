@@ -1,9 +1,11 @@
 //! Reading storage the way the server does: the public `reads` functions over a `QueryContext`
 //! of the project's snapshot, every page followed (docs/plans/r-hardening/01-m1-model.md § R1.3).
 //!
-//! Each function takes the storage it reads, runs one query on one snapshot, and returns a
-//! [`ReadFailure`] instead of panicking, so the checks and the reader threads of the concurrent
-//! mode can use the same functions (docs/plans/r-hardening/06-m6-concurrency.md § R6.3).
+//! Each function runs its query on the [`QueryContext`] it is given (or, for the ones that take a
+//! storage, on a context it builds), and returns a [`ReadFailure`] instead of panicking, so the
+//! checks and the reader threads of the concurrent mode can use the same functions
+//! (docs/plans/r-hardening/06-m6-concurrency.md § R6.3). Reads that must agree with each other
+//! share one context, so they see one snapshot.
 
 use std::time::Duration;
 
@@ -99,7 +101,7 @@ pub(super) async fn observe_eval_trace_ids(
 
 /// A query context on `project`'s snapshot, as the server's read handlers build one. A read takes
 /// one, and every page it reads comes from it.
-async fn context(storage: &Storage, project: P) -> Result<QueryContext, ReadFailure> {
+pub(super) async fn context(storage: &Storage, project: P) -> Result<QueryContext, ReadFailure> {
     let query = storage
         .query(project.id(), crate::QueryOptions::new(None, None))
         .await?;
@@ -109,16 +111,14 @@ async fn context(storage: &Storage, project: P) -> Result<QueryContext, ReadFail
 /// `(start_time, trace_id hex, span_id hex)` of every `span_list` row, duplicates kept, in list
 /// order. Pages of `limit` rows each.
 pub(super) async fn observe_spans(
-    storage: &Storage,
-    project: P,
+    ctx: &QueryContext,
     limit: usize,
 ) -> Result<Vec<(i64, String, String)>, ReadFailure> {
-    let ctx = context(storage, project).await?;
     let mut keys = Vec::new();
     let mut cursor: Option<String> = None;
     loop {
         let page = span_list(
-            &ctx,
+            ctx,
             SpanListRequest {
                 filter: None,
                 search: None,
@@ -154,17 +154,15 @@ pub(super) async fn observe_spans(
 /// Every `traces` row `trace_list` returns for `scope`, in list order (`start_time DESC`),
 /// read in pages of `limit` rows.
 pub(super) async fn observe_traces(
-    storage: &Storage,
-    project: P,
+    ctx: &QueryContext,
     scope: ListScope,
     limit: usize,
 ) -> Result<Vec<ExpectedTrace>, ReadFailure> {
-    let ctx = context(storage, project).await?;
     let mut rows = Vec::new();
     let mut cursor: Option<String> = None;
     loop {
         let page = trace_list(
-            &ctx,
+            ctx,
             TraceListRequest {
                 filter: None,
                 search: None,
@@ -254,16 +252,14 @@ pub(super) async fn observe_span_detail(
 
 /// Every live `scores` row of `project`, in list order, read in pages of `limit` rows.
 pub(super) async fn observe_scores(
-    storage: &Storage,
-    project: P,
+    ctx: &QueryContext,
     limit: usize,
 ) -> Result<Vec<ExpectedScore>, ReadFailure> {
-    let ctx = context(storage, project).await?;
     let mut rows = Vec::new();
     let mut cursor: Option<String> = None;
     loop {
         let page = score_list(
-            &ctx,
+            ctx,
             ScoreListRequest {
                 target: None,
                 trace_id: None,
