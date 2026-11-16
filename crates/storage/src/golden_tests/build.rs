@@ -78,6 +78,7 @@ pub(super) fn golden_config(dir: &Path) -> StorageConfig {
             ..CompactionConfig::default()
         },
         deletion: Default::default(),
+        delete_objects: true,
     }
 }
 
