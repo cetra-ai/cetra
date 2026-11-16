@@ -24,8 +24,8 @@ use crate::{
     Bucket, BucketWidth, DeletionStatus, ListScope, MAX_PAGE, MetricsRequest, QueryContext,
     QueryOptions, ScoreListRequest, ScoreTargets, SessionListRequest, SessionSort, SortOrder,
     SpanListRequest, SpanSort, Storage, TimeWindow, TraceListRequest, TraceSort, UserListRequest,
-    UserSort, latest_scores, metrics, score_list, session_list, span_list, trace_detail,
-    trace_list, user_list,
+    UserSort, latest_scores, metrics, score_list, session_list, span_detail, span_list,
+    trace_detail, trace_list, user_list,
 };
 
 /// Time allowed for each read request.
@@ -84,7 +84,7 @@ fn rows(batches: &[RecordBatch], columns: &[&str]) -> Vec<Value> {
         else {
             panic!("the JSON writer returns an array");
         };
-        out.extend(values);
+        out.extend(values.into_iter().map(sorted_keys));
     }
     out
 }
@@ -99,6 +99,25 @@ fn ids_of(rows: &[Value]) -> Vec<String> {
                 .to_owned()
         })
         .collect()
+}
+
+/// `value` with the keys of every object (a map column, a JSON attribute) in sorted order, so the
+/// text of `expected.json` does not depend on the order a read writes its map entries in.
+fn sorted_keys(value: Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut entries: Vec<(String, Value)> = map.into_iter().collect();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, sorted_keys(value)))
+                    .collect(),
+            )
+        }
+        Value::Array(items) => Value::Array(items.into_iter().map(sorted_keys).collect()),
+        other => other,
+    }
 }
 
 /// Sorts JSON rows by their text: for reads that do not order their rows.
@@ -211,15 +230,31 @@ const SPAN_COLUMNS: &[&str] = &[
     spans::USER_ID,
 ];
 
-/// The columns of a span of a trace detail.
+/// The columns of a span of a trace detail (the list projection of `trace_detail`).
 const DETAIL_COLUMNS: &[&str] = &[
     spans::SPAN_ID,
     spans::PARENT_SPAN_ID,
     spans::NAME,
     spans::SPAN_KIND,
+    spans::START_TIME,
+    spans::END_TIME,
     spans::STATUS,
+    spans::STATUS_MESSAGE,
     spans::MODEL,
+    spans::TAGS,
     spans::TOTAL_TOKENS,
+];
+
+/// The columns of a span of `span_detail`, the one read with the payload columns (input, output,
+/// attributes), which `trace_detail` leaves out.
+const PAYLOAD_COLUMNS: &[&str] = &[
+    spans::SPAN_ID,
+    spans::INPUT,
+    spans::OUTPUT,
+    spans::ATTRIBUTES,
+    spans::OPERATION,
+    spans::PROVIDER,
+    spans::ENVIRONMENT,
 ];
 
 /// The columns of a `scores` row the dump keeps.
@@ -250,11 +285,22 @@ async fn project_dump(storage: &Storage, project: ProjectId) -> Value {
             .await
             .unwrap_or_else(|error| panic!("trace_detail of a golden trace: {error}"))
             .expect("a listed trace has a detail");
+        let spans_json = rows(&detail.spans, DETAIL_COLUMNS);
+        let mut payloads = Vec::new();
+        for span in &spans_json {
+            let span_id = span["span_id"].as_str().expect("a span_id text");
+            let found = span_detail(&ctx, id, span_id, TIMEOUT)
+                .await
+                .unwrap_or_else(|error| panic!("span_detail of a golden span: {error}"))
+                .expect("a listed span has a detail");
+            payloads.extend(rows(std::slice::from_ref(&found), PAYLOAD_COLUMNS));
+        }
         details.insert(
             id.clone(),
             json!({
                 "truncated": detail.truncated,
-                "spans": rows(&detail.spans, DETAIL_COLUMNS),
+                "spans": spans_json,
+                "span_payloads": payloads,
             }),
         );
     }
@@ -465,21 +511,16 @@ async fn all_users(storage: &Storage, project: ProjectId) -> Vec<Value> {
     }
 }
 
-/// Whether `trace` (hex) has a detail on `project` now: a read of one trace by id.
-pub(super) async fn has_detail(storage: &Storage, project: ProjectId, trace: &str) -> bool {
-    let ctx = context(storage, project).await;
-    trace_detail(&ctx, trace, TIMEOUT)
-        .await
-        .unwrap_or_else(|error| panic!("trace_detail of a golden trace: {error}"))
-        .is_some()
-}
-
-/// The KPIs of `expected` plus the contribution of the probe trace row `probe`: one trace, its
-/// cost and its tokens. The probe has no error and lasts as long as every golden trace (3 ms), so
-/// ErrorRate and LatencyP95 do not change.
-pub(super) fn kpis_with_probe(expected: &Value, probe: &Value) -> Value {
+/// The KPIs of `expected` plus the contribution of the probe trace row `probe`, which is one more
+/// trace of `traces` (the expected trace rows of P1): its cost and its tokens, and its error in
+/// ErrorRate, which is the traces with an error over the traces. The probe lasts as long as every
+/// golden trace (3 ms), so LatencyP95 does not change.
+pub(super) fn kpis_with_probe(expected: &Value, traces: &[Value], probe: &Value) -> Value {
     let cost = probe["cost_total"].as_f64().expect("the probe's cost");
     let tokens = probe["total_tokens"].as_f64().expect("the probe's tokens");
+    let with_error = |row: &Value| row["error_count"].as_i64().is_some_and(|count| count > 0);
+    let errors = traces.iter().filter(|row| with_error(row)).count();
+    let count = traces.len();
     let mut kpis = expected.clone();
     for kpi in kpis.as_array_mut().expect("the KPIs are a list") {
         let value = kpi["value"].as_f64().expect("a golden KPI has a value");
@@ -487,6 +528,17 @@ pub(super) fn kpis_with_probe(expected: &Value, probe: &Value) -> Value {
             "Traces" => 1.0,
             "CostTotal" => cost,
             "TotalTokens" => tokens,
+            "ErrorRate" => {
+                // The rate of the expected traces is exact: the same division `metrics` makes.
+                assert_eq!(
+                    Some(value),
+                    (count > 0).then(|| errors as f64 / count as f64),
+                    "the expected ErrorRate is the errors over the traces"
+                );
+                let probe_error = usize::from(with_error(probe));
+                kpi["value"] = Value::from((errors + probe_error) as f64 / (count + 1) as f64);
+                continue;
+            }
             _ => continue,
         };
         kpi["value"] = Value::from(value + added);

@@ -317,7 +317,8 @@ async fn ingest(storage: &Storage) {
     append_spans(storage, p1, &group).await;
     flush(storage).await;
 
-    // Group B: P1 day D1, trace 3 with an error.
+    // Group B: P1 day D1, trace 3 (the trace deletion's target, so it has no error: the deletion
+    // would take the only error with it).
     let group = chat(
         p1,
         3,
@@ -329,7 +330,7 @@ async fn ingest(storage: &Storage) {
             input: 7,
             output: 3,
             cost: 0.25,
-            status: SpanStatus::Error,
+            status: SpanStatus::Ok,
             text: None,
         },
         true,
@@ -337,7 +338,9 @@ async fn ingest(storage: &Storage) {
     append_spans(storage, p1, &group).await;
     flush(storage).await;
 
-    // Group C: P1 day D2 (traces 4 and 5), P2 days D1 and D0, P3 day D1 (dropped later).
+    // Group C: P1 day D2 (traces 4 and 5, which has the scenario's error: an LLM span with status
+    // Error; neither trace is the trace deletion's target or u-2's, so the error survives it),
+    // P2 days D1 and D0, P3 day D1 (dropped later).
     let mut p1_group = chat(
         p1,
         4,
@@ -365,7 +368,7 @@ async fn ingest(storage: &Storage) {
             input: 8,
             output: 4,
             cost: 0.5,
-            status: SpanStatus::Ok,
+            status: SpanStatus::Error,
             text: None,
         },
         true,
@@ -680,11 +683,6 @@ async fn wal_tail(storage: &Storage) {
         },
     );
     append_scores(storage, p1, &[quality, label]).await;
-}
-
-/// The hex trace id of the scenario's trace number `trace` (as `trace_list` writes it).
-pub(super) fn trace_hex(trace: u16) -> String {
-    trace_id(trace).to_string()
 }
 
 /// The write probe of `check_dir` step 8 (R8.7): one trace of two spans in P1 starting at `start`,

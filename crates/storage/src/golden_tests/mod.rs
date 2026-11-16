@@ -13,13 +13,18 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Instant;
 
+use arrow::array::StringArray;
 use chrono::NaiveDate;
+use llmobs_core::ids::ProjectId;
+use llmobs_core::schema::spans;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde_json::Value;
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{ConnectOptions, Connection};
 use uuid::Uuid;
 
 use crate::Storage;
+use crate::catalog::FileTable;
 use crate::error::{CatalogError, HeaderProblem, OpenError, WalError};
 use crate::format::FORMAT_VERSION;
 use crate::format::tests_support::dir_digest;
@@ -224,6 +229,35 @@ fn build_leaves_the_expected_shape() {
         parquet += 1;
     }
     assert!(parquet > 0, "the golden directory has Parquet files");
+
+    // The error path reaches the golden data (R8.6): P1 has a non-zero ErrorRate, one of its traces
+    // has error_count above zero, and a trace detail has a span with status `error`.
+    let expected = read_expected(&dir);
+    let p1 = &expected["projects"][P1];
+    let error_rate = p1["kpis"]
+        .as_array()
+        .and_then(|kpis| kpis.iter().find(|kpi| kpi["name"] == "ErrorRate"))
+        .and_then(|kpi| kpi["value"].as_f64());
+    assert!(
+        error_rate.is_some_and(|rate| rate > 0.0),
+        "the ErrorRate of P1 is {error_rate:?}: the scenario has an error trace"
+    );
+    assert!(
+        p1["traces"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["error_count"].as_i64() > Some(0))),
+        "a P1 trace has error_count above zero"
+    );
+    assert!(
+        p1["trace_details"].as_object().is_some_and(|details| {
+            details.values().any(|detail| {
+                detail["spans"]
+                    .as_array()
+                    .is_some_and(|spans| spans.iter().any(|span| span["status"] == "error"))
+            })
+        }),
+        "a trace detail of P1 has a span with status error"
+    );
     eprintln!("build_leaves_the_expected_shape: {:?}", started.elapsed());
 }
 
@@ -581,7 +615,7 @@ async fn check_dir(dir: &Path) {
     }
 
     // 8. New writes on the old directory: one probe trace, flushed, compacted, deletions applied.
-    let p1: llmobs_core::ids::ProjectId = P1.parse().expect("a golden project id");
+    let p1: ProjectId = P1.parse().expect("a golden project id");
     let probe_start = expected["write_probe"]["start_time"]
         .as_i64()
         .unwrap_or_else(|| panic!("{name}: step 8: expected.json has no write_probe.start_time"));
@@ -599,10 +633,26 @@ async fn check_dir(dir: &Path) {
         .compact(ns_at("2026-02-12", 0))
         .await
         .unwrap_or_else(|error| panic!("{name}: step 8: compact: {error}"));
+    // The rows of u-2 are in the active files before the deletion is applied, and not after it.
+    // Only trace 2 (day D1) is counted before: the compaction above rewrote day D2 and dropped
+    // trace 4, which the pending deletion's tombstones cover (spec 03 § 7: flush and compaction
+    // apply the tombstone set).
+    // The physical check reads the files: a read alone proves nothing, because a read hides the
+    // rows of a pending deletion whether or not the deletion was applied.
+    let before = active_user_rows(&storage, p1, &copy, "u-2");
+    assert!(
+        before > 0,
+        "{name}: step 8: no active file holds a row of u-2 before the deletion"
+    );
     storage
         .apply_deletions(ns_at("2026-02-12", 0))
         .await
         .unwrap_or_else(|error| panic!("{name}: step 8: apply deletions: {error}"));
+    let after = active_user_rows(&storage, p1, &copy, "u-2");
+    assert_eq!(
+        after, 0,
+        "{name}: step 8: the applied user deletion of u-2 left {after} rows in the active files of P1"
+    );
     let second = dump::dump(&storage).await;
 
     let second_p1 = &second["projects"][P1];
@@ -652,8 +702,13 @@ async fn check_dir(dir: &Path) {
         want_map.remove(key);
     }
     want["deletions"][DELETION_USER.to_string()] = Value::from("applied");
-    want["projects"][P1]["kpis"] =
-        dump::kpis_with_probe(&expected["projects"][P1]["kpis"], &probe_row);
+    want["projects"][P1]["kpis"] = dump::kpis_with_probe(
+        &expected["projects"][P1]["kpis"],
+        expected["projects"][P1]["traces"]
+            .as_array()
+            .expect("the expected trace rows"),
+        &probe_row,
+    );
     let mut got = without_probe(second.clone(), &probe_trace);
     let got_map = got.as_object_mut().expect("the dump is an object");
     for key in ["format_version", "workspace_version"] {
@@ -664,20 +719,40 @@ async fn check_dir(dir: &Path) {
         "{name}: step 8: the second dump is not expected.json plus exactly the probe trace, with the u-2 deletion applied"
     );
 
-    // The applied user deletion took effect: a trace of u-2 has no detail now.
-    for trace in [build::trace_hex(2), build::trace_hex(4)] {
-        assert!(
-            !dump::has_detail(&storage, p1, &trace).await,
-            "{name}: step 8: a trace of the applied user deletion of u-2 is still readable"
-        );
-    }
-
     // 9. Shutdown.
     storage
         .shutdown()
         .await
         .unwrap_or_else(|error| panic!("{name}: step 9: shutdown: {error}"));
     eprintln!("check_dir {name}: {:?}", started.elapsed());
+}
+
+/// The rows of `user` in the Parquet files the catalog lists as active for `project`, counted in
+/// the files of the directory `dir` (its `objects` directory). Read from the files, not through
+/// a read API: a read hides the rows of a pending deletion.
+fn active_user_rows(storage: &Storage, project: ProjectId, dir: &Path, user: &str) -> usize {
+    let mut rows = 0;
+    for file in storage.catalog_files(FileTable::Spans) {
+        if file.project != project {
+            continue;
+        }
+        let path = dir.join("objects").join(&file.path);
+        let handle = fs::File::open(&path)
+            .unwrap_or_else(|error| panic!("open an active spans file: {error}"));
+        let reader = ParquetRecordBatchReaderBuilder::try_new(handle)
+            .unwrap_or_else(|error| panic!("read an active spans file: {error}"))
+            .build()
+            .unwrap_or_else(|error| panic!("read an active spans file: {error}"));
+        for batch in reader {
+            let batch = batch.unwrap_or_else(|error| panic!("read a spans batch: {error}"));
+            let users = batch
+                .column_by_name(spans::USER_ID)
+                .and_then(|column| column.as_any().downcast_ref::<StringArray>())
+                .unwrap_or_else(|| panic!("a spans file has a Utf8 {} column", spans::USER_ID));
+            rows += users.iter().filter(|value| *value == Some(user)).count();
+        }
+    }
+    rows
 }
 
 /// A dump without the probe trace: its row, its detail, its spans, and its user and session.

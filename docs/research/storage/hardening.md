@@ -263,11 +263,11 @@ Two consequences drove the design: an older binary could destroy newer data in t
 
 **Review follow-ups.** Commit e51bbae9 (R8 review) syncs a reused WAL segment header. Commit 2d9872fe (R8 review) makes the refusals read-only and runs them before anything is written: the catalog check, then every WAL segment header. A refused open changes no existing file's content (spec 03 § 12).
 
-**Golden directory size.** The scenario of `golden_tests/build.rs` writes 21 files, 359,268 bytes, measured on the R8.7 build. The limit is 1 MiB (`golden_directories_stay_small`); each release adds its directory to the repository.
+**Golden directory size.** The scenario of `golden_tests/build.rs` writes 21 files, 363,850 bytes, measured after the error and payload checks were added (R8.6 review fixes; 359,268 bytes before). The limit is 1 MiB (`golden_directories_stay_small`); each release adds its directory to the repository.
 
 ### Commands and tests
 
-- `just golden-dir <name>`: writes `fixtures/storage/golden/<name>` from the current build and appends it to `RELEASES`, unless the name starts with `scratch` (not appended). The name must be the workspace version (`CARGO_PKG_VERSION`), which `release-prep` sets; the test refuses another name before anything is written.
+- `just golden-dir <name>`: writes `fixtures/storage/golden/<name>` from the current build and appends it to `RELEASES`, unless the name starts with `scratch` (not appended). A name is `scratch...` (letters, digits, `-`, `_`) or `X.Y.Z` with digits only; the recipe refuses any other name (a `/`, a `..`, an rc tag) before anything is written. The name must be the workspace version (`CARGO_PKG_VERSION`), which `release-prep` sets; the test refuses another name before anything is written.
 - `just check-golden`: fails a branch that deletes a released directory or removes a `RELEASES` line, against `origin/main`'s merge base. Skipped without `origin/main`; `just check-rust` runs it. CI does not run it yet (the ci.yml request is open).
 - `golden_tests::` (`crates/storage/src/golden_tests/`): `build_is_deterministic`, `build_leaves_the_expected_shape`, `a_fresh_golden_directory_opens` (the check runs while no directory is committed), `the_committed_golden_directories_open`, `golden_directories_stay_small`, `a_newer_golden_directory_is_refused`, `every_released_version_has_a_golden_directory`, `every_golden_directory_is_released`, and the ignored `write_golden_dir`.
 
