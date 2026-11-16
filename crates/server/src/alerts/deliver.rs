@@ -348,6 +348,7 @@ fn notice_of(state: &AppState, due: &DueDelivery) -> Notice {
     let kind = match event.kind {
         crate::api::alerts::AlertEventKind::Fired => MessageKind::Fired,
         crate::api::alerts::AlertEventKind::Resolved => MessageKind::Resolved,
+        crate::api::alerts::AlertEventKind::NoData => MessageKind::NoData,
         crate::api::alerts::AlertEventKind::Reminder => MessageKind::Reminder,
     };
     let public_url = &state.config.public_url;

@@ -1,13 +1,32 @@
 //! Daily usage read back from `usage_daily` (spec 04 § Metering, D-P-42).
 
 use chrono::NaiveDate;
-use llmobs_core::ids::OrgId;
+use llmobs_core::ids::{OrgId, ProjectId};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use super::MetaError;
 use crate::api::internal::InternalUsageRow;
 use crate::api::usage::UsageDay;
+
+/// GenAI content log records of `project` received and dropped since it was created, as
+/// flushed to `usage_daily` (D-G-40).
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails.
+pub(crate) async fn genai_log_events(
+    pool: &SqlitePool,
+    project: ProjectId,
+) -> Result<u64, MetaError> {
+    let total: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(genai_log_events), 0) FROM usage_daily WHERE project_id = ?",
+    )
+    .bind(project.to_string())
+    .fetch_one(pool)
+    .await?;
+    Ok(u64::try_from(total).unwrap_or(0))
+}
 
 /// The org's usage per UTC day from `from` to `to`, both inclusive, summed over its projects.
 /// Oldest first; days without rows are absent.

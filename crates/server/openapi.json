@@ -14812,6 +14812,7 @@
         "enum": [
           "fired",
           "resolved",
+          "no_data",
           "reminder"
         ]
       },
@@ -19443,6 +19444,12 @@
             "type": "string",
             "format": "date-time",
             "description": "Creation time, nanoseconds since the Unix epoch. JSON is RFC 3339."
+          },
+          "genai_log_events": {
+            "type": "integer",
+            "format": "int64",
+            "description": "GenAI content log records received on `/v1/logs` and dropped since the project was\ncreated (D-G-40). Present when one project is read or updated; omitted in lists and\nwhen the project is created.",
+            "minimum": 0
           },
           "id": {
             "$ref": "#/components/schemas/ProjectId",

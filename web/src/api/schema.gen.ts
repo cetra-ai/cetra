@@ -2398,7 +2398,7 @@ export interface components {
          * @description What an event records.
          * @enum {string}
          */
-        AlertEventKind: "fired" | "resolved" | "reminder";
+        AlertEventKind: "fired" | "resolved" | "no_data" | "reminder";
         /** @description One page of results. `next_cursor` is null when there is no next page. */
         AlertEventPage: {
             /** @description Items in this page. */
@@ -4842,6 +4842,13 @@ export interface components {
              * @description Creation time, nanoseconds since the Unix epoch. JSON is RFC 3339.
              */
             created_at: string;
+            /**
+             * Format: int64
+             * @description GenAI content log records received on `/v1/logs` and dropped since the project was
+             *     created (D-G-40). Present when one project is read or updated; omitted in lists and
+             *     when the project is created.
+             */
+            genai_log_events?: number;
             /** @description Project id. */
             id: components["schemas"]["ProjectId"];
             /** @description Display name. */

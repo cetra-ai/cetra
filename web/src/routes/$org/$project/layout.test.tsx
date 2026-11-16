@@ -97,3 +97,41 @@ function project(name: string, slug: string) {
     created_at: "2026-01-01T09:00:00.000000000Z",
   };
 }
+
+function projectWithDroppedLogs(count: number) {
+  return {
+    id: "01900000-0000-7000-8000-000000000001",
+    org_id: "01900000-0000-7000-8000-000000000010",
+    slug: "support-bot",
+    name: "Support bot",
+    trace_completion_timeout_s: 60,
+    role: "owner",
+    genai_log_events: count,
+    created_at: "2026-01-01T09:00:00.000000000Z",
+  };
+}
+
+it("says once that GenAI content sent as log events was dropped", async () => {
+  server.use(
+    http.get("/api/v1/projects/:project", () => HttpResponse.json(projectWithDroppedLogs(1200))),
+  );
+
+  const first = await renderApp("/acme/support-bot/traces");
+  const hint = await screen.findByRole("status");
+  expect(hint).toHaveTextContent("GenAI content was sent as log events");
+  expect(hint).toHaveTextContent("1,200 GenAI log records");
+
+  await first.user.click(screen.getByRole("button", { name: "Dismiss" }));
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  first.unmount();
+
+  await renderApp("/acme/support-bot/traces");
+  expect(await screen.findByRole("grid", { name: "Traces" })).toBeInTheDocument();
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+});
+
+it("shows no hint when no log event was dropped", async () => {
+  await renderApp("/acme/support-bot/traces");
+  expect(await screen.findByRole("grid", { name: "Traces" })).toBeInTheDocument();
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+});

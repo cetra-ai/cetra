@@ -215,6 +215,23 @@ it("shows the edge values of events and channels", async () => {
   expect(await screen.findByText("Team Slack, Pager webhook, Deleted channel")).toBeInTheDocument();
 });
 
+it("labels a no data event, which is neither fired nor resolved", async () => {
+  server.use(
+    http.get(EVENTS, () =>
+      HttpResponse.json({
+        data: [
+          { ...eventsFixture.data[0], kind: "no_data", value: null, count: 0, deliveries: [] },
+        ],
+        next_cursor: null,
+      }),
+    ),
+  );
+  await renderApp(PAGE);
+  const table = await screen.findByRole("table", { name: "Alert events" });
+  expect(rowAt(table, 1)).toHaveTextContent("No data");
+  expect(table).not.toHaveTextContent("Resolved");
+});
+
 it("shows the empty history", async () => {
   server.use(http.get(EVENTS, () => HttpResponse.json({ data: [], next_cursor: null })));
 

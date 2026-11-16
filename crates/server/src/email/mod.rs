@@ -82,7 +82,7 @@ pub(crate) enum Email {
     Test,
     /// An alert notification (D-K-8).
     Alert {
-        /// `Firing`, `Resolved`, `Still firing` or `Test`.
+        /// `Firing`, `Resolved`, `No data`, `Still firing` or `Test`.
         state: &'static str,
         rule_name: String,
         project_name: String,
