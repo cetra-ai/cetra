@@ -29,6 +29,7 @@ use crate::wal::Table;
 /// The storage config every model case uses.
 pub(super) fn model_config(dir: &std::path::Path) -> StorageConfig {
     StorageConfig {
+        delete_objects: true,
         data_dir: dir.to_path_buf(),
         min_free_bytes: ByteSize::b(0),
         object_store: None,

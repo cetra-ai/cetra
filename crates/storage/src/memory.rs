@@ -24,12 +24,15 @@ pub(crate) const BASE_BYTES: u64 = 200 << 20;
 /// Memory the process can use: the machine's RAM, or the limit of the process's own cgroup (and
 /// its ancestors) when that is lower (`sysinfo::Process::cgroup_limits`). A systemd unit's or
 /// scope's `MemoryMax=` is seen here; a container's limit is seen when its cgroup namespace is
-/// the process's root. Zero when the OS reports nothing.
+/// the process's root. Zero when the OS reports nothing, including on a platform `sysinfo`
+/// does not support.
 pub(crate) fn detected_memory() -> u64 {
     use sysinfo::{MemoryRefreshKind, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
-    let mut system = System::new_with_specifics(
+    let Ok(mut system) = System::new_with_specifics(
         RefreshKind::nothing().with_memory(MemoryRefreshKind::nothing().with_ram()),
-    );
+    ) else {
+        return 0;
+    };
     let mut total = system.total_memory();
     if let Ok(pid) = sysinfo::get_current_pid() {
         system.refresh_processes_specifics(
@@ -339,6 +342,7 @@ mod tests {
         use crate::config::{CompactionConfig, FlushConfig, MemtableConfig, QueryConfig, S3Config};
         use bytesize::ByteSize;
         StorageConfig {
+            delete_objects: true,
             data_dir: std::path::PathBuf::from("unused"),
             min_free_bytes: ByteSize::b(0),
             object_store: None,

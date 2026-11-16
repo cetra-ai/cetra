@@ -98,7 +98,7 @@ Every enum's variants are exactly the values listed in the 00-design table.
   - `process_*` (below).
 
 **The eval queue count.**
-- A `tokio::sync::Mutex<Option<(tokio::time::Instant, [i64; 2])>>` reused for 10 s. Use `tokio::time::Instant`, so the test can use `tokio::time::pause()`.
+- A `tokio::sync::Mutex<Option<(i64, [i64; 2])>>` reused for 10 s, with the time in `state.clock` nanoseconds (not `tokio::time::Instant`): a paused tokio clock auto-advances past the TTL during database I/O, so the test drives `state.clock` instead.
 - The query is `SELECT status, COUNT(*) FROM eval_jobs WHERE status IN ('queued', 'running') GROUP BY status` on `state.meta.reader()`, written next to the other `eval_jobs` queries in `crates/server/src/meta/eval_jobs.rs` as `pub(crate) async fn count_open(…)`.
 - A query error keeps the previous values and logs at `warn` with the error, which carries no payload.
 

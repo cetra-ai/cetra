@@ -116,7 +116,7 @@ pub(crate) fn check_rule(
                 if !priced {
                     errors.push(field_error(
                         "budget_usd",
-                        "the judge model has no price, so the rule cannot have a budget",
+                        "the judge model has no price, so the rule cannot have a budget; add one under Settings → Model prices",
                     ));
                 }
             }
@@ -435,7 +435,7 @@ mod tests {
             errors,
             [pair(
                 "budget_usd",
-                "the judge model has no price, so the rule cannot have a budget"
+                "the judge model has no price, so the rule cannot have a budget; add one under Settings → Model prices"
             )]
         );
     }
@@ -453,7 +453,7 @@ mod tests {
             errors,
             [pair(
                 "budget_usd",
-                "the judge model has no price, so the rule cannot have a budget"
+                "the judge model has no price, so the rule cannot have a budget; add one under Settings → Model prices"
             )]
         );
     }

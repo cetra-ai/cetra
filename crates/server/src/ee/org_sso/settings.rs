@@ -25,6 +25,7 @@ use crate::entitlements::require;
 use crate::http::AppState;
 use crate::http::access::{Access, OrgAccess, RouteDef};
 use crate::http::error::{self, ApiError};
+use crate::http::restore::refuse_outbound;
 use crate::meta::MetaError;
 
 /// The org SSO settings routes. Owners only, session only (D-P-51).
@@ -170,6 +171,7 @@ async fn put_org_sso_provider(
     let org = access.org.id;
     let caller = principal::session_user(&principal)?.id;
     require(&state, org, Feature::OrgSso)?;
+    refuse_outbound(&state, "identity provider check")?;
     let input = validate(body)?;
 
     let existing = store::provider(state.meta.reader(), org).await?;
@@ -481,6 +483,7 @@ async fn post_org_sso_domain_verify(
     let org = access.org.id;
     let caller = principal::session_user(&principal)?.id;
     require(&state, org, Feature::OrgSso)?;
+    refuse_outbound(&state, "domain check")?;
     let row = store::domain(state.meta.reader(), org, id)
         .await?
         .ok_or(ApiError::NotFound)?;
@@ -1877,5 +1880,34 @@ mod tests {
         })
         .await;
         assert_eq!(saved.status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn put_org_sso_provider_is_refused_in_restore_mode() {
+        let (app, _seeded, owner) = org_sso_app_with(|config| config.restore_mode = true).await;
+        let response = put(
+            &app,
+            &owner.cookie,
+            &json!({
+                "display_name": "Acme Okta",
+                "issuer": "https://idp.example",
+                "client_id": CLIENT_ID,
+                "client_secret": CLIENT_SECRET,
+                "jit_role": "viewer",
+            }),
+        )
+        .await;
+        crate::http::restore::tests::assert_refused(&response, "identity provider check");
+        assert!(identity_providers(&app).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn post_org_sso_domain_verify_is_refused_in_restore_mode() {
+        let (app, seeded, owner) = org_sso_app_with(|config| config.restore_mode = true).await;
+        seed_provider(&app, seeded.org_id, "https://idp.example").await;
+        add_domain(&app, "acme", &owner.cookie, "acme.test").await;
+        let row = domain_of(&app, "acme", &owner.cookie, "acme.test").await;
+        let response = verify(&app, "acme", &owner.cookie, row.id).await;
+        crate::http::restore::tests::assert_refused(&response, "domain check");
     }
 }

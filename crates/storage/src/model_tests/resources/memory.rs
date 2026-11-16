@@ -98,6 +98,7 @@ impl Profile {
 /// so the run exercises everything within a minute.
 fn defaults_config(data_dir: &Path) -> StorageConfig {
     StorageConfig {
+        delete_objects: true,
         data_dir: data_dir.to_path_buf(),
         min_free_bytes: ByteSize::gib(2),
         object_store: None,
@@ -131,6 +132,7 @@ fn defaults_config(data_dir: &Path) -> StorageConfig {
 /// The small-machine profile (spec 03, documented in R5.8) for a machine with about 1 GiB.
 fn small_config(data_dir: &Path) -> StorageConfig {
     StorageConfig {
+        delete_objects: true,
         data_dir: data_dir.to_path_buf(),
         min_free_bytes: ByteSize::gib(2),
         object_store: None,

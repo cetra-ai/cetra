@@ -9,8 +9,8 @@ pub(crate) mod grpc;
 pub(crate) mod otlp;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, PoisonError, RwLock};
 
 use bytes::Bytes;
 use futures::{StreamExt, stream};
@@ -42,7 +42,8 @@ const MEDIA_CONCURRENCY: usize = 4;
 
 /// Ingest state shared by every request (D-G-1). Holds no `AppState`.
 pub(crate) struct Ingest {
-    prices: RwLock<Arc<PriceTable>>,
+    // Boxed to keep AppState futures under clippy's large_futures limit.
+    prices: Arc<crate::prices::Prices>,
     budget: Arc<Semaphore>,
     max_request_bytes: usize,
     max_spans_per_request: usize,
@@ -149,14 +150,18 @@ pub(crate) enum IngestError {
 }
 
 impl Ingest {
-    pub(crate) fn new(config: &IngestConfig, media: &MediaConfig, prices: PriceTable) -> Self {
+    pub(crate) fn new(
+        config: &IngestConfig,
+        media: &MediaConfig,
+        prices: Arc<crate::prices::Prices>,
+    ) -> Self {
         // Sizes were checked by `config::validate_ingest`; a value that does not fit is clipped.
         let max_request_bytes =
             usize::try_from(config.max_request_bytes.as_u64()).unwrap_or(usize::MAX);
         let max_inflight =
             usize::try_from(config.max_inflight_bytes.as_u64()).unwrap_or(usize::MAX);
         Self {
-            prices: RwLock::new(Arc::new(prices)),
+            prices,
             budget: Arc::new(Semaphore::new(max_inflight.min(Semaphore::MAX_PERMITS))),
             max_request_bytes,
             max_spans_per_request: usize::try_from(config.max_spans_per_request)
@@ -166,16 +171,9 @@ impl Ingest {
         }
     }
 
-    /// Swaps the price table (D-G-10). `#[cfg(test)]` in M1: only tests call it.
-    /// The track that adds custom prices removes the `cfg`.
-    #[cfg(test)]
-    pub(crate) fn replace_prices(&self, prices: PriceTable) {
-        *self.prices.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(prices);
-    }
-
-    /// The current price table (D-G-10). Judge runs price their `llm` span with it.
-    pub(crate) fn prices(&self) -> Arc<PriceTable> {
-        Arc::clone(&self.prices.read().unwrap_or_else(PoisonError::into_inner))
+    /// The price tables (D-T-9). Callers pick the table of their project or org.
+    pub(crate) fn prices(&self) -> &crate::prices::Prices {
+        &self.prices
     }
 
     pub(crate) fn max_request_bytes(&self) -> usize {
@@ -320,11 +318,7 @@ impl Ingest {
         retention_cap: Option<u32>,
         now_ns: i64,
     ) -> Result<Accepted, IngestError> {
-        let prices: Arc<PriceTable> = self
-            .prices
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
+        let prices: Arc<PriceTable> = self.prices.for_project(project.org_id, project.id);
         let ctx = self.context(project, retention_cap, now_ns);
         let max_spans = self.max_spans_per_request;
         let work = tokio::task::spawn_blocking(move || -> Result<_, IngestError> {
@@ -580,15 +574,22 @@ mod tests {
     use axum::http::{StatusCode, header};
     use axum::response::IntoResponse;
     use bytesize::ByteSize;
+    use llmobs_core::enums::{CostSource, SpanKind};
     use llmobs_core::ids::ProjectId;
     use llmobs_core::media::MediaBlob as CoreBlob;
-    use llmobs_otel::{ExportTraceServiceRequest, Rejections, builtin_price_rows, decode_json};
+    use llmobs_otel::{
+        ExportTraceServiceRequest, PriceRow, PriceScope, Rejections, builtin_price_rows,
+        decode_json,
+    };
     use llmobs_storage::error::ObjectError;
     use prost::Message;
     use sha2::{Digest, Sha256};
+    use uuid::Uuid;
 
     use super::*;
-    use crate::meta::projects::ProjectRow;
+    use crate::meta::model_prices;
+    use crate::meta::orgs::insert_org;
+    use crate::meta::projects::{ProjectRow, insert_project};
     use crate::test_support::{Seeded, TestApp, dataset_span};
 
     fn fixture(relative: &str) -> Vec<u8> {
@@ -857,7 +858,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn replace_prices_changes_what_accept_uses() {
+    async fn the_builtin_table_is_what_accept_uses_without_custom_rows() {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
         let now = app.state.clock.now_ns();
@@ -869,7 +870,8 @@ mod tests {
         assert_ne!(priced, unpriced, "the fixture must have a built-in price");
         app.state
             .ingest
-            .replace_prices(PriceTable::new(Vec::new()).expect("an empty table compiles"));
+            .prices()
+            .set_builtin(PriceTable::new(Vec::new()).expect("an empty table compiles"));
         let accepted = accept_body(
             &app,
             &seeded.project,
@@ -880,6 +882,160 @@ mod tests {
         .await
         .expect("accepted");
         assert_eq!(accepted.normalized, unpriced);
+    }
+
+    /// Stores one catch-all row priced `input` per million tokens: in `org`'s scope, or in
+    /// `project`'s when given. Then reloads the org's tables, as a price write does.
+    async fn store_price(app: &TestApp, org: OrgId, project: Option<ProjectId>, input: f64) {
+        let row = PriceRow {
+            scope: if project.is_some() {
+                PriceScope::Project
+            } else {
+                PriceScope::Org
+            },
+            model_name: "any".to_owned(),
+            match_pattern: ".*".to_owned(),
+            provider: None,
+            valid_from: 0,
+            price_input: Some(input),
+            price_output: Some(input),
+            price_cache_read: None,
+            price_cache_write: None,
+            price_reasoning: None,
+            tiers: None,
+        };
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    model_prices::insert_tx(conn, Uuid::now_v7(), org, project, &row, now)
+                        .await
+                        .map(|_| ())
+                })
+            })
+            .await
+            .unwrap();
+        app.state
+            .ingest
+            .prices()
+            .reload_org(app.state.meta.reader(), org)
+            .await
+            .unwrap();
+    }
+
+    /// The embedding span of the cost fixture, which has one million input tokens.
+    fn embedding(normalized: &Normalized) -> &llmobs_core::span::Span {
+        normalized
+            .spans
+            .iter()
+            .find(|span| span.span_kind == SpanKind::Embedding)
+            .expect("the fixture has an embedding span")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_project_row_prices_that_project_only() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let (other, _) = app.add_project(&seeded, "other", None).await;
+        app.state
+            .ingest
+            .prices()
+            .set_builtin(PriceTable::new(Vec::new()).expect("an empty table compiles"));
+        store_price(&app, seeded.org_id, Some(seeded.project.id), 1.0).await;
+        let body = fixture("edge/cost-embedding/input.json");
+        let priced = accept_body(
+            &app,
+            &seeded.project,
+            body.clone(),
+            BodyFormat::Json,
+            BodyEncoding::Identity,
+        )
+        .await
+        .expect("accepted");
+        let span = embedding(&priced.normalized);
+        assert_eq!(span.cost_source, Some(CostSource::Computed));
+        assert_eq!(span.cost_input, Some(1.0));
+        let unpriced = accept_body(&app, &other, body, BodyFormat::Json, BodyEncoding::Identity)
+            .await
+            .expect("accepted");
+        assert_eq!(
+            embedding(&unpriced.normalized).cost_source,
+            Some(CostSource::None)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_org_row_prices_every_project_of_the_org() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let (other, _) = app.add_project(&seeded, "other", None).await;
+        let now = app.state.clock.now_ns();
+        let foreign = app
+            .state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    let org =
+                        insert_org(conn, OrgId::new_v7(), "Elsewhere", "elsewhere", now).await?;
+                    insert_project(conn, org.id, "Far", "far", None, now).await
+                })
+            })
+            .await
+            .unwrap();
+        store_price(&app, seeded.org_id, None, 1.0).await;
+        let body = fixture("edge/cost-embedding/input.json");
+        for project in [&seeded.project, &other] {
+            let accepted = accept_body(
+                &app,
+                project,
+                body.clone(),
+                BodyFormat::Json,
+                BodyEncoding::Identity,
+            )
+            .await
+            .expect("accepted");
+            assert_eq!(embedding(&accepted.normalized).cost_input, Some(1.0));
+        }
+        let accepted = accept_body(
+            &app,
+            &foreign,
+            body,
+            BodyFormat::Json,
+            BodyEncoding::Identity,
+        )
+        .await
+        .expect("accepted");
+        assert_eq!(
+            embedding(&accepted.normalized).cost_source,
+            Some(CostSource::Computed),
+            "the built-in row prices it"
+        );
+        assert_ne!(embedding(&accepted.normalized).cost_input, Some(1.0));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_project_row_beats_an_org_row() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let (other, _) = app.add_project(&seeded, "other", None).await;
+        store_price(&app, seeded.org_id, None, 1.0).await;
+        store_price(&app, seeded.org_id, Some(seeded.project.id), 2.0).await;
+        let body = fixture("edge/cost-embedding/input.json");
+        let own = accept_body(
+            &app,
+            &seeded.project,
+            body.clone(),
+            BodyFormat::Json,
+            BodyEncoding::Identity,
+        )
+        .await
+        .expect("accepted");
+        let shared = accept_body(&app, &other, body, BodyFormat::Json, BodyEncoding::Identity)
+            .await
+            .expect("accepted");
+        assert_eq!(embedding(&own.normalized).cost_input, Some(2.0));
+        assert_eq!(embedding(&shared.normalized).cost_input, Some(1.0));
     }
 
     #[tokio::test(flavor = "multi_thread")]

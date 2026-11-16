@@ -49,6 +49,12 @@ pub(crate) enum ApiError {
         /// Static text shown as the problem `detail`.
         detail: &'static str,
     },
+    /// Restore mode: this outbound call is off (D-N-26).
+    #[error("restore mode")]
+    RestoreMode {
+        /// What is off, e.g. `"channel test"`. Static text.
+        what: &'static str,
+    },
     /// The request is malformed.
     #[error("bad request")]
     BadRequest {
@@ -167,6 +173,10 @@ impl ApiError {
             Self::Unavailable { detail } => {
                 Problem::new(ProblemCode::Busy, Some((*detail).to_owned()))
             }
+            Self::RestoreMode { what } => Problem::new(
+                ProblemCode::RestoreMode,
+                Some(format!("{what} is off: this server runs in restore mode")),
+            ),
             Self::BadRequest { detail, errors } => {
                 let mut problem = Problem::new(ProblemCode::BadRequest, detail.clone());
                 problem.errors.clone_from(errors);

@@ -9,7 +9,8 @@ pub(crate) mod access;
 pub(crate) mod client_ip;
 mod csrf;
 pub(crate) mod error;
-mod health;
+pub(crate) mod health;
+pub(crate) mod restore;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -41,6 +42,8 @@ pub(crate) struct AppInner {
     pub(crate) config: ServerConfig,
     pub(crate) meta: MetaDb,
     pub(crate) storage: Arc<Storage>,
+    /// The last object-store probe behind `/readyz`, cached 10 s (D-N-36).
+    pub(crate) ready: health::ReadyCache,
     pub(crate) clock: Clock,
     pub(crate) limits: Limits,
     /// Successful API-key lookups, cached 60 s by hash.
@@ -94,6 +97,8 @@ pub(crate) struct AppInner {
     pub(crate) ingest_rate: crate::entitlements::rate::IngestRate,
     /// Per-org SSO routing (track P M5).
     pub(crate) org_sso: crate::ee::org_sso::OrgSso,
+    /// The Prometheus registry served on `metrics_addr` (N M3, D-N-28).
+    pub(crate) telemetry: crate::telemetry::Telemetry,
 }
 
 impl AppState {
@@ -168,6 +173,10 @@ fn finish(state: AppState, routed: Router<AppState>, ui: Option<Router>) -> Rout
         .layer(middleware::from_fn_with_state(state.clone(), csrf::csrf))
         .layer(middleware::from_fn_with_state(state.clone(), authenticate))
         .layer(middleware::from_fn(log_request))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::telemetry::track_http,
+        ))
         .with_state(state)
 }
 

@@ -126,6 +126,8 @@ pub enum ProblemCode {
     TooManyTraces,
     /// Admission control refused the query.
     Busy,
+    /// The server runs in restore mode: outbound calls are off (D-N-26).
+    RestoreMode,
     /// No credentials, or the credentials are invalid.
     Unauthorized,
     /// The credentials do not allow this operation.
@@ -184,7 +186,7 @@ impl ProblemCode {
             Self::QuotaExceeded => 402,
             Self::RateLimited => 429,
             Self::Internal => 500,
-            Self::Busy => 503,
+            Self::Busy | Self::RestoreMode => 503,
         }
     }
 
@@ -211,7 +213,7 @@ impl ProblemCode {
             Self::QuotaExceeded => "Payment Required",
             Self::RateLimited => "Too Many Requests",
             Self::Internal => "Internal Server Error",
-            Self::Busy => "Service Unavailable",
+            Self::Busy | Self::RestoreMode => "Service Unavailable",
         }
     }
 }

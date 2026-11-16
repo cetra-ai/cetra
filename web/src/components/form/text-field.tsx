@@ -20,7 +20,7 @@ export function TextField({
   label: string;
   value: string;
   onChange: (value: string) => void;
-  type?: "text" | "email" | "password" | "number";
+  type?: "text" | "email" | "password" | "number" | "date";
   error?: string;
   description?: string;
   autoComplete?: string;

@@ -27,10 +27,14 @@ spec:
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+      {{- $annotations := deepCopy (.Values.podAnnotations | default dict) }}
+      {{- if .Values.metrics.enabled }}
+      {{- $annotations = merge $annotations .Values.metrics.podAnnotations }}
+      {{- end }}
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
-        {{- with .Values.podAnnotations }}
+        {{- with $annotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
@@ -67,11 +71,20 @@ spec:
             - name: otlp-http
               containerPort: 4318
               protocol: TCP
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: 9464
+              protocol: TCP
+            {{- end }}
           env:
             - name: LLMOBS_DATA_DIR
               value: /data
             - name: LLMOBS_PUBLIC_URL
               value: {{ .Values.publicUrl | quote }}
+            {{- if .Values.metrics.enabled }}
+            - name: LLMOBS_METRICS_ADDR
+              value: "0.0.0.0:9464"
+            {{- end }}
             {{- if .Values.config }}
             - name: LLMOBS_CONFIG
               value: /etc/llmobs/llmobs.toml

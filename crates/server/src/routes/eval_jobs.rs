@@ -25,6 +25,7 @@ use crate::eval::rule_check::{Subject, field_error, unmapped_variables};
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
+use crate::http::restore::refuse_outbound;
 use crate::meta::MetaError;
 use crate::meta::eval_jobs::{self, JobFilter, JobRow, NewJob};
 use crate::meta::evaluators;
@@ -125,6 +126,7 @@ async fn run_evaluator(
     error::Path(IdPath { id }): error::Path<IdPath>,
     error::Json(body): error::Json<RunEvaluatorRequest>,
 ) -> Result<(StatusCode, error::Json<EvalJob>), ApiError> {
+    refuse_outbound(&state, "evaluator run")?;
     let user = principal::session_user(&principal)?;
     let project = access.project.id;
     let now = state.clock.now_ns();
@@ -1031,5 +1033,15 @@ mod tests {
             .await;
         assert_eq!(detail.status, 200, "{}", text(&detail));
         tasks.shutdown(&app.state).await;
+    }
+
+    #[tokio::test]
+    async fn run_evaluator_is_refused_in_restore_mode() {
+        let app = TestApp::with_config(|config| config.restore_mode = true).await;
+        let seeded = app.seed().await;
+        add_fixture_connection(&app, &seeded).await;
+        let evaluator = create_judge(&app, &seeded, fixture_judge_body()).await;
+        let response = run(&app, &seeded, evaluator, &run_body()).await;
+        crate::http::restore::tests::assert_refused(&response, "evaluator run");
     }
 }

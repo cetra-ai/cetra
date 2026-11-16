@@ -26,6 +26,7 @@ use crate::crypto::{Aad, SecretBox};
 use crate::http::AppState;
 use crate::http::access::{Access, OrgAccess, RouteDef};
 use crate::http::error::{self, ApiError};
+use crate::http::restore::refuse_outbound;
 use crate::meta::MetaError;
 use crate::meta::connections::{self, ConnectionFields, ConnectionRow};
 use crate::meta::evaluators;
@@ -405,6 +406,7 @@ async fn test_connection(
     error::Path(IdPath { id }): error::Path<IdPath>,
     error::Json(body): error::Json<TestLlmConnectionRequest>,
 ) -> Result<error::Json<LlmConnectionTestResult>, ApiError> {
+    refuse_outbound(&state, "connection test")?;
     let user = principal::session_user(&principal)?;
     state
         .limits
@@ -463,7 +465,7 @@ async fn test_connection(
         retention_days: None,
         limits: state.config.ingest.limits(&state.config.media),
     };
-    let prices = state.ingest.prices();
+    let prices = state.ingest.prices().for_org(access.org.id);
     let bytes = crate::auth::secret::random_bytes(16).map_err(internal)?;
     let bytes = <[u8; 16]>::try_from(bytes.as_slice()).map_err(internal)?;
     let judge_trace_id = llmobs_core::ids::TraceId::from_bytes(bytes).map_err(internal)?; // refuses all-zero bytes only
@@ -2478,5 +2480,20 @@ mod tests {
         // The manual clock does not move: the 11th test in the minute is refused.
         let response = test(&app, &cookie, id, &json!({})).await;
         assert_eq!(response.status, 429);
+    }
+
+    #[tokio::test]
+    async fn test_connection_is_refused_in_restore_mode() {
+        let mock = MockLlm::start(vec![completion(r#"{"value": true}"#)]).await;
+        let app = TestApp::with_config(|config| {
+            config.security.allow_private_network_egress = true;
+            config.restore_mode = true;
+        })
+        .await;
+        let seeded = app.seed().await;
+        let id = mocked(&app, &seeded.cookie, &mock).await;
+        let response = test(&app, &seeded.cookie, id, &json!({})).await;
+        crate::http::restore::tests::assert_refused(&response, "connection test");
+        assert!(mock.requests().is_empty());
     }
 }

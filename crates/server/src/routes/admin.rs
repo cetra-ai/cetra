@@ -23,6 +23,7 @@ use crate::email::Email;
 use crate::http::AppState;
 use crate::http::access::{Access, RouteDef};
 use crate::http::error::{self, ApiError, problem_response};
+use crate::http::restore::refuse_outbound;
 use crate::meta::MetaError;
 use crate::meta::identities;
 use crate::meta::members;
@@ -339,6 +340,7 @@ async fn send_test_email(
     axum::extract::State(state): axum::extract::State<AppState>,
     axum::extract::Extension(principal): axum::extract::Extension<Principal>,
 ) -> Result<Response, ApiError> {
+    refuse_outbound(&state, "email")?;
     let actor = principal::session_user(&principal)?;
     let Some(mailer) = state.mailer.as_ref() else {
         return Err(ApiError::BadRequest {
@@ -1115,5 +1117,31 @@ mod tests {
                 "features": [],
             })
         );
+    }
+
+    #[tokio::test]
+    async fn test_email_is_refused_in_restore_mode() {
+        let app = TestApp::with_mailer_config(|config| config.restore_mode = true).await;
+        bootstrap::prepare(&app.state).await.unwrap();
+        let token = app.state.setup.token().unwrap().expect("setup token");
+        let created = app
+            .request(Method::POST, "/api/auth/setup")
+            .json(&serde_json::json!({
+                "setup_token": token,
+                "email": "ada@example.com",
+                "password": PASSWORD,
+                "name": "Ada",
+                "org_name": "Acme",
+                "project_name": "Support bot",
+            }))
+            .send()
+            .await;
+        let response = app
+            .request(Method::POST, "/api/v1/admin/settings/test-email")
+            .header("cookie", &session_cookie(&created))
+            .send()
+            .await;
+        crate::http::restore::tests::assert_refused(&response, "email");
+        assert!(app.sent().is_empty());
     }
 }

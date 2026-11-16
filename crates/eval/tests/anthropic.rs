@@ -18,6 +18,7 @@ const PROMPT: &str = "Grade the answer.";
 fn client() -> EgressClient {
     EgressClient::new(EgressPolicy {
         allow_private_network: true,
+        restore_mode: false,
     })
     .expect("client")
 }

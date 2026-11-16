@@ -19,6 +19,7 @@ pub(crate) mod identities;
 pub(crate) mod instance_settings;
 pub(crate) mod invites;
 pub(crate) mod members;
+pub(crate) mod model_prices;
 pub(crate) mod online_rules;
 pub(crate) mod orgs;
 pub(crate) mod password_resets;

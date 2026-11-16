@@ -83,6 +83,8 @@ pub(crate) enum OrgPerm {
     ManageMembers,
     /// Create, edit, delete and test LLM connections (D-I-24).
     ManageConnections,
+    /// Create, replace and delete the org's model prices (D-T-6).
+    ManagePrices,
     /// Delete the org (owner only, spec 08).
     Delete,
     /// The org's deletion history (D-M-8).
@@ -203,6 +205,7 @@ impl OrgPerm {
             | Self::CreateProject
             | Self::ManageMembers
             | Self::ManageConnections
+            | Self::ManagePrices
             | Self::ViewDeletions => OrgRole::Admin,
             Self::Delete | Self::ManageSso => OrgRole::Owner,
         }
@@ -284,6 +287,7 @@ mod tests {
         assert_eq!(OrgPerm::CreateProject.min_role(), OrgRole::Admin);
         assert_eq!(OrgPerm::ManageMembers.min_role(), OrgRole::Admin);
         assert_eq!(OrgPerm::ManageConnections.min_role(), OrgRole::Admin);
+        assert_eq!(OrgPerm::ManagePrices.min_role(), OrgRole::Admin);
         assert_eq!(OrgPerm::Delete.min_role(), OrgRole::Owner);
         assert_eq!(OrgPerm::ViewDeletions.min_role(), OrgRole::Admin);
         assert_eq!(OrgPerm::ManageSso.min_role(), OrgRole::Owner);

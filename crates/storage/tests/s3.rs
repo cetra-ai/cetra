@@ -77,6 +77,7 @@ fn config(
     path_style: bool,
 ) -> StorageConfig {
     StorageConfig {
+        delete_objects: true,
         data_dir: dir.to_path_buf(),
         min_free_bytes: ByteSize::b(0),
         object_store: Some(ObjectStoreUrl::S3 {

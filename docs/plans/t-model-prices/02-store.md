@@ -240,7 +240,7 @@ just check
 
 ## Done when
 
-- The migration, store and 11 tests are in; the version literals and the snapshot are updated as § 1 says.
+- The migration, store and 11 tests are in; the snapshot is regenerated (§ Schema version: no version literal changes).
 - Nothing reads the table yet (T3 does); the file carries the `dead_code` allowance.
 - `just check` is green.
 

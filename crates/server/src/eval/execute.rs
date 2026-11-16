@@ -95,7 +95,10 @@ pub(crate) async fn run_evaluator(
     } = args;
     // A judge trace is written now, so the D85 age bound never applies (D-P-22).
     let ingest = state.ingest.context(project, None, now);
-    let prices = state.ingest.prices();
+    let prices = state
+        .ingest
+        .prices()
+        .for_project(project.org_id, project.id);
     if matches!(evaluator.config, EvaluatorConfig::Check(_)) {
         // Checks are CPU work: they run off the async workers (D-I-23).
         let runner = Arc::clone(&state.eval_runner);
@@ -605,8 +608,17 @@ async fn prepare<'a>(state: &'a AppState, job: &ClaimedJob) -> Result<Ready<'a>,
                 .and_then(BudgetPeriod::from_name),
         )
     {
-        let (amount, guard) =
-            reserve(state, rule, judge, link.adapter, limit, period, &variables).await?;
+        let (amount, guard) = reserve(
+            state,
+            project.org_id,
+            rule,
+            judge,
+            link.adapter,
+            limit,
+            period,
+            &variables,
+        )
+        .await?;
         estimate = Some(amount);
         reservation = Some(guard);
     }
@@ -740,8 +752,10 @@ fn load_retry(state: &AppState, job: &ClaimedJob, error: &'static str) -> Exit {
 }
 
 /// Step 10: prices the call, reserves its estimate and returns the estimate with the guard.
+#[allow(clippy::too_many_arguments)] // the state, the org, the rule, its judge and budget, and the variables
 async fn reserve<'a>(
     state: &'a AppState,
+    org: OrgId,
     rule: &RuleRow,
     judge: &JudgeConfig,
     adapter: Adapter,
@@ -753,7 +767,7 @@ async fn reserve<'a>(
     let prompt = PromptTemplate::compile(&judge.prompt)
         .and_then(|template| template.render(variables))
         .map_err(|error| permanent(&error.to_string()))?;
-    let prices = state.ingest.prices();
+    let prices = state.ingest.prices().for_project(org, rule.project_id);
     let Some(price) = budget::model_price(&prices, &judge.model, adapter, now) else {
         return Err(unpriced(rule.id));
     };
@@ -830,6 +844,9 @@ async fn call_evaluator(state: &AppState, job: &ClaimedJob, call: Call) -> Ended
     )
     .await;
     let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    state
+        .telemetry
+        .eval_run(eval_kind_of(&kind), started.elapsed().as_secs_f64());
     // The call can take seconds: the retry, the writes and the finish use the time after it.
     let now = state.clock.now_ns();
     let run = match run {
@@ -1133,6 +1150,7 @@ async fn finish_job(
     // downgraded to none is not a result of the evaluator (§ Job execution › The breaker).
     let counts = reached_evaluator && matches!(finish, Finish::Done { .. } | Finish::Failed { .. });
     let label = finish_label(&finish);
+    let counted = eval_outcome(&finish);
     // Only a budgeted job holds a reservation, and its spend goes to its rule (D-I-15).
     let spend = match (&reservation, row.rule_id) {
         (Some(_), Some(rule)) if actual > 0.0 => Some((rule, budget::day_start(now), actual)),
@@ -1155,6 +1173,11 @@ async fn finish_job(
         reservation.settle(actual);
     }
     let settled = result?;
+    if settled.matched
+        && let Some(outcome) = counted
+    {
+        state.telemetry.finish_eval(outcome);
+    }
     tracing::debug!(
         job_id = %row.id,
         kind = %row.kind,
@@ -1524,6 +1547,28 @@ fn score_metadata(
         metadata.insert(TRUNCATED_KEY.to_owned(), "true".to_owned());
     }
     metadata
+}
+
+/// The telemetry outcome of a finish that leaves the job in a final status (phase 06). `None`
+/// for a finish that puts the job back in the queue. A deleted job ends as `skipped`.
+fn eval_outcome(finish: &Finish) -> Option<crate::telemetry::EvalOutcome> {
+    use crate::telemetry::EvalOutcome as Counted;
+    match finish {
+        Finish::Done { .. } => Some(Counted::done),
+        Finish::Failed { .. } => Some(Counted::failed),
+        Finish::Skipped { .. } | Finish::Deleted { .. } => Some(Counted::skipped),
+        _ => None,
+    }
+}
+
+/// The `kind` label of an evaluator's run time (phase 06).
+fn eval_kind_of(kind: &EvaluatorKind) -> crate::telemetry::EvalKind {
+    use crate::telemetry::EvalKind as Counted;
+    match kind {
+        EvaluatorKind::LlmJudge => Counted::llm_judge,
+        EvaluatorKind::Check => Counted::check,
+        EvaluatorKind::Webhook => Counted::webhook,
+    }
 }
 
 fn kind_of(config: &EvaluatorConfig) -> EvaluatorKind {
@@ -3663,7 +3708,7 @@ mod job_tests {
         let row = run_once(&app, &seeded.project, job, Some(conn)).await;
         assert_eq!(row.status, "done", "{:?}", row.error);
         let now = app.state.clock.now_ns();
-        let prices = app.state.ingest.prices();
+        let prices = app.state.ingest.prices().builtin();
         let adapter = Adapter::from_name("openai").expect("adapter");
         let price = budget::model_price(&prices, PRICED, adapter, now).expect("priced");
         let prompt = format!("Question: {QUESTION}\nAnswer: {ANSWER}");

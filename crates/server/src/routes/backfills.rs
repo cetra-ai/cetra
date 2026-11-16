@@ -23,6 +23,7 @@ use crate::eval::rule_check::Subject;
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
+use crate::http::restore::refuse_outbound;
 use crate::meta::MetaError;
 use crate::meta::backfills::{self as backfills, BackfillRow, NewBackfill};
 use crate::meta::evaluators;
@@ -146,6 +147,7 @@ async fn create_backfill(
     error::Path(IdPath { id }): error::Path<IdPath>,
     error::Json(body): error::Json<CreateBackfillRequest>,
 ) -> Result<(StatusCode, error::Json<Backfill>), ApiError> {
+    refuse_outbound(&state, "backfill")?;
     let user_id = principal::session_user(&principal)?.id;
     let project = access.project.id;
     let now = state.clock.now_ns();
@@ -271,7 +273,7 @@ async fn judge_cost(
     };
     let adapter = judge_adapter(state, org, &subject).await?;
     let price = adapter.and_then(|adapter| {
-        let prices = state.ingest.prices();
+        let prices = state.ingest.prices().for_project(org, rule.project_id);
         budget::model_price(&prices, &judge.model, adapter, now).cloned()
     });
     let mapping: BTreeMap<String, String> =
@@ -633,7 +635,7 @@ mod tests {
         let chars = PROMPT.chars().count() + 2 * 2_000;
         assert_eq!(body["estimated_input_tokens"], 2 * chars.div_ceil(4) as u64);
         assert_eq!(body["estimated_output_tokens"], 2 * 1024);
-        let prices = app.state.ingest.prices();
+        let prices = app.state.ingest.prices().builtin();
         let price = budget::model_price(&prices, PRICED, Adapter::OpenAi, NOW).expect("priced");
         let expected = 2.0 * budget::estimate_usd(chars, 1024, price);
         let cost = body["estimated_cost_usd"].as_f64().expect("a cost");
@@ -984,5 +986,18 @@ mod tests {
         assert_eq!(data[2]["status"], "done");
         assert!(data[2].get("error").is_none(), "{listed}");
         assert!(data[2].get("finished_at").is_some(), "{listed}");
+    }
+
+    #[tokio::test]
+    async fn create_backfill_is_refused_in_restore_mode() {
+        let app = TestApp::with_config(|config| config.restore_mode = true).await;
+        app.state.clock.set(NOW);
+        let seeded = app.seed().await;
+        let evaluator = judge_with_model(&app, &seeded, PRICED).await;
+        let rule = create_rule(&app, &seeded, &trace_rule(evaluator, true)).await;
+        let response = create(&app, &seeded, rule, &window_body(10)).await;
+        crate::http::restore::tests::assert_refused(&response, "backfill");
+        let listed: Value = list(&app, &seeded, rule).await.json();
+        assert_eq!(listed["data"], json!([]));
     }
 }

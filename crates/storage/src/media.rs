@@ -100,6 +100,10 @@ impl MediaGc {
         project: ProjectId,
         now: i64,
     ) -> Result<MediaReport, MediaError> {
+        // With deletion off (D-N-34) nothing is collected: no transaction, no staged row, no delete.
+        if !self.objects.deletes_enabled() {
+            return Ok(MediaReport::default());
+        }
         let grace = i64::try_from(MEDIA_GRACE.as_nanos()).unwrap_or(i64::MAX);
         let before = now.saturating_sub(grace);
         let live = self.live_set(project).await?;
@@ -182,6 +186,8 @@ impl MediaGc {
             if self.hooks.fail(HookPoint::MediaBeforeDelete).is_some() {
                 return Err(MediaError::Fault);
             }
+            // With deletion off (D-N-34) this returns before `finish_drop`, so the drop stays
+            // `dropping` and its blobs are deleted by a later server.
             self.objects.delete(&path).await?;
             self.committer.delete_media_row(project, &sha).await?;
         }

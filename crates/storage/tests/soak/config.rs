@@ -212,6 +212,7 @@ pub(crate) fn storage_config(dir: &Path, s3: Option<&S3Env>, prefix: &str) -> St
     let stat = rustix::fs::statvfs(dir).expect("the data directory exists");
     let read_cache = ByteSize::b(stat.f_blocks * stat.f_frsize / 10);
     StorageConfig {
+        delete_objects: true,
         data_dir: dir.to_path_buf(),
         min_free_bytes: ByteSize::gib(2),
         object_store,

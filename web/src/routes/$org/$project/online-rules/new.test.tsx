@@ -244,3 +244,31 @@ it("shows a name that is taken under the Name field", async () => {
   );
   expect(screen.queryByRole("alert")).toBeNull();
 });
+
+it("links a refused budget to the project's model prices", async () => {
+  captureCreate(() =>
+    problemResponse(400, "bad_request", {
+      errors: [
+        {
+          field: "budget_usd",
+          message:
+            "the judge model has no price, so the rule cannot have a budget; add one under Settings → Model prices",
+        },
+      ],
+    }),
+  );
+  const { user } = await renderApp("/acme/support-bot/online-rules/new");
+  await screen.findByLabelText("Name");
+
+  await user.type(screen.getByLabelText("Name"), "Relevance on answers");
+  await choose(user, "Evaluator", RELEVANCE_OPTION);
+  await user.click(screen.getByRole("checkbox", { name: "Limit spend" }));
+  await user.type(screen.getByLabelText("Amount (USD)"), "5");
+  await user.click(screen.getByRole("button", { name: "Create rule" }));
+
+  expect(await screen.findByText(/the judge model has no price/)).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Add a model price" })).toHaveAttribute(
+    "href",
+    "/acme/support-bot/settings/models",
+  );
+});

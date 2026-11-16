@@ -19,6 +19,7 @@ use crate::http::AppState;
 use crate::http::access::{Access, RouteDef};
 use crate::http::client_ip::ClientIp;
 use crate::http::error::{self, ApiError};
+use crate::http::restore::refuse_outbound;
 
 /// Authorize and callback.
 pub(crate) fn routes() -> Vec<RouteDef> {
@@ -63,6 +64,7 @@ async fn authorize(
     error::Path(provider): error::Path<String>,
     error::Query(query): error::Query<AuthorizeQuery>,
 ) -> Result<Response, ApiError> {
+    refuse_outbound(&state, "external sign-in")?;
     match flow::start(
         &state,
         &provider,
@@ -87,6 +89,7 @@ async fn callback(
     error::Path(provider): error::Path<String>,
     error::Query(query): error::Query<CallbackQuery>,
 ) -> Result<Response, ApiError> {
+    refuse_outbound(&state, "external sign-in")?;
     let https = state.config.public_url.is_https();
     let clear = state_cookie::clear(https);
     let finished = if provider == crate::ee::org_sso::login::PROVIDER {
@@ -1630,5 +1633,25 @@ mod tests {
         )
         .await;
         assert_eq!(location(&admitted), "/login?error=link_refused");
+    }
+
+    #[tokio::test]
+    async fn authorize_is_refused_in_restore_mode() {
+        let app = TestApp::with_config(|config| config.restore_mode = true).await;
+        let response = app
+            .request(Method::GET, "/api/auth/authorize/github")
+            .send()
+            .await;
+        crate::http::restore::tests::assert_refused(&response, "external sign-in");
+    }
+
+    #[tokio::test]
+    async fn callback_is_refused_in_restore_mode() {
+        let app = TestApp::with_config(|config| config.restore_mode = true).await;
+        let response = app
+            .request(Method::GET, "/api/auth/callback/github?state=s&code=c")
+            .send()
+            .await;
+        crate::http::restore::tests::assert_refused(&response, "external sign-in");
     }
 }
