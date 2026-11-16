@@ -538,7 +538,7 @@ mod tests {
 
     use crate::QueryOptions;
     use crate::Storage;
-    use crate::catalog::{FileMeta, FileTable};
+    use crate::catalog::{FileMeta, FileTable, now_ns};
     use crate::compaction::job::tests::{
         at, config_in, flush_cycle, flush_scores, project, quiet_compaction, score_file_rows,
         wait_at,
@@ -581,6 +581,15 @@ mod tests {
             counts.extend(column.values().iter().copied());
         }
         counts
+    }
+
+    /// A query context on the fixed test project's current snapshot.
+    async fn snapshot(storage: &Storage) -> QueryContext {
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
+        QueryContext::new(query, None).unwrap()
     }
 
     /// One `traces` deletion of the given traces, cut off at `cutoff`.
@@ -770,10 +779,12 @@ mod tests {
     }
 
     // 0. A context reads one snapshot: a compaction pass between two reads on it leaves both
-    // reads unchanged, while a fresh context sees the merged file (one copy of the span).
+    // reads unchanged, GC keeps the input files while the context lives, and a fresh context
+    // sees the merged file (one copy of the span).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_context_keeps_its_snapshot_across_a_compaction_pass() {
+    async fn a_context_keeps_its_snapshot_across_compaction_and_gc() {
         let dir = tempfile::tempdir().unwrap();
+        // The compaction interval is an hour, so its first tick cannot fire during this test.
         let config = config_in(dir.path(), quiet_compaction(2), Duration::from_secs(3_600));
         let mut storage = Storage::open(config.clone()).await.unwrap();
         let base = at(10, 0, 0);
@@ -786,27 +797,57 @@ mod tests {
             .await;
         }
         assert_eq!(storage.catalog_files(Table::Spans).len(), 2);
-        let query = storage
-            .query(project(), QueryOptions::new(None, None))
-            .await
-            .unwrap();
-        let ctx = QueryContext::new(query, None).unwrap();
+        let inputs: Vec<String> = storage
+            .catalog_files(Table::Spans)
+            .iter()
+            .chain(storage.catalog_files(FileTable::Traces).iter())
+            .map(|file| file.path.clone())
+            .collect();
+        let ctx = snapshot(&storage).await;
         assert_eq!(span_counts(&ctx).await, vec![2]);
 
         let report = storage.compact(at(11, 0, 0)).await.unwrap();
         assert_eq!((report.jobs, report.failed), (1, 0), "{report:?}");
         assert_eq!(storage.catalog_files(Table::Spans).len(), 1);
+
+        // Zero grace: the inputs are collectable at once, but the live context still names them.
+        let hooks = crate::hooks::Hooks::default();
+        let held = crate::gc::collect_obsolete(
+            &storage.committer,
+            &storage.objects,
+            &hooks,
+            now_ns(),
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+        assert_eq!(held.deleted, 0, "{held:?}");
+        assert!(held.in_use >= 1, "{held:?}");
+        for path in &inputs {
+            assert!(dir.path().join("objects").join(path).exists(), "{path}");
+        }
         assert_eq!(
             span_counts(&ctx).await,
             vec![2],
             "the context keeps its snapshot"
         );
 
-        let query = storage
-            .query(project(), QueryOptions::new(None, None))
-            .await
-            .unwrap();
-        let fresh = QueryContext::new(query, None).unwrap();
+        drop(ctx);
+        let freed = crate::gc::collect_obsolete(
+            &storage.committer,
+            &storage.objects,
+            &hooks,
+            now_ns(),
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+        assert_eq!(freed.deleted, inputs.len() as u64, "{freed:?}");
+        for path in &inputs {
+            assert!(!dir.path().join("objects").join(path).exists(), "{path}");
+        }
+
+        let fresh = snapshot(&storage).await;
         assert_eq!(span_counts(&fresh).await, vec![1]);
         storage.shutdown().await.unwrap();
     }
@@ -1246,7 +1287,7 @@ mod tests {
         let deletion = traces_deletion(&[1], time + 1);
         storage.register_deletion(deletion.clone()).await.unwrap();
 
-        let now = crate::catalog::now_ns() + 2 * 3_600 * 1_000_000_000;
+        let now = now_ns() + 2 * 3_600 * 1_000_000_000;
         let report = storage.apply_deletions(now).await.unwrap();
         assert_eq!(report.applied, 0, "the memtable batch still blocks it");
         let overdue = overdue_logged(&storage);
