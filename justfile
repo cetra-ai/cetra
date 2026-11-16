@@ -154,14 +154,19 @@ fuzz-lock:
     cp Cargo.lock fuzz/Cargo.lock
     cargo metadata --manifest-path fuzz/Cargo.toml --format-version 1 > /dev/null
 
+# The host triple. cargo-fuzz defaults to the target it was itself built for, so a prebuilt
+# (musl) cargo-fuzz would build for musl, which the sanitizer rejects.
+_fuzz-host:
+    @rustc -vV | sed -n 's/^host: //p'
+
 # Fuzz one target for `secs` seconds; new inputs go into its committed corpus
 fuzz target secs="60": fuzz-lock
-    cargo +{{fuzz_toolchain}} fuzz run {{target}} fuzz/corpus/{{target}} -- -max_total_time={{secs}} -rss_limit_mb=4096 -timeout=30 -max_len=$(just _fuzz-max-len {{target}})
+    cargo +{{fuzz_toolchain}} fuzz run --target "$(just _fuzz-host)" {{target}} fuzz/corpus/{{target}} -- -max_total_time={{secs}} -rss_limit_mb=4096 -timeout=30 -max_len=$(just _fuzz-max-len {{target}})
 
 # Fuzz one target for CI: new inputs go to target/fuzz-new/<target>, so the checkout stays clean
 fuzz-ci target secs: fuzz-lock
     mkdir -p target/fuzz-new/{{target}}
-    cargo +{{fuzz_toolchain}} fuzz run {{target}} target/fuzz-new/{{target}} fuzz/corpus/{{target}} -- -max_total_time={{secs}} -rss_limit_mb=4096 -timeout=30 -max_len=$(just _fuzz-max-len {{target}})
+    cargo +{{fuzz_toolchain}} fuzz run --target "$(just _fuzz-host)" {{target}} target/fuzz-new/{{target}} fuzz/corpus/{{target}} -- -max_total_time={{secs}} -rss_limit_mb=4096 -timeout=30 -max_len=$(just _fuzz-max-len {{target}})
 
 # Fuzz every target in turn; fails if any target crashed
 fuzz-all secs="60":
@@ -177,7 +182,7 @@ fuzz-cmin: fuzz-lock
     set -euo pipefail
     for target in {{fuzz_targets}}; do
         dir="fuzz/corpus/$target"
-        cargo +{{fuzz_toolchain}} fuzz cmin "$target" "$dir" -- -max_len="$(just _fuzz-max-len "$target")"
+        cargo +{{fuzz_toolchain}} fuzz cmin --target "$(just _fuzz-host)" "$target" "$dir" -- -max_len="$(just _fuzz-max-len "$target")"
         dropped=0
         while [ "$(du -sb "$dir" | cut -f1)" -gt 2097152 ]; do
             rm -- "$dir/$(ls -S "$dir" | head -n 1)"
