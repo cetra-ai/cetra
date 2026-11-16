@@ -303,7 +303,7 @@ mod tests {
     use crate::meta::projects::insert_project;
     use crate::meta::users::{self, NewUser, insert_user};
     use crate::test_support::{TestApp, capture_logs};
-    use llmobs_core::ids::OrgId;
+    use cetra_core::ids::OrgId;
 
     struct Account {
         cookie: String,
@@ -325,6 +325,7 @@ mod tests {
                             name: None,
                             password_hash: None,
                             email_verified_at: None,
+                            email_verified_via: None,
                             is_instance_admin: false,
                         },
                         now,
@@ -339,9 +340,15 @@ mod tests {
             })
             .await
             .unwrap();
-        let header = start_session(&app.state, user_id, None, None)
-            .await
-            .unwrap();
+        let header = start_session(
+            &app.state,
+            user_id,
+            None,
+            None,
+            crate::auth::session::SessionOrigin::Password,
+        )
+        .await
+        .unwrap();
         let cookie = header
             .to_str()
             .unwrap()
@@ -379,7 +386,7 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_token_is_unauthorized() {
         let app = TestApp::new().await;
-        let auth = format!("Bearer pat-llmobs-{}", "A".repeat(32));
+        let auth = format!("Bearer pat-cetra-{}", "A".repeat(32));
         let response = app
             .request(Method::GET, "/api/auth/me")
             .header(header::AUTHORIZATION.as_str(), &auth)

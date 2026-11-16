@@ -9,6 +9,7 @@ const FEATURE_NAMES: Record<Schema<"Feature">, string> = {
   retention_management: "Data retention management",
   project_roles: "Per-project roles",
   sso_enforcement: "SSO enforcement",
+  org_sso: "Single sign-on",
 };
 
 /** The licence on the admin settings page: status, customer, id and the features it lists. */
@@ -56,7 +57,7 @@ export function LicenseCard() {
         </dd>
       </dl>
       <p className="text-sm text-muted-foreground">
-        Set the key with LLMOBS_LICENSE_KEY and restart the server.
+        Set the key with CETRA_LICENSE_KEY and restart the server.
       </p>
     </section>
   );

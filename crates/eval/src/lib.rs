@@ -2,12 +2,12 @@
 //!
 //! ```text
 //! Wave 2 eval server ── loads evaluator, decrypts connection/secret, fetches the trace (A2) ──▶
-//!   llmobs_eval::resolve(mapping, TraceData, item)        → Variables
+//!   cetra_eval::resolve(mapping, TraceData, item)        → Variables
 //!   EvalRunner::run(RunInput { evaluator, variables, connection, target, judge_trace_id, ingest, prices })
 //!        ├─ check   → pure Rust
 //!        ├─ webhook → EgressClient → user's URL
 //!        └─ judge   → template → adapter → EgressClient → provider → answer parser
-//!     → EvalRun { outcome: Result<EvalOutcome, EvalError>, judge_trace: llmobs_otel::Normalized }
+//!     → EvalRun { outcome: Result<EvalOutcome, EvalError>, judge_trace: cetra_otel::Normalized }
 //! Wave 2 eval server ── writes the spans (WAL) and the Score (deterministic id), updates eval_jobs ──▶
 //! ```
 //!
@@ -34,7 +34,7 @@ pub use config::{
     Check, ContainsMode, Evaluator, EvaluatorConfig, JudgeConfig, JudgeOutput, OutputScore,
     WebhookConfig,
 };
-pub use egress::{EgressClient, EgressPolicy, EgressRequest, EgressResponse};
+pub use egress::{EgressClient, EgressPolicy, EgressRequest, EgressResponse, identity_http_client};
 pub use error::{
     CheckError, ConfigError, EgressError, ErrorClass, EvalError, JudgeError, MappingError,
     TemplateError, WebhookError,

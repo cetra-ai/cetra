@@ -11,20 +11,25 @@ mod traces;
 
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::Context;
+use cetra_server::admin::{self, EntitlementsReport, UserSummary};
+use cetra_server::admin_socket::{ADMIN_SOCKET, AdminRequest, AdminResponse};
+use cetra_server::api::entitlements::OrgLimits;
+use cetra_server::backup::BackupMode;
+use cetra_server::config::{LogConfig, LogFormat, ServerConfig};
+use cetra_server::serve::{self, ServeError};
 use clap::{Parser, Subcommand};
-use llmobs_server::admin::{self, EntitlementsReport, UserSummary};
-use llmobs_server::api::entitlements::OrgLimits;
-use llmobs_server::config::{LogConfig, LogFormat, ServerConfig};
-use llmobs_server::serve::{self, ServeError};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixStream;
 use tracing_subscriber::EnvFilter;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[derive(Debug, Parser)]
-#[command(name = "llmobs", version, about = "LLM observability server")]
+#[command(name = "cetra", version, about = "LLM observability server")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -34,7 +39,7 @@ struct Cli {
 enum Command {
     /// Start the HTTP server.
     Serve {
-        /// Config file. Overrides `LLMOBS_CONFIG`.
+        /// Config file. Overrides `CETRA_CONFIG`.
         #[arg(long)]
         config: Option<PathBuf>,
     },
@@ -43,7 +48,7 @@ enum Command {
         #[command(subcommand)]
         command: AdminCommand,
     },
-    /// Print the llmobs version.
+    /// Print the cetra version.
     Version,
     /// Exit 0 if the server answers `GET <url>/readyz` with 200 (the container healthcheck).
     Health {
@@ -52,6 +57,8 @@ enum Command {
         url: String,
     },
     /// Save a personal access token for a server.
+    ///
+    /// The token expires after 90 days. Run `cetra login` again when it does.
     Login {
         /// Server URL, for example `http://127.0.0.1:8080`.
         #[arg(long)]
@@ -96,7 +103,7 @@ enum AdminCommand {
         /// Make the user an instance admin.
         #[arg(long)]
         instance_admin: bool,
-        /// Config file. Overrides `LLMOBS_CONFIG`.
+        /// Config file. Overrides `CETRA_CONFIG`.
         #[arg(long)]
         config: Option<PathBuf>,
     },
@@ -105,7 +112,7 @@ enum AdminCommand {
         /// Email address.
         #[arg(long)]
         email: String,
-        /// Config file. Overrides `LLMOBS_CONFIG`.
+        /// Config file. Overrides `CETRA_CONFIG`.
         #[arg(long)]
         config: Option<PathBuf>,
     },
@@ -114,28 +121,61 @@ enum AdminCommand {
         /// `table` or `json`.
         #[arg(long, value_enum, default_value = "table")]
         format: output::ListFormat,
-        /// Config file. Overrides `LLMOBS_CONFIG`.
+        /// Config file. Overrides `CETRA_CONFIG`.
         #[arg(long)]
         config: Option<PathBuf>,
     },
     /// Re-encrypt stored secrets under a new key. Stop the server first.
     RotateEncryptionKey {
         /// Read the new key (32 bytes, standard base64) from one line of stdin. Default:
-        /// generate one, unless the current key comes from `LLMOBS_ENCRYPTION_KEY`.
+        /// generate one, unless the current key comes from `CETRA_ENCRYPTION_KEY`.
         #[arg(long)]
         new_from_stdin: bool,
-        /// Config file. Overrides `LLMOBS_CONFIG`.
+        /// Config file. Overrides `CETRA_CONFIG`.
         #[arg(long)]
         config: Option<PathBuf>,
     },
     /// Re-open the deletions of another data directory that this one lacks (after a backup restore).
-    /// Both `meta.db` files must be at this binary's schema; run `llmobs serve` once on a restored older backup first.
+    /// Both `meta.db` files must be at this binary's schema; run `cetra admin migrate` on a restored older backup first.
     ReapplyDeletions {
         /// The data directory whose `meta.db` holds the deletions to re-apply (for example the
         /// directory as it was before the restore).
         #[arg(long)]
         from: PathBuf,
-        /// Config file. Overrides `LLMOBS_CONFIG`.
+        /// Config file. Overrides `CETRA_CONFIG`.
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Back up the running server into DIR (online; the server writes DIR).
+    Backup {
+        /// Target directory on the server's filesystem: absent or empty, outside the data directory.
+        #[arg(long)]
+        to: PathBuf,
+        /// Metadata only (S3-compatible object storage; objects stay in the bucket).
+        #[arg(long)]
+        meta_only: bool,
+        /// Config file. Overrides `CETRA_CONFIG`.
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Delete objects the catalog does not know and report the ones it misses. Stop the server first.
+    GcOrphans {
+        /// Leave unknown objects younger than this (e.g. `1h`, `30m`).
+        #[arg(long, default_value = "1h", value_parser = humantime_duration)]
+        min_age: Duration,
+        /// Report only; delete nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Required in S3 mode without `--dry-run`: deleting orphans there rolls the live bucket back.
+        #[arg(long)]
+        rollback_bucket: bool,
+        /// Config file. Overrides `CETRA_CONFIG`.
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Migrate `meta.db` and `catalog.db` to this version's schema, then exit. Stop the server first.
+    Migrate {
+        /// Config file. Overrides `CETRA_CONFIG`.
         #[arg(long)]
         config: Option<PathBuf>,
     },
@@ -143,6 +183,24 @@ enum AdminCommand {
     Entitlements {
         #[command(subcommand)]
         command: EntitlementsCommand,
+    },
+    /// An org's single sign-on (track P M5).
+    OrgSso {
+        #[command(subcommand)]
+        command: OrgSsoCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum OrgSsoCommand {
+    /// Turn an org's identity provider and its enforcement off, for a broken provider.
+    /// A running server applies it within a minute.
+    Disable {
+        /// Org id or slug.
+        org: String,
+        /// Config file. Overrides `CETRA_CONFIG`.
+        #[arg(long)]
+        config: Option<PathBuf>,
     },
 }
 
@@ -155,7 +213,7 @@ enum EntitlementsCommand {
         /// `table` or `json`.
         #[arg(long, value_enum, default_value = "table")]
         format: output::ListFormat,
-        /// Config file. Overrides `LLMOBS_CONFIG`.
+        /// Config file. Overrides `CETRA_CONFIG`.
         #[arg(long)]
         config: Option<PathBuf>,
     },
@@ -274,7 +332,7 @@ async fn serve(config_path: Option<&Path>) -> anyhow::Result<()> {
         .context("loading config")?;
     init_tracing(&config.log)?;
     let signals = Signals::install().context("installing signal handlers")?;
-    serve::run(config, Some(llmobs_ui::router()), signals.wait())
+    serve::run(config, Some(cetra_ui::router()), signals.wait())
         .await
         .map_err(annotate)?;
     Ok(())
@@ -341,8 +399,8 @@ fn default_log_format() -> LogFormat {
 
 fn print_version() -> io::Result<()> {
     let mut stdout = io::stdout().lock();
-    writeln!(stdout, "llmobs {}", env!("CARGO_PKG_VERSION"))?;
-    let ui = if llmobs_ui::embedded() {
+    writeln!(stdout, "cetra {}", env!("CARGO_PKG_VERSION"))?;
+    let ui = if cetra_ui::embedded() {
         "embedded"
     } else {
         "not built"
@@ -420,6 +478,23 @@ async fn admin_command(command: AdminCommand) -> anyhow::Result<()> {
                 }
             }
         }
+        AdminCommand::OrgSso {
+            command: OrgSsoCommand::Disable { org, config },
+        } => {
+            let loaded = load_config(config.as_deref())?;
+            let changed = admin::org_sso_disable(&loaded, &org)
+                .await
+                .context("disabling the org's SSO")?;
+            let mut stdout = io::stdout().lock();
+            if changed {
+                writeln!(
+                    stdout,
+                    "org SSO disabled for {org}; a running server applies it within a minute"
+                )?;
+            } else {
+                writeln!(stdout, "{org} has no identity provider")?;
+            }
+        }
         AdminCommand::RotateEncryptionKey {
             new_from_stdin,
             config,
@@ -438,9 +513,63 @@ async fn admin_command(command: AdminCommand) -> anyhow::Result<()> {
             if loaded.encryption_key.is_some() {
                 writeln!(
                     stdout,
-                    "Set LLMOBS_ENCRYPTION_KEY to the new key before the next start."
+                    "Set CETRA_ENCRYPTION_KEY to the new key before the next start."
                 )?;
             }
+        }
+        AdminCommand::Backup {
+            to,
+            meta_only,
+            config,
+        } => backup_command(&to, meta_only, config.as_deref()).await?,
+        AdminCommand::GcOrphans {
+            min_age,
+            dry_run,
+            rollback_bucket,
+            config,
+        } => {
+            let loaded = load_config(config.as_deref())?;
+            let report = admin::gc_orphans(&loaded, min_age, dry_run, rollback_bucket).await?;
+            let mut stdout = io::stdout().lock();
+            let verb = if report.dry_run {
+                "orphans found"
+            } else {
+                "orphans deleted"
+            };
+            writeln!(
+                stdout,
+                "{verb}: {} ({})",
+                report.orphans,
+                format_bytes(report.orphan_bytes)
+            )?;
+            writeln!(
+                stdout,
+                "recent unknown objects kept: {}",
+                report.recent_unknown
+            )?;
+            writeln!(stdout, "missing objects: {}", report.missing)?;
+            if report.missing_media > 0 {
+                writeln!(
+                    stdout,
+                    "missing media: {} (attachments only; traces are intact)",
+                    report.missing_media
+                )?;
+            }
+            if report.missing > 0 {
+                anyhow::bail!(
+                    "the catalog needs objects the store does not have: the restore is incomplete (backup older than gc.grace, or objects/ not copied)"
+                );
+            }
+        }
+        AdminCommand::Migrate { config } => {
+            let loaded = load_config(config.as_deref())?;
+            admin::migrate(&loaded)
+                .await
+                .context("migrating the databases")?;
+            writeln!(
+                io::stdout().lock(),
+                "meta.db and catalog.db are at this version's schema"
+            )?;
         }
         AdminCommand::ReapplyDeletions { from, config } => {
             let loaded = load_config(config.as_deref())?;
@@ -449,7 +578,7 @@ async fn admin_command(command: AdminCommand) -> anyhow::Result<()> {
                 .context("re-applying deletions")?;
             writeln!(
                 io::stdout().lock(),
-                "Re-opened {} deletions ({} failed ones copied for the record, {} already present). `llmobs serve` applies them.",
+                "Re-opened {} deletions ({} failed ones copied for the record, {} already present). `cetra serve` applies them.",
                 report.reopened,
                 report.failed_copied,
                 report.present
@@ -461,6 +590,121 @@ async fn admin_command(command: AdminCommand) -> anyhow::Result<()> {
 
 fn load_config(path: Option<&Path>) -> anyhow::Result<ServerConfig> {
     ServerConfig::load(path).context("loading config")
+}
+
+/// Asks the running server, through `<data_dir>/admin.sock`, to write a backup into `to`
+/// (N M2, D-N-17). The server writes `to`, so the path is resolved here, against this
+/// process's working directory.
+async fn backup_command(to: &Path, meta_only: bool, config: Option<&Path>) -> anyhow::Result<()> {
+    let loaded = load_config(config)?;
+    let to = std::path::absolute(to).context("resolving the backup directory")?;
+    let socket = loaded.data_dir.join(ADMIN_SOCKET);
+    let mut stream = match UnixStream::connect(&socket).await {
+        Ok(stream) => stream,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            anyhow::bail!(
+                "no running cetra serve answers on {}; start it, or for a stopped server copy the data directory (docs/self-hosting/backup.md)",
+                socket.display()
+            );
+        }
+        Err(error) => return Err(error).context("connecting to the admin socket"),
+    };
+    let request = serde_json::to_string(&AdminRequest::Backup { to, meta_only })?;
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .await
+        .context("sending the backup request")?;
+    let mut line = String::new();
+    BufReader::new(stream)
+        .read_line(&mut line)
+        .await
+        .context("reading the server's answer")?;
+    if line.is_empty() {
+        anyhow::bail!("the server closed the connection without an answer");
+    }
+    match serde_json::from_str::<AdminResponse>(&line).context("reading the server's answer")? {
+        AdminResponse::Done { report, .. } => {
+            let mut stdout = io::stdout().lock();
+            writeln!(stdout, "backup written to {}", report.dir.display())?;
+            match report.mode {
+                BackupMode::Full => {
+                    writeln!(stdout, "mode: full")?;
+                    writeln!(
+                        stdout,
+                        "objects: {} ({}; {} linked, {} copied)",
+                        report.objects,
+                        format_bytes(report.object_bytes),
+                        report.linked,
+                        report.copied
+                    )?;
+                }
+                BackupMode::MetaOnly => {
+                    writeln!(stdout, "mode: meta-only")?;
+                    writeln!(
+                        stdout,
+                        "objects: {} ({}; in the bucket)",
+                        report.objects,
+                        format_bytes(report.object_bytes)
+                    )?;
+                }
+            }
+            writeln!(
+                stdout,
+                "took: {}.{} s",
+                report.duration_ms / 1000,
+                report.duration_ms % 1000 / 100
+            )?;
+            Ok(())
+        }
+        AdminResponse::Failed { code, message, .. } => {
+            anyhow::bail!("backup failed ({code}): {message}")
+        }
+    }
+}
+
+/// `<n>s`, `<n>m`, `<n>h` or `<n>d`, for `--min-age`. A small parser: the workspace has no
+/// `humantime` crate, and one flag does not justify adding it.
+fn humantime_duration(text: &str) -> Result<Duration, String> {
+    let invalid = || format!("invalid duration {text:?}: use <n>s, <n>m, <n>h or <n>d");
+    let split = text
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(text.len());
+    let (digits, unit) = text.split_at(split);
+    let unit_seconds: u64 = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3_600,
+        "d" => 86_400,
+        _ => return Err(invalid()),
+    };
+    let amount: u64 = digits.parse().map_err(|_| invalid())?;
+    amount
+        .checked_mul(unit_seconds)
+        .map(Duration::from_secs)
+        .ok_or_else(|| format!("duration {text:?} is too long"))
+}
+
+/// Binary units with one decimal, for example `3.0 GiB`. Integer arithmetic only.
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut whole = bytes;
+    let mut tenth = 0;
+    let mut unit = 0;
+    while whole >= 1024 && unit + 1 < UNITS.len() {
+        tenth = (whole % 1024) * 10 / 1024;
+        whole /= 1024;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{whole}.{tenth} {}", UNITS[unit])
+    }
 }
 
 /// One stdin line, with a trailing `\n` or `\r\n` removed. The password itself is not trimmed.
@@ -554,6 +798,7 @@ fn write_entitlements(out: &mut impl Write, report: &EntitlementsReport) -> io::
     for (name, limit) in limit_rows(&report.limits) {
         writeln!(out, "{name}: {}", limit_text(limit))?;
     }
+    writeln!(out, "units this month: {}", report.month_units)?;
     let window = report
         .retention_window_days
         .map_or_else(|| "unlimited".to_owned(), |days| format!("{days} days"));
@@ -657,15 +902,20 @@ impl Signals {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
     use clap::Parser;
 
-    use super::{AdminCommand, Cli, Command, EntitlementsCommand, log_filter, run_cli};
+    use super::{
+        AdminCommand, Cli, Command, EntitlementsCommand, OrgSsoCommand, humantime_duration,
+        log_filter, run_cli,
+    };
     use crate::output;
-    use llmobs_server::admin::EntitlementsReport;
-    use llmobs_server::api::entitlements::{Feature, OrgLimits};
+    use crate::test_server::TestServer;
+    use cetra_server::admin::EntitlementsReport;
+    use cetra_server::api::entitlements::{Feature, OrgLimits};
+    use std::time::Duration;
 
     #[test]
     fn log_filter_caps_rmcp() {
@@ -694,13 +944,13 @@ mod tests {
         let dispatch = tracing::Dispatch::new(tracing_subscriber::registry().with(layer));
         let guard = tracing::dispatcher::set_default(&dispatch);
         tracing::debug!(target: "rmcp::service", "dropped-canary");
-        tracing::debug!(target: "llmobs::serve", "kept-canary");
+        tracing::debug!(target: "cetra::serve", "kept-canary");
         drop(guard);
         drop(dispatch);
         let logs = String::from_utf8_lossy(&buffer.lock().unwrap().clone()).into_owned();
         assert!(!logs.contains("dropped-canary"), "{logs}");
         assert!(logs.contains("kept-canary"), "{logs}");
-        assert!(logs.contains("llmobs::serve"), "{logs}");
+        assert!(logs.contains("cetra::serve"), "{logs}");
     }
 
     /// `io::Write` over the shared buffer of [`a_debug_filter_drops_rmcp_debug_events`].
@@ -722,9 +972,9 @@ mod tests {
             Command::Health { url } => url,
             other => panic!("unexpected command {other:?}"),
         };
-        assert_eq!(url_of(&["llmobs", "health"]), "http://127.0.0.1:8080");
+        assert_eq!(url_of(&["cetra", "health"]), "http://127.0.0.1:8080");
         assert_eq!(
-            url_of(&["llmobs", "health", "--url", "http://10.0.0.1:9000"]),
+            url_of(&["cetra", "health", "--url", "http://10.0.0.1:9000"]),
             "http://10.0.0.1:9000"
         );
     }
@@ -732,7 +982,7 @@ mod tests {
     #[test]
     fn rotate_encryption_key_parses() {
         let cli = Cli::try_parse_from([
-            "llmobs",
+            "cetra",
             "admin",
             "rotate-encryption-key",
             "--new-from-stdin",
@@ -746,15 +996,14 @@ mod tests {
         };
         assert!(new_from_stdin);
         assert!(
-            Cli::try_parse_from(["llmobs", "admin", "rotate-encryption-key", "--new", "x"])
-                .is_err()
+            Cli::try_parse_from(["cetra", "admin", "rotate-encryption-key", "--new", "x"]).is_err()
         );
     }
 
     #[tokio::test]
     async fn missing_config_exits_with_the_path() {
-        let path = std::env::temp_dir().join(format!("llmobs-missing-{}.toml", std::process::id()));
-        let error = run_cli(["llmobs", "serve", "--config", path.to_str().unwrap()])
+        let path = std::env::temp_dir().join(format!("cetra-missing-{}.toml", std::process::id()));
+        let error = run_cli(["cetra", "serve", "--config", path.to_str().unwrap()])
             .await
             .unwrap_err();
         let text = format!("{error:#}");
@@ -771,16 +1020,34 @@ mod tests {
             other => panic!("unexpected command {other:?}"),
         };
         assert_eq!(
-            format_of(&["llmobs", "admin", "list-users", "--format", "json"]),
+            format_of(&["cetra", "admin", "list-users", "--format", "json"]),
             output::ListFormat::Json
         );
         assert_eq!(
-            format_of(&["llmobs", "admin", "list-users"]),
+            format_of(&["cetra", "admin", "list-users"]),
             output::ListFormat::Table
         );
         let error =
-            Cli::try_parse_from(["llmobs", "admin", "list-users", "--format", "xml"]).unwrap_err();
+            Cli::try_parse_from(["cetra", "admin", "list-users", "--format", "xml"]).unwrap_err();
         assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn admin_org_sso_disable_takes_an_org() {
+        let parsed = Cli::try_parse_from(["cetra", "admin", "org-sso", "disable", "acme"]).unwrap();
+        match parsed.command {
+            Command::Admin {
+                command:
+                    AdminCommand::OrgSso {
+                        command: OrgSsoCommand::Disable { org, config },
+                    },
+            } => {
+                assert_eq!(org, "acme");
+                assert_eq!(config, None);
+            }
+            other => panic!("unexpected command {other:?}"),
+        }
+        assert!(Cli::try_parse_from(["cetra", "admin", "org-sso", "disable"]).is_err());
     }
 
     #[test]
@@ -803,12 +1070,12 @@ mod tests {
             }
         };
         assert_eq!(
-            show_of(&["llmobs", "admin", "entitlements", "show", "acme"]),
+            show_of(&["cetra", "admin", "entitlements", "show", "acme"]),
             ("acme".to_owned(), output::ListFormat::Table, None)
         );
         assert_eq!(
             show_of(&[
-                "llmobs",
+                "cetra",
                 "admin",
                 "entitlements",
                 "show",
@@ -816,21 +1083,21 @@ mod tests {
                 "--format",
                 "json",
                 "--config",
-                "/etc/llmobs.toml",
+                "/etc/cetra.toml",
             ]),
             (
                 "acme".to_owned(),
                 output::ListFormat::Json,
-                Some(PathBuf::from("/etc/llmobs.toml"))
+                Some(PathBuf::from("/etc/cetra.toml"))
             )
         );
-        assert!(Cli::try_parse_from(["llmobs", "admin", "entitlements", "show"]).is_err());
+        assert!(Cli::try_parse_from(["cetra", "admin", "entitlements", "show"]).is_err());
     }
 
     #[test]
     fn entitlements_table_names_the_plan_and_limits() {
-        use llmobs_core::ids::OrgId;
-        use llmobs_server::api::entitlements::{OrgPlan, PlanSource, PlanStatus};
+        use cetra_core::ids::OrgId;
+        use cetra_server::api::entitlements::{OrgPlan, PlanSource, PlanStatus};
 
         let report = EntitlementsReport {
             org_id: OrgId::new_v7().as_uuid(),
@@ -850,6 +1117,7 @@ mod tests {
                 ..OrgLimits::default()
             },
             retention_window_days: None,
+            month_units: 1240,
         };
         let mut out = Vec::new();
         super::write_entitlements(&mut out, &report).unwrap();
@@ -866,6 +1134,7 @@ mod tests {
         assert!(text.contains("units_included: 200000\n"), "{text}");
         assert!(text.contains("units_cap: unlimited\n"), "{text}");
         assert!(text.contains("retention window: unlimited\n"), "{text}");
+        assert!(text.contains("units this month: 1240\n"), "{text}");
     }
 
     #[test]
@@ -892,7 +1161,7 @@ mod tests {
     #[tokio::test]
     async fn list_users_on_a_missing_database_names_serve() {
         let dir = std::env::temp_dir().join(format!(
-            "llmobs-admin-{}-{}",
+            "cetra-admin-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -900,11 +1169,11 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        let config_path = dir.join("llmobs.toml");
+        let config_path = dir.join("cetra.toml");
         let data = dir.join("data");
         std::fs::write(&config_path, format!("data_dir = \"{}\"\n", data.display())).unwrap();
         let error = run_cli([
-            "llmobs",
+            "cetra",
             "admin",
             "list-users",
             "--config",
@@ -914,7 +1183,7 @@ mod tests {
         .unwrap_err();
         let text = format!("{error:#}");
         assert!(
-            text.contains("run `llmobs serve` once to create the database"),
+            text.contains("run `cetra serve` once to create the database"),
             "{text}"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -922,9 +1191,9 @@ mod tests {
 
     #[test]
     fn reapply_deletions_requires_from() {
-        assert!(Cli::try_parse_from(["llmobs", "admin", "reapply-deletions"]).is_err());
+        assert!(Cli::try_parse_from(["cetra", "admin", "reapply-deletions"]).is_err());
         let parsed =
-            Cli::try_parse_from(["llmobs", "admin", "reapply-deletions", "--from", "/x"]).unwrap();
+            Cli::try_parse_from(["cetra", "admin", "reapply-deletions", "--from", "/x"]).unwrap();
         assert!(matches!(
             parsed.command,
             Command::Admin {
@@ -939,16 +1208,16 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("llmobs-admin-{}-{stamp}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("cetra-admin-{}-{stamp}", std::process::id()));
         let from =
-            std::env::temp_dir().join(format!("llmobs-admin-from-{}-{stamp}", std::process::id()));
+            std::env::temp_dir().join(format!("cetra-admin-from-{}-{stamp}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::create_dir_all(&from).unwrap();
-        let config_path = dir.join("llmobs.toml");
+        let config_path = dir.join("cetra.toml");
         let data = dir.join("data");
         std::fs::write(&config_path, format!("data_dir = \"{}\"\n", data.display())).unwrap();
         let error = run_cli([
-            "llmobs",
+            "cetra",
             "admin",
             "reapply-deletions",
             "--from",
@@ -960,10 +1229,272 @@ mod tests {
         .unwrap_err();
         let text = format!("{error:#}");
         assert!(
-            text.contains("run `llmobs serve` once to create the database"),
+            text.contains("run `cetra serve` once to create the database"),
             "{text}"
         );
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&from);
+    }
+
+    #[test]
+    fn backup_parses() {
+        let parse = |argv: &[&str]| match Cli::try_parse_from(argv).unwrap().command {
+            Command::Admin {
+                command: AdminCommand::Backup { to, meta_only, .. },
+            } => (to, meta_only),
+            _ => panic!("expected the backup command"),
+        };
+        let (to, meta_only) = parse(&["cetra", "admin", "backup", "--to", "/b"]);
+        assert_eq!(to, PathBuf::from("/b"));
+        assert!(!meta_only);
+        let (_, meta_only) = parse(&["cetra", "admin", "backup", "--to", "/b", "--meta-only"]);
+        assert!(meta_only);
+    }
+
+    #[test]
+    fn gc_orphans_parses_defaults() {
+        let parse = |argv: &[&str]| match Cli::try_parse_from(argv).unwrap().command {
+            Command::Admin {
+                command:
+                    AdminCommand::GcOrphans {
+                        min_age, dry_run, ..
+                    },
+            } => (min_age, dry_run),
+            _ => panic!("expected the gc-orphans command"),
+        };
+        assert_eq!(
+            parse(&["cetra", "admin", "gc-orphans"]),
+            (Duration::from_secs(3_600), false)
+        );
+        assert_eq!(
+            parse(&["cetra", "admin", "gc-orphans", "--min-age", "30m"]),
+            (Duration::from_secs(1_800), false)
+        );
+        assert_eq!(
+            parse(&["cetra", "admin", "gc-orphans", "--dry-run"]),
+            (Duration::from_secs(3_600), true)
+        );
+    }
+
+    #[test]
+    fn duration_flag_parses_units() {
+        assert_eq!(humantime_duration("30s"), Ok(Duration::from_secs(30)));
+        assert_eq!(humantime_duration("30m"), Ok(Duration::from_secs(1_800)));
+        assert_eq!(humantime_duration("2h"), Ok(Duration::from_secs(7_200)));
+        assert_eq!(humantime_duration("1d"), Ok(Duration::from_secs(86_400)));
+        for bad in ["", "m", "10", "10w", "1.5h", "-1m"] {
+            assert!(humantime_duration(bad).is_err(), "{bad}");
+        }
+    }
+
+    /// A config file that sets only the data directory and disables the OTLP listeners.
+    fn config_file(dir: &Path, data: &Path) -> PathBuf {
+        let path = dir.join("cetra.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "data_dir = {:?}\notlp_http_addr = \"\"\ngrpc_addr = \"\"\n",
+                data.display().to_string()
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    /// The first `.parquet` file under `dir`, searched depth first.
+    fn first_parquet_under(dir: &Path) -> Option<PathBuf> {
+        for entry in std::fs::read_dir(dir).ok()? {
+            let path = entry.ok()?.path();
+            let found = if path.is_dir() {
+                first_parquet_under(&path)
+            } else {
+                Some(path).filter(|file| file.extension().is_some_and(|ext| ext == "parquet"))
+            };
+            if found.is_some() {
+                return found;
+            }
+        }
+        None
+    }
+
+    #[tokio::test]
+    async fn backup_without_a_server_names_the_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_file(dir.path(), &dir.path().join("data"));
+        let target = dir.path().join("backup");
+        let error = run_cli([
+            "cetra",
+            "admin",
+            "backup",
+            "--to",
+            target.to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
+        ])
+        .await
+        .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("admin.sock"), "{text}");
+        assert!(text.contains("docs/self-hosting/backup.md"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn backup_through_a_running_server() {
+        let server = TestServer::start().await;
+        let target_root = tempfile::tempdir().unwrap();
+        let target = target_root.path().join("backup");
+        run_cli([
+            "cetra",
+            "admin",
+            "backup",
+            "--to",
+            target.to_str().unwrap(),
+            "--config",
+            server.config_path().to_str().unwrap(),
+        ])
+        .await
+        .unwrap();
+        assert!(target.join("manifest.json").is_file());
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn backup_meta_only_in_local_mode_is_refused() {
+        let server = TestServer::start().await;
+        let target_root = tempfile::tempdir().unwrap();
+        let target = target_root.path().join("backup");
+        let error = run_cli([
+            "cetra",
+            "admin",
+            "backup",
+            "--to",
+            target.to_str().unwrap(),
+            "--meta-only",
+            "--config",
+            server.config_path().to_str().unwrap(),
+        ])
+        .await
+        .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("meta_only_needs_s3"), "{text}");
+        assert!(!target.exists());
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn gc_orphans_refuses_a_data_dir_without_a_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_file(dir.path(), &dir.path().join("data"));
+        let error = run_cli([
+            "cetra",
+            "admin",
+            "gc-orphans",
+            "--config",
+            config.to_str().unwrap(),
+        ])
+        .await
+        .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("no catalog.db"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn gc_orphans_on_a_stopped_server_reports_zero_missing() {
+        let server = TestServer::start().await;
+        let config = server.config_path();
+        let _dir = server.stop().await;
+        run_cli([
+            "cetra",
+            "admin",
+            "gc-orphans",
+            "--config",
+            config.to_str().unwrap(),
+        ])
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn gc_orphans_fails_when_objects_are_missing() {
+        let server = TestServer::start().await;
+        let data = server.data_dir();
+        let config = server.config_path();
+        let _dir = server.stop().await;
+        // The stop flushed the trace to Parquet; removing one file makes the catalog need
+        // an object the store does not have.
+        let parquet = first_parquet_under(&data.join("objects").join("tables"))
+            .expect("a flushed Parquet file");
+        std::fs::remove_file(&parquet).unwrap();
+        let error = run_cli([
+            "cetra",
+            "admin",
+            "gc-orphans",
+            "--config",
+            config.to_str().unwrap(),
+        ])
+        .await
+        .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("the restore is incomplete"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn migrate_on_a_stopped_server_succeeds() {
+        let server = TestServer::start().await;
+        let config = server.config_path();
+        let _dir = server.stop().await;
+        run_cli([
+            "cetra",
+            "admin",
+            "migrate",
+            "--config",
+            config.to_str().unwrap(),
+        ])
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn migrate_while_the_server_runs_is_refused() {
+        let server = TestServer::start().await;
+        let meta = server.data_dir().join("meta.db");
+        let meta_before = std::fs::read(&meta).unwrap();
+        let error = run_cli([
+            "cetra",
+            "admin",
+            "migrate",
+            "--config",
+            server.config_path().to_str().unwrap(),
+        ])
+        .await
+        .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("the server is running: stop it first"),
+            "{text}"
+        );
+        // The lock is taken before meta.db is opened, so a refused migrate writes nothing.
+        assert_eq!(std::fs::read(&meta).unwrap(), meta_before);
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn migrate_without_a_data_dir_creates_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let config = config_file(dir.path(), &data);
+        let error = run_cli([
+            "cetra",
+            "admin",
+            "migrate",
+            "--config",
+            config.to_str().unwrap(),
+        ])
+        .await
+        .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("no catalog.db"), "{text}");
+        assert!(!data.join("meta.db").exists());
+        assert!(!data.join("catalog.db").exists());
     }
 }

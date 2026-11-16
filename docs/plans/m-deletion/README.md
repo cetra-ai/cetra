@@ -13,7 +13,7 @@ What is left is server work: resolving which traces a request covers, a status l
 
 **Prerequisites** (checked when this plan was written, 2026-11-14):
 - A1 M5 (deletion, retention, project drop) and G M1–M5 are merged into `main`. L is implemented.
-- H (console) is merged. I (online evaluation) is being implemented; its M1 (connections, migration `0004_connections.sql`) is merged. M1–M7 and M9–M12 do not depend on I. **M8 needs I's M3 merged** (the `eval_jobs` table and the job executor). If it has not merged when you reach M8, stop and report.
+- H (console) is merged. I (online evaluation) is being implemented; its M1 and M2 are merged and its M3 is planned in [`../i-online-eval/03-m3-queue-rules.md`](../i-online-eval/03-m3-queue-rules.md). M1–M7 and M9–M12 do not depend on I. **M8 needs I's M3 merged** (the `eval_jobs` table, the job executor and manual runs). If it has not merged when you reach M8, stop and report.
 - Track P (plans and entitlements, D179) is not built. M leaves two call sites for it (§ Plans and cloud). Track Q (cloud control plane, D170) is not built either; M leaves one hook for it.
 - All of M is MIT core code (D172): nothing goes under `ee/`.
 - Node `26.13.0` is installed at `$HOME/.local/share/nvm/v26.13.0/bin`. It is not on the non-interactive `PATH`.
@@ -43,7 +43,7 @@ What is left is server work: resolving which traces a request covers, a status l
   - `GET …/deletions` and `GET …/deletions/{id}` (M4).
 - `DELETE /api/v1/projects/{project}`, `DELETE /api/v1/orgs/{org}` and `GET /api/v1/orgs/{org}/deletions`, plus the worker's project and org kinds (M5).
 - Retention: an hourly `apply_retention` for every project, and an immediate one when a `PATCH` changes retention (M6).
-- `llmobs admin reapply-deletions --from <data_dir>` (M7).
+- `cetra admin reapply-deletions --from <data_dir>` (M7).
 - The evaluation cascade: delete `eval_jobs` of deleted traces, and the guard in I's executor (M8).
 - Web:
   - the project settings **Data** tab, with deletion by user id and the deletion history (M9);
@@ -55,7 +55,7 @@ What is left is server work: resolving which traces a request covers, a status l
 **Out:**
 - Deleting instance user accounts (people who log in). That is account management, not end-user data. D149 lets instance admins disable accounts.
 - Personal data typed by project members into saved views, saved SQL queries, rule filters or alert names. Those are texts written by the customer's own staff, not ingested data (D-M-14).
-- Datasets and experiment items copied from traces (D24). Track J creates those tables and adds its own cascade to `deletion::cascade` (§ Coordination).
+- Datasets and experiment items copied from traces (D24). Track J creates those tables and adds its own statement to the scope transaction in `deletion/resolve.rs` (§ Coordination).
 - Alert history: `alert_events` hold aggregates only and are kept (spec 03 § Cascades). Track K's tables cascade with the project row (§ Coordination).
 - Plan lookup, the data-access window that hides old data from reads, and the upsell copy beyond one message: track P (D175, D177, D179). The control-plane side of org and project deletion: track Q (D170).
 - `Idempotency-Key` on the new POSTs. Spec 09 lists it for every create, but no route implements it yet; it stays a cross-track gap (§ API contract gaps).
@@ -109,13 +109,15 @@ The `filter` kind matches the traces list exactly. It takes the same filter DSL,
 
 ### Evaluation traces (D-M-6)
 
-A judge trace (track I) is a trace in the same project, with environment `llmobs-eval`. Its spans carry `metadata['llmobs.eval.target_trace_id']`, the hex id of the trace it evaluated. It holds copies of the evaluated data (prompt, variables, webhook body), so spec 03 § 7 extends every scope with them.
-- **Lookup.** `eval_trace_ids` (M2) scans the project's eval spans once (`environment = 'llmobs-eval'` and the key present) and keeps the ids whose target is in the scope. The intersection is done in memory, streaming batch by batch, so the scope size does not change the query plan.
+A judge trace (track I) is a trace in the same project, with environment `cetra-eval`. Its spans carry `metadata['cetra.eval.target_trace_id']`, the hex id of the trace it evaluated. It holds copies of the evaluated data (prompt, variables, webhook body), so spec 03 § 7 extends every scope with them.
+- **Lookup.** `eval_trace_ids` (M2) scans the project's eval spans once (`environment = 'cetra-eval'` and the key present) and keeps the ids whose target is in the scope. The intersection is done in memory, streaming batch by batch, so the scope size does not change the query plan.
 - **Late judge traces.** A judge run that loaded its target before the deletion and commits after the cut-off would write a judge trace that no tombstone covers. The **deletion guard** (`deletion::DeletionGuard`, M3) closes that gap. It keeps in memory, for 24 hours after `created_at`:
   - the user ids of `user` deletions, from creation;
   - the trace ids of every deletion, from the moment they are known.
 
-  I's executor asks `guard.blocks(project, target_trace_id, users, newest_ingest, now)` before the judge call and again before it commits a judge trace or a score; `users` are the trace's span user ids and `newest_ingest` its newest span's `ingest_time`. A user entry only blocks a trace whose data was ingested at or before the deletion's cut-off: a user who keeps using the product after an erasure is still evaluated. When blocked, the job ends `skipped` (`deleted`) and commits nothing (M8). The guard is loaded from `meta.db` at startup. 24 h is longer than a job can live (D-I-28 expires queued rule jobs after 24 h, and a running job has a timeout of minutes).
+  `create_deletion` fills the guard before it reads the cut-off (and again with it), after a filter's read and before it stores the row; a `filter` row guards the ids it matched at the `POST`. Two accepted gaps: a trace that starts matching a filter between its read and its cut-off is guarded only from resolution, and after a restart a `resolving` filter row guards nothing until it resolves. Each entry carries its deletion's id.
+
+  I's executor asks `guard.blocking(project, target_trace_id, users, now)` at the job's start, after loading the target, before each commit and **after** each commit; `users` pairs each user id of the trace's spans with that user's oldest `ingest_time`. A user entry blocks a trace that holds that user's data ingested at or before the deletion's cut-off: a trace with only newer data of the user (they kept using the product after the erasure) is still evaluated. Blocked before a commit, the job ends `skipped` (`deleted`) and commits nothing. Blocked after a commit, the judge trace or score is already stored with an `ingest_time` after the cut-off, which the deletion does not cover in storage; the executor then stores a **follow-up** `trace_ids` deletion of the judge trace and the target, same actor, cut-off now (M8). Because the guard knew the deletion before its cut-off, every copy stamped after a cut-off is followed by a check that sees it (except in the two filter gaps above). The guard is loaded from `meta.db` at startup. 24 h is longer than a job can live (D-I-28 expires queued rule jobs after 24 h, and a running job has a timeout of minutes).
 
 ### Cascades in `meta.db` (D-M-7, D-M-11)
 
@@ -125,7 +127,7 @@ A judge trace (track I) is a trace in the same project, with environment `llmobs
 | `pending_traces` (I) | kept; the sweeper reads through storage, which hides the traces | cascade | cascade |
 | `saved_views` (H), evaluators, rules, score definitions, API keys, members, alert tables (K) | kept | cascade | cascade |
 | `llm_connections`, `invites`, `org_members` | kept | kept | cascade from `orgs` |
-| `usage_daily` | kept | kept: aggregates, needed for the org's billing (N) | deleted, after one `Usage::flush` |
+| `usage_daily` | kept | kept: aggregates, needed for the org's billing (N) | kept 40 days after the drop is applied, then pruned (D-P-46, amending D-M-7) |
 | `deletions` and its scope tables | kept forever (audit, D-M-8) | kept | kept |
 | live streams (SSE) | `resync` event on the project's streams when registered | `resync` | `resync` per project |
 | `GET /metrics` cache | entries of the project dropped | dropped | dropped |
@@ -186,7 +188,7 @@ Timeouts: `RESOLVE_TIMEOUT = 600 s` for each resolution read; the `POST` count a
 - Retention does not clear the metrics cache or send a live `resync`: dropped days are old data, and the 10 s cache and the next refetch catch up.
 - What it covers:
   - spans, traces and scores: whole days, in storage;
-  - judge traces: they are spans of the project;
+  - judge traces: they are spans of the project, dropped by their own day. A judge trace or score written later about an old trace (a manual or backfill run, a late score) lives at most the retention plus the target's age when it was written; retention does not follow the target, deletions do (D-M-10, cross-track review X19);
   - media: daily media GC, so a blob outlives its last span by at most a day.
 
   `deletions` rows are audit and are kept. `eval_jobs` are pruned by I after 7 days. `usage_daily` is aggregate and is kept.
@@ -204,7 +206,7 @@ Timeouts: `RESOLVE_TIMEOUT = 600 s` for each resolution read; the `POST` count a
   - `deletion failed`: `deletion_id`, `error`;
   - `retention changed`: `project_id`, `actor_id`, `retention_days` (number or `none`);
   - `project dropped`: `deletion_id`, `org_id`, `project_id`; `org dropped`: `deletion_id`, `org_id`, `projects` (a count) — both from `deletion::on_dropped` (D-M-17).
-- `llmobs admin reapply-deletions --from <data_dir>` (M7) copies the deletions that the current `meta.db` lacks from another data directory's `meta.db`, with their scope, as open rows. The server then registers or drops them again (D-M-9). This is how a backup restore keeps erasures done after the backup (spec 12 § Backups).
+- `cetra admin reapply-deletions --from <data_dir>` (M7) copies the deletions that the current `meta.db` lacks from another data directory's `meta.db`, with their scope, as open rows. The server then registers or drops them again (D-M-9). This is how a backup restore keeps erasures done after the backup (spec 12 § Backups).
 
 ### Live streams and caches (D-M-11)
 
@@ -218,9 +220,9 @@ Three call sites for tracks P and Q. Each is one plain function call in M's code
 
 | Hook | Where (M) | M's behaviour | Who replaces it, with what |
 |---|---|---|---|
-| Retention cap (D175) | `retention::retention_once`: `let cap: Option<u32> = None;` passed to `effective_days` | no cap | P: `state.entitlements.of(org).retention_cap_days()` (plan data-access window + 30 days; `None` without a plan, e.g. self-hosted without a licence) |
+| Retention cap (D175) | `retention::retention_once`: `let cap: Option<u32> = None;` passed to `effective_days` | no cap | P (M4, D-P-45): the largest data window of the last 30 days plus 30 days, `state.entitlements.retention_window_at(&state.meta, org, now).await?` plus 30 (`None` when unlimited, e.g. self-hosted without a licence) |
 | Retention management (D177) | `routes/projects.rs::may_manage_retention(state, org) -> bool`, called by `create_project` and `update_project` when the body sets `retention_days` to a number | returns `true` | P: the body becomes `state.entitlements.of(org).allows(Feature::RetentionManagement)` (free when self-hosted, Pro on the cloud) |
-| Dropped (D170) | `deletion::on_dropped(state, &Dropped)`, called once by the worker after a project or org drop committed (at most once: a crash right after the commit skips it) | emits the audit event `org dropped` / `project dropped` | Q: also sends the control-plane notification (org → cell mapping cleanup); for durability Q reconciles from `deletions` rows of kind `project`/`org` in status `applied`, which are never deleted |
+| Dropped (D170) | `deletion::on_dropped(&Dropped)`, called once by the worker after a project or org drop committed (at most once: a crash right after the commit skips it) | emits the audit event `org dropped` / `project dropped` | none: the control plane pulls the `deletions` rows of kind `project`/`org` in status `applied`, which are never deleted (R5, P's M4; D-M-17) |
 
 ### Code layout (end state)
 
@@ -231,7 +233,6 @@ crates/server/src/meta/deletions.rs       rows, inserts, updates, queries       
 crates/server/src/deletion/mod.rs         Deletions (wake + guard + attempts), run_once, on_dropped (M3)
 crates/server/src/deletion/resolve.rs     scope resolution over the M2 reads              (M3)
 crates/server/src/deletion/guard.rs       DeletionGuard                                    (M3)
-crates/server/src/deletion/cascade.rs     meta.db cascades of a stored scope              (M8)
 crates/server/src/retention.rs            retention_once, keep_from                        (M6)
 crates/server/src/api/deletions.rs        request and response types                       (M4, M5)
 crates/server/src/routes/deletions.rs     project deletion routes                          (M4)
@@ -260,7 +261,7 @@ The decisions are in `docs/mvp-decisions.md` § Track M — Deletion and retenti
 | M4 | [`04-api.md`](04-api.md) | Project deletion routes, types, OpenAPI, fixtures, `ProblemCode::TooManyTraces` | M3 |
 | M5 | [`05-drop.md`](05-drop.md) | `DELETE` project and org, org deletion list, worker kinds `project`/`org` | M4 |
 | M6 | [`06-retention.md`](06-retention.md) | Hourly retention, retention on `PATCH`, the cap and entitlement call sites | M3 (both edit `serve.rs`'s task list) |
-| M7 | [`07-reapply.md`](07-reapply.md) | `llmobs admin reapply-deletions` | M5 |
+| M7 | [`07-reapply.md`](07-reapply.md) | `cetra admin reapply-deletions` | M5 |
 | M8 | [`08-eval-cascade.md`](08-eval-cascade.md) | `eval_jobs` cascade and the guard in I's executor | M3, **I's M3** |
 | M9 | [`09-web-data-tab.md`](09-web-data-tab.md) | Type-to-confirm dialog, Data tab (user deletion, history) | M4 |
 | M10 | [`10-web-actions.md`](10-web-actions.md) | Delete matching traces, delete trace, delete user data | M9 |
@@ -274,8 +275,8 @@ Run them in this order. M6 may run any time after M3. M8 may wait for I and run 
 - **Commit**: one commit per sub-phase, with the subject line given in the sub-phase file. No attribution lines.
 - **Errors**: server code returns `ApiError` (`crates/server/src/http/error.rs`); store code returns `MetaError`; storage reads return `RunError`. No `unwrap()`/`expect()` outside tests unless a comment states the invariant (`AGENTS.md`).
 - **Privacy**: never log or put in an error message a trace id, user id, session id, filter text, search text or slug from a deletion request. Log `deletion_id`, `project_id`, `org_id`, counts and the error kind.
-- **Time**: `i64` ns from `state.clock.now_ns()`. JSON instants use `llmobs_core::time_serde` and the `optional_time` helper that `api/keys.rs` uses.
-- **Ids**: `Uuid::now_v7()` for deletion ids. Trace ids are `llmobs_core::ids::TraceId`, stored in `meta.db` as 16-byte BLOBs (`trace_id.as_bytes()` / `TraceId::from_bytes`), and written in JSON as lowercase hex.
+- **Time**: `i64` ns from `state.clock.now_ns()`. JSON instants use `cetra_core::time_serde` and the `optional_time` helper that `api/keys.rs` uses.
+- **Ids**: `Uuid::now_v7()` for deletion ids. Trace ids are `cetra_core::ids::TraceId`, stored in `meta.db` as 16-byte BLOBs (`trace_id.as_bytes()` / `TraceId::from_bytes`), and written in JSON as lowercase hex.
 - **Tests**: Rust unit tests next to the code (`#[cfg(test)] mod tests`). Server tests use `crate::test_support::TestApp` with its manual clock (`2026-01-01T00:00:00Z`). Web tests use Vitest + Testing Library on the MSW server, with `server.use(...)` to override an endpoint; never `vi.mock`.
 - **Contract**: when `openapi.json` changes, run `just openapi`. It regenerates `crates/server/openapi.json` and `web/src/api/schema.gen.ts`, and both are committed. When the API examples change, run `just api-examples`.
 
@@ -294,8 +295,8 @@ just check
 ```
 
 `just check` must pass before every commit. For a quick loop while working:
-- `cargo test -p llmobs-server <name>`;
-- `cargo test -p llmobs-storage <name>`;
+- `cargo test -p cetra-server <name>`;
+- `cargo test -p cetra-storage <name>`;
 - `cd web && pnpm vitest run <file>`.
 
 ## Coordination with other tracks
@@ -303,19 +304,19 @@ just check
 These go to the coordinating session, which forwards them. They are also in the report of the sub-phase named.
 
 - **I (online evaluation)**:
-  - Judge spans must carry `metadata['llmobs.eval.target_trace_id']` as lowercase hex (spec 06 already says so). M2's lookup depends on it.
+  - Judge spans must carry `metadata['cetra.eval.target_trace_id']` as lowercase hex (spec 06 already says so). M2's lookup depends on it.
   - M8 adds `DeletionGuard::blocks` calls to I's executor and deletes `eval_jobs` rows. I should keep the guard calls when it changes the executor.
   - D-I-28 already deletes jobs of projects that are not `active`.
 - **K (alerts)**: every K table that holds a `project_id` must declare `REFERENCES projects(id) ON DELETE CASCADE`, or reach a table that does, so a project drop removes it. Rows must not copy span payloads (spec 03 § Cascades keeps `alert_events` because they are aggregates). A notification body that quotes a trace id is acceptable; one that quotes span content is not.
 - **H (console)**: `saved_views` already cascades from `projects`; H's MCP `list_projects` already skips inactive orgs and projects. Nothing to do.
-- **J (datasets)**: dataset items copied from a deleted trace (`source_trace_id` in the scope) must be hard-deleted, all versions (D24). J adds that statement to `deletion::cascade::traces_deleted` (M8), which runs in the scope transaction.
+- **J (datasets)**: dataset items copied from a deleted trace (`source_trace_id` in the scope) must be hard-deleted, all versions (D24). J adds that statement to the scope transaction in `deletion/resolve.rs`, next to M8's `eval_jobs` delete, or calls its own module from there once it has tables (plan review M-3: no cascade module ahead of J).
 - **P (plans and entitlements)**:
   - replace `None` in `retention::retention_once` with the org's retention cap (D175, D-M-15). `retention::apply_now` (the `PATCH` path) stays as is: the hourly run applies the cap. Once a cap exists, projects without their own `retention_days` are capped too: `retention_once` already lists every active project, not only those with retention;
   - replace the body of `routes/projects.rs::may_manage_retention` with the entitlement check, and the matching UI state: the settings page already shows `plan_required` (D177, D-M-16);
   - P's hidden data-access window is enforced in A2's query time window, not by M. It must **not** apply to M's scope reads (`filter_trace_ids`, `user_deletion_scope`, `eval_trace_ids`) or to the deletion preview: an erasure must also cover hidden-but-kept data. P adds a test for that;
   - ingest's D85 age check uses the project's `retention_days` today; P switches it to `retention::effective_days`, and drops spec 12's `orgs.limits.max_retention_days` in favour of the cap.
-- **Q (cloud)**: add the control-plane notification to `deletion::on_dropped` (D170, D-M-17). `on_dropped` runs after the `meta.db` rows are deleted, at most once per drop; it receives the deletion id, the org id, the dropped project ids and whether the whole org went. For durability Q reconciles from `deletions` rows of kind `project`/`org` in status `applied` (kept forever), so a crash or a failed call is caught up.
-- **N (packaging)**: the backup docs must say to keep the pre-restore data directory, or a copy of its `meta.db`, and to run `llmobs admin reapply-deletions --from <it>` after a restore (D-M-9).
+- **Q (cloud)**: nothing to add in M. The control plane learns of drops by pulling the `deletions` rows of kind `project`/`org` in status `applied` (kept forever) through Q's request R5, which track P's M4 builds (D-P-43, D-M-17). `on_dropped` only emits the audit event.
+- **N (packaging)**: the backup docs must say to keep the pre-restore data directory, or a copy of its `meta.db`, and to run `cetra admin reapply-deletions --from <it>` after a restore (D-M-9).
 
 ## API contract gaps
 
@@ -326,7 +327,7 @@ Found while planning. M closes 1–6.
 3. `DELETE /projects/{project}` and `DELETE /orgs/{org}` had no request or response shape. They take `?confirm=<slug>` and answer `202` with a `Deletion` (D-M-7).
 4. There was no org-level history, so a dropped project's deletion record was unreachable. It is `GET /orgs/{org}/deletions` (D-M-8).
 5. No problem code meant "too many traces". `too_many_traces` (422) is added (D-M-5).
-6. Spec 12's `llmobs admin reapply-deletions --since <date>` read the deletions from the restored `meta.db`, which predates them. It becomes `--from <data_dir>` (D-M-9).
+6. Spec 12's `cetra admin reapply-deletions --since <date>` read the deletions from the restored `meta.db`, which predates them. It becomes `--from <data_dir>` (D-M-9).
 7. **Not closed**: `Idempotency-Key` (spec 09 § Conventions) is implemented by no route. A retried `POST /deletions` creates a second request. That is harmless, because deletions are idempotent in effect, but it counts toward the 1,000 open deletions.
 8. **Not closed**: `UpdateProjectRequest.retention_days` is typed without `null` in `openapi.json` (L's contract gap CG5). M6 does not change it.
 9. A new problem code `plan_required` (403) is added by M6 for the retention entitlement check (D-M-16). P reuses it for its other gates.

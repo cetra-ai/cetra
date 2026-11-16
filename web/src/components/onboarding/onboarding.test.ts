@@ -8,40 +8,40 @@ import {
   typescriptSnippet,
   vercelSnippet,
 } from "@/components/onboarding/snippets";
-import { tracesNeedOnboarding } from "@/components/onboarding/state";
+import { onboardingShown, tracesNeedOnboarding } from "@/components/onboarding/state";
 
-const ORIGIN = "https://llmobs.example";
+const ORIGIN = "https://cetra.example";
 
 it("builds the OTel endpoint from the origin", () => {
   const snippet = otelSnippet(ORIGIN);
   expect(snippet).toContain(`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${ORIGIN}/v1/traces`);
-  expect(snippet).toContain('OTEL_EXPORTER_OTLP_TRACES_HEADERS="Authorization=Bearer sk-llmobs-…"');
+  expect(snippet).toContain('OTEL_EXPORTER_OTLP_TRACES_HEADERS="Authorization=Bearer sk-cetra-…"');
   expect(snippet).toContain("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf");
 });
 
 it("uses the spec init names and env vars", () => {
   for (const snippet of [pythonSnippet(ORIGIN), typescriptSnippet(ORIGIN), vercelSnippet(ORIGIN)]) {
     expect(snippet).toContain(ORIGIN);
-    expect(snippet).toContain("sk-llmobs-…");
+    expect(snippet).toContain("sk-cetra-…");
   }
-  expect(pythonSnippet(ORIGIN)).toContain('api_key="sk-llmobs-…"');
+  expect(pythonSnippet(ORIGIN)).toContain('api_key="sk-cetra-…"');
   expect(pythonSnippet(ORIGIN)).toContain(`base_url="${ORIGIN}"`);
-  expect(pythonSnippet(ORIGIN)).toContain("LLMOBS_API_KEY");
-  expect(pythonSnippet(ORIGIN)).toContain("LLMOBS_BASE_URL");
-  expect(typescriptSnippet(ORIGIN)).toContain('apiKey: "sk-llmobs-…"');
+  expect(pythonSnippet(ORIGIN)).toContain("CETRA_API_KEY");
+  expect(pythonSnippet(ORIGIN)).toContain("CETRA_BASE_URL");
+  expect(typescriptSnippet(ORIGIN)).toContain('apiKey: "sk-cetra-…"');
   expect(typescriptSnippet(ORIGIN)).toContain(`baseUrl: "${ORIGIN}"`);
-  expect(vercelSnippet(ORIGIN)).toContain("experimental_telemetry: llmobs.aiTelemetry()");
+  expect(vercelSnippet(ORIGIN)).toContain("experimental_telemetry: cetra.aiTelemetry()");
   expect(API_KEY_NOTE).toBe("Create a secret key in Settings → API keys");
   expect(API_KEY_ASK_NOTE).toBe("Ask a project admin for a secret key");
 });
 
 it("fills a real key into every snippet", () => {
-  const key = "sk-llmobs-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0";
+  const key = "sk-cetra-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0";
   expect(otelSnippet(ORIGIN, key)).toContain(`Authorization=Bearer ${key}`);
   expect(pythonSnippet(ORIGIN, key)).toContain(`api_key="${key}"`);
   expect(typescriptSnippet(ORIGIN, key)).toContain(`apiKey: "${key}"`);
   expect(vercelSnippet(ORIGIN, key)).toContain(`apiKey: "${key}"`);
-  expect(PLACEHOLDER_KEY).toBe("sk-llmobs-…");
+  expect(PLACEHOLDER_KEY).toBe("sk-cetra-…");
 });
 
 it("keeps onboarding for a preset and drops it when the list is constrained", () => {
@@ -58,4 +58,17 @@ it("keeps onboarding for a preset and drops it when the list is constrained", ()
       { kind: "absolute", from: "2026-01-01T00:00:00.000Z", to: "2026-01-02T00:00:00.000Z" },
     ),
   ).toBe(false);
+});
+
+it("shows onboarding only when the all-time probe found no trace", () => {
+  expect(onboardingShown(true, 0, false)).toBe(true);
+  expect(onboardingShown(true, 1, false)).toBe(false);
+  expect(onboardingShown(true, undefined, false)).toBe(false);
+  expect(onboardingShown(false, 0, false)).toBe(false);
+});
+
+it("shows onboarding when the probe failed, and not while it loads", () => {
+  expect(onboardingShown(true, undefined, true)).toBe(true);
+  expect(onboardingShown(true, 1, true)).toBe(true);
+  expect(onboardingShown(false, undefined, true)).toBe(false);
 });

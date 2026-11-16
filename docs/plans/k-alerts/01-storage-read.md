@@ -164,23 +164,23 @@ const DAY_NS: i64 = 86_400_000_000_000;
    - `Cost`: `value = Some(f64_at(require(batch, VALUE)?, 0)?.unwrap_or(0.0))` — always `Some`, 0.0 when no trace or no cost.
    - `TraceLatencyP95`: `value = f64_at(require(batch, VALUE)?, 0)?.map(|ns| ns / NS_PER_MS)`; when `count == 0`, `None`.
 
-**Trace-id semi-join** (span and score measures), a private `async fn trace_id_plan(ctx, window, filter: Option<Filter>, references_environment) -> Result<LogicalPlan, RunError>`, the same as `metrics::trace_ids` but always built (the exclusions are always on here):
-1. `let start = window.from().checked_sub(DAY_NS).ok_or_else(|| RunError::InvalidRequest("from is out of range".to_owned()))?;`
+**Trace-id semi-join** (span and score measures), a private `async fn trace_id_plan(ctx, window, lookback: i64, ends_after_from: bool, filter: Option<Filter>, references_environment) -> Result<LogicalPlan, RunError>`, the same as `metrics::trace_ids` but always built (the exclusions are always on here). Span measures call it with `DAY_NS, true`; score measures with `SCORE_TRACE_LOOKBACK` (7 days, D-K-17) and `false`, so a late score counts whatever its trace's end time:
+1. `let start = window.from().checked_sub(lookback).ok_or_else(|| RunError::InvalidRequest("from is out of range".to_owned()))?;`
 2. `let wide = TimeWindow::new(start, window.to())?;`
 3. `let mut frame = scoped_traces(ctx, ListScope { window: Some(wide), include_eval: false, include_experiments: false }, references_environment).await?;`
-4. `frame = frame.filter(col(traces::END_TIME).gt_eq(Expr::Literal(ScalarValue::TimestampNanosecond(Some(window.from()), Some("UTC".into())), None))).map_err(classify)?;`
+4. If `ends_after_from`: `frame = frame.filter(col(traces::END_TIME).gt_eq(Expr::Literal(ScalarValue::TimestampNanosecond(Some(window.from()), Some("UTC".into())), None))).map_err(classify)?;`
 5. Apply the filter as above, then `frame.select(vec![col(traces::TRACE_ID)]).map_err(classify)?` and return `frame.logical_plan().clone()`.
 
-**`LlmLatencyP95`**:
-1. `let ids = trace_id_plan(…).await?;`
+**`LlmLatencyP95`** (window on the span's `end_time`, D-K-18):
+1. `let ids = trace_id_plan(ctx, window, DAY_NS, true, …).await?;`
 2. `ctx.session().table("spans").await.map_err(classify)?`
-   `.filter(window.predicate(spans::START_TIME).and(col(spans::SPAN_KIND).eq(lit(SpanKind::Llm.as_str()))).and(in_subquery(col(spans::TRACE_ID), Arc::new(ids))))`
+   `.filter(window.predicate(spans::END_TIME).and(col(spans::SPAN_KIND).eq(lit(SpanKind::Llm.as_str()))).and(in_subquery(col(spans::TRACE_ID), Arc::new(ids))))`
    `.map_err(classify)?`
 3. Aggregate: `count(lit(1_i64)).alias(COUNT)` and `percentile(spans::DURATION_NS, 0.95).alias(VALUE)`. Collect with `ctx.fail`.
 4. `value = f64_at(…VALUE…)?.map(|ns| ns / NS_PER_MS)`, `None` when `count == 0`.
 
 **`ScoreAvg { name }` and `ScorePassRate { name }`**:
-1. `let ids = trace_id_plan(…).await?;`
+1. `let ids = trace_id_plan(ctx, window, SCORE_TRACE_LOOKBACK, false, …).await?;`
 2. Predicate: `window.predicate(scores::CREATED_AT)`
    `.and(col(scores::NAME).eq(lit(name.as_str())))`
    `.and(col(scores::TARGET).in_list(vec![lit(ScoreTargetKind::Trace.as_str()), lit(ScoreTargetKind::Span.as_str())], false))`
@@ -196,7 +196,7 @@ The `scores` view already holds only the latest live version of each score (spec
 
 `parsed`, `trace_ids` and `at_least` in `metrics.rs` are close to the code above but take a `MetricsRequest`; the small duplication is deliberate, so `metrics.rs` changes only by the five visibilities.
 
-Imports you need (adjust to what the compiler asks): `std::sync::Arc`, `std::time::Duration`, `arrow::record_batch::RecordBatch`, `datafusion::common::ScalarValue`, `datafusion::functions_aggregate::expr_fn::{avg, count, sum}`, `datafusion::logical_expr::expr_fn::when`, `datafusion::logical_expr::{Expr, LogicalPlan, col, in_subquery, lit}`, `llmobs_core::enums::{ScoreDataType, ScoreTargetKind, SpanKind}`, `llmobs_core::schema::{scores, spans, traces}`, `super::{ListScope, present, scoped_traces}`, `super::metrics::{f64_at, i64_at, internal, percentile, require}`, `crate::filter::{Filter, FilterView}`, `crate::query_error::{RunError, classify}`, `crate::views::{QueryContext, TimeWindow, exact_cost_sum}`. `ScoreDataType::as_str()` and `SpanKind::as_str()` exist (`stored_enum!`); if `ScoreDataType::Boolean.as_str()` is not `"boolean"`, STOP and report.
+Imports you need (adjust to what the compiler asks): `std::sync::Arc`, `std::time::Duration`, `arrow::record_batch::RecordBatch`, `datafusion::common::ScalarValue`, `datafusion::functions_aggregate::expr_fn::{avg, count, sum}`, `datafusion::logical_expr::expr_fn::when`, `datafusion::logical_expr::{Expr, LogicalPlan, col, in_subquery, lit}`, `cetra_core::enums::{ScoreDataType, ScoreTargetKind, SpanKind}`, `cetra_core::schema::{scores, spans, traces}`, `super::{ListScope, present, scoped_traces}`, `super::metrics::{f64_at, i64_at, internal, percentile, require}`, `crate::filter::{Filter, FilterView}`, `crate::query_error::{RunError, classify}`, `crate::views::{QueryContext, TimeWindow, exact_cost_sum}`. `ScoreDataType::as_str()` and `SpanKind::as_str()` exist (`stored_enum!`); if `ScoreDataType::Boolean.as_str()` is not `"boolean"`, STOP and report.
 
 ## 3. Exports
 
@@ -222,7 +222,7 @@ fn context(spans: &[Span], scores: &[Score]) -> QueryContext {
 }
 ```
 
-Test imports: `std::num::NonZeroUsize`, `std::sync::Arc`, `datafusion::execution::runtime_env::RuntimeEnv`, `llmobs_core::enums::{SpanKind, SpanStatus}`, `llmobs_core::names::{environment, metadata_key}`, `llmobs_core::score::{Score, ScoreTarget, ScoreValue}`, `llmobs_core::span::Span`, `crate::test_support::{live_scores_table, score_row, span_row, spans_table, traces_table}`, `crate::views::ProjectQuery`, plus `super::*`. Remove any the compiler reports unused.
+Test imports: `std::num::NonZeroUsize`, `std::sync::Arc`, `datafusion::execution::runtime_env::RuntimeEnv`, `cetra_core::enums::{SpanKind, SpanStatus}`, `cetra_core::names::{environment, metadata_key}`, `cetra_core::score::{Score, ScoreTarget, ScoreValue}`, `cetra_core::span::Span`, `crate::test_support::{live_scores_table, score_row, span_row, spans_table, traces_table}`, `crate::views::ProjectQuery`, plus `super::*`. Remove any the compiler reports unused.
 
 **Test data recipe.**
 - A trace `t` (0, 1, 2, …) is a root span `let mut root = span_row(t, 0, T0 + MIN, 1);` (its `end_time` is `start + 100`). Set fields on it: `end_time`, `status = SpanStatus::Error` (the trace's `error_count` becomes 1), `cost_total = Some(x)`, `environment = Some("prod".to_owned())`, or for an evaluation trace `environment = Some(environment::EVAL.to_owned())`. An experiment trace: `root.metadata.insert(metadata_key::EXPERIMENT_ID.to_owned(), "e1".to_owned());` (`Span::metadata` is `BTreeMap<String, String>`; use `metadata_key::EXPERIMENT_ID`, not `attr::EXPERIMENT_ID`, because the exclusion reads the metadata key).
@@ -258,7 +258,7 @@ If one of these expectations disagrees with how the existing views behave (e.g. 
 ## Commands
 
 ```bash
-cargo test -p llmobs-storage alerts
+cargo test -p cetra-storage alerts
 ```
 
 ```bash
@@ -267,6 +267,6 @@ just check
 
 ## Done when
 
-- `alert_value` and `check_alert_filter` are exported from `llmobs_storage` with exactly the signatures above.
+- `alert_value` and `check_alert_filter` are exported from `cetra_storage` with exactly the signatures above.
 - The 15 tests pass; `just check` is green. (The timeout path is not tested: it is the same `tokio::time::timeout` wrapper as `metrics`.)
 - `metrics.rs` changed only in the five visibilities.

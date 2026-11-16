@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use llmobs_core::enums::Convention;
+use cetra_core::enums::Convention;
 use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
 
 use crate::bag::AttrBag;
@@ -465,7 +465,7 @@ mod tests {
             &mut bag,
             &view,
             &[
-                span("first", Convention::Llmobs),
+                span("first", Convention::Cetra),
                 span("second", Convention::Genai),
                 span("third", Convention::Vercel),
             ],
@@ -479,7 +479,7 @@ mod tests {
     #[test]
     fn a_string_list_uses_the_first_list() {
         let attrs = vec![
-            int_attr("llmobs.tags", 1),
+            int_attr("cetra.tags", 1),
             string_attr("tag.tags", "[]"),
             string_attr("langfuse.trace.tags", "[\"later\"]"),
         ];
@@ -490,7 +490,7 @@ mod tests {
             &mut bag,
             &view,
             &[
-                span("llmobs.tags", Convention::Llmobs),
+                span("cetra.tags", Convention::Cetra),
                 span("tag.tags", Convention::Openinference),
                 span("langfuse.trace.tags", Convention::Langfuse),
             ],
@@ -498,7 +498,7 @@ mod tests {
         let resolved = resolved.expect("empty list");
         assert!(resolved.value.is_empty());
         assert_eq!(resolved.source.convention, Convention::Openinference);
-        assert_eq!(bag.state("llmobs.tags"), Some(Use::Unread));
+        assert_eq!(bag.state("cetra.tags"), Some(Use::Unread));
         assert_eq!(bag.state("tag.tags"), Some(Use::Consumed));
         assert_eq!(bag.state("langfuse.trace.tags"), Some(Use::Unread));
     }

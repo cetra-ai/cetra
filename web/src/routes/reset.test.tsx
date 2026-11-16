@@ -44,7 +44,7 @@ async function sendEmail(user: UserEvent, email = "ada@example.com") {
 it("explains how to reset without email", async () => {
   await renderApp("/reset");
   expect(await screen.findByRole("heading", { name: "Reset your password" })).toBeInTheDocument();
-  expect(screen.getByText(/llmobs admin reset-password --email <your email>/)).toBeInTheDocument();
+  expect(screen.getByText(/cetra admin reset-password --email <your email>/)).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Send reset link" })).toBeNull();
 });
 
@@ -163,6 +163,16 @@ it("says when the link is invalid", async () => {
   expect(router.state.location.search).toEqual({});
 });
 
+it("says when the account signs in through single sign-on", async () => {
+  server.use(http.post("/api/auth/password/reset", () => problemResponse(403, "sso_required")));
+  const { user } = await renderApp("/reset?token=tok123");
+  await fillNewPassword(user);
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Your organization requires single sign-on, so this account has no password to reset.",
+  );
+  expect(screen.getByRole("link", { name: "Go to sign in" })).toHaveAttribute("href", "/login");
+});
+
 it("shows the password policy error under the field", async () => {
   server.use(
     http.post("/api/auth/password/reset", () =>
@@ -211,13 +221,24 @@ it("maps the reset errors", async () => {
   }
 });
 
-it("explains when password sign-in is disabled with a token", async () => {
+it("shows the reset form with a token when password sign-in is disabled", async () => {
   withConfig({ password_enabled: false });
-  await renderApp("/reset?token=tok123");
-  expect(
-    await screen.findByText(
-      "Password sign-in is disabled on this server. Sign in with your identity provider.",
-    ),
-  ).toBeInTheDocument();
-  expect(screen.queryByLabelText("New password", { selector: "input#password" })).toBeNull();
+  server.use(http.post("/api/auth/password/reset", () => new HttpResponse(null, { status: 204 })));
+  const { user } = await renderApp("/reset?token=tok123");
+  await fillNewPassword(user);
+  expect(await screen.findByRole("heading", { name: "Password updated" })).toBeInTheDocument();
+  // The admins' sign-in goes through the password form, not the provider (D-S-4).
+  expect(screen.getByRole("link", { name: "Sign in" }).getAttribute("href")).toMatch(
+    /^\/login\?.*password=/,
+  );
+});
+
+it("explains a reset refused for a non-admin with password sign-in disabled", async () => {
+  withConfig({ password_enabled: false });
+  server.use(http.post("/api/auth/password/reset", () => problemResponse(403, "forbidden")));
+  const { user } = await renderApp("/reset?token=tok123");
+  await fillNewPassword(user);
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Password sign-in is disabled on this server.",
+  );
 });

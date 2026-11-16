@@ -109,7 +109,7 @@ function setMessages(
     const converted = Array.isArray(masked) ? masked.map(toCanonicalMessage) : masked;
     span.setAttribute(key, serialize(converted)[0]);
   } catch (error) {
-    debug(`llmobs: setting ${key} failed: ${errorName(error)}`);
+    debug(`cetra: setting ${key} failed: ${errorName(error)}`);
   }
 }
 
@@ -127,7 +127,7 @@ function setSystemInstructions(
     const parts = typeof masked === "string" ? [{ type: "text", content: masked }] : masked;
     span.setAttribute("gen_ai.system_instructions", serialize(parts)[0]);
   } catch (error) {
-    debug(`llmobs: setting gen_ai.system_instructions failed: ${errorName(error)}`);
+    debug(`cetra: setting gen_ai.system_instructions failed: ${errorName(error)}`);
   }
 }
 
@@ -167,7 +167,7 @@ function stampLlmStart(
       setSystemInstructions(span, options.systemInstructions, runtime);
     }
   } catch (error) {
-    debug(`llmobs: starting the LLM span attributes failed: ${errorName(error)}`);
+    debug(`cetra: starting the LLM span attributes failed: ${errorName(error)}`);
   }
 }
 
@@ -194,13 +194,13 @@ class LiveLlmSpanHandle implements LlmSpanHandle {
 
   setInput(value: unknown): void {
     if (this.span.isRecording()) {
-      setPayload(this.span, "llmobs.input", value, this.runtime);
+      setPayload(this.span, "cetra.input", value, this.runtime);
     }
   }
 
   setOutput(value: unknown): void {
     if (this.span.isRecording()) {
-      setPayload(this.span, "llmobs.output", value, this.runtime);
+      setPayload(this.span, "cetra.output", value, this.runtime);
     }
   }
 
@@ -229,7 +229,7 @@ class LiveLlmSpanHandle implements LlmSpanHandle {
     try {
       this.span.setAttribute("gen_ai.response.model", model);
     } catch (error) {
-      debug(`llmobs: setting gen_ai.response.model failed: ${errorName(error)}`);
+      debug(`cetra: setting gen_ai.response.model failed: ${errorName(error)}`);
     }
   }
 
@@ -247,11 +247,11 @@ class LiveLlmSpanHandle implements LlmSpanHandle {
         if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
           this.span.setAttribute(attribute, value);
         } else {
-          debug(`llmobs: skipped ${attribute}`);
+          debug(`cetra: skipped ${attribute}`);
         }
       }
     } catch (error) {
-      debug(`llmobs: setting a usage attribute failed: ${errorName(error)}`);
+      debug(`cetra: setting a usage attribute failed: ${errorName(error)}`);
     }
   }
 
@@ -261,16 +261,16 @@ class LiveLlmSpanHandle implements LlmSpanHandle {
     }
     if (typeof totalUsd === "number" && Number.isFinite(totalUsd) && totalUsd >= 0) {
       try {
-        this.span.setAttribute("llmobs.cost.total", totalUsd);
+        this.span.setAttribute("cetra.cost.total", totalUsd);
       } catch (error) {
-        debug(`llmobs: setting llmobs.cost.total failed: ${errorName(error)}`);
+        debug(`cetra: setting cetra.cost.total failed: ${errorName(error)}`);
       }
     } else {
-      debug("llmobs: skipped llmobs.cost.total");
+      debug("cetra: skipped cetra.cost.total");
     }
   }
 
-  /** `llmobs.ttft_ns`: now − span start; only the first call counts. */
+  /** `cetra.ttft_ns`: now − span start; only the first call counts. */
   recordFirstToken(): void {
     if (this.firstTokenRecorded || !this.span.isRecording()) {
       return;
@@ -282,11 +282,11 @@ class LiveLlmSpanHandle implements LlmSpanHandle {
       // The one cast T8's plan allows.
       const startTime = (this.span as unknown as ReadableSpan).startTime;
       this.span.setAttribute(
-        "llmobs.ttft_ns",
+        "cetra.ttft_ns",
         hrTimeToNanoseconds(hrTimeDuration(startTime, hrTime())),
       );
     } catch (error) {
-      debug(`llmobs: recording the first token failed: ${errorName(error)}`);
+      debug(`cetra: recording the first token failed: ${errorName(error)}`);
     }
   }
 }

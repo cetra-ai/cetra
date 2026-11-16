@@ -144,7 +144,7 @@ Purpose (D131): dense pages and the 10 000-span target need volume that the 6-tr
   - `traces: Schema<"TraceSummary">[]`. 5 000 traces by default, start times spread over the last 30 days relative to `now`, with denser activity in the last 24 h.
     - Names drawn from about 12 agent and workflow names; models from a list of 6.
     - About 8 % errors, some sessions (`sess-NNNN`) and users (`user-NNN`), tags, environments `production` / `staging`.
-    - About 3 % `llmobs-eval`, which the default lists hide unless `include_eval`.
+    - About 3 % `cetra-eval`, which the default lists hide unless `include_eval`.
     - Latest scores for 2 score names on half the traces.
   - `traceDetail(traceId): Schema<"TraceDetail"> | undefined`: deterministic per trace (seeded by the trace index).
     - Span counts 3–60, with depth up to 6.

@@ -13,6 +13,9 @@ use std::time::Duration;
 use arrow::array::{Array, AsArray};
 use arrow::datatypes::{Float64Type, Int64Type, TimestampNanosecondType, UInt64Type};
 use arrow::record_batch::RecordBatch;
+use cetra_core::enums::{ScoreTargetKind, SpanKind};
+use cetra_core::names::environment;
+use cetra_core::schema::{scores, spans, traces};
 use datafusion::common::{NullHandling, ScalarValue, UnnestOptions};
 use datafusion::error::DataFusionError;
 use datafusion::functions::datetime::expr_fn::date_bin;
@@ -20,9 +23,6 @@ use datafusion::functions_aggregate::expr_fn::{approx_percentile_cont, avg, coun
 use datafusion::logical_expr::expr_fn::when;
 use datafusion::logical_expr::{Expr, LogicalPlan, SortExpr, col, in_subquery, lit};
 use datafusion::prelude::DataFrame;
-use llmobs_core::enums::{ScoreTargetKind, SpanKind};
-use llmobs_core::names::environment;
-use llmobs_core::schema::{scores, spans, traces};
 
 use super::{ListScope, present, scoped_traces};
 use crate::filter::{Filter, FilterView};
@@ -1596,13 +1596,13 @@ mod tests {
     use std::time::Duration;
 
     use super::resolve;
+    use cetra_core::enums::SpanKind;
+    use cetra_core::ids::{SpanId, TraceId};
+    use cetra_core::names::environment;
+    use cetra_core::score::ScoreTarget;
+    use cetra_core::span::Span;
+    use cetra_core::time_serde::parse_rfc3339;
     use datafusion::execution::runtime_env::RuntimeEnv;
-    use llmobs_core::enums::SpanKind;
-    use llmobs_core::ids::{SpanId, TraceId};
-    use llmobs_core::names::environment;
-    use llmobs_core::score::ScoreTarget;
-    use llmobs_core::span::Span;
-    use llmobs_core::time_serde::parse_rfc3339;
     use serde_json::Value;
 
     use super::{
@@ -2573,6 +2573,7 @@ mod tests {
                 optimizer_rules: Vec::new(),
 
                 suspects: crate::verify::Suspects::detached(),
+                visible_from: None,
             },
             None,
         )

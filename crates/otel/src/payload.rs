@@ -5,9 +5,9 @@
 
 use std::collections::BTreeSet;
 
-use llmobs_core::enums::{Convention, PayloadFormat, SpanKind};
-use llmobs_core::message::{Message, Part, Role, messages_to_json};
-use llmobs_core::span::Span;
+use cetra_core::enums::{Convention, PayloadFormat, SpanKind};
+use cetra_core::message::{Message, Part, Role, messages_to_json};
+use cetra_core::span::Span;
 use opentelemetry_proto::tonic::common::v1::AnyValue;
 use opentelemetry_proto::tonic::common::v1::any_value::Value;
 use opentelemetry_proto::tonic::trace::v1::span::Event;
@@ -190,7 +190,7 @@ pub(crate) fn write(span: &mut Span, io: Io) {
     }
 }
 
-/// `llmobs.normalize_error` text. `None` when nothing failed.
+/// `cetra.normalize_error` text. `None` when nothing failed.
 pub(crate) fn error_attribute(errors: &[&str]) -> Option<String> {
     if errors.is_empty() {
         None
@@ -383,7 +383,7 @@ fn matches_indexed(key: &str, prefix: &str) -> bool {
 /// Spec 02 rule 13. A lower rank is higher precedence.
 fn rank(convention: Convention) -> usize {
     match convention {
-        Convention::Llmobs => 0,
+        Convention::Cetra => 0,
         Convention::Genai => 1,
         Convention::Openinference => 2,
         Convention::Vercel => 3,
@@ -396,9 +396,9 @@ fn rank(convention: Convention) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use llmobs_core::enums::PayloadFormat;
-    use llmobs_core::message::{Message, Part, Role, messages_to_json};
-    use llmobs_core::span::Span;
+    use cetra_core::enums::PayloadFormat;
+    use cetra_core::message::{Message, Part, Role, messages_to_json};
+    use cetra_core::span::Span;
     use opentelemetry_proto::tonic::common::v1::any_value::Value;
     use opentelemetry_proto::tonic::common::v1::{AnyValue, ArrayValue, KeyValue, KeyValueList};
     use opentelemetry_proto::tonic::trace::v1::span::Event;
@@ -728,8 +728,8 @@ mod tests {
     fn error_codes_join_with_a_comma_and_no_spaces() {
         assert_eq!(error_attribute(&[]), None);
         assert_eq!(
-            error_attribute(&["messages:llmobs:input", "messages:genai:output"]).as_deref(),
-            Some("messages:llmobs:input,messages:genai:output")
+            error_attribute(&["messages:cetra:input", "messages:genai:output"]).as_deref(),
+            Some("messages:cetra:input,messages:genai:output")
         );
     }
 
@@ -738,7 +738,7 @@ mod tests {
         Io {
             input: Some(Payload::Text("ours".to_owned())),
             events: vec![0],
-            errors: vec!["messages:llmobs:input"],
+            errors: vec!["messages:cetra:input"],
             ..Io::default()
         }
     }
@@ -757,8 +757,8 @@ mod tests {
 
     #[test]
     fn the_first_value_wins_and_lower_payload_keys_are_dropped() {
-        const LLMOBS_KEYS: &[(Field, KeyPattern)] =
-            &[(Field::Input, KeyPattern::Exact("llmobs.input"))];
+        const CETRA_KEYS: &[(Field, KeyPattern)] =
+            &[(Field::Input, KeyPattern::Exact("cetra.input"))];
         const GENAI_KEYS: &[(Field, KeyPattern)] = &[
             (Field::Input, KeyPattern::Exact("gen_ai.input.messages")),
             (Field::Output, KeyPattern::Exact("gen_ai.output.messages")),
@@ -775,7 +775,7 @@ mod tests {
             &[(Field::Output, KeyPattern::Exact("lmnr.span.output"))];
 
         let attrs = vec![
-            kv("llmobs.input", string("keep")),
+            kv("cetra.input", string("keep")),
             kv("gen_ai.input.messages", string("[]")),
             kv("llm.input_messages.0.message.content", string("flat")),
             kv("llm.input_messages.2.message.role", string("user")),
@@ -793,7 +793,7 @@ mod tests {
         ];
         let readers = [
             super::ConventionPayload {
-                convention: Convention::Llmobs,
+                convention: Convention::Cetra,
                 read: ours,
             },
             super::ConventionPayload {
@@ -803,8 +803,8 @@ mod tests {
         ];
         let registries = [
             PayloadKeys {
-                convention: Convention::Llmobs,
-                keys: LLMOBS_KEYS,
+                convention: Convention::Cetra,
+                keys: CETRA_KEYS,
             },
             PayloadKeys {
                 convention: Convention::Genai,
@@ -835,10 +835,10 @@ mod tests {
         assert_eq!(assembled.io.system_instructions, Some(json!("be brief")));
         assert_eq!(
             error_attribute(&assembled.io.errors).as_deref(),
-            Some("messages:llmobs:input,messages:genai:output")
+            Some("messages:cetra:input,messages:genai:output")
         );
         assert_eq!(assembled.dropped_events, vec![0, 1, 2]);
-        assert_eq!(bag.state("llmobs.input"), Some(Use::Unread));
+        assert_eq!(bag.state("cetra.input"), Some(Use::Unread));
         assert_eq!(bag.state("gen_ai.input.messages"), Some(Use::Payload));
         assert_eq!(
             bag.state("llm.input_messages.0.message.content"),
@@ -882,8 +882,8 @@ mod tests {
 
     #[test]
     fn an_empty_tool_list_does_not_win() {
-        const LLMOBS_KEYS: &[(Field, KeyPattern)] =
-            &[(Field::ToolDefinitions, KeyPattern::Exact("llmobs.tools"))];
+        const CETRA_KEYS: &[(Field, KeyPattern)] =
+            &[(Field::ToolDefinitions, KeyPattern::Exact("cetra.tools"))];
         const GENAI_KEYS: &[(Field, KeyPattern)] = &[(
             Field::ToolDefinitions,
             KeyPattern::Exact("gen_ai.tool.definitions"),
@@ -891,7 +891,7 @@ mod tests {
         const LAMINAR_KEYS: &[(Field, KeyPattern)] =
             &[(Field::ToolDefinitions, KeyPattern::Exact("lmnr.tools"))];
         let attrs = vec![
-            kv("llmobs.tools", string("[]")),
+            kv("cetra.tools", string("[]")),
             kv("gen_ai.tool.definitions", string("[]")),
             kv("lmnr.tools", string("[]")),
         ];
@@ -899,7 +899,7 @@ mod tests {
         let mut bag = AttrBag::new(&attrs, &mut warnings);
         let readers = [
             super::ConventionPayload {
-                convention: Convention::Llmobs,
+                convention: Convention::Cetra,
                 read: empty_tools,
             },
             super::ConventionPayload {
@@ -913,8 +913,8 @@ mod tests {
         ];
         let registries = [
             PayloadKeys {
-                convention: Convention::Llmobs,
-                keys: LLMOBS_KEYS,
+                convention: Convention::Cetra,
+                keys: CETRA_KEYS,
             },
             PayloadKeys {
                 convention: Convention::Genai,
@@ -937,7 +937,7 @@ mod tests {
             assembled.io.tool_definitions,
             Some(vec![json!({"name": "lookup"})])
         );
-        assert_eq!(bag.state("llmobs.tools"), Some(Use::Unread));
+        assert_eq!(bag.state("cetra.tools"), Some(Use::Unread));
         assert_eq!(bag.state("gen_ai.tool.definitions"), Some(Use::Unread));
         assert_eq!(bag.state("lmnr.tools"), Some(Use::Payload));
     }

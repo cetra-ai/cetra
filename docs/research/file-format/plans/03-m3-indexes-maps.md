@@ -501,7 +501,7 @@ The M3.1 commands pass.
 **`reader.rs`:** the shredded round trip of a map column with a null-valued promoted key, a duplicated key, null maps and empty maps (built in the test), compared with stable-sorted entries.
 
 **`roundtrip_light.rs`:**
-- Every column equals the input. Maps are compared directly, since `llmobs-core` builds maps from `BTreeMap`, so their entries are already sorted.
+- Every column equals the input. Maps are compared directly, since `cetra-core` builds maps from `BTreeMap`, so their entries are already sorted.
 - Print the per-column table with `shredded_keys`, and print the ratio.
 - Keep the 1.35× assertion. If it fails, stop and report.
 

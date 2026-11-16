@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  formatBytes,
   formatCost,
   formatDuration,
   formatRelative,
+  formatRetention,
   formatTimestamp,
   formatTokens,
   instantNs,
@@ -59,6 +61,23 @@ describe("formatCost", () => {
   });
 });
 
+describe("formatBytes", () => {
+  it("uses base 1000 and one decimal above bytes", () => {
+    expect(formatBytes(0)).toBe("0 B");
+    expect(formatBytes(999)).toBe("999 B");
+    expect(formatBytes(1_000)).toBe("1.0 KB");
+    expect(formatBytes(1_500)).toBe("1.5 KB");
+    expect(formatBytes(3_500_000)).toBe("3.5 MB");
+    expect(formatBytes(5_600_000)).toBe("5.6 MB");
+    expect(formatBytes(2_500_000_000)).toBe("2.5 GB");
+    expect(formatBytes(4_000_000_000_000)).toBe("4.0 TB");
+  });
+
+  it("rolls over when rounding reaches 1000 of the smaller unit", () => {
+    expect(formatBytes(999_950)).toBe("1.0 MB");
+  });
+});
+
 describe("formatTimestamp", () => {
   const stamp = "2026-01-01T10:00:04.200000000Z";
 
@@ -105,6 +124,12 @@ describe("ids and nanosecond differences", () => {
 
   it("shortens an id to eight characters", () => {
     expect(shortId("0123456789abcdef")).toBe("01234567");
+    expect(shortId("01900000-0000-7000-8000-000000000100")).toBe("01900000");
+  });
+
+  it("keeps free-form ids whole, up to 40 characters", () => {
+    expect(shortId("sess-02-1")).toBe("sess-02-1");
+    expect(shortId("s".repeat(41))).toBe(`${"s".repeat(40)}…`);
   });
 
   it("documents instantNs as a layout number", () => {
@@ -112,5 +137,17 @@ describe("ids and nanosecond differences", () => {
     const later = instantNs("2026-01-01T00:00:00.000001000Z");
     expect(later - earlier).toBeGreaterThanOrEqual(500);
     expect(later - earlier).toBeLessThanOrEqual(1_500);
+  });
+});
+
+describe("formatRetention", () => {
+  it("labels a missing retention as forever, not as a default", () => {
+    expect(formatRetention(null)).toBe("Forever");
+    expect(formatRetention(undefined)).toBe("Forever");
+  });
+
+  it("counts days", () => {
+    expect(formatRetention(1)).toBe("1 day");
+    expect(formatRetention(30)).toBe("30 days");
   });
 });

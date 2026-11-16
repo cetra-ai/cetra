@@ -5,9 +5,9 @@
 use std::path::PathBuf;
 
 use arrow::array::{Array, AsArray, StructArray};
-use llmobs_core::enums::{CostSource, PayloadFormat, SpanKind, SpanStatus};
-use llmobs_core::ids::{SpanId, TraceId};
-use llmobs_core::span::Span;
+use cetra_core::enums::{CostSource, PayloadFormat, SpanKind, SpanStatus};
+use cetra_core::ids::{SpanId, TraceId};
+use cetra_core::span::Span;
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use xxhash_rust::xxh3::xxh3_128;
@@ -340,7 +340,7 @@ mod tests {
     use arrow::array::{ArrayRef, BooleanArray, ListArray, RecordBatch, StringArray, StructArray};
     use arrow::buffer::OffsetBuffer;
     use arrow::datatypes::{DataType, Field, Fields, Schema};
-    use llmobs_core::batch::spans_to_record_batch;
+    use cetra_core::batch::spans_to_record_batch;
     use parquet::arrow::ArrowWriter;
 
     use super::*;

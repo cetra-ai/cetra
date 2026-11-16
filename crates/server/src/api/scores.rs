@@ -1,13 +1,13 @@
 //! Score list parameters and the score write contract.
 //!
-//! The list response is [`llmobs_core::score::Score`]. Spec 09 § Scores & annotations.
+//! The list response is [`cetra_core::score::Score`]. Spec 09 § Scores & annotations.
 //! Spec 06 § Scores and § End-user feedback; D-G-26 to D-G-28.
 
 use std::collections::BTreeMap;
 
-use llmobs_core::enums::{ScoreSource, ScoreTargetKind};
-use llmobs_core::ids::{SpanId, TraceId};
-use llmobs_core::score::{ScoreTarget, ScoreValue};
+use cetra_core::enums::{ScoreSource, ScoreTargetKind};
+use cetra_core::ids::{SpanId, TraceId};
+use cetra_core::score::{ScoreTarget, ScoreValue};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
@@ -42,6 +42,13 @@ pub struct ScoreCreate {
     /// String metadata stored with the score.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata: BTreeMap<String, String>,
+    /// Experiment the score belongs to; set together with `dataset_item_id`, on a trace target
+    /// (D-J-12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experiment_id: Option<Uuid>,
+    /// Dataset item (stable id) the score is about; set together with `experiment_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset_item_id: Option<Uuid>,
 }
 
 /// `POST …/scores` and `POST /api/v1/scores` body.
@@ -121,6 +128,12 @@ pub struct ScoreListParams {
     /// Who wrote the score.
     #[serde(default)]
     pub source: Option<ScoreSource>,
+    /// Scores written by this evaluator.
+    #[serde(default)]
+    pub evaluator_id: Option<Uuid>,
+    /// Scores written by this online rule.
+    #[serde(default)]
+    pub rule_id: Option<Uuid>,
     /// Inclusive `created_at` start. RFC 3339 or epoch milliseconds.
     #[serde(default)]
     pub from: Option<TimeParam>,
@@ -138,7 +151,7 @@ pub struct ScoreListParams {
 
 #[cfg(test)]
 mod tests {
-    use llmobs_core::enums::{ScoreSource, ScoreTargetKind};
+    use cetra_core::enums::{ScoreSource, ScoreTargetKind};
 
     use super::ScoreListParams;
 

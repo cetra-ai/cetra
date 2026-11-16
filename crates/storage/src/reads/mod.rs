@@ -7,6 +7,7 @@
 mod alerts;
 mod cursor;
 mod deletions;
+mod experiments;
 pub(crate) mod metrics;
 mod scores;
 mod sessions;
@@ -19,12 +20,16 @@ use datafusion::prelude::DataFrame;
 
 use crate::filter::{FilterView, exclusions, time_window};
 use crate::query_error::{RunError, classify};
-use crate::views::{QueryContext, TimeWindow};
+use crate::views::{QueryContext, TimeWindow, ViewName};
 
-pub use alerts::{AlertMeasure, AlertValue, AlertValueRequest, alert_value, check_alert_filter};
+pub use alerts::{AlertMeasure, AlertValue, AlertValueRequest, alert_value};
 pub use deletions::{
     FilterDeletionRequest, MAX_FILTER_DELETION_TRACES, UserDeletionScope, eval_trace_ids,
     filter_trace_ids, user_deletion_scope,
+};
+pub use experiments::{
+    ExperimentScore, ExperimentTrace, MAX_EXPERIMENT_SCORES, MAX_EXPERIMENT_TRACES,
+    experiment_scores, experiment_traces,
 };
 pub use metrics::{
     Bucket, BucketWidth, Kpi, KpiName, MetricsData, MetricsGroupBy, MetricsRequest, ModelUsageRow,
@@ -38,10 +43,11 @@ pub use sessions::{
     session_list,
 };
 pub use traces::{
-    MAX_REFRESH_IDS, MAX_TRACE_SPANS, SPAN_LIST_COLUMNS, SpanListRequest, SpanSort,
-    TraceDetailData, TraceListRequest, TraceRefreshRequest, TraceSort, TraceSpansData,
-    TraceSpansRequest, span_detail, span_list, trace_detail, trace_list, trace_list_plan,
-    trace_refresh, trace_spans,
+    MAX_MATCH_COUNT, MAX_REFRESH_IDS, MAX_REFRESH_SPANS_PER_TRACE, MAX_TRACE_SPANS,
+    MatchCountRequest, SPAN_LIST_COLUMNS, SPAN_REFRESH_COLUMNS, SpanListRequest,
+    SpanRefreshRequest, SpanSort, TRACE_REFRESH_STRICT_COLUMNS, TraceDetailData, TraceListRequest,
+    TraceRefreshRequest, TraceSort, TraceSpansData, TraceSpansRequest, match_count, span_detail,
+    span_list, span_refresh, trace_detail, trace_list, trace_list_plan, trace_refresh, trace_spans,
 };
 pub use users::{
     MAX_USER_SESSIONS, USER_COLUMNS, UserDetailData, UserListRequest, UserSort, user_detail,
@@ -85,6 +91,32 @@ pub(crate) fn present(text: Option<&str>) -> Option<&str> {
     text.filter(|text| !text.chars().all(char::is_whitespace))
 }
 
+/// Parses `text` as a filter of `view` without running anything (D-I-30). Empty or blank text
+/// is accepted (it means no filter).
+///
+/// # Errors
+///
+/// [`RunError::Invalid`] when the text does not parse or names an unknown column;
+/// [`RunError::InvalidRequest`] for a view other than traces or spans.
+pub fn validate_filter(ctx: &QueryContext, view: ViewName, text: &str) -> Result<(), RunError> {
+    let view = match view {
+        ViewName::Traces => FilterView::Traces,
+        ViewName::Spans => FilterView::Spans,
+        _ => {
+            return Err(RunError::InvalidRequest(
+                "filters are checked for traces and spans only".to_owned(),
+            ));
+        }
+    };
+    match present(Some(text)) {
+        None => Ok(()),
+        Some(text) => ctx
+            .parse_filter(view, text)
+            .map(|_| ())
+            .map_err(RunError::from),
+    }
+}
+
 /// The `traces` view restricted by a list's window and default exclusions.
 pub(crate) async fn scoped_traces(
     ctx: &QueryContext,
@@ -109,4 +141,29 @@ pub(crate) async fn scoped_traces(
         frame = frame.filter(predicate).map_err(classify)?;
     }
     Ok(frame)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_filter;
+    use crate::query_error::RunError;
+    use crate::test_support::example_query;
+    use crate::views::{QueryContext, ViewName};
+
+    #[test]
+    fn validate_filter_accepts_blank_and_rejects_bad_text() {
+        let ctx = QueryContext::new(example_query(), None).expect("context");
+        assert!(validate_filter(&ctx, ViewName::Traces, "").is_ok());
+        assert!(validate_filter(&ctx, ViewName::Traces, "  ").is_ok());
+        assert!(matches!(
+            validate_filter(&ctx, ViewName::Traces, "error_count >"),
+            Err(RunError::Invalid(_))
+        ));
+        assert!(validate_filter(&ctx, ViewName::Traces, "error_count > 0").is_ok());
+        assert!(validate_filter(&ctx, ViewName::Spans, "span_kind = 'llm'").is_ok());
+        assert!(matches!(
+            validate_filter(&ctx, ViewName::Sessions, "error_count > 0"),
+            Err(RunError::InvalidRequest(_))
+        ));
+    }
 }

@@ -33,13 +33,13 @@ This plan builds a prototype of the two-layer format from [README.md](README.md)
 
 | Crate | Path | Content |
 |---|---|---|
-| `fmt-testdata` | `docs/research/file-format/testdata/` | Library. `datagen.rs` moved from `bench` unchanged, plus the SWE-agent conversion (`swe.rs`, moved from `bench/src/main.rs::swe_cmd`, returning `Vec<Span>` instead of printing). Depends on `llmobs-core` by path. |
+| `fmt-testdata` | `docs/research/file-format/testdata/` | Library. `datagen.rs` moved from `bench` unchanged, plus the SWE-agent conversion (`swe.rs`, moved from `bench/src/main.rs::swe_cmd`, returning `Vec<Span>` instead of printing). Depends on `cetra-core` by path. |
 | `strata` | `docs/research/file-format/strata/` | Library: format, writer, reader, DataFusion provider, fast paths, merge. `fmt-testdata` is a **dev-dependency** only. |
 | `fmtbench` | `docs/research/file-format/bench/` | Existing binary. Depends on `fmt-testdata` and `strata`. |
 
 Tests that need realistic data live in `strata/tests/` and use `fmt-testdata`. Unit tests inside `strata/src` build their own Arrow batches.
 
-All three crates have their own `[workspace]` table, so they stay outside the llmobs workspace and outside `just check` and CI. Versions are pinned to the workspace family: datafusion 55.2, arrow and parquet 59.2, object_store 0.13. Any new dependency's version is looked up (`cargo search` / `cargo info`), never guessed, and listed in the phase's commit message.
+All three crates have their own `[workspace]` table, so they stay outside the cetra workspace and outside `just check` and CI. Versions are pinned to the workspace family: datafusion 55.2, arrow and parquet 59.2, object_store 0.13. Any new dependency's version is looked up (`cargo search` / `cargo info`), never guessed, and listed in the phase's commit message.
 
 The repository rules still apply here:
 - `#![forbid(unsafe_code)]`;
@@ -53,7 +53,7 @@ The prototype does not need the production extras: no versioning beyond `version
 
 The profile was taken before planning (`fmtbench profile`). It reports the minimum of 30 runs, with process CPU time beside it. The machine was loaded (load average 40–55 on 32 threads) while it ran. Times below are milliseconds per query, warm.
 
-**`pq_llmobs`, `target_partitions = 1`:**
+**`pq_cetra`, `target_partitions = 1`:**
 
 | Query | Total | SQL + logical plan | Physical plan | Execute | Bytes scanned |
 |---|---|---|---|---|---|
@@ -435,7 +435,7 @@ Applies to `Map<Utf8, Utf8>` columns.
 
 **Residual.** Keys that are not promoted form the residual map column (layer 4, `MAP` encoding).
 
-**Reconstruction.** The map is rebuilt with entries sorted bytewise by key, using the field names and nullability of the map's type in the Arrow schema. llmobs-core already writes maps from `BTreeMap`s, and tests compare maps with sorted keys. `unshred` returns each row's entries sorted bytewise by key (stable for equal keys); the original entry order is not kept.
+**Reconstruction.** The map is rebuilt with entries sorted bytewise by key, using the field names and nullability of the map's type in the Arrow schema. cetra-core already writes maps from `BTreeMap`s, and tests compare maps with sorted keys. `unshred` returns each row's entries sorted bytewise by key (stable for equal keys); the original entry order is not kept.
 
 **Hot-tail section 5 layout:** `u32 n_maps`, then per map: `u32 map_column_id` · `u32 residual_column_id` · `u32 n_keys` · `n_keys × (u32 child_column_id · u32 residual_hits · u16 key_len · key bytes)`.
 
@@ -596,7 +596,7 @@ Each phase ends with `cargo test` and `cargo clippy --all-targets -- -D warnings
 
 **Phase 0: test-data crate.**
 - Create `testdata/` (`fmt-testdata`). Move `bench/src/datagen.rs` into it, and move `bench/src/main.rs::swe_cmd`'s trajectory → span-input logic into `swe.rs`. The SWE function takes a Parquet path and returns `Vec<(input, output, system)>` values; the spans with narrow columns come in phase 9a.
-- Make `bench` depend on it. `fmt-testdata` depends on `llmobs-core` by path; that crate inherits its dependency versions from the llmobs workspace, so it builds from outside that workspace root.
+- Make `bench` depend on it. `fmt-testdata` depends on `cetra-core` by path; that crate inherits its dependency versions from the cetra workspace, so it builds from outside that workspace root.
 - Test: `fmtbench gen` on 3,000 traces gives byte-identical Parquet files before and after (compare `sha256sum`).
 
 **Phase 1: container.**
@@ -725,7 +725,7 @@ Each phase ends with `cargo test` and `cargo clippy --all-targets -- -D warnings
 
 Every variant is written from the same sorted batches with the same file slicing (4 files per dataset), so row order is the same.
 
-**Variants:** `pq_default`, `pq_tuned`, `pq_llmobs`, `pq_fast` (lookups only), `vx_compact`, `st`, `st_fast`. "Best Parquet" means the best of the three Parquet variants on that metric.
+**Variants:** `pq_default`, `pq_tuned`, `pq_cetra`, `pq_fast` (lookups only), `vx_compact`, `st`, `st_fast`. "Best Parquet" means the best of the three Parquet variants on that metric.
 
 **Storage:**
 - **Local tmpfs:** CPU-bound.

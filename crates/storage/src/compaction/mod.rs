@@ -3,8 +3,6 @@
 
 pub(crate) mod job;
 pub(crate) mod merge;
-#[cfg(test)]
-pub(crate) mod model;
 pub(crate) mod plan;
 pub(crate) mod rewrite;
 pub(crate) mod slice;

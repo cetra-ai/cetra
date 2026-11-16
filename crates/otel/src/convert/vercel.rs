@@ -4,7 +4,7 @@
 //! `result`. v5+ uses `input` and `output: {type, value}`. `image` and `file`
 //! parts carry raw base64, or a URL.
 
-use llmobs_core::message::{Message, Modality, Part, Role};
+use cetra_core::message::{Message, Modality, Part, Role};
 use serde_json::{Map, Value as Json};
 
 use crate::convert::ConvertError;
@@ -223,7 +223,7 @@ fn take_string(map: &mut Map<String, Json>, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{assistant_message, vercel_messages};
-    use llmobs_core::message::messages_to_json;
+    use cetra_core::message::messages_to_json;
     use serde_json::json;
 
     #[test]

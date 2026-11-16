@@ -1,10 +1,10 @@
 /**
- * The llmobs span processor.
+ * The cetra span processor.
  *
  * Owns an OTel `BatchSpanProcessor` (1 s scheduled delay, 45 s export
  * timeout — above the exporter's 30 s retry deadline, so `flush()` waits for
  * retries), stamps the context values (D-F-12) plus
- * `llmobs.environment` / `llmobs.release` on every span our provider
+ * `cetra.environment` / `cetra.release` on every span our provider
  * starts, whatever tracer created it, and decides each ended span's export
  * fate (D-F-5). Nothing here raises into the app: every method catches and
  * logs the error name at debug level.
@@ -24,7 +24,7 @@ import { defaultFilter } from "./filter.js";
 import { debug } from "./log.js";
 import { attributeValue } from "./serialize.js";
 
-export class LlmobsSpanProcessor implements SpanProcessor {
+export class CetraSpanProcessor implements SpanProcessor {
   private readonly batch: BatchSpanProcessor;
   private readonly environment: string | undefined;
   private readonly release: string | undefined;
@@ -56,14 +56,20 @@ export class LlmobsSpanProcessor implements SpanProcessor {
   onStart(span: Span, parentContext: Context): void {
     try {
       stampContext(span, parentContext);
-      if (this.environment !== undefined) {
-        span.setAttribute("llmobs.environment", this.environment);
+      const experiment = currentValues(parentContext).experiment;
+      if (experiment !== undefined) {
+        // An experiment run's spans carry the linkage and the `experiment` environment (D-J-16).
+        span.setAttribute("cetra.experiment.id", experiment.experimentId);
+        span.setAttribute("cetra.dataset_item.id", experiment.datasetItemId);
+        span.setAttribute("cetra.environment", "experiment");
+      } else if (this.environment !== undefined) {
+        span.setAttribute("cetra.environment", this.environment);
       }
       if (this.release !== undefined) {
-        span.setAttribute("llmobs.release", this.release);
+        span.setAttribute("cetra.release", this.release);
       }
     } catch (error) {
-      debug(`llmobs: span processor onStart failed: ${errorName(error)}`);
+      debug(`cetra: span processor onStart failed: ${errorName(error)}`);
     }
   }
 
@@ -73,7 +79,7 @@ export class LlmobsSpanProcessor implements SpanProcessor {
         this.batch.onEnd(span);
       }
     } catch (error) {
-      debug(`llmobs: span processor onEnd failed: ${errorName(error)}`);
+      debug(`cetra: span processor onEnd failed: ${errorName(error)}`);
     }
   }
 
@@ -87,7 +93,7 @@ export class LlmobsSpanProcessor implements SpanProcessor {
       try {
         return this.exportFilter(span);
       } catch (error) {
-        debug(`llmobs: exportFilter raised ${errorName(error)}; span exported`);
+        debug(`cetra: exportFilter raised ${errorName(error)}; span exported`);
         return true;
       }
     }
@@ -98,7 +104,7 @@ export class LlmobsSpanProcessor implements SpanProcessor {
     try {
       await this.batch.forceFlush();
     } catch (error) {
-      debug(`llmobs: span processor forceFlush failed: ${errorName(error)}`);
+      debug(`cetra: span processor forceFlush failed: ${errorName(error)}`);
     }
   }
 
@@ -106,7 +112,7 @@ export class LlmobsSpanProcessor implements SpanProcessor {
     try {
       await this.batch.shutdown();
     } catch (error) {
-      debug(`llmobs: span processor shutdown failed: ${errorName(error)}`);
+      debug(`cetra: span processor shutdown failed: ${errorName(error)}`);
     }
   }
 }
@@ -118,10 +124,10 @@ export class LlmobsSpanProcessor implements SpanProcessor {
  */
 function stampContext(span: Span, parentContext: Context | undefined): void {
   const values = currentValues(parentContext);
-  stampSessionOrUser(span, "llmobs.session.id", values.sessionId, parentContext);
-  stampSessionOrUser(span, "llmobs.user.id", values.userId, parentContext);
+  stampSessionOrUser(span, "cetra.session.id", values.sessionId, parentContext);
+  stampSessionOrUser(span, "cetra.user.id", values.userId, parentContext);
   if (values.tags.length > 0) {
-    span.setAttribute("llmobs.tags", [...values.tags]);
+    span.setAttribute("cetra.tags", [...values.tags]);
   }
   for (const [key, value] of Object.entries(values.metadata)) {
     const name = metadataAttributeName(key);

@@ -6,40 +6,57 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use llmobs_core::enums::PayloadFormat;
-use llmobs_core::ids::{SpanId, TraceId};
-use llmobs_core::message::{Message, Part};
-use llmobs_core::score::{Score, ScoreTarget, ScoreValue};
-use llmobs_core::span::Span;
-use llmobs_server::api::account::{
+use cetra_core::enums::PayloadFormat;
+use cetra_core::ids::{SpanId, TraceId};
+use cetra_core::message::{Message, Part};
+use cetra_core::score::{Score, ScoreTarget, ScoreValue};
+use cetra_core::span::Span;
+use cetra_server::api::account::{
     AuthConfig, Me, OrgMembership, OrgRole, Project, SetupResponse, SignupResponse,
 };
-use llmobs_server::api::admin::{AdminLicense, AdminSettings, AdminUser, CreatedAdminUser};
-use llmobs_server::api::alerts::{AlertEvent, AlertRule, NotificationChannel};
-use llmobs_server::api::common::Page;
-use llmobs_server::api::connections::{
+use cetra_server::api::admin::{AdminLicense, AdminSettings, AdminUser, CreatedAdminUser};
+use cetra_server::api::alerts::{AlertEvent, AlertRule, NotificationChannel};
+use cetra_server::api::backfills::{Backfill, BackfillEstimate, CreateBackfillRequest};
+use cetra_server::api::common::Page;
+use cetra_server::api::connections::{
     CreateLlmConnectionRequest, LlmConnection, LlmConnectionTestResult,
 };
-use llmobs_server::api::deletions::{Deletion, DeletionPreview};
-use llmobs_server::api::entitlements::OrgEntitlements;
-use llmobs_server::api::evaluators::{
+use cetra_server::api::datasets::{
+    AddItemsRequest, CreateDatasetRequest, Dataset, DatasetItem, DatasetVersion, FromTraceRequest,
+    ImportMapping, ImportPreview, ImportResult,
+};
+use cetra_server::api::deletions::{Deletion, DeletionPreview};
+use cetra_server::api::entitlements::OrgEntitlements;
+use cetra_server::api::eval_jobs::{EvalJob, RunEvaluatorRequest};
+use cetra_server::api::evaluators::{
     CreateEvaluatorRequest, Evaluator, EvaluatorTemplateList, EvaluatorTestRequest,
     EvaluatorTestResult,
 };
-use llmobs_server::api::invites::{CreatedInvite, Invite, InvitePreview};
-use llmobs_server::api::keys::{ApiKey, CreatedApiKey, CreatedPersonalToken, PersonalToken};
-use llmobs_server::api::members::{OrgMember, ProjectMember};
-use llmobs_server::api::metrics::MetricsResponse;
-use llmobs_server::api::openapi::openapi;
-use llmobs_server::api::payload::Payload;
-use llmobs_server::api::saved_views::SavedView;
-use llmobs_server::api::schema::SchemaResponse;
-use llmobs_server::api::score_definitions::{CreateScoreDefinitionRequest, ScoreDefinition};
-use llmobs_server::api::scores::{FeedbackRequest, ScoreBatch};
-use llmobs_server::api::sessions::{SessionDetail, SessionSummary};
-use llmobs_server::api::sql::{SqlQueryRequest, SqlQueryResult};
-use llmobs_server::api::traces::{SpanDetail, SpanSummary, TraceDetail, TraceSummary};
-use llmobs_server::api::users::{EndUserDetail, EndUserSummary};
+use cetra_server::api::experiments::{
+    CreateExperimentResponse, Experiment, ExperimentComparison, ExperimentResults,
+    ExperimentResultsRequest,
+};
+use cetra_server::api::invites::{CreatedInvite, Invite, InvitePreview};
+use cetra_server::api::keys::{ApiKey, CreatedApiKey, CreatedPersonalToken, PersonalToken};
+use cetra_server::api::members::{OrgMember, ProjectMember};
+use cetra_server::api::metrics::MetricsResponse;
+use cetra_server::api::model_prices::{ModelPrice, ModelPriceInput, ModelPriceResolution};
+use cetra_server::api::online_rules::{
+    CreateOnlineRuleRequest, OnlineRule, OnlineRulePage, OnlineRulePreview,
+    OnlineRulePreviewRequest, UpdateOnlineRuleRequest,
+};
+use cetra_server::api::openapi::openapi;
+use cetra_server::api::org_sso::OrgSso;
+use cetra_server::api::payload::Payload;
+use cetra_server::api::saved_views::SavedView;
+use cetra_server::api::schema::SchemaResponse;
+use cetra_server::api::score_definitions::{CreateScoreDefinitionRequest, ScoreDefinition};
+use cetra_server::api::scores::{FeedbackRequest, ScoreBatch};
+use cetra_server::api::sessions::{SessionDetail, SessionSummary};
+use cetra_server::api::sql::{SqlQueryRequest, SqlQueryResult};
+use cetra_server::api::traces::{SpanDetail, SpanSummary, TraceDetail, TraceSummary};
+use cetra_server::api::usage::OrgUsage;
+use cetra_server::api::users::{EndUserDetail, EndUserSummary};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -199,7 +216,7 @@ fn contract_document() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("openapi.json")
 }
 
-const OPENAPI_URI: &str = "urn:llmobs:openapi";
+const OPENAPI_URI: &str = "urn:cetra:openapi";
 
 fn schema_pointer(document: &Value, entry: &Example, failures: &mut Vec<String>) -> Option<String> {
     let Some((path, method, operation)) = operation_at(document, &entry.operation_id) else {
@@ -369,6 +386,7 @@ fn static_files_match_their_types() {
     roundtrip::<Page<OrgMembership>>("static/orgs.json");
     roundtrip::<OrgMembership>("static/org.json");
     roundtrip::<OrgEntitlements>("static/org-entitlements.json");
+    roundtrip::<OrgUsage>("static/org-usage.json");
     roundtrip::<Page<OrgMember>>("static/org-members.json");
     roundtrip::<Page<Invite>>("static/invites.json");
     roundtrip::<Page<AdminUser>>("static/admin-users.json");
@@ -405,8 +423,30 @@ fn static_files_match_their_types() {
     roundtrip::<Evaluator>("static/evaluator.json");
     roundtrip::<EvaluatorTemplateList>("static/evaluator-templates.json");
     roundtrip::<EvaluatorTestResult>("static/evaluator-test-result.json");
+    roundtrip::<Page<Experiment>>("static/experiments.json");
+    roundtrip::<Experiment>("static/experiment.json");
+    roundtrip::<CreateExperimentResponse>("static/experiment-created.json");
+    roundtrip::<ExperimentResults>("static/experiment-results.json");
+    roundtrip::<ExperimentComparison>("static/experiment-comparison.json");
     roundtrip::<Page<ScoreDefinition>>("static/score-definitions.json");
     roundtrip::<ScoreDefinition>("static/score-definition.json");
+    roundtrip::<Page<ModelPrice>>("static/model-prices.json");
+    roundtrip::<Page<ModelPrice>>("static/org-model-prices.json");
+    roundtrip::<ModelPrice>("static/model-price.json");
+    roundtrip::<ModelPriceResolution>("static/model-price-resolution.json");
+    roundtrip::<OnlineRulePage>("static/online-rules.json");
+    roundtrip::<OnlineRule>("static/online-rule.json");
+    roundtrip::<OnlineRule>("static/online-rule-resumed.json");
+    roundtrip::<OnlineRulePreview>("static/online-rule-preview.json");
+    roundtrip::<Page<EvalJob>>("static/eval-jobs.json");
+    roundtrip::<EvalJob>("static/eval-job.json");
+    roundtrip::<EvalJob>("static/eval-job-queued.json");
+    roundtrip::<Page<Backfill>>("static/backfills.json");
+    roundtrip::<Backfill>("static/backfill.json");
+    roundtrip::<BackfillEstimate>("static/backfill-estimate.json");
+    roundtrip::<ImportPreview>("static/dataset-import-preview.json");
+    roundtrip::<ImportResult>("static/dataset-import-result.json");
+    roundtrip::<DatasetItem>("static/dataset-item-from-trace.json");
 }
 
 #[test]
@@ -417,10 +457,46 @@ fn request_examples_match_their_types_and_the_openapi_document() {
     roundtrip::<SqlQueryRequest>("requests/sql-query.json");
     roundtrip::<CreateEvaluatorRequest>("requests/evaluator-create.json");
     roundtrip::<CreateScoreDefinitionRequest>("requests/score-definition-create.json");
+    roundtrip::<CreateDatasetRequest>("requests/dataset-create.json");
+    roundtrip::<AddItemsRequest>("requests/dataset-items-add.json");
+    roundtrip::<ImportMapping>("requests/dataset-import-mapping.json");
+    roundtrip::<FromTraceRequest>("requests/dataset-from-trace.json");
+    roundtrip::<ExperimentResultsRequest>("requests/experiment-results.json");
+    roundtrip::<CreateOnlineRuleRequest>("requests/online-rule-create.json");
+    // `ModelPriceInput` has no `Serialize`, so it is only deserialized.
+    let price_text = fs::read_to_string(api_dir().join("requests/model-price-create.json"))
+        .unwrap_or_else(|error| panic!("{error}"));
+    serde_json::from_str::<ModelPriceInput>(&price_text)
+        .unwrap_or_else(|error| panic!("requests/model-price-create.json: {error}"));
+    // `UpdateOnlineRuleRequest` has no `Serialize`, so it is only deserialized.
+    let update_text = fs::read_to_string(api_dir().join("requests/online-rule-update.json"))
+        .unwrap_or_else(|error| panic!("{error}"));
+    serde_json::from_str::<UpdateOnlineRuleRequest>(&update_text)
+        .unwrap_or_else(|error| panic!("requests/online-rule-update.json: {error}"));
+    // `OnlineRulePreviewRequest` has no `Serialize` (`TimeParam`), so it is only deserialized.
+    let preview_text = fs::read_to_string(api_dir().join("requests/online-rule-preview.json"))
+        .unwrap_or_else(|error| panic!("{error}"));
+    serde_json::from_str::<OnlineRulePreviewRequest>(&preview_text)
+        .unwrap_or_else(|error| panic!("requests/online-rule-preview.json: {error}"));
+    // `CreateBackfillRequest` has no `Serialize` (`TimeParam`), so it is only deserialized.
+    for file in [
+        "requests/backfill-create.json",
+        "requests/backfill-estimate.json",
+    ] {
+        let text =
+            fs::read_to_string(api_dir().join(file)).unwrap_or_else(|error| panic!("{error}"));
+        serde_json::from_str::<CreateBackfillRequest>(&text)
+            .unwrap_or_else(|error| panic!("{file}: {error}"));
+    }
     let test_text = fs::read_to_string(api_dir().join("requests/evaluator-test.json"))
         .unwrap_or_else(|error| panic!("{error}"));
     serde_json::from_str::<EvaluatorTestRequest>(&test_text)
         .unwrap_or_else(|error| panic!("requests/evaluator-test.json: {error}"));
+    // `RunEvaluatorRequest` has no `Serialize` (`TimeParam`), so it is only deserialized.
+    let run_text = fs::read_to_string(api_dir().join("requests/evaluator-run.json"))
+        .unwrap_or_else(|error| panic!("{error}"));
+    serde_json::from_str::<RunEvaluatorRequest>(&run_text)
+        .unwrap_or_else(|error| panic!("requests/evaluator-run.json: {error}"));
     let document = read_json::<Value>(&contract_document());
     let registry = jsonschema::Registry::new()
         .add(OPENAPI_URI, document.clone())
@@ -434,10 +510,30 @@ fn request_examples_match_their_types_and_the_openapi_document() {
         ("run_sql", "requests/sql-query.json"),
         ("post_evaluator", "requests/evaluator-create.json"),
         ("post_evaluator_test", "requests/evaluator-test.json"),
+        ("post_evaluator_run", "requests/evaluator-run.json"),
+        ("post_online_rule", "requests/online-rule-create.json"),
+        ("patch_online_rule", "requests/online-rule-update.json"),
+        (
+            "post_online_rule_preview",
+            "requests/online-rule-preview.json",
+        ),
         (
             "post_score_definition",
             "requests/score-definition-create.json",
         ),
+        ("post_dataset", "requests/dataset-create.json"),
+        ("post_dataset_items", "requests/dataset-items-add.json"),
+        (
+            "post_dataset_item_from_trace",
+            "requests/dataset-from-trace.json",
+        ),
+        (
+            "post_experiment_results",
+            "requests/experiment-results.json",
+        ),
+        ("post_backfill", "requests/backfill-create.json"),
+        ("post_model_price", "requests/model-price-create.json"),
+        ("post_backfill_estimate", "requests/backfill-estimate.json"),
     ];
     let mut failures = Vec::new();
     for (operation_id, file) in requests {
@@ -498,6 +594,11 @@ fn generated_files_roundtrip() {
             "list_users" => roundtrip::<Page<EndUserSummary>>(&example.file),
             "get_user" => roundtrip::<EndUserDetail>(&example.file),
             "list_scores" => roundtrip::<Page<Score>>(&example.file),
+            "list_datasets" => roundtrip::<Page<Dataset>>(&example.file),
+            "get_dataset" | "post_dataset" => roundtrip::<Dataset>(&example.file),
+            "list_dataset_versions" => roundtrip::<Page<DatasetVersion>>(&example.file),
+            "list_dataset_items" => roundtrip::<Page<DatasetItem>>(&example.file),
+            "get_dataset_item" => roundtrip::<DatasetItem>(&example.file),
             "list_api_keys" => roundtrip::<Page<ApiKey>>(&example.file),
             "post_api_key" => roundtrip::<CreatedApiKey>(&example.file),
             "list_personal_tokens" => roundtrip::<Page<PersonalToken>>(&example.file),
@@ -506,6 +607,7 @@ fn generated_files_roundtrip() {
             "run_sql" => roundtrip::<SqlQueryResult>(&example.file),
             "list_deletions" => roundtrip::<Page<Deletion>>(&example.file),
             "list_org_deletions" => roundtrip::<Page<Deletion>>(&example.file),
+            "get_org_usage" => roundtrip::<OrgUsage>(&example.file),
             "get_deletion" | "create_deletion" | "delete_project" | "delete_org" => {
                 roundtrip::<Deletion>(&example.file);
             }
@@ -535,6 +637,7 @@ fn generated_files_roundtrip() {
             | "post_admin_user"
             | "get_admin_settings"
             | "get_admin_license" => {}
+            "get_org_sso" => roundtrip::<OrgSso>(&example.file),
             "list_llm_connections" => roundtrip::<Page<LlmConnection>>(&example.file),
             "get_llm_connection" | "post_llm_connection" => {
                 roundtrip::<LlmConnection>(&example.file);
@@ -544,8 +647,31 @@ fn generated_files_roundtrip() {
             "get_evaluator" | "post_evaluator" => roundtrip::<Evaluator>(&example.file),
             "list_evaluator_templates" => roundtrip::<EvaluatorTemplateList>(&example.file),
             "post_evaluator_test" => roundtrip::<EvaluatorTestResult>(&example.file),
+            "get_saved_view" => roundtrip::<SavedView>(&example.file),
             "list_score_definitions" => roundtrip::<Page<ScoreDefinition>>(&example.file),
             "post_score_definition" => roundtrip::<ScoreDefinition>(&example.file),
+            "list_models" => roundtrip::<Page<ModelPrice>>(&example.file),
+            "list_org_model_prices" => roundtrip::<Page<ModelPrice>>(&example.file),
+            "resolve_model_price" => roundtrip::<ModelPriceResolution>(&example.file),
+            "post_model_price" => roundtrip::<ModelPrice>(&example.file),
+            "list_online_rules" => roundtrip::<OnlineRulePage>(&example.file),
+            "get_online_rule" | "post_online_rule" | "post_online_rule_resume" => {
+                roundtrip::<OnlineRule>(&example.file);
+            }
+            "post_online_rule_preview" => roundtrip::<OnlineRulePreview>(&example.file),
+            "list_eval_jobs" => roundtrip::<Page<EvalJob>>(&example.file),
+            "get_eval_job" | "post_evaluator_run" => roundtrip::<EvalJob>(&example.file),
+            "list_experiments" => roundtrip::<Page<Experiment>>(&example.file),
+            "get_experiment" => roundtrip::<Experiment>(&example.file),
+            "post_experiment" => roundtrip::<CreateExperimentResponse>(&example.file),
+            "get_experiment_results" => roundtrip::<ExperimentResults>(&example.file),
+            "compare_experiments" => roundtrip::<ExperimentComparison>(&example.file),
+            "list_backfills" => roundtrip::<Page<Backfill>>(&example.file),
+            "post_backfill" => roundtrip::<Backfill>(&example.file),
+            "post_backfill_estimate" => roundtrip::<BackfillEstimate>(&example.file),
+            "post_dataset_import_preview" => roundtrip::<ImportPreview>(&example.file),
+            "post_dataset_import" => roundtrip::<ImportResult>(&example.file),
+            "post_dataset_item_from_trace" => roundtrip::<DatasetItem>(&example.file),
             other => panic!("{other} has no round-trip"),
         }
     }
@@ -573,10 +699,15 @@ fn manifest_covers_the_read_operations() {
                 .unwrap_or_else(|| panic!("operation id"));
             known.insert(id.to_owned());
             // Streams and the OAuth redirects have no JSON body to fixture.
+            // Internal operations are called by the control plane and have no examples.
+            // A file download, not a JSON body.
             if method == "get"
+                && operation["tags"][0].as_str() != Some("internal")
                 && id != "stream_traces"
                 && id != "stream_trace"
+                && id != "get_dataset_export"
                 && id != "get_oauth_authorize"
+                && id != "get_sso_authorize"
                 && id != "get_oauth_callback"
             {
                 gets.insert(id.to_owned());
@@ -792,7 +923,7 @@ fn example_scenarios() {
         .iter()
         .find(|trace| trace.trace_id.to_string() == TRACE_3)
         .unwrap_or_else(|| panic!("T3"));
-    assert_eq!(third.status, llmobs_core::enums::SpanStatus::Error);
+    assert_eq!(third.status, cetra_core::enums::SpanStatus::Error);
     assert_eq!(third.error_count, 2);
 
     let span: SpanDetail =

@@ -11,8 +11,8 @@ use arrow::compute::{SortColumn, cast, concat_batches, lexsort_to_indices, take_
 use arrow::datatypes::{DataType, Float32Type, Float64Type};
 use arrow::util::display::{ArrayFormatter, FormatOptions};
 use fmt_testdata::datagen;
-use llmobs_core::batch::spans_to_record_batch;
-use llmobs_core::schema::spans_schema;
+use cetra_core::batch::spans_to_record_batch;
+use cetra_core::schema::spans_schema;
 
 /// Time slices of one generated dataset.
 pub struct Dataset {

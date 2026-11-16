@@ -1,6 +1,6 @@
 //! Rule condition defaults and checks (D-K-2).
 
-use llmobs_storage::AlertMeasure;
+use cetra_storage::AlertMeasure;
 
 use crate::api::alerts::{AlertCondition, AlertMetric, LatencyTarget, ScoreAggregation};
 use crate::api::common::FieldError;
@@ -11,6 +11,7 @@ pub(crate) const MAX_FILTER_CHARS: usize = 4096;
 pub(crate) const MAX_SCORE_NAME_CHARS: usize = 200;
 /// Largest `min_count`.
 pub(crate) const MAX_MIN_COUNT: i64 = 1_000_000;
+const NS_PER_MS: f64 = 1_000_000.0;
 
 /// Fills the defaults and checks every field. Errors name the field as
 /// `condition.<name>`. Several errors are returned together, in field order.
@@ -42,7 +43,19 @@ pub(crate) fn normalize_condition(
                 (!(0.0..=1.0).contains(&threshold)).then_some("must be between 0 and 1")
             }
             AlertMetric::Cost => (threshold < 0.0).then_some("must be at least 0"),
-            AlertMetric::LatencyP95 => (threshold <= 0.0).then_some("must be greater than 0"),
+            AlertMetric::LatencyP95 => {
+                // A trace is measured from its start (D-K-18), so a trace threshold at or
+                // above the window cannot be measured fairly; llm spans are not affected.
+                let window_ms = condition.window.ns() as f64 / NS_PER_MS;
+                let llm_span = condition.target == Some(LatencyTarget::LlmSpan);
+                if threshold <= 0.0 {
+                    Some("must be greater than 0")
+                } else if !llm_span && threshold >= window_ms {
+                    Some("must be less than the window")
+                } else {
+                    None
+                }
+            }
             AlertMetric::Score => (aggregation == ScoreAggregation::PassRate
                 && !(0.0..=1.0).contains(&threshold))
             .then_some("must be between 0 and 1"),
@@ -236,6 +249,28 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].field, "condition.threshold");
         assert_eq!(errors[0].message, "must be a finite number");
+    }
+
+    #[test]
+    fn trace_latency_threshold_must_be_below_the_window() {
+        // M5 is 300 000 ms.
+        let trace_at = |threshold: f64, target: Option<LatencyTarget>| {
+            let mut rule = condition(AlertMetric::LatencyP95);
+            rule.threshold = threshold;
+            rule.target = target;
+            rule
+        };
+        assert!(normalize_condition(trace_at(299_999.0, None)).is_ok());
+        assert_eq!(fields(trace_at(300_000.0, None)), ["condition.threshold"]);
+        assert_eq!(
+            fields(trace_at(300_000.0, Some(LatencyTarget::Trace))),
+            ["condition.threshold"]
+        );
+        let errors = normalize_condition(trace_at(400_000.0, Some(LatencyTarget::Trace)))
+            .expect_err("too long");
+        assert_eq!(errors[0].message, "must be less than the window");
+        // Span latency is measured over the window itself: no such limit.
+        assert!(normalize_condition(trace_at(400_000.0, Some(LatencyTarget::LlmSpan))).is_ok());
     }
 
     #[test]

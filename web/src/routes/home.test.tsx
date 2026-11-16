@@ -8,6 +8,7 @@ import { server } from "@/mocks/node";
 import { createAppRouter } from "@/router";
 import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
+import entitlementsFixture from "../../../fixtures/api/static/org-entitlements.json";
 import projectsFixture from "../../../fixtures/api/static/projects.json";
 
 const USER = {
@@ -48,7 +49,7 @@ it("shows role, retention and slug", async () => {
   expect(support).toHaveTextContent("support-bot");
 
   const playground = screen.getByRole("row", { name: /Playground/ });
-  expect(playground).toHaveTextContent("Default");
+  expect(playground).toHaveTextContent("Forever");
   expect(playground).toHaveTextContent("playground");
 });
 
@@ -324,6 +325,29 @@ it("shows a taken slug and a refusal", async () => {
   expect(
     await screen.findByText("Only admins and owners can create projects."),
   ).toBeInTheDocument();
+});
+
+it("explains a project past the plan limit and offers an upgrade", async () => {
+  server.use(
+    http.post("/api/v1/orgs/:org/projects", () =>
+      problemResponse(403, "plan_limit", { detail: "Your plan allows 1 project." }),
+    ),
+  );
+
+  const { user } = await renderApp("/acme");
+  await user.click(screen.getByRole("button", { name: "New project" }));
+  const dialog = await screen.findByRole("dialog", { name: "New project" });
+  await user.type(within(dialog).getByLabelText("Name"), "New bot");
+  await user.click(within(dialog).getByRole("button", { name: "Create project" }));
+
+  expect(await within(dialog).findByText("Your plan allows 1 project.")).toBeInTheDocument();
+  expect(await within(dialog).findByRole("link", { name: "Upgrade" })).toHaveAttribute(
+    "href",
+    entitlementsFixture.upgrade_url,
+  );
+  expect(
+    within(dialog).queryByText("Only admins and owners can create projects."),
+  ).not.toBeInTheDocument();
 });
 
 it("rejects a bad retention without calling the server", async () => {

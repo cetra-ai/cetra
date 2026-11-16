@@ -7,7 +7,7 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use axum::body::Bytes;
 use axum::http::{Method, header};
-use llmobs_core::ids::OrgId;
+use cetra_core::ids::OrgId;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -117,7 +117,7 @@ impl Outcome {
 
 #[tokio::test(flavor = "current_thread")]
 async fn every_route_against_every_principal() {
-    let ((needles, checked), logs) = capture_logs(suite()).await;
+    let ((needles, checked), logs) = Box::pin(capture_logs(suite())).await;
     for needle in &needles {
         assert!(!logs.contains(needle), "log contains {needle}: {logs}");
     }
@@ -193,7 +193,7 @@ async fn build(app: &TestApp) -> World {
         create_key(app, &ada.cookie, &project_a, "secret", &["read"], "extra").await;
     let (_, key_foreign) =
         create_key(app, &bob.cookie, &project_b, "secret", &["read"], "foreign").await;
-    let control_plane = control_plane_token("orgs");
+    let control_plane = control_plane_token("orgs", "GET", "/");
     for secret in [
         control_plane.clone(),
         pat_read.clone(),
@@ -251,6 +251,7 @@ async fn build(app: &TestApp) -> World {
             bearer(Who::KeyIngest, key_ingest),
             bearer(Who::KeyPublic, key_public),
             bearer(Who::KeyForeign, key_foreign),
+            // Signed per request in `call`: a control-plane token names its method and path.
             bearer(Who::ControlPlane, control_plane),
         ],
     }
@@ -368,6 +369,13 @@ fn checked_routes() -> Vec<RouteDef> {
 }
 
 fn concrete_path(route: &RouteDef, world: &World) -> String {
+    // The control plane's drop would delete the world's org. An id that no org has answers 404
+    // and drops nothing, which the matrix records as allowed.
+    if route.method == Method::DELETE && route.path == "/api/internal/v1/orgs/{org_id}" {
+        return route
+            .path
+            .replace("{org_id}", "01900000-0000-7000-8000-000000009999");
+    }
     let id = if route.path.contains("api-keys") {
         world.key_id.as_str()
     } else if route.path.contains("tokens/{id}") {
@@ -380,6 +388,8 @@ fn concrete_path(route: &RouteDef, world: &World) -> String {
         .replace("{org}", &world.org_slug)
         .replace("{org_id}", &world.org_id.to_string())
         .replace("{project}", &world.project_a)
+        .replace("{dataset}", "faq")
+        .replace("{item_id}", "01900000-0000-7000-8000-000000009999")
         .replace("{score_id}", "01900000-0000-7000-8000-000000009999")
         .replace("{trace_id}", "a1000000000000000000000000000001")
         .replace("{span_id}", "b100000000000011")
@@ -397,12 +407,14 @@ fn concrete_path(route: &RouteDef, world: &World) -> String {
 
 async fn call(app: &TestApp, route: &RouteDef, path: &str, caller: &Caller) -> TestResponse {
     let body = route.method != Method::GET && route.method != Method::HEAD;
+    let control_plane = (caller.who == Who::ControlPlane)
+        .then(|| control_plane_token("orgs", route.method.as_str(), path));
     send(
         app,
         route.method.clone(),
         path,
         caller.cookie.as_deref(),
-        caller.bearer.as_deref(),
+        control_plane.as_deref().or(caller.bearer.as_deref()),
         body,
     )
     .await
@@ -665,7 +677,9 @@ async fn assert_lists_omit_secrets(app: &TestApp, world: &World) {
 }
 
 fn is_list(route: &RouteDef) -> bool {
+    // Control-plane lists (`/api/internal/...`) answer only the control plane's token.
     route.method == Method::GET
+        && !matches!(route.access, Access::ControlPlane { .. })
         && matches!(
             route.path.rsplit('/').next(),
             Some("orgs" | "projects" | "members" | "api-keys" | "tokens" | "llm-connections")

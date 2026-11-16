@@ -59,13 +59,28 @@ export function canManageConnections(role: OrgRole | undefined): boolean {
   return atLeast(role, "admin");
 }
 
+/** Mirrors `OrgPerm::ManagePrices`: org admins and owners (D-T-6). */
+export function canManageOrgPrices(role: OrgRole | undefined): boolean {
+  return atLeast(role, "admin");
+}
+
 /** Mirrors `ProjectPerm::ManageEvaluation`: project members and above (D-I-24). */
 export function canManageEvaluation(role: OrgRole | undefined): boolean {
   return atLeast(role, "member");
 }
 
+/** Mirrors `ProjectPerm::Annotate`: project members and above write scores (D-G-16). Same logic as `canManageEvaluation`, kept separate on purpose: it mirrors a different server permission. */
+export function canAnnotate(role: OrgRole | undefined): boolean {
+  return atLeast(role, "member");
+}
+
 /** Members and above manage alert rules and channels (D-K-9). */
 export function canManageAlerts(role: OrgRole | undefined): boolean {
+  return atLeast(role, "member");
+}
+
+/** Mirrors `ProjectPerm::ManageDatasets`: project members and above write datasets and experiments (D-J-5). */
+export function canManageDatasets(role: OrgRole | undefined): boolean {
   return atLeast(role, "member");
 }
 

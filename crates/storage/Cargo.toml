@@ -1,5 +1,5 @@
 [package]
-name = "llmobs-storage"
+name = "cetra-storage"
 description = "WAL, Parquet storage, catalog, compaction, and queries"
 version.workspace = true
 edition.workspace = true
@@ -11,7 +11,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-llmobs-core.workspace = true
+cetra-core.workspace = true
 arrow = { workspace = true, features = ["ipc_compression", "json"] }
 async-trait.workspace = true
 bytes.workspace = true
@@ -23,6 +23,7 @@ datafusion-datasource.workspace = true
 futures.workspace = true
 hex.workspace = true
 humantime-serde.workspace = true
+lz4_flex = { workspace = true }
 # `fs` is already a default feature of the pin. `aws` is the S3 backend (D119).
 object_store = { workspace = true, features = ["fs", "aws"] }
 parquet.workspace = true
@@ -37,7 +38,17 @@ tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 
+# Fuzz entry points (track R M3): cargo-fuzz sets `--cfg fuzzing`.
+[target.'cfg(fuzzing)'.dependencies]
+arbitrary.workspace = true
+
 [dev-dependencies]
+arbitrary.workspace = true
 proptest.workspace = true
+flate2.workspace = true
+tracing-subscriber.workspace = true
+# Descriptor limits for the resource tests (track R M5, R5.7); the pin is the workspace's.
+rustix = { workspace = true, features = ["process"] }
+reqwest = { workspace = true }
 tempfile.workspace = true
 toml.workspace = true

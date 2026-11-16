@@ -9,16 +9,22 @@
  * unchanged either way.
  */
 
-import { type Context, context, createContextKey, propagation } from "@opentelemetry/api";
+import {
+  type Context,
+  context,
+  createContextKey,
+  propagation,
+  ROOT_CONTEXT,
+} from "@opentelemetry/api";
 
 import { debug } from "./log.js";
 import { applyMask } from "./mask.js";
 
 /** README § Names: one OTel context key for all context values. */
-export const CONTEXT_KEY = createContextKey("llmobs.context");
+export const CONTEXT_KEY = createContextKey("cetra.context");
 
-const BAGGAGE_SESSION_KEY = "llmobs.session.id";
-const BAGGAGE_USER_KEY = "llmobs.user.id";
+const BAGGAGE_SESSION_KEY = "cetra.session.id";
+const BAGGAGE_USER_KEY = "cetra.user.id";
 /** § Span attributes: not empty, only `[A-Za-z0-9_.-]`. */
 const METADATA_KEY = /^[A-Za-z0-9_.-]+$/;
 
@@ -31,11 +37,18 @@ export interface ContextOptions {
   propagate?: boolean;
 }
 
+/** The experiment and dataset item of an `evaluate` run (D-J-16). Internal. */
+export interface ExperimentLink {
+  readonly experimentId: string;
+  readonly datasetItemId: string;
+}
+
 export interface ContextValues {
   readonly sessionId: string | undefined;
   readonly userId: string | undefined;
   readonly tags: readonly string[];
   readonly metadata: Readonly<Record<string, unknown>>;
+  readonly experiment: ExperimentLink | undefined;
 }
 
 const EMPTY_VALUES: ContextValues = Object.freeze({
@@ -43,7 +56,21 @@ const EMPTY_VALUES: ContextValues = Object.freeze({
   userId: undefined,
   tags: Object.freeze([]),
   metadata: Object.freeze({}) as Readonly<Record<string, unknown>>,
+  experiment: undefined,
 });
+
+/**
+ * A context holding only the experiment link, built on `ROOT_CONTEXT`: no
+ * active span, no baggage and none of the caller's values, so the run's root
+ * span starts a new trace. Internal (`evaluate`).
+ */
+export function experimentContext(experimentId: string, datasetItemId: string): Context {
+  const values: ContextValues = Object.freeze({
+    ...EMPTY_VALUES,
+    experiment: Object.freeze({ experimentId, datasetItemId }),
+  });
+  return ROOT_CONTEXT.setValue(CONTEXT_KEY, values);
+}
 
 /** The context values of `ctx` (the active context when omitted). Internal. */
 export function currentValues(ctx?: Context): ContextValues {
@@ -73,6 +100,7 @@ function contextFor(options: ContextOptions): Context {
       userId: inner.userId ?? outer.userId,
       tags: Object.freeze(unionTags(outer.tags, inner.tags)),
       metadata: Object.freeze({ ...outer.metadata, ...inner.metadata }),
+      experiment: outer.experiment,
     });
     let ctx = context.active().setValue(CONTEXT_KEY, merged);
     if (raw.propagate) {
@@ -87,7 +115,7 @@ function contextFor(options: ContextOptions): Context {
     }
     return ctx;
   } catch (error) {
-    debug(`llmobs: withContext failed: ${errorName(error)}`);
+    debug(`cetra: withContext failed: ${errorName(error)}`);
     return context.active();
   }
 }
@@ -110,7 +138,7 @@ function validOptions(raw: Record<string, unknown>): {
       metadata[key] = applyMask(value);
     }
   } else if (source !== undefined) {
-    debug("llmobs: withContext metadata option dropped");
+    debug("cetra: withContext metadata option dropped");
   }
   return { sessionId, userId, tags, metadata };
 }
@@ -120,7 +148,7 @@ function validString(value: unknown, name: string): string | undefined {
     return value;
   }
   if (value !== undefined) {
-    debug(`llmobs: withContext ${name} option dropped`);
+    debug(`cetra: withContext ${name} option dropped`);
   }
   return undefined;
 }
@@ -132,7 +160,7 @@ function validTags(value: unknown): string[] {
   }
   if (!Array.isArray(value)) {
     if (value !== undefined) {
-      debug("llmobs: withContext tags option dropped");
+      debug("cetra: withContext tags option dropped");
     }
     return [];
   }
@@ -172,23 +200,36 @@ function coerceValues(raw: unknown): ContextValues {
     userId: typeof record.userId === "string" ? record.userId : undefined,
     tags,
     metadata,
+    experiment: coerceLink(record.experiment),
   };
+}
+
+/** An experiment link with two string ids; anything else is no link. */
+function coerceLink(raw: unknown): ExperimentLink | undefined {
+  if (typeof raw !== "object" || raw === null) {
+    return undefined;
+  }
+  const record = raw as Record<string, unknown>;
+  if (typeof record.experimentId !== "string" || typeof record.datasetItemId !== "string") {
+    return undefined;
+  }
+  return { experimentId: record.experimentId, datasetItemId: record.datasetItemId };
 }
 
 const skippedMetadataKeys = new Set<string>();
 
 /**
- * The attribute name a metadata key maps to (`llmobs.metadata.<key>`), or
+ * The attribute name a metadata key maps to (`cetra.metadata.<key>`), or
  * `undefined` when the key fails the rule (§ Span attributes). A failing key
  * is logged once at debug level, with its length only, never the key.
  */
 export function metadataAttributeName(key: string): string | undefined {
   if (METADATA_KEY.test(key)) {
-    return `llmobs.metadata.${key}`;
+    return `cetra.metadata.${key}`;
   }
   if (!skippedMetadataKeys.has(key)) {
     skippedMetadataKeys.add(key);
-    debug(`llmobs: metadata key of length ${key.length} skipped`);
+    debug(`cetra: metadata key of length ${key.length} skipped`);
   }
   return undefined;
 }

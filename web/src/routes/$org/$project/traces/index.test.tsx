@@ -5,6 +5,7 @@ import type { Schema } from "@/api/types";
 import { columnChoiceKey } from "@/components/data-table/column-layout";
 import { ROW_HEIGHT } from "@/components/data-table/data-table";
 import { LIVE_BUFFER_MAX, LIVE_PAGE_MAX } from "@/components/data-table/live-list";
+import { traceProbeOptions } from "@/components/data-table/use-infinite-list";
 import { setLiveLimits } from "@/components/data-table/use-live-traces";
 import { ONBOARDING_POLL_MS, setOnboardingPollMs } from "@/components/onboarding/poll";
 import { otelSnippet } from "@/components/onboarding/snippets";
@@ -14,6 +15,7 @@ import { largeHandlers } from "@/mocks/generated/handlers";
 import { server } from "@/mocks/node";
 import { savedViewHandlers } from "@/mocks/saved-views";
 import { type StreamEmit, spanStreamHandler, traceStreamHandler } from "@/mocks/sse";
+import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
 import projectFixture from "../../../../../../fixtures/api/static/project.json";
 
@@ -205,11 +207,11 @@ it("persists a column width and restores the default on double-click", async () 
   fireEvent.pointerDown(handle, { clientX: 100 });
   fireEvent.pointerMove(window, { clientX: 180 });
   fireEvent.pointerUp(window, { clientX: 180 });
-  expect(JSON.parse(localStorage.getItem("llmobs.table.traces") ?? "")).toEqual({ name: 280 });
+  expect(JSON.parse(localStorage.getItem("cetra.table.traces") ?? "")).toEqual({ name: 280 });
   const header = handle.parentElement?.parentElement;
   expect(header?.style.gridTemplateColumns.startsWith("28px 132px 280px")).toBe(true);
   fireEvent.doubleClick(handle);
-  expect(localStorage.getItem("llmobs.table.traces")).toBeNull();
+  expect(localStorage.getItem("cetra.table.traces")).toBeNull();
   expect(header?.style.gridTemplateColumns.startsWith("28px 132px 200px")).toBe(true);
 });
 
@@ -591,6 +593,139 @@ it("replaces onboarding with the table when a trace arrives", async () => {
   }
 });
 
+it("shows onboarding when the all-time probe fails", async () => {
+  savedViewHandlers([]);
+  server.use(
+    http.get("/api/v1/projects/:project/traces", ({ request }) => {
+      const url = new URL(request.url);
+      if (!url.searchParams.has("from")) {
+        return problemResponse(500, "internal", { detail: "probe failed" });
+      }
+      return HttpResponse.json({ data: [], next_cursor: null });
+    }),
+  );
+  await renderApp("/acme/support-bot/traces");
+  expect(await screen.findByRole("tab", { name: "OTel env vars" })).toBeInTheDocument();
+  expect(screen.queryByText("No traces in this time range.")).not.toBeInTheDocument();
+});
+
+it("shows neither the empty range nor onboarding while the probe loads", async () => {
+  savedViewHandlers([]);
+  let release: (() => void) | undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  server.use(
+    http.get("/api/v1/projects/:project/traces", async ({ request }) => {
+      const url = new URL(request.url);
+      if (!url.searchParams.has("from")) {
+        await gate;
+      }
+      return HttpResponse.json({ data: [], next_cursor: null });
+    }),
+  );
+  try {
+    await renderApp("/acme/support-bot/traces");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(screen.queryByText("No traces in this time range.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "OTel env vars" })).not.toBeInTheDocument();
+    release?.();
+    expect(await screen.findByRole("tab", { name: "OTel env vars" })).toBeInTheDocument();
+  } finally {
+    release?.();
+  }
+});
+
+it("hides onboarding while a cached empty probe refetches", async () => {
+  savedViewHandlers([]);
+  let probes = 0;
+  let release: (() => void) | undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  server.use(
+    http.get("/api/v1/projects/:project/traces", async ({ request }) => {
+      if (!new URL(request.url).searchParams.has("from")) {
+        probes += 1;
+        if (probes > 1) {
+          await gate;
+        }
+      }
+      return HttpResponse.json({ data: [], next_cursor: null });
+    }),
+  );
+  try {
+    const { queryClient } = await renderApp("/acme/support-bot/traces");
+    expect(await screen.findByRole("tab", { name: "OTel env vars" })).toBeInTheDocument();
+    void queryClient.invalidateQueries({
+      queryKey: traceProbeOptions("acme", "support-bot").queryKey,
+    });
+    await waitFor(() => expect(probes).toBe(2));
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(screen.queryByRole("tab", { name: "OTel env vars" })).not.toBeInTheDocument();
+    expect(screen.queryByText("No traces in this time range.")).not.toBeInTheDocument();
+    release?.();
+    expect(await screen.findByRole("tab", { name: "OTel env vars" })).toBeInTheDocument();
+  } finally {
+    release?.();
+  }
+});
+
+it("asks for one trace over all time before it shows onboarding", async () => {
+  savedViewHandlers([]);
+  const probes: URL[] = [];
+  server.use(
+    http.get("/api/v1/projects/:project/traces", ({ request }) => {
+      const url = new URL(request.url);
+      if (!url.searchParams.has("from")) {
+        probes.push(url);
+      }
+      return HttpResponse.json({ data: [], next_cursor: null });
+    }),
+  );
+  await renderApp("/acme/support-bot/traces");
+  expect(await screen.findByRole("tab", { name: "OTel env vars" })).toBeInTheDocument();
+  expect(probes[0]?.searchParams.get("limit")).toBe("1");
+  expect(probes[0]?.searchParams.has("filter")).toBe(false);
+  expect(probes[0]?.searchParams.has("include_eval")).toBe(false);
+});
+
+it("shows the empty range, not onboarding, when the project has traces outside it", async () => {
+  savedViewHandlers([]);
+  setOnboardingPollMs(20);
+  const dataset = createDataset({ seed: 1, now: Date.now(), traces: 1 });
+  const trace = dataset.traces[0];
+  if (!trace) {
+    throw new Error("missing trace");
+  }
+  const listed: URL[] = [];
+  const onStart = ({ request }: { request: Request }) => {
+    const url = new URL(request.url);
+    if (url.pathname.endsWith("/traces") && url.searchParams.has("from")) {
+      listed.push(url);
+    }
+  };
+  server.events.on("request:start", onStart);
+  server.use(
+    http.get("/api/v1/projects/:project/traces", ({ request }) => {
+      const url = new URL(request.url);
+      const probe = !url.searchParams.has("from");
+      return HttpResponse.json({ data: probe ? [trace] : [], next_cursor: null });
+    }),
+  );
+  try {
+    await renderApp("/acme/support-bot/traces");
+    expect(await screen.findByText("No traces in this time range.")).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "OTel env vars" })).not.toBeInTheDocument();
+    const before = listed.length;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(listed.length).toBe(before);
+  } finally {
+    server.events.removeListener("request:start", onStart);
+    setOnboardingPollMs(ONBOARDING_POLL_MS);
+  }
+});
+
 it("opens the trace stream with the list filter and search", async () => {
   const streams: URL[] = [];
   const onStart = ({ request }: { request: Request }) => {
@@ -611,6 +746,56 @@ it("opens the trace stream with the list filter and search", async () => {
     expect(streams[0]?.searchParams.get("include_eval")).toBe("true");
     expect(streams[0]?.searchParams.get("include_experiments")).toBe("true");
     expect(screen.getByRole("switch", { name: "Live" })).toBeEnabled();
+    expect(screen.getByRole("switch", { name: "Live" })).toBeChecked();
+  } finally {
+    server.events.removeListener("request:start", onStart);
+  }
+});
+
+it("opens no trace stream while the list answers an invalid filter", async () => {
+  savedViewHandlers([]);
+  const streams: URL[] = [];
+  const onStart = ({ request }: { request: Request }) => {
+    const url = new URL(request.url);
+    if (url.pathname.endsWith("/traces/stream")) {
+      streams.push(url);
+    }
+  };
+  server.events.on("request:start", onStart);
+  server.use(
+    http.get("/api/v1/projects/:project/traces", () =>
+      problemResponse(400, "invalid_filter", { detail: "unknown column" }),
+    ),
+    traceStreamHandler(() => undefined),
+  );
+  try {
+    await renderApp(`/acme/support-bot/traces?live=1&filter=${encodeURIComponent("nope =")}`);
+    expect((await screen.findAllByText("unknown column")).length).toBeGreaterThan(0);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(streams).toEqual([]);
+  } finally {
+    server.events.removeListener("request:start", onStart);
+  }
+});
+
+it("keeps the live stream open while a background refetch fails", async () => {
+  const streams: URL[] = [];
+  const onStart = ({ request }: { request: Request }) => {
+    const url = new URL(request.url);
+    if (url.pathname.endsWith("/traces/stream")) {
+      streams.push(url);
+    }
+  };
+  server.events.on("request:start", onStart);
+  try {
+    const { emit } = await openLive("/acme/support-bot/traces?live=1");
+    const opened = streams.length;
+    server.use(http.get("/api/v1/projects/:project/traces", () => HttpResponse.error()));
+    emit.resync();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    emit.trace(liveTrace("c1000000000000000000000000000051", "after the blip", LATER));
+    expect(await screen.findByText("after the blip")).toBeInTheDocument();
+    expect(streams.length).toBe(opened);
     expect(screen.getByRole("switch", { name: "Live" })).toBeChecked();
   } finally {
     server.events.removeListener("request:start", onStart);
@@ -835,6 +1020,191 @@ it("refetches the first page instead of growing it past the cap", async () => {
     setLiveLimits({ buffer: LIVE_BUFFER_MAX, page: LIVE_PAGE_MAX });
   }
 });
+
+it("keeps one first-page refetch in flight and queues one trailing refetch", async () => {
+  setLiveLimits({ buffer: LIVE_BUFFER_MAX, page: 5 });
+  const { emit } = await openLive("/acme/support-bot/traces?live=1");
+  expect(screen.getByText("5 loaded")).toBeInTheDocument();
+  let requests = 0;
+  let inFlight = 0;
+  let maxInFlight = 0;
+  let aborted = 0;
+  let release: (() => void) | undefined;
+  server.use(
+    http.get("/api/v1/projects/:project/traces", async ({ request }) => {
+      requests += 1;
+      const call = requests;
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      request.signal.addEventListener("abort", () => {
+        aborted += 1;
+      });
+      try {
+        if (call === 1) {
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+        }
+        const name = call === 1 ? "first refresh" : "after the burst";
+        return HttpResponse.json({
+          data: [liveTrace(`c10000000000000000000000000000${call}0`, name, LATER)],
+          next_cursor: null,
+        });
+      } finally {
+        inFlight -= 1;
+      }
+    }),
+  );
+  try {
+    emit.trace(liveTrace("c1000000000000000000000000000021", "burst one", LATER));
+    await waitFor(() => expect(requests).toBe(1));
+    emit.trace(liveTrace("c1000000000000000000000000000022", "burst two", LATER));
+    emit.trace(liveTrace("c1000000000000000000000000000023", "burst three", LATER));
+    emit.resync();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(requests).toBe(1);
+    expect(release).toBeDefined();
+    release?.();
+    expect(await screen.findByText("after the burst")).toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(requests).toBe(2);
+    expect(maxInFlight).toBe(1);
+    expect(aborted).toBe(0);
+    expect(screen.queryByText("first refresh")).not.toBeInTheDocument();
+  } finally {
+    release?.();
+    setLiveLimits({ buffer: LIVE_BUFFER_MAX, page: LIVE_PAGE_MAX });
+  }
+});
+
+it("queues a trace that arrives during a first-page refetch instead of inserting it", async () => {
+  setLiveLimits({ buffer: LIVE_BUFFER_MAX, page: LIVE_PAGE_MAX });
+  const { emit } = await openLive("/acme/support-bot/traces?live=1");
+  expect(screen.getByText("5 loaded")).toBeInTheDocument();
+  let requests = 0;
+  let inFlight = 0;
+  let maxInFlight = 0;
+  let aborted = 0;
+  let release: (() => void) | undefined;
+  server.use(
+    http.get("/api/v1/projects/:project/traces", async ({ request }) => {
+      requests += 1;
+      const call = requests;
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      request.signal.addEventListener("abort", () => {
+        aborted += 1;
+      });
+      try {
+        if (call === 1) {
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+        }
+        const rows =
+          call === 1
+            ? [liveTrace("c1000000000000000000000000000041", "first refresh", LATER)]
+            : [liveTrace("c1000000000000000000000000000042", "arrived mid-fetch", LATER)];
+        return HttpResponse.json({ data: rows, next_cursor: null });
+      } finally {
+        inFlight -= 1;
+      }
+    }),
+  );
+  try {
+    emit.resync();
+    await waitFor(() => expect(requests).toBe(1));
+    emit.trace(liveTrace("c1000000000000000000000000000043", "arrived mid-fetch", LATER));
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(screen.queryByText("arrived mid-fetch")).not.toBeInTheDocument();
+    expect(requests).toBe(1);
+    release?.();
+    expect(await screen.findByText("arrived mid-fetch")).toBeInTheDocument();
+    expect(requests).toBe(2);
+    expect(maxInFlight).toBe(1);
+    expect(aborted).toBe(0);
+    expect(screen.queryByText("first refresh")).not.toBeInTheDocument();
+  } finally {
+    release?.();
+    setLiveLimits({ buffer: LIVE_BUFFER_MAX, page: LIVE_PAGE_MAX });
+  }
+});
+
+it("keeps the pages a reader scrolled to when a queued refetch runs", async () => {
+  server.use(...largeHandlers(traces5k));
+  let emit: StreamEmit | undefined;
+  server.use(
+    traceStreamHandler((next) => {
+      emit = next;
+      return undefined;
+    }),
+  );
+  let hold = false;
+  let release: (() => void) | undefined;
+  const cursors: string[] = [];
+  const onStart = ({ request }: { request: Request }) => {
+    const cursor = new URL(request.url).searchParams.get("cursor");
+    if (cursor) {
+      cursors.push(cursor);
+    }
+  };
+  server.events.on("request:start", onStart);
+  // Holds the next first-page request; the handler below falls through to the large list.
+  server.use(
+    http.get("/api/v1/projects/:project/traces", async ({ request }) => {
+      if (hold && new URL(request.url).searchParams.has("from")) {
+        hold = false;
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      }
+      return undefined;
+    }),
+  );
+  try {
+    const { queryClient } = await renderApp("/acme/support-bot/traces?live=1");
+    await screen.findByRole("grid", { name: "Traces" });
+    await waitFor(() => expect(emit).toBeDefined());
+    const scroller = tracesScroller();
+    const firstPage = loadedCount();
+    scroller.scrollTop = scroller.scrollHeight;
+    fireEvent.scroll(scroller);
+    await waitFor(() => expect(loadedCount()).toBeGreaterThan(firstPage));
+    const scrolled = loadedCount();
+    // A list refetch is in flight at the top, and a trace queues one trailing refetch.
+    scroller.scrollTop = 0;
+    fireEvent.scroll(scroller);
+    const list = queryClient
+      .getQueryCache()
+      .getAll()
+      .find((query) => (query.state.data as { pages?: unknown } | undefined)?.pages !== undefined);
+    if (!list) {
+      throw new Error("missing list query");
+    }
+    hold = true;
+    void queryClient.invalidateQueries({ queryKey: list.queryKey, exact: true });
+    await waitFor(() => expect(release).toBeDefined());
+    emit?.trace(liveTrace("c1000000000000000000000000000061", "queued top", LATER));
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    // The reader scrolls down before the refetch settles.
+    scroller.scrollTop = ROW_HEIGHT * 10;
+    fireEvent.scroll(scroller);
+    const cursorsBefore = cursors.length;
+    release?.();
+    await waitFor(() => expect(cursors.length).toBeGreaterThan(cursorsBefore));
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(loadedCount()).toBeGreaterThanOrEqual(scrolled);
+  } finally {
+    release?.();
+    server.events.removeListener("request:start", onStart);
+  }
+  // It renders 5k traces and takes about 11 s alone: twice the default for a loaded machine.
+}, 30_000);
+
+function loadedCount(): number {
+  const text = screen.getByText(/^\d+ loaded$/).textContent ?? "";
+  return Number.parseInt(text, 10);
+}
 
 const LATER = "2026-11-11T21:00:00.000000000Z";
 const LATER_STILL = "2026-11-11T21:00:01.000000000Z";

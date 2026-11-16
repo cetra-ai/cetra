@@ -4,7 +4,7 @@ import { useState } from "react";
 import { api } from "@/api/client";
 import { problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
-import { meQuery, savedQueriesQuery } from "@/api/queries";
+import { meQuery, savedQueriesQuery, savedViewQuery } from "@/api/queries";
 import type { Schema } from "@/api/types";
 import { DisabledReason } from "@/components/disabled-reason";
 import { Flag, NameField } from "@/components/saved-views/saved-views-menu";
@@ -74,8 +74,18 @@ export function SavedQueriesMenu({
   const ownerless = loaded !== undefined && loaded.owner_user_id === undefined;
   const modified = loaded !== undefined && !sameSavedState(current, parseSavedState(loaded.state));
 
-  async function refresh(): Promise<void> {
+  /**
+   * Refetches the list and the by-id query of `id`. A removed view drops that query from the
+   * cache, so a `?view=` link to it is read again and dropped instead of reopening from cache.
+   */
+  async function refresh(id: string, removed = false): Promise<void> {
+    const byId = savedViewQuery(org, project, id).queryKey;
     await queryClient.invalidateQueries({ queryKey: savedQueriesQuery(org, project).queryKey });
+    if (removed) {
+      queryClient.removeQueries({ queryKey: byId, exact: true });
+    } else {
+      await queryClient.invalidateQueries({ queryKey: byId, exact: true });
+    }
   }
 
   async function patch(
@@ -91,7 +101,7 @@ export function SavedQueriesMenu({
       setProblem(problemText(error));
       return false;
     }
-    await refresh();
+    await refresh(id);
     return true;
   }
 
@@ -261,7 +271,7 @@ export function SavedQueriesMenu({
                     setProblem(problemText(error));
                     return;
                   }
-                  await refresh();
+                  await refresh(created.id);
                   setDialog(null);
                   onSaved(created);
                 })();
@@ -352,7 +362,7 @@ export function SavedQueriesMenu({
                     setProblem(problemText(error));
                     return;
                   }
-                  await refresh();
+                  await refresh(loaded.id, true);
                   setDialog(null);
                   onCleared();
                 })();

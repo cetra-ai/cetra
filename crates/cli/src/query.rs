@@ -1,4 +1,4 @@
-//! `llmobs query`: one SQL statement through `POST /api/v1/projects/{project}/sql`
+//! `cetra query`: one SQL statement through `POST /api/v1/projects/{project}/sql`
 //! (spec 05 § SQL console, spec 09 § CLI, D-H-8, D-H-12, D101).
 
 use std::collections::BTreeMap;
@@ -16,7 +16,7 @@ use serde_json::{Map, Number, Value};
 use crate::client::{self, ApiClient, ConnectionArgs};
 use crate::output::{self, Column, Io};
 
-/// Output of `llmobs query`.
+/// Output of `cetra query`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum QueryFormat {
     /// Aligned columns.
@@ -45,7 +45,7 @@ pub(crate) struct QueryArgs {
     #[arg(long, value_name = "PATH")]
     pub(crate) file: Option<PathBuf>,
     /// Project UUID or org-slug/project-slug.
-    #[arg(long, env = "LLMOBS_PROJECT", value_name = "PROJECT")]
+    #[arg(long, env = "CETRA_PROJECT", value_name = "PROJECT")]
     pub(crate) project: String,
     /// A parameter value; repeat for each parameter. Int and Timestamp values that are all digits are sent as integers (Timestamp: epoch milliseconds).
     #[arg(long = "param", value_name = "NAME=VALUE")]
@@ -115,7 +115,7 @@ enum Body {
     Streamed(reqwest::Response),
 }
 
-/// `llmobs query`. `args` is borrowed; `now` anchors `--since`.
+/// `cetra query`. `args` is borrowed; `now` anchors `--since`.
 pub(crate) async fn run(
     args: &QueryArgs,
     credentials: impl FnOnce() -> anyhow::Result<PathBuf>,
@@ -169,7 +169,7 @@ pub(crate) async fn run(
                 return Ok(());
             }
             let more = result.truncated.then_some(
-                "more rows matched; raise --limit or export with --format csv, ndjson or parquet",
+                "more rows matched; --limit or the answer size cap left some out; raise --limit or export with --format csv, ndjson or parquet",
             );
             output::write_rows_note(&mut *streams.err, result.rows.len(), more)?;
         }
@@ -412,9 +412,7 @@ fn placeholder_types(statement: &str) -> BTreeMap<String, ParamType> {
             '"' | '`' => skip_quoted(&chars, index + 1, character),
             '$' => skip_dollar(&chars, index).unwrap_or(index + 1),
             '-' if next == Some('-') => skip_line_comment(&chars, index + 2),
-            '/' if next == Some('*') => {
-                find_sequence(&chars, index + 2, &['*', '/']).unwrap_or(chars.len())
-            }
+            '/' if next == Some('*') => skip_block_comment(&chars, index + 2),
             '{' => {
                 if let Some((name, kind)) = placeholder_at(&chars, index) {
                     found.entry(name).or_insert(kind);
@@ -469,6 +467,31 @@ fn skip_escape(chars: &[char], mut index: usize) -> usize {
 
 fn skip_line_comment(chars: &[char], from: usize) -> usize {
     find_sequence(chars, from, &['\n']).unwrap_or(chars.len())
+}
+
+/// Skips a `/* … */` comment body that starts at `from` (just after the `/*`). Block comments
+/// nest, as they do in the server's GenericDialect tokenizer. Returns the index after the
+/// matching `*/`, or the end of the text.
+fn skip_block_comment(chars: &[char], from: usize) -> usize {
+    let mut depth = 1;
+    let mut index = from;
+    while index < chars.len() {
+        match (chars[index], chars.get(index + 1)) {
+            ('/', Some('*')) => {
+                depth += 1;
+                index += 2;
+            }
+            ('*', Some('/')) => {
+                depth -= 1;
+                index += 2;
+                if depth == 0 {
+                    return index;
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    chars.len()
 }
 
 /// Skips a dollar-quoted string that starts with the `$` at `start`. `None` when that `$` is an
@@ -605,7 +628,7 @@ mod tests {
     const PROJECT: &str = "01900000-0000-7000-8000-000000000001";
 
     fn query_args(argv: &[&str]) -> QueryArgs {
-        let mut full = vec!["llmobs", "query"];
+        let mut full = vec!["cetra", "query"];
         full.extend_from_slice(argv);
         match Cli::try_parse_from(full).unwrap().command {
             Command::Query(args) => *args,
@@ -689,6 +712,18 @@ mod tests {
     }
 
     #[test]
+    fn placeholder_types_nests_block_comments() {
+        // The server's GenericDialect nests `/* */`, so the `'` after the inner `*/` is still
+        // inside the comment and `{x:Int}` is a placeholder.
+        assert_eq!(
+            placeholder_types("/* a /* b */ c's */ {x:Int}"),
+            typed_map(&[("x", ParamType::Int)])
+        );
+        // An unclosed comment swallows the rest of the text.
+        assert_eq!(placeholder_types("/* a /* b */ {x:Int}"), typed_map(&[]));
+    }
+
+    #[test]
     fn parameters_type_values() {
         let statement = "{a:Int} {f:Float} {b:Bool} {s:String} {t:Timestamp}";
         let value = |raw: &str| parameters(statement, &[raw.to_owned()]);
@@ -758,7 +793,7 @@ mod tests {
     #[test]
     fn query_flags_are_validated_by_clap() {
         let kind = |argv: &[&str]| {
-            let mut full = vec!["llmobs", "query"];
+            let mut full = vec!["cetra", "query"];
             full.extend_from_slice(argv);
             Cli::try_parse_from(full).unwrap_err().kind()
         };
@@ -1349,7 +1384,7 @@ mod tests {
         assert_eq!(out, "x\n-\n1\n");
         assert_eq!(
             err,
-            "1 row; more rows matched; raise --limit or export with --format csv, ndjson or parquet\n"
+            "1 row; more rows matched; --limit or the answer size cap left some out; raise --limit or export with --format csv, ndjson or parquet\n"
         );
         server.stop().await;
     }
@@ -1509,7 +1544,7 @@ mod tests {
             "--url",
             server.url.as_str(),
             "--token",
-            "pat-llmobs-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "pat-cetra-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             "--project",
             server.project.as_str(),
         ]);
@@ -1519,7 +1554,7 @@ mod tests {
         assert_eq!(
             error.to_string(),
             format!(
-                "the server rejected the token; run `llmobs login --url {}`",
+                "the server rejected the token; run `cetra login --url {}`",
                 server.url
             )
         );

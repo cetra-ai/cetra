@@ -1,8 +1,10 @@
 import { screen, waitFor } from "@testing-library/react";
 import type { UserEvent } from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
-import { expect, it } from "vitest";
+import { afterEach, expect, it } from "vitest";
 import { NO_SIGN_IN_METHOD } from "@/components/auth/messages";
+import { setExternalNavigator } from "@/lib/external-navigation";
+import { authorizeHref } from "@/lib/redirect";
 import { server } from "@/mocks/node";
 import { INVITE_TOKEN, ORG_ID } from "@/test/fixtures";
 import { problemResponse } from "@/test/problem";
@@ -33,6 +35,33 @@ function withConfig(overrides: Partial<typeof authConfig>) {
 function signedInAsGuest() {
   server.use(http.get("/api/auth/me", () => HttpResponse.json({ user: GUEST, orgs: [] })));
 }
+
+const CLOUD = { id: "oidc:cloud", display_name: "cetra Cloud" };
+const START = authorizeHref("oidc:cloud", { redirect: URL_PATH });
+
+function onlyCloud(overrides: Partial<typeof authConfig> = {}) {
+  withConfig({ password_enabled: false, providers: [CLOUD], ...overrides });
+}
+
+function recordReplace() {
+  const replaced: string[] = [];
+  setExternalNavigator({
+    navigate: () => {
+      throw new Error("the invite page never navigates with a history entry");
+    },
+    replace: (url) => {
+      replaced.push(url);
+    },
+    submit: () => {
+      throw new Error("the invite page never posts a form");
+    },
+  });
+  return replaced;
+}
+
+afterEach(() => {
+  setExternalNavigator(undefined);
+});
 
 async function fillSignup(
   user: UserEvent,
@@ -338,4 +367,93 @@ it("shows the error state when the session check fails", async () => {
   server.use(http.get("/api/auth/me", () => problemResponse(500, "internal")));
   await renderApp(URL_PATH);
   expect(await screen.findByRole("button", { name: "Try again" })).toBeInTheDocument();
+});
+
+it("starts the only provider for a visitor without an account", async () => {
+  signedOut();
+  onlyCloud();
+  const replaced = recordReplace();
+  await renderApp(URL_PATH);
+  await waitFor(() => expect(replaced).toEqual([START]));
+  expect(screen.getByText("Redirecting to cetra Cloud…")).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "Join Acme" })).toBeInTheDocument();
+});
+
+it("starts the only provider for a visitor with an account", async () => {
+  signedOut();
+  onlyCloud();
+  server.use(
+    http.get("/api/auth/invites/:token", () =>
+      HttpResponse.json({ ...preview, account_exists: true }),
+    ),
+  );
+  const replaced = recordReplace();
+  await renderApp(URL_PATH);
+  await waitFor(() => expect(replaced).toEqual([START]));
+});
+
+it("keeps the sign-up-disabled message", async () => {
+  signedOut();
+  onlyCloud({ signup: "disabled" });
+  const replaced = recordReplace();
+  await renderApp(URL_PATH);
+  expect(await screen.findByText(/^Sign-up is disabled on this server/)).toBeInTheDocument();
+  expect(replaced).toEqual([]);
+});
+
+it("starts the provider for an existing account even when sign-up is disabled", async () => {
+  signedOut();
+  onlyCloud({ signup: "disabled" });
+  server.use(
+    http.get("/api/auth/invites/:token", () =>
+      HttpResponse.json({ ...preview, account_exists: true }),
+    ),
+  );
+  const replaced = recordReplace();
+  await renderApp(URL_PATH);
+  await waitFor(() => expect(replaced).toEqual([START]));
+});
+
+it("does not start the provider for a signed-in invitee", async () => {
+  signedInAsGuest();
+  onlyCloud();
+  const replaced = recordReplace();
+  await renderApp(URL_PATH);
+  expect(await screen.findByRole("button", { name: "Join Acme" })).toBeInTheDocument();
+  expect(replaced).toEqual([]);
+});
+
+it("does not start the provider again after signing out of another account", async () => {
+  let signedOutNow = false;
+  server.use(
+    http.get("/api/auth/me", () =>
+      signedOutNow ? problemResponse(401, "unauthorized") : HttpResponse.json(meFixture),
+    ),
+  );
+  server.use(
+    http.post("/api/auth/logout", () => {
+      signedOutNow = true;
+      return new HttpResponse(null, { status: 204 });
+    }),
+  );
+  onlyCloud();
+  const replaced = recordReplace();
+  const { user } = await renderApp(URL_PATH);
+  await user.click(await screen.findByRole("button", { name: "Sign out" }));
+  expect(
+    await screen.findByRole("link", { name: "Continue with cetra Cloud" }),
+  ).toBeInTheDocument();
+  expect(screen.getByText(/^You're signed out here\./)).toBeInTheDocument();
+  expect(replaced).toEqual([]);
+});
+
+it("keeps the page with password sign-in on", async () => {
+  signedOut();
+  withConfig({ providers: [CLOUD] });
+  const replaced = recordReplace();
+  await renderApp(URL_PATH);
+  expect(
+    await screen.findByRole("button", { name: "Create account and join" }),
+  ).toBeInTheDocument();
+  expect(replaced).toEqual([]);
 });

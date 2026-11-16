@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use cetra_core::ids::ProjectId;
 use chrono::NaiveDate;
-use llmobs_core::ids::ProjectId;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -20,7 +20,7 @@ use crate::compaction::job::tests::{at, config_in, project, quiet_compaction, wa
 use crate::deletion::{Deletion, DeletionScope, DeletionStatus};
 use crate::error::{AppendError, MediaError, StorageError};
 use crate::hooks::HookPoint;
-use crate::media::MediaBlob;
+use crate::media::{MediaBlob, MediaReport};
 use crate::objects::Objects;
 use crate::test_support::{rows, score_row, score_rows, span_row, span_rows};
 use crate::views::QueryContext;
@@ -41,6 +41,7 @@ fn blob_of(bytes: &[u8], mime_type: &str) -> MediaBlob {
         sha256: sha256_of(&bytes),
         mime_type: mime_type.to_owned(),
         bytes,
+        newest_span_start: 0,
     }
 }
 
@@ -71,7 +72,10 @@ async fn connect(dir: &Path) -> sqlx::SqliteConnection {
 
 /// The first `i64` of the first row of `sql`, over `which`'s providers.
 async fn scalar(storage: &Storage, which: ProjectId, sql: &str) -> i64 {
-    let query = storage.query(which, QueryOptions::default()).await.unwrap();
+    let query = storage
+        .query(which, QueryOptions::new(None, None))
+        .await
+        .unwrap();
     let ctx = QueryContext::new(query, None).unwrap();
     let batches = rows(&ctx, sql).await;
     let column = batches[0]
@@ -293,13 +297,13 @@ async fn a_drop_hides_the_project_and_deletes_its_data() {
     );
     assert!(
         matches!(
-            storage.get_media(project(), &p_sha, None).await,
+            storage.get_media(project(), &p_sha, None, None).await,
             Err(MediaError::NotFound)
         ),
         "a dropped project's blob was found"
     );
     let read = storage
-        .get_media(kept_project(), &q_sha, None)
+        .get_media(kept_project(), &q_sha, None, None)
         .await
         .unwrap();
     assert_eq!(read.bytes, Bytes::from_static(b"media-of-q"));
@@ -388,6 +392,14 @@ async fn wal_rows_of_a_dropped_project_never_reach_a_file() {
     storage.shutdown().await.unwrap();
 }
 
+struct ReleaseOnDrop(crate::hooks::Hooks, HookPoint);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        self.0.release(self.1);
+    }
+}
+
 // 4. The append gate: an append in flight holds the drop until it returns, and
 //    the append itself is acknowledged. Run 10 times.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -398,6 +410,7 @@ async fn the_drop_waits_for_an_append_in_flight() {
         let storage = Arc::new(Storage::open(config).await.unwrap());
         let hooks = storage.hooks().clone();
         hooks.hold(HookPoint::AfterWalSync);
+        let _release = ReleaseOnDrop(hooks.clone(), HookPoint::AfterWalSync);
         let time = at(0, 0, 0);
         let append = {
             let storage = Arc::clone(&storage);
@@ -439,10 +452,15 @@ async fn the_drop_waits_for_an_append_in_flight() {
 async fn a_flush_prepared_before_the_drop_conflicts() {
     for _ in 0..10 {
         let dir = tempfile::tempdir().unwrap();
-        let config = config_in(dir.path(), quiet_compaction(8), Duration::from_millis(100));
+        // No age-triggered flush: `flush_now` freezes both appends at once, so
+        // a slow machine cannot split them across two flushes.
+        let config = config_in(dir.path(), quiet_compaction(8), Duration::from_secs(3_600));
         let storage = Arc::new(Storage::open(config.clone()).await.unwrap());
         let hooks = storage.hooks().clone();
         hooks.hold(HookPoint::FlushAfterWrite);
+        // A parked flush blocks a runtime worker, so a failed assertion below
+        // must release it or the runtime never shuts down (a silent hang).
+        let _release = ReleaseOnDrop(hooks.clone(), HookPoint::FlushAfterWrite);
         let time = at(0, 0, 0);
         storage
             .append_spans(project(), span_batch(project(), 1, time))
@@ -452,6 +470,10 @@ async fn a_flush_prepared_before_the_drop_conflicts() {
             .append_spans(kept_project(), span_batch(kept_project(), 1, time))
             .await
             .unwrap();
+        let flushing = {
+            let storage = Arc::clone(&storage);
+            tokio::spawn(async move { storage.flush_now(Duration::from_secs(60)).await })
+        };
         wait_at(&storage, HookPoint::FlushAfterWrite);
         // The parked flush prepared a spans file and a traces file per project.
         let staged = storage.staged_paths().await.unwrap();
@@ -462,7 +484,11 @@ async fn a_flush_prepared_before_the_drop_conflicts() {
             let storage = Arc::clone(&storage);
             tokio::spawn(async move { storage.drop_project(project()).await })
         };
-        dropping.await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(30), dropping)
+            .await
+            .expect("the drop never returned while a flush was parked after its write")
+            .unwrap()
+            .unwrap();
         hooks.release(HookPoint::FlushAfterWrite);
 
         // The first commit was refused and its staged rows stayed; the retry
@@ -506,11 +532,20 @@ async fn a_flush_prepared_before_the_drop_conflicts() {
             scalar(&storage, kept_project(), "SELECT count(*) FROM spans").await,
             1
         );
-        Arc::try_unwrap(storage)
-            .unwrap_or_else(|_| panic!("storage still shared"))
-            .shutdown()
+        tokio::time::timeout(Duration::from_secs(30), flushing)
             .await
+            .expect("flush_now never returned after the flush retry committed")
+            .unwrap()
             .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            Arc::try_unwrap(storage)
+                .unwrap_or_else(|_| panic!("storage still shared"))
+                .shutdown(),
+        )
+        .await
+        .expect("shutdown never returned")
+        .unwrap();
     }
 }
 
@@ -659,6 +694,57 @@ async fn a_failed_media_delete_leaves_the_drop_unfinished() {
     storage.shutdown().await.unwrap();
 }
 
+// N M3 (D-N-34): with object deletion off, a drop removes no blob and stays `dropping`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn drop_stays_dropping_when_delete_objects_is_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config_in(dir.path(), quiet_compaction(8), Duration::from_secs(3_600));
+    config.delete_objects = false;
+    let storage = two_projects(&config).await;
+    let p_sha = p_blob().sha256;
+
+    let error = storage.drop_project(project()).await.unwrap_err();
+    assert!(
+        matches!(
+            error,
+            StorageError::Media(MediaError::Object(crate::error::ObjectError::DeletionOff))
+        ),
+        "{error}"
+    );
+    assert_eq!(project_state(dir.path(), project()).await, "dropping");
+    assert!(
+        storage
+            .committer
+            .dropping_projects()
+            .await
+            .unwrap()
+            .contains(&project())
+    );
+    assert!(object_file(dir.path(), project(), &p_sha).is_file());
+    assert_eq!(media_rows(dir.path(), project()).await, 1);
+    storage.shutdown().await.unwrap();
+}
+
+// N M3 (D-N-34): with object deletion off, media collection of a stale, unreferenced blob
+// changes nothing: the row stays, nothing is staged and the blob stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn media_is_not_collected_when_delete_objects_is_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config_in(dir.path(), quiet_compaction(8), Duration::from_secs(3_600));
+    config.delete_objects = false;
+    let storage = two_projects(&config).await;
+    let p_sha = p_blob().sha256;
+    // Two hours after the blobs were stored: both are stale and unreferenced.
+    let now = crate::catalog::now_ns() + 2 * 3_600 * 1_000_000_000;
+
+    let report = storage.collect_media(now).await.unwrap();
+    assert_eq!(report, MediaReport::default());
+    assert_eq!(media_rows(dir.path(), project()).await, 1);
+    assert!(storage.staged_paths().await.unwrap().is_empty());
+    assert!(object_file(dir.path(), project(), &p_sha).is_file());
+    storage.shutdown().await.unwrap();
+}
+
 // 8. Dropping twice is `Ok`, and retention of a dropped project writes
 //    nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -730,6 +816,89 @@ async fn a_media_put_racing_the_drop_never_lands_its_row() {
         storage.collect_staged(Duration::ZERO).await.unwrap();
         assert!(!object_file(dir.path(), project(), &sha).exists());
         assert!(storage.staged_paths().await.unwrap().is_empty());
+        Arc::try_unwrap(storage)
+            .unwrap_or_else(|_| panic!("storage still shared"))
+            .shutdown()
+            .await
+            .unwrap();
+    }
+}
+
+// R6.8. A compaction started before the drop fails at its commit; the
+// dropped project's staged outputs are collected, and the other project's
+// rows read back unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_compaction_started_before_the_drop_fails_and_is_collected() {
+    for with_kept in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_in(dir.path(), quiet_compaction(2), Duration::from_secs(3_600));
+        let mut storage = Storage::open(config.clone()).await.unwrap();
+        for index in 0..2_u16 {
+            let time = at(10, 0, i64::from(index));
+            storage
+                .append_spans(project(), span_batch(project(), 1 + index, time))
+                .await
+                .unwrap();
+            if with_kept {
+                storage
+                    .append_spans(kept_project(), span_batch(kept_project(), 1 + index, time))
+                    .await
+                    .unwrap();
+            }
+            storage.shutdown().await.unwrap();
+            storage = Storage::open(config.clone()).await.unwrap();
+        }
+        let kept_before = scalar(&storage, kept_project(), "SELECT count(*) FROM spans").await;
+        // Two spans files and their two traces files.
+        assert_eq!(active_files(&storage, project()).len(), 4);
+
+        let storage = Arc::new(storage);
+        let hooks = storage.hooks().clone();
+        hooks.hold(HookPoint::CompactionAfterWrite);
+        let racing = {
+            let storage = Arc::clone(&storage);
+            tokio::spawn(async move { storage.compact(at(11, 0, 0)).await })
+        };
+        wait_at(&storage, HookPoint::CompactionAfterWrite);
+
+        storage.drop_project(project()).await.unwrap();
+        hooks.release(HookPoint::CompactionAfterWrite);
+        let compacted = racing.await.unwrap().unwrap();
+        if !with_kept {
+            assert_eq!((compacted.jobs, compacted.failed), (0, 1), "{compacted:?}");
+            // The job is counted once, as a conflict or a failure, and never as committed.
+            let stats = storage.stats().await;
+            assert_eq!(
+                stats.compactions_conflict + stats.compactions_failed,
+                1,
+                "{stats:?}"
+            );
+            assert_eq!(stats.compactions_ok, 0, "{stats:?}");
+        }
+        assert!(
+            active_files(&storage, project()).is_empty(),
+            "a file of the dropped project is still active"
+        );
+        assert_eq!(
+            scalar(&storage, project(), "SELECT count(*) FROM spans").await,
+            0,
+            "P's rows are visible"
+        );
+        assert_eq!(
+            scalar(&storage, kept_project(), "SELECT count(*) FROM spans").await,
+            kept_before,
+            "Q's rows changed"
+        );
+
+        storage.collect_staged(Duration::ZERO).await.unwrap();
+        let leftover: Vec<_> = storage
+            .staged_paths()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|path| path.contains(&format!("project={}", project())))
+            .collect();
+        assert!(leftover.is_empty(), "staged outputs of P: {leftover:?}");
         Arc::try_unwrap(storage)
             .unwrap_or_else(|_| panic!("storage still shared"))
             .shutdown()

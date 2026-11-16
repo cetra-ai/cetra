@@ -20,5 +20,11 @@
     "ingest_burst": 100000,
     "data_access_days": 1825
   },
+  "usage": {
+    "month": "2026-01",
+    "units": 1240,
+    "resets_at": "2026-02-01T00:00:00.000000000Z",
+    "notice": "none"
+  },
   "upgrade_url": "https://app.example.com/orgs/01900000-0000-7000-8000-000000000010/billing"
 }

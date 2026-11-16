@@ -12,13 +12,13 @@ use arrow::compute::cast;
 use arrow::datatypes::DataType;
 use arrow::error::ArrowError;
 use arrow::record_batch::RecordBatch;
+use cetra_core::ids::TraceId;
+use cetra_core::names::{environment, metadata_key};
+use cetra_core::schema::{spans, traces};
 use datafusion::common::ScalarValue;
 use datafusion::error::DataFusionError;
 use datafusion::logical_expr::{col, lit};
 use futures::StreamExt;
-use llmobs_core::ids::TraceId;
-use llmobs_core::names::{environment, metadata_key};
-use llmobs_core::schema::{spans, traces};
 
 use super::{ListScope, present, scoped_traces};
 use crate::filter::{Filter, FilterView, search};
@@ -179,8 +179,8 @@ async fn user_scope(
     })
 }
 
-/// Evaluation traces (environment `llmobs-eval`) with a span whose
-/// `metadata['llmobs.eval.target_trace_id']` is one of `targets`. Ids already in `targets`
+/// Evaluation traces (environment `cetra-eval`) with a span whose
+/// `metadata['cetra.eval.target_trace_id']` is one of `targets`. Ids already in `targets`
 /// are not returned. One level only, not transitive: an eval trace of an eval trace is
 /// returned only when its own target is in `targets`. Sorted by bytes, no duplicates. One
 /// scan of the project's eval spans; the match against `targets` is done in memory, batch
@@ -297,8 +297,8 @@ mod tests {
     use std::collections::HashSet;
     use std::time::Duration;
 
-    use llmobs_core::ids::TraceId;
-    use llmobs_core::span::Span;
+    use cetra_core::ids::TraceId;
+    use cetra_core::span::Span;
 
     use super::{
         FilterDeletionRequest, RunError, UserDeletionScope, eval_trace_ids, filter_trace_ids,
@@ -378,11 +378,11 @@ mod tests {
     #[tokio::test]
     async fn default_exclusions_apply() {
         let mut eval = span_row(5, 0, 5_000, 0);
-        eval.environment = Some("llmobs-eval".to_owned());
+        eval.environment = Some("cetra-eval".to_owned());
         let mut experiment = span_row(6, 0, 6_000, 0);
         experiment
             .metadata
-            .insert("llmobs.experiment_id".to_owned(), "e1".to_owned());
+            .insert("cetra.experiment_id".to_owned(), "e1".to_owned());
         let ctx = context_of(&[eval, experiment]);
 
         let ids = filter_trace_ids(&ctx, request(None, None))
@@ -400,7 +400,7 @@ mod tests {
         let ids = filter_trace_ids(&ctx, req).await.expect("experiments");
         assert_eq!(ids, [id(6)]);
 
-        let ids = filter_trace_ids(&ctx, request(Some("environment = 'llmobs-eval'"), None))
+        let ids = filter_trace_ids(&ctx, request(Some("environment = 'cetra-eval'"), None))
             .await
             .expect("environment filter");
         assert_eq!(ids, [id(5)]);
@@ -513,7 +513,7 @@ mod tests {
     async fn user_scope_ignores_exclusions() {
         let mut eval = span_row(4, 0, 4_000, 100);
         eval.user_id = Some("u1".to_owned());
-        eval.environment = Some("llmobs-eval".to_owned());
+        eval.environment = Some("cetra-eval".to_owned());
         let ctx = context_of(&[eval]);
         let scope = user_deletion_scope(&ctx, "u1", 200, TIMEOUT)
             .await
@@ -535,9 +535,9 @@ mod tests {
     /// An eval trace (`trace`) whose one span targets `target` (hex text as written).
     fn eval_span(trace: u16, target: &str) -> Span {
         let mut span = span_row(trace, 0, i64::from(trace) * 1_000, 0);
-        span.environment = Some("llmobs-eval".to_owned());
+        span.environment = Some("cetra-eval".to_owned());
         span.metadata
-            .insert("llmobs.eval.target_trace_id".to_owned(), target.to_owned());
+            .insert("cetra.eval.target_trace_id".to_owned(), target.to_owned());
         span
     }
 
@@ -554,7 +554,7 @@ mod tests {
         production.environment = Some("production".to_owned());
         spans.push(production);
         let mut plain = span_row(15, 1, 15_000, 0);
-        plain.environment = Some("llmobs-eval".to_owned());
+        plain.environment = Some("cetra-eval".to_owned());
         spans.push(eval_span(15, &target(3)));
         spans.push(plain);
         let ctx = context_of(&spans);

@@ -596,7 +596,7 @@ impl HotTail {
 mod tests {
     use super::*;
     use crate::narrow::BlockEntry;
-    use llmobs_core::schema::spans_schema;
+    use cetra_core::schema::spans_schema;
     use proptest::prelude::*;
 
     fn record(column_id: u32, pages_offset: u32) -> DirectoryRecord {

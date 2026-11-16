@@ -8,7 +8,7 @@ See [README.md](README.md). These run in the pipeline order of spec 02: payloads
 
 **Commit:** `otel: extract media blobs from payloads`
 
-**Uses** C2 (`llmobs_core::media::MediaBlob`), already on `main`.
+**Uses** C2 (`cetra_core::media::MediaBlob`), already on `main`.
 
 `media.rs`:
 
@@ -35,7 +35,7 @@ pub(crate) fn extract_json(v: &mut serde_json::Value, sink: &mut MediaSink); // 
 **Decoding and limits:**
 - Base64 is the standard alphabet, with or without padding. Whitespace is not allowed. Anything else is not a candidate and stays inline.
 - The decoded size must be at least `media_min_bytes`. Anything smaller stays inline.
-- Above `media_max_bytes`: a part becomes `{"type":"uri","uri":"llmobs:dropped","reason":"too_large","size":N}` (core `marker` constant), and a raw string becomes `llmobs:dropped`. No blob is created.
+- Above `media_max_bytes`: a part becomes `{"type":"uri","uri":"cetra:dropped","reason":"too_large","size":N}` (core `marker` constant), and a raw string becomes `cetra:dropped`. No blob is created.
 - Check the size from the base64 length **before** decoding: `len * 3 / 4` minus padding. A 32 MiB+ blob is never decoded.
 
 **MIME type:** the declared type wins when it's present and syntactically `type/subtype`. Otherwise the magic-byte table is used:
@@ -93,13 +93,14 @@ This applies after media extraction (rule 14), with `limit = max_attribute_bytes
 - each event's `attributes` JSON;
 - `status_message`;
 - `name` (spans can carry absurd names).
+- Added by fix B-2 (spec 02 § Truncation has the full list): the promoted string columns, `metadata` values, `tags` elements, event names and link attributes.
 
-`truncated` gets the column name (`input`, `output`, …, `name`, `status_message`), the attribute key, or `events[<i>].attributes`. It's sorted and unique.
+`truncated` gets the column name (`input`, `output`, …, `name`, `status_message`, `session_id`, …), the attribute key, `metadata.<key>`, `tags`, `events[<i>].name`, `events[<i>].attributes` or `links[<i>].attributes`. It's sorted and unique.
 
-**Strings** (rule 14): cut at the largest char boundary ≤ `limit`, then append `…[llmobs: truncated, original N bytes]` (core marker prefix + `N bytes]`).
+**Strings** (rule 14): cut at the largest char boundary ≤ `limit`, then append `…[cetra: truncated, original N bytes]` (core marker prefix + `N bytes]`).
 
 **Messages** (spec 02 § Truncation):
-1. Keep every `system` message, the first `user` message, and as many of the last messages as fit, counting from the end. Insert the placeholder message `[llmobs: K messages truncated]` (core marker) where messages were removed. Each candidate is measured by its serialized length.
+1. Keep every `system` message, the first `user` message, and as many of the last messages as fit, counting from the end. Insert the placeholder message `[cetra: K messages truncated]` (core marker) where messages were removed. Each candidate is measured by its serialized length.
 2. If the kept list still exceeds the limit, cut the longest string leaf in the list (text or reasoning `content`, a string tool `arguments`/`response`) with the string rule. Cut it to the length that makes the list fit, or to 1 KiB if that's not enough. Repeat, longest first, until it fits or no leaf is longer than 1 KiB.
 3. If it still doesn't fit, store the serialized messages cut with the string rule as `Text`, change the format to `text`, and record `normalize_error` code `truncate:<field>`.
 
@@ -144,7 +145,7 @@ pub struct PriceRow {
     pub model_name: String,
     pub match_pattern: String,
     pub provider: Option<String>,
-    #[serde(with = "llmobs_core::time_serde")] pub valid_from: i64,
+    #[serde(with = "cetra_core::time_serde")] pub valid_from: i64,
     pub price_input: Option<f64>, pub price_output: Option<f64>,
     pub price_cache_read: Option<f64>, pub price_cache_write: Option<f64>, pub price_reasoning: Option<f64>,
     pub tiers: Option<Vec<PriceTier>>,
@@ -166,7 +167,7 @@ impl PriceTable { pub fn new(rows: Vec<PriceRow>) -> Result<Self, PriceError>; }
 1. **Reported cost** (N1 § 5 keys), on `llm`/`embedding` spans only. Rule 3 keeps cost columns null on other kinds, so a reported cost there stays in `attributes` (pinned by a fixture). On an `llm`/`embedding` span, any reported key gives `cost_source = reported`, and D109 fills the columns.
 2. **Lookup**, only on `llm`/`embedding` spans that have a model (`coalesce(response_model, request_model)`).
    - Candidates are the rows whose regex matches the model, whose `valid_from ≤ start_time`, and whose provider matches the span's.
-   - **Clarification A, added to spec 02:** a row with a `provider` matches when the span's provider equals it, **or the span has no provider**.
+   - **Clarification A, added to spec 02:** a row with a `provider` matches when the span's provider equals it, **or the span has no provider**. Changed by D-B1-11: a `gcp.gen_ai` span also matches `gcp.gemini` and `gcp.vertex_ai` rows, and there is no other cross-provider fallback.
    - Pick by scope priority, then the latest `valid_from`, then the longest `match_pattern`, then the lowest row index for determinism.
 3. **Tier:** the tier with the greatest `min_input_tokens ≤ input_tokens` (input including cache). A tier's null prices fall back to the row's base price, not to null.
    - **Clarification B, added to spec 02:** which tier applies, and the fallback to base prices.
@@ -217,24 +218,24 @@ Unit tests:
   - patterns are anchored-safe, with no `^`/`$` inside since we add them;
   - the file is canonical JSON (2-space indent, trailing newline);
   - at least these models match: `gpt-4o`, `gpt-4o-mini`, `claude-sonnet-4-5`, `gemini-2.5-pro`, `text-embedding-3-small`.
-- `refresh` (env-gated, like `fixtures-fmt`). When `LLMOBS_LITELLM_JSON=<path>` is set, it reads LiteLLM's `model_prices_and_context_window.json`, converts it, and writes `crates/otel/prices/builtin.json`. Otherwise it returns immediately. The conversion code lives in the test file, since it isn't shipped.
+- `refresh` (env-gated, like `fixtures-fmt`). When `CETRA_LITELLM_JSON=<path>` is set, it reads LiteLLM's `model_prices_and_context_window.json`, converts it, and writes `crates/otel/prices/builtin.json`. Otherwise it returns immediately. The conversion code lives in the test file, since it isn't shipped.
 
 Conversion rules (also written as a comment at the top of the test):
 - Keep entries whose `mode` is `chat`, `completion`, `responses` or `embedding`, with at least one of `input_cost_per_token` / `output_cost_per_token`.
 - The model name is the LiteLLM key with a leading `<litellm_provider>/` removed. A key that still contains `/` after that is skipped (proxy routes such as `openrouter/…`).
-- When two kept entries give the same model name, keep the entry whose key has no `/`. Otherwise keep the first in key order. Report the count of collisions.
+- One row per `(model_name, provider)`. When two kept entries give the same pair, keep the entry whose key has no `/`. Otherwise keep the first in key order. Report the count of collisions. (Changed by D-B1-11: the key was the model name alone, which dropped every provider but one.)
 - `match_pattern` = `regex::escape(model_name)`.
-- `provider` = the canonical provider when `litellm_provider` maps to one of `openai`, `anthropic`, `gcp.gemini` (`gemini`), `gcp.vertex_ai` (`vertex_ai*`), `aws.bedrock` (`bedrock*`), `azure.ai.openai` (`azure*`), `mistral_ai` (`mistral`), `x_ai` (`xai`), `groq`, `deepseek`, `cohere`. Anything else gets `None`.
+- `provider` = the semconv name for `litellm_provider` (`openai`, `anthropic`, `gcp.gemini` (`gemini`), `gcp.vertex_ai` (`vertex_ai*`), `aws.bedrock` (`bedrock*`), `azure.ai.openai` (`azure`, `azure_text`), `azure.ai.inference` (`azure_ai`), `mistral_ai` (`mistral`, `codestral`), `x_ai` (`xai`), `groq`, `deepseek`, `cohere`, `perplexity`, `ibm.watsonx.ai` (`watsonx`)). A name with no mapping keeps its LiteLLM name, lowercased; a missing `litellm_provider` gives `None`. (Changed by D-B1-11: the old rule gave `None` to every unmapped name, and mapped `azure_ai` to `azure.ai.openai`.)
 - Prices: `input_cost_per_token` → `price_input` × 1e6, `output_cost_per_token` → `price_output` × 1e6, `cache_read_input_token_cost` → `price_cache_read`, `cache_creation_input_token_cost` → `price_cache_write`, `output_cost_per_reasoning_token` → `price_reasoning`.
 - Tiers: `*_above_<N>k_tokens` → `min_input_tokens = N·1000`, with the matching prices.
-- Rows are sorted by `(model_name, provider)`.
+- Rows are sorted by `(model_name, provider_rank, provider)`: rank 0 the publisher's own API, 1 a cloud platform, 2 another named provider, 3 `None` (D-B1-11). The first matching row wins a tie, so a span with no provider infers the publisher.
 
 `justfile`:
 
 ```
 # Regenerate the built-in price snapshot from a downloaded LiteLLM JSON (D104)
 prices-update litellm_json:
-    LLMOBS_LITELLM_JSON={{litellm_json}} cargo test -p llmobs-otel --test prices -- refresh
+    CETRA_LITELLM_JSON={{litellm_json}} cargo test -p cetra-otel --test prices -- refresh
 ```
 
 The download is manual (the URL goes in the recipe comment); the recipe itself never fetches.

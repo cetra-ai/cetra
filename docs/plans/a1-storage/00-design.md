@@ -1,6 +1,6 @@
 # A1 · Storage engine — design
 
-Top-level design of the storage track (Wave 1, track A1). It settles what specs 03 and 04 leave open or got wrong, fixes the public API of `llmobs-storage`, and cuts the work into milestones. Each milestone then gets its own implementation plan (`01-m1-….md`, …), written just before it starts, from the code that exists by then.
+Top-level design of the storage track (Wave 1, track A1). It settles what specs 03 and 04 leave open or got wrong, fixes the public API of `cetra-storage`, and cuts the work into milestones. Each milestone then gets its own implementation plan (`01-m1-….md`, …), written just before it starts, from the code that exists by then.
 
 **Status:** accepted. The decisions below are in `docs/mvp-decisions.md` and the specs carry the changes listed in § Spec changes. Nothing is implemented yet.
 
@@ -14,7 +14,7 @@ Top-level design of the storage track (Wave 1, track A1). It settles what specs 
 
 | # | Decision | Source |
 |---|---|---|
-| D83 | **Storage owns its catalog.** `llmobs-storage` keeps its tables in `<data_dir>/catalog.db`, with its own migrations and its own writer connection (`synchronous=FULL`). The server's `meta.db` keeps deletion requests (audit, cascades) and hands them to storage, idempotently by deletion id. Backups cover both files. | User |
+| D83 | **Storage owns its catalog.** `cetra-storage` keeps its tables in `<data_dir>/catalog.db`, with its own migrations and its own writer connection (`synchronous=FULL`). The server's `meta.db` keeps deletion requests (audit, cascades) and hands them to storage, idempotently by deletion id. Backups cover both files. | User |
 | D84 | **Files stay per `(project, partition day)`.** A flush writes its files in parallel and commits them in one catalog transaction. Compaction's size-ratio rule bounds the number of small files. | User |
 | D85 | **Spans with absurd start times are rejected** at normalization: before 2000-01-01, before `ingest_time − retention_days`, or more than 1 day after `ingest_time`. They count in `partial_success.rejected_spans`. | User |
 | D86 | **A trace lives in one day.** Spans and trace partials are partitioned by the trace's **anchor day**, the partition day of its first partial, instead of their own start day. The anchor differs from a row's own UTC day by at most one day, so day pruning uses one day of slack. Retention and compaction then treat a trace that crosses midnight as one unit. Kept in the M3 plan after S1 measured the rebuild (§ Trace anchor › Exit ramp). | User |
@@ -52,21 +52,21 @@ Top-level design of the storage track (Wave 1, track A1). It settles what specs 
 ## Boundaries
 
 ```
-llmobs-server ──append_spans / append_scores──▶ llmobs-storage ──▶ WAL, memtable, files
+cetra-server ──append_spans / append_scores──▶ cetra-storage ──▶ WAL, memtable, files
               ──query(project) → context + providers──▶  providers: spans, traces, scores
               ──register_deletion / deletion_status──▶  tombstones, rewriter
               ──apply_retention(project, keep_from)──▶  partition drops
               ──put_media / get_media──▶            media blobs
-llmobs-storage/src/filter, src/sql (A2) ──▶ DataFusion Expr / validated LogicalPlan, consumed by the providers
+cetra-storage/src/filter, src/sql (A2) ──▶ DataFusion Expr / validated LogicalPlan, consumed by the providers
 ```
 
 - Storage is **policy-free**: it never reads `meta.db`. Retention days, project lifecycle and deletion scopes come in through API calls.
 - The server publishes live events after `append_spans` returns, using the batch it already has. Storage has no pub/sub.
-- A2 builds the user-facing views of spec 05 over A1's providers (D89): hex IDs, hidden `project_id`, `sessions`, the hex-to-binary literal rewrite, default exclusions. It also produces DataFusion `Expr`s and validated plans from the DSL and SQL. A1's providers expose the stored schemas (`llmobs-core`) and accept any `Expr` DataFusion pushes down. The contract between them is those schemas and the `ProjectQuery` that `Storage::query` returns. A2 can start right away and test against in-memory tables.
+- A2 builds the user-facing views of spec 05 over A1's providers (D89): hex IDs, hidden `project_id`, `sessions`, the hex-to-binary literal rewrite, default exclusions. It also produces DataFusion `Expr`s and validated plans from the DSL and SQL. A1's providers expose the stored schemas (`cetra-core`) and accept any `Expr` DataFusion pushes down. The contract between them is those schemas and the `ProjectQuery` that `Storage::query` returns. A2 can start right away and test against in-memory tables.
 
 ## Public API
 
-The whole public surface of `llmobs-storage`. Names may be adjusted in M1, but no other public items are added without updating this section.
+The whole public surface of `cetra-storage`. Names may be adjusted in M1, but no other public items are added without updating this section.
 
 ```rust
 pub struct Storage { /* private */ }
@@ -78,7 +78,7 @@ impl Storage {
     pub async fn open(config: StorageConfig) -> Result<Storage, OpenError>;
 
     /// Durable when it returns Ok (per `wal.sync`), and visible to queries.
-    /// `batch` uses `llmobs_core` `spans_schema()`; every row has the given project.
+    /// `batch` uses `cetra_core` `spans_schema()`; every row has the given project.
     pub async fn append_spans(&self, project: ProjectId, batch: RecordBatch) -> Result<AppendReceipt, AppendError>;
     pub async fn append_scores(&self, project: ProjectId, batch: RecordBatch) -> Result<AppendReceipt, AppendError>;
 
@@ -307,7 +307,7 @@ The `traces` view is the least proven part of this design. Laminar merges partia
 
 The detailed plan is `02-s1-trace-list-benchmark.md`. It adds a one-day query (Q6), an informational "wrong pushdown" variant, and a measurement of the anchor's startup cost to what follows.
 
-**What it is:** a throwaway prototype, run alongside M1, by one agent. It lives on its own branch and is **never merged**. Only the results document is. It uses DataFusion 55 directly, not `llmobs-storage`.
+**What it is:** a throwaway prototype, run alongside M1, by one agent. It lives on its own branch and is **never merged**. Only the results document is. It uses DataFusion 55 directly, not `cetra-storage`.
 
 **Data:** synthetic, written straight to Parquet with spec 03 §3's settings:
 - one project, 7 days, 5 million traces with 10 spans each;
@@ -376,7 +376,7 @@ Spec 03 §7, with the bookkeeping that makes it terminate (G20):
 
 ## Catalog (`catalog.db`, D83)
 
-Tables (migrations owned by `llmobs-storage`, `sqlx::migrate!` like the server's). The full schema is in spec 03 §4.
+Tables (migrations owned by `cetra-storage`, `sqlx::migrate!` like the server's). The full schema is in spec 03 §4.
 
 | Table | Content |
 |---|---|
@@ -485,11 +485,11 @@ Each milestone ends merged, with `just check` green, and gets its own implementa
   - `traces` derived from `spans` files.
 - **Spec 02:** rule 15 gains the D85 start-time bounds (B1 implements them).
 - **Spec 12:**
-  - § Backups: back up `catalog.db` together with `meta.db`, in the same snapshot; restore uses `llmobs admin gc-orphans`, since GC no longer lists the bucket;
+  - § Backups: back up `catalog.db` together with `meta.db`, in the same snapshot; restore uses `cetra admin gc-orphans`, since GC no longer lists the bucket;
   - § Process lifecycle: storage opens (migrations, replay) before ingestion;
   - § Upgrades: a pre-migration copy of `catalog.db`.
-- **Spec 09 § CLI:** `llmobs admin gc-orphans`.
-- **Spec 02 § Media extraction:** blobs are stored through `llmobs-storage`.
+- **Spec 09 § CLI:** `cetra admin gc-orphans`.
+- **Spec 02 § Media extraction:** blobs are stored through `cetra-storage`.
 - **Spec README:** the architecture diagram shows `catalog.db`.
 - **`docs/mvp-decisions.md`:** D83–D88.
 - **AGENTS.md § Layout:** the storage line mentions `catalog.db`.
@@ -499,7 +499,7 @@ Each milestone ends merged, with `just check` green, and gets its own implementa
 Answered in M2:
 
 - DataFusion 55's file metadata cache does **not** include bloom-filter bitsets. It caches footers and page indexes (column and offset indexes) up to `query.metadata_cache_bytes`. Bloom pruning still runs: the bitset is read from the object. No custom reader factory was written (§ Query resources).
-- A real S3 server is not part of CI (D119). S3 coverage there is `FaultStore` around `InMemory`. `crates/storage/tests/s3.rs` runs when `LLMOBS_TEST_S3_ENDPOINT` is set. The `minio/minio` image is no longer published, so the test's doc comment uses Versity Gateway (`versity/versitygw:v1.11.0`). After M2 merged, the test passed against it, including a multipart upload.
+- A real S3 server is not part of CI (D119). S3 coverage there is `FaultStore` around `InMemory`. `crates/storage/tests/s3.rs` runs when `CETRA_TEST_S3_ENDPOINT` is set. The `minio/minio` image is no longer published, so the test's doc comment uses Versity Gateway (`versity/versitygw:v1.11.0`). After M2 merged, the test passed against it, including a multipart upload.
 
 Still open:
 

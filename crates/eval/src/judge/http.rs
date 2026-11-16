@@ -28,7 +28,21 @@ pub(crate) fn provider_error(
         Adapter::OpenAi | Adapter::Anthropic => error_object(body),
         Adapter::Gemini => gemini_error(body),
     };
-    let class = classify(status, provider_type.as_deref(), provider_code.as_deref());
+    let quota = match adapter {
+        Adapter::OpenAi => {
+            is_insufficient_quota(provider_type.as_deref(), provider_code.as_deref())
+        }
+        Adapter::Anthropic => {
+            anthropic_out_of_credit(provider_type.as_deref(), provider_message.as_deref())
+        }
+        Adapter::Gemini => gemini_quota_exhausted(status, provider_code.as_deref(), body),
+    };
+    let class = classify(
+        status,
+        quota,
+        provider_type.as_deref(),
+        provider_code.as_deref(),
+    );
     let hint = structured_output_hint(adapter, mode, status, provider_code.as_deref());
     JudgeError::Provider {
         status,
@@ -108,8 +122,13 @@ fn provider_message(value: Option<&str>) -> Option<String> {
     Some(value.chars().take(MESSAGE_MAX_CHARS).collect())
 }
 
-fn classify(status: u16, provider_type: Option<&str>, provider_code: Option<&str>) -> ErrorClass {
-    if status == 429 && is_insufficient_quota(provider_type, provider_code) {
+fn classify(
+    status: u16,
+    quota: bool,
+    provider_type: Option<&str>,
+    provider_code: Option<&str>,
+) -> ErrorClass {
+    if quota {
         return ErrorClass::Pause;
     }
     if status == 408 || status == 425 || status == 429 || (500..600).contains(&status) {
@@ -129,6 +148,38 @@ fn classify(status: u16, provider_type: Option<&str>, provider_code: Option<&str
 
 fn is_insufficient_quota(provider_type: Option<&str>, provider_code: Option<&str>) -> bool {
     provider_type == Some("insufficient_quota") || provider_code == Some("insufficient_quota")
+}
+
+/// Anthropic: `billing_error` (documented, status 402) or a 400 `invalid_request_error`
+/// whose message says the credit balance is too low (seen in the wild, not in the docs).
+fn anthropic_out_of_credit(provider_type: Option<&str>, message: Option<&str>) -> bool {
+    provider_type == Some("billing_error")
+        || message.is_some_and(|message| message.to_ascii_lowercase().contains("credit balance"))
+}
+
+/// Gemini: a 429 `RESOURCE_EXHAUSTED` whose `error.details` carry a `QuotaFailure` violation
+/// on a per-day quota. A per-minute or per-second violation, or no details, is a rate limit.
+/// The per-day naming is seen in the wild; Google's docs do not show a body.
+fn gemini_quota_exhausted(status: u16, provider_code: Option<&str>, body: &[u8]) -> bool {
+    if status != 429 || provider_code != Some("RESOURCE_EXHAUSTED") {
+        return false;
+    }
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        return false;
+    };
+    let Some(details) = value.pointer("/error/details").and_then(Value::as_array) else {
+        return false;
+    };
+    details
+        .iter()
+        .filter(|detail| {
+            detail.get("@type").and_then(Value::as_str)
+                == Some("type.googleapis.com/google.rpc.QuotaFailure")
+        })
+        .filter_map(|detail| detail.get("violations").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|violation| violation.get("quotaId").and_then(Value::as_str))
+        .any(|id| id.contains("PerDay"))
 }
 
 /// `content_filter` and `content_policy_violation` are permanent. `PERMISSION_DENIED` is not.

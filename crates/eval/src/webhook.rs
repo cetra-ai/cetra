@@ -1,14 +1,14 @@
 //! Webhook evaluator (D165).
 //!
 //! One POST, signed with HMAC-SHA256. The header name is not in
-//! [`llmobs_core::names`]; [`SIGNATURE_HEADER`] is the constant D46 renames.
+//! [`cetra_core::names`]; [`SIGNATURE_HEADER`] is the constant a rename changes.
 
 use std::time::Duration;
 
+use cetra_core::enums::ScoreDataType;
+use cetra_core::ids::{ProjectId, SpanId, TraceId};
+use cetra_core::score::ScoreValue;
 use hmac::{Hmac, KeyInit, Mac};
-use llmobs_core::enums::ScoreDataType;
-use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-use llmobs_core::score::ScoreValue;
 use reqwest::Url;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Serialize;
@@ -29,8 +29,8 @@ const RESPONSE_CAP: usize = 64 * 1024;
 /// Score reason length, in Unicode scalar values.
 const REASON_CHARS: usize = 8_000;
 
-/// The signature header, lower case. D46 renames it with the product.
-pub const SIGNATURE_HEADER: &str = "x-llmobs-signature";
+/// The signature header, lower case. A rename of the product changes it.
+pub const SIGNATURE_HEADER: &str = "x-cetra-signature";
 
 const NOT_JSON_OBJECT: &str = "not a JSON object";
 const MISSING_VALUE: &str = "missing value";
@@ -193,15 +193,16 @@ fn headers(
     signature: HeaderValue,
 ) -> Result<Vec<(HeaderName, HeaderValue)>, WebhookError> {
     let mut map = HeaderMap::new();
-    map.insert(
-        HeaderName::from_static("content-type"),
-        HeaderValue::from_static("application/json"),
-    );
     for (name, value) in &config.headers {
         let name = HeaderName::try_from(name.as_str()).map_err(|_| WebhookError::InvalidHeader)?;
         let value = HeaderValue::from_str(value).map_err(|_| WebhookError::InvalidHeader)?;
         map.insert(name, value);
     }
+    // Set after the configured headers so they cannot override either (D-I-46).
+    map.insert(
+        HeaderName::from_static("content-type"),
+        HeaderValue::from_static("application/json"),
+    );
     map.insert(HeaderName::from_static(SIGNATURE_HEADER), signature);
     Ok(map
         .into_iter()
@@ -240,12 +241,13 @@ fn optional_json<T: Serialize>(value: Option<T>) -> Result<Value, WebhookError> 
     }
 }
 
-/// 408, 425, 429, and 5xx retry. 401, 403, 404, and 410 pause. 3xx and other 4xx are permanent.
+/// 408, 425, 429, and 5xx retry. 401, 402, 403, 404, and 410 pause (D160 and D165).
+/// 3xx and other 4xx are permanent.
 fn classify_status(status: u16) -> ErrorClass {
     match status {
         408 | 425 | 429 => ErrorClass::Retryable,
         500..=599 => ErrorClass::Retryable,
-        401 | 403 | 404 | 410 => ErrorClass::Pause,
+        401 | 402 | 403 | 404 | 410 => ErrorClass::Pause,
         _ => ErrorClass::Permanent,
     }
 }
@@ -333,8 +335,8 @@ fn bad(reason: &'static str) -> WebhookError {
 
 #[cfg(test)]
 mod tests {
-    use llmobs_core::enums::ScoreDataType;
-    use llmobs_core::score::ScoreValue;
+    use cetra_core::enums::ScoreDataType;
+    use cetra_core::score::ScoreValue;
     use proptest::prelude::*;
 
     use super::{REASON_CHARS, parse_score};

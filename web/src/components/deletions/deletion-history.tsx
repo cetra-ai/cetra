@@ -26,6 +26,30 @@ import {
   isOpenDeletion,
 } from "@/lib/deletions";
 
+/** Who asked, as a label (`requested_by.kind`). */
+function actorLabel(kind: "user" | "api_key" | "control_plane"): string {
+  switch (kind) {
+    case "api_key":
+      return "API key";
+    case "control_plane":
+      return "Control plane";
+    case "user":
+      return "Member";
+  }
+}
+
+/** The kind word `IdText` shows before the id of the requester. */
+function actorIdKind(kind: "user" | "api_key" | "control_plane"): string {
+  switch (kind) {
+    case "api_key":
+      return "API key";
+    case "control_plane":
+      return "control plane";
+    case "user":
+      return "user";
+  }
+}
+
 /** The project's deletions, newest first. Refetches while one is open. */
 export function DeletionHistory() {
   const { org, project } = useProject();
@@ -104,12 +128,10 @@ export function DeletionHistory() {
                     </TableCell>
                     <TableCell>
                       <div className="flex flex-col">
-                        <span>
-                          {deletion.requested_by.kind === "api_key" ? "API key" : "Member"}
-                        </span>
+                        <span>{actorLabel(deletion.requested_by.kind)}</span>
                         <IdText
                           value={deletion.requested_by.id}
-                          kind={deletion.requested_by.kind === "api_key" ? "API key" : "user"}
+                          kind={actorIdKind(deletion.requested_by.kind)}
                         />
                       </div>
                     </TableCell>

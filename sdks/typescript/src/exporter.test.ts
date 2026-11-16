@@ -10,10 +10,11 @@ import { describe, expect, it, vi } from "vitest";
 
 import { FetchTraceExporter } from "./exporter.js";
 import { resetWarningsForTests } from "./log.js";
+import { QuotaState } from "./quota.js";
 import { type FetchLike, type ResponseLike, runtimeGlobals } from "./web.js";
 
 const URL_UNDER_TEST = "http://127.0.0.1:9/v1/traces";
-const API_KEY = "sk-llmobs-test";
+const API_KEY = "sk-cetra-test";
 
 interface RecordedCall {
   url: string;
@@ -47,7 +48,10 @@ function recordCall(url: string, init: Parameters<FetchLike>[1]): RecordedCall {
 }
 
 /** An exporter wired to a fake `fetch` answering from `script` and a fake sleep. */
-function makeExporter(script: ReadonlyArray<ScriptedAnswer>): {
+function makeExporter(
+  script: ReadonlyArray<ScriptedAnswer>,
+  options: { now?: () => number; quota?: QuotaState } = {},
+): {
   calls: RecordedCall[];
   sleeps: number[];
   exporter: FetchTraceExporter;
@@ -70,7 +74,8 @@ function makeExporter(script: ReadonlyArray<ScriptedAnswer>): {
       sleeps.push(ms);
       return Promise.resolve();
     },
-    now: () => 1_000_000,
+    now: options.now ?? (() => 1_000_000),
+    quota: options.quota,
   });
   return { calls, sleeps, exporter };
 }
@@ -87,9 +92,9 @@ function finishedSpans(): ReadableSpan[] {
   const provider = new TracerProvider({
     spanProcessors: [new SimpleSpanProcessor({ exporter: memory })],
   });
-  const tracer = provider.getTracer("llmobs", "0.0.0");
-  const span = tracer.startSpan("hello", { attributes: { "llmobs.span.kind": "chain" } });
-  span.setAttribute("llmobs.input", "hi");
+  const tracer = provider.getTracer("cetra", "0.0.0");
+  const span = tracer.startSpan("hello", { attributes: { "cetra.span.kind": "chain" } });
+  span.setAttribute("cetra.input", "hi");
   span.end();
   return memory.getFinishedSpans();
 }
@@ -359,10 +364,71 @@ describe("FetchTraceExporter", () => {
       expect(first.code).toBe(ExportResultCode.FAILED);
       expect(second.code).toBe(ExportResultCode.FAILED);
       expect(warn).toHaveBeenCalledTimes(1);
-      expect(warn).toHaveBeenCalledWith("llmobs: fetch is not available; spans are not exported");
+      expect(warn).toHaveBeenCalledWith("cetra: fetch is not available; spans are not exported");
     } finally {
       warn.mockRestore();
       Object.defineProperty(globalThis, "fetch", { value: previous, configurable: true });
+    }
+  });
+});
+
+describe("FetchTraceExporter after a 402 (D-P-34)", () => {
+  it("returns SUCCESS on 402 without retrying, then skips fetches while paused", async () => {
+    let clock = 1_000_000;
+    const { calls, sleeps, exporter } = makeExporter([response(402, { "Retry-After": "60" })], {
+      now: () => clock,
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const first = await exportSpans(exporter, []);
+      expect(first.code).toBe(ExportResultCode.SUCCESS);
+      expect(first.error).toBeUndefined();
+      expect(calls).toHaveLength(1);
+      expect(sleeps).toEqual([]);
+
+      clock += 59_000;
+      const second = await exportSpans(exporter, []);
+      expect(second.code).toBe(ExportResultCode.SUCCESS);
+      expect(calls).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("sends again once Retry-After seconds have passed", async () => {
+    let clock = 1_000_000;
+    const { calls, exporter } = makeExporter(
+      [response(402, { "Retry-After": "60" }), response(200)],
+      { now: () => clock },
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await exportSpans(exporter, []);
+      clock += 60_000;
+      const result = await exportSpans(exporter, []);
+      expect(result.code).toBe(ExportResultCode.SUCCESS);
+      expect(calls).toHaveLength(2);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("honours a pause set through a QuotaState shared with another exporter", async () => {
+    const clock = 1_000_000;
+    const quota = new QuotaState(() => clock);
+    const paused = makeExporter([response(402, { "Retry-After": "60" })], {
+      now: () => clock,
+      quota,
+    });
+    const other = makeExporter([response(200)], { now: () => clock, quota });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await exportSpans(paused.exporter, []);
+      const result = await exportSpans(other.exporter, []);
+      expect(result.code).toBe(ExportResultCode.SUCCESS);
+      expect(other.calls).toHaveLength(0);
+    } finally {
+      warn.mockRestore();
     }
   });
 });

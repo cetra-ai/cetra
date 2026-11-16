@@ -14,8 +14,8 @@ use std::time::Instant;
 
 use arrow::array::{Array, BooleanArray, RecordBatch, TimestampNanosecondArray};
 use arrow::compute::{concat_batches, filter_record_batch};
+use cetra_core::ids::ProjectId;
 use chrono::NaiveDate;
-use llmobs_core::ids::ProjectId;
 
 use crate::error::MemtableError;
 use crate::wal::Table;
@@ -161,6 +161,12 @@ impl Memtable {
     /// Highest WAL seq in the active memtable, or `0` when it is empty.
     pub(crate) fn active_max_seq(&self) -> u64 {
         self.active.max_seq
+    }
+
+    /// Highest WAL seq held, active or frozen. `0` when the memtable holds nothing.
+    pub(crate) fn max_seq(&self) -> u64 {
+        let frozen = self.frozen.as_ref().map_or(0, |frozen| frozen.max_seq);
+        self.active.max_seq.max(frozen)
     }
 
     /// When the first batch of the active memtable was inserted.
@@ -474,12 +480,12 @@ mod tests {
     use std::time::Instant;
 
     use arrow::array::{Array, TimestampNanosecondArray};
+    use cetra_core::batch::scores_to_record_batch;
+    use cetra_core::enums::ScoreSource;
+    use cetra_core::ids::{ProjectId, TraceId};
+    use cetra_core::schema::spans::START_TIME;
+    use cetra_core::score::{Score, ScoreTarget, ScoreValue};
     use chrono::NaiveDate;
-    use llmobs_core::batch::scores_to_record_batch;
-    use llmobs_core::enums::ScoreSource;
-    use llmobs_core::ids::{ProjectId, TraceId};
-    use llmobs_core::schema::spans::START_TIME;
-    use llmobs_core::score::{Score, ScoreTarget, ScoreValue};
 
     use super::*;
     use crate::wal::spans_at;

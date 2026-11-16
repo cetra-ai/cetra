@@ -14,11 +14,12 @@ use serde::Deserialize;
 
 use crate::auth::oidc::flow::{self, LoginError, StartError};
 use crate::auth::oidc::state_cookie;
-use crate::auth::session::start_session;
+use crate::auth::session::{SessionOrigin, start_session};
 use crate::http::AppState;
 use crate::http::access::{Access, RouteDef};
 use crate::http::client_ip::ClientIp;
 use crate::http::error::{self, ApiError};
+use crate::http::restore::refuse_outbound;
 
 /// Authorize and callback.
 pub(crate) fn routes() -> Vec<RouteDef> {
@@ -63,6 +64,7 @@ async fn authorize(
     error::Path(provider): error::Path<String>,
     error::Query(query): error::Query<AuthorizeQuery>,
 ) -> Result<Response, ApiError> {
+    refuse_outbound(&state, "external sign-in")?;
     match flow::start(
         &state,
         &provider,
@@ -87,18 +89,30 @@ async fn callback(
     error::Path(provider): error::Path<String>,
     error::Query(query): error::Query<CallbackQuery>,
 ) -> Result<Response, ApiError> {
+    refuse_outbound(&state, "external sign-in")?;
     let https = state.config.public_url.is_https();
     let clear = state_cookie::clear(https);
-    match flow::finish(
-        &state,
-        &headers,
-        &provider,
-        query.state.as_deref(),
-        query.code.as_deref(),
-        query.error.is_some(),
-    )
-    .await
-    {
+    let finished = if provider == crate::ee::org_sso::login::PROVIDER {
+        crate::ee::org_sso::login::finish(
+            &state,
+            &headers,
+            query.state.as_deref(),
+            query.code.as_deref(),
+            query.error.is_some(),
+        )
+        .await
+    } else {
+        flow::finish(
+            &state,
+            &headers,
+            &provider,
+            query.state.as_deref(),
+            query.code.as_deref(),
+            query.error.is_some(),
+        )
+        .await
+    };
+    match finished {
         Ok(logged_in) => {
             let session = match start_session(
                 &state,
@@ -107,6 +121,9 @@ async fn callback(
                     .get(header::USER_AGENT)
                     .and_then(|value| value.to_str().ok()),
                 Some(ip),
+                logged_in
+                    .sso_org
+                    .map_or(SessionOrigin::Provider, SessionOrigin::OrgProvider),
             )
             .await
             {
@@ -117,12 +134,21 @@ async fn callback(
                     return Ok(response);
                 }
             };
-            tracing::info!(
-                target: "audit",
-                user_id = %logged_in.user_id,
-                provider = %provider,
-                "login"
-            );
+            match logged_in.sso_org {
+                Some(org_id) => tracing::info!(
+                    target: "audit",
+                    user_id = %logged_in.user_id,
+                    org_id = %org_id,
+                    provider = %provider,
+                    "login"
+                ),
+                None => tracing::info!(
+                    target: "audit",
+                    user_id = %logged_in.user_id,
+                    provider = %provider,
+                    "login"
+                ),
+            }
             redirect(&logged_in.redirect, [clear, session])
         }
         Err(LoginError::Internal(error)) => {
@@ -137,7 +163,7 @@ async fn callback(
     }
 }
 
-fn redirect(
+pub(crate) fn redirect(
     location: &str,
     cookies: impl IntoIterator<Item = axum::http::HeaderValue>,
 ) -> Result<Response, ApiError> {
@@ -163,10 +189,7 @@ mod tests {
     use std::time::Duration;
 
     use axum::http::{Method, StatusCode, header};
-    use base64::Engine;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use llmobs_core::ids::OrgId;
-    use serde::Deserialize;
+    use cetra_core::ids::OrgId;
     use serde_json::json;
     use uuid::Uuid;
 
@@ -179,33 +202,13 @@ mod tests {
     use crate::meta::invites::{self, INVITE_TTL_NS};
     use crate::meta::users;
     use crate::test_support::mock_idp::{
-        CLIENT_ID, CLIENT_SECRET, GithubEmail, GithubUser, Grant, MockIdp,
+        CLIENT_ID, CLIENT_SECRET, GithubEmail, GithubUser, MockIdp,
     };
-    use crate::test_support::{TestApp, TestResponse, assert_logs_clean, capture_logs};
+    use crate::test_support::{TestApp, assert_logs_clean, capture_logs, set_limits};
 
-    const OAUTH_NAME: &str = llmobs_core::llmobs_name!("_oauth");
-    const SESSION_NAME: &str = llmobs_core::llmobs_name!("_session");
-    const PASSWORD: &str = "llmobs-ok1";
+    use crate::test_support::oauth::*;
 
-    #[derive(Deserialize)]
-    struct MeBody {
-        user: MeUser,
-    }
-
-    #[derive(Deserialize)]
-    struct MeUser {
-        id: Uuid,
-        email: String,
-        name: Option<String>,
-    }
-
-    struct Pending {
-        cookie: String,
-        state: String,
-        nonce: Option<String>,
-        challenge: String,
-        redirect_uri: String,
-    }
+    const PASSWORD: &str = "cetra-ok-1";
 
     fn secret(value: &str) -> Secret<String> {
         serde_json::from_str(&format!("\"{value}\"")).expect("secret")
@@ -257,102 +260,6 @@ mod tests {
         one_cookie(&response, SESSION_NAME)
     }
 
-    fn set_cookies(response: &TestResponse) -> Vec<String> {
-        response
-            .headers
-            .get_all(header::SET_COOKIE)
-            .iter()
-            .filter_map(|value| value.to_str().ok().map(str::to_owned))
-            .collect()
-    }
-
-    fn cookie_header(response: &TestResponse, name: &str) -> String {
-        let prefix = format!("{name}=");
-        set_cookies(response)
-            .into_iter()
-            .find(|value| value.starts_with(&prefix))
-            .unwrap_or_else(|| panic!("missing {name}"))
-    }
-
-    fn one_cookie(response: &TestResponse, name: &str) -> String {
-        cookie_header(response, name)
-            .split(';')
-            .next()
-            .expect("pair")
-            .to_owned()
-    }
-
-    fn location(response: &TestResponse) -> &str {
-        response.header("location").expect("location")
-    }
-
-    fn saved_redirect(response: &TestResponse) -> String {
-        let pair = one_cookie(response, OAUTH_NAME);
-        let value = pair.split_once('=').expect("cookie").1;
-        let payload = value.split_once('.').expect("signature").0;
-        let bytes = URL_SAFE_NO_PAD.decode(payload).expect("payload");
-        let state: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
-        state["redirect"].as_str().expect("redirect").to_owned()
-    }
-
-    async fn begin(app: &TestApp, provider: &str, redirect: &str) -> Pending {
-        begin_with(app, provider, &[("redirect", redirect)]).await
-    }
-
-    async fn begin_with(app: &TestApp, provider: &str, query: &[(&str, &str)]) -> Pending {
-        let response = app
-            .request(
-                Method::GET,
-                &format!(
-                    "/api/auth/authorize/{provider}?{}",
-                    serde_urlencoded::to_string(query).expect("query")
-                ),
-            )
-            .send()
-            .await;
-        assert_eq!(response.status, StatusCode::FOUND);
-        let url = url::Url::parse(location(&response)).expect("authorize url");
-        let pairs: std::collections::HashMap<String, String> =
-            url.query_pairs().into_owned().collect();
-        Pending {
-            cookie: one_cookie(&response, OAUTH_NAME),
-            state: pairs["state"].clone(),
-            nonce: pairs.get("nonce").cloned(),
-            challenge: pairs["code_challenge"].clone(),
-            redirect_uri: pairs["redirect_uri"].clone(),
-        }
-    }
-
-    async fn finish(app: &TestApp, provider: &str, pending: &Pending, query: &str) -> TestResponse {
-        app.request(
-            Method::GET,
-            &format!("/api/auth/callback/{provider}?{query}"),
-        )
-        .header(header::COOKIE.as_str(), &pending.cookie)
-        .send()
-        .await
-    }
-
-    fn grant(pending: &Pending, email: &str, verified: Option<bool>) -> Grant {
-        let mut grant = Grant::new("grace", &pending.challenge, &pending.redirect_uri);
-        grant.claims.email = Some(email.to_owned());
-        grant.claims.email_verified = verified;
-        grant.claims.nonce.clone_from(&pending.nonce);
-        grant.claims.name = Some(" Grace ".to_owned());
-        grant.claims.hd = Some("acme.test".to_owned());
-        grant
-    }
-
-    async fn me(app: &TestApp, cookie: &str) -> MeUser {
-        let response = app
-            .request(Method::GET, "/api/auth/me")
-            .header(header::COOKIE.as_str(), cookie)
-            .send()
-            .await;
-        assert_eq!(response.status, StatusCode::OK);
-        response.json::<MeBody>().user
-    }
-
     async fn signup(app: &TestApp, email: &str) -> String {
         let response = app
             .request(Method::POST, "/api/auth/signup")
@@ -384,7 +291,8 @@ mod tests {
         }
     }
 
-    async fn invite(app: &TestApp, email: &str) {
+    /// Returns the invitation's plaintext token.
+    async fn invite(app: &TestApp, email: &str) -> String {
         let org_id: String = sqlx::query_scalar("SELECT id FROM orgs LIMIT 1")
             .fetch_one(app.state.meta.reader())
             .await
@@ -397,6 +305,7 @@ mod tests {
         let user = Uuid::parse_str(&user_id).expect("user id");
         let now = app.state.clock.now_ns();
         let token = new_opaque_token().expect("token");
+        let plaintext = token.plaintext.clone();
         let email = email.to_owned();
         app.state
             .meta
@@ -418,6 +327,7 @@ mod tests {
             })
             .await
             .expect("invite");
+        plaintext
     }
 
     #[tokio::test]
@@ -441,7 +351,7 @@ mod tests {
         assert!(cookie[0].contains("Max-Age=600"));
         assert!(!cookie[0].contains("Secure"));
 
-        let code = idp.issue_code(grant(&pending, "grace@example.com", Some(true)));
+        let code = idp.issue_code(grant("grace", &pending, "grace@example.com", Some(true)));
         let response = assert_logs_clean(
             &[code.as_str(), CLIENT_SECRET, "grace@example.com", "eyJ"],
             finish(
@@ -473,7 +383,7 @@ mod tests {
         assert!(hash.is_none());
 
         let again = begin(&app, "oidc:mock", "/traces").await;
-        let mut second = grant(&again, "grace@example.com", Some(false));
+        let mut second = grant("grace", &again, "grace@example.com", Some(false));
         second.claims.sub = "grace".to_owned();
         let code = idp.issue_code(second);
         let response = finish(
@@ -498,7 +408,7 @@ mod tests {
         let idp = MockIdp::start().await;
         let app = oidc_app(&idp, SignupPolicy::Open).await;
         let pending = begin(&app, "oidc:mock", "/").await;
-        let code = idp.issue_code(grant(&pending, "grace@example.com", Some(true)));
+        let code = idp.issue_code(grant("grace", &pending, "grace@example.com", Some(true)));
         let response = finish(
             &app,
             "oidc:mock",
@@ -600,7 +510,7 @@ mod tests {
             Bad::ForeignKey,
         ] {
             let pending = begin(&app, "oidc:mock", "/traces").await;
-            let mut issued = grant(&pending, "grace@example.com", Some(true));
+            let mut issued = grant("grace", &pending, "grace@example.com", Some(true));
             match bad {
                 Bad::Nonce => issued.claims.nonce = Some("other-nonce".to_owned()),
                 Bad::Audience => issued.claims.aud = Some("other-client".to_owned()),
@@ -655,7 +565,7 @@ mod tests {
         let pending = begin(&app, "oidc:mock", "/traces").await;
         let before = idp.discovery_hits();
         idp.rotate();
-        let code = idp.issue_code(grant(&pending, "grace@example.com", Some(true)));
+        let code = idp.issue_code(grant("grace", &pending, "grace@example.com", Some(true)));
         let response = finish(
             &app,
             "oidc:mock",
@@ -674,7 +584,7 @@ mod tests {
         setup_admin(&app).await;
         for verified in [Some(false), None] {
             let pending = begin(&app, "oidc:mock", "/").await;
-            let code = idp.issue_code(grant(&pending, "grace@example.com", verified));
+            let code = idp.issue_code(grant("grace", &pending, "grace@example.com", verified));
             let response = finish(
                 &app,
                 "oidc:mock",
@@ -697,7 +607,7 @@ mod tests {
         let app = oidc_app(&idp, SignupPolicy::Open).await;
         setup_admin(&app).await;
         let pending = begin(&app, "oidc:mock", "/").await;
-        let mut grant = grant(&pending, "ada@example.com", Some(true));
+        let mut grant = grant("grace", &pending, "ada@example.com", Some(true));
         grant.claims.sub = "someone-else".to_owned();
         let code = idp.issue_code(grant);
         let response = finish(
@@ -722,7 +632,7 @@ mod tests {
         let ada = setup_admin(&app).await;
         let ada_user = me(&app, &ada).await;
         let pending = begin(&app, "oidc:mock", "/traces").await;
-        let code = idp.issue_code(grant(&pending, "grace@example.com", Some(true)));
+        let code = idp.issue_code(grant("grace", &pending, "grace@example.com", Some(true)));
         let response = app
             .request(
                 Method::GET,
@@ -753,7 +663,7 @@ mod tests {
         let app = oidc_app(&idp, SignupPolicy::InviteOnly).await;
         setup_admin(&app).await;
         let pending = begin(&app, "oidc:mock", "/").await;
-        let code = idp.issue_code(grant(&pending, "grace@example.com", Some(true)));
+        let code = idp.issue_code(grant("grace", &pending, "grace@example.com", Some(true)));
         let closed = finish(
             &app,
             "oidc:mock",
@@ -765,7 +675,7 @@ mod tests {
 
         invite(&app, "grace@example.com").await;
         let pending = begin(&app, "oidc:mock", "/").await;
-        let code = idp.issue_code(grant(&pending, "grace@example.com", Some(true)));
+        let code = idp.issue_code(grant("grace", &pending, "grace@example.com", Some(true)));
         let created = finish(
             &app,
             "oidc:mock",
@@ -786,7 +696,7 @@ mod tests {
         let app = oidc_app(&idp, SignupPolicy::Disabled).await;
         setup_admin(&app).await;
         let pending = begin(&app, "oidc:mock", "/").await;
-        let code = idp.issue_code(grant(&pending, "grace@example.com", Some(true)));
+        let code = idp.issue_code(grant("grace", &pending, "grace@example.com", Some(true)));
         let disabled = finish(
             &app,
             "oidc:mock",
@@ -827,7 +737,7 @@ mod tests {
             ),
             "/traces"
         );
-        let code = idp.issue_code(grant(&pending, "grace@example.com", Some(true)));
+        let code = idp.issue_code(grant("grace", &pending, "grace@example.com", Some(true)));
         let response = finish(
             &app,
             "oidc:mock",
@@ -844,7 +754,7 @@ mod tests {
         let app = oidc_app(&idp, SignupPolicy::Open).await;
         setup_admin(&app).await;
         let pending = begin(&app, "oidc:mock", "/").await;
-        let code = idp.issue_code(grant(&pending, "grace@example.com", Some(true)));
+        let code = idp.issue_code(grant("grace", &pending, "grace@example.com", Some(true)));
         let created = finish(
             &app,
             "oidc:mock",
@@ -862,7 +772,7 @@ mod tests {
             .await
             .expect("disable");
         let pending = begin(&app, "oidc:mock", "/").await;
-        let code = idp.issue_code(grant(&pending, "grace@example.com", Some(true)));
+        let code = idp.issue_code(grant("grace", &pending, "grace@example.com", Some(true)));
         let response = finish(
             &app,
             "oidc:mock",
@@ -984,7 +894,7 @@ mod tests {
         setup_admin(&app).await;
 
         let pending = begin(&app, "google", "/").await;
-        let mut issued = grant(&pending, "ada@acme.com", Some(true));
+        let mut issued = grant("grace", &pending, "ada@acme.com", Some(true));
         issued.claims.hd = Some("acme.com".to_owned());
         let code = idp.issue_code(issued);
         let response = finish(
@@ -998,7 +908,7 @@ mod tests {
 
         for hd in [None, Some("other.com".to_owned())] {
             let pending = begin(&app, "google", "/").await;
-            let mut issued = grant(&pending, "ada@acme.com", Some(true));
+            let mut issued = grant("grace", &pending, "ada@acme.com", Some(true));
             issued.claims.sub = format!("other-{}", hd.as_deref().unwrap_or("missing"));
             issued.claims.hd = hd;
             let code = idp.issue_code(issued);
@@ -1026,7 +936,7 @@ mod tests {
         .await;
         setup_admin(&app).await;
         let pending = begin(&app, "oidc:mock", "/").await;
-        let code = idp.issue_code(grant(&pending, "grace@example.com", Some(true)));
+        let code = idp.issue_code(grant("grace", &pending, "grace@example.com", Some(true)));
         let response = finish(
             &app,
             "oidc:mock",
@@ -1063,7 +973,15 @@ mod tests {
         app.state
             .meta
             .write(move |conn| {
-                Box::pin(async move { users::set_email_verified(conn, user_id, now).await })
+                Box::pin(async move {
+                    users::set_email_verified(
+                        conn,
+                        user_id,
+                        now,
+                        users::EmailVerifiedVia::MailToken,
+                    )
+                    .await
+                })
             })
             .await
             .expect("verify");
@@ -1142,7 +1060,7 @@ mod tests {
         setup_admin(&app).await;
         signup(&app, "grace@example.com").await;
         let pending = begin(&app, "oidc:mock", "/").await;
-        let code = idp.issue_code(grant(&pending, "grace@example.com", Some(true)));
+        let code = idp.issue_code(grant("grace", &pending, "grace@example.com", Some(true)));
         let response = finish(
             &app,
             "oidc:mock",
@@ -1202,7 +1120,7 @@ mod tests {
         setup_admin(&app).await;
         signup(&app, "grace@example.com").await;
         let pending = begin(&app, "google", "/").await;
-        let code = idp.issue_code(grant(&pending, "grace@example.com", Some(true)));
+        let code = idp.issue_code(grant("grace", &pending, "grace@example.com", Some(true)));
         let response = finish(
             &app,
             "google",
@@ -1229,6 +1147,90 @@ mod tests {
             password_status(&app, "grace@example.com").await,
             StatusCode::UNAUTHORIZED
         );
+    }
+
+    /// Auth review #9: an invitation token proves nothing about the mailbox, so an account made
+    /// with it loses its password, sessions and tokens when the identity provider links it.
+    #[tokio::test]
+    async fn an_invite_verified_password_loses_that_password_when_google_links_it() {
+        let idp = MockIdp::start().await;
+        let base = idp.issuer().to_owned();
+        let app = TestApp::with_google(&base, |config| {
+            config.auth.signup = SignupPolicy::InviteOnly;
+            config.auth.google = Some(google(&[], true));
+        })
+        .await;
+        setup_admin(&app).await;
+        // The inviter holds the token, so they register the victim's address with their own
+        // password.
+        let token = invite(&app, "victim@example.com").await;
+        let created = app
+            .request(Method::POST, "/api/auth/signup")
+            .json(&json!({
+                "email": "victim@example.com",
+                "password": PASSWORD,
+                "invite_token": token,
+            }))
+            .send()
+            .await;
+        assert_eq!(created.status, StatusCode::CREATED);
+        let session = one_cookie(&created, SESSION_NAME);
+        let minted = app
+            .request(Method::POST, "/api/v1/me/tokens")
+            .header(header::COOKIE.as_str(), &session)
+            .json(&json!({ "name": "cli", "scopes": ["read"] }))
+            .send()
+            .await;
+        assert_eq!(minted.status, StatusCode::CREATED);
+        let pat: String = minted.json::<serde_json::Value>()["secret"]
+            .as_str()
+            .expect("secret")
+            .to_owned();
+        let via: Option<String> =
+            sqlx::query_scalar("SELECT email_verified_via FROM users WHERE email = ?")
+                .bind("victim@example.com")
+                .fetch_one(app.state.meta.reader())
+                .await
+                .expect("via");
+        assert_eq!(via.as_deref(), Some("invite"));
+        assert_eq!(
+            password_status(&app, "victim@example.com").await,
+            StatusCode::OK
+        );
+
+        let pending = begin(&app, "google", "/").await;
+        let code = idp.issue_code(grant("victim", &pending, "victim@example.com", Some(true)));
+        let response = finish(
+            &app,
+            "google",
+            &pending,
+            &format!("code={code}&state={}", pending.state),
+        )
+        .await;
+        assert_eq!(location(&response), "/");
+        assert_eq!(
+            password_status(&app, "victim@example.com").await,
+            StatusCode::UNAUTHORIZED
+        );
+        let old_session = app
+            .request(Method::GET, "/api/auth/me")
+            .header(header::COOKIE.as_str(), &session)
+            .send()
+            .await;
+        assert_eq!(old_session.status, StatusCode::UNAUTHORIZED);
+        let old_pat = app
+            .request(Method::GET, "/api/auth/me")
+            .header(header::AUTHORIZATION.as_str(), &format!("Bearer {pat}"))
+            .send()
+            .await;
+        assert_eq!(old_pat.status, StatusCode::UNAUTHORIZED);
+        let via: Option<String> =
+            sqlx::query_scalar("SELECT email_verified_via FROM users WHERE email = ?")
+                .bind("victim@example.com")
+                .fetch_one(app.state.meta.reader())
+                .await
+                .expect("via");
+        assert_eq!(via.as_deref(), Some("idp"));
     }
 
     #[tokio::test]
@@ -1289,7 +1291,7 @@ mod tests {
         let token = app.state.setup.token().unwrap().expect("setup token");
 
         let pending = begin(&app, "oidc:mock", "/").await;
-        let code = idp.issue_code(grant(&pending, "ada@example.com", Some(true)));
+        let code = idp.issue_code(grant("grace", &pending, "ada@example.com", Some(true)));
         let missing = finish(
             &app,
             "oidc:mock",
@@ -1305,7 +1307,7 @@ mod tests {
             &[("redirect", "/traces"), ("setup_token", &token)],
         )
         .await;
-        let mut issued = grant(&pending, "ada@example.com", Some(true));
+        let mut issued = grant("grace", &pending, "ada@example.com", Some(true));
         issued.claims.sub = "ada".to_owned();
         let code = idp.issue_code(issued);
         let (response, logs) = capture_logs(finish(
@@ -1340,7 +1342,7 @@ mod tests {
             &[("redirect", "/"), ("setup_token", &token)],
         )
         .await;
-        let mut grant = grant(&pending, "grace@example.com", Some(true));
+        let mut grant = grant("grace", &pending, "grace@example.com", Some(true));
         grant.claims.sub = "grace".to_owned();
         let code = idp.issue_code(grant);
         let later = finish(
@@ -1376,7 +1378,7 @@ mod tests {
         .await;
         setup_admin(&app).await;
         let pending = begin(&app, "oidc:mock", "/").await;
-        let code = idp.issue_code(grant(&pending, "grace@example.com", Some(true)));
+        let code = idp.issue_code(grant("grace", &pending, "grace@example.com", Some(true)));
         let response = finish(
             &app,
             "oidc:mock",
@@ -1394,7 +1396,7 @@ mod tests {
         assert_eq!(role, "member");
 
         let pending = begin(&app, "oidc:mock", "/").await;
-        let code = idp.issue_code(grant(&pending, "grace@example.com", Some(true)));
+        let code = idp.issue_code(grant("grace", &pending, "grace@example.com", Some(true)));
         let again = finish(
             &app,
             "oidc:mock",
@@ -1413,6 +1415,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auto_provision_at_the_seat_limit_signs_in_without_a_membership() {
+        let idp = MockIdp::start().await;
+        let issuer = idp.issuer().to_owned();
+        let app = TestApp::with_config(move |config| {
+            config.auth.signup = SignupPolicy::InviteOnly;
+            let mut provider = oidc(&issuer);
+            provider.auto_provision = Some(AutoProvision {
+                org: "acme".to_owned(),
+                role: "member".to_owned(),
+            });
+            config.auth.oidc = vec![provider];
+        })
+        .await;
+        setup_admin(&app).await;
+        let org = crate::meta::orgs::org_by_slug(app.state.meta.reader(), "acme")
+            .await
+            .unwrap()
+            .unwrap();
+        // The owner from setup fills the only seat.
+        set_limits(
+            &app,
+            org.id,
+            "2026-01-01T00:00:00Z",
+            &json!({"max_seats": 1}),
+        );
+        let pending = begin(&app, "oidc:mock", "/").await;
+        let code = idp.issue_code(grant("grace", &pending, "grace@example.com", Some(true)));
+        let response = finish(
+            &app,
+            "oidc:mock",
+            &pending,
+            &format!("code={code}&state={}", pending.state),
+        )
+        .await;
+        assert_eq!(location(&response), "/");
+        let user = me(&app, &one_cookie(&response, SESSION_NAME)).await;
+        let memberships: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM org_members WHERE user_id = ?")
+                .bind(user.id.to_string())
+                .fetch_one(app.state.meta.reader())
+                .await
+                .expect("count");
+        assert_eq!(memberships, 0);
+    }
+
+    #[tokio::test]
     async fn a_missing_provision_org_logs_the_slug_and_still_signs_in() {
         let idp = MockIdp::start().await;
         let issuer = idp.issuer().to_owned();
@@ -1428,7 +1476,7 @@ mod tests {
         .await;
         setup_admin(&app).await;
         let pending = begin(&app, "oidc:mock", "/").await;
-        let code = idp.issue_code(grant(&pending, "grace@example.com", Some(true)));
+        let code = idp.issue_code(grant("grace", &pending, "grace@example.com", Some(true)));
         let (response, logs) = capture_logs(finish(
             &app,
             "oidc:mock",
@@ -1461,7 +1509,7 @@ mod tests {
         .await;
         setup_admin(&app).await;
         let pending = begin(&app, "oidc:mock", "/").await;
-        let code = idp.issue_code(grant(&pending, "grace@example.com", Some(true)));
+        let code = idp.issue_code(grant("grace", &pending, "grace@example.com", Some(true)));
         let closed = finish(
             &app,
             "oidc:mock",
@@ -1472,7 +1520,7 @@ mod tests {
         assert!(location(&closed).contains("error=signup_closed"));
 
         let pending = begin(&app, "oidc:mock", "/").await;
-        let mut grant = grant(&pending, "grace@acme.test", Some(true));
+        let mut grant = grant("grace", &pending, "grace@acme.test", Some(true));
         grant.claims.sub = "inside".to_owned();
         let code = idp.issue_code(grant);
         let opened = finish(
@@ -1483,5 +1531,127 @@ mod tests {
         )
         .await;
         assert_eq!(location(&opened), "/");
+    }
+
+    #[tokio::test]
+    async fn instance_providers_are_refused_under_org_enforcement() {
+        let idp = MockIdp::start().await;
+        let issuer = idp.issuer().to_owned();
+        let app = TestApp::with_config(move |config| {
+            config.security.allow_private_network_egress = true;
+            config.auth.signup = SignupPolicy::Open;
+            config.auth.oidc = vec![oidc(&issuer)];
+        })
+        .await;
+        let seeded = app.seed().await;
+        crate::test_support::configure_org_sso(&app, seeded.org_id, &idp, "acme.test", true, true)
+            .await;
+
+        // A new person of the enforced domain is refused and nothing is written.
+        let pending = begin(&app, "oidc:mock", "/").await;
+        let code = idp.issue_code(grant("ada-sub", &pending, "ada@acme.test", Some(true)));
+        let refused = finish(
+            &app,
+            "oidc:mock",
+            &pending,
+            &format!("code={code}&state={}", pending.state),
+        )
+        .await;
+        assert_eq!(location(&refused), "/login?error=sso_required");
+        let written: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE email = 'ada@acme.test'")
+                .fetch_one(app.state.meta.reader())
+                .await
+                .unwrap();
+        assert_eq!(written, 0);
+
+        // An existing non-admin of the domain is refused too.
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    users::insert_user(
+                        conn,
+                        users::NewUser {
+                            email: "grace@acme.test".to_owned(),
+                            name: None,
+                            password_hash: None,
+                            email_verified_at: Some(now),
+                            email_verified_via: Some(users::EmailVerifiedVia::MailToken),
+                            is_instance_admin: false,
+                        },
+                        now,
+                    )
+                    .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        let pending = begin(&app, "oidc:mock", "/").await;
+        let code = idp.issue_code(grant("grace-sub", &pending, "grace@acme.test", Some(true)));
+        let refused = finish(
+            &app,
+            "oidc:mock",
+            &pending,
+            &format!("code={code}&state={}", pending.state),
+        )
+        .await;
+        assert_eq!(location(&refused), "/login?error=sso_required");
+
+        // An instance admin of the domain passes the check; linking refuses admins anyway.
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    users::insert_user(
+                        conn,
+                        users::NewUser {
+                            email: "root@acme.test".to_owned(),
+                            name: None,
+                            password_hash: None,
+                            email_verified_at: Some(now),
+                            email_verified_via: Some(users::EmailVerifiedVia::MailToken),
+                            is_instance_admin: true,
+                        },
+                        now,
+                    )
+                    .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        let pending = begin(&app, "oidc:mock", "/").await;
+        let code = idp.issue_code(grant("root-sub", &pending, "root@acme.test", Some(true)));
+        let admitted = finish(
+            &app,
+            "oidc:mock",
+            &pending,
+            &format!("code={code}&state={}", pending.state),
+        )
+        .await;
+        assert_eq!(location(&admitted), "/login?error=link_refused");
+    }
+
+    #[tokio::test]
+    async fn authorize_is_refused_in_restore_mode() {
+        let app = TestApp::with_config(|config| config.restore_mode = true).await;
+        let response = app
+            .request(Method::GET, "/api/auth/authorize/github")
+            .send()
+            .await;
+        crate::http::restore::tests::assert_refused(&response, "external sign-in");
+    }
+
+    #[tokio::test]
+    async fn callback_is_refused_in_restore_mode() {
+        let app = TestApp::with_config(|config| config.restore_mode = true).await;
+        let response = app
+            .request(Method::GET, "/api/auth/callback/github?state=s&code=c")
+            .send()
+            .await;
+        crate::http::restore::tests::assert_refused(&response, "external sign-in");
     }
 }

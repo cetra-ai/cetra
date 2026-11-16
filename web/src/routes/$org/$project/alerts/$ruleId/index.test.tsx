@@ -7,6 +7,7 @@ import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
 import eventsFixture from "../../../../../../../fixtures/api/static/alert-events.json";
 import ruleFixture from "../../../../../../../fixtures/api/static/alert-rule.json";
+import entitlementsFixture from "../../../../../../../fixtures/api/static/org-entitlements.json";
 import projectFixture from "../../../../../../../fixtures/api/static/project.json";
 
 const PAGE = `/acme/support-bot/alerts/${FIRING_RULE_ID}`;
@@ -112,6 +113,10 @@ it("shows the plan limit when enabling", async () => {
 
   expect(await screen.findByText("Your plan allows 1 enabled alert rule.")).toBeInTheDocument();
   expect(screen.getByText("Upgrade your plan or disable another rule.")).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Upgrade" })).toHaveAttribute(
+    "href",
+    entitlementsFixture.upgrade_url,
+  );
 });
 
 it("shows other toggle errors next to the switch", async () => {
@@ -208,6 +213,23 @@ it("shows the edge values of events and channels", async () => {
   expect(rowAt(table, 1)).toHaveTextContent("1.235");
   expect(within(rowAt(table, 1)).getByText("No channels")).toBeInTheDocument();
   expect(await screen.findByText("Team Slack, Pager webhook, Deleted channel")).toBeInTheDocument();
+});
+
+it("labels a no data event, which is neither fired nor resolved", async () => {
+  server.use(
+    http.get(EVENTS, () =>
+      HttpResponse.json({
+        data: [
+          { ...eventsFixture.data[0], kind: "no_data", value: null, count: 0, deliveries: [] },
+        ],
+        next_cursor: null,
+      }),
+    ),
+  );
+  await renderApp(PAGE);
+  const table = await screen.findByRole("table", { name: "Alert events" });
+  expect(rowAt(table, 1)).toHaveTextContent("No data");
+  expect(table).not.toHaveTextContent("Resolved");
 });
 
 it("shows the empty history", async () => {

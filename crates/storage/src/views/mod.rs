@@ -57,6 +57,10 @@ pub struct ProjectQuery {
     pub optimizer_rules: Vec<Arc<dyn PhysicalOptimizerRule + Send + Sync>>,
     /// Files this query's scans read; a decode failure queues them for verification (spec 03 §10).
     pub suspects: Suspects,
+    /// Rows before this instant are hidden from the views (D-P-21, D-P-47). The providers
+    /// above stay unfiltered: storage's own reads (compaction, media GC, retention) build
+    /// their options with `None`.
+    pub visible_from: Option<i64>,
 }
 
 /// Inclusive `from`, exclusive `to`, nanoseconds since the Unix epoch, UTC (D101).
@@ -181,13 +185,15 @@ impl QueryContext {
     /// Builds the session and registers `spans`, `traces`, `sessions` and `scores`.
     ///
     /// `window`, when set, is written into each base view's scan (D101). `sessions`
-    /// is aggregated from the windowed `traces` view.
+    /// is aggregated from the windowed `traces` view. `source.visible_from`, when set,
+    /// hides older rows from every base view the same way (D-P-21).
     ///
     /// # Errors
     ///
     /// Returns [`RunError::Internal`] when a view cannot be planned or registered.
     pub fn new(source: ProjectQuery, window: Option<TimeWindow>) -> Result<Self, RunError> {
         let suspects = source.suspects;
+        let visible_from = source.visible_from;
         let state = session::session_state(
             source.runtime,
             source.target_partitions,
@@ -200,10 +206,10 @@ impl QueryContext {
             register(
                 &session,
                 ViewName::Spans,
-                spans::spans_view(source.spans, window)?,
+                spans::spans_view(source.spans, window, visible_from)?,
             )?,
         );
-        let traces_plan = traces::traces_view(source.traces, window)?;
+        let traces_plan = traces::traces_view(source.traces, window, visible_from)?;
         schemas.insert(
             ViewName::Sessions,
             register(
@@ -221,7 +227,7 @@ impl QueryContext {
             register(
                 &session,
                 ViewName::Scores,
-                scores::scores_view(source.scores, window)?,
+                scores::scores_view(source.scores, window, visible_from)?,
             )?,
         );
         Ok(Self {
@@ -338,11 +344,8 @@ pub(crate) fn duration_ms(duration_ns: Expr) -> Expr {
 
 /// `CAST(end_time AS BIGINT) - CAST(start_time AS BIGINT)`.
 pub(crate) fn duration_ns_from_bounds() -> Expr {
-    cast(col(llmobs_core::schema::traces::END_TIME), DataType::Int64)
-        - cast(
-            col(llmobs_core::schema::traces::START_TIME),
-            DataType::Int64,
-        )
+    cast(col(cetra_core::schema::traces::END_TIME), DataType::Int64)
+        - cast(col(cetra_core::schema::traces::START_TIME), DataType::Int64)
 }
 
 #[derive(Clone, Copy)]
@@ -357,6 +360,7 @@ pub(crate) struct ViewProjection<'a> {
 pub(crate) fn view_plan(
     provider: Arc<dyn TableProvider>,
     window: Option<TimeWindow>,
+    visible_from: Option<i64>,
     projection: ViewProjection<'_>,
     extra_after: impl Fn(&str) -> Vec<Expr>,
 ) -> Result<LogicalPlan, DataFusionError> {
@@ -379,6 +383,12 @@ pub(crate) fn view_plan(
     if let Some(window) = window {
         builder = builder.filter(window.predicate(projection.window_column))?;
     }
+    if let Some(from) = visible_from {
+        let bound =
+            datafusion::common::ScalarValue::TimestampNanosecond(Some(from), Some("UTC".into()));
+        builder =
+            builder.filter(col(projection.window_column).gt_eq(Expr::Literal(bound, None)))?;
+    }
     builder.project(exprs)?.build()
 }
 
@@ -393,12 +403,14 @@ mod tests {
     use std::collections::BTreeMap;
 
     use arrow::array::{Array, AsArray, RecordBatch};
+    use cetra_core::time_serde::parse_rfc3339;
     use chrono::{DateTime, SecondsFormat, Utc};
-    use llmobs_core::time_serde::parse_rfc3339;
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::test_support::{RecordingTable, dataset_spans, example_query, rows};
+    use crate::test_support::{
+        RecordingTable, dataset_scores, dataset_spans, example_query, live_scores, rows,
+    };
 
     fn rfc3339(ns: i64) -> String {
         let secs = ns.div_euclid(1_000_000_000);
@@ -747,7 +759,7 @@ mod tests {
     #[tokio::test]
     async fn score_count_matches_live_rows() {
         let ctx = context();
-        let live = crate::test_support::live_scores(&crate::test_support::dataset_scores()).len();
+        let live = live_scores(&dataset_scores()).len();
         let batches = rows(&ctx, "SELECT count(*) AS n FROM scores").await;
         assert_eq!(i64_cell(&batches[0], 0, "n"), Some(live as i64));
     }
@@ -801,7 +813,7 @@ mod tests {
         let counted = rows(&ctx, "SELECT count(*) AS n FROM spans").await;
         assert_eq!(i64_cell(&counted[0], 0, "n"), Some(span_count as i64));
 
-        let scores = crate::test_support::live_scores(&crate::test_support::dataset_scores());
+        let scores = live_scores(&dataset_scores());
         let score_count = scores
             .iter()
             .filter(|score| (from..to).contains(&score.created_at))
@@ -823,6 +835,7 @@ mod tests {
                 optimizer_rules: Vec::new(),
 
                 suspects: Suspects::detached(),
+                visible_from: None,
             },
             Some(window),
         )
@@ -874,5 +887,93 @@ mod tests {
             TimeWindow::new(6, 5),
             Err(RunError::InvalidRequest(_))
         ));
+    }
+
+    /// The merged `start_time` of each trace of the dataset, ascending.
+    fn trace_starts() -> Vec<i64> {
+        let mut starts = BTreeMap::new();
+        for span in dataset_spans() {
+            starts
+                .entry(span.trace_id)
+                .and_modify(|start: &mut i64| *start = (*start).min(span.start_time))
+                .or_insert(span.start_time);
+        }
+        let mut starts: Vec<i64> = starts.into_values().collect();
+        starts.sort_unstable();
+        starts
+    }
+
+    #[tokio::test]
+    async fn visible_from_hides_older_spans_traces_and_scores() {
+        let bound = trace_starts()[2];
+        let spans = dataset_spans();
+        let live = live_scores(&dataset_scores());
+        let query = ProjectQuery {
+            visible_from: Some(bound),
+            ..example_query()
+        };
+        let ctx = QueryContext::new(query, None).expect("bounded context");
+
+        let visible_spans = spans.iter().filter(|s| s.start_time >= bound).count() as i64;
+        let visible_traces = trace_starts().iter().filter(|s| **s >= bound).count() as i64;
+        let visible_scores = live.iter().filter(|s| s.created_at >= bound).count() as i64;
+        assert!(
+            visible_spans < spans.len() as i64,
+            "the bound must hide something"
+        );
+        let count = |batches: &[RecordBatch]| i64_cell(&batches[0], 0, "n");
+        assert_eq!(
+            count(&rows(&ctx, "SELECT count(*) AS n FROM spans").await),
+            Some(visible_spans)
+        );
+        assert_eq!(
+            count(&rows(&ctx, "SELECT count(*) AS n FROM traces").await),
+            Some(visible_traces)
+        );
+        assert_eq!(
+            count(&rows(&ctx, "SELECT count(*) AS n FROM scores").await),
+            Some(visible_scores)
+        );
+        let sessions = rows(&ctx, "SELECT count(*) AS n FROM sessions").await;
+        let unbounded = QueryContext::new(example_query(), None).expect("context");
+        let all_sessions = rows(&unbounded, "SELECT count(*) AS n FROM sessions").await;
+        assert!(count(&sessions).expect("n") <= count(&all_sessions).expect("n"));
+    }
+
+    #[tokio::test]
+    async fn visible_from_and_the_window_intersect() {
+        let bound = trace_starts()[2];
+        let hour = 3_600_000_000_000_i64;
+        let window = TimeWindow::new(bound - 24 * hour, bound + hour).expect("window");
+        let query = ProjectQuery {
+            visible_from: Some(bound),
+            ..example_query()
+        };
+        let ctx = QueryContext::new(query, Some(window)).expect("bounded context");
+
+        let expected = dataset_spans()
+            .iter()
+            .filter(|s| (bound..bound + hour).contains(&s.start_time))
+            .count() as i64;
+        let batches = rows(&ctx, "SELECT start_time FROM spans").await;
+        let mut seen = 0_i64;
+        for batch in &batches {
+            for row in 0..batch.num_rows() {
+                let start = i64_cell(batch, row, "start_time").expect("start");
+                assert!((bound..bound + hour).contains(&start), "{start}");
+                seen += 1;
+            }
+        }
+        assert_eq!(seen, expected);
+    }
+
+    #[tokio::test]
+    async fn no_visible_from_changes_nothing() {
+        let ctx = QueryContext::new(example_query(), None).expect("context");
+        let batches = rows(&ctx, "SELECT count(*) AS n FROM spans").await;
+        assert_eq!(
+            i64_cell(&batches[0], 0, "n"),
+            Some(dataset_spans().len() as i64)
+        );
     }
 }

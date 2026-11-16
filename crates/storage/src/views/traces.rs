@@ -9,15 +9,17 @@ use super::{
     DURATION_MS, DURATION_NS, TimeWindow, duration_ms, duration_ns_from_bounds, map_plan, view_plan,
 };
 use crate::query_error::RunError;
-use llmobs_core::schema::{traces, traces_schema};
+use cetra_core::schema::{traces, traces_schema};
 
 pub(crate) fn traces_view(
     raw: Arc<dyn TableProvider>,
     window: Option<TimeWindow>,
+    visible_from: Option<i64>,
 ) -> Result<LogicalPlan, RunError> {
     map_plan(view_plan(
         raw,
         window,
+        visible_from,
         super::ViewProjection {
             raw_name: "raw_traces",
             schema: traces_schema().as_ref(),

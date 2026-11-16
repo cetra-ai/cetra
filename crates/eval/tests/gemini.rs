@@ -20,6 +20,7 @@ const PATH: &str = "/v1beta/models/gemini-2.5-flash:generateContent";
 fn client() -> EgressClient {
     EgressClient::new(EgressPolicy {
         allow_private_network: true,
+        restore_mode: false,
     })
     .expect("client")
 }
@@ -393,9 +394,46 @@ async fn maps_usage_including_thoughts_and_cache() {
 }
 
 #[tokio::test]
+async fn an_exhausted_daily_quota_pauses_but_a_rate_limit_retries() {
+    let quota = |id: &str| {
+        json!({"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "message": "SECRET-PAYLOAD",
+            "details": [{"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                "violations": [{"quotaMetric": "m", "quotaId": id}]}]}})
+    };
+    let mock = Mock::start().await;
+    let conn = connection(mock.origin(), Vec::new());
+    let http = client();
+    let output = numeric();
+    let request = judge(&output, None, Duration::from_secs(2));
+    for (body, class) in [
+        (
+            quota("GenerateRequestsPerDayPerProjectPerModel-FreeTier"),
+            ErrorClass::Pause,
+        ),
+        (
+            quota("GenerateRequestsPerMinutePerProjectPerModel"),
+            ErrorClass::Retryable,
+        ),
+        (
+            json!({"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "message": "x"}}),
+            ErrorClass::Retryable,
+        ),
+    ] {
+        mock.enqueue(MockReply {
+            status: 429,
+            body,
+            delay: Duration::ZERO,
+        });
+        let err = call_err(&http, &conn, &request).await;
+        assert_eq!(err.class(), class);
+    }
+}
+
+#[tokio::test]
 async fn classifies_provider_statuses() {
     let cases = [
         (429, "RESOURCE_EXHAUSTED", ErrorClass::Retryable),
+        (402, "PAYMENT_REQUIRED", ErrorClass::Pause),
         (401, "UNAUTHENTICATED", ErrorClass::Pause),
         (403, "PERMISSION_DENIED", ErrorClass::Pause),
         (404, "NOT_FOUND", ErrorClass::Pause),
@@ -570,4 +608,34 @@ fn assert_hidden(err: &JudgeError) {
     let debug = format!("{err:?}");
     assert!(!debug.contains(PROMPT), "{debug}");
     assert!(!debug.contains("SECRET-PAYLOAD"), "{debug}");
+}
+
+#[tokio::test]
+async fn extra_headers_cannot_override_the_content_type_or_the_auth_header() {
+    let mock = Mock::start().await;
+    let conn = connection(
+        mock.origin(),
+        vec![
+            ("Content-Type", "text/plain"),
+            ("X-Goog-Api-Key", "forged"),
+            ("X-Trace", "kept"),
+        ],
+    );
+    let http = client();
+    let output = numeric();
+    mock.enqueue(MockReply {
+        status: 500,
+        body: json!({"error": {"message": "overloaded"}}),
+        delay: Duration::ZERO,
+    });
+    call(&http, &conn, &judge(&output, None, Duration::from_secs(2)))
+        .await
+        .expect_err("status");
+    let request = &mock.requests()[0];
+    assert_eq!(request.header("content-type"), Some("application/json"));
+    assert_eq!(
+        request.header("x-goog-api-key"),
+        Some(KEY.to_owned().as_str())
+    );
+    assert_eq!(request.header("x-trace"), Some("kept"));
 }

@@ -92,6 +92,6 @@ Add right after the D-G-38 row (F4):
 
 ## Done when
 
-- `cargo test -p llmobs-server search` passes.
+- `cargo test -p cetra-server search` passes.
 - `just openapi` leaves no diff after the commit.
 - `just check` passes.

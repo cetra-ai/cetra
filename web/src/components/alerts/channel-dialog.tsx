@@ -352,7 +352,7 @@ function ChannelForm({
             description={
               channel
                 ? "Leave empty to keep the current one."
-                : "16 to 256 characters. Verify the X-Llmobs-Signature header with it."
+                : "16 to 256 characters. Verify the X-Cetra-Signature header with it."
             }
             error={errors.secret}
             disabled={pending}

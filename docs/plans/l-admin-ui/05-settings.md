@@ -798,7 +798,7 @@ Render `SettingsPage` with title `General` and description `Name, URL and data r
 
 1. `TextField` id `project-name`, label `Name`, `required`, `maxLength={100}`, `error={nameError}`, disabled when `!canEdit` or pending.
 2. `TextField` id `project-slug`, label `Slug`, value `data.slug`, `readOnly`, `onChange={() => {}}`, description `The slug is part of every URL of this project and cannot be changed.`
-3. `TextField` id `project-retention`, `type="number"`, label `Retention (days)`, value `days`, error `daysError`, disabled when `forever`, `!canEdit` or pending. Its description is `Lowering retention drops older data right away. Deleted data cannot be recovered.`
+3. `TextField` id `project-retention`, `type="number"`, label `Retention (days)`, value `days`, error `daysError`, disabled when `forever`, `!canEdit` or pending. Its description is `Lowering retention drops older data right away. Deleted data cannot be recovered. Evaluation results and scores are kept by the day they were written, not by the day of the trace they score.` (the last sentence added by track M, D-M-10)
 4. A row `<div className="flex items-center gap-2">` with `<Checkbox id="project-retention-forever" checked={forever} onCheckedChange={(value) => setForever(value === true)} disabled={!canEdit || mutation.isPending} />` and `<Label htmlFor="project-retention-forever">Keep data forever</Label>`.
 5. `FormError`, `FormSuccess` (`Saved`), and `<DisabledReason reason={canEdit ? undefined : "Only project admins can change these settings"}><SubmitButton pending={mutation.isPending} disabled={!canEdit}>Save</SubmitButton></DisabledReason>`.
 
@@ -1191,7 +1191,7 @@ Imports: `renderApp`, `problemResponse`, `API_KEY_ID`, `server`, `http`, `HttpRe
 1. `it("lists keys")`:
    - `renderApp("/acme/support-bot/settings/api-keys")`;
    - `const table = await screen.findByRole("table", { name: "API keys" })`;
-   - `const row = within(table).getByRole("row", { name: /^CI\b/ })` contains `sk-llmobs-EXAMPL…`, `Secret` and `ingest, read, write`;
+   - `const row = within(table).getByRole("row", { name: /^CI\b/ })` contains `sk-cetra-EXAMPL…`, `Secret` and `ingest, read, write`;
    - `within(row).getAllByText("Never")` has length 2 (last used and expires);
    - `projectNav().getByRole("link", { name: "API keys" })` has `aria-current="page"`.
 2. `it("creates a secret key and shows it once")`:
@@ -1199,10 +1199,10 @@ Imports: `renderApp`, `problemResponse`, `API_KEY_ID`, `server`, `http`, `HttpRe
    - `openCreate`, type `CI` in `Name (optional)`, `submit`;
    - the body is `{ kind: "secret", name: "CI" }`;
    - `const secret = await screen.findByRole("dialog", { name: "Secret key created" })`;
-   - `within(secret).getByLabelText("Secret")` has value `sk-llmobs-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0`;
+   - `within(secret).getByLabelText("Secret")` has value `sk-cetra-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0`;
    - `within(secret).getByRole("tab", { name: "OTel env vars" })` exists;
    - click `Done`; `queryByRole("dialog")` is null and `queryByLabelText("Secret")` is null;
-   - the secret left TanStack's mutation cache (D-L-5): with `queryClient` from `renderApp`, `await waitFor(() => expect(JSON.stringify(queryClient.getMutationCache().getAll().map((m) => m.state.data ?? null))).not.toContain("sk-llmobs-EXAMPLE0"))`.
+   - the secret left TanStack's mutation cache (D-L-5): with `queryClient` from `renderApp`, `await waitFor(() => expect(JSON.stringify(queryClient.getMutationCache().getAll().map((m) => m.state.data ?? null))).not.toContain("sk-cetra-EXAMPLE0"))`.
 3. `it("creates an ingest-only key with an expiry")`:
    - pick the radio `Ingest only`;
    - open the combobox `Expires` and pick `In 30 days` (README § Pitfalls if refused);
@@ -1211,7 +1211,7 @@ Imports: `renderApp`, `problemResponse`, `API_KEY_ID`, `server`, `http`, `HttpRe
    - `Date.parse(body.expires_at) - Date.now()` is between `29.9 * 86_400_000` and `30.1 * 86_400_000`.
 4. `it("creates a public key without snippets")`:
    - pick the radio `Public key`; `queryByRole("radiogroup", { name: "Scopes" })` is null;
-   - the POST answers `{ ...apiKeyCreated, key: { ...apiKeyCreated.key, kind: "public", scopes: ["feedback"], prefix: "pk-llmobs-EXAMPL" }, secret: "pk-llmobs-EXAMPLE0EXAMPLE0EXAMPLE0" }` with status 201;
+   - the POST answers `{ ...apiKeyCreated, key: { ...apiKeyCreated.key, kind: "public", scopes: ["feedback"], prefix: "pk-cetra-EXAMPL" }, secret: "pk-cetra-EXAMPLE0EXAMPLE0EXAMPLE0" }` with status 201;
    - `submit`; the body is `{ kind: "public" }`;
    - in the dialog `Public key created`, `queryByRole("tab", { name: "OTel env vars" })` is null.
 5. `it("shows the server's expiry error")`: POST answers `problemResponse(400, "bad_request", { errors: [{ field: "expires_at", message: "must be in the future" }] })`; `submit`; `must be in the future` is shown in the form dialog.
@@ -1228,7 +1228,7 @@ Imports: `renderApp`, `problemResponse`, `API_KEY_ID`, `server`, `http`, `HttpRe
 9. `it("shows Forbidden when the list answers 403")`: GET `/api/v1/projects/:project/api-keys` answers `problemResponse(403, "forbidden")`; `await screen.findByText("Only project admins can manage API keys.")`.
 10. `it("computes expiry dates")`: `expiresAt(Date.UTC(2026, 0, 1), 30)` equals `"2026-01-31T00:00:00.000Z"`.
 11. `it("shows the empty state")`: GET `/api/v1/projects/:project/api-keys` answers `{ data: [], next_cursor: null }`; `await screen.findByText("No API keys yet")`; `Create a secret key to send traces.` is shown.
-12. `it("loads more keys")`: the GET answers `{ data: [the CI key from api-keys.json], next_cursor: "c2" }` without `cursor`, and `{ data: [{ ...that key, id: "01900000-0000-7000-8000-000000000202", name: "Staging", prefix: "sk-llmobs-STAGIN" }], next_cursor: null }` with `cursor=c2`; click `Load more`; `await screen.findByRole("row", { name: /^Staging\b/ })`; `Load more` is gone.
+12. `it("loads more keys")`: the GET answers `{ data: [the CI key from api-keys.json], next_cursor: "c2" }` without `cursor`, and `{ data: [{ ...that key, id: "01900000-0000-7000-8000-000000000202", name: "Staging", prefix: "sk-cetra-STAGIN" }], next_cursor: null }` with `cursor=c2`; click `Load more`; `await screen.findByRole("row", { name: /^Staging\b/ })`; `Load more` is gone.
 13. `it("explains a refused creation")`: POST answers `problemResponse(403, "forbidden")`; `openCreate`, `submit`; `within(dialog).getByRole("alert")` has `Only project admins can create keys.`; the form dialog stays open.
 14. `it("shows the server's name error")`: POST answers `problemResponse(400, "bad_request", { errors: [{ field: "name", message: "must be at most 100 characters" }] })`; `openCreate`, type `CI`, `submit`; `must be at most 100 characters` is shown and `Name (optional)` has `aria-invalid="true"`.
 15. `it("cancels without creating a key")`: no POST handler is installed (an unhandled write fails the test); `openCreate`, type `CI`, click `Cancel`; `queryByRole("dialog")` is null; `openCreate` again: `Name (optional)` has value `""`.

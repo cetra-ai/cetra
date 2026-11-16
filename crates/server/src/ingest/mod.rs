@@ -8,25 +8,28 @@ mod fixtures_tests;
 pub(crate) mod grpc;
 pub(crate) mod otlp;
 
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, PoisonError, RwLock};
 
 use bytes::Bytes;
-use futures::{StreamExt, stream};
-use llmobs_core::batch::spans_to_record_batch;
-use llmobs_core::error::CoreError;
-use llmobs_core::ids::{OrgId, ProjectId};
-use llmobs_core::media::MediaBlob as CoreBlob;
-use llmobs_core::names::environment::EVAL as EVAL_ENVIRONMENT;
-use llmobs_otel::{
+use cetra_core::batch::spans_to_record_batch;
+use cetra_core::error::CoreError;
+use cetra_core::ids::{OrgId, ProjectId};
+use cetra_core::media::MediaBlob as CoreBlob;
+use cetra_core::names::environment::EVAL as EVAL_ENVIRONMENT;
+use cetra_otel::{
     DecodeError, ExportTraceServiceRequest, IngestContext, IngestLimits, Normalized, PriceTable,
-    decode_json, decode_protobuf, normalize,
+    count_genai_log_records, decode_json, decode_logs_json, decode_logs_protobuf, decode_protobuf,
+    normalize,
 };
-use llmobs_storage::error::{AppendError, MediaError};
-use llmobs_storage::{MediaBlob, Storage};
+use cetra_storage::error::{AppendError, MediaError};
+use cetra_storage::{MediaBlob, Storage};
+use futures::{StreamExt, stream};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
 use crate::config::{IngestConfig, MediaConfig};
+use crate::eval::pending::PendingTraces;
 use crate::http::AppState;
 use crate::http::error::ApiError;
 use crate::live::LiveBus;
@@ -40,7 +43,8 @@ const MEDIA_CONCURRENCY: usize = 4;
 
 /// Ingest state shared by every request (D-G-1). Holds no `AppState`.
 pub(crate) struct Ingest {
-    prices: RwLock<Arc<PriceTable>>,
+    // Boxed to keep AppState futures under clippy's large_futures limit.
+    prices: Arc<crate::prices::Prices>,
     budget: Arc<Semaphore>,
     max_request_bytes: usize,
     max_spans_per_request: usize,
@@ -132,6 +136,8 @@ pub(crate) enum IngestError {
     Decode(#[source] DecodeError),
     #[error("ingest budget is full")]
     Busy,
+    #[error("ingest rate limit")]
+    RateLimited { retry_after_s: u64 },
     #[error("storage refused the append")]
     Append(#[source] AppendError),
     #[error("storage refused a media blob")]
@@ -145,14 +151,18 @@ pub(crate) enum IngestError {
 }
 
 impl Ingest {
-    pub(crate) fn new(config: &IngestConfig, media: &MediaConfig, prices: PriceTable) -> Self {
+    pub(crate) fn new(
+        config: &IngestConfig,
+        media: &MediaConfig,
+        prices: Arc<crate::prices::Prices>,
+    ) -> Self {
         // Sizes were checked by `config::validate_ingest`; a value that does not fit is clipped.
         let max_request_bytes =
             usize::try_from(config.max_request_bytes.as_u64()).unwrap_or(usize::MAX);
         let max_inflight =
             usize::try_from(config.max_inflight_bytes.as_u64()).unwrap_or(usize::MAX);
         Self {
-            prices: RwLock::new(Arc::new(prices)),
+            prices,
             budget: Arc::new(Semaphore::new(max_inflight.min(Semaphore::MAX_PERMITS))),
             max_request_bytes,
             max_spans_per_request: usize::try_from(config.max_spans_per_request)
@@ -162,28 +172,28 @@ impl Ingest {
         }
     }
 
-    /// Swaps the price table (D-G-10). `#[cfg(test)]` in M1: only tests call it.
-    /// The track that adds custom prices removes the `cfg`.
-    #[cfg(test)]
-    pub(crate) fn replace_prices(&self, prices: PriceTable) {
-        *self.prices.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(prices);
-    }
-
-    /// The current price table (D-G-10). Judge runs price their `llm` span with it.
-    pub(crate) fn prices(&self) -> Arc<PriceTable> {
-        Arc::clone(&self.prices.read().unwrap_or_else(PoisonError::into_inner))
+    /// The price tables (D-T-9). Callers pick the table of their project or org.
+    pub(crate) fn prices(&self) -> &crate::prices::Prices {
+        &self.prices
     }
 
     pub(crate) fn max_request_bytes(&self) -> usize {
         self.max_request_bytes
     }
 
-    /// The normalizer's context for an in-process commit into `project` (D-I-21).
-    pub(crate) fn context(&self, project: &ProjectRow, now_ns: i64) -> IngestContext {
+    /// The normalizer's context for an in-process commit into `project` (D-I-21). The D85 age
+    /// bound is the project's retention, or `retention_cap` (the org's window plus 30 days, D-P-22)
+    /// when that is shorter.
+    pub(crate) fn context(
+        &self,
+        project: &ProjectRow,
+        retention_cap: Option<u32>,
+        now_ns: i64,
+    ) -> IngestContext {
         IngestContext {
             project_id: project.id,
             ingest_time: now_ns,
-            retention_days: project.retention_days,
+            retention_days: crate::retention::effective_days(project.retention_days, retention_cap),
             limits: self.limits,
         }
     }
@@ -212,27 +222,18 @@ impl Ingest {
             .map_err(|_| IngestError::Busy)
     }
 
-    /// Decompresses, decodes, counts, normalizes and rewrites one OTLP request (D-G-2, D-G-7).
-    ///
-    /// `reservation` covers the raw body; decompressed chunks are reserved as they are
-    /// produced. The result keeps the reservation until it is dropped.
-    pub(crate) async fn accept(
+    /// Sets `reservation` to exactly `bytes` of budget (D-G-5): a larger one gives back the
+    /// rest, a smaller one takes what is missing. Never waits; `Busy` when the budget is full.
+    pub(crate) fn fit(
         &self,
-        raw: Bytes,
-        mut reservation: Reservation,
-        format: BodyFormat,
-        encoding: BodyEncoding,
-        project: &ProjectRow,
-        now_ns: i64,
-    ) -> Result<Accepted, IngestError> {
-        let request_bytes = raw.len();
-        // Give back the part of a chunked reservation that the body does not use, and cover
-        // any part of the body the reservation does not.
+        reservation: &mut Reservation,
+        bytes: usize,
+    ) -> Result<(), IngestError> {
         let held = reservation.0.num_permits();
-        if held > request_bytes {
-            drop(reservation.0.split(held - request_bytes));
-        } else if held < request_bytes {
-            let missing = u32::try_from(request_bytes - held).map_err(|_| IngestError::Busy)?;
+        if held > bytes {
+            drop(reservation.0.split(held - bytes));
+        } else if held < bytes {
+            let missing = u32::try_from(bytes - held).map_err(|_| IngestError::Busy)?;
             let extra = self
                 .budget
                 .clone()
@@ -240,6 +241,54 @@ impl Ingest {
                 .map_err(|_| IngestError::Busy)?;
             reservation.0.merge(extra);
         }
+        Ok(())
+    }
+
+    /// Decompresses, decodes, counts, normalizes and rewrites one OTLP request (D-G-2, D-G-7).
+    ///
+    /// `reservation` covers the raw body; decompressed chunks are reserved as they are
+    /// produced. The result keeps the reservation until it is dropped.
+    #[allow(clippy::too_many_arguments)] // the body, its reservation and format, and the project and clock
+    pub(crate) async fn accept(
+        &self,
+        raw: Bytes,
+        reservation: Reservation,
+        format: BodyFormat,
+        encoding: BodyEncoding,
+        project: &ProjectRow,
+        retention_cap: Option<u32>,
+        now_ns: i64,
+    ) -> Result<Accepted, IngestError> {
+        let request_bytes = raw.len();
+        let (request, decompressed_bytes, reservation) = self
+            .inflate(raw, reservation, encoding, move |body| match format {
+                BodyFormat::Protobuf => decode_protobuf(body),
+                BodyFormat::Json => decode_json(body),
+            })
+            .await?;
+        self.accept_request(
+            request,
+            reservation,
+            u64::try_from(request_bytes).unwrap_or(u64::MAX),
+            u64::try_from(decompressed_bytes).unwrap_or(u64::MAX),
+            project,
+            retention_cap,
+            now_ns,
+        )
+        .await
+    }
+
+    /// Fits `reservation` to `raw`, decompresses it (the output is reserved as it is produced)
+    /// and decodes it with `decode`, off the async threads. Returns the decoded value, the
+    /// decompressed size and the reservation.
+    async fn inflate<T: Send + 'static>(
+        &self,
+        raw: Bytes,
+        mut reservation: Reservation,
+        encoding: BodyEncoding,
+        decode: impl FnOnce(&[u8]) -> Result<T, DecodeError> + Send + 'static,
+    ) -> Result<(T, usize, Reservation), IngestError> {
+        self.fit(&mut reservation, raw.len())?;
         let max_bytes = self.max_request_bytes;
         let semaphore = Arc::clone(&self.budget);
         let work = tokio::task::spawn_blocking(move || -> Result<_, IngestError> {
@@ -262,30 +311,40 @@ impl Ingest {
                 })?
             };
             let decompressed_bytes = decompressed.len();
-            let request = match format {
-                BodyFormat::Protobuf => decode_protobuf(&decompressed),
-                BodyFormat::Json => decode_json(&decompressed),
-            }
-            .map_err(IngestError::Decode)?;
-            Ok((request, decompressed_bytes, reservation))
+            let value = decode(&decompressed).map_err(IngestError::Decode)?;
+            Ok((value, decompressed_bytes, reservation))
         });
-        let (request, decompressed_bytes, reservation) = match work.await {
-            Ok(result) => result?,
-            Err(error) => return Err(IngestError::Join(error)),
-        };
-        self.accept_request(
-            request,
-            reservation,
-            u64::try_from(request_bytes).unwrap_or(u64::MAX),
-            u64::try_from(decompressed_bytes).unwrap_or(u64::MAX),
-            project,
-            now_ns,
-        )
-        .await
+        match work.await {
+            Ok(result) => result,
+            Err(error) => Err(IngestError::Join(error)),
+        }
+    }
+
+    /// Decodes an OTLP logs request and returns how many of its records look like GenAI
+    /// content events (D-G-40). Nothing is stored. The body is held to the same size and
+    /// budget limits as a trace request.
+    pub(crate) async fn count_genai_logs(
+        &self,
+        raw: Bytes,
+        reservation: Reservation,
+        format: BodyFormat,
+        encoding: BodyEncoding,
+    ) -> Result<u64, IngestError> {
+        let (count, _, _reservation) = self
+            .inflate(raw, reservation, encoding, move |body| {
+                let request = match format {
+                    BodyFormat::Protobuf => decode_logs_protobuf(body),
+                    BodyFormat::Json => decode_logs_json(body),
+                }?;
+                Ok(count_genai_log_records(&request))
+            })
+            .await?;
+        Ok(count)
     }
 
     /// Counts, normalizes and rewrites a decoded request (D-G-2, D-G-7). Used by OTLP/HTTP after
     /// decoding and by gRPC, whose request tonic decodes.
+    #[allow(clippy::too_many_arguments)] // the request, its reservation and sizes, and the project and clock
     pub(crate) async fn accept_request(
         &self,
         request: ExportTraceServiceRequest,
@@ -293,14 +352,11 @@ impl Ingest {
         request_bytes: u64,
         decompressed_bytes: u64,
         project: &ProjectRow,
+        retention_cap: Option<u32>,
         now_ns: i64,
     ) -> Result<Accepted, IngestError> {
-        let prices: Arc<PriceTable> = self
-            .prices
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        let ctx = self.context(project, now_ns);
+        let prices: Arc<PriceTable> = self.prices.for_project(project.org_id, project.id);
+        let ctx = self.context(project, retention_cap, now_ns);
         let max_spans = self.max_spans_per_request;
         let work = tokio::task::spawn_blocking(move || -> Result<_, IngestError> {
             let spans = request
@@ -333,19 +389,25 @@ impl Ingest {
     /// Stores the media, then appends the spans (D-G-8, D-G-9), then counts the billable spans
     /// (every span outside the reserved evaluation environment, D-I-31) and the request bytes
     /// (D-G-30). Nothing is appended when a blob fails, and nothing is counted then. The
-    /// caller's reservation covers the spans until this returns.
+    /// caller's reservation covers the spans until this returns. Then records the trace in the
+    /// trigger's pending map when its project has an online rule (D-I-8; memory only).
     pub(crate) async fn commit(
         &self,
         storage: &Storage,
         usage: &Usage,
         live: &LiveBus,
+        pending: &PendingTraces,
         target: CommitTarget,
         normalized: Normalized,
     ) -> Result<CommitReceipt, IngestError> {
         let Normalized { spans, media, .. } = normalized;
+        let starts = newest_span_starts(&spans);
         let blobs = media
             .into_iter()
-            .map(store_blob)
+            .map(|blob| {
+                let newest = starts.get(&blob.sha256).copied().unwrap_or(i64::MIN);
+                store_blob(blob, newest)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let mut stored = 0_usize;
         let mut puts = stream::iter(blobs)
@@ -372,6 +434,7 @@ impl Ingest {
                 .await
                 .map_err(IngestError::Append)?;
             live.publish(target.project_id, &spans);
+            pending.observe(target.project_id, &spans, target.now_ns);
         }
         usage.add(
             target.org_id,
@@ -413,6 +476,7 @@ pub(crate) async fn commit_in_task(
                 &state.storage,
                 &state.usage,
                 &state.live,
+                &state.pending,
                 target,
                 normalized,
             )
@@ -423,14 +487,31 @@ pub(crate) async fn commit_in_task(
     task.await.map_err(IngestError::Join)?
 }
 
+/// The newest `start_time` of the spans that reference each blob, keyed by the blob's hash
+/// (the spans' `media_refs`, hex). A blob no span references has no entry (D-P-21).
+pub(crate) fn newest_span_starts(spans: &[cetra_core::span::Span]) -> HashMap<String, i64> {
+    let mut newest: HashMap<String, i64> = HashMap::new();
+    for span in spans {
+        for sha in &span.media_refs {
+            newest
+                .entry(sha.clone())
+                .and_modify(|start| *start = (*start).max(span.start_time))
+                .or_insert(span.start_time);
+        }
+    }
+    newest
+}
+
 /// Converts a normalized blob to the storage type, checking that its hash is 32 bytes.
-fn store_blob(blob: CoreBlob) -> Result<MediaBlob, IngestError> {
+/// `newest_span_start` is the newest `start_time` of the spans that reference it.
+fn store_blob(blob: CoreBlob, newest_span_start: i64) -> Result<MediaBlob, IngestError> {
     let digest = hex::decode(&blob.sha256).map_err(|_| IngestError::MediaHash)?;
     let sha256 = <[u8; 32]>::try_from(digest.as_slice()).map_err(|_| IngestError::MediaHash)?;
     Ok(MediaBlob {
         sha256,
         mime_type: blob.mime_type,
         bytes: Bytes::from(blob.bytes),
+        newest_span_start,
     })
 }
 
@@ -439,6 +520,28 @@ fn bad_request(detail: &str) -> ApiError {
         detail: Some(detail.to_owned()),
         errors: Vec::new(),
     }
+}
+
+/// Takes the batch's spans from the org's ingest rate (D-P-19). Called after `accept` and
+/// before `commit`, so a refused batch stores nothing.
+pub(crate) fn check_rate(
+    state: &AppState,
+    org: OrgId,
+    spans: usize,
+    now_ns: i64,
+) -> Result<(), IngestError> {
+    let limits = state.entitlements.resolve(org, now_ns).limits;
+    let Some(rate) = limits.ingest_spans_per_sec else {
+        return Ok(());
+    };
+    let spans = u64::try_from(spans).unwrap_or(u64::MAX);
+    let burst = limits.ingest_burst.unwrap_or(rate);
+    state
+        .ingest_rate
+        .take(org, spans, rate, burst, now_ns)
+        .map_err(|retry| IngestError::RateLimited {
+            retry_after_s: retry.0.as_secs().max(1),
+        })
 }
 
 /// The mapping of spec 02 § Endpoints and the design's error table.
@@ -463,6 +566,7 @@ impl From<IngestError> for ApiError {
             IngestError::Media(MediaError::Invalid { .. }) => {
                 bad_request("invalid media in the request")
             }
+            IngestError::RateLimited { retry_after_s } => ApiError::RateLimited { retry_after_s },
             IngestError::Busy | IngestError::Append(AppendError::Backpressure) => {
                 ApiError::Unavailable {
                     detail: "server is busy, retry later",
@@ -503,20 +607,27 @@ mod tests {
     use std::path::Path;
     use std::time::Duration;
 
+    use crate::test_support::raw_query;
     use axum::http::{StatusCode, header};
     use axum::response::IntoResponse;
     use bytesize::ByteSize;
-    use llmobs_core::ids::ProjectId;
-    use llmobs_core::media::MediaBlob as CoreBlob;
-    use llmobs_otel::{ExportTraceServiceRequest, Rejections, builtin_price_rows, decode_json};
-    use llmobs_storage::QueryOptions;
-    use llmobs_storage::error::ObjectError;
+    use cetra_core::enums::{CostSource, SpanKind};
+    use cetra_core::ids::ProjectId;
+    use cetra_core::media::MediaBlob as CoreBlob;
+    use cetra_otel::{
+        ExportTraceServiceRequest, PriceRow, PriceScope, Rejections, builtin_price_rows,
+        decode_json,
+    };
+    use cetra_storage::error::ObjectError;
     use prost::Message;
     use sha2::{Digest, Sha256};
+    use uuid::Uuid;
 
     use super::*;
-    use crate::meta::projects::ProjectRow;
-    use crate::test_support::{Seeded, TestApp};
+    use crate::meta::model_prices;
+    use crate::meta::orgs::insert_org;
+    use crate::meta::projects::{ProjectRow, insert_project};
+    use crate::test_support::{Seeded, TestApp, dataset_span};
 
     fn fixture(relative: &str) -> Vec<u8> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -601,6 +712,7 @@ mod tests {
                 format,
                 encoding,
                 project,
+                None,
                 app.state.clock.now_ns(),
             )
             .await
@@ -617,12 +729,7 @@ mod tests {
 
     /// Spans in the project, read through the storage query provider.
     async fn stored_spans(app: &TestApp, project: ProjectId) -> usize {
-        let query = app
-            .state
-            .storage
-            .query(project, QueryOptions::default())
-            .await
-            .expect("query opens");
+        let query = raw_query(&app.state.storage, project).await;
         let ctx = datafusion::prelude::SessionContext::new();
         ctx.register_table("raw_spans", query.spans)
             .expect("spans register");
@@ -695,7 +802,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn too_many_spans_are_refused_before_normalizing() {
-        let body = fixture("llmobs/input-output-formats/input.json");
+        let body = fixture("cetra/input-output-formats/input.json");
         let spans = span_count(&decode_json(&body).expect("fixture decodes"));
         assert!(spans >= 3, "the fixture has {spans} spans");
         let app = TestApp::with_config(|config| config.ingest.max_spans_per_request = 2).await;
@@ -749,6 +856,7 @@ mod tests {
                 BodyFormat::Json,
                 BodyEncoding::Identity,
                 &seeded.project,
+                None,
                 app.state.clock.now_ns(),
             )
             .await
@@ -787,7 +895,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn replace_prices_changes_what_accept_uses() {
+    async fn the_builtin_table_is_what_accept_uses_without_custom_rows() {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
         let now = app.state.clock.now_ns();
@@ -799,7 +907,8 @@ mod tests {
         assert_ne!(priced, unpriced, "the fixture must have a built-in price");
         app.state
             .ingest
-            .replace_prices(PriceTable::new(Vec::new()).expect("an empty table compiles"));
+            .prices()
+            .set_builtin(PriceTable::new(Vec::new()).expect("an empty table compiles"));
         let accepted = accept_body(
             &app,
             &seeded.project,
@@ -810,6 +919,160 @@ mod tests {
         .await
         .expect("accepted");
         assert_eq!(accepted.normalized, unpriced);
+    }
+
+    /// Stores one catch-all row priced `input` per million tokens: in `org`'s scope, or in
+    /// `project`'s when given. Then reloads the org's tables, as a price write does.
+    async fn store_price(app: &TestApp, org: OrgId, project: Option<ProjectId>, input: f64) {
+        let row = PriceRow {
+            scope: if project.is_some() {
+                PriceScope::Project
+            } else {
+                PriceScope::Org
+            },
+            model_name: "any".to_owned(),
+            match_pattern: ".*".to_owned(),
+            provider: None,
+            valid_from: 0,
+            price_input: Some(input),
+            price_output: Some(input),
+            price_cache_read: None,
+            price_cache_write: None,
+            price_reasoning: None,
+            tiers: None,
+        };
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    model_prices::insert_tx(conn, Uuid::now_v7(), org, project, &row, now)
+                        .await
+                        .map(|_| ())
+                })
+            })
+            .await
+            .unwrap();
+        app.state
+            .ingest
+            .prices()
+            .reload_org(app.state.meta.reader(), org)
+            .await
+            .unwrap();
+    }
+
+    /// The embedding span of the cost fixture, which has one million input tokens.
+    fn embedding(normalized: &Normalized) -> &cetra_core::span::Span {
+        normalized
+            .spans
+            .iter()
+            .find(|span| span.span_kind == SpanKind::Embedding)
+            .expect("the fixture has an embedding span")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_project_row_prices_that_project_only() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let (other, _) = app.add_project(&seeded, "other", None).await;
+        app.state
+            .ingest
+            .prices()
+            .set_builtin(PriceTable::new(Vec::new()).expect("an empty table compiles"));
+        store_price(&app, seeded.org_id, Some(seeded.project.id), 1.0).await;
+        let body = fixture("edge/cost-embedding/input.json");
+        let priced = accept_body(
+            &app,
+            &seeded.project,
+            body.clone(),
+            BodyFormat::Json,
+            BodyEncoding::Identity,
+        )
+        .await
+        .expect("accepted");
+        let span = embedding(&priced.normalized);
+        assert_eq!(span.cost_source, Some(CostSource::Computed));
+        assert_eq!(span.cost_input, Some(1.0));
+        let unpriced = accept_body(&app, &other, body, BodyFormat::Json, BodyEncoding::Identity)
+            .await
+            .expect("accepted");
+        assert_eq!(
+            embedding(&unpriced.normalized).cost_source,
+            Some(CostSource::None)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_org_row_prices_every_project_of_the_org() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let (other, _) = app.add_project(&seeded, "other", None).await;
+        let now = app.state.clock.now_ns();
+        let foreign = app
+            .state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    let org =
+                        insert_org(conn, OrgId::new_v7(), "Elsewhere", "elsewhere", now).await?;
+                    insert_project(conn, org.id, "Far", "far", None, now).await
+                })
+            })
+            .await
+            .unwrap();
+        store_price(&app, seeded.org_id, None, 1.0).await;
+        let body = fixture("edge/cost-embedding/input.json");
+        for project in [&seeded.project, &other] {
+            let accepted = accept_body(
+                &app,
+                project,
+                body.clone(),
+                BodyFormat::Json,
+                BodyEncoding::Identity,
+            )
+            .await
+            .expect("accepted");
+            assert_eq!(embedding(&accepted.normalized).cost_input, Some(1.0));
+        }
+        let accepted = accept_body(
+            &app,
+            &foreign,
+            body,
+            BodyFormat::Json,
+            BodyEncoding::Identity,
+        )
+        .await
+        .expect("accepted");
+        assert_eq!(
+            embedding(&accepted.normalized).cost_source,
+            Some(CostSource::Computed),
+            "the built-in row prices it"
+        );
+        assert_ne!(embedding(&accepted.normalized).cost_input, Some(1.0));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_project_row_beats_an_org_row() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let (other, _) = app.add_project(&seeded, "other", None).await;
+        store_price(&app, seeded.org_id, None, 1.0).await;
+        store_price(&app, seeded.org_id, Some(seeded.project.id), 2.0).await;
+        let body = fixture("edge/cost-embedding/input.json");
+        let own = accept_body(
+            &app,
+            &seeded.project,
+            body.clone(),
+            BodyFormat::Json,
+            BodyEncoding::Identity,
+        )
+        .await
+        .expect("accepted");
+        let shared = accept_body(&app, &other, body, BodyFormat::Json, BodyEncoding::Identity)
+            .await
+            .expect("accepted");
+        assert_eq!(embedding(&own.normalized).cost_input, Some(2.0));
+        assert_eq!(embedding(&shared.normalized).cost_input, Some(1.0));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -829,6 +1092,7 @@ mod tests {
                 len,
                 len,
                 &seeded.project,
+                None,
                 app.state.clock.now_ns(),
             )
             .await
@@ -865,7 +1129,7 @@ mod tests {
         let app = TestApp::with_config(|config| config.media.min_bytes = ByteSize::b(1)).await;
         let seeded = app.seed().await;
         let normalized =
-            accepted_fixture(&app, &seeded.project, "llmobs/sdk-media-bytes/input.json").await;
+            accepted_fixture(&app, &seeded.project, "cetra/sdk-media-bytes/input.json").await;
         let blob = normalized
             .media
             .first()
@@ -879,6 +1143,7 @@ mod tests {
                 &app.state.storage,
                 &app.state.usage,
                 &app.state.live,
+                &app.state.pending,
                 target(&app, &seeded.project),
                 normalized,
             )
@@ -896,19 +1161,14 @@ mod tests {
         let read = app
             .state
             .storage
-            .get_media(seeded.project.id, &sha, None)
+            .get_media(seeded.project.id, &sha, None, None)
             .await
             .expect("the blob is stored");
         assert_eq!(read.bytes.as_ref(), blob.bytes.as_slice());
         assert_eq!(read.mime_type, blob.mime_type);
         assert_eq!(stored_spans(&app, seeded.project.id).await, span_total);
         // The span row carries the media reference.
-        let query = app
-            .state
-            .storage
-            .query(seeded.project.id, QueryOptions::default())
-            .await
-            .expect("query opens");
+        let query = raw_query(&app.state.storage, seeded.project.id).await;
         let ctx = datafusion::prelude::SessionContext::new();
         ctx.register_table("raw_spans", query.spans)
             .expect("register");
@@ -930,7 +1190,7 @@ mod tests {
         let app = TestApp::with_config(|config| config.media.min_bytes = ByteSize::b(1)).await;
         let seeded = app.seed().await;
         let mut normalized =
-            accepted_fixture(&app, &seeded.project, "llmobs/sdk-media-bytes/input.json").await;
+            accepted_fixture(&app, &seeded.project, "cetra/sdk-media-bytes/input.json").await;
         normalized.media = vec![CoreBlob {
             sha256: "ab".repeat(32),
             mime_type: "image/png".to_owned(),
@@ -943,6 +1203,7 @@ mod tests {
                 &app.state.storage,
                 &app.state.usage,
                 &app.state.live,
+                &app.state.pending,
                 CommitTarget {
                     request_bytes: 7,
                     ..target(&app, &seeded.project)
@@ -973,7 +1234,7 @@ mod tests {
         let app = TestApp::with_config(|config| config.media.min_bytes = ByteSize::b(1)).await;
         let seeded = app.seed().await;
         let mut normalized =
-            accepted_fixture(&app, &seeded.project, "llmobs/sdk-media-bytes/input.json").await;
+            accepted_fixture(&app, &seeded.project, "cetra/sdk-media-bytes/input.json").await;
         let bytes = b"long mime".to_vec();
         normalized.media = vec![CoreBlob {
             sha256: hex::encode(Sha256::digest(&bytes)),
@@ -987,6 +1248,7 @@ mod tests {
                 &app.state.storage,
                 &app.state.usage,
                 &app.state.live,
+                &app.state.pending,
                 target(&app, &seeded.project),
                 normalized,
             )
@@ -1010,6 +1272,7 @@ mod tests {
                 &app.state.storage,
                 &app.state.usage,
                 &app.state.live,
+                &app.state.pending,
                 CommitTarget {
                     request_bytes: 7,
                     ..target(&app, &seeded.project)
@@ -1065,7 +1328,7 @@ mod tests {
             Some("production".to_owned()),
         ]
         .into_iter()
-        .map(|environment| llmobs_core::span::Span {
+        .map(|environment| cetra_core::span::Span {
             environment,
             ..base.clone()
         })
@@ -1077,6 +1340,7 @@ mod tests {
                 &app.state.storage,
                 &app.state.usage,
                 &app.state.live,
+                &app.state.pending,
                 target(&app, &seeded.project),
                 Normalized {
                     spans,
@@ -1101,6 +1365,57 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn commit_records_tracked_projects_only() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let normalized = accepted_fixture(
+            &app,
+            &seeded.project,
+            "genai/openai-v2-chat-tool/input.json",
+        )
+        .await;
+        let base = normalized
+            .spans
+            .first()
+            .cloned()
+            .expect("the fixture has a span");
+        let other_trace = cetra_core::ids::TraceId::from_bytes([9; 16]).expect("not all zero");
+        let production = cetra_core::span::Span {
+            environment: Some("production".to_owned()),
+            ..base.clone()
+        };
+        let judge = cetra_core::span::Span {
+            environment: Some(EVAL_ENVIRONMENT.to_owned()),
+            trace_id: other_trace,
+            ..base.clone()
+        };
+        let pending = &app.state.pending;
+        pending.set_tracked(std::collections::HashSet::from([seeded.project.id]));
+        let commit = |spans: Vec<cetra_core::span::Span>| {
+            app.state.ingest.commit(
+                &app.state.storage,
+                &app.state.usage,
+                &app.state.live,
+                pending,
+                target(&app, &seeded.project),
+                Normalized {
+                    spans,
+                    media: Vec::new(),
+                    rejections: Rejections::default(),
+                },
+            )
+        };
+        commit(vec![production.clone()]).await.expect("committed");
+        assert_eq!(pending.len(), 1);
+        commit(vec![judge]).await.expect("committed");
+        assert_eq!(pending.len(), 1, "an evaluation span is not tracked");
+        pending.set_tracked(std::collections::HashSet::new());
+        assert_eq!(pending.len(), 0);
+        commit(vec![production]).await.expect("committed");
+        assert_eq!(pending.len(), 0, "an untracked project is not tracked");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn commit_after_the_project_is_dropped_is_refused() {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
@@ -1122,6 +1437,7 @@ mod tests {
                 &app.state.storage,
                 &app.state.usage,
                 &app.state.live,
+                &app.state.pending,
                 target(&app, &seeded.project),
                 normalized,
             )
@@ -1137,12 +1453,8 @@ mod tests {
     async fn a_commit_finishes_after_its_request_is_dropped() {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
-        let normalized = accepted_fixture(
-            &app,
-            &seeded.project,
-            "llmobs/sdk-observe-nested/input.json",
-        )
-        .await;
+        let normalized =
+            accepted_fixture(&app, &seeded.project, "cetra/sdk-observe-nested/input.json").await;
         let spans = normalized.spans.len();
         assert!(spans > 0);
         // A receiver must exist, or `publish` builds nothing.
@@ -1266,6 +1578,13 @@ mod tests {
                 None,
             ),
             (
+                IngestError::RateLimited { retry_after_s: 3 },
+                429,
+                "rate_limited",
+                None,
+                Some("3"),
+            ),
+            (
                 IngestError::Busy,
                 503,
                 "busy",
@@ -1304,7 +1623,7 @@ mod tests {
             ),
             (
                 IngestError::Media(MediaError::Catalog(
-                    llmobs_storage::error::CatalogError::Corrupt { what: "test" },
+                    cetra_storage::error::CatalogError::Corrupt { what: "test" },
                 )),
                 503,
                 "busy",
@@ -1424,5 +1743,23 @@ mod tests {
         let handle = tokio::spawn(std::future::pending::<()>());
         handle.abort();
         handle.await.expect_err("an aborted task does not finish")
+    }
+
+    /// D-P-21: a blob's newest span start is the latest `start_time` of the spans that reference it.
+    #[test]
+    fn newest_span_starts_takes_the_latest_start_per_hash() {
+        const A: &str = "aa00000000000000000000000000000000000000000000000000000000000000";
+        const B: &str = "bb00000000000000000000000000000000000000000000000000000000000000";
+        let span = |start: i64, refs: &[&str]| {
+            let mut span = dataset_span(0);
+            span.start_time = start;
+            span.media_refs = refs.iter().map(|sha| (*sha).to_owned()).collect();
+            span
+        };
+        let spans = [span(5, &[A]), span(9, &[A]), span(3, &[B])];
+        let starts = newest_span_starts(&spans);
+        assert_eq!(starts.len(), 2);
+        assert_eq!(starts[A], 9);
+        assert_eq!(starts[B], 3);
     }
 }

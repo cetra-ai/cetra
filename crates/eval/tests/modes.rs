@@ -12,7 +12,7 @@ use crate::judge::{
 };
 use crate::mock::{Mock, MockReply};
 use crate::secret::Secret;
-use llmobs_core::score::ScoreValue;
+use cetra_core::score::ScoreValue;
 use serde_json::json;
 
 const KEY: &str = "mode-SECRET-PAYLOAD";
@@ -50,6 +50,7 @@ const PROVIDERS: [Provider; 3] = [
 fn client() -> EgressClient {
     EgressClient::new(EgressPolicy {
         allow_private_network: true,
+        restore_mode: false,
     })
     .expect("client")
 }

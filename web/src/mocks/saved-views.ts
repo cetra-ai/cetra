@@ -76,6 +76,10 @@ const handlers: HttpHandler[] = [
     views.push(view);
     return HttpResponse.json(view, { status: 201 });
   }),
+  http.get(ONE, ({ params }) => {
+    const view = views.find((item) => item.id === params.id);
+    return view && visible(view) ? HttpResponse.json(view) : notFound();
+  }),
   http.patch(ONE, async ({ params, request }) => {
     const view = views.find((item) => item.id === params.id);
     if (!view) {

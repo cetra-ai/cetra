@@ -4,7 +4,7 @@
 
 use std::borrow::Cow;
 
-use llmobs_core::time_serde::parse_rfc3339;
+use cetra_core::time_serde::parse_rfc3339;
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 use utoipa::openapi::schema::{ArrayBuilder, ObjectBuilder, SchemaType};
@@ -70,6 +70,15 @@ where
     }
 }
 
+/// The OpenAPI schema of a field that holds any JSON value (D-J-2): `AnyValue`, as
+/// `api::payload`'s `json` branch. Use it with `#[schema(schema_with = any_json)]`.
+pub(crate) fn any_json() -> RefOr<utoipa::openapi::schema::Schema> {
+    ObjectBuilder::new()
+        .schema_type(SchemaType::AnyValue)
+        .description(Some("Any JSON value."))
+        .into()
+}
+
 /// RFC 7807 problem document.
 ///
 /// Spec 09 § Conventions.
@@ -120,12 +129,14 @@ pub enum ProblemCode {
     QueryFailed,
     /// The query exceeded its time limit.
     QueryTimeout,
-    /// The query needed more memory than the cap.
+    /// The query needed more memory or temporary disk space than the cap.
     QueryTooLarge,
     /// A filter deletion would cover more than 100,000 traces.
     TooManyTraces,
     /// Admission control refused the query.
     Busy,
+    /// The server runs in restore mode: outbound calls are off (D-N-26).
+    RestoreMode,
     /// No credentials, or the credentials are invalid.
     Unauthorized,
     /// The credentials do not allow this operation.
@@ -152,6 +163,8 @@ pub enum ProblemCode {
     RangeNotSatisfiable,
     /// The request conflicts with the current state.
     Conflict,
+    /// The org reached its monthly units cap (D-P-17).
+    QuotaExceeded,
     /// Too many requests.
     RateLimited,
     /// The server failed.
@@ -179,9 +192,10 @@ impl ProblemCode {
             | Self::OwnerNotAllowed
             | Self::TooManyTraces => 422,
             Self::Conflict => 409,
+            Self::QuotaExceeded => 402,
             Self::RateLimited => 429,
             Self::Internal => 500,
-            Self::Busy => 503,
+            Self::Busy | Self::RestoreMode => 503,
         }
     }
 
@@ -205,9 +219,10 @@ impl ProblemCode {
             | Self::OwnerNotAllowed
             | Self::TooManyTraces => "Unprocessable Content",
             Self::Conflict => "Conflict",
+            Self::QuotaExceeded => "Payment Required",
             Self::RateLimited => "Too Many Requests",
             Self::Internal => "Internal Server Error",
-            Self::Busy => "Service Unavailable",
+            Self::Busy | Self::RestoreMode => "Service Unavailable",
         }
     }
 }
@@ -474,6 +489,11 @@ mod tests {
         assert_eq!(ProblemCode::EmailNotVerified.status(), 403);
         assert_eq!(ProblemCode::PlanLimit.status(), 403);
         assert_eq!(ProblemCode::PlanRequired.status(), 403);
+        assert_eq!(ProblemCode::QuotaExceeded.status(), 402);
+        assert_eq!(
+            Problem::new(ProblemCode::QuotaExceeded, None).title,
+            "Payment Required"
+        );
         assert_eq!(ProblemCode::MethodNotAllowed.status(), 405);
         assert_eq!(ProblemCode::Conflict.status(), 409);
         assert_eq!(ProblemCode::PayloadTooLarge.status(), 413);

@@ -41,8 +41,8 @@
           },
           "spans": [
             {
-              "traceId": "fc3c3eab75225f916580a7b55a52c15c",
-              "spanId": "8e5dd1bc6aa7887e",
+              "traceId": "8f682469d940ec4561a10451f8c9bfc9",
+              "spanId": "9cfdbff73d88b8c6",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
@@ -120,7 +120,7 @@
                 {
                   "key": "gen_ai.response.time_to_first_chunk",
                   "value": {
-                    "doubleValue": 0.139585947006708
+                    "doubleValue": 0.13675462899846025
                   }
                 },
                 {

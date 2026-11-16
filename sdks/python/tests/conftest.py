@@ -11,12 +11,12 @@ from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.sdk.trace.id_generator import IdGenerator
 
-import llmobs._runtime as runtime_module
-from llmobs._config import ConfigError, resolve_config
-from llmobs._instrument import enable_for, resolve
-from llmobs._runtime import Runtime, install, uninstall
+import cetra._runtime as runtime_module
+from cetra._config import ConfigError, resolve_config
+from cetra._instrument import enable_for, resolve
+from cetra._runtime import Runtime, install, uninstall
 
-TEST_API_KEY = "sk-llmobs-test"
+TEST_API_KEY = "sk-cetra-test"
 TEST_BASE_URL = "http://127.0.0.1:9"
 
 # Minimal provider responses per request path (plan F § P10); the exact JSON
@@ -62,6 +62,7 @@ class HttpRecorder:
         self.requests: list[tuple[str, str, dict[str, str], bytes]] = []
         self._responses: list[tuple[int, dict[str, str], bytes]] = []
         self._bodies: dict[str, bytes] = dict(PATH_BODIES)
+        self._handler: Callable[[str, str, bytes], tuple[int, dict[str, str], bytes]] | None = None
         self._lock = threading.Lock()
 
     def queue_response(self, status: int, headers: dict[str, str], body: bytes) -> None:
@@ -69,29 +70,55 @@ class HttpRecorder:
         with self._lock:
             self._responses.append((status, headers, body))
 
+    def respond_with(
+        self, handler: Callable[[str, str, bytes], tuple[int, dict[str, str], bytes]]
+    ) -> None:
+        """Answer every request without a queued response with ``handler(method, path, body)``."""
+        with self._lock:
+            self._handler = handler
+
     def record(self, method: str, path: str, headers: dict[str, str], body: bytes) -> None:
         with self._lock:
             self.requests.append((method, path, headers, body))
 
-    def take_response(self, path: str) -> tuple[int, dict[str, str], bytes]:
+    def take_response(
+        self, method: str, path: str, body: bytes
+    ) -> tuple[int, dict[str, str], bytes]:
         with self._lock:
             if self._responses:
                 return self._responses.pop(0)
-            body = self._bodies.get(path, b"")
-            headers = {"Content-Type": "application/json"} if body else {}
-            return (200, headers, body)
+            handler = self._handler
+        if handler is not None:
+            return handler(method, path, body)
+        response_body = self._bodies.get(path, b"")
+        headers = {"Content-Type": "application/json"} if response_body else {}
+        return (200, headers, response_body)
 
 
 class _RecordingHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     recorder: ClassVar[HttpRecorder]
 
+    def do_GET(self) -> None:
+        self._handle()
+
     def do_POST(self) -> None:
+        self._handle()
+
+    def do_PATCH(self) -> None:
+        self._handle()
+
+    def do_DELETE(self) -> None:
+        self._handle()
+
+    def _handle(self) -> None:
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length)
         headers = {name: value for name, value in self.headers.items()}
         self.recorder.record(self.command, self.path, headers, body)
-        status, response_headers, response_body = self.recorder.take_response(self.path)
+        status, response_headers, response_body = self.recorder.take_response(
+            self.command, self.path, body
+        )
         self.send_response(status)
         for name, value in response_headers.items():
             self.send_header(name, value)

@@ -1,0 +1,10 @@
+{
+  "matched": 1000,
+  "capped": true,
+  "sampled": 250,
+  "estimated_input_tokens": 1062500,
+  "estimated_output_tokens": 256000,
+  "estimated_cost_usd": 0.31,
+  "from": "2025-12-25T00:00:00.000000000Z",
+  "to": "2026-01-01T00:00:00.000000000Z"
+}

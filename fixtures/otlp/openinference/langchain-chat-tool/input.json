@@ -41,15 +41,15 @@
           },
           "spans": [
             {
-              "traceId": "8cc4a9aa8204b7c18d4d1ef49747dd05",
-              "spanId": "f67688267e0bcf51",
+              "traceId": "b4722e90299f28e8ee624db80812e226",
+              "spanId": "dce2d199c63a540e",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
               "name": "ChatOpenAI",
               "kind": 1,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590088000000",
+              "endTimeUnixNano": "1767225590042000000",
               "attributes": [
                 {
                   "key": "input.value",
@@ -225,15 +225,15 @@
               }
             },
             {
-              "traceId": "bfeebbed4c8225a11a0ff7163de2b419",
-              "spanId": "c1b7efa4e43fcb9d",
+              "traceId": "47e8b977b32779863224cafd5ab8212d",
+              "spanId": "960da26652558f49",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
               "name": "get_weather",
               "kind": 1,
-              "startTimeUnixNano": "1767225590090000000",
-              "endTimeUnixNano": "1767225590090000000",
+              "startTimeUnixNano": "1767225590044000000",
+              "endTimeUnixNano": "1767225590044000000",
               "attributes": [
                 {
                   "key": "input.value",
@@ -283,15 +283,15 @@
               }
             },
             {
-              "traceId": "1e42aadd3b69271519f853ff838432eb",
-              "spanId": "0ac1d50ff803eada",
+              "traceId": "7056ba6e572d2a43874470e44087d403",
+              "spanId": "b547d4ba3eab7d13",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
               "name": "ChatOpenAI",
               "kind": 1,
-              "startTimeUnixNano": "1767225590091000000",
-              "endTimeUnixNano": "1767225590124000000",
+              "startTimeUnixNano": "1767225590045000000",
+              "endTimeUnixNano": "1767225590078000000",
               "attributes": [
                 {
                   "key": "input.value",

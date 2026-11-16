@@ -16,12 +16,28 @@ use reqwest::{StatusCode, Url};
 use crate::error::EgressError;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Whole-request timeout of an identity provider's request (D-P-53).
+const IDENTITY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Whether resolved and literal addresses in a private range may be used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EgressPolicy {
     /// Keep addresses that [`is_denied`] would drop.
     pub allow_private_network: bool,
+    /// Restore mode (N M3, D-N-25): every request is refused before it is sent.
+    pub restore_mode: bool,
+}
+
+impl EgressPolicy {
+    /// Whether a request to `url` may be attempted: `http` or `https`, and a literal IP host
+    /// that is not denied (D166) unless private networks are allowed. A host name is allowed
+    /// here; the resolver checks its addresses. Restore mode allows nothing.
+    #[must_use]
+    pub fn allows_url(&self, url: &Url) -> bool {
+        !self.restore_mode
+            && matches!(url.scheme(), "http" | "https")
+            && (self.allow_private_network || !literal_ip(url).is_some_and(is_denied))
+    }
 }
 
 /// One shared client with the SSRF guard (D166). Redirects are not followed; proxies are ignored.
@@ -55,6 +71,36 @@ pub struct EgressResponse {
     pub body: Bytes,
 }
 
+/// A client for an identity provider an org registered (D-P-53): the same guarded
+/// resolver as [`EgressClient`], no redirects, no proxy, rustls, a 10 s whole-request timeout.
+///
+/// This client does **not** guard IP-literal hosts: reqwest does not call the resolver for
+/// them. Every caller checks [`EgressPolicy::allows_url`] before sending, as
+/// [`EgressClient::post`] does.
+///
+/// # Errors
+///
+/// Returns [`EgressError::Request`] when the TLS backend cannot be initialized.
+pub fn identity_http_client(policy: EgressPolicy) -> Result<reqwest::Client, EgressError> {
+    client_builder(policy)
+        .timeout(IDENTITY_TIMEOUT)
+        .build()
+        .map_err(|_| EgressError::Request)
+}
+
+fn client_builder(policy: EgressPolicy) -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .user_agent(user_agent())
+        .use_rustls_tls()
+        .dns_resolver(Arc::new(GuardedResolver {
+            allow_private_network: policy.allow_private_network,
+            restore_mode: policy.restore_mode,
+        }))
+}
+
 impl EgressClient {
     /// Builds a rustls client that resolves through [`GuardedResolver`].
     ///
@@ -62,15 +108,7 @@ impl EgressClient {
     ///
     /// Returns [`EgressError::Request`] when the TLS backend cannot be initialized.
     pub fn new(policy: EgressPolicy) -> Result<Self, EgressError> {
-        let http = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .no_proxy()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .user_agent(user_agent())
-            .use_rustls_tls()
-            .dns_resolver(Arc::new(GuardedResolver {
-                allow_private_network: policy.allow_private_network,
-            }))
+        let http = client_builder(policy)
             .build()
             .map_err(|_| EgressError::Request)?;
         Ok(Self { http, policy })
@@ -87,11 +125,14 @@ impl EgressClient {
     /// [`EgressError::Request`]. Their text is not the client error's `Display`,
     /// which contains the URL.
     pub async fn post(&self, req: EgressRequest<'_>) -> Result<EgressResponse, EgressError> {
+        if self.policy.restore_mode {
+            return Err(EgressError::RestoreMode);
+        }
         if req.url.scheme() != "http" && req.url.scheme() != "https" {
             return Err(EgressError::Scheme);
         }
         let host = host_label(req.url);
-        if !self.policy.allow_private_network && literal_ip(req.url).is_some_and(is_denied) {
+        if !self.policy.allows_url(req.url) {
             return Err(EgressError::Denied { host });
         }
 
@@ -134,7 +175,7 @@ impl EgressClient {
 fn user_agent() -> String {
     format!(
         "{}/{}",
-        llmobs_core::names::PRODUCT,
+        cetra_core::names::PRODUCT,
         env!("CARGO_PKG_VERSION")
     )
 }
@@ -193,13 +234,19 @@ impl std::error::Error for DeniedAddress {}
 
 struct GuardedResolver {
     allow_private_network: bool,
+    restore_mode: bool,
 }
 
 impl Resolve for GuardedResolver {
     fn resolve(&self, name: Name) -> Resolving {
         let allow_private_network = self.allow_private_network;
+        let restore_mode = self.restore_mode;
         let host = name.as_str().to_owned();
         Box::pin(async move {
+            // Restore mode resolves no name: the same refusal as a fully denied lookup.
+            if restore_mode {
+                return Err(Box::new(DeniedAddress) as Box<dyn std::error::Error + Send + Sync>);
+            }
             let looked_up = tokio::net::lookup_host((host.as_str(), 0))
                 .await
                 .map_err(|_| Box::new(LookupFailed) as Box<dyn std::error::Error + Send + Sync>)?;
@@ -247,6 +294,8 @@ fn denied_v4(ip: Ipv4Addr) -> bool {
         || ip.is_unspecified()
         || ip.is_multicast()
         || ip.is_broadcast()
+        || a == 0
+        || a >= 240
         || (a == 100 && (64..128).contains(&b))
         || (a == 192 && b == 0 && c == 0)
         || (a == 198 && (b == 18 || b == 19))
@@ -262,13 +311,18 @@ fn denied_v6(ip: Ipv6Addr) -> bool {
     if let Some(v4) = nat64_v4(ip) {
         return denied_v4(v4);
     }
-    let [first, second, ..] = ip.segments();
+    let segments = ip.segments();
+    let [first, second, third, ..] = segments;
     ip.is_loopback()
         || ip.is_unspecified()
         || ip.is_multicast()
         || first & 0xffc0 == 0xfe80
         || first & 0xfe00 == 0xfc00
         || (first == 0x2001 && second == 0x0db8)
+        || first & 0xffc0 == 0xfec0
+        || first == 0x2002
+        || (first == 0x0064 && second == 0xff9b && third == 1)
+        || segments[..6].iter().all(|&segment| segment == 0)
 }
 
 /// The IPv4 address embedded in `64:ff9b::/96`, the well-known NAT64 prefix.
@@ -296,7 +350,7 @@ mod tests {
     use axum::response::{IntoResponse, Response};
     use reqwest::Url;
 
-    use super::{EgressClient, EgressPolicy, EgressRequest, is_denied};
+    use super::{EgressClient, EgressPolicy, EgressRequest, identity_http_client, is_denied};
     use crate::error::{EgressError, assert_no_payload};
 
     const PLANTED: &str = "SECRET-PAYLOAD";
@@ -349,6 +403,18 @@ mod tests {
             "::ffff:0.0.0.0",
             "::ffff:192.0.2.1",
             "::ffff:169.254.169.254",
+            "0.0.0.1",
+            "0.255.255.255",
+            "240.0.0.0",
+            "255.255.255.254",
+            "::1.2.3.4",
+            "::8.8.8.8",
+            "64:ff9b:1::7f00:1",
+            "64:ff9b:1:ffff:ffff:ffff:ffff:ffff",
+            "2002::",
+            "2002:808:808::1",
+            "fec0::",
+            "feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
             "64:ff9b::7f00:1",
             "64:ff9b::a00:0",
             "64:ff9b::ffff:ffff",
@@ -368,9 +434,8 @@ mod tests {
             "100.128.0.0",
             "169.253.255.255",
             "169.255.0.0",
-            "0.0.0.1",
+            "1.0.0.0",
             "223.255.255.255",
-            "240.0.0.0",
             "192.0.1.0",
             "198.17.255.255",
             "198.20.0.0",
@@ -379,14 +444,16 @@ mod tests {
             "203.0.114.0",
             "2001:4860:4860::8888",
             "fe7f:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
-            "fec0::",
             "fbff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
             "fe00::",
             "2001:db7:ffff:ffff:ffff:ffff:ffff:ffff",
             "2001:db9::",
             "::ffff:1.1.1.1",
             "64:ff9b::101:101",
-            "64:ff9b:1::7f00:1",
+            "64:ff9b:2::1",
+            "2003::",
+            "fe7f::1",
+            "::1:0:0:1",
         ];
         for text in denied {
             assert!(is_denied(addr(text)), "{text} is allowed");
@@ -394,6 +461,57 @@ mod tests {
         for text in allowed {
             assert!(!is_denied(addr(text)), "{text} is denied");
         }
+    }
+
+    #[test]
+    fn allows_url_checks_scheme_and_literal_addresses() {
+        let strict = EgressPolicy {
+            allow_private_network: false,
+            restore_mode: false,
+        };
+        let open = EgressPolicy {
+            allow_private_network: true,
+            restore_mode: false,
+        };
+        let url = |text: &str| Url::parse(text).unwrap();
+
+        assert!(strict.allows_url(&url("https://idp.example/.well-known")));
+        assert!(strict.allows_url(&url("http://idp.example/")));
+        assert!(!strict.allows_url(&url("http://10.0.0.1/")));
+        assert!(open.allows_url(&url("http://10.0.0.1/")));
+        assert!(!strict.allows_url(&url("https://[::1]/")));
+        assert!(!strict.allows_url(&url("http://169.254.169.254/latest")));
+        assert!(!strict.allows_url(&url("ftp://x")));
+        assert!(!open.allows_url(&url("ftp://x")));
+    }
+
+    #[tokio::test]
+    async fn identity_client_guards_host_names_and_follows_no_redirects() {
+        let mock = Mock::start().await;
+        let name = mock.url(true);
+
+        let strict = identity_http_client(EgressPolicy {
+            allow_private_network: false,
+            restore_mode: false,
+        })
+        .expect("client");
+        strict
+            .get(name.clone())
+            .send()
+            .await
+            .expect_err("localhost is refused by the resolver");
+        assert_eq!(mock.hits(), 0);
+
+        let open = identity_http_client(EgressPolicy {
+            allow_private_network: true,
+            restore_mode: false,
+        })
+        .expect("client");
+        let response = open.get(mock.path("/redirect")).send().await.expect("send");
+        assert_eq!(response.status(), StatusCode::FOUND);
+        let response = open.get(name).send().await.expect("localhost allowed");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(mock.hits(), 2);
     }
 
     #[tokio::test]
@@ -479,8 +597,56 @@ mod tests {
     fn client(allow_private_network: bool) -> EgressClient {
         EgressClient::new(EgressPolicy {
             allow_private_network,
+            restore_mode: false,
         })
         .expect("client")
+    }
+
+    #[tokio::test]
+    async fn restore_mode_refuses_before_sending() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("address").port();
+        let client = EgressClient::new(EgressPolicy {
+            allow_private_network: true,
+            restore_mode: true,
+        })
+        .expect("client");
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/hook")).unwrap();
+        let err = post(&client, &url, Duration::from_secs(2), 64)
+            .await
+            .expect_err("restore mode");
+        assert_eq!(err, EgressError::RestoreMode);
+        let accepted = tokio::time::timeout(Duration::from_millis(200), listener.accept()).await;
+        assert!(accepted.is_err(), "a connection was accepted");
+    }
+
+    #[test]
+    fn restore_mode_denies_every_url() {
+        let policy = EgressPolicy {
+            allow_private_network: true,
+            restore_mode: true,
+        };
+        let url = |text: &str| Url::parse(text).unwrap();
+        assert!(!policy.allows_url(&url("https://example.com/")));
+        assert!(!policy.allows_url(&url("http://127.0.0.1/")));
+    }
+
+    #[tokio::test]
+    async fn identity_client_in_restore_mode_cannot_resolve() {
+        let mock = Mock::start().await;
+        let client = identity_http_client(EgressPolicy {
+            allow_private_network: true,
+            restore_mode: true,
+        })
+        .expect("client");
+        client
+            .get(mock.url(true))
+            .send()
+            .await
+            .expect_err("restore mode resolves no name");
+        assert_eq!(mock.hits(), 0);
     }
 
     async fn post(

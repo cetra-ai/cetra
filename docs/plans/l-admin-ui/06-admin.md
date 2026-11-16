@@ -584,7 +584,7 @@ There is no empty state; the object always exists.
 
 **Content**, top to bottom:
 
-1. `<h2 className="text-lg font-medium">Settings</h2>` and `<p className="text-sm text-muted-foreground">These come from the server's configuration and can't be changed here. Edit llmobs.toml or the LLMOBS_* environment variables, then restart the server.</p>`.
+1. `<h2 className="text-lg font-medium">Settings</h2>` and `<p className="text-sm text-muted-foreground">These come from the server's configuration and can't be changed here. Edit cetra.toml or the CETRA_* environment variables, then restart the server.</p>`.
 2. `<dl aria-label="Instance settings" className="grid grid-cols-[minmax(10rem,max-content)_1fr] gap-x-6 gap-y-2 text-sm">`. One `<dt className="text-muted-foreground">` and `<dd>` pair per row:
 
    | `dt` | `dd` |
@@ -602,7 +602,7 @@ There is no empty state; the object always exists.
 
    Put the mapping of `signup` in a small function `signupLabel(policy: Schema<"SignupPolicy">): string` in the same file.
 3. `<h3 className="text-base font-medium">Test email</h3>` and `<p className="text-sm text-muted-foreground">{`Sends a test message to ${me.user.email}.`}</p>`.
-4. The button, wrapped in `<DisabledReason reason={settings.data.smtp_enabled ? undefined : "Email is not configured. Set LLMOBS_SMTP_URL and restart the server."}>`:
+4. The button, wrapped in `<DisabledReason reason={settings.data.smtp_enabled ? undefined : "Email is not configured. Set CETRA_SMTP_URL and restart the server."}>`:
 
    `<Button type="button" variant="outline" disabled={!settings.data.smtp_enabled || test.isPending} onClick={send}>`
 
@@ -653,8 +653,8 @@ Also add `withSettings(overrides: object)`. It returns `http.get("/api/v1/admin/
 |---|---|---|
 | "shows the effective settings" | — | "Public URL" → `http://localhost:8080`. "Sign-up" → "Invite only". "Sign-up domains" → "Any domain". "Password sign-in" → "Enabled". "Email verification" → "Not required". "Single sign-on required for" → "No domains". "Email (SMTP)" → "Not configured". `queryByText("From address", { selector: "dt" })` is null. "Sign-in providers" → "GitHub (github), Okta (oidc:okta)". "Trusted proxies" → "None". `screen.getByRole("link", { name: "Settings" })` has `aria-current="page"`. |
 | "labels a disabled sign-up" | `withSettings({ signup: "disabled" })` | "Sign-up" → "Disabled". |
-| "shows the from address and lists" | `withSettings({ smtp_enabled: true, email_from: "llmobs <noreply@example.com>", signup: "open", signup_domains: ["example.com"], enforce_sso_domains: ["corp.example.com"], trusted_proxies: ["10.0.0.0/8"], providers: [] })` | "Email (SMTP)" → "Configured". "From address" → `llmobs <noreply@example.com>`. "Sign-up" → "Open to anyone". "Sign-up domains" → "example.com". "Single sign-on required for" → "corp.example.com". "Trusted proxies" → "10.0.0.0/8". "Sign-in providers" → "None". |
-| "disables the test email without SMTP" | — | Button "Send test email" is disabled, and its wrapper (`button.parentElement`) has the accessible description "Email is not configured. Set LLMOBS_SMTP_URL and restart the server." |
+| "shows the from address and lists" | `withSettings({ smtp_enabled: true, email_from: "cetra <noreply@example.com>", signup: "open", signup_domains: ["example.com"], enforce_sso_domains: ["corp.example.com"], trusted_proxies: ["10.0.0.0/8"], providers: [] })` | "Email (SMTP)" → "Configured". "From address" → `cetra <noreply@example.com>`. "Sign-up" → "Open to anyone". "Sign-up domains" → "example.com". "Single sign-on required for" → "corp.example.com". "Trusted proxies" → "10.0.0.0/8". "Sign-in providers" → "None". |
+| "disables the test email without SMTP" | — | Button "Send test email" is disabled, and its wrapper (`button.parentElement`) has the accessible description "Email is not configured. Set CETRA_SMTP_URL and restart the server." |
 | "sends a test email" | `withSettings({ smtp_enabled: true })` and `http.post("/api/v1/admin/settings/test-email", () => new HttpResponse(null, { status: 204 }))` counting calls | Click the button. Status "Test email sent to ada@example.com." is shown, and the handler was called once. |
 | "shows an SMTP failure" | `withSettings({ smtp_enabled: true })`; POST answering `problemResponse(503, "busy", { detail: "the SMTP server could not be reached or refused the message" })` | Alert "The SMTP server could not be reached or refused the message." |
 | "shows that email is not configured" | `withSettings({ smtp_enabled: true })`; POST answering `problemResponse(400, "bad_request", { detail: "email is not configured" })` | Alert "Email is not configured." |
@@ -820,7 +820,7 @@ export const writeHandlers: HttpHandler[] = WRITE_OPERATIONS.map((operation) => 
 | `post_org_invite` | `201` `{ ...inviteCreatedDocument, invite: { ...inviteCreatedDocument.invite, email: <body.email if a string, else the fixture's>, role: <body.role if a string, else the fixture's> } }` |
 | `post_project` | `201` `{ ...projectDocument, name: <body.name trimmed, or the fixture's> }`, plus `retention_days: body.retention_days` when it is a number. The slug stays `support-bot`. |
 | `patch_project` | `200`. `const { retention_days: _retention, ...withoutRetention } = projectDocument`. Start from `const result: Record<string, unknown> = "retention_days" in body && body.retention_days === null ? { ...withoutRetention } : { ...projectDocument }`. Then set `result.retention_days = body.retention_days` when it is a number, and `result.name` to the trimmed `body.name` when that is non-empty. |
-| `post_api_key` | `201`. `kind` is `body.kind === "public" ? "public" : "secret"`. `scopes` is `body.scopes` when it is an array, else `["feedback"]` for public and `["ingest", "read", "write"]` for secret. With `const { name: _name, ...unnamedKey } = apiKeyCreatedDocument.key`, the answer is `{ key: { ...unnamedKey, kind, scopes, prefix: kind === "public" ? "pk-llmobs-EXAMPL" : "sk-llmobs-EXAMPL", ...(typeof body.name === "string" && body.name.trim() ? { name: body.name.trim() } : {}) }, secret: kind === "public" ? "pk-llmobs-EXAMPLE0EXAMPLE0EXAMPLE0" : apiKeyCreatedDocument.secret }`. An unnamed key has no `name`, as the contract says. |
+| `post_api_key` | `201`. `kind` is `body.kind === "public" ? "public" : "secret"`. `scopes` is `body.scopes` when it is an array, else `["feedback"]` for public and `["ingest", "read", "write"]` for secret. With `const { name: _name, ...unnamedKey } = apiKeyCreatedDocument.key`, the answer is `{ key: { ...unnamedKey, kind, scopes, prefix: kind === "public" ? "pk-cetra-EXAMPL" : "sk-cetra-EXAMPL", ...(typeof body.name === "string" && body.name.trim() ? { name: body.name.trim() } : {}) }, secret: kind === "public" ? "pk-cetra-EXAMPLE0EXAMPLE0EXAMPLE0" : apiKeyCreatedDocument.secret }`. An unnamed key has no `name`, as the contract says. |
 | `delete_api_key` | 204 |
 | `put_project_member` | Find `projectMembersDocument.data` by `user.id === params.user`; not found → 404. When `member.org_role` is `owner` or `admin` → `problem(400, "bad_request", "owners and admins cannot be overridden")`. `body.role` must be one of `admin`, `member`, `viewer`, `none`; otherwise 400. Answer `200` with `{ user: member.user, org_role: member.org_role, override: body.role }`, plus `effective_role: body.role` unless it is `none`. |
 | `delete_project_member` | 204 |
@@ -865,7 +865,7 @@ These tests use the shared test server (`server` from `./node`). They install th
 | "has one handler per operation" | `writeHandlers.length === WRITE_OPERATIONS.length` |
 | "signs in as the fixture user" | `POST /api/auth/login` with body `{"email":"ada@example.com","password":"x"}` and `Content-Type: application/json` → 200; the JSON's `user.email` is `ada@example.com` |
 | "refuses to change the signed-in admin" | `PATCH /api/v1/admin/users/<ADA_ID>` with `{"disabled":true}` → 400; the JSON's `detail` is `cannot change your own account` |
-| "creates a public key" | `POST /api/v1/projects/acme%2Fsupport-bot/api-keys` with `{"kind":"public","name":"Web"}` → 201; `key.kind` is `public`, `key.scopes` is `["feedback"]`, `key.name` is `Web`, and `secret` starts with `pk-llmobs-` |
+| "creates a public key" | `POST /api/v1/projects/acme%2Fsupport-bot/api-keys` with `{"kind":"public","name":"Web"}` → 201; `key.kind` is `public`, `key.scopes` is `["feedback"]`, `key.name` is `Web`, and `secret` starts with `pk-cetra-` |
 | "omits the name of an unnamed key" | The same with `{"kind":"secret"}` → `"name" in body.key` is false |
 | "refuses an override for an owner" | `PUT /api/v1/projects/acme%2Fsupport-bot/members/<ADA_ID>` with `{"role":"viewer"}` → 400 |
 | "answers 204 for deletes" | `DELETE /api/v1/me/tokens/<TOKEN_ID>` → 204, and `DELETE /api/v1/me/tokens/current` → 204 |

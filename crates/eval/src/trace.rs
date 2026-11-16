@@ -5,11 +5,11 @@
 
 use std::collections::BTreeMap;
 
-use llmobs_core::enums::SpanKind;
-use llmobs_core::ids::{SpanId, TraceId};
-use llmobs_core::names::{attr, environment, metadata_key, score_metadata_key};
-use llmobs_core::score::ScoreValue;
-use llmobs_otel::{IngestContext, Normalized, PriceTable, RejectReason, normalize};
+use cetra_core::enums::SpanKind;
+use cetra_core::ids::{SpanId, TraceId};
+use cetra_core::names::{attr, environment, metadata_key, score_metadata_key};
+use cetra_core::score::ScoreValue;
+use cetra_otel::{IngestContext, Normalized, PriceTable, RejectReason, normalize};
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::common::v1::any_value::Value as AnyValueKind;
 use opentelemetry_proto::tonic::common::v1::{AnyValue, InstrumentationScope, KeyValue};
@@ -310,7 +310,7 @@ fn child_span(input: &TraceInput<'_>, parent: &SpanId, child: &ChildSpan<'_>) ->
                 string_attr(attr::SPAN_KIND, SpanKind::Llm.as_str()),
                 string_attr(attr::ENVIRONMENT, environment::EVAL),
                 string_attr("gen_ai.operation.name", "chat"),
-                string_attr("gen_ai.provider.name", provider_name(*adapter)),
+                string_attr("gen_ai.provider.name", adapter.provider_name()),
                 string_attr("gen_ai.request.model", request_model),
                 string_attr(attr::INPUT, &user_message(prompt)),
                 string_attr(attr::INPUT_FORMAT, "messages"),
@@ -396,14 +396,6 @@ fn usage_attrs(usage: &JudgeUsage) -> Vec<KeyValue> {
             token_count(usage.reasoning),
         ),
     ]
-}
-
-fn provider_name(adapter: Adapter) -> &'static str {
-    match adapter {
-        Adapter::OpenAi => "openai",
-        Adapter::Anthropic => "anthropic",
-        Adapter::Gemini => "gcp.gemini",
-    }
 }
 
 fn otel_span(
@@ -525,11 +517,11 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::OnceLock;
 
-    use llmobs_core::enums::{ScoreDataType, SpanKind, SpanStatus};
-    use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-    use llmobs_core::names::{environment, metadata_key, score_metadata_key};
-    use llmobs_core::score::ScoreValue;
-    use llmobs_otel::{IngestContext, IngestLimits, PriceTable, builtin_price_rows};
+    use cetra_core::enums::{ScoreDataType, SpanKind, SpanStatus};
+    use cetra_core::ids::{ProjectId, SpanId, TraceId};
+    use cetra_core::names::{environment, metadata_key, score_metadata_key};
+    use cetra_core::score::ScoreValue;
+    use cetra_otel::{IngestContext, IngestLimits, PriceTable, builtin_price_rows};
     use serde_json::{Value, json};
     use uuid::Uuid;
 
@@ -609,7 +601,7 @@ mod tests {
         }
     }
 
-    fn assert_common(normalized: &llmobs_otel::Normalized, indexes: &[u8]) {
+    fn assert_common(normalized: &cetra_otel::Normalized, indexes: &[u8]) {
         assert_eq!(normalized.rejections.total(), 0);
         assert_eq!(normalized.spans.len(), indexes.len());
         let trace = trace_id();
@@ -617,7 +609,7 @@ mod tests {
             assert_eq!(span.environment.as_deref(), Some(environment::EVAL));
             assert_eq!(span.span_id, span_id(trace, *index));
             assert_eq!(span.service_name.as_deref(), Some(environment::EVAL));
-            assert_eq!(span.scope_name.as_deref(), Some("llmobs-eval"));
+            assert_eq!(span.scope_name.as_deref(), Some("cetra-eval"));
             assert_eq!(span.scope_version.as_deref(), Some("0.0.0"));
         }
         let ids: Vec<_> = normalized.spans.iter().map(|span| span.span_id).collect();
@@ -634,7 +626,7 @@ mod tests {
         }
     }
 
-    fn snapshot(name: &str, normalized: &llmobs_otel::Normalized) {
+    fn snapshot(name: &str, normalized: &cetra_otel::Normalized) {
         let text = serde_json::to_string(&normalized.spans).expect("spans");
         assert!(
             !text.contains("SECRET-PAYLOAD"),

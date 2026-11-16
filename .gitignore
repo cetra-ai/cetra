@@ -1,5 +1,5 @@
 /target
-/llmobs-data/
+/cetra-data/
 node_modules/
 dist/
 .venv/
@@ -13,7 +13,7 @@ web/src/routeTree.gen.ts
 .env
 .env.*
 !.env.example
-deploy/compose/llmobs.env
+deploy/compose/cetra.env
 .DS_Store
 *.swp
 

@@ -8,7 +8,7 @@ use axum::http::{Method, StatusCode};
 use axum::routing::{delete, get, patch, post};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use llmobs_core::ids::OrgId;
+use cetra_core::ids::OrgId;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -124,7 +124,7 @@ async fn create_rule(
     let project_id = access.project.id;
     let org_id = access.project.org_id;
     let name = checked_name(&body.name)?;
-    let condition = checked_condition(&state, project_id, body.condition).await?;
+    let condition = checked_condition(&state, org_id, project_id, body.condition).await?;
     let channel_ids = checked_channels(&state, project_id, &body.channel_ids).await?;
     let cooldown_s = checked_cooldown(body.cooldown_s.unwrap_or(DEFAULT_COOLDOWN_S))?;
     let enabled = body.enabled.unwrap_or(true);
@@ -189,7 +189,7 @@ async fn update_rule(
     let org_id = access.project.org_id;
     let name = body.name.as_deref().map(checked_name).transpose()?;
     let condition = match body.condition {
-        Some(condition) => Some(checked_condition(&state, project_id, condition).await?),
+        Some(condition) => Some(checked_condition(&state, org_id, project_id, condition).await?),
         None => None,
     };
     let channel_ids = match &body.channel_ids {
@@ -341,7 +341,7 @@ fn checked_cooldown(value: i64) -> Result<i64, ApiError> {
 /// The channel ids of the project, sorted. A rule has at most 10, none twice, all its own.
 async fn checked_channels(
     state: &AppState,
-    project: llmobs_core::ids::ProjectId,
+    project: cetra_core::ids::ProjectId,
     ids: &[Uuid],
 ) -> Result<Vec<Uuid>, ApiError> {
     if ids.len() > alerts::MAX_RULE_CHANNELS {
@@ -365,7 +365,8 @@ async fn checked_channels(
 /// `400 invalid_filter` on the `filter` field.
 async fn checked_condition(
     state: &AppState,
-    project: llmobs_core::ids::ProjectId,
+    org: OrgId,
+    project: cetra_core::ids::ProjectId,
     condition: AlertCondition,
 ) -> Result<AlertCondition, ApiError> {
     let condition = normalize_condition(condition).map_err(|errors| ApiError::BadRequest {
@@ -373,8 +374,8 @@ async fn checked_condition(
         errors,
     })?;
     if let Some(text) = &condition.filter {
-        let ctx = open_query(state, project, None).await?;
-        llmobs_storage::check_alert_filter(&ctx, text)?;
+        let ctx = open_query(state, org, project, None).await?;
+        cetra_storage::validate_filter(&ctx, cetra_storage::ViewName::Traces, text)?;
     }
     Ok(condition)
 }
@@ -416,13 +417,14 @@ struct EventCursor {
     id: Uuid,
 }
 
-fn encode_cursor(created_at: i64, id: Uuid) -> Result<String, ApiError> {
+/// The opaque cursor of a page of `(created_at, id)`; shared with the eval jobs list.
+pub(crate) fn encode_cursor(created_at: i64, id: Uuid) -> Result<String, ApiError> {
     let bytes = serde_json::to_vec(&EventCursor { created_at, id })
         .map_err(|error| ApiError::Internal(Box::new(error)))?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
-fn decode_cursor(text: &str) -> Result<(i64, Uuid), ApiError> {
+pub(crate) fn decode_cursor(text: &str) -> Result<(i64, Uuid), ApiError> {
     let bytes = URL_SAFE_NO_PAD
         .decode(text)
         .map_err(|_| field_error("cursor", "invalid cursor"))?;
@@ -449,9 +451,10 @@ mod tests {
 
     use super::*;
     use crate::api::alerts::{AlertState, ChannelKind};
+    use crate::api::common::ProblemCode;
     use crate::auth::roles::OrgRole;
     use crate::meta::alerts::NewChannel;
-    use crate::test_support::{Seeded, TestApp, TestResponse, assert_logs_clean};
+    use crate::test_support::{Seeded, TestApp, TestResponse, assert_logs_clean, set_limits};
 
     fn rules(seeded: &Seeded) -> String {
         format!("/api/v1/projects/{}/alert-rules", seeded.project.id)
@@ -528,7 +531,7 @@ mod tests {
 
     async fn insert_channel(
         app: &TestApp,
-        project: llmobs_core::ids::ProjectId,
+        project: cetra_core::ids::ProjectId,
         name: &str,
     ) -> Uuid {
         let id = Uuid::now_v7();
@@ -623,6 +626,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn trace_latency_threshold_as_long_as_the_window_is_400() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        // A 5m window is 300 000 ms; a trace threshold of that much is refused.
+        let refused = send(
+            &app,
+            Method::POST,
+            &rules(&seeded),
+            &seeded.cookie,
+            Some(json!({
+                "name": "Slow traces",
+                "condition": {"metric": "latency_p95", "window": "5m", "comparator": "gt", "threshold": 300000},
+            })),
+        )
+        .await;
+        assert_eq!(refused.status, 400);
+        let fields: Vec<String> = problem_of(&refused)
+            .into_iter()
+            .map(|(field, _)| field)
+            .collect();
+        assert_eq!(fields, ["condition.threshold"]);
+
+        let llm = send(
+            &app,
+            Method::POST,
+            &rules(&seeded),
+            &seeded.cookie,
+            Some(json!({
+                "name": "Slow calls",
+                "condition": {"metric": "latency_p95", "target": "llm_span", "window": "5m", "comparator": "gt", "threshold": 300000},
+            })),
+        )
+        .await;
+        assert_eq!(llm.status, 201);
+    }
+
+    #[tokio::test]
     async fn invalid_condition_is_400_with_fields() {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
@@ -678,7 +718,7 @@ mod tests {
         .await;
         assert_eq!(refused.status, 400);
         let problem = refused.problem();
-        assert_eq!(problem.code, crate::api::common::ProblemCode::InvalidFilter);
+        assert_eq!(problem.code, ProblemCode::InvalidFilter);
         assert_eq!(problem.errors[0].field, "filter");
         assert!(problem.errors[0].position.is_some());
 
@@ -703,10 +743,7 @@ mod tests {
         )
         .await;
         assert_eq!(patched.status, 400);
-        assert_eq!(
-            patched.problem().code,
-            crate::api::common::ProblemCode::InvalidFilter
-        );
+        assert_eq!(patched.problem().code, ProblemCode::InvalidFilter);
     }
 
     #[tokio::test]
@@ -1195,6 +1232,78 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn the_plan_limits_enabled_rules() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-01T00:00:00Z",
+            &json!({"max_alert_rules": 1}),
+        );
+        let first = create_ok(&app, &seeded, rule_body("First")).await;
+
+        let second = send(
+            &app,
+            Method::POST,
+            &rules(&seeded),
+            &seeded.cookie,
+            Some(rule_body("Second")),
+        )
+        .await;
+        assert_eq!(second.status, 403);
+        let problem = second.problem();
+        assert_eq!(problem.code, ProblemCode::PlanLimit);
+        assert_eq!(
+            problem.detail.as_deref(),
+            Some("Your plan allows 1 enabled alert rule.")
+        );
+
+        let disabled = send(
+            &app,
+            Method::POST,
+            &rules(&seeded),
+            &seeded.cookie,
+            Some(with(rule_body("Parked"), json!({"enabled": false}))),
+        )
+        .await;
+        assert_eq!(disabled.status, 201);
+        let parked: AlertRule = disabled.json();
+
+        let path = format!("{}/{}", rules(&seeded), parked.id);
+        let enable = send(
+            &app,
+            Method::PATCH,
+            &path,
+            &seeded.cookie,
+            Some(json!({"enabled": true})),
+        )
+        .await;
+        assert_eq!(enable.status, 403);
+        assert_eq!(enable.problem().code, ProblemCode::PlanLimit);
+
+        let first_path = format!("{}/{}", rules(&seeded), first.id);
+        let off = send(
+            &app,
+            Method::PATCH,
+            &first_path,
+            &seeded.cookie,
+            Some(json!({"enabled": false})),
+        )
+        .await;
+        assert_eq!(off.status, 200);
+        let enable = send(
+            &app,
+            Method::PATCH,
+            &path,
+            &seeded.cookie,
+            Some(json!({"enabled": true})),
+        )
+        .await;
+        assert_eq!(enable.status, 200);
     }
 
     #[tokio::test]

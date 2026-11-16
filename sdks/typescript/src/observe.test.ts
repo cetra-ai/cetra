@@ -36,8 +36,8 @@ describe("observe", () => {
     observe(() => 1, { name: "t", kind: "tool" })();
     const spans = await finished(exporter);
     const byName = new Map(spans.map((span) => [span.name, span]));
-    expect(byName.get("d")?.attributes["llmobs.span.kind"]).toBe("chain");
-    expect(byName.get("t")?.attributes["llmobs.span.kind"]).toBe("tool");
+    expect(byName.get("d")?.attributes["cetra.span.kind"]).toBe("chain");
+    expect(byName.get("t")?.attributes["cetra.span.kind"]).toBe("tool");
   });
 
   it("passes through without a runtime and traces after init()", async () => {
@@ -49,7 +49,7 @@ describe("observe", () => {
     expect(double(4)).toBe(8);
     const [span] = await finished(exporter);
     expect(span?.name).toBe("double");
-    expect(span?.attributes["llmobs.input"]).toBe("4");
+    expect(span?.attributes["cetra.input"]).toBe("4");
   });
 
   it("names the span from the function, the options, or anonymous", async () => {
@@ -67,11 +67,11 @@ describe("observe", () => {
     observe((a: unknown) => a, { name: "one" })("solo");
     observe((a: unknown, b: unknown) => [a, b], { name: "two" })(1, "b");
     const byName = new Map((await finished(exporter)).map((span) => [span.name, span]));
-    expect(byName.get("zero")?.attributes["llmobs.input"]).toBeUndefined();
-    expect(byName.get("one")?.attributes["llmobs.input"]).toBe("solo");
-    expect(byName.get("one")?.attributes["llmobs.input.format"]).toBe("text");
-    expect(byName.get("two")?.attributes["llmobs.input"]).toBe('[1,"b"]');
-    expect(byName.get("two")?.attributes["llmobs.input.format"]).toBe("json");
+    expect(byName.get("zero")?.attributes["cetra.input"]).toBeUndefined();
+    expect(byName.get("one")?.attributes["cetra.input"]).toBe("solo");
+    expect(byName.get("one")?.attributes["cetra.input.format"]).toBe("text");
+    expect(byName.get("two")?.attributes["cetra.input"]).toBe('[1,"b"]');
+    expect(byName.get("two")?.attributes["cetra.input.format"]).toBe("json");
   });
 
   it("records outputs: strings as text, undefined as none, null and objects as json", async () => {
@@ -81,11 +81,11 @@ describe("observe", () => {
     observe(() => null, { name: "c" })();
     observe(() => ({ n: 1 }), { name: "d" })();
     const byName = new Map((await finished(exporter)).map((span) => [span.name, span]));
-    expect(byName.get("a")?.attributes["llmobs.output"]).toBe("text");
-    expect(byName.get("a")?.attributes["llmobs.output.format"]).toBe("text");
-    expect(byName.get("b")?.attributes["llmobs.output"]).toBeUndefined();
-    expect(byName.get("c")?.attributes["llmobs.output"]).toBe("null");
-    expect(byName.get("d")?.attributes["llmobs.output"]).toBe('{"n":1}');
+    expect(byName.get("a")?.attributes["cetra.output"]).toBe("text");
+    expect(byName.get("a")?.attributes["cetra.output.format"]).toBe("text");
+    expect(byName.get("b")?.attributes["cetra.output"]).toBeUndefined();
+    expect(byName.get("c")?.attributes["cetra.output"]).toBe("null");
+    expect(byName.get("d")?.attributes["cetra.output"]).toBe('{"n":1}');
   });
 
   it("preserves this on a method", async () => {
@@ -105,7 +105,7 @@ describe("observe", () => {
     expect(tool.run(1)).toBe("t-9");
     expect(seen).toBe(tool);
     const [span] = await finished(exporter);
-    expect(span?.attributes["llmobs.input"]).toBe("1");
+    expect(span?.attributes["cetra.input"]).toBe("1");
   });
 
   it("re-throws a sync error unchanged with the span in error", async () => {
@@ -125,8 +125,8 @@ describe("observe", () => {
     }
     expect(caught).toBe(thrown);
     const [span] = await finished(exporter);
-    expect(span?.attributes["llmobs.input"]).toBe("1");
-    expect(span?.attributes["llmobs.output"]).toBeUndefined();
+    expect(span?.attributes["cetra.input"]).toBe("1");
+    expect(span?.attributes["cetra.output"]).toBeUndefined();
     expect(span?.status.code).toBe(SpanStatusCode.ERROR);
     expect(span?.status.message).toBe("ScenarioError: bang");
     expect(span?.events[0]?.attributes?.["exception.type"]).toBe("ScenarioError");
@@ -153,7 +153,7 @@ describe("observe", () => {
     const promise = observe(async () => ({ ok: true }), { name: "a" })();
     await expect(promise).resolves.toEqual({ ok: true });
     const [span] = await finished(exporter);
-    expect(span?.attributes["llmobs.output"]).toBe('{"ok":true}');
+    expect(span?.attributes["cetra.output"]).toBe('{"ok":true}');
     expect(span?.status.code).toBe(SpanStatusCode.UNSET);
   });
 
@@ -167,7 +167,7 @@ describe("observe", () => {
     expect(Object.prototype.toString.call(returned)).toBe("[object Generator]");
     expect([...returned]).toEqual([1, 2]);
     const byName = new Map((await finished(exporter)).map((span) => [span.name, span.attributes]));
-    expect(byName.get("g")?.["llmobs.output"]).toBeUndefined();
+    expect(byName.get("g")?.["cetra.output"]).toBeUndefined();
   });
 
   it("does not record an async generator object resolved by an async function", async () => {
@@ -178,7 +178,7 @@ describe("observe", () => {
     const returned = await observe(async () => stream(), { name: "s" })();
     expect(Object.prototype.toString.call(returned)).toBe("[object AsyncGenerator]");
     const [span] = await finished(exporter);
-    expect(span?.attributes["llmobs.output"]).toBeUndefined();
+    expect(span?.attributes["cetra.output"]).toBeUndefined();
   });
 
   it("nests observe calls as parent and child", async () => {
@@ -200,9 +200,9 @@ describe("observe", () => {
     const parent = byName.get("answer");
     const child = byName.get("retrieve");
     expect(child?.parentSpanContext?.spanId).toBe(parent?.spanContext().spanId);
-    expect(child?.attributes["llmobs.span.kind"]).toBe("retriever");
-    expect(child?.attributes["llmobs.input"]).toBe("why?");
-    expect(parent?.attributes["llmobs.output"]).toBe("It is 42.");
+    expect(child?.attributes["cetra.span.kind"]).toBe("retriever");
+    expect(child?.attributes["cetra.input"]).toBe("why?");
+    expect(parent?.attributes["cetra.output"]).toBe("It is 42.");
   });
 
   it("gives concurrent async calls the same parent", async () => {
@@ -237,10 +237,10 @@ describe("observe", () => {
     observe((a: unknown) => a, { name: "no-in", captureInput: false })(1);
     observe(() => "v", { name: "no-out", captureOutput: false })();
     const byName = new Map((await finished(exporter)).map((span) => [span.name, span]));
-    expect(byName.get("no-in")?.attributes["llmobs.input"]).toBeUndefined();
-    expect(byName.get("no-in")?.attributes["llmobs.output"]).toBe("1");
-    expect(byName.get("no-out")?.attributes["llmobs.input"]).toBeUndefined();
-    expect(byName.get("no-out")?.attributes["llmobs.output"]).toBeUndefined();
+    expect(byName.get("no-in")?.attributes["cetra.input"]).toBeUndefined();
+    expect(byName.get("no-in")?.attributes["cetra.output"]).toBe("1");
+    expect(byName.get("no-out")?.attributes["cetra.input"]).toBeUndefined();
+    expect(byName.get("no-out")?.attributes["cetra.output"]).toBeUndefined();
   });
 
   it("writes only the kind with captureContent: false", async () => {
@@ -249,7 +249,7 @@ describe("observe", () => {
       query: "q",
     });
     const [span] = await finished(exporter);
-    expect(span?.attributes).toEqual({ "llmobs.span.kind": "tool" });
+    expect(span?.attributes).toEqual({ "cetra.span.kind": "tool" });
   });
 
   it("masks the input and the output at capture time", async () => {
@@ -258,7 +258,7 @@ describe("observe", () => {
     });
     observe((s: string) => `got ${s}`, { name: "m" })("quiet");
     const [span] = await finished(exporter);
-    expect(span?.attributes["llmobs.input"]).toBe("QUIET");
-    expect(span?.attributes["llmobs.output"]).toBe("GOT QUIET");
+    expect(span?.attributes["cetra.input"]).toBe("QUIET");
+    expect(span?.attributes["cetra.output"]).toBe("GOT QUIET");
   });
 });

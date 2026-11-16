@@ -11,6 +11,7 @@ use std::sync::Arc;
 use arrow::array::{Array, AsArray, RecordBatch};
 use arrow::compute::concat_batches;
 use arrow::datatypes::{DataType, TimestampNanosecondType};
+use cetra_core::schema::{scores, scores_schema, spans, spans_schema};
 use datafusion::common::ScalarValue;
 use datafusion::datasource::physical_plan::ParquetSource;
 use datafusion::error::DataFusionError;
@@ -30,9 +31,7 @@ use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMerge
 use datafusion_datasource::PartitionedFile;
 use datafusion_datasource::file_groups::FileGroup;
 use datafusion_datasource::file_scan_config::FileScanConfigBuilder;
-use datafusion_datasource::source::DataSourceExec;
 use futures::StreamExt;
-use llmobs_core::schema::{scores, scores_schema, spans, spans_schema};
 
 use crate::catalog::{FileMeta, FileTable};
 use crate::compaction::slice::Slice;
@@ -216,7 +215,7 @@ pub(super) fn file_scan(
         .with_output_ordering(vec![ordering.clone()])
         .with_projection_indices(projection)
         .map_err(read_error)?;
-    Ok(DataSourceExec::from_data_source(builder.build()))
+    Ok(crate::unwind::guarded_scan(builder.build()))
 }
 
 /// The table's `sort_columns` as physical sort expressions, in the order the
@@ -420,15 +419,15 @@ mod tests {
     use arrow::compute::{
         SortColumn, SortOptions, concat_batches, lexsort_to_indices, take_record_batch,
     };
+    use cetra_core::batch::scores_to_record_batch;
+    use cetra_core::enums::ScoreSource;
+    use cetra_core::ids::ProjectId;
+    use cetra_core::schema::{scores, spans, traces};
+    use cetra_core::score::{Score, ScoreTarget, ScoreValue};
     use chrono::NaiveDate;
     use datafusion::execution::memory_pool::GreedyMemoryPool;
     use datafusion::execution::runtime_env::RuntimeEnvBuilder;
     use datafusion::physical_plan::displayable;
-    use llmobs_core::batch::scores_to_record_batch;
-    use llmobs_core::enums::ScoreSource;
-    use llmobs_core::ids::ProjectId;
-    use llmobs_core::schema::{scores, spans, traces};
-    use llmobs_core::score::{Score, ScoreTarget, ScoreValue};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use uuid::Uuid;
 
@@ -455,6 +454,7 @@ mod tests {
 
     async fn objects(dir: &tempfile::TempDir) -> Arc<Objects> {
         let config = StorageConfig {
+            delete_objects: true,
             data_dir: dir.path().to_path_buf(),
             min_free_bytes: ByteSize::b(0),
             object_store: Some(ObjectStoreUrl::Local(dir.path().join("objects"))),
@@ -897,6 +897,11 @@ mod tests {
             let mut scans = Vec::new();
             let mut stack = vec![plan];
             while let Some(node) = stack.pop() {
+                // A GuardExec answers the scan downcast through its delegate; count its scan once.
+                if node.name() == "GuardExec" {
+                    stack.extend(node.children().into_iter().cloned());
+                    continue;
+                }
                 if let Some(scan) = node.downcast_ref::<DataSourceExec>() {
                     scans.push(
                         scan.data_source()

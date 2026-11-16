@@ -12,10 +12,10 @@ use std::time::Duration;
 
 use arrow::array::{Array, ListArray, RecordBatch, StringArray};
 use bytes::Bytes;
+use cetra_core::ids::ProjectId;
 use datafusion::error::DataFusionError;
 use datafusion::execution::context::{SessionConfig, SessionContext};
 use datafusion::execution::runtime_env::RuntimeEnv;
-use llmobs_core::ids::ProjectId;
 
 use crate::catalog::Committer;
 use crate::error::{MediaError, QueryError};
@@ -34,6 +34,9 @@ pub struct MediaBlob {
     pub mime_type: String,
     /// The bytes. Never empty.
     pub bytes: Bytes,
+    /// The newest `start_time` (ns) of a span that references the blob; [`crate::Storage::get_media`]
+    /// hides the blob before it (D-P-21).
+    pub newest_span_start: i64,
 }
 
 /// [`crate::Storage::get_media`]'s answer.
@@ -97,6 +100,10 @@ impl MediaGc {
         project: ProjectId,
         now: i64,
     ) -> Result<MediaReport, MediaError> {
+        // With deletion off (D-N-34) nothing is collected: no transaction, no staged row, no delete.
+        if !self.objects.deletes_enabled() {
+            return Ok(MediaReport::default());
+        }
         let grace = i64::try_from(MEDIA_GRACE.as_nanos()).unwrap_or(i64::MAX);
         let before = now.saturating_sub(grace);
         let live = self.live_set(project).await?;
@@ -106,13 +113,16 @@ impl MediaGc {
                 continue;
             }
             let path = Objects::media_path(project, &sha);
-            let Some(bytes) = self
-                .committer
-                .collect_media(project, &sha, before, &self.hooks, || {
-                    self.objects.delete_len(&path)
-                })
-                .await?
-            else {
+            // The gate comes before any committer call (N M2, D-N-18).
+            let deleted = {
+                let _gate = self.committer.object_gc_gate.read().await;
+                self.committer
+                    .collect_media(project, &sha, before, &self.hooks, || {
+                        self.objects.delete_len(&path)
+                    })
+                    .await?
+            };
+            let Some(bytes) = deleted else {
                 continue;
             };
             report.deleted += 1;
@@ -168,12 +178,16 @@ impl MediaGc {
     /// Idempotent: a project with no media row left only gets its `dropped`
     /// state. Errors are logged by the callers as `error = error.label()`.
     pub(crate) async fn finish_drop(&self, project: ProjectId) -> Result<(), MediaError> {
+        // Held to the end: a catalog snapshot cannot run while media is deleted (N M2, D-N-18).
+        let _gate = self.committer.object_gc_gate.read().await;
         for sha in self.committer.media_of(project).await? {
             let path = Objects::media_path(project, &sha);
             self.hooks.pause(HookPoint::MediaBeforeDelete);
             if self.hooks.fail(HookPoint::MediaBeforeDelete).is_some() {
                 return Err(MediaError::Fault);
             }
+            // With deletion off (D-N-34) this returns before `finish_drop`, so the drop stays
+            // `dropping` and its blobs are deleted by a later server.
             self.objects.delete(&path).await?;
             self.committer.delete_media_row(project, &sha).await?;
         }
@@ -213,7 +227,7 @@ impl MediaGc {
         let query = project_query(
             &state,
             project,
-            QueryOptions::default(),
+            QueryOptions::new(None, None),
             &self.runtime,
             self.target_partitions,
             self.lookback,
@@ -287,7 +301,7 @@ mod tests {
     use std::time::Duration;
 
     use bytes::Bytes;
-    use llmobs_core::ids::ProjectId;
+    use cetra_core::ids::ProjectId;
     use sha2::{Digest, Sha256};
     use uuid::Uuid;
 
@@ -318,6 +332,7 @@ mod tests {
             sha256: sha256_of(&bytes),
             mime_type: mime_type.to_owned(),
             bytes,
+            newest_span_start: 0,
         }
     }
 
@@ -392,7 +407,10 @@ mod tests {
         let sha = blob.sha256;
         storage.put_media(project(), blob).await.unwrap();
 
-        let read = storage.get_media(project(), &sha, None).await.unwrap();
+        let read = storage
+            .get_media(project(), &sha, None, None)
+            .await
+            .unwrap();
         assert_eq!(read.mime_type, "image/png");
         assert_eq!(read.bytes, Bytes::from_static(b"media-bytes-0123456789"));
         assert_eq!(read.size, 22);
@@ -404,7 +422,7 @@ mod tests {
         );
 
         let ranged = storage
-            .get_media(project(), &sha, Some(2..5))
+            .get_media(project(), &sha, Some(2..5), None)
             .await
             .unwrap();
         assert_eq!(ranged.bytes, Bytes::from_static(b"dia"));
@@ -463,7 +481,7 @@ mod tests {
         let unknown = [7; 32];
         assert!(
             matches!(
-                storage.get_media(project(), &unknown, None).await,
+                storage.get_media(project(), &unknown, None, None).await,
                 Err(MediaError::NotFound)
             ),
             "an unknown hash was found"
@@ -475,7 +493,9 @@ mod tests {
         for range in [Some(5..5), Some(0..11), Some(11..12)] {
             assert!(
                 matches!(
-                    storage.get_media(project(), &sha, range.clone()).await,
+                    storage
+                        .get_media(project(), &sha, range.clone(), None)
+                        .await,
                     Err(MediaError::InvalidRange)
                 ),
                 "{range:?} passed"
@@ -587,7 +607,10 @@ mod tests {
             "the object was deleted"
         );
         assert_eq!(media_rows(dir.path()).await, 1);
-        let read = storage.get_media(project(), &sha, None).await.unwrap();
+        let read = storage
+            .get_media(project(), &sha, None, None)
+            .await
+            .unwrap();
         assert_eq!(read.bytes, Bytes::from_static(b"stored-media"));
         storage.shutdown().await.unwrap();
     }
@@ -615,7 +638,10 @@ mod tests {
         assert_eq!(storage.published_rows(crate::wal::Table::Spans), 0);
         let report = storage.collect_media(now_ns() + 2 * HOUR_NS).await.unwrap();
         assert_eq!(report, MediaReport::default());
-        let read = storage.get_media(project(), &sha, None).await.unwrap();
+        let read = storage
+            .get_media(project(), &sha, None, None)
+            .await
+            .unwrap();
         assert_eq!(read.bytes, Bytes::from_static(b"file-referenced-media"));
         storage.shutdown().await.unwrap();
     }
@@ -639,7 +665,10 @@ mod tests {
 
         let report = storage.collect_media(now_ns() + 2 * HOUR_NS).await.unwrap();
         assert_eq!(report, MediaReport::default());
-        storage.get_media(project(), &sha, None).await.unwrap();
+        storage
+            .get_media(project(), &sha, None, None)
+            .await
+            .unwrap();
         storage.shutdown().await.unwrap();
     }
 
@@ -665,7 +694,7 @@ mod tests {
         assert_eq!(media_rows(dir.path()).await, 0);
         assert!(
             matches!(
-                storage.get_media(project(), &sha, None).await,
+                storage.get_media(project(), &sha, None, None).await,
                 Err(MediaError::NotFound)
             ),
             "the row survived its collection"
@@ -779,11 +808,109 @@ mod tests {
         assert_eq!(media_rows(dir.path()).await, 0);
         assert!(
             matches!(
-                storage.get_media(project(), &sha, None).await,
+                storage.get_media(project(), &sha, None, None).await,
                 Err(MediaError::NotFound)
             ),
             "the row survived its deletion"
         );
+        storage.shutdown().await.unwrap();
+    }
+
+    /// `blob_of` whose newest span starts at `start` (ns).
+    fn blob_starting(bytes: &[u8], start: i64) -> MediaBlob {
+        MediaBlob {
+            newest_span_start: start,
+            ..blob_of(bytes, "image/png")
+        }
+    }
+
+    // D-P-21: a blob whose newest span is older than the visible bound is not found; a
+    // read without a bound finds it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_blob_is_hidden_before_its_newest_span() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(config_in(dir.path())).await.unwrap();
+        let blob = blob_starting(b"hidden-until-100", 100);
+        let sha = blob.sha256;
+        storage.put_media(project(), blob).await.unwrap();
+
+        assert!(matches!(
+            storage.get_media(project(), &sha, None, Some(101)).await,
+            Err(MediaError::NotFound)
+        ));
+        assert!(
+            storage
+                .get_media(project(), &sha, None, Some(100))
+                .await
+                .is_ok()
+        );
+        assert!(storage.get_media(project(), &sha, None, None).await.is_ok());
+        storage.shutdown().await.unwrap();
+    }
+
+    // D-P-21: a later put raises the newest span; a lower one does not lower it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_later_put_raises_the_newest_span() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(config_in(dir.path())).await.unwrap();
+        let sha = blob_starting(b"reused-blob", 100).sha256;
+        storage
+            .put_media(project(), blob_starting(b"reused-blob", 100))
+            .await
+            .unwrap();
+        assert!(matches!(
+            storage.get_media(project(), &sha, None, Some(150)).await,
+            Err(MediaError::NotFound)
+        ));
+
+        storage
+            .put_media(project(), blob_starting(b"reused-blob", 200))
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .get_media(project(), &sha, None, Some(150))
+                .await
+                .is_ok()
+        );
+
+        storage
+            .put_media(project(), blob_starting(b"reused-blob", 50))
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .get_media(project(), &sha, None, Some(150))
+                .await
+                .is_ok(),
+            "a lower put does not lower the newest span"
+        );
+        storage.shutdown().await.unwrap();
+    }
+
+    // D-P-21: two puts of one new blob that race past `touch_media` both leave their span
+    // start; the row keeps the newer one whichever insert won.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_puts_keep_the_newest_span() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(config_in(dir.path())).await.unwrap();
+        let sha = blob_starting(b"raced-blob", 0).sha256;
+        let older = storage.put_media(project(), blob_starting(b"raced-blob", 100));
+        let newer = storage.put_media(project(), blob_starting(b"raced-blob", 200));
+        let (a, b) = tokio::join!(older, newer);
+        a.unwrap();
+        b.unwrap();
+
+        assert!(
+            storage
+                .get_media(project(), &sha, None, Some(200))
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            storage.get_media(project(), &sha, None, Some(201)).await,
+            Err(MediaError::NotFound)
+        ));
         storage.shutdown().await.unwrap();
     }
 }

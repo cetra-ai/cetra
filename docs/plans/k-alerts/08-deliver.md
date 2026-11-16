@@ -12,7 +12,7 @@ No background task yet (K9).
 ## Read first
 
 - README § Design → Delivery, D-K-6, D-K-7, D-K-8, D-K-10, § Conventions → Privacy.
-- K2 (`llmobs_eval::{EgressClient, EgressRequest, EgressResponse, EgressError, SIGNATURE_HEADER, sign_payload, Secret}`, `EvalRunner::egress`), K3 (`ChannelConfig`, `Comparator::symbol`, `AlertWindow::as_str`, `AlertMetric::as_str`), K4/K6/K7 (`meta::alerts`: `EventDetails`, `DeliveryRow`, `open_config`), K5 (`routes/channels.rs`).
+- K2 (`cetra_eval::{EgressClient, EgressRequest, EgressResponse, EgressError, SIGNATURE_HEADER, sign_payload, Secret}`, `EvalRunner::egress`), K3 (`ChannelConfig`, `Comparator::symbol`, `AlertWindow::as_str`, `AlertMetric::as_str`), K4/K6/K7 (`meta::alerts`: `EventDetails`, `DeliveryRow`, `open_config`), K5 (`routes/channels.rs`).
 - `crates/server/src/email/mod.rs` (`Email`, `TEMPLATES`, `render`, `subject`, `template_name`, `send_now`, `MailError`, the test `templates_render`), `crates/server/src/email/templates/test.html` and `invite.txt` (layout to copy).
 - `crates/server/src/config.rs`: `PublicUrl::join`; `state.config.public_url`.
 - `crates/server/src/http/mod.rs`: `AppInner.eval_runner` (I M1), `AppInner.mailer`, `AppInner.secrets`.
@@ -36,7 +36,7 @@ No background task yet (K9).
 
 ## 1. `alerts/message.rs`
 
-Imports: `serde::Serialize`, `uuid::Uuid`, `llmobs_core::ids::ProjectId`, `llmobs_core::names::PRODUCT`, `llmobs_core::time_serde`, `crate::api::alerts::{AlertMetric, AlertWindow, Comparator}`, `crate::config::PublicUrl`, `crate::email::Email` (adjust to what the compiler reports; run `just fmt`).
+Imports: `serde::Serialize`, `uuid::Uuid`, `cetra_core::ids::ProjectId`, `cetra_core::names::PRODUCT`, `cetra_core::time_serde`, `crate::api::alerts::{AlertMetric, AlertWindow, Comparator}`, `crate::config::PublicUrl`, `crate::email::Email` (adjust to what the compiler reports; run `just fmt`).
 
 ```rust
 //! Notification bodies and links (spec 07 § Channels, D-K-8).
@@ -82,7 +82,7 @@ pub(crate) fn rule_url(public_url: &PublicUrl, org_slug: &str, project_slug: &st
 pub(crate) fn traces_url(public_url: &PublicUrl, org_slug: &str, project_slug: &str, from: i64, to: i64, filter: Option<&str>) -> String;
 ```
 
-The times are RFC 3339 UTC with 9 fractional digits, from a private helper in `message.rs` (`time_serde::format_rfc3339` is `pub(crate)` in `llmobs-core`, so it cannot be used; `chrono` is a server dependency):
+The times are RFC 3339 UTC with 9 fractional digits, from a private helper in `message.rs` (`time_serde::format_rfc3339` is `pub(crate)` in `cetra-core`, so it cannot be used; `chrono` is a server dependency):
 
 ```rust
 fn rfc3339(ns: i64) -> String {
@@ -112,7 +112,7 @@ pub(crate) fn value_text(metric: AlertMetric, value: Option<f64>) -> String;
 | Fired | `Firing: <rule name>` |
 | Resolved | `Resolved: <rule name>` |
 | Reminder | `Still firing: <rule name>` |
-| Test | `Test notification from <PRODUCT>` (`llmobs_core::names::PRODUCT`) |
+| Test | `Test notification from <PRODUCT>` (`cetra_core::names::PRODUCT`) |
 
 The rule name is cut to 100 characters (`chars().take(100)`) in every title. Build titles with `fn title(kind: MessageKind, rule_name: &str) -> String`; Slack's `"text"` calls it with the escaped name (`&slack_escape(&notice.rule_name)`), the header with the raw name.
 
@@ -220,7 +220,7 @@ View the traces:
 
 `alert.html`: copy `test.html`'s layout; inside the cell put `<p style="margin:0 0 16px;font-weight:600;">{{ state }}: {{ rule_name }}</p>`, `<p style="margin:0 0 16px;">{{ project_name }} · {{ value }} (threshold {{ threshold }}) over {{ window }}</p>`, and two links `<a href="{{ rule_url }}">View the rule</a>` and `<a href="{{ traces_url }}">View the traces</a>` in one `<p>`. `.html` is auto-escaped.
 
-Extend `templates_render` with `insta::assert_snapshot!("alert", rendered(&mailer, &Email::Alert { state: "Firing", rule_name: "High errors".to_owned(), project_name: "Support bot".to_owned(), value: "12.5%".to_owned(), threshold: "5.0%".to_owned(), window: "5m", rule_url: "https://example.com/acme/support-bot/alerts/r".to_owned(), traces_url: "https://example.com/acme/support-bot/traces?from=a&to=b".to_owned() }))`. Accept the new snapshot (`INSTA_UPDATE=always cargo test -p llmobs-server templates_render`) and check it reads right.
+Extend `templates_render` with `insta::assert_snapshot!("alert", rendered(&mailer, &Email::Alert { state: "Firing", rule_name: "High errors".to_owned(), project_name: "Support bot".to_owned(), value: "12.5%".to_owned(), threshold: "5.0%".to_owned(), window: "5m", rule_url: "https://example.com/acme/support-bot/alerts/r".to_owned(), traces_url: "https://example.com/acme/support-bot/traces?from=a&to=b".to_owned() }))`. Accept the new snapshot (`INSTA_UPDATE=always cargo test -p cetra-server templates_render`) and check it reads right.
 
 ```rust
 /// The email for `notice`.
@@ -313,7 +313,7 @@ const MAX_RESPONSE_BYTES: usize = 16 * 1024;
 pub(crate) const EVENT_RETENTION_NS: i64 = 90 * 86_400_000_000_000;
 pub(crate) const DELIVERY_RETENTION_NS: i64 = 30 * 86_400_000_000_000;
 /// Delivery id header, lower case. D46 renames it with the product.
-pub(crate) const DELIVERY_HEADER: &str = "x-llmobs-delivery";
+pub(crate) const DELIVERY_HEADER: &str = "x-cetra-delivery";
 ```
 
 ### Backoff
@@ -344,12 +344,12 @@ pub(crate) struct SendError {
     pub(crate) message: String,
 }
 
-/// Sends `notice` once to the channel `config`. `delivery_id` goes into `X-Llmobs-Delivery`.
+/// Sends `notice` once to the channel `config`. `delivery_id` goes into `X-Cetra-Delivery`.
 pub(crate) async fn send_one(state: &AppState, config: &ChannelConfig, notice: &Notice, delivery_id: Uuid, now: i64) -> Result<(), SendError>;
 ```
 
 - **Slack**: POST `slack_body(notice)` (`serde_json::to_vec`) to `config.url` with header `content-type: application/json`.
-- **Webhook**: POST `webhook_body(notice)` to `config.url` with headers `content-type: application/json`, `x-llmobs-signature: sign_payload(&Secret::new(secret.clone()), now / 1_000_000_000, &body)`, `x-llmobs-delivery: <delivery_id>`, then each configured header (validated at write time; a header that no longer converts → permanent `"invalid header"`). `sign_payload` returning `None` → permanent `"could not sign the payload"`.
+- **Webhook**: POST `webhook_body(notice)` to `config.url` with headers `content-type: application/json`, `x-cetra-signature: sign_payload(&Secret::new(secret.clone()), now / 1_000_000_000, &body)`, `x-cetra-delivery: <delivery_id>`, then each configured header (validated at write time; a header that no longer converts → permanent `"invalid header"`). `sign_payload` returning `None` → permanent `"could not sign the payload"`.
 - Both: parse the URL with `reqwest::Url::parse` (failure → permanent `"invalid URL"`), then `state.eval_runner.egress().post(EgressRequest { url: &url, headers, body, timeout: SEND_TIMEOUT, max_response_bytes: MAX_RESPONSE_BYTES })`. Results:
 
 | Result | retryable | message |
@@ -365,7 +365,7 @@ pub(crate) async fn send_one(state: &AppState, config: &ChannelConfig, notice: &
 | `EgressError::TooLarge { .. }` | false | `the response was too large` |
 
   (These six are all the `EgressError` variants.)
-- **Email**: `state.mailer` is `None` → permanent `email is not configured`. Otherwise `let email = message::email(notice);` and for each recipient in order `mailer.send_now(recipient, &email).await`; stop at the first error. Wrap the whole loop in `tokio::time::timeout(SEND_TIMEOUT, …)`; an elapsed timeout → retryable `the request timed out`. `MailError::Connect`, `Tls` and `Auth` → retryable (an admin may fix SMTP credentials within the retry span, D-K-7); `Rejected`, `InvalidAddress`, `Template` → permanent. The message is the error's `Display` text (fixed strings without the address, `email/mod.rs`). D-K-7: a retry sends to every recipient again.
+- **Email**: `state.mailer` is `None` → permanent `email is not configured`. Under `auth.signup = open` (D-K-19), `verified_member_emails(state.meta.reader(), due.org_id)` gives the members; a recipient that is not one (ASCII case ignored) is skipped; when none is left the result is permanent `no recipient is a verified member of the organization`. Otherwise `state.alert_email_count.reserve(org_id, n, now)` reserves one message per sendable recipient, and a refusal is permanent `daily alert email limit reached` with nothing sent. Then `let email = message::email(notice);` and for each sendable recipient in order `mailer.send_now(recipient, &email).await`; stop at the first error. A send that succeeded but skipped recipients is permanent `N recipient(s) skipped: not verified members of the organization`. Wrap the whole loop in `tokio::time::timeout(SEND_TIMEOUT, …)`; an elapsed timeout → retryable `the request timed out`. `MailError::Connect`, `Tls` and `Auth` → retryable (an admin may fix SMTP credentials within the retry span, D-K-7); `Rejected`, `InvalidAddress`, `Template` → permanent. The message is the error's `Display` text (fixed strings without the address, `email/mod.rs`). D-K-7: a retry sends to every recipient again.
 
 ### A pass
 
@@ -426,12 +426,12 @@ async fn test_channel(
 
 `let now = state.clock.now_ns();`
 
-1. `session_user`; `alerts::channel_by_id` (404 when absent); `open_config` (error → `200 {ok: false, error: "the channel config could not be read"}`).
+1. `session_user`; `state.limits.alert_tests_by_user.check(&user_id, now)` then `state.limits.alert_tests_by_channel.check(&id, now)`, each refusal `ApiError::RateLimited { retry_after_s }` (`429`, `Retry-After`; D-K-19); `alerts::channel_by_id` (404 when absent); `open_config` (error → `200 {ok: false, error: "the channel config could not be read"}`).
 2. Build a sample `Notice`: `kind Test`, `event_id = Uuid::now_v7()`, `rule_id = Uuid::nil()`, `rule_name "Test alert"`, `metric ErrorRate`, `comparator Gt`, `threshold 0.05`, `window M5`, `filter None`, `value Some(0.125)`, `count Some(48)`, `window_from = now − 5 min`, `window_to = now`, `occurred_at = now`, the project's id and name (`access.project.name`), `rule_url = state.config.public_url.join(&format!("/{org_slug}/{project_slug}/alerts"))` (the list page; `project_slug = access.project.slug`; the org slug from `crate::meta::orgs::org_by_id(state.meta.reader(), access.project.org_id)`, where `None` → `ApiError::NotFound`), `traces_url` over the sample window without a filter.
-3. `Box::pin(send_one(&state, &config, &notice, Uuid::now_v7(), now)).await` → `200 {ok: true}` or `200 {ok: false, error}`. Nothing is stored.
+3. `Box::pin(send_one(&state, project.org_id, &config, &notice, Uuid::now_v7(), now)).await` → `200 {ok: true}` or `200 {ok: false, error}`. Nothing is stored. An email send counts against the org's daily cap (D-K-19).
 4. Audit log `"alert channel tested"` with `channel_id`, `project_id`, `user_id`, `ok`.
 
-OpenAPI: `test_channel` — POST `{PROJECT}/channels/{id}/test`, tag `"alerts"`, `.parameters(Some(vec![project_param(), path_uuid("id", "Channel id.")]))` (copy K5's `delete_channel` builder), summary `Send a test notification`, description `"Sends one sample message now and reports the result. Nothing is stored. Needs role member."`, `200` `json_of::<ChannelTestResult>("Whether the channel accepted the message.")`, errors `&[400, 401, 403, 404, 429]`; `set.insert::<ChannelTestResult>()`. `tests/openapi.rs`: the operation in `OPERATIONS`, and `test_channel` in the `["400", "401", "403", "404", "429"]` branch. `just openapi`.
+OpenAPI: `test_channel` — POST `{PROJECT}/channels/{id}/test`, tag `"alerts"`, `.parameters(Some(vec![project_param(), path_uuid("id", "Channel id.")]))` (copy K5's `delete_channel` builder), summary `Send a test notification`, description `"Sends one sample message now and reports the result. Nothing is stored. Needs role member. At most 5 sends per minute per user and 5 per minute per channel (429, Retry-After). Email sends count against the org's daily limit of 1000 messages; over it the result is ok false."`, `200` `json_of::<ChannelTestResult>("Whether the channel accepted the message.")`, errors `&[400, 401, 403, 404, 429]`; `set.insert::<ChannelTestResult>()`. `tests/openapi.rs`: the operation in `OPERATIONS`, and `test_channel` in the `["400", "401", "403", "404", "429"]` branch. `just openapi`.
 
 ## 5. Test receiver (`test_support/hook_receiver.rs`)
 
@@ -491,7 +491,7 @@ async fn seed_delivery(app: &TestApp, config: ChannelConfig, now: i64) -> (Uuid,
 
 `alerts::deliver::tests`:
 5. `backoff_doubles_and_caps`: 1 → 30 s, 2 → 60 s, 7 → 1 920 s, 8 → 3 600 s, 100 → 3 600 s.
-6. `webhook_is_signed_and_identified`: receiver `[200]`; webhook channel with secret `0123456789abcdef` and header `X-Team: core`; `send_one` → `Ok`. The request has `content-type: application/json`, `x-team: core`, `x-llmobs-delivery: <id>`, and an `x-llmobs-signature` equal to `sign_payload(&Secret::new(secret), now / 1_000_000_000, &body)`.
+6. `webhook_is_signed_and_identified`: receiver `[200]`; webhook channel with secret `0123456789abcdef` and header `X-Team: core`; `send_one` → `Ok`. The request has `content-type: application/json`, `x-team: core`, `x-cetra-delivery: <id>`, and an `x-cetra-signature` equal to `sign_payload(&Secret::new(secret), now / 1_000_000_000, &body)`.
 7. `slack_posts_block_kit`: receiver `[200]`; a Slack channel whose URL is the receiver's (http is fine for the test: only validation requires https) → `Ok`, the body parses as JSON with `blocks`.
 8. `statuses_are_classified`: receiver `[503]` → `Err { retryable: true, message: "the endpoint answered 503" }`; `[404]` → retryable false; `[429]` → retryable true.
 9. `private_addresses_are_denied_by_default`: `TestApp::new()` (policy default) → sending to the receiver gives `Err { retryable: false, message: "the address is not allowed (security.allow_private_network_egress)" }`.
@@ -516,15 +516,15 @@ just fmt
 ```
 
 ```bash
-cargo test -p llmobs-server alerts::
+cargo test -p cetra-server alerts::
 ```
 
 ```bash
-cargo test -p llmobs-server channels
+cargo test -p cetra-server channels
 ```
 
 ```bash
-INSTA_UPDATE=always cargo test -p llmobs-server templates_render
+INSTA_UPDATE=always cargo test -p cetra-server templates_render
 ```
 
 ```bash

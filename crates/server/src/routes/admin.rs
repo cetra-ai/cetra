@@ -23,9 +23,12 @@ use crate::email::Email;
 use crate::http::AppState;
 use crate::http::access::{Access, RouteDef};
 use crate::http::error::{self, ApiError, problem_response};
+use crate::http::restore::refuse_outbound;
 use crate::meta::MetaError;
 use crate::meta::identities;
+use crate::meta::members;
 use crate::meta::password_resets::insert_reset;
+use crate::meta::users::EmailVerifiedVia;
 use crate::meta::users::{self, NewUser, UserRow};
 use crate::meta::web_sessions::delete_user_sessions;
 
@@ -150,6 +153,7 @@ async fn create_user(
                         name,
                         password_hash: None,
                         email_verified_at: Some(now),
+                        email_verified_via: Some(EmailVerifiedVia::Operator),
                         is_instance_admin: admin,
                     },
                     now,
@@ -247,6 +251,13 @@ async fn reset_link(
             detail: "the user is disabled",
         });
     }
+    // A reset link signs in as the user. It is no way into an org the admin is not part of
+    // (D-P-68): the owners of such an org reset their own password by mail.
+    if members::owns_org_without(state.meta.reader(), id, actor.id).await? {
+        return Err(ApiError::Conflict {
+            detail: "the user owns an organization you are not a member of",
+        });
+    }
     let url = reset::reset_link(
         &state.meta,
         &state.config.public_url,
@@ -329,6 +340,7 @@ async fn send_test_email(
     axum::extract::State(state): axum::extract::State<AppState>,
     axum::extract::Extension(principal): axum::extract::Extension<Principal>,
 ) -> Result<Response, ApiError> {
+    refuse_outbound(&state, "email")?;
     let actor = principal::session_user(&principal)?;
     let Some(mailer) = state.mailer.as_ref() else {
         return Err(ApiError::BadRequest {
@@ -441,8 +453,8 @@ mod tests {
         TestApp, TestResponse, assert_logs_clean, capture_logs, license_key, license_key_until,
     };
 
-    const PASSWORD: &str = "llmobs-ok1";
-    const REPLACEMENT: &str = "llmobs-ok2";
+    const PASSWORD: &str = "cetra-ok-1";
+    const REPLACEMENT: &str = "cetra-ok-2";
 
     async fn admin() -> (TestApp, String, SetupResponse) {
         admin_with(|_| {}).await
@@ -603,6 +615,54 @@ mod tests {
             let response = request.send().await;
             assert_eq!(response.status, 403, "{method} {path}");
         }
+    }
+
+    /// Auth review #11 (D-P-68): no reset link for an owner of an org the admin is not in.
+    #[tokio::test]
+    async fn no_reset_link_for_the_owner_of_a_foreign_org() {
+        let (app, cookie, _) = admin().await;
+        let (org, owner) = crate::test_support::second_org(&app, "other", "owner@other.test").await;
+        let path = format!("/api/v1/admin/users/{}/reset-link", owner.id);
+        let refused = app
+            .request(Method::POST, &path)
+            .header("cookie", &cookie)
+            .send()
+            .await;
+        assert_eq!(refused.status, 409);
+        let resets: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM password_resets")
+            .fetch_one(app.state.meta.reader())
+            .await
+            .unwrap();
+        assert_eq!(resets, 0);
+
+        // Once the admin belongs to that org, the link is theirs to mint.
+        let ada = crate::meta::users::user_by_email(app.state.meta.reader(), "ada@example.com")
+            .await
+            .unwrap()
+            .unwrap();
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    crate::meta::members::add_org_member(
+                        conn,
+                        org,
+                        ada.id,
+                        crate::auth::OrgRole::Admin,
+                        now,
+                    )
+                    .await
+                })
+            })
+            .await
+            .unwrap();
+        let allowed = app
+            .request(Method::POST, &path)
+            .header("cookie", &cookie)
+            .send()
+            .await;
+        assert_eq!(allowed.status, 200);
     }
 
     #[tokio::test]
@@ -831,7 +891,7 @@ mod tests {
                 port: 587,
                 credentials: Some(("mailer".to_owned(), secret)),
             });
-            config.email_from = Some("llmobs <noreply@example.com>".to_owned());
+            config.email_from = Some("cetra <noreply@example.com>".to_owned());
         })
         .await;
         bootstrap::prepare(&app.state).await.unwrap();
@@ -865,7 +925,7 @@ mod tests {
         assert!(settings.smtp_enabled);
         assert_eq!(
             settings.email_from.as_deref(),
-            Some("llmobs <noreply@example.com>")
+            Some("cetra <noreply@example.com>")
         );
         assert!(settings.providers.is_empty());
         assert!(settings.password_enabled);
@@ -1057,5 +1117,31 @@ mod tests {
                 "features": [],
             })
         );
+    }
+
+    #[tokio::test]
+    async fn test_email_is_refused_in_restore_mode() {
+        let app = TestApp::with_mailer_config(|config| config.restore_mode = true).await;
+        bootstrap::prepare(&app.state).await.unwrap();
+        let token = app.state.setup.token().unwrap().expect("setup token");
+        let created = app
+            .request(Method::POST, "/api/auth/setup")
+            .json(&serde_json::json!({
+                "setup_token": token,
+                "email": "ada@example.com",
+                "password": PASSWORD,
+                "name": "Ada",
+                "org_name": "Acme",
+                "project_name": "Support bot",
+            }))
+            .send()
+            .await;
+        let response = app
+            .request(Method::POST, "/api/v1/admin/settings/test-email")
+            .header("cookie", &session_cookie(&created))
+            .send()
+            .await;
+        crate::http::restore::tests::assert_refused(&response, "email");
+        assert!(app.sent().is_empty());
     }
 }

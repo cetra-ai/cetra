@@ -1792,11 +1792,11 @@ mod tests {
             world.trace(&mut rng, &mut spans);
         }
         spans.sort_by_key(|s| (s.trace_id, s.start_time));
-        let schema = llmobs_core::schema::spans_schema();
+        let schema = cetra_core::schema::spans_schema();
         let mut w =
             StrataWriter::new(schema, &["trace_id", "start_time"], Config::default()).unwrap();
         for chunk in spans.chunks(8192) {
-            w.write(&llmobs_core::batch::spans_to_record_batch(chunk).unwrap())
+            w.write(&cetra_core::batch::spans_to_record_batch(chunk).unwrap())
                 .unwrap();
         }
         let (bytes, _) = w.finish().unwrap();

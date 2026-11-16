@@ -16,7 +16,7 @@ use arrow::array::RecordBatch;
 use arrow::compute::{SortColumn, concat_batches, lexsort_to_indices, take_record_batch};
 use datafusion::prelude::SessionContext;
 use fmt_testdata::datagen::{DAY_START, NS};
-use llmobs_core::schema::spans_schema;
+use cetra_core::schema::spans_schema;
 use object_store::memory::InMemory;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};

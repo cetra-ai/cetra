@@ -619,7 +619,7 @@ Finally set the first line of `docs/plans/l-admin-ui/README.md` to `Status: L1 d
 
 ### 1. Snippets take a key — `snippets.ts`
 
-1. Rename the module constant `KEY` to `PLACEHOLDER_KEY` and export it: `export const PLACEHOLDER_KEY = "sk-llmobs-…";`.
+1. Rename the module constant `KEY` to `PLACEHOLDER_KEY` and export it: `export const PLACEHOLDER_KEY = "sk-cetra-…";`.
 2. Give each of `otelSnippet`, `pythonSnippet`, `typescriptSnippet` and `vercelSnippet` a second parameter `key: string = PLACEHOLDER_KEY`, and use `key` where `KEY` was. The rest of each function stays the same.
 3. `API_KEY_NOTE` and `WAITING_LINE` stay.
 
@@ -627,12 +627,12 @@ In `onboarding.test.ts`, add:
 
 ```ts
 it("fills a real key into every snippet", () => {
-  const key = "sk-llmobs-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0";
+  const key = "sk-cetra-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0";
   expect(otelSnippet(ORIGIN, key)).toContain(`Authorization=Bearer ${key}`);
   expect(pythonSnippet(ORIGIN, key)).toContain(`api_key="${key}"`);
   expect(typescriptSnippet(ORIGIN, key)).toContain(`apiKey: "${key}"`);
   expect(vercelSnippet(ORIGIN, key)).toContain(`apiKey: "${key}"`);
-  expect(PLACEHOLDER_KEY).toBe("sk-llmobs-…");
+  expect(PLACEHOLDER_KEY).toBe("sk-cetra-…");
 });
 ```
 
@@ -755,8 +755,8 @@ The dialog keeps the secret only in its props. Callers render it only while they
 
 | Test | Steps and assertions |
 |---|---|
-| `"shows the secret once with a copy button"` | Secret `pat-llmobs-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0`, title `"Token created"`. `getByRole("dialog", { name: "Token created" })` exists. `getByLabelText("Secret")` has that value. The text `Copy it now. You won't see it again.` is shown. `getByRole("button", { name: "Copy secret" })` exists. `queryByRole("tab")` is null (no snippets for a `pat` secret). |
-| `"shows snippets for a secret key"` | Secret `sk-llmobs-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0`, `showSnippets`. `getByRole("tab", { name: "OTel env vars" })` exists, and `expect(screen.getByRole("dialog")).toHaveTextContent("Authorization=Bearer sk-llmobs-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0")`. |
+| `"shows the secret once with a copy button"` | Secret `pat-cetra-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0`, title `"Token created"`. `getByRole("dialog", { name: "Token created" })` exists. `getByLabelText("Secret")` has that value. The text `Copy it now. You won't see it again.` is shown. `getByRole("button", { name: "Copy secret" })` exists. `queryByRole("tab")` is null (no snippets for a `pat` secret). |
+| `"shows snippets for a secret key"` | Secret `sk-cetra-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0`, `showSnippets`. `getByRole("tab", { name: "OTel env vars" })` exists, and `expect(screen.getByRole("dialog")).toHaveTextContent("Authorization=Bearer sk-cetra-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0")`. |
 | `"shows no snippets unless asked for a secret key"` | With an `sk-` secret and no `showSnippets`: `queryByRole("tab")` is null. With a `pat-` secret and `showSnippets`: `queryByRole("tab")` is null. |
 | `"closes with Done"` | Click "Done". `onDone` was called once and the dialog is gone. |
 | `"asks before Escape closes an uncopied secret"` | Press `{Escape}`. The dialog is still there. `getByRole("alert")` contains `You haven't copied the secret. Close without copying?`. `onDone` was not called. Click "Go back": the alert is gone. Press `{Escape}`, then click "Close anyway". `onDone` was called once. |

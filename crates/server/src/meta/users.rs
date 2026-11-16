@@ -17,6 +17,74 @@ pub(crate) enum EmailError {
     Invalid,
 }
 
+/// How an account's address came to be verified (auth review #9, D-P-60).
+///
+/// Only the first three prove that someone read mail sent to the address or that the identity
+/// provider vouches for it; an invitation token or an operator's say-so does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EmailVerifiedVia {
+    /// The owner followed the link mailed to the address.
+    MailToken,
+    /// An OIDC provider reported the address as verified.
+    Idp,
+    /// An invitation token was presented. The inviter can read that token.
+    Invite,
+    /// The control plane vouched for the owner it created.
+    ControlPlane,
+    /// An operator created the account (setup, admin API or CLI).
+    Operator,
+}
+
+impl UserRow {
+    /// Whether the address is known to belong to this account's owner. An invitation or an
+    /// operator proves nothing about the mailbox, and a row of unknown origin is treated alike.
+    pub(crate) fn email_proven(&self) -> bool {
+        self.email_verified_at.is_some()
+            && matches!(
+                self.email_verified_via,
+                Some(
+                    EmailVerifiedVia::MailToken
+                        | EmailVerifiedVia::Idp
+                        | EmailVerifiedVia::ControlPlane
+                )
+            )
+    }
+}
+
+impl EmailVerifiedVia {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::MailToken => "mail_token",
+            Self::Idp => "idp",
+            Self::Invite => "invite",
+            Self::ControlPlane => "control_plane",
+            Self::Operator => "operator",
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        Some(match text {
+            "mail_token" => Self::MailToken,
+            "idp" => Self::Idp,
+            "invite" => Self::Invite,
+            "control_plane" => Self::ControlPlane,
+            "operator" => Self::Operator,
+            _ => return None,
+        })
+    }
+
+    /// Parses a stored column.
+    pub(crate) fn from_column(text: Option<String>) -> Result<Option<Self>, MetaError> {
+        text.map(|text| {
+            Self::parse(&text).ok_or(MetaError::Corrupt {
+                table: "users",
+                column: "email_verified_via",
+            })
+        })
+        .transpose()
+    }
+}
+
 /// A `users` row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UserRow {
@@ -30,6 +98,8 @@ pub(crate) struct UserRow {
     pub(crate) password_hash: Option<String>,
     /// When the address was verified, nanoseconds.
     pub(crate) email_verified_at: Option<i64>,
+    /// How it was verified. Absent on an unverified address.
+    pub(crate) email_verified_via: Option<EmailVerifiedVia>,
     /// Instance admin.
     pub(crate) is_instance_admin: bool,
     /// When the account was disabled. Absent means active.
@@ -51,6 +121,8 @@ pub(crate) struct NewUser {
     pub(crate) password_hash: Option<String>,
     /// Verification time, if the address is already verified.
     pub(crate) email_verified_at: Option<i64>,
+    /// How it was verified; set together with `email_verified_at`.
+    pub(crate) email_verified_via: Option<EmailVerifiedVia>,
     /// Instance admin.
     pub(crate) is_instance_admin: bool,
 }
@@ -62,6 +134,7 @@ struct UserRecord {
     name: Option<String>,
     password_hash: Option<String>,
     email_verified_at: Option<i64>,
+    email_verified_via: Option<String>,
     is_instance_admin: i64,
     disabled_at: Option<i64>,
     created_at: i64,
@@ -119,14 +192,15 @@ pub(crate) async fn insert_user(
     let admin = i64::from(user.is_instance_admin);
     sqlx::query(
         "INSERT INTO users \
-         (id, email, name, password_hash, email_verified_at, is_instance_admin, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+         (id, email, name, password_hash, email_verified_at, email_verified_via, is_instance_admin, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id_text)
     .bind(&user.email)
     .bind(&user.name)
     .bind(&user.password_hash)
     .bind(user.email_verified_at)
+    .bind(user.email_verified_via.map(EmailVerifiedVia::as_str))
     .bind(admin)
     .bind(now)
     .bind(now)
@@ -139,6 +213,7 @@ pub(crate) async fn insert_user(
         name: user.name,
         password_hash: user.password_hash,
         email_verified_at: user.email_verified_at,
+        email_verified_via: user.email_verified_via,
         is_instance_admin: user.is_instance_admin,
         disabled_at: None,
         created_at: now,
@@ -154,7 +229,7 @@ pub(crate) async fn insert_user(
 pub(crate) async fn user_by_id(pool: &SqlitePool, id: Uuid) -> Result<Option<UserRow>, MetaError> {
     fetch_user(
         sqlx::query_as(
-            "SELECT id, email, name, password_hash, email_verified_at, is_instance_admin, \
+            "SELECT id, email, name, password_hash, email_verified_at, email_verified_via, is_instance_admin, \
              disabled_at, created_at, updated_at FROM users WHERE id = ?",
         )
         .bind(id.to_string())
@@ -174,7 +249,7 @@ pub(crate) async fn user_by_email(
 ) -> Result<Option<UserRow>, MetaError> {
     fetch_user(
         sqlx::query_as(
-            "SELECT id, email, name, password_hash, email_verified_at, is_instance_admin, \
+            "SELECT id, email, name, password_hash, email_verified_at, email_verified_via, is_instance_admin, \
              disabled_at, created_at, updated_at FROM users WHERE email = ?",
         )
         .bind(email)
@@ -194,7 +269,7 @@ pub(crate) async fn user_by_email_tx(
 ) -> Result<Option<UserRow>, MetaError> {
     fetch_user(
         sqlx::query_as(
-            "SELECT id, email, name, password_hash, email_verified_at, is_instance_admin, \
+            "SELECT id, email, name, password_hash, email_verified_at, email_verified_via, is_instance_admin, \
              disabled_at, created_at, updated_at FROM users WHERE email = ?",
         )
         .bind(email)
@@ -247,7 +322,7 @@ pub(crate) async fn set_password_hash(
     Ok(())
 }
 
-/// Marks the email verified at `now`.
+/// Marks the email verified at `now`, by `via`.
 ///
 /// # Errors
 ///
@@ -256,9 +331,13 @@ pub(crate) async fn set_email_verified(
     conn: &mut SqliteConnection,
     id: Uuid,
     now: i64,
+    via: EmailVerifiedVia,
 ) -> Result<(), MetaError> {
-    sqlx::query("UPDATE users SET email_verified_at = ?, updated_at = ? WHERE id = ?")
+    sqlx::query(
+        "UPDATE users SET email_verified_at = ?, email_verified_via = ?, updated_at = ? WHERE id = ?",
+    )
         .bind(now)
+        .bind(via.as_str())
         .bind(now)
         .bind(id.to_string())
         .execute(&mut *conn)
@@ -463,7 +542,7 @@ pub(crate) async fn user_by_id_tx(
 ) -> Result<Option<UserRow>, MetaError> {
     fetch_user(
         sqlx::query_as(
-            "SELECT id, email, name, password_hash, email_verified_at, is_instance_admin, \
+            "SELECT id, email, name, password_hash, email_verified_at, email_verified_via, is_instance_admin, \
              disabled_at, created_at, updated_at FROM users WHERE id = ?",
         )
         .bind(id.to_string())
@@ -485,7 +564,7 @@ pub(crate) async fn list_users(
     let records: Vec<UserRecord> = match after_email {
         Some(email) => {
             sqlx::query_as(
-                "SELECT id, email, name, password_hash, email_verified_at, is_instance_admin, \
+                "SELECT id, email, name, password_hash, email_verified_at, email_verified_via, is_instance_admin, \
                  disabled_at, created_at, updated_at FROM users WHERE email > ? \
                  ORDER BY email LIMIT ?",
             )
@@ -496,7 +575,7 @@ pub(crate) async fn list_users(
         }
         None => {
             sqlx::query_as(
-                "SELECT id, email, name, password_hash, email_verified_at, is_instance_admin, \
+                "SELECT id, email, name, password_hash, email_verified_at, email_verified_via, is_instance_admin, \
                  disabled_at, created_at, updated_at FROM users ORDER BY email LIMIT ?",
             )
             .bind(i64::from(limit))
@@ -532,6 +611,7 @@ fn user_row(record: UserRecord) -> Result<UserRow, MetaError> {
         name: record.name,
         password_hash: record.password_hash,
         email_verified_at: record.email_verified_at,
+        email_verified_via: EmailVerifiedVia::from_column(record.email_verified_via)?,
         is_instance_admin,
         disabled_at: record.disabled_at,
         created_at: record.created_at,
@@ -543,7 +623,7 @@ fn user_row(record: UserRecord) -> Result<UserRow, MetaError> {
 mod tests {
     use super::*;
     use crate::meta::test_db;
-    use llmobs_core::ids::OrgId;
+    use cetra_core::ids::OrgId;
     use uuid::Uuid;
 
     #[test]
@@ -613,7 +693,7 @@ mod tests {
                 Box::pin(async move {
                     set_name(conn, id, Some("Ada"), 2).await?;
                     set_password_hash(conn, id, Some("hash"), 3).await?;
-                    set_email_verified(conn, id, 4).await?;
+                    set_email_verified(conn, id, 4, EmailVerifiedVia::MailToken).await?;
                     set_instance_admin(conn, id, true, 5).await?;
                     set_disabled(conn, id, Some(6), 7).await?;
                     assert_eq!(count_active_instance_admins(conn).await?, 0);
@@ -666,6 +746,7 @@ mod tests {
             name: None,
             password_hash: None,
             email_verified_at: None,
+            email_verified_via: None,
             is_instance_admin: admin,
         }
     }

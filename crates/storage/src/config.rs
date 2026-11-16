@@ -59,6 +59,10 @@ pub struct StorageConfig {
     /// Deletion settings.
     #[serde(default)]
     pub deletion: DeletionConfig,
+    /// Restore mode (N M3, D-N-34): `false` makes every object deletion fail with
+    /// `ObjectError::DeletionOff`. Not a TOML key; the server sets it.
+    #[serde(skip, default = "default_true")]
+    pub delete_objects: bool,
 }
 
 impl StorageConfig {
@@ -180,12 +184,10 @@ impl StorageConfig {
                 "must be greater than 0 and at most 24h",
             ));
         }
-        if self.gc.grace < Duration::from_secs(1)
-            || self.gc.grace > Duration::from_secs(24 * 60 * 60)
-        {
+        if self.gc.grace < Duration::from_secs(1) || self.gc.grace > MAX_GC_GRACE {
             return Err(ConfigError::invalid(
                 "storage.gc.grace",
-                "must be between 1s and 24h",
+                "must be between 1s and 30d",
             ));
         }
         let compaction = &self.compaction;
@@ -317,6 +319,10 @@ where
 
 fn default_min_free_bytes() -> ByteSize {
     ByteSize::gib(2)
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_sync() -> WalSync {
@@ -475,13 +481,19 @@ fn default_gc_grace() -> Duration {
     Duration::from_secs(5 * 60)
 }
 
+/// Longest `gc.grace`: it is also the window a metadata-only S3 backup stays
+/// restorable for (D-N-20).
+const MAX_GC_GRACE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
 /// `[storage.gc]`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GcConfig {
     /// How long an obsolete file stays after `obsoleted_at` before GC may
     /// delete it (spec 03 §5). At least the longest query timeout, so a reader
-    /// that never pinned a `ReadState` still finishes.
+    /// that never pinned a `ReadState` still finishes. In S3 mode it is also
+    /// how long a metadata-only backup can be restored against the live bucket
+    /// (D-N-20); at most 30 days.
     #[serde(default = "default_gc_grace", with = "humantime_serde")]
     pub grace: Duration,
 }
@@ -897,11 +909,11 @@ mod tests {
             ),
             (
                 r#"{"data_dir":"/data","gc":{"grace":"0s"}}"#,
-                "storage.gc.grace: must be between 1s and 24h",
+                "storage.gc.grace: must be between 1s and 30d",
             ),
             (
-                r#"{"data_dir":"/data","gc":{"grace":"25h"}}"#,
-                "storage.gc.grace: must be between 1s and 24h",
+                r#"{"data_dir":"/data","gc":{"grace":"31d"}}"#,
+                "storage.gc.grace: must be between 1s and 30d",
             ),
             (
                 r#"{"data_dir":"/data","compaction":{"interval":"10ms"}}"#,
@@ -1134,6 +1146,13 @@ mod tests {
     }
 
     #[test]
+    fn gc_grace_accepts_thirty_days() {
+        let parsed = parse(r#"{"data_dir":"/data","gc":{"grace":"30d"}}"#).unwrap();
+        parsed.validate().unwrap();
+        assert_eq!(parsed.gc.grace, Duration::from_secs(30 * 24 * 60 * 60));
+    }
+
+    #[test]
     fn deletion_max_delay_defaults_to_a_day_and_parses() {
         let default = parse(r#"{"data_dir":"/data"}"#).unwrap();
         assert_eq!(default.deletion, DeletionConfig::default());
@@ -1233,10 +1252,10 @@ mod tests {
 
     #[test]
     fn the_default_object_store_is_under_data_dir() {
-        let config = parse(r#"{"data_dir":"/var/lib/llmobs"}"#).unwrap();
+        let config = parse(r#"{"data_dir":"/var/lib/cetra"}"#).unwrap();
         assert_eq!(
             config.object_store_url(),
-            ObjectStoreUrl::Local(PathBuf::from("/var/lib/llmobs/objects"))
+            ObjectStoreUrl::Local(PathBuf::from("/var/lib/cetra/objects"))
         );
     }
 

@@ -4,7 +4,7 @@ Date: 2026-11-15. Status: research. No decision is taken here, and nothing in th
 
 **Question.** Is there a file format faster than Parquet for LLM-observability data, and if not, what would one look like?
 
-**Scope.** This research is independent of the llmobs storage spec. Formats are judged as general-purpose columnar files on five workload classes:
+**Scope.** This research is independent of the cetra storage spec. Formats are judged as general-purpose columnar files on five workload classes:
 - **(A)** filtered scans over narrow columns;
 - **(B)** point lookups by a sorted key;
 - **(C)** large, repetitive strings and substring search over them;
@@ -81,7 +81,7 @@ The generator does **not** model history repeated across the traces of one chat 
 |---|---|
 | `pq_default` | arrow-rs `WriterProperties` defaults + zstd-3: v1 pages, dictionary on, 1 MiB pages, 1M-row row groups |
 | `pq_tuned` | "Point-lookup tuned": v2 pages, 64 KiB / 8,192-row pages, 128k-row row groups, page statistics, bloom filters on the ID columns, dictionary off for large strings |
-| `pq_llmobs` | Today's llmobs writer settings, as a reference point only |
+| `pq_cetra` | Today's cetra writer settings, as a reference point only |
 | `vx_default` | Vortex `write_options()` defaults |
 | `vx_compact` | Vortex with `BtrBlocksCompressorBuilder::with_compact()` (zstd for strings, pco for numbers) |
 
@@ -107,7 +107,7 @@ Vortex has no `FixedSizeBinary`, so the IDs are cast to `Binary` for Vortex only
 |---|---|---|
 | pq_default | 332 MiB | 6.7 s |
 | pq_tuned | 622 MiB | 11.3 s |
-| pq_llmobs | 438 MiB | 8.9 s |
+| pq_cetra | 438 MiB | 8.9 s |
 | vx_default | 487 MiB | 4.2 s |
 | vx_compact | **316 MiB** | **4.0 s** |
 
@@ -117,7 +117,7 @@ Vortex has no `FixedSizeBinary`, so the IDs are cast to `Binary` for Vortex only
 |---|---|---|
 | pq_default | 151 MiB | 5.2 s |
 | pq_tuned | 191 MiB | 5.3 s |
-| pq_llmobs | 161 MiB | 4.8 s |
+| pq_cetra | 161 MiB | 4.8 s |
 | vx_default | 210 MiB | **1.6 s** |
 | vx_compact | **136 MiB** | 1.8 s |
 
@@ -151,7 +151,7 @@ Per lookup, *payload* dataset. "Full" is `SELECT *`; "light" is 9 narrow columns
 |---|---|---|---|---|---|
 | pq_default | 26.4 | 6.3 MB | 112 | 7.0 | 1.7 MB |
 | pq_tuned | **12.7** | 3.4 MB | 101 | 7.1 | 2.3 MB |
-| pq_llmobs | 17.0 | **2.6 MB** | 74 | 6.1 | **0.56 MB** |
+| pq_cetra | 17.0 | **2.6 MB** | 74 | 6.1 | **0.56 MB** |
 | vx_default | 16.1 | **75.9 MB** | 12 | **4.2** | 17.8 MB |
 | vx_compact | 31.6 | 79.9 MB | 11 | 4.2 | 11.4 MB |
 
@@ -172,7 +172,7 @@ Parquet's cost, in turn, is the request count: about 100 dependent ranged reads 
 |---|---|---|---|---|
 | pq_default | 191 | 125 MB | 335 | 258 MB |
 | pq_tuned | 231 | 160 MB | 427 | 327 MB |
-| pq_llmobs | 137 | 125 MB | 246 | 258 MB |
+| pq_cetra | 137 | 125 MB | 246 | 258 MB |
 | vx_default | 136 | 236 MB | 210 | 405 MB |
 | vx_compact | **93** | 113 MB | **162** | 253 MB |
 
@@ -256,14 +256,14 @@ These figures come from the M7 bench ([bench/](bench/), [prototype-plan.md](prot
 
 ### File size (MiB, 4 files)
 
-| Dataset | `st` | pq_default | pq_tuned | pq_llmobs | vx_default | vx_compact |
+| Dataset | `st` | pq_default | pq_tuned | pq_cetra | vx_default | vx_compact |
 |---|---|---|---|---|---|---|
 | payload | 419 | 332 | 622 | 438 | 487 | 316 |
 | light | 166 | 151 | 191 | 161 | 210 | 136 |
 | swe | 35 | 36 | 65 | 36 | 560 | 31 |
 
 `swe` payload columns, in KiB:
-- `input`: Strata 15,180, against 21,289 for pq_default, 45,791 for pq_tuned and 21,288 for pq_llmobs.
+- `input`: Strata 15,180, against 21,289 for pq_default, 45,791 for pq_tuned and 21,288 for pq_cetra.
 - `output`: Strata 12,030, against 9,729, 12,394 and 9,791.
 
 Every Strata frame has a trigram filter.
@@ -274,14 +274,14 @@ Every Strata frame has a trigram filter.
 
 | Dataset | `st` | Best Parquet | Others |
 |---|---|---|---|
-| payload, all columns | **1,210 KiB**, 39 requests, 2.0 waves | pq_llmobs: 2,610 KiB, 74 requests | pq_default: 6,350 KiB; vx_compact: 70,381 KiB |
-| payload, light columns | **141 KiB**, 9.5 requests, 1.0 wave | pq_llmobs: 563 KiB, 16 requests | |
+| payload, all columns | **1,210 KiB**, 39 requests, 2.0 waves | pq_cetra: 2,610 KiB, 74 requests | pq_default: 6,350 KiB; vx_compact: 70,381 KiB |
+| payload, light columns | **141 KiB**, 9.5 requests, 1.0 wave | pq_cetra: 563 KiB, 16 requests | |
 | swe, all columns | 677 KiB, 15 requests, 2.0 waves | pq_tuned: **615 KiB**, 102 requests | pq_default: 1,328 KiB |
-| swe, light columns | **179 KiB**, 4.2 requests, 1.0 wave | pq_llmobs: 276 KiB, 14 requests | |
+| swe, light columns | **179 KiB**, 4.2 requests, 1.0 wave | pq_cetra: 276 KiB, 14 requests | |
 
 **Cold.** A fresh context for each ID, so the open and the metadata are counted too. Requests exclude HEAD and LIST.
 
-| Dataset | `st` | pq_default | pq_tuned | pq_llmobs | vx_compact |
+| Dataset | `st` | pq_default | pq_tuned | pq_cetra | vx_compact |
 |---|---|---|---|---|---|
 | payload | **3,037 KiB**, 68.5 requests, 4 waves | 8,398 KiB, 116 | 9,094 KiB, 109 | 4,658 KiB, 78 | 73,355 KiB, 15 |
 | swe | **1,940 KiB**, 28.4 requests, 4 waves | 3,376 KiB, 110 | 2,663 KiB, 106 | 2,843 KiB, 75 | 29,542 KiB, 13 |
@@ -292,10 +292,10 @@ The prototype's no-engine Parquet reader (`pq_fast`) reads 10–100 MiB for one 
 
 | Query | Dataset | `st` | pq_default | Best Parquet | vx_compact |
 |---|---|---|---|---|---|
-| count_errors_6h | light | 4,297 (4 requests) | 5,111 (46) | pq_llmobs: 4,300 (52) | 3,954 (16) |
+| count_errors_6h | light | 4,297 (4 requests) | 5,111 (46) | pq_cetra: 4,300 (52) | 3,954 (16) |
 | model_rollup_day | light | 16,252 (20) | 13,007 (340) | 13,007 | 17,729 (19) |
 | list_llm_1h | light | 16,553 (7) | 14,292 (214) | 14,271 | 18,859 (8) |
-| user_filter | light | 1,606 (11) | 2,089 (16) | pq_llmobs: 1,231 (31) | 2,184 (13) |
+| user_filter | light | 1,606 (11) | 2,089 (16) | pq_cetra: 1,231 (31) | 2,184 (13) |
 | metadata_filter (map key) | light | 1,170 (4) | 2,088 (8) | 2,088 | errors |
 | substring_input, 1 needle | payload | **8,999** (71) | 128,316 (4) | 128,316 | 115,726 (38) |
 | substring, mean over 20 needles, cold | swe | **14,143** | 21,289 | 21,289 | 19,085 |
@@ -310,27 +310,27 @@ On narrow queries, Strata reads as much as Parquet and Vortex, in a few large re
 | | `st` | `st_fast` | Best Parquet | `pq_fast` (best) | vx_compact |
 |---|---|---|---|---|---|
 | all columns | 7.15 | 6.02 | pq_tuned: 12.16 | 322.10 | 33.71 |
-| light columns | 1.09 | 0.69 | pq_llmobs: 5.18 | 8.39 | 5.57 |
+| light columns | 1.09 | 0.69 | pq_cetra: 5.18 | 8.39 | 5.57 |
 
 **Profile on `payload`, one partition, min of 30, ms.** Total is the whole query, and "execute" is the time in execution, from the plan metrics.
 
 | | `st` total | `st` execute | Best Parquet total | Best Parquet execute |
 |---|---|---|---|---|
 | lookup, all columns | 7.10 | 6.05 | pq_tuned: 11.37 | 8.90 |
-| lookup, 9 light columns | 1.02 | 0.70 | pq_llmobs: 4.48 | 2.94 |
-| trace list (top 50 in 1 h) | 30.07 | 28.83 | pq_llmobs: 24.97 | 22.51 |
+| lookup, 9 light columns | 1.02 | 0.70 | pq_cetra: 4.48 | 2.94 |
+| trace list (top 50 in 1 h) | 30.07 | 28.83 | pq_cetra: 24.97 | 22.51 |
 
 **Narrow queries on `light`, ms:**
 
 | Query | `st` | Best Parquet | vx_compact | vx_default |
 |---|---|---|---|---|
-| count_errors_6h | 12.72 | pq_llmobs: 10.63 | 6.16 | 4.29 |
-| model_rollup_day | 79.56 | pq_llmobs: 38.38 | 19.59 | 14.34 |
+| count_errors_6h | 12.72 | pq_cetra: 10.63 | 6.16 | 4.29 |
+| model_rollup_day | 79.56 | pq_cetra: 38.38 | 19.59 | 14.34 |
 | list_llm_1h | 98.51 | pq_tuned: 43.37 | 18.74 | 11.51 |
-| user_filter | 11.45 | pq_llmobs: 6.99 | 11.76 | 4.71 |
+| user_filter | 11.45 | pq_cetra: 6.99 | 11.76 | 4.71 |
 | metadata_filter | 9.65 | pq_tuned: 29.25 | errors | errors |
 
-**Substring search on `swe`, 20 needles, warm, one partition:** `st` takes 79 ms per needle, against 510 ms for pq_llmobs and 206 ms for vx_compact.
+**Substring search on `swe`, 20 needles, warm, one partition:** `st` takes 79 ms per needle, against 510 ms for pq_cetra and 206 ms for vx_compact.
 
 **Write and merge on `payload`:**
 - `gen` writes at 107 MiB/s of Arrow for `st`, against 534 MiB/s for pq_default and 526 MiB/s for vx_compact.

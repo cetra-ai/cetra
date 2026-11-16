@@ -80,6 +80,36 @@ export function SavedViewsMenu({
     return true;
   }
 
+  async function saveAs(): Promise<void> {
+    setProblem(undefined);
+    const { data, error } = await api.POST("/api/v1/projects/{project}/saved-views", {
+      params: { path: { project: projectRef(org, project) } },
+      body: {
+        kind,
+        name: name.trim(),
+        state: storedState(viewStateOf(search)),
+        shared,
+        is_default: makeDefault,
+      },
+    });
+    if (error || !data) {
+      setProblem(problemText(error));
+      return;
+    }
+    await refresh();
+    setDialog(null);
+    onApply({ ...searchFromViewState(data.state), view: data.id });
+  }
+
+  async function rename(): Promise<void> {
+    if (!current) {
+      return;
+    }
+    if (await patch(current.id, { name: name.trim() })) {
+      setDialog(null);
+    }
+  }
+
   function openSaveAs(): void {
     setName("");
     setShared(false);
@@ -190,85 +220,71 @@ export function SavedViewsMenu({
         onOpenChange={(open) => setDialog(open ? "save-as" : null)}
       >
         <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Save view</DialogTitle>
-            <DialogDescription>Save the current filters and columns as a view.</DialogDescription>
-          </DialogHeader>
-          <NameField name={name} onName={setName} />
-          <Flag id="view-share" label="Share with project" checked={shared} onChecked={setShared} />
-          <Flag
-            id="view-default"
-            label="Make my default"
-            checked={makeDefault}
-            onChecked={setMakeDefault}
-          />
-          {problem ? <p className="text-xs text-destructive">{problem}</p> : null}
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setDialog(null)}>
-              Cancel
-            </Button>
-            <Button
-              type="button"
-              disabled={name.trim().length === 0}
-              onClick={() => {
-                void (async () => {
-                  setProblem(undefined);
-                  const { data, error } = await api.POST("/api/v1/projects/{project}/saved-views", {
-                    params: { path: { project: projectRef(org, project) } },
-                    body: {
-                      kind,
-                      name: name.trim(),
-                      state: storedState(viewStateOf(search)),
-                      shared,
-                      is_default: makeDefault,
-                    },
-                  });
-                  if (error || !data) {
-                    setProblem(problemText(error));
-                    return;
-                  }
-                  await refresh();
-                  setDialog(null);
-                  onApply({ ...searchFromViewState(data.state), view: data.id });
-                })();
-              }}
-            >
-              Save view
-            </Button>
-          </DialogFooter>
+          <form
+            className="contents"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (name.trim().length > 0) {
+                void saveAs();
+              }
+            }}
+          >
+            <DialogHeader>
+              <DialogTitle>Save view</DialogTitle>
+              <DialogDescription>Save the current filters and columns as a view.</DialogDescription>
+            </DialogHeader>
+            <NameField name={name} onName={setName} />
+            <Flag
+              id="view-share"
+              label="Share with project"
+              checked={shared}
+              onChecked={setShared}
+            />
+            <Flag
+              id="view-default"
+              label="Make my default"
+              checked={makeDefault}
+              onChecked={setMakeDefault}
+            />
+            {problem ? <p className="text-xs text-destructive">{problem}</p> : null}
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setDialog(null)}>
+                Cancel
+              </Button>
+              <Button type="submit" disabled={name.trim().length === 0}>
+                Save view
+              </Button>
+            </DialogFooter>
+          </form>
         </DialogContent>
       </Dialog>
 
       <Dialog open={dialog === "rename"} onOpenChange={(open) => setDialog(open ? "rename" : null)}>
         <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Rename view</DialogTitle>
-            <DialogDescription>Change the name shown in the views menu.</DialogDescription>
-          </DialogHeader>
-          <NameField name={name} onName={setName} />
-          {problem ? <p className="text-xs text-destructive">{problem}</p> : null}
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setDialog(null)}>
-              Cancel
-            </Button>
-            <Button
-              type="button"
-              disabled={name.trim().length === 0 || !current}
-              onClick={() => {
-                if (!current) {
-                  return;
-                }
-                void (async () => {
-                  const ok = await patch(current.id, { name: name.trim() });
-                  if (ok) {
-                    setDialog(null);
-                  }
-                })();
-              }}
-            >
-              Rename
-            </Button>
-          </DialogFooter>
+          <form
+            className="contents"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (name.trim().length > 0 && current) {
+                void rename();
+              }
+            }}
+          >
+            <DialogHeader>
+              <DialogTitle>Rename view</DialogTitle>
+              <DialogDescription>Change the name shown in the views menu.</DialogDescription>
+            </DialogHeader>
+            <NameField name={name} onName={setName} />
+            {problem ? <p className="text-xs text-destructive">{problem}</p> : null}
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setDialog(null)}>
+                Cancel
+              </Button>
+              <Button type="submit" disabled={name.trim().length === 0 || !current}>
+                Rename
+              </Button>
+            </DialogFooter>
+          </form>
         </DialogContent>
       </Dialog>
 

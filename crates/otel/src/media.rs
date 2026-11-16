@@ -10,9 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use base64::Engine;
 use base64::alphabet::STANDARD as STANDARD_ALPHABET;
 use base64::engine::general_purpose::{GeneralPurpose, PAD_INDIFFERENT};
-use llmobs_core::media::MediaBlob;
-use llmobs_core::message::{Message, Modality, Part};
-use llmobs_core::names::media::{DROPPED_URI, URI_SCHEME};
+use cetra_core::media::MediaBlob;
+use cetra_core::message::{Message, Modality, Part};
+use cetra_core::names::media::{DROPPED_URI, URI_SCHEME};
 use serde_json::{Map, Value as Json};
 use sha2::{Digest, Sha256};
 
@@ -23,6 +23,10 @@ use crate::payload::{Io, Payload};
 const DECODER: GeneralPurpose = GeneralPurpose::new(&STANDARD_ALPHABET, PAD_INDIFFERENT);
 
 const OCTET_STREAM: &str = "application/octet-stream";
+
+/// Longest MIME type kept. Storage's `MediaBlob` allows 1 to 255 bytes. A longer
+/// declared type is ignored, so the blob is sniffed instead of failing the request.
+const MAX_MIME_BYTES: usize = 255;
 
 /// What replaced one candidate, when it was not left inline.
 enum Replacement {
@@ -489,6 +493,9 @@ fn is_b64(byte: u8) -> bool {
 }
 
 fn is_mime(value: &str) -> bool {
+    if value.len() > MAX_MIME_BYTES {
+        return false;
+    }
     let Some((top, sub)) = value.split_once('/') else {
         return false;
     };
@@ -574,7 +581,7 @@ fn hex_sha256(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::normalize::IngestLimits;
-    use llmobs_core::message::messages_to_json;
+    use cetra_core::message::messages_to_json;
     use serde_json::json;
 
     fn limits(min: usize, max: usize) -> IngestLimits {
@@ -628,6 +635,19 @@ mod tests {
             };
             assert_eq!(found, *mime);
         }
+    }
+
+    #[test]
+    fn a_mime_type_over_the_storage_cap_is_sniffed_not_refused() {
+        // 300 bytes of token characters. Storage refuses a blob over 255 bytes,
+        // so the declared type must fall back to sniffing.
+        let long = format!("image/{}", "a".repeat(294));
+        assert_eq!(long.len(), 300);
+        assert_eq!(resolve_mime(Some(&long), &png()), "image/png");
+        assert_eq!(resolve_mime(Some(&long), b"unknown!"), OCTET_STREAM);
+        // The cap itself is kept.
+        let at_cap = format!("image/{}", "a".repeat(MAX_MIME_BYTES - 6));
+        assert_eq!(resolve_mime(Some(&at_cap), b"unknown!"), at_cap);
     }
 
     #[test]
@@ -702,7 +722,7 @@ mod tests {
         let limits = limits(1, 64);
         let mut sink = MediaSink::new(&limits);
         let mut payload = Payload::Messages(vec![Message {
-            role: llmobs_core::message::Role::User,
+            role: cetra_core::message::Role::User,
             name: None,
             parts: vec![Part::Blob {
                 modality: Some(Modality::Image),

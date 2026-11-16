@@ -21,11 +21,21 @@ are checked against spec 03 § Capacity sanity check in the last section.
 - The benchmark binaries were built with `RUST_MIN_STACK=33554432` (one release
   build crashed with SIGSEGV in rustc without it).
 
+**Erratum (track R M7).** The machine line of runs 1–7 names `sda` as the disk
+(rotational). `sda` is a card reader that holds no data. The local data directory of runs 1–7 was on btrfs
+(`compress=zstd:1`) over LUKS, on the NVMe drive `nvme1n1` (model
+`CT4000P3PSSD8`, not rotational). The benches' `machine()` printed the first row of
+`lsblk -d`, which was `sda`. It now walks from the data directory's mounted device
+down to the physical disk and prints the mount's filesystem and options (track R
+M7, R7.1). Runs 1–7 are not rewritten. btrfs also compressed the files on disk, so
+the physical write volume of those runs is not the logical byte count they report
+(`dir_bytes` sums file lengths, which btrfs does not change). The S3 runs (2, 4–6) kept their objects on a tmpfs Versity, not on that disk.
+
 Common environment for every S3 run:
 
 ```bash
-export LLMOBS_TEST_S3_ENDPOINT=http://127.0.0.1:7070 LLMOBS_TEST_S3_BUCKET=llmobs-bench \
-  AWS_ACCESS_KEY_ID=llmobs AWS_SECRET_ACCESS_KEY=llmobs-secret
+export CETRA_TEST_S3_ENDPOINT=http://127.0.0.1:7070 CETRA_TEST_S3_BUCKET=cetra-bench \
+  AWS_ACCESS_KEY_ID=cetra AWS_SECRET_ACCESS_KEY=cetra-secret
 ```
 
 ## Runs
@@ -33,9 +43,9 @@ export LLMOBS_TEST_S3_ENDPOINT=http://127.0.0.1:7070 LLMOBS_TEST_S3_BUCKET=llmob
 | # | Benchmark | Store | Config | Result |
 |---|---|---|---|---|
 | 1 | ingest 60 s | local disk | defaults + the bench config below | measured |
-| 2 | ingest 60 s | S3 (`llmobs-bench/ingest-bench-<uuidv7>`) | same | measured |
+| 2 | ingest 60 s | S3 (`cetra-bench/ingest-bench-<uuidv7>`) | same | measured |
 | 3 | trace_bench, 1,000,000 traces | local disk | defaults | measured |
-| 4 | trace_bench, 1,000,000 traces | S3 `trace-bench` | `LLMOBS_TRACE_BENCH_CACHE=cold` | measured |
+| 4 | trace_bench, 1,000,000 traces | S3 `trace-bench` | `CETRA_TRACE_BENCH_CACHE=cold` | measured |
 | 5 | trace_bench, 1,000,000 traces | S3 `trace-bench` | `warm` | measured |
 | 6 | trace_bench, 1,000,000 traces | S3 `trace-bench` | `off` | measured |
 | 7 | trace_bench, 1,000,000 traces | local disk | defaults, default query memory (M6c) | measured |
@@ -51,8 +61,8 @@ explicit passes.
 ### Run 1 — ingest, local disk
 
 ```bash
-LLMOBS_INGEST_BENCH_DIR=<scratchpad>/bench/ingest-local LLMOBS_INGEST_BENCH_SECS=60 \
-  cargo test --release -p llmobs-storage --test ingest_bench -- --ignored --nocapture
+CETRA_INGEST_BENCH_DIR=<scratchpad>/bench/ingest-local CETRA_INGEST_BENCH_SECS=60 \
+  cargo test --release -p cetra-storage --test ingest_bench -- --ignored --nocapture
 ```
 
 ```
@@ -72,8 +82,8 @@ append (including backpressure retries) first.
 ### Run 2 — ingest, S3
 
 ```bash
-LLMOBS_INGEST_BENCH_DIR=<scratchpad>/bench/ingest-s3 LLMOBS_INGEST_BENCH_SECS=60 \
-  cargo test --release -p llmobs-storage --test ingest_bench -- --ignored --nocapture
+CETRA_INGEST_BENCH_DIR=<scratchpad>/bench/ingest-s3 CETRA_INGEST_BENCH_SECS=60 \
+  cargo test --release -p cetra-storage --test ingest_bench -- --ignored --nocapture
   # with the common S3 environment above
 ```
 
@@ -90,8 +100,8 @@ The prefix was deleted at the end of the run.
 ### Run 3 — trace_bench, local disk, 1,000,000 traces
 
 ```bash
-LLMOBS_TRACE_BENCH_DIR=<scratchpad>/bench/trace-local LLMOBS_TRACE_BENCH_TRACES=1000000 \
-  cargo test --release -p llmobs-storage --test trace_bench -- --ignored --nocapture
+CETRA_TRACE_BENCH_DIR=<scratchpad>/bench/trace-local CETRA_TRACE_BENCH_TRACES=1000000 \
+  cargo test --release -p cetra-storage --test trace_bench -- --ignored --nocapture
 ```
 
 Dataset: 1,000,000 traces, 31 spans files, 719,041,050 bytes. Generation
@@ -117,8 +127,8 @@ p50 2144.6 ms, p95 3351.7 ms.
 ### Run 4 — trace_bench, S3, cold cache
 
 ```bash
-LLMOBS_TRACE_BENCH_DIR=<scratchpad>/bench/trace-s3 LLMOBS_TRACE_BENCH_TRACES=1000000 \
-  LLMOBS_TRACE_BENCH_CACHE=cold cargo test ... trace_bench -- --ignored --nocapture
+CETRA_TRACE_BENCH_DIR=<scratchpad>/bench/trace-s3 CETRA_TRACE_BENCH_TRACES=1000000 \
+  CETRA_TRACE_BENCH_CACHE=cold cargo test ... trace_bench -- --ignored --nocapture
   # with the common S3 environment above
 ```
 
@@ -145,7 +155,7 @@ fetched (see Findings (d)).
 
 ### Run 5 — trace_bench, S3, warm cache
 
-Same dataset and command with `LLMOBS_TRACE_BENCH_CACHE=warm`. The whole query
+Same dataset and command with `CETRA_TRACE_BENCH_CACHE=warm`. The whole query
 set ran once untimed, then again measured.
 
 | query | mode | cold | p50 | p95 | max | target | pass | rows | differing ids |
@@ -166,7 +176,7 @@ Q3's max (30.7 ms) is one outlier; its p95 is 13.8 ms.
 
 ### Run 6 — trace_bench, S3, cache off
 
-Same dataset and command with `LLMOBS_TRACE_BENCH_CACHE=off`
+Same dataset and command with `CETRA_TRACE_BENCH_CACHE=off`
 (`query.read_cache_bytes = 0`): every read goes to S3.
 
 | query | mode | cold | p50 | p95 | max | target | pass | rows | differing ids |
@@ -194,8 +204,8 @@ the default 2 GiB per query. The dataset was generated by this run in an empty
 directory, with the same command as Run 3:
 
 ```bash
-LLMOBS_TRACE_BENCH_DIR=<scratchpad>/m69/fresh LLMOBS_TRACE_BENCH_TRACES=1000000 \
-  cargo test --release -p llmobs-storage --test trace_bench -- --ignored --nocapture
+CETRA_TRACE_BENCH_DIR=<scratchpad>/m69/fresh CETRA_TRACE_BENCH_TRACES=1000000 \
+  cargo test --release -p cetra-storage --test trace_bench -- --ignored --nocapture
 ```
 
 Dataset: 1,000,000 traces, 29 spans files, 721,005,532 bytes, generated in
@@ -322,7 +332,7 @@ regenerating at a smaller `max_bytes` gave 30 → 31 files locally (3.8 MiB) and
 28 → 32 files on S3 (3.6 MiB). The run accepts whatever count generation gives:
 31 files (local, 719 MB) and 32 files (S3, 837 MB). Both are recorded above.
 
-**(d) Cold-cache note.** `LLMOBS_TRACE_BENCH_CACHE=cold` empties `<dir>/cache`
+**(d) Cold-cache note.** `CETRA_TRACE_BENCH_CACHE=cold` empties `<dir>/cache`
 once, before the storage opens. The first query of the run is a true cold sample
 (empty cache). Later queries of the same cold run may hit blocks that earlier
 queries fetched: the cold run's totals were 22,409 hits and 283 misses. So the
@@ -340,11 +350,11 @@ The warm numbers are not affected by this.
 Build once, then run one benchmark at a time on each data directory:
 
 ```bash
-RUST_MIN_STACK=33554432 cargo test --release -p llmobs-storage --test ingest_bench --test trace_bench --no-run
+RUST_MIN_STACK=33554432 cargo test --release -p cetra-storage --test ingest_bench --test trace_bench --no-run
 ```
 
-- Run 1: see above (`ingest_bench`, `LLMOBS_INGEST_BENCH_DIR`, `LLMOBS_INGEST_BENCH_SECS=60`).
+- Run 1: see above (`ingest_bench`, `CETRA_INGEST_BENCH_DIR`, `CETRA_INGEST_BENCH_SECS=60`).
 - Run 2: as run 1, with the common S3 environment.
-- Run 3: `trace_bench` with `LLMOBS_TRACE_BENCH_DIR=<scratchpad>/bench/trace-local LLMOBS_TRACE_BENCH_TRACES=1000000`.
-- Run 7: as run 3, with an empty `LLMOBS_TRACE_BENCH_DIR` so the run generates its dataset.
-- Runs 4–6: `trace_bench` with `LLMOBS_TRACE_BENCH_DIR=<scratchpad>/bench/trace-s3 LLMOBS_TRACE_BENCH_TRACES=1000000 LLMOBS_TRACE_BENCH_CACHE=cold|warm|off`, with the common S3 environment. Run 4 generates the dataset; runs 5 and 6 reuse it (the manifest's endpoint and bucket match).
+- Run 3: `trace_bench` with `CETRA_TRACE_BENCH_DIR=<scratchpad>/bench/trace-local CETRA_TRACE_BENCH_TRACES=1000000`.
+- Run 7: as run 3, with an empty `CETRA_TRACE_BENCH_DIR` so the run generates its dataset.
+- Runs 4–6: `trace_bench` with `CETRA_TRACE_BENCH_DIR=<scratchpad>/bench/trace-s3 CETRA_TRACE_BENCH_TRACES=1000000 CETRA_TRACE_BENCH_CACHE=cold|warm|off`, with the common S3 environment. Run 4 generates the dataset; runs 5 and 6 reuse it (the manifest's endpoint and bucket match).

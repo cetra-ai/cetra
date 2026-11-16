@@ -1,6 +1,7 @@
 //! The `sessions` view, one row per `session_id` aggregated from `traces`.
 
 use arrow::datatypes::DataType;
+use cetra_core::schema::traces;
 use datafusion::common::ScalarValue;
 use datafusion::error::DataFusionError;
 use datafusion::functions::expr_fn::coalesce;
@@ -11,7 +12,6 @@ use datafusion::logical_expr::expr::NullTreatment;
 use datafusion::logical_expr::{
     Expr, ExprFunctionExt, LogicalPlan, LogicalPlanBuilder, cast, col, lit,
 };
-use llmobs_core::schema::traces;
 
 use super::{DURATION_MS, DURATION_NS, duration_ms, duration_ns_from_bounds};
 
@@ -124,12 +124,12 @@ mod tests {
 
     use arrow::array::{Array, AsArray, RecordBatch};
     use arrow::datatypes::{DataType, Field, TimeUnit};
+    use cetra_core::ids::{SpanId, TraceId};
+    use cetra_core::schema::traces_schema;
+    use cetra_core::span::Span;
     use chrono::{DateTime, SecondsFormat, Utc};
     use datafusion::datasource::MemTable;
     use datafusion::execution::runtime_env::RuntimeEnv;
-    use llmobs_core::ids::{SpanId, TraceId};
-    use llmobs_core::schema::traces_schema;
-    use llmobs_core::span::Span;
     use serde_json::Value;
 
     use crate::test_support::{
@@ -361,9 +361,9 @@ mod tests {
             target_partitions: std::num::NonZeroUsize::new(2).expect("two partitions"),
             optimizer_rules: Vec::new(),
             suspects: crate::verify::Suspects::detached(),
+            visible_from: None,
         }
     }
-
     fn session_span(
         template: &Span,
         nth: u8,

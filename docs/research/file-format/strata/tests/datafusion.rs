@@ -20,7 +20,7 @@ use datafusion::datasource::MemTable;
 use datafusion::physical_plan::displayable;
 use datafusion::prelude::{ParquetReadOptions, SessionContext};
 use dataset::rows;
-use llmobs_core::schema::spans_schema;
+use cetra_core::schema::spans_schema;
 use object_store::memory::InMemory;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};

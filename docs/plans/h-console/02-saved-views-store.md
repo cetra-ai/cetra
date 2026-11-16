@@ -51,7 +51,7 @@ CREATE INDEX saved_views_owner ON saved_views(project_id, owner_user_id);
 - In the test `open_twice_is_idempotent`: `assert_eq!(count, 2);` becomes `assert_eq!(count, 3);`.
 - In the test `open_existing_checks_the_file_and_the_version`: the inserted future migration `VALUES (3, 'future', …)` becomes `VALUES (4, 'future', …)`, `assert_eq!(found, 3)` becomes `assert_eq!(found, 4)`, and `assert_eq!(expected, 2)` becomes `assert_eq!(expected, 3)`.
 - In `crates/server/src/admin.rs`, the test `schema_mismatch_names_the_versions` inserts a future migration `VALUES (3, 'future', …)` and expects `"this binary expects schema 2, found 3"`: change them to `VALUES (4, 'future', …)` and `"this binary expects schema 3, found 4"`. Then search for other hard-coded versions with `grep -rn "'future'\|expects schema\|count, 2)" crates/` and fix any other hit the same way.
-- Regenerate the schema snapshot: `INSTA_UPDATE=always cargo test -p llmobs-server schema_matches_the_snapshot`, then check with `git diff crates/server/tests/snapshots/meta_schema.snap` that the only change is four added blocks. The snapshot lists `sqlite_master` rows `ORDER BY name`, so they land at these places: `table saved_views`, then `index saved_views_lookup`, then `index saved_views_owner` (together, after the `projects`/`project_members` blocks and before the `sqlite_autoindex_*` blocks), and `index sqlite_autoindex_saved_views_1` (the primary key's index, no SQL line) among the other `sqlite_autoindex_*` blocks, after `sqlite_autoindex_projects_*`. Any other difference: STOP.
+- Regenerate the schema snapshot: `INSTA_UPDATE=always cargo test -p cetra-server schema_matches_the_snapshot`, then check with `git diff crates/server/tests/snapshots/meta_schema.snap` that the only change is four added blocks. The snapshot lists `sqlite_master` rows `ORDER BY name`, so they land at these places: `table saved_views`, then `index saved_views_lookup`, then `index saved_views_owner` (together, after the `projects`/`project_members` blocks and before the `sqlite_autoindex_*` blocks), and `index sqlite_autoindex_saved_views_1` (the primary key's index, no SQL line) among the other `sqlite_autoindex_*` blocks, after `sqlite_autoindex_projects_*`. Any other difference: STOP.
 
 ## 3. `meta/saved_views.rs`
 
@@ -59,7 +59,7 @@ Module doc: `//! `saved_views` rows (spec 04): saved list views and SQL queries 
 
 Do not add a `#![cfg_attr(not(test), allow(dead_code))]` line: `meta/mod.rs` already carries that inner attribute, and it covers its submodules until H3 calls this module.
 
-Imports you need: `serde_json::{Map, Value}`, `sqlx::{SqliteConnection, SqlitePool}`, `uuid::Uuid`, `llmobs_core::ids::ProjectId`, `super::MetaError`, `crate::api::saved_views::{SavedView, SavedViewKind}`.
+Imports you need: `serde_json::{Map, Value}`, `sqlx::{SqliteConnection, SqlitePool}`, `uuid::Uuid`, `cetra_core::ids::ProjectId`, `super::MetaError`, `crate::api::saved_views::{SavedView, SavedViewKind}`.
 
 ### Constants
 
@@ -368,10 +368,10 @@ Corruption:
 
 ```bash
 export PATH="$HOME/.local/share/nvm/v26.13.0/bin:$PATH"
-INSTA_UPDATE=always cargo test -p llmobs-server schema_matches_the_snapshot
+INSTA_UPDATE=always cargo test -p cetra-server schema_matches_the_snapshot
 git diff crates/server/tests/snapshots/meta_schema.snap
-cargo test -p llmobs-server saved_views
-cargo test -p llmobs-server meta::
+cargo test -p cetra-server saved_views
+cargo test -p cetra-server meta::
 just check
 ```
 

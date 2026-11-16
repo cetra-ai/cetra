@@ -6,7 +6,7 @@ URL patterns: `https://github.com/<repo>/security/advisories/<GHSA>` and `https:
 
 ## Table
 
-| Product | ID | Published | What went wrong | Lesson for llmobs |
+| Product | ID | Published | What went wrong | Lesson for cetra |
 |---|---|---|---|---|
 | Langfuse | GHSA-w9pw-c549-5m6w / CVE-2025-65107 | 2025-11-19 | SSO providers without an explicit `AUTH_<PROVIDER>_CHECKS` ran with no `state`/PKCE check. An attacker aborts their own IdP login, then makes a signed-in victim open the callback URL with the attacker's code: the attacker's IdP account gets linked to the victim's account (login CSRF → takeover). | `state` + PKCE + `nonce` always on, not configurable. The callback must verify `state` against a browser-bound cookie and **never link an identity to the currently signed-in user**; linking to a session user only happens in an explicit "connect account" flow started by that user. |
 | Langfuse | GHSA-94hf-6gqq-pj69 / CVE-2025-64504 | 2025-11-09 | Membership APIs (`members.allFromProject`, `allInvitesFromProject`) checked permissions against a client-supplied `orgId` that did not have to match the project: any user could list names/emails of another org. | Derive the org/project from the resource server-side and authorize on that. Never accept a parent id from the request as the authorization scope when the child id determines it. Test every route with a principal from another org. |

@@ -11,7 +11,7 @@ use axum::extract::{Request, State};
 use axum::http::HeaderMap;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use llmobs_core::ids::ProjectId;
+use cetra_core::ids::ProjectId;
 use uuid::Uuid;
 
 use crate::api::common::ProblemCode;
@@ -55,6 +55,8 @@ pub(crate) enum Principal {
         user: AuthUser,
         /// SHA-256 hex of the cookie. Not the cookie value.
         session_hash: String,
+        /// The org whose provider started this session, D-P-59.
+        sso_org: Option<cetra_core::ids::OrgId>,
     },
     /// A project API key. `Debug` omits the hash.
     ApiKey {
@@ -82,6 +84,9 @@ pub(crate) enum Principal {
         token_id: Uuid,
         /// The token's scope.
         scope: String,
+        /// The one method and path the token is for (D-P-71).
+        method: String,
+        path: String,
     },
 }
 
@@ -142,10 +147,17 @@ impl fmt::Debug for Principal {
                 .field("token_id", token_id)
                 .field("write", write)
                 .finish(),
-            Self::ControlPlane { token_id, scope } => formatter
+            Self::ControlPlane {
+                token_id,
+                scope,
+                method,
+                path,
+            } => formatter
                 .debug_struct("ControlPlane")
                 .field("token_id", token_id)
                 .field("scope", scope)
+                .field("method", method)
+                .field("path", path)
                 .finish(),
         }
     }
@@ -174,6 +186,10 @@ pub(crate) async fn authenticate(
     mut request: Request,
     next: Next,
 ) -> Response {
+    // A hidden control-plane route answers 404 in `enforce`, so no credential is read here.
+    if crate::http::access::hidden_without_control_plane(&state, request.uri().path()) {
+        return next.run(request).await;
+    }
     if request
         .headers()
         .contains_key(axum::http::header::AUTHORIZATION)
@@ -199,6 +215,7 @@ pub(crate) async fn authenticate(
                     email: row.user.email,
                 },
                 session_hash: row.hash,
+                sso_org: row.sso_org_id,
             }),
             refresh,
         ),
@@ -224,7 +241,7 @@ pub(crate) async fn bearer_principal(
     let token = bearer_token(headers)?;
     let now = state.clock.now_ns();
     if token
-        .strip_prefix(llmobs_token::TOKEN_TAG)
+        .strip_prefix(cetra_token::TOKEN_TAG)
         .is_some_and(|rest| rest.starts_with('.'))
     {
         return control_plane_principal(state, token, now);
@@ -258,13 +275,16 @@ pub(crate) async fn bearer_principal(
 }
 
 /// The caller of a `control_plane` token. It must verify, name this cell as its audience,
-/// live at most 5 minutes and be valid within 60 s of skew. It is not single-use: a captured
-/// one works until it expires, which the idempotent internal endpoints accept (D-P-28).
+/// live at most 5 minutes and be valid within 60 s of skew. It is not single-use, but the
+/// access layer accepts it only for the method and path it names (D-P-28, D-P-71).
 fn control_plane_principal(state: &AppState, token: &str, now: i64) -> Result<Principal, ApiError> {
-    let Ok(verified) = llmobs_token::verify(token) else {
+    if !state.config.entitlements.control_plane {
+        return Err(ApiError::Unauthorized);
+    }
+    let Ok(verified) = cetra_token::verify(token) else {
         return Err(ApiError::Unauthorized);
     };
-    let llmobs_token::Claims::ControlPlane(claims) = verified.claims else {
+    let cetra_token::Claims::ControlPlane(claims) = verified.claims else {
         return Err(ApiError::Unauthorized);
     };
     let five_minutes = 300 * 1_000_000_000;
@@ -280,6 +300,8 @@ fn control_plane_principal(state: &AppState, token: &str, now: i64) -> Result<Pr
     Ok(Principal::ControlPlane {
         token_id: claims.id,
         scope: claims.scope,
+        method: claims.method,
+        path: claims.path,
     })
 }
 
@@ -330,6 +352,13 @@ async fn pat_principal(
         return Err(ApiError::Unauthorized);
     };
     if row.disabled_at.is_some() {
+        return Err(ApiError::Unauthorized);
+    }
+    // D-P-58: under enforcement a personal access token is always refused, so a token made
+    // while the revocation committed does not work.
+    if crate::ee::sso_enforcement::requires_sso(state, &row.email)
+        || (!row.is_instance_admin && crate::ee::org_sso::enforces(state, &row.email))
+    {
         return Err(ApiError::Unauthorized);
     }
     state.token_last_used.record(cached.id, now);
@@ -387,7 +416,7 @@ mod tests {
     use uuid::Uuid;
 
     use axum::http::{HeaderMap, HeaderValue, header};
-    use llmobs_core::ids::{OrgId, ProjectId};
+    use cetra_core::ids::{OrgId, ProjectId};
     use serde_json::json;
 
     use super::{AuthUser, Principal, bearer_principal};
@@ -404,13 +433,20 @@ mod tests {
                 email: "ada@example.com".to_owned(),
             },
             session_hash: "not-a-cookie".to_owned(),
+            sso_org: None,
         };
         let text = format!("{principal:?}");
-        let Principal::Session { user, session_hash } = &principal else {
+        let Principal::Session {
+            user,
+            session_hash,
+            sso_org,
+        } = &principal
+        else {
             panic!("expected a session");
         };
         assert_eq!(user.email, "ada@example.com");
         assert_eq!(session_hash, "not-a-cookie");
+        assert_eq!(*sso_org, None);
         assert!(!text.contains(&user.email), "{text}");
         assert!(!text.contains(session_hash), "{text}");
     }
@@ -424,7 +460,7 @@ mod tests {
             scopes: KeyScopes::from_scopes(&[KeyScope::Read]),
         };
         let text = format!("{principal:?}");
-        assert!(!text.contains("sk-llmobs-"), "{text}");
+        assert!(!text.contains("sk-cetra-"), "{text}");
     }
 
     fn bearer_headers(token: &str) -> HeaderMap {
@@ -445,13 +481,15 @@ mod tests {
             "expires_at": expires_at,
             "audience": audience,
             "scope": scope,
+            "method": "GET",
+            "path": "/api/internal/v1/orgs",
         }))
     }
 
     #[tokio::test]
     async fn control_plane_token_resolves() {
         let app = TestApp::new().await;
-        let token = control_plane_token("orgs");
+        let token = control_plane_token("orgs", "GET", "/api/internal/v1/orgs");
         let Ok(principal) = bearer_principal(&app.state, &bearer_headers(&token)).await else {
             panic!("a valid control-plane token resolves");
         };
@@ -459,6 +497,17 @@ mod tests {
             panic!("expected a control-plane principal");
         };
         assert_eq!(scope, "orgs");
+    }
+
+    #[tokio::test]
+    async fn control_plane_tokens_are_refused_when_off() {
+        let app = TestApp::with_config(|c| c.entitlements.control_plane = false).await;
+        let token = control_plane_token("orgs", "GET", "/api/internal/v1/orgs");
+        let refused = bearer_principal(&app.state, &bearer_headers(&token)).await;
+        assert!(
+            matches!(refused, Err(crate::http::error::ApiError::Unauthorized)),
+            "a control-plane token is refused when entitlements.control_plane is off"
+        );
     }
 
     #[tokio::test]
@@ -474,7 +523,7 @@ mod tests {
             &json!({}),
         );
         let tampered = {
-            let mut token = control_plane_token("orgs");
+            let mut token = control_plane_token("orgs", "GET", "/api/internal/v1/orgs");
             let last = token.pop().expect("a token is not empty");
             token.push(if last == 'A' { 'B' } else { 'A' });
             token
@@ -537,7 +586,7 @@ mod tests {
             ("bad signature", tampered, false),
         ];
         for (case, token, verifies) in cases {
-            assert_eq!(llmobs_token::verify(&token).is_ok(), verifies, "{case}");
+            assert_eq!(cetra_token::verify(&token).is_ok(), verifies, "{case}");
             assert!(
                 bearer_principal(&app.state, &bearer_headers(&token))
                     .await

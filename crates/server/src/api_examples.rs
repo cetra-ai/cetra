@@ -5,13 +5,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use axum::http::{Method, StatusCode};
-use llmobs_core::ids::ProjectId;
-use llmobs_core::score::Score;
+use cetra_core::ids::ProjectId;
+use cetra_core::score::Score;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::api::common::Page;
+use crate::api::datasets::{Dataset, DatasetItem, DatasetVersion};
 use crate::api::metrics::MetricsResponse;
 use crate::api::schema::SchemaResponse;
 use crate::api::sessions::{SessionDetail, SessionSummary};
@@ -21,6 +22,9 @@ use crate::api::users::{EndUserDetail, EndUserSummary};
 use crate::test_support::{EXAMPLE_PROJECT, TestApp};
 
 const MEDIA: &str = "497790947d4666760ce38f3c00e852c71fdb66cae849bae8e9ede352719e1581";
+const EXAMPLE_DATASET: &str = "01900000-0000-7000-8000-000000000c01";
+/// Item `…0d02` of `faq`: edited once, so its current revision is `…0d14`.
+const EXAMPLE_ITEM: &str = "01900000-0000-7000-8000-000000000d02";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Example {
@@ -198,6 +202,7 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
         .parse()
         .unwrap_or_else(|error| panic!("{error}"));
     app.load_example_dataset(project).await;
+    app.seed_example_faq_dataset().await;
     let cookie = cookie.as_str();
     let mut out = Output::default();
 
@@ -313,6 +318,71 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
     let scores: Page<Score> = fetch(&app, cookie, "/scores").await;
     out.add("list_scores", &[], &[], "responses/scores.json", &scores);
 
+    let datasets: Page<Dataset> = fetch(&app, cookie, "/datasets").await;
+    out.add(
+        "list_datasets",
+        &[],
+        &[],
+        "responses/datasets.json",
+        &datasets,
+    );
+    let dataset: Dataset = fetch(&app, cookie, &format!("/datasets/{EXAMPLE_DATASET}")).await;
+    out.add(
+        "get_dataset",
+        &[("dataset", EXAMPLE_DATASET)],
+        &[],
+        &format!("responses/datasets/{EXAMPLE_DATASET}.json"),
+        &dataset,
+    );
+    let versions: Page<DatasetVersion> = fetch(
+        &app,
+        cookie,
+        &format!("/datasets/{EXAMPLE_DATASET}/versions"),
+    )
+    .await;
+    out.add(
+        "list_dataset_versions",
+        &[("dataset", EXAMPLE_DATASET)],
+        &[],
+        &format!("responses/datasets/{EXAMPLE_DATASET}/versions.json"),
+        &versions,
+    );
+    let items: Page<DatasetItem> =
+        fetch(&app, cookie, &format!("/datasets/{EXAMPLE_DATASET}/items")).await;
+    out.add(
+        "list_dataset_items",
+        &[("dataset", EXAMPLE_DATASET)],
+        &[],
+        &format!("responses/datasets/{EXAMPLE_DATASET}/items.json"),
+        &items,
+    );
+    let items_v1: Page<DatasetItem> = fetch(
+        &app,
+        cookie,
+        &format!("/datasets/{EXAMPLE_DATASET}/items?version=1"),
+    )
+    .await;
+    out.add(
+        "list_dataset_items",
+        &[("dataset", EXAMPLE_DATASET)],
+        &[("version", "1")],
+        &format!("responses/datasets/{EXAMPLE_DATASET}/items-v1.json"),
+        &items_v1,
+    );
+    let item: DatasetItem = fetch(
+        &app,
+        cookie,
+        &format!("/datasets/{EXAMPLE_DATASET}/items/{EXAMPLE_ITEM}"),
+    )
+    .await;
+    out.add(
+        "get_dataset_item",
+        &[("dataset", EXAMPLE_DATASET), ("item_id", EXAMPLE_ITEM)],
+        &[],
+        &format!("responses/datasets/{EXAMPLE_DATASET}/items/{EXAMPLE_ITEM}.json"),
+        &item,
+    );
+
     let metrics: MetricsResponse = fetch(
         &app,
         cookie,
@@ -370,6 +440,29 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
 
     // Static entries, copied from the hand-written list this generator replaces.
     out.manifest.extend([
+        // The create answer has the shape of the read, so the read's file serves it too.
+        example_created(
+            "post_dataset",
+            BTreeMap::new(),
+            &format!("responses/datasets/{EXAMPLE_DATASET}.json"),
+        ),
+        example(
+            "post_dataset_import_preview",
+            params(&[("dataset", EXAMPLE_DATASET)]),
+            params(&[("format", "csv")]),
+            "static/dataset-import-preview.json",
+            "application/json",
+        ),
+        example_created(
+            "post_dataset_import",
+            params(&[("dataset", EXAMPLE_DATASET)]),
+            "static/dataset-import-result.json",
+        ),
+        example_created(
+            "post_dataset_item_from_trace",
+            params(&[("dataset", EXAMPLE_DATASET)]),
+            "static/dataset-item-from-trace.json",
+        ),
         example(
             "list_admin_users",
             BTreeMap::new(),
@@ -438,6 +531,20 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
             params(&[("org", "acme")]),
             BTreeMap::new(),
             "static/org-entitlements.json",
+            "application/json",
+        ),
+        example(
+            "get_org_sso",
+            params(&[("org", "acme")]),
+            BTreeMap::new(),
+            "static/org-sso.json",
+            "application/json",
+        ),
+        example(
+            "get_org_usage",
+            params(&[("org", "acme")]),
+            BTreeMap::new(),
+            "static/org-usage.json",
             "application/json",
         ),
         example(
@@ -524,6 +631,13 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
         ),
         example_status("post_api_key", "static/api-key-created.json", 201),
         example(
+            "list_org_model_prices",
+            params(&[("org", "acme")]),
+            BTreeMap::new(),
+            "static/org-model-prices.json",
+            "application/json",
+        ),
+        example(
             "list_llm_connections",
             params(&[("org", "acme")]),
             BTreeMap::new(),
@@ -597,6 +711,61 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
             "static/score-definition.json",
         ),
         example(
+            "list_experiments",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "static/experiments.json",
+            "application/json",
+        ),
+        example(
+            "get_experiment",
+            params(&[("id", "01900000-0000-7000-8000-000000000e01")]),
+            BTreeMap::new(),
+            "static/experiment.json",
+            "application/json",
+        ),
+        example_created(
+            "post_experiment",
+            BTreeMap::new(),
+            "static/experiment-created.json",
+        ),
+        example(
+            "get_experiment_results",
+            params(&[("id", "01900000-0000-7000-8000-000000000e01")]),
+            BTreeMap::new(),
+            "static/experiment-results.json",
+            "application/json",
+        ),
+        example(
+            "compare_experiments",
+            BTreeMap::new(),
+            params(&[(
+                "ids",
+                "01900000-0000-7000-8000-000000000e01,01900000-0000-7000-8000-000000000e02",
+            )]),
+            "static/experiment-comparison.json",
+            "application/json",
+        ),
+        example(
+            "list_models",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "static/model-prices.json",
+            "application/json",
+        ),
+        example(
+            "resolve_model_price",
+            BTreeMap::new(),
+            params(&[("model", "gpt-4o"), ("provider", "openai")]),
+            "static/model-price-resolution.json",
+            "application/json",
+        ),
+        example_created(
+            "post_model_price",
+            BTreeMap::new(),
+            "static/model-price.json",
+        ),
+        example(
             "list_personal_tokens",
             BTreeMap::new(),
             BTreeMap::new(),
@@ -613,6 +782,13 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
             BTreeMap::new(),
             BTreeMap::new(),
             "static/saved-views.json",
+            "application/json",
+        ),
+        example(
+            "get_saved_view",
+            params(&[("id", "01900000-0000-7000-8000-000000000211")]),
+            BTreeMap::new(),
+            "static/saved-view.json",
             "application/json",
         ),
         example(
@@ -648,6 +824,89 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
             params(&[("org", "acme")]),
             "static/deletion-org.json",
         ),
+        example(
+            "list_online_rules",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "static/online-rules.json",
+            "application/json",
+        ),
+        example(
+            "get_online_rule",
+            params(&[("id", "01900000-0000-7000-8000-000000000700")]),
+            BTreeMap::new(),
+            "static/online-rule.json",
+            "application/json",
+        ),
+        example_created(
+            "post_online_rule",
+            BTreeMap::new(),
+            "static/online-rule.json",
+        ),
+        example(
+            "post_online_rule_resume",
+            params(&[("id", "01900000-0000-7000-8000-000000000701")]),
+            BTreeMap::new(),
+            "static/online-rule-resumed.json",
+            "application/json",
+        ),
+        example(
+            "post_online_rule_preview",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "static/online-rule-preview.json",
+            "application/json",
+        ),
+        example(
+            "list_eval_jobs",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "static/eval-jobs.json",
+            "application/json",
+        ),
+        example(
+            "get_eval_job",
+            params(&[("id", "01900000-0000-7000-8000-000000000800")]),
+            BTreeMap::new(),
+            "static/eval-job.json",
+            "application/json",
+        ),
+        Example {
+            status: 202,
+            ..example(
+                "post_evaluator_run",
+                params(&[("id", "01900000-0000-7000-8000-000000000500")]),
+                BTreeMap::new(),
+                "static/eval-job-queued.json",
+                "application/json",
+            )
+        },
+        example(
+            "list_backfills",
+            params(&[("id", "01900000-0000-7000-8000-000000000700")]),
+            BTreeMap::new(),
+            "static/backfills.json",
+            "application/json",
+        ),
+        example(
+            "list_backfills",
+            params(&[("id", "01900000-0000-7000-8000-000000000701")]),
+            BTreeMap::new(),
+            "static/backfills.json",
+            "application/json",
+        ),
+        example(
+            "post_backfill_estimate",
+            params(&[("id", "01900000-0000-7000-8000-000000000700")]),
+            BTreeMap::new(),
+            "static/backfill-estimate.json",
+            "application/json",
+        ),
+        example_accepted(
+            "post_backfill",
+            params(&[("id", "01900000-0000-7000-8000-000000000700")]),
+            "static/backfill.json",
+        ),
     ]);
     out.manifest.sort_by(|left, right| {
         left.operation_id
@@ -663,11 +922,11 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
 }
 
 fn examples_write_requested() -> bool {
-    match std::env::var("LLMOBS_API_EXAMPLES_WRITE") {
+    match std::env::var("CETRA_API_EXAMPLES_WRITE") {
         Err(std::env::VarError::NotPresent) => false,
         Ok(value) if value == "1" => true,
         Ok(value) if value.is_empty() => false,
-        Ok(_) | Err(_) => panic!("set LLMOBS_API_EXAMPLES_WRITE=1 to write, or unset it"),
+        Ok(_) | Err(_) => panic!("set CETRA_API_EXAMPLES_WRITE=1 to write, or unset it"),
     }
 }
 

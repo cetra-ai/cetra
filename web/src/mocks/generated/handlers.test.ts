@@ -88,8 +88,8 @@ it("hides evaluation traces until include_eval", async () => {
     await fetch(`${PROJECT}/traces?limit=1000&include_eval=true`)
   ).json()) as Schema<"TracePage">;
 
-  expect(plain.data.every((trace) => trace.environment !== "llmobs-eval")).toBe(true);
-  expect(withEval.data.some((trace) => trace.environment === "llmobs-eval")).toBe(true);
+  expect(plain.data.every((trace) => trace.environment !== "cetra-eval")).toBe(true);
+  expect(withEval.data.some((trace) => trace.environment === "cetra-eval")).toBe(true);
   expect(withEval.data.length).toBeGreaterThan(plain.data.length);
 });
 
@@ -115,7 +115,7 @@ it("keeps session and user totals equal to their traces", async () => {
   server.use(...largeHandlers(dataset));
   const traces = dataset.traces.filter(
     (trace) =>
-      trace.environment !== "llmobs-eval" && trace.metadata["llmobs.experiment_id"] === undefined,
+      trace.environment !== "cetra-eval" && trace.metadata["cetra.experiment_id"] === undefined,
   );
   const sessions = (await (
     await fetch(`${PROJECT}/sessions?limit=1000`)

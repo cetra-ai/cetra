@@ -44,13 +44,13 @@ M3's worker does the rest.
 
 ## Types
 
-`crates/server/src/api/deletions.rs` (`pub` items, like the other `api` modules, since `llmobs_server::api` is public and the example tests use it):
+`crates/server/src/api/deletions.rs` (`pub` items, like the other `api` modules, since `cetra_server::api` is public and the example tests use it):
 
 ```rust
 //! Deletion request and response types (spec 09 § Pricing & GDPR, D-M-2).
 
-use llmobs_core::ids::{OrgId, ProjectId};
-use llmobs_core::time_serde;
+use cetra_core::ids::{OrgId, ProjectId};
+use cetra_core::time_serde;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -359,7 +359,7 @@ async fn create_deletion(
    - `Filter { filter, search, from, to, include_eval, include_experiments }`:
      - `let window = TimeWindow::new(from.ns(), to.ns())?;`. The `RunError` becomes `400 bad_request` through `From<RunError>`;
      - `filter` and `search` are kept only when they hold a non-whitespace character: `.filter(|text| !text.trim().is_empty())`. The stored text is not trimmed;
-     - count: `let ctx = crate::routes::read::open_query(&state, access.project.id, None).await?;`, then `let ids = llmobs_storage::filter_trace_ids(&ctx, FilterDeletionRequest { filter: filter.as_deref(), search: search.as_deref(), window, include_eval, include_experiments, limit: state.deletions.filter_cap() + 1, timeout: READ_TIMEOUT }).await?;` (with `filter`/`search` already reduced to non-blank text). An invalid filter is `400 invalid_filter`, a timeout `422 query_timeout`, busy `503`. If `ids.len() > state.deletions.filter_cap()` → `Err(ApiError::TooManyTraces)`;
+     - count: `let ctx = crate::routes::read::open_query(&state, access.project.id, None).await?;`, then `let ids = cetra_storage::filter_trace_ids(&ctx, FilterDeletionRequest { filter: filter.as_deref(), search: search.as_deref(), window, include_eval, include_experiments, limit: state.deletions.filter_cap() + 1, timeout: READ_TIMEOUT }).await?;` (with `filter`/`search` already reduced to non-blank text). An invalid filter is `400 invalid_filter`, a timeout `422 query_timeout`, busy `503`. If `ids.len() > state.deletions.filter_cap()` → `Err(ApiError::TooManyTraces)`;
      - `request` sets `filter`, `search`, `from: Some(from.ns())`, `to: Some(to.ns())`, `include_eval: Some(include_eval)`, `include_experiments: Some(include_experiments)`.
    - `User { user_id }`: `1..=MAX_USER_ID_BYTES` bytes (`user_id.len()`), else `field_error("user_id", "user_id must be 1 to 255 bytes")`. `request` is the default.
 4. `let id = Uuid::now_v7(); let now = state.clock.now_ns();`. `store::NewDeletion { id, org_id: access.project.org_id, project_id: Some(access.project.id), kind, user_id /* Some for User only */, request, actor_kind, actor_id, state: store::DeletionState::Resolving, created_at: now }`.
@@ -369,9 +369,10 @@ async fn create_deletion(
    - for `TraceIds`, `insert_traces(conn, id, &ids)`.
 
    The conflict becomes `409 conflict`.
-6. **Guard**, after the commit:
-   - `TraceIds`: `state.deletions.guard.add_traces(project, &ids, now)`;
-   - `User`: `state.deletions.guard.add_user(project, &user_id, now)`.
+6. **Guard**, before the write of step 5 (amended after the plan review, M-1: a judge copy stamped after the cut-off must always meet a guard that knows the trace): after the filter's count, fill it once with `clock.now_ns()`, then read the cut-off `now`, then fill it again with `now`:
+   - `TraceIds`: `state.deletions.guard.add_traces(project, &ids, id, now)`;
+   - `Filter`: `state.deletions.guard.add_traces(project, &matched, id, now)` (the ids the count read);
+   - `User`: `state.deletions.guard.add_user(project, &user_id, id, now)`.
 7. `state.deletions.wake.notify_one();`
 8. Audit: `tracing::info!(target: "audit", deletion_id = %id, kind = kind.as_str(), org_id = %org, project_id = %project, actor_kind = actor_kind.as_str(), actor_id = %actor_id, "deletion requested");`.
 9. `Ok((StatusCode::ACCEPTED, error::Json(deletion_json(&row))))`.
@@ -466,7 +467,7 @@ Every file under `fixtures/api/static` must be listed in the manifest (`every_fi
 `crates/server/tests/api_examples.rs`:
 - in `static_files_match_their_types`, add `roundtrip::<Page<Deletion>>("static/deletions.json");`, `roundtrip::<Deletion>("static/deletion.json");`, `roundtrip::<DeletionPreview>("static/deletion-preview.json");`;
 - in `generated_files_roundtrip`'s `match`, add the arms `"list_deletions" => roundtrip::<Page<Deletion>>(&example.file)`, `"get_deletion" | "create_deletion" => roundtrip::<Deletion>(&example.file)`, `"preview_deletion" => roundtrip::<DeletionPreview>(&example.file)` (its catch-all panics on unknown operations);
-- add `use llmobs_server::api::deletions::{Deletion, DeletionPreview};`.
+- add `use cetra_server::api::deletions::{Deletion, DeletionPreview};`.
 
 Run `just api-examples` to regenerate `manifest.json`.
 
@@ -556,7 +557,7 @@ After committing, advance the clock 1 s (`app.state.clock.advance(Duration::from
     - `?limit=2` returns the newest two and a `next_cursor`. The next page returns the oldest, with `next_cursor` null.
     - `?cursor=bad` → `400`.
 14. `get_checks_the_project`: a deletion of another project (`app.add_project`) is `404` through this project's path. An unknown id is `404`. `…/deletions/not-a-uuid` is `400`.
-15. `guard_is_filled_at_creation`: after a `user` deletion of `u9`, `app.state.deletions.guard.blocks(project, TraceId::from_bytes([1; 16]).unwrap(), &["u9"], now, now)` is true (data ingested at the cut-off).
+15. `guard_is_filled_at_creation`: after a `user` deletion of `u9`, `app.state.deletions.guard.blocking(project, TraceId::from_bytes([1; 16]).unwrap(), &[("u9", now)], now)` is `Some` (data ingested at the cut-off). `filter_guard_is_filled_at_creation`: a filter deletion matching trace A guards A with its id, and not trace B.
 16. `request_audit_log_has_no_scope`: `let (response, logs) = capture_logs(post(…user secret-user-1…)).await;` → `202`, `logs.contains("deletion requested")`, `!logs.contains("secret-user-1")`.
 17. `read_pat_of_an_admin_lists`: a read-only PAT of the owner → `GET …/deletions` `200`.
 

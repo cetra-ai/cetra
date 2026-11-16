@@ -12,6 +12,10 @@ inputs:
   s3-secret-access-key:
     description: Secret access key paired with s3-access-key-id.
     required: false
+  mold:
+    description: Install mold and link with it (only the jobs that set the mold RUSTFLAGS in ci.yml).
+    required: false
+    default: "false"
 
 runs:
   using: composite
@@ -22,14 +26,17 @@ runs:
       run: rustup toolchain install
 
     - name: Install mold 3.0.0
+      if: inputs.mold == 'true' && runner.os == 'Linux' && runner.arch == 'X64'
       shell: bash
       # Pinned release, not apt: ubuntu 24.04 ships mold 2.30. The jobs link with
       # mold via RUSTFLAGS in ci.yml (-Clinker-features=-lld -Clink-arg=-fuse-ld=mold).
+      # Checksum: the release asset's GitHub digest; the same hash is in taiki-e/install-action's mold manifest.
       run: |
         set -euo pipefail
-        curl -fsSL -o /tmp/mold.tar.gz \
+        curl -fsSL -o "$RUNNER_TEMP/mold.tar.gz" \
           https://github.com/rui314/mold/releases/download/v3.0.0/mold-3.0.0-x86_64-linux.tar.gz
-        sudo tar -xzf /tmp/mold.tar.gz --strip-components=1 -C /usr/local
+        echo "6c90d4a474c7c0409dfb575be03a5345878ac14fdba18de8b40fa58c60121189  $RUNNER_TEMP/mold.tar.gz" | sha256sum -c -
+        sudo tar -xzf "$RUNNER_TEMP/mold.tar.gz" --strip-components=1 -C /usr/local
 
     - name: Cache Rust compilation with kache and Garage
       # The caller enables caching and supplies credentials only for trusted runs.
@@ -52,6 +59,6 @@ runs:
         pr-comment: false
 
     - name: Install just and cargo-deny
-      uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+      uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
       with:
         tool: just@1.59.0,cargo-deny@0.20.2

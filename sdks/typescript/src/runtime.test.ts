@@ -26,13 +26,13 @@ import {
 import { finished, startMemory } from "./testing.test-helpers.js";
 import { type FetchLike, runtimeGlobals } from "./web.js";
 
-const INIT_OPTIONS = { apiKey: "sk-llmobs-test", baseUrl: "http://127.0.0.1:9" } as const;
+const INIT_OPTIONS = { apiKey: "sk-cetra-test", baseUrl: "http://127.0.0.1:9" } as const;
 
 const MISSING_KEY_WARNING =
-  "llmobs: no API key; set LLMOBS_API_KEY, or LLMOBS_ENABLED=false to silence this; tracing is disabled";
-const INIT_TWICE_WARNING = "llmobs: init() was already called; this call is ignored";
+  "cetra: no API key; set CETRA_API_KEY, or CETRA_ENABLED=false to silence this; tracing is disabled";
+const INIT_TWICE_WARNING = "cetra: init() was already called; this call is ignored";
 const GLOBAL_EXISTS_WARNING =
-  "llmobs: a global tracer provider is already registered; llmobs keeps its own provider. Add spanProcessor() to your provider to send its spans to llmobs";
+  "cetra: a global tracer provider is already registered; cetra keeps its own provider. Add spanProcessor() to your provider to send its spans to cetra";
 
 interface RecordedCall {
   url: string;
@@ -88,7 +88,7 @@ describe("init", () => {
   });
 
   it("warns once and installs nothing without an API key", () => {
-    vi.stubEnv("LLMOBS_API_KEY", ""); // empty counts as unset
+    vi.stubEnv("CETRA_API_KEY", ""); // empty counts as unset
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       init();
@@ -120,7 +120,7 @@ describe("init", () => {
     const first = currentRuntime();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
-      init({ apiKey: "sk-llmobs-test-2", baseUrl: "http://127.0.0.1:10" });
+      init({ apiKey: "sk-cetra-test-2", baseUrl: "http://127.0.0.1:10" });
       expect(warn).toHaveBeenCalledTimes(1);
       expect(warn).toHaveBeenCalledWith(INIT_TWICE_WARNING);
       expect(currentRuntime()).toBe(first);
@@ -144,13 +144,13 @@ describe("init", () => {
 });
 
 describe("the provider", () => {
-  it("exports spans with the llmobs scope and the distro resource", async () => {
+  it("exports spans with the cetra scope and the distro resource", async () => {
     const { exporter, runtime } = startMemory();
     runtime.tracer.startSpan("hello").end();
     const [span] = await finished(exporter);
-    expect(span?.instrumentationScope.name).toBe("llmobs");
+    expect(span?.instrumentationScope.name).toBe("cetra");
     expect(span?.instrumentationScope.version).toBe(VERSION);
-    expect(span?.resource.attributes["telemetry.distro.name"]).toBe("llmobs");
+    expect(span?.resource.attributes["telemetry.distro.name"]).toBe("cetra");
     expect(span?.resource.attributes["telemetry.distro.version"]).toBe(VERSION);
     expect(span?.resource.attributes["service.name"]).toBe("conformance");
   });
@@ -159,16 +159,16 @@ describe("the provider", () => {
     const { exporter, runtime } = startMemory({ environment: "staging", release: "1.2.3" });
     runtime.tracer.startSpan("a").end();
     const [span] = await finished(exporter);
-    expect(span?.attributes["llmobs.environment"]).toBe("staging");
-    expect(span?.attributes["llmobs.release"]).toBe("1.2.3");
+    expect(span?.attributes["cetra.environment"]).toBe("staging");
+    expect(span?.attributes["cetra.release"]).toBe("1.2.3");
   });
 
   it("stamps nothing when environment and release are not configured", async () => {
     const { exporter, runtime } = startMemory();
     runtime.tracer.startSpan("a").end();
     const [span] = await finished(exporter);
-    expect(span?.attributes["llmobs.environment"]).toBeUndefined();
-    expect(span?.attributes["llmobs.release"]).toBeUndefined();
+    expect(span?.attributes["cetra.environment"]).toBeUndefined();
+    expect(span?.attributes["cetra.release"]).toBeUndefined();
   });
 
   it("drops root spans at sampleRate 0 but keeps a sampled remote parent's children", async () => {
@@ -190,7 +190,7 @@ describe("the provider", () => {
 describe("the context manager", () => {
   it("registers an AsyncLocalStorage context manager", () => {
     startMemory();
-    const key = createContextKey("llmobs.test");
+    const key = createContextKey("cetra.test");
     const seen: unknown[] = [];
     context.with(context.active().setValue(key, "in-with"), () => {
       seen.push(context.active().getValue(key));
@@ -237,7 +237,7 @@ describe("the lifecycle", () => {
     expect(calls[0]?.url).toBe("http://127.0.0.1:9/v1/traces");
     expect(calls[0]?.headers).toEqual({
       "Content-Type": "application/x-protobuf",
-      Authorization: "Bearer sk-llmobs-test",
+      Authorization: "Bearer sk-cetra-test",
       "Content-Encoding": "gzip",
     });
     // The body really is a gzip stream.

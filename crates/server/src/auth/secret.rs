@@ -10,19 +10,19 @@ use subtle::ConstantTimeEq;
 use super::AuthError;
 
 /// Product name inside `sk-` / `pk-` / `pat-` prefixes. Renaming is
-/// [`llmobs_core::names::PRODUCT`] (D46).
-const NAME: &str = llmobs_core::names::PRODUCT;
+/// [`cetra_core::names::PRODUCT`].
+const NAME: &str = cetra_core::names::PRODUCT;
 
 const BASE62: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
 /// A project API key or a personal access token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KeyKind {
-    /// `sk-llmobs-` and 32 base62 characters.
+    /// `sk-cetra-` and 32 base62 characters.
     Secret,
-    /// `pk-llmobs-` and 24 base62 characters.
+    /// `pk-cetra-` and 24 base62 characters.
     Public,
-    /// `pat-llmobs-` and 32 base62 characters.
+    /// `pat-cetra-` and 32 base62 characters.
     Personal,
 }
 
@@ -232,7 +232,7 @@ mod tests {
         assert_eq!(parse_key(&dashed), None);
         assert_eq!(parse_key(&format!("xx-{NAME}-{}", "a".repeat(32))), None);
         assert_eq!(parse_key(&format!("pat-{NAME}-{}", "a".repeat(24))), None);
-        assert_eq!(display_prefix("sk-llmobs-a1B2c3…"), "sk-llmobs-a1B2c3");
+        assert_eq!(display_prefix("sk-cetra-a1B2c3…"), "sk-cetra-a1B2c3");
     }
 
     #[test]

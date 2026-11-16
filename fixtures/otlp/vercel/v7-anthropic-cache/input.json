@@ -41,15 +41,15 @@
           },
           "spans": [
             {
-              "traceId": "d9d9c189eaa0ec8147cea85213e9707c",
-              "spanId": "ff98c084107a0eba",
+              "traceId": "2d24270ed80451e51b7fb7cfa8a1c6ee",
+              "spanId": "384c3dceaa131168",
               "traceState": "",
               "parentSpanId": "",
               "flags": 257,
               "name": "invoke_agent claude-sonnet-4-5",
               "kind": 1,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590067000000",
+              "endTimeUnixNano": "1767225590072000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",
@@ -132,15 +132,15 @@
               "status": null
             },
             {
-              "traceId": "d9d9c189eaa0ec8147cea85213e9707c",
-              "spanId": "e2db95979d64f8ae",
+              "traceId": "2d24270ed80451e51b7fb7cfa8a1c6ee",
+              "spanId": "6f99384cb361dbed",
               "traceState": "",
-              "parentSpanId": "ff98c084107a0eba",
+              "parentSpanId": "384c3dceaa131168",
               "flags": 257,
               "name": "step 1",
               "kind": 1,
-              "startTimeUnixNano": "1767225590002000000",
-              "endTimeUnixNano": "1767225590064000000",
+              "startTimeUnixNano": "1767225590003000000",
+              "endTimeUnixNano": "1767225590070000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",
@@ -157,15 +157,15 @@
               "status": null
             },
             {
-              "traceId": "d9d9c189eaa0ec8147cea85213e9707c",
-              "spanId": "96d0fd75732c4b70",
+              "traceId": "2d24270ed80451e51b7fb7cfa8a1c6ee",
+              "spanId": "cf41d3c1135239ee",
               "traceState": "",
-              "parentSpanId": "e2db95979d64f8ae",
+              "parentSpanId": "6f99384cb361dbed",
               "flags": 257,
               "name": "chat claude-sonnet-4-5",
               "kind": 3,
-              "startTimeUnixNano": "1767225590002000000",
-              "endTimeUnixNano": "1767225590061000000",
+              "startTimeUnixNano": "1767225590003000000",
+              "endTimeUnixNano": "1767225590067000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",
@@ -194,7 +194,7 @@
                 {
                   "key": "gen_ai.client.operation.duration",
                   "value": {
-                    "doubleValue": 0.05808278399999998
+                    "doubleValue": 0.06309165100000001
                   }
                 },
                 {

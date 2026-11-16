@@ -3,10 +3,14 @@
 //! lists and reads.
 
 use axum::extract::{Extension, State};
+use std::collections::BTreeSet;
+use std::sync::Arc;
+
 use axum::http::StatusCode;
 use axum::routing::{delete, get, patch, post};
-use llmobs_core::ids::{OrgId, ProjectId};
-use llmobs_eval::{EvaluatorConfig, JudgeOutput, OutputScore};
+use cetra_core::ids::{OrgId, ProjectId};
+use cetra_eval::{Adapter, EvaluatorConfig, JudgeOutput, OutputScore, VariableMapping};
+use cetra_otel::PriceTable;
 use serde::Deserialize;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
@@ -16,18 +20,22 @@ use crate::api::evaluators::{
     CreateEvaluatorRequest, Evaluator, EvaluatorKind, EvaluatorTemplateList, EvaluatorTestRequest,
     EvaluatorTestResult, OutputScoreBody, UpdateEvaluatorRequest, builtin_template_list,
 };
+use crate::api::online_rules::RuleTarget;
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::ProjectPerm;
 use crate::crypto::{Aad, SecretBox};
 use crate::eval::definitions::fits_definition;
 use crate::eval::evaluator::{self, EvaluatorError, Prepared, WebhookSecrets};
+use crate::eval::rule_check::{RuleShape, Subject, check_rule};
 use crate::eval::test_run;
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
+use crate::http::restore::refuse_outbound;
 use crate::meta::MetaError;
 use crate::meta::connections;
 use crate::meta::evaluators::{self as store, EvaluatorFields, EvaluatorRow};
+use crate::meta::online_rules::{self as rules, RuleRow};
 use crate::meta::score_definitions::list_definitions;
 
 use super::orgs::page_named;
@@ -122,6 +130,16 @@ enum Outcome {
     Gone,
     /// A judge's connection is not in the org.
     ConnectionMissing,
+    /// The change would break rules that use the evaluator (D-I-19), one error per rule.
+    BreaksRules(Vec<FieldError>),
+}
+
+/// What a delete transaction did.
+enum Removal {
+    Removed,
+    Missing,
+    /// Rules use the evaluator; nothing was deleted (D-I-19).
+    InUse(Vec<RuleRow>),
 }
 
 async fn list_evaluators(
@@ -236,6 +254,11 @@ async fn create_evaluator(
         }
         Outcome::ConnectionMissing => Err(bad_request(vec![connection_missing()])),
         Outcome::Gone => Err(ApiError::NotFound),
+        // A new evaluator has no rules yet; the arm exists for the shared enum.
+        Outcome::BreaksRules(errors) => Err(ApiError::ConflictWith {
+            detail: "the change would break online rules that use this evaluator",
+            errors,
+        }),
     }
 }
 
@@ -249,6 +272,9 @@ async fn update_evaluator(
     let user = principal::session_user(&principal)?;
     let project = access.project.id;
     let org = access.project.org_id;
+    // D-T-8: the price table is read and the write made under the price write lock, so a
+    // price write cannot pass its guard between the two.
+    let prices_write = state.ingest.prices().lock_writes().await;
     let expected = store::get_evaluator(state.meta.reader(), project, id)
         .await?
         .ok_or(ApiError::NotFound)?;
@@ -301,6 +327,12 @@ async fn update_evaluator(
     } else {
         expected.version
     };
+    // The rules of this evaluator are checked against the new config in the write (D-I-19).
+    let checks = RuleChecks {
+        subject: Subject::from_config(&prepared.evaluator.config),
+        prices: state.ingest.prices().for_project(org, project),
+        now: state.clock.now_ns(),
+    };
     let fields = EvaluatorFields {
         name: prepared.evaluator.name.clone(),
         config: prepared.config_json,
@@ -310,15 +342,16 @@ async fn update_evaluator(
         version,
     };
     let user_id = user.id;
-    let now = state.clock.now_ns();
     let outcome = state
         .meta
         .write(move |conn| {
-            Box::pin(
-                async move { write_update(conn, org, project, id, expected, fields, now).await },
-            )
+            Box::pin(async move {
+                write_update(conn, org, project, id, expected, fields, &checks).await
+            })
         })
-        .await?;
+        .await;
+    drop(prices_write);
+    let outcome = outcome?;
     match outcome {
         Outcome::Updated(row) => {
             tracing::info!(
@@ -333,6 +366,10 @@ async fn update_evaluator(
         }
         Outcome::Gone => Err(ApiError::NotFound),
         Outcome::ConnectionMissing => Err(bad_request(vec![connection_missing()])),
+        Outcome::BreaksRules(errors) => Err(ApiError::ConflictWith {
+            detail: "the change would break online rules that use this evaluator",
+            errors,
+        }),
     }
 }
 
@@ -345,14 +382,41 @@ async fn delete_evaluator(
     let user = principal::session_user(&principal)?;
     let project = access.project.id;
     let user_id = user.id;
-    let went = state
+    let removal = state
         .meta
         .write(move |conn| {
-            Box::pin(async move { store::delete_evaluator(conn, project, id).await })
+            Box::pin(async move {
+                // Only this project's rules: an id from another project must answer 404 and
+                // name none of that project's rules.
+                let mut rules = rules::rules_of_evaluator(conn, id).await?;
+                rules.retain(|rule| rule.project_id == project);
+                if !rules.is_empty() {
+                    return Ok(Removal::InUse(rules));
+                }
+                Ok(if store::delete_evaluator(conn, project, id).await? {
+                    Removal::Removed
+                } else {
+                    Removal::Missing
+                })
+            })
         })
         .await?;
-    if !went {
-        return Err(ApiError::NotFound);
+    match removal {
+        Removal::Removed => {}
+        Removal::Missing => return Err(ApiError::NotFound),
+        Removal::InUse(rules) => {
+            return Err(ApiError::ConflictWith {
+                detail: "online rules use this evaluator",
+                errors: rules
+                    .iter()
+                    .map(|rule| FieldError {
+                        field: format!("rules.{}", rule.id),
+                        message: format!("{}: uses this evaluator", rule.name),
+                        position: None,
+                    })
+                    .collect(),
+            });
+        }
     }
     tracing::info!(
         target: "audit",
@@ -371,6 +435,7 @@ async fn test_evaluator(
     Extension(access): Extension<ProjectAccess>,
     error::Json(body): error::Json<EvaluatorTestRequest>,
 ) -> Result<error::Json<EvaluatorTestResult>, ApiError> {
+    refuse_outbound(&state, "evaluator test")?;
     let user = principal::session_user(&principal)?;
     let result = test_run::run(&state, &access.project, user.id, body).await?;
     Ok(error::Json(result))
@@ -380,8 +445,18 @@ async fn list_evaluator_templates() -> error::Json<EvaluatorTemplateList> {
     error::Json(builtin_template_list())
 }
 
+/// What the rules of an evaluator are checked with in a PATCH's write: the new configuration,
+/// the prices and the time.
+struct RuleChecks {
+    subject: Subject,
+    prices: Arc<PriceTable>,
+    now: i64,
+}
+
 /// Step 7 of the update: refuses a row that changed since `expected` was read, then
-/// writes `fields`. A judge's connection is read in the same transaction.
+/// writes `fields`. A judge's connection is read in the same transaction, and so are the
+/// rules of the evaluator: a change of the config or the connection that breaks one of them is
+/// refused (D-I-19). Other changes (a rename, the webhook values) leave the rules alone.
 async fn write_update(
     conn: &mut SqliteConnection,
     org: OrgId,
@@ -389,7 +464,7 @@ async fn write_update(
     id: Uuid,
     expected: EvaluatorRow,
     fields: EvaluatorFields,
-    now: i64,
+    checks: &RuleChecks,
 ) -> Result<Outcome, MetaError> {
     let Some(current) = store::get_evaluator_tx(conn, project, id).await? else {
         return Ok(Outcome::Gone);
@@ -397,19 +472,90 @@ async fn write_update(
     if current != expected {
         return Err(MetaError::Conflict("evaluator changed, retry"));
     }
-    if let Some(connection) = fields.connection_id
-        && connections::get_connection_tx(conn, org, connection)
-            .await?
-            .is_none()
-    {
-        return Ok(Outcome::ConnectionMissing);
+    let connection = match fields.connection_id {
+        Some(connection) => match connections::get_connection_tx(conn, org, connection).await? {
+            Some(row) => Some(row),
+            None => return Ok(Outcome::ConnectionMissing),
+        },
+        None => None,
+    };
+    let rules_affected =
+        fields.config != expected.config || fields.connection_id != expected.connection_id;
+    if rules_affected {
+        let broken = broken_rules(
+            conn,
+            id,
+            &checks.subject,
+            connection.as_ref(),
+            &checks.prices,
+            checks.now,
+        )
+        .await?;
+        if !broken.is_empty() {
+            return Ok(Outcome::BreaksRules(broken));
+        }
     }
     Ok(
-        match store::update_evaluator(conn, project, id, fields, now).await? {
+        match store::update_evaluator(conn, project, id, fields, checks.now).await? {
             Some(row) => Outcome::Updated(Box::new(row)),
             None => Outcome::Gone,
         },
     )
+}
+
+/// One error per rule of evaluator `id` that the new `subject` would break: the rule's first
+/// check error, named after the rule (D-I-19).
+async fn broken_rules(
+    conn: &mut SqliteConnection,
+    id: Uuid,
+    subject: &Subject,
+    connection: Option<&connections::ConnectionRow>,
+    prices: &PriceTable,
+    now: i64,
+) -> Result<Vec<FieldError>, MetaError> {
+    let adapter = match connection {
+        Some(row) => Some(
+            Adapter::from_name(&row.adapter).map_err(|_| MetaError::Corrupt {
+                table: "llm_connections",
+                column: "adapter",
+            })?,
+        ),
+        None => None,
+    };
+    let mut broken = Vec::new();
+    for rule in rules::rules_of_evaluator(conn, id).await? {
+        let value: serde_json::Value =
+            serde_json::from_str(&rule.variable_mapping).map_err(|_| MetaError::Corrupt {
+                table: "online_rules",
+                column: "variable_mapping",
+            })?;
+        let mapping = VariableMapping::from_json(&value).map_err(|_| MetaError::Corrupt {
+            table: "online_rules",
+            column: "variable_mapping",
+        })?;
+        let variables: BTreeSet<String> = value
+            .as_object()
+            .map(|map| map.keys().cloned().collect())
+            .unwrap_or_default();
+        let target = RuleTarget::from_name(&rule.target).ok_or(MetaError::Corrupt {
+            table: "online_rules",
+            column: "target",
+        })?;
+        let shape = RuleShape {
+            target,
+            mapping: Some(&mapping),
+            variables: &variables,
+            budgeted: rule.budget_usd.is_some(),
+        };
+        if let Some(first) = check_rule(&shape, subject, adapter, prices, now).first() {
+            broken.push(FieldError {
+                field: format!("rules.{}", rule.id),
+                message: format!("{}: {}", rule.name, first.message),
+                position: None,
+            });
+        }
+    }
+    Ok(broken)
 }
 
 /// The checks that need `meta.db`: a judge's connection is in the org, and the output fits
@@ -559,9 +705,9 @@ mod tests {
     use crate::test_support::mock_llm::{MockLlm, Reply, completion};
     use crate::test_support::mock_webhook::MockWebhook;
     use crate::test_support::{Seeded, TestApp, TestResponse, capture_logs, dataset_span};
-    use llmobs_core::enums::PayloadFormat;
-    use llmobs_core::ids::{SpanId, TraceId};
-    use llmobs_core::span::Span;
+    use cetra_core::enums::PayloadFormat;
+    use cetra_core::ids::{SpanId, TraceId};
+    use cetra_core::span::Span;
 
     /// The fixture judge's connection (`fixtures/api/README.md`).
     const FIXTURE_CONNECTION: &str = "01900000-0000-7000-8000-000000000400";
@@ -1174,6 +1320,32 @@ mod tests {
         assert_eq!(response.json::<Value>(), expected);
     }
 
+    /// Review 2026-11-15 #3: another org's connection id answered 409 while used, not 404.
+    #[tokio::test]
+    async fn connection_delete_from_another_org_is_404_while_used() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        fixture_connection(&app, &seeded).await;
+        create_ok(&app, &seeded, &judge_body()).await;
+        let other = app
+            .request(Method::POST, "/api/v1/orgs")
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .json(&json!({ "name": "Other" }))
+            .send()
+            .await;
+        assert_eq!(other.status, 201, "{}", text(&other));
+        let slug = other.json::<Value>()["slug"].as_str().unwrap().to_owned();
+        let response = app
+            .request(
+                Method::DELETE,
+                &format!("/api/v1/orgs/{slug}/llm-connections/{FIXTURE_CONNECTION}"),
+            )
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(response.status, 404, "{}", text(&response));
+    }
+
     #[tokio::test]
     async fn connection_delete_is_409_while_used() {
         let app = TestApp::new().await;
@@ -1302,12 +1474,17 @@ mod tests {
             secret_enc: None,
             version: 2,
         };
+        let checks = RuleChecks {
+            subject: Subject::from_row(&expected).unwrap(),
+            prices: app.state.ingest.prices().builtin(),
+            now,
+        };
         let stale = app
             .state
             .meta
             .write(move |conn| {
                 Box::pin(async move {
-                    write_update(conn, org, project, id, expected, fields, now).await
+                    write_update(conn, org, project, id, expected, fields, &checks).await
                 })
             })
             .await;
@@ -1329,17 +1506,288 @@ mod tests {
             secret_enc: None,
             version: current.version,
         };
+        let checks = RuleChecks {
+            subject: Subject::from_row(&current).unwrap(),
+            prices: app.state.ingest.prices().builtin(),
+            now,
+        };
         let outcome = app
             .state
             .meta
             .write(move |conn| {
-                Box::pin(
-                    async move { write_update(conn, org, project, id, current, fields, now).await },
-                )
+                Box::pin(async move {
+                    write_update(conn, org, project, id, current, fields, &checks).await
+                })
             })
             .await
             .unwrap();
         assert!(matches!(outcome, Outcome::ConnectionMissing));
+    }
+
+    /// A trace rule on `evaluator` that maps `input` and `output`, written straight to the store.
+    async fn rule_on(
+        app: &TestApp,
+        seeded: &Seeded,
+        evaluator: Uuid,
+        name: &str,
+        budget: Option<f64>,
+    ) -> Uuid {
+        let (project, now) = (seeded.project.id, app.state.clock.now_ns());
+        let name = name.to_owned();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    let id = Uuid::now_v7();
+                    rules::insert_rule(
+                        conn,
+                        rules::NewRule {
+                            id,
+                            project_id: project,
+                            evaluator_id: evaluator,
+                            target: "trace".to_owned(),
+                            created_by: None,
+                        },
+                        rules::RuleFields {
+                            name,
+                            filter: None,
+                            variable_mapping: r#"{"input":"trace.input","output":"trace.output"}"#
+                                .to_owned(),
+                            sample_rate: 1.0,
+                            budget_usd: budget,
+                            budget_period: budget.map(|_| "day".to_owned()),
+                            enabled: true,
+                        },
+                        now,
+                    )
+                    .await?;
+                    Ok(id)
+                })
+            })
+            .await
+            .unwrap()
+    }
+
+    /// The judge body with `prompt` replaced, as a PATCH `config`.
+    fn judge_config_with_prompt(prompt: &str) -> Value {
+        let mut config = judge_body()["config"].clone();
+        config["prompt"] = json!(prompt);
+        config
+    }
+
+    /// D-T-8: the rules are checked against the prices in the write, so the PATCH waits for a
+    /// price write in progress.
+    #[tokio::test]
+    async fn a_patch_waits_for_a_price_write() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        fixture_connection(&app, &seeded).await;
+        let created = create_ok(&app, &seeded, &judge_body()).await;
+        let id = id_of(&created);
+        let guard = app.state.ingest.prices().lock_writes().await;
+        let rename = json!({"name": "Renamed judge"});
+        let mut pending = std::pin::pin!(patch(&app, &seeded, &id, &rename));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), pending.as_mut())
+                .await
+                .is_err(),
+            "the patch did not wait for the price write"
+        );
+        drop(guard);
+        let response = pending.await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+    }
+
+    #[tokio::test]
+    async fn delete_with_rules_is_409_listing_them() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        fixture_connection(&app, &seeded).await;
+        let created = create_ok(&app, &seeded, &judge_body()).await;
+        let id = id_of(&created);
+        let rule = rule_on(
+            &app,
+            &seeded,
+            Uuid::from_str(&id).unwrap(),
+            "Blocks delete",
+            None,
+        )
+        .await;
+        let response = app
+            .request(Method::DELETE, &format!("{}/{id}", path(seeded.project.id)))
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(response.status, 409, "{}", text(&response));
+        let problem = response.problem();
+        assert_eq!(
+            problem.detail.as_deref(),
+            Some("online rules use this evaluator")
+        );
+        assert_eq!(problem.errors.len(), 1);
+        assert_eq!(problem.errors[0].field, format!("rules.{rule}"));
+        assert_eq!(
+            problem.errors[0].message,
+            "Blocks delete: uses this evaluator"
+        );
+        let kept = app
+            .request(Method::GET, &format!("{}/{id}", path(seeded.project.id)))
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(kept.status, 200);
+    }
+
+    /// Review 2026-11-15 #1: the rule check ran before the project check, so another project's
+    /// evaluator id answered 409 with that project's rule ids and names.
+    #[tokio::test]
+    async fn delete_from_another_project_names_none_of_its_rules() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        fixture_connection(&app, &seeded).await;
+        let (other, _) = app.add_project(&seeded, "other", None).await;
+        let created = create_ok(&app, &seeded, &judge_body()).await;
+        let id = id_of(&created);
+        rule_on(
+            &app,
+            &seeded,
+            Uuid::from_str(&id).unwrap(),
+            "Secret rule name",
+            None,
+        )
+        .await;
+        let response = app
+            .request(Method::DELETE, &format!("{}/{id}", path(other.id)))
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(response.status, 404, "{}", text(&response));
+        assert!(!text(&response).contains("Secret rule name"));
+    }
+
+    #[tokio::test]
+    async fn patch_that_drops_a_mapped_prompt_variable_is_409() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        fixture_connection(&app, &seeded).await;
+        let created = create_ok(&app, &seeded, &judge_body()).await;
+        let id = id_of(&created);
+        let rule = rule_on(
+            &app,
+            &seeded,
+            Uuid::from_str(&id).unwrap(),
+            "Maps both",
+            None,
+        )
+        .await;
+        let config = judge_config_with_prompt("Q: {{ input }} A: {{ output }} C: {{ context }}");
+        let response = patch(&app, &seeded, &id, &json!({"config": config})).await;
+        assert_eq!(response.status, 409, "{}", text(&response));
+        let problem = response.problem();
+        assert_eq!(
+            problem.detail.as_deref(),
+            Some("the change would break online rules that use this evaluator")
+        );
+        assert_eq!(problem.errors.len(), 1);
+        assert_eq!(problem.errors[0].field, format!("rules.{rule}"));
+        assert_eq!(
+            problem.errors[0].message,
+            "Maps both: variable context is used by the prompt but not mapped"
+        );
+        let read = app
+            .request(Method::GET, &format!("{}/{id}", path(seeded.project.id)))
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await
+            .json::<Value>();
+        assert_eq!(read["version"], created["version"]);
+    }
+
+    #[tokio::test]
+    async fn patch_that_moves_to_an_unpriced_model_breaks_a_budgeted_rule() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        fixture_connection(&app, &seeded).await;
+        let created = create_ok(&app, &seeded, &judge_body()).await;
+        let id = id_of(&created);
+        rule_on(
+            &app,
+            &seeded,
+            Uuid::from_str(&id).unwrap(),
+            "Budgeted",
+            Some(5.0),
+        )
+        .await;
+        let mut config = judge_body()["config"].clone();
+        config["model"] = json!("no-such-model-0");
+        let response = patch(&app, &seeded, &id, &json!({"config": config})).await;
+        assert_eq!(response.status, 409, "{}", text(&response));
+        assert_eq!(
+            response.problem().errors[0].message,
+            "Budgeted: the judge model has no price, so the rule cannot have a budget; add one under Settings → Model prices"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rule_saved_during_the_patch_is_checked() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        fixture_connection(&app, &seeded).await;
+        let created = create_ok(&app, &seeded, &judge_body()).await;
+        let id = Uuid::from_str(&id_of(&created)).unwrap();
+        let (project, org, now) = (seeded.project.id, seeded.org_id, app.state.clock.now_ns());
+        // The PATCH read the evaluator; a rule is saved before its write.
+        let current = store::get_evaluator(app.state.meta.reader(), project, id)
+            .await
+            .unwrap()
+            .unwrap();
+        rule_on(&app, &seeded, id, "Saved late", None).await;
+        let config = judge_config_with_prompt("Q: {{ input }} A: {{ output }} C: {{ context }}");
+        let parsed = EvaluatorConfig::from_parts("llm_judge", &config).unwrap();
+        let fields = EvaluatorFields {
+            name: current.name.clone(),
+            config: config.to_string(),
+            output_score: current.output_score.clone(),
+            connection_id: current.connection_id,
+            secret_enc: None,
+            version: current.version + 1,
+        };
+        let checks = RuleChecks {
+            subject: Subject::from_config(&parsed),
+            prices: app.state.ingest.prices().builtin(),
+            now,
+        };
+        let outcome = app
+            .state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    write_update(conn, org, project, id, current, fields, &checks).await
+                })
+            })
+            .await
+            .unwrap();
+        let Outcome::BreaksRules(errors) = outcome else {
+            panic!("the saved rule breaks the change");
+        };
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].message.starts_with("Saved late: "), "{errors:?}");
+    }
+
+    #[tokio::test]
+    async fn a_rename_does_not_check_the_rules() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        fixture_connection(&app, &seeded).await;
+        // The judge's prompt uses `context`, which the rule does not map: the rule is broken already.
+        let mut body = judge_body();
+        body["config"]["prompt"] = json!("Q: {{ input }} A: {{ output }} C: {{ context }}");
+        let created = create_ok(&app, &seeded, &body).await;
+        let id = Uuid::from_str(&id_of(&created)).unwrap();
+        rule_on(&app, &seeded, id, "Already broken", None).await;
+        let renamed = patch(&app, &seeded, &id.to_string(), &json!({"name": "Renamed"})).await;
+        assert_eq!(renamed.status, 200, "{}", text(&renamed));
+        assert_eq!(renamed.json::<Value>()["name"], "Renamed");
     }
 
     #[tokio::test]
@@ -1658,8 +2106,8 @@ mod tests {
             .await;
         assert_eq!(read.status, 200, "{}", text(&read));
         assert!(
-            text(&read).contains("llmobs-eval"),
-            "the judge trace is in llmobs-eval"
+            text(&read).contains("cetra-eval"),
+            "the judge trace is in cetra-eval"
         );
 
         app.state
@@ -1776,7 +2224,7 @@ mod tests {
                 None,
                 "judge input",
                 "judge output",
-                "llmobs-eval",
+                "cetra-eval",
             )],
         )
         .await;
@@ -1965,7 +2413,7 @@ mod tests {
         assert_eq!(requests.len(), 1);
         let signature = requests[0]
             .0
-            .get("x-llmobs-signature")
+            .get("x-cetra-signature")
             .expect("a signature header")
             .to_str()
             .unwrap();
@@ -2005,7 +2453,7 @@ mod tests {
         assert_eq!(answer["ok"], true, "{answer}");
         let requests = hook.requests();
         assert_eq!(requests.len(), 1, "the saved URL was called");
-        assert!(requests[0].0.get("x-llmobs-signature").is_some());
+        assert!(requests[0].0.get("x-cetra-signature").is_some());
     }
 
     #[tokio::test]
@@ -2298,5 +2746,17 @@ mod tests {
                 "webhook_secret is required".to_owned()
             )]
         );
+    }
+
+    #[tokio::test]
+    async fn test_evaluator_is_refused_in_restore_mode() {
+        let app = TestApp::with_config(|config| config.restore_mode = true).await;
+        let seeded = app.seed().await;
+        let body = json!({
+            "evaluator": judge_on(Uuid::nil()),
+            "variables": {"input": "a literal question", "output": "a literal answer"}
+        });
+        let response = run_test(&app, &seeded, &seeded.cookie, &body).await;
+        crate::http::restore::tests::assert_refused(&response, "evaluator test");
     }
 }

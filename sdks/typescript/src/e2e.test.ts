@@ -1,13 +1,23 @@
-// End-to-end: the SDK against a running `llmobs serve` (`just e2e`, D-G-20).
-// tools/e2e/run.sh starts the server and sets LLMOBS_E2E_BASE_URL and
-// LLMOBS_E2E_API_KEY; without them the suite is skipped.
+// End-to-end: the SDK against a running `cetra serve` (`just e2e`, D-G-20).
+// tools/e2e/run.sh starts the server and sets CETRA_E2E_BASE_URL and
+// CETRA_E2E_API_KEY; without them the suite is skipped.
 
 import { describe, expect, it } from "vitest";
 
-import { currentTraceId, init, observe, score, shutdown } from "./index.js";
+import {
+  Client,
+  currentTraceId,
+  evaluate,
+  flush,
+  init,
+  observe,
+  score,
+  shutdown,
+  uuid7,
+} from "./index.js";
 
-const baseUrl = process.env.LLMOBS_E2E_BASE_URL ?? "";
-const apiKey = process.env.LLMOBS_E2E_API_KEY ?? "";
+const baseUrl = process.env.CETRA_E2E_BASE_URL ?? "";
+const apiKey = process.env.CETRA_E2E_API_KEY ?? "";
 
 const POLL_LIMIT_MS = 10_000;
 const POLL_INTERVAL_MS = 250;
@@ -40,6 +50,51 @@ async function poll<T>(url: string, ready: (body: T) => boolean): Promise<T> {
 }
 
 describe.skipIf(baseUrl === "")("e2e", () => {
+  // Runs before the first test, which ends with shutdown(): init() is once per
+  // process, so a runtime shut down there cannot be started again. This test
+  // flushes instead and leaves the runtime up.
+  it("runs an experiment and reads its results back", async () => {
+    init({ apiKey, baseUrl });
+    const client = new Client({ apiKey, baseUrl });
+    const created = await client.datasets.create(`e2e-ts-${uuid7()}`);
+    try {
+      const dataset = await created.addItems([
+        { input: { q: "a" }, expectedOutput: "A" },
+        { input: { q: "b" }, expectedOutput: "B" },
+      ]);
+
+      function exact({ output, expected }: { output: unknown; expected: unknown }): boolean {
+        return output === expected;
+      }
+
+      const result = await evaluate({
+        dataset,
+        task: (input) => (input as { q: string }).q.toUpperCase(),
+        scorers: [exact],
+        client,
+      });
+      expect(result.errorCount).toBe(0);
+      result.assertMin("exact", 1.0);
+      await flush();
+
+      await poll<{
+        summary: {
+          experiment: { status: string };
+          scores: { name: string; count: number; pass_rate?: number }[];
+        };
+      }>(
+        `${baseUrl}/api/v1/projects/current/experiments/${result.experimentId}/results`,
+        (body) =>
+          body.summary.experiment.status === "completed" &&
+          body.summary.scores.some(
+            (item) => item.name === "exact" && item.count === 2 && item.pass_rate === 1,
+          ),
+      );
+    } finally {
+      await client.datasets.delete(created.id);
+    }
+  }, 30_000);
+
   it("reads a traced function and a score back through the API", async () => {
     init({ apiKey, baseUrl });
     const seen: { traceId?: string } = {};

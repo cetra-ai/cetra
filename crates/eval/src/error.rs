@@ -7,7 +7,7 @@
 
 use std::fmt;
 
-use llmobs_core::enums::ScoreDataType;
+use cetra_core::enums::ScoreDataType;
 use serde_json::error::Category;
 
 /// A configuration document or an assembled [`crate::Evaluator`] broke a rule.
@@ -341,9 +341,11 @@ impl EgressError {
     pub fn class(&self) -> ErrorClass {
         match self {
             Self::Timeout | Self::Connect => ErrorClass::Retryable,
-            Self::Scheme | Self::Denied { .. } | Self::Request | Self::TooLarge { .. } => {
-                ErrorClass::Permanent
-            }
+            Self::Scheme
+            | Self::Denied { .. }
+            | Self::Request
+            | Self::TooLarge { .. }
+            | Self::RestoreMode => ErrorClass::Permanent,
         }
     }
 }
@@ -503,6 +505,9 @@ pub enum EgressError {
         /// The limit that was exceeded, in bytes.
         limit: usize,
     },
+    /// Restore mode (N M3, D-N-25): no outbound call is made.
+    #[error("outbound calls are off: restore mode")]
+    RestoreMode,
 }
 
 /// Fails the test when `message` contains `payload`.
@@ -553,6 +558,7 @@ mod class_tests {
         assert_eq!(EgressError::Connect.class(), ErrorClass::Retryable);
         assert_eq!(EgressError::Scheme.class(), ErrorClass::Permanent);
         assert_eq!(EgressError::Request.class(), ErrorClass::Permanent);
+        assert_eq!(EgressError::RestoreMode.class(), ErrorClass::Permanent);
         assert_eq!(
             EgressError::TooLarge { limit: 4 }.class(),
             ErrorClass::Permanent

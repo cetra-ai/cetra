@@ -1,4 +1,4 @@
-# OpenObserve storage engine: research notes for llmobs spec 03
+# OpenObserve storage engine: research notes for cetra spec 03
 
 Repo: `/home/sebastien/travaux/openobserve`, local HEAD `8dcaf5e8` (commit date 2026-09-20, read through the GitHub API, because this session could not run `git` on a repo outside its worktree). The commit history in §13 comes from `gh search commits` and `gh pr view` on `openobserve/openobserve`. That history runs up to 2026-11-10, so it includes some PRs newer than the local checkout. Those PRs are marked "(post-HEAD)". Paths below are relative to `src/`.
 
@@ -207,7 +207,7 @@ There are two levels, and both re-merge time-sorted files.
 - **3d0085c43 (#13809)**: a write-only index stream was deleted.
 - **f208d3a8c (#681)**: an early "corrupted WAL file" fix.
 
-## 14. Recommendations for llmobs spec 03
+## 14. Recommendations for cetra spec 03
 
 **Ideas to adopt**
 - **§6 TracesProvider: confirmed.** OpenObserve's trace time index is our `traces` partial table: per-flush `GROUP BY trace_id` with MIN/MAX, merged again by compaction. Consider their **two-bucket rule**: also emit a partial into the partition of the trace's *end* when it crosses the boundary. A per-trace min/max time index then bounds detail lookups without `trace_lookback` guesswork.

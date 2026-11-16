@@ -1,21 +1,37 @@
 import { type HttpHandler, HttpResponse, http } from "msw";
+import datasetItemDocument from "../../../fixtures/api/responses/datasets/01900000-0000-7000-8000-000000000c01/items/01900000-0000-7000-8000-000000000d02.json";
+import datasetVersionsDocument from "../../../fixtures/api/responses/datasets/01900000-0000-7000-8000-000000000c01/versions.json";
+import datasetDocument from "../../../fixtures/api/responses/datasets/01900000-0000-7000-8000-000000000c01.json";
 import adminUserCreatedDocument from "../../../fixtures/api/static/admin-user-created.json";
 import adminUsersDocument from "../../../fixtures/api/static/admin-users.json";
 import alertRulesDocument from "../../../fixtures/api/static/alert-rules.json";
 import apiKeyCreatedDocument from "../../../fixtures/api/static/api-key-created.json";
+import backfillDocument from "../../../fixtures/api/static/backfill.json";
+import backfillEstimateDocument from "../../../fixtures/api/static/backfill-estimate.json";
 import channelsDocument from "../../../fixtures/api/static/channels.json";
+import datasetImportPreviewDocument from "../../../fixtures/api/static/dataset-import-preview.json";
+import datasetImportResultDocument from "../../../fixtures/api/static/dataset-import-result.json";
+import datasetItemFromTraceDocument from "../../../fixtures/api/static/dataset-item-from-trace.json";
 import deletionOrgDocument from "../../../fixtures/api/static/deletion-org.json";
 import deletionPreviewDocument from "../../../fixtures/api/static/deletion-preview.json";
 import deletionProjectDocument from "../../../fixtures/api/static/deletion-project.json";
 import deletionResolvingDocument from "../../../fixtures/api/static/deletion-resolving.json";
+import evalJobQueuedDocument from "../../../fixtures/api/static/eval-job-queued.json";
 import evaluatorDocument from "../../../fixtures/api/static/evaluator.json";
 import evaluatorTestResultDocument from "../../../fixtures/api/static/evaluator-test-result.json";
+import experimentDocument from "../../../fixtures/api/static/experiment.json";
 import inviteCreatedDocument from "../../../fixtures/api/static/invite-created.json";
 import llmConnectionDocument from "../../../fixtures/api/static/llm-connection.json";
 import llmConnectionTestDocument from "../../../fixtures/api/static/llm-connection-test.json";
 import meDocument from "../../../fixtures/api/static/me.json";
+import modelPriceDocument from "../../../fixtures/api/static/model-price.json";
+import onlineRuleDocument from "../../../fixtures/api/static/online-rule.json";
+import onlineRulePreviewDocument from "../../../fixtures/api/static/online-rule-preview.json";
+import onlineRuleResumedDocument from "../../../fixtures/api/static/online-rule-resumed.json";
 import orgDocument from "../../../fixtures/api/static/org.json";
 import orgMembersDocument from "../../../fixtures/api/static/org-members.json";
+import orgModelPricesDocument from "../../../fixtures/api/static/org-model-prices.json";
+import orgSsoDocument from "../../../fixtures/api/static/org-sso.json";
 import personalTokenCreatedDocument from "../../../fixtures/api/static/personal-token-created.json";
 import projectDocument from "../../../fixtures/api/static/project.json";
 import projectMembersDocument from "../../../fixtures/api/static/project-members.json";
@@ -39,6 +55,7 @@ export interface WriteOperation {
 export const WRITE_OPERATIONS: readonly WriteOperation[] = [
   { operationId: "post_login", method: "post", path: "/api/auth/login" },
   { operationId: "post_logout", method: "post", path: "/api/auth/logout" },
+  { operationId: "post_sso_discover", method: "post", path: "/api/auth/sso/discover" },
   { operationId: "post_signup", method: "post", path: "/api/auth/signup" },
   { operationId: "post_setup", method: "post", path: "/api/auth/setup" },
   { operationId: "post_password_forgot", method: "post", path: "/api/auth/password/forgot" },
@@ -61,6 +78,24 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
   { operationId: "delete_org_member", method: "delete", path: "/api/v1/orgs/{org}/members/{user}" },
   { operationId: "post_org_invite", method: "post", path: "/api/v1/orgs/{org}/invites" },
   { operationId: "delete_org_invite", method: "delete", path: "/api/v1/orgs/{org}/invites/{id}" },
+  { operationId: "put_org_sso_provider", method: "put", path: "/api/v1/orgs/{org}/sso/provider" },
+  {
+    operationId: "delete_org_sso_provider",
+    method: "delete",
+    path: "/api/v1/orgs/{org}/sso/provider",
+  },
+  { operationId: "post_org_sso_domain", method: "post", path: "/api/v1/orgs/{org}/sso/domains" },
+  {
+    operationId: "post_org_sso_domain_verify",
+    method: "post",
+    path: "/api/v1/orgs/{org}/sso/domains/{id}/verify",
+  },
+  {
+    operationId: "delete_org_sso_domain",
+    method: "delete",
+    path: "/api/v1/orgs/{org}/sso/domains/{id}",
+  },
+  { operationId: "patch_org_sso", method: "patch", path: "/api/v1/orgs/{org}/sso" },
   {
     operationId: "post_llm_connection",
     method: "post",
@@ -80,6 +115,17 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     operationId: "post_llm_connection_test",
     method: "post",
     path: "/api/v1/orgs/{org}/llm-connections/{id}/test",
+  },
+  { operationId: "post_org_model_price", method: "post", path: "/api/v1/orgs/{org}/models" },
+  {
+    operationId: "patch_org_model_price",
+    method: "patch",
+    path: "/api/v1/orgs/{org}/models/{id}",
+  },
+  {
+    operationId: "delete_org_model_price",
+    method: "delete",
+    path: "/api/v1/orgs/{org}/models/{id}",
   },
   { operationId: "post_project", method: "post", path: "/api/v1/orgs/{org}/projects" },
   { operationId: "patch_project", method: "patch", path: "/api/v1/projects/{project}" },
@@ -146,6 +192,17 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     method: "delete",
     path: "/api/v1/projects/{project}/score-definitions/{id}",
   },
+  { operationId: "post_model_price", method: "post", path: "/api/v1/projects/{project}/models" },
+  {
+    operationId: "patch_model_price",
+    method: "patch",
+    path: "/api/v1/projects/{project}/models/{id}",
+  },
+  {
+    operationId: "delete_model_price",
+    method: "delete",
+    path: "/api/v1/projects/{project}/models/{id}",
+  },
   { operationId: "post_admin_user", method: "post", path: "/api/v1/admin/users" },
   { operationId: "patch_admin_user", method: "patch", path: "/api/v1/admin/users/{id}" },
   {
@@ -189,6 +246,113 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     method: "delete",
     path: "/api/v1/projects/{project}/alert-rules/{id}",
   },
+  {
+    operationId: "post_online_rule",
+    method: "post",
+    path: "/api/v1/projects/{project}/online-rules",
+  },
+  {
+    operationId: "patch_online_rule",
+    method: "patch",
+    path: "/api/v1/projects/{project}/online-rules/{id}",
+  },
+  {
+    operationId: "delete_online_rule",
+    method: "delete",
+    path: "/api/v1/projects/{project}/online-rules/{id}",
+  },
+  {
+    operationId: "post_online_rule_preview",
+    method: "post",
+    path: "/api/v1/projects/{project}/online-rules/preview",
+  },
+  {
+    operationId: "post_online_rule_resume",
+    method: "post",
+    path: "/api/v1/projects/{project}/online-rules/{id}/resume",
+  },
+  {
+    operationId: "post_backfill_estimate",
+    method: "post",
+    path: "/api/v1/projects/{project}/online-rules/{id}/backfills/estimate",
+  },
+  {
+    operationId: "post_backfill",
+    method: "post",
+    path: "/api/v1/projects/{project}/online-rules/{id}/backfills",
+  },
+  {
+    operationId: "post_evaluator_run",
+    method: "post",
+    path: "/api/v1/projects/{project}/evaluators/{id}/run",
+  },
+  { operationId: "create_scores", method: "post", path: "/api/v1/projects/{project}/scores" },
+  {
+    operationId: "delete_score",
+    method: "delete",
+    path: "/api/v1/projects/{project}/scores/{score_id}",
+  },
+  { operationId: "post_dataset", method: "post", path: "/api/v1/projects/{project}/datasets" },
+  {
+    operationId: "patch_dataset",
+    method: "patch",
+    path: "/api/v1/projects/{project}/datasets/{dataset}",
+  },
+  {
+    operationId: "delete_dataset",
+    method: "delete",
+    path: "/api/v1/projects/{project}/datasets/{dataset}",
+  },
+  {
+    operationId: "post_dataset_items",
+    method: "post",
+    path: "/api/v1/projects/{project}/datasets/{dataset}/items",
+  },
+  {
+    operationId: "patch_dataset_item",
+    method: "patch",
+    path: "/api/v1/projects/{project}/datasets/{dataset}/items/{item_id}",
+  },
+  {
+    operationId: "delete_dataset_item",
+    method: "delete",
+    path: "/api/v1/projects/{project}/datasets/{dataset}/items/{item_id}",
+  },
+  {
+    operationId: "post_dataset_import_preview",
+    method: "post",
+    path: "/api/v1/projects/{project}/datasets/{dataset}/import/preview",
+  },
+  {
+    operationId: "post_dataset_import",
+    method: "post",
+    path: "/api/v1/projects/{project}/datasets/{dataset}/import",
+  },
+  {
+    operationId: "post_dataset_item_from_trace",
+    method: "post",
+    path: "/api/v1/projects/{project}/datasets/{dataset}/items/from-trace",
+  },
+  {
+    operationId: "post_experiment",
+    method: "post",
+    path: "/api/v1/projects/{project}/experiments",
+  },
+  {
+    operationId: "delete_experiment",
+    method: "delete",
+    path: "/api/v1/projects/{project}/experiments/{id}",
+  },
+  {
+    operationId: "post_experiment_results",
+    method: "post",
+    path: "/api/v1/projects/{project}/experiments/{id}/items",
+  },
+  {
+    operationId: "post_experiment_finish",
+    method: "post",
+    path: "/api/v1/projects/{project}/experiments/{id}/finish",
+  },
 ];
 
 type Respond = (input: {
@@ -202,6 +366,7 @@ const PROJECT_OVERRIDES = ["admin", "member", "viewer", "none"] as const;
 const RESPONSES: Record<string, Respond> = {
   post_login: () => HttpResponse.json(meDocument),
   post_logout: () => noContent(),
+  post_sso_discover: () => HttpResponse.json({ sso: false }),
   post_signup: () => HttpResponse.json(signupResponseDocument, { status: 201 }),
   post_setup: () => HttpResponse.json(setupResponseDocument, { status: 201 }),
   post_password_forgot: () => noContent(),
@@ -261,6 +426,12 @@ const RESPONSES: Record<string, Respond> = {
   },
   delete_org_member: () => noContent(),
   delete_org_invite: () => noContent(),
+  put_org_sso_provider: () => HttpResponse.json(orgSsoDocument),
+  delete_org_sso_provider: () => noContent(),
+  post_org_sso_domain: () => HttpResponse.json(orgSsoDocument, { status: 201 }),
+  post_org_sso_domain_verify: () => HttpResponse.json(orgSsoDocument),
+  delete_org_sso_domain: () => noContent(),
+  patch_org_sso: () => HttpResponse.json(orgSsoDocument),
   post_org_invite: ({ body }) =>
     HttpResponse.json(
       {
@@ -279,6 +450,11 @@ const RESPONSES: Record<string, Respond> = {
     HttpResponse.json({ ...llmConnectionDocument, ...named(body) }),
   delete_llm_connection: () => noContent(),
   post_llm_connection_test: () => HttpResponse.json(llmConnectionTestDocument),
+  post_org_model_price: ({ body }) =>
+    HttpResponse.json({ ...orgModelPricesDocument.data[0], ...priced(body) }, { status: 201 }),
+  patch_org_model_price: ({ body, params }) =>
+    HttpResponse.json({ ...orgModelPricesDocument.data[0], ...priced(body), id: params.id }),
+  delete_org_model_price: () => noContent(),
   post_project: ({ body }) =>
     HttpResponse.json(
       {
@@ -319,12 +495,12 @@ const RESPONSES: Record<string, Respond> = {
           ...unnamedKey,
           kind,
           scopes,
-          prefix: kind === "public" ? "pk-llmobs-EXAMPL" : "sk-llmobs-EXAMPL",
+          prefix: kind === "public" ? "pk-cetra-EXAMPL" : "sk-cetra-EXAMPL",
           ...(name !== undefined ? { name } : {}),
         },
         secret:
           kind === "public"
-            ? "pk-llmobs-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0"
+            ? "pk-cetra-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0"
             : apiKeyCreatedDocument.secret,
       },
       { status: 201 },
@@ -361,6 +537,11 @@ const RESPONSES: Record<string, Respond> = {
   patch_score_definition: ({ body }) =>
     HttpResponse.json({ ...scoreDefinitionDocument, ...named(body) }),
   delete_score_definition: () => noContent(),
+  post_model_price: ({ body }) =>
+    HttpResponse.json({ ...modelPriceDocument, ...priced(body) }, { status: 201 }),
+  patch_model_price: ({ body, params }) =>
+    HttpResponse.json({ ...modelPriceDocument, ...priced(body), id: params.id }),
+  delete_model_price: () => noContent(),
 
   post_admin_user: ({ body }) => {
     const { name: _name, ...unnamedUser } = adminUserCreatedDocument.user;
@@ -456,6 +637,58 @@ const RESPONSES: Record<string, Respond> = {
     return HttpResponse.json({ ...rule, ...body });
   },
   delete_alert_rule: () => noContent(),
+
+  post_online_rule: ({ body }) =>
+    HttpResponse.json({ ...onlineRuleDocument, ...named(body) }, { status: 201 }),
+  patch_online_rule: ({ body }) => HttpResponse.json({ ...onlineRuleDocument, ...named(body) }),
+  delete_online_rule: () => noContent(),
+  post_online_rule_preview: () => HttpResponse.json(onlineRulePreviewDocument),
+  post_online_rule_resume: ({ params }) =>
+    HttpResponse.json({ ...onlineRuleResumedDocument, id: params.id }),
+  post_backfill_estimate: () => HttpResponse.json(backfillEstimateDocument),
+  post_backfill: () => HttpResponse.json(backfillDocument, { status: 202 }),
+  post_evaluator_run: () => HttpResponse.json(evalJobQueuedDocument, { status: 202 }),
+  create_scores: ({ body }) => {
+    const scores = Array.isArray(body.scores) ? body.scores : [];
+    return HttpResponse.json({
+      score_ids: scores.map(() => "01900000-0000-7000-8000-000000000310"),
+    });
+  },
+  delete_score: () => noContent(),
+
+  post_dataset: ({ body }) =>
+    HttpResponse.json({ ...datasetDocument, ...named(body) }, { status: 201 }),
+  patch_dataset: ({ body }) => HttpResponse.json({ ...datasetDocument, ...named(body) }),
+  delete_dataset: () => noContent(),
+  post_dataset_items: () =>
+    HttpResponse.json(
+      { version: datasetDocument.current_version + 1, item_ids: [datasetItemDocument.id] },
+      { status: 201 },
+    ),
+  patch_dataset_item: ({ params }) =>
+    HttpResponse.json({ ...datasetItemDocument, id: params.item_id }),
+  delete_dataset_item: () => HttpResponse.json(datasetVersionsDocument.data[0]),
+  post_dataset_import_preview: () => HttpResponse.json(datasetImportPreviewDocument),
+  post_dataset_import: () => HttpResponse.json(datasetImportResultDocument, { status: 201 }),
+  post_dataset_item_from_trace: () =>
+    HttpResponse.json(datasetItemFromTraceDocument, { status: 201 }),
+  post_experiment: ({ body }) =>
+    HttpResponse.json(
+      {
+        experiment: { ...experimentDocument, ...named(body) },
+        items: [],
+        next_cursor: null,
+      },
+      { status: 201 },
+    ),
+  delete_experiment: () => noContent(),
+  post_experiment_results: ({ body }) =>
+    HttpResponse.json({
+      stored: Array.isArray(body.results) ? body.results.length : 0,
+      skipped: 0,
+    }),
+  post_experiment_finish: ({ params }) =>
+    HttpResponse.json({ ...experimentDocument, id: params.id, status: "completed" }),
 };
 
 export const writeHandlers: HttpHandler[] = WRITE_OPERATIONS.map((operation) => {
@@ -484,6 +717,12 @@ function trimmed(value: unknown): string | undefined {
 /** The connection fixture's overrides, with `name` from the body when it is a string. */
 function named(body: Record<string, unknown>): { name: string } | Record<string, never> {
   return typeof body.name === "string" ? { name: body.name } : {};
+}
+
+/** The price fixture's overrides, with the trimmed `model_name` from the body when it is one. */
+function priced(body: Record<string, unknown>): { model_name: string } | Record<string, never> {
+  const name = trimmed(body.model_name);
+  return name ? { model_name: name } : {};
 }
 
 const TITLES: Record<400 | 404, string> = { 400: "Bad Request", 404: "Not Found" };

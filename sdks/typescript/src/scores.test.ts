@@ -1,9 +1,12 @@
+import { type ExportResult, ExportResultCode } from "@opentelemetry/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { resolveConfig } from "./config.js";
 import { withContext } from "./context.js";
+import { FetchTraceExporter } from "./exporter.js";
+import { QuotaState } from "./quota.js";
 import { flush, installRuntime, Runtime, resetForTests, shutdown } from "./runtime.js";
-import { type ScoreBody, type ScoreOptions, score } from "./scores.js";
+import { type ScoreBody, type ScoreOptions, ScoreQueue, score } from "./scores.js";
 import type { FetchLike, ResponseLike } from "./web.js";
 
 const BASE_URL = "http://127.0.0.1:9";
@@ -49,7 +52,7 @@ function startScores(
 ): { sleeps: number[]; runtime: Runtime } {
   const sleeps: number[] = [];
   const config = resolveConfig(
-    { apiKey: "sk-llmobs-test", baseUrl: BASE_URL, mask: options?.mask },
+    { apiKey: "sk-cetra-test", baseUrl: BASE_URL, mask: options?.mask },
     { OTEL_SERVICE_NAME: "conformance" },
   );
   const runtime = Runtime.create(config, {
@@ -97,7 +100,7 @@ describe("score()", () => {
     expect(calls[0]?.url).toBe(SCORE_URL);
     expect(calls[0]?.headers).toEqual({
       "Content-Type": "application/json",
-      Authorization: "Bearer sk-llmobs-test",
+      Authorization: "Bearer sk-cetra-test",
     });
     expect(bodies(calls[0])).toEqual([
       {
@@ -247,7 +250,7 @@ describe("score() validation", () => {
     try {
       expect(score(options)).toBeUndefined();
       expect(warn).toHaveBeenCalledTimes(1);
-      expect(warn).toHaveBeenCalledWith(`llmobs: score not queued: ${reason}`);
+      expect(warn).toHaveBeenCalledWith(`cetra: score not queued: ${reason}`);
       await flush();
       expect(calls).toHaveLength(0);
     } finally {
@@ -264,9 +267,9 @@ describe("score() validation", () => {
       score({ name: "a", value: 1, spanId: "nothex" });
       score({ name: "a", value: Number.NaN, sessionId: "", scoreId: "bad" });
       expect(warn.mock.calls.map(([message]) => message)).toEqual([
-        "llmobs: score not queued: empty name",
-        "llmobs: score not queued: span_id without trace_id",
-        "llmobs: score not queued: invalid session_id",
+        "cetra: score not queued: empty name",
+        "cetra: score not queued: span_id without trace_id",
+        "cetra: score not queued: invalid session_id",
       ]);
     } finally {
       warn.mockRestore();
@@ -310,7 +313,7 @@ describe("score() lifecycle", () => {
       expect(score({ name: "a", value: 1, sessionId: "s" })).toBeUndefined();
       expect(score({ name: "b", value: 1, sessionId: "s" })).toBeUndefined();
       expect(warn).toHaveBeenCalledTimes(1);
-      expect(warn).toHaveBeenCalledWith("llmobs: crypto is not available; scores are not queued");
+      expect(warn).toHaveBeenCalledWith("cetra: crypto is not available; scores are not queued");
     } finally {
       warn.mockRestore();
       Object.defineProperty(globalThis, "crypto", { value: previous, configurable: true });
@@ -419,7 +422,7 @@ describe("the score queue", () => {
       expect(sleeps).toEqual([1_000, 2_000, 4_000]);
       expect(warn).toHaveBeenCalledTimes(1);
       expect(warn).toHaveBeenCalledWith(
-        "llmobs: score batch failed after retries; dropped 2 scores",
+        "cetra: score batch failed after retries; dropped 2 scores",
       );
     } finally {
       warn.mockRestore();
@@ -437,7 +440,7 @@ describe("the score queue", () => {
       expect(sleeps).toEqual([]);
       expect(warn).toHaveBeenCalledTimes(1);
       expect(warn).toHaveBeenCalledWith(
-        "llmobs: score batch rejected with status 400; dropped 1 scores",
+        "cetra: score batch rejected with status 400; dropped 1 scores",
       );
     } finally {
       warn.mockRestore();
@@ -462,7 +465,7 @@ describe("the score queue", () => {
       }
       expect(warn).toHaveBeenCalledTimes(1);
       expect(warn).toHaveBeenCalledWith(
-        "llmobs: score buffer full; dropped 1 scores in the last minute",
+        "cetra: score buffer full; dropped 1 scores in the last minute",
       );
       // A drop a minute later warns again, with everything dropped since.
       clock = 60_000;
@@ -470,7 +473,7 @@ describe("the score queue", () => {
       expect(warn).toHaveBeenCalledTimes(2);
       expect(warn).toHaveBeenNthCalledWith(
         2,
-        "llmobs: score buffer full; dropped 4 scores in the last minute",
+        "cetra: score buffer full; dropped 4 scores in the last minute",
       );
     } finally {
       warn.mockRestore();
@@ -486,5 +489,74 @@ describe("the score queue", () => {
     await vi.advanceTimersByTimeAsync(10_000);
     expect(calls).toHaveLength(1);
     expect(score({ name: "late", value: 1, sessionId: "s" })).toBeUndefined();
+  });
+});
+
+describe("score 402 pause (D-P-34)", () => {
+  const body: ScoreBody = {
+    score_id: "0190d0a8-0000-7000-8000-000000000001",
+    target: { type: "trace", trace_id: TRACE_ID },
+    name: "accuracy",
+    value: { data_type: "boolean", value: true },
+    source: "sdk",
+  };
+
+  it("drops a batch that gets 402 with one warning, and sends nothing while paused", async () => {
+    const { fetch, calls } = scriptedFetch([response(402, { "Retry-After": "60" })]);
+    const warn = spyWarn();
+    try {
+      startScores(fetch);
+      score({ name: "first", value: true, traceId: TRACE_ID });
+      await flush();
+      expect(calls).toHaveLength(1);
+
+      score({ name: "second", value: true, traceId: TRACE_ID });
+      await flush();
+      expect(calls).toHaveLength(1);
+
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0]?.[0]).toContain("the organization reached its monthly units cap");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("pauses the trace exporter sharing the queue's QuotaState, and both resume", async () => {
+    const { fetch, calls } = scriptedFetch([response(402, { "Retry-After": "60" })]);
+    const quota = new QuotaState();
+    const queue = new ScoreQueue({
+      url: SCORE_URL,
+      apiKey: "sk-cetra-test",
+      fetch,
+      sleep: () => Promise.resolve(),
+      quota,
+    });
+    const exporter = new FetchTraceExporter({
+      url: `${BASE_URL}/v1/traces`,
+      apiKey: "sk-cetra-test",
+      fetch,
+      quota,
+    });
+    const warn = spyWarn();
+    try {
+      queue.put(body);
+      await queue.flush();
+      expect(calls).toHaveLength(1);
+
+      const paused = await new Promise<ExportResult>((resolve) => {
+        exporter.export([], resolve);
+      });
+      expect(paused.code).toBe(ExportResultCode.SUCCESS);
+      expect(calls).toHaveLength(1);
+      expect(calls).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      queue.put(body);
+      await queue.flush();
+      expect(calls).toHaveLength(2);
+      await queue.shutdown();
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

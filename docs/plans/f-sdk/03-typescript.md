@@ -13,7 +13,7 @@ See [README.md](README.md) for the decisions and the shared contract; every "§"
 | `serialize.ts` | § Serialization, attribute value conversion | T2 |
 | `exporter.ts` | `FetchTraceExporter` | T3 |
 | `runtime.ts` | `Runtime`, `init`, `flush`, `shutdown`, `tracerProvider`, `spanProcessor`, test seam | T4 |
-| `processor.ts` | `LlmobsSpanProcessor` | T4, T5, T9 |
+| `processor.ts` | `CetraSpanProcessor` | T4, T5, T9 |
 | `context.ts` | `withContext`, the context key, merge rules, baggage | T5 |
 | `span.ts` | `SpanHandle`, `withSpan`, `observe`, `currentTraceId`, `currentSpanId` | T6 |
 | `generators.ts` | traced generator and async generator wrappers | T7 |
@@ -74,8 +74,8 @@ Tests are `src/<file>.test.ts` (Vitest), plus `src/testing.test-helpers.ts` (T4;
 5. **`tsconfig.json`:** add `"src/**/*.test-helpers.ts"` to `exclude` (test helpers are type-checked by `tsconfig.test.json` only).
 6. **`config.ts` changes:**
    - `Config` gains `serviceName: string | undefined`, read from `OTEL_SERVICE_NAME` in the same env source (trimmed, empty = unset); `undefined` when disabled.
-   - `instrument`: remove the option from `LlmobsOptions` and `Config` for now (its string form is replaced by D-F-7; T11 adds it back with the new type). Remove its tests.
-   - **D-F-3:** a missing API key → `warnOnce("missing-api-key", "llmobs: no API key; set LLMOBS_API_KEY, or LLMOBS_ENABLED=false to silence this; tracing is disabled")` and the disabled config. A wrong prefix still throws.
+   - `instrument`: remove the option from `CetraOptions` and `Config` for now (its string form is replaced by D-F-7; T11 adds it back with the new type). Remove its tests.
+   - **D-F-3:** a missing API key → `warnOnce("missing-api-key", "cetra: no API key; set CETRA_API_KEY, or CETRA_ENABLED=false to silence this; tracing is disabled")` and the disabled config. A wrong prefix still throws.
 7. **Tests:** update `config.test.ts` for the missing-key change, `serviceName` and the removed `instrument`; `log.test.ts` for `warnOnce` (spy on `console.warn`).
 
 **Checks:** `just check-ts`, `just check`.
@@ -98,7 +98,7 @@ export function attributeValue(value: unknown): string | boolean | number;
 
 - `toJsonable`: § Serialization rule 2, TypeScript column, in this order: `null`; `undefined` (handled by the caller per position); `boolean`; `number` (finite → itself; `NaN`/`±Infinity` → the strings); `bigint` → `value.toString()`; `string`; `Date`; `ArrayBuffer` and byte views (`ArrayBuffer.isView(v) && v.BYTES_PER_ELEMENT === 1`) → data URI (base64 via a small local encoder; do not use `Buffer`); `Error` → `{type, message}`; `Map` → object; `Set` → array; `Array` → array (`undefined` items → `null`); objects with a callable `toJSON` → `toJSON()` then recurse; plain objects (`Object.getPrototypeOf(v) === Object.prototype || null`) → own enumerable string keys, `undefined` values omitted; non-byte typed arrays (`ArrayBuffer.isView(v)` with `BYTES_PER_ELEMENT > 1`) → `Array.from(v)`, bigint elements as strings; a `DataView` → the data URI of its bytes (check `DataView` before the typed-array branch); class instances → own enumerable string keys like plain objects; `function`/`symbol` → omitted as an object property, `null` as an array item, `String(value)` at the top level. Depth and cycle markers as rules 3–4 (track a `Set<object>` of the current path). Place the byte-view and typed-array branches before the generic object branch.
 - `serialize`: top-level `string` → `truncate(value, "text")`; top-level `undefined` → `["null", "json"]`; else `JSON.stringify(toJsonable(value))` → `truncate(text, "json")`. Any exception → `["<unserializable " + typeName + ">", "text"]` where `typeName` is `value?.constructor?.name ?? typeof value`.
-- `truncate`: measure with `utf8Encode(text)`; cut at `MAX_PAYLOAD_BYTES`, then step back while the byte at the cut is a UTF-8 continuation byte (`(b & 0xc0) === 0x80`), decode with `utf8Decode`, append `…[llmobs: truncated, original ${n} bytes]`, format `text`.
+- `truncate`: measure with `utf8Encode(text)`; cut at `MAX_PAYLOAD_BYTES`, then step back while the byte at the cut is a UTF-8 continuation byte (`(b & 0xc0) === 0x80`), decode with `utf8Decode`, append `…[cetra: truncated, original ${n} bytes]`, format `text`.
 - `attributeValue`: `string` → truncated text; `boolean`; `number` integral with `Number.isSafeInteger` → itself; finite non-integral → itself; else `serialize(v)[0]`.
 
 **Tests:** the same table as P2 adapted to TS types (including `undefined` in objects/arrays/top level, `bigint`, `Map` with non-string keys, a class instance, a `toJSON` object, cyclic object/array, a shared reference, depth 32/33, exact-limit and over-limit strings with 2-byte and 4-byte characters at the cut, `Uint8Array`, `ArrayBuffer`, `Int16Array` and `Float64Array` (non-byte typed arrays → an array of their numbers, § Serialization), `Error` subclass, a getter that throws → `"<unserializable X>"`).
@@ -131,7 +131,7 @@ export class FetchTraceExporter implements SpanExporter {
 - Body: `ProtobufTraceSerializer.serializeRequest(spans)` from `@opentelemetry/otlp-transformer`; `undefined` → callback `FAILED` with an `Error("serialize")`.
 - Headers: `Content-Type: application/x-protobuf`, `Authorization: Bearer <apiKey>`; when `gzip(body)` returns bytes, send them with `Content-Encoding: gzip`.
 - Attempts: up to 4 (1 + 3 retries), within a **total deadline of 30 s** per `export` call: each attempt's timeout is `min(timeoutMillis, time left)`, and a retry whose wait would end past the deadline is not made (→ `FAILED`). Retry on status 429, 502, 503, 504 and on a rejected `fetch` (network error or timeout). Wait `Retry-After` seconds when the header is a non-negative integer (cap 30), else 1 s, 2 s, 4 s. Tests inject a clock (`now?: () => number`, default `Date.now`) next to `sleep`. Any other non-2xx → `FAILED` without retry. `2xx` → `SUCCESS` (the body is not read; partial success is not reported in the MVP).
-- `fetch` missing at construction → every export fails with `FAILED` and `warnOnce("no-fetch", "llmobs: fetch is not available; spans are not exported")`.
+- `fetch` missing at construction → every export fails with `FAILED` and `warnOnce("no-fetch", "cetra: fetch is not available; spans are not exported")`.
 - Never throws from `export`; the callback is called exactly once per call.
 - `keepalive: true` is **not** set (bodies may exceed the 64 KiB keepalive limit).
 
@@ -147,7 +147,7 @@ export class FetchTraceExporter implements SpanExporter {
 
 The processor's `BatchSpanProcessor` uses `exportTimeoutMillis: 45_000` (above the exporter's 30 s deadline, so `flush()` waits for retries).
 
-**`processor.ts`** — `class LlmobsSpanProcessor implements SpanProcessor`: constructor `(exporter: SpanExporter, options: { environment?: string; release?: string; exportFilter?: (s: ReadableSpan) => boolean; defaultFilter: boolean })`; owns `new BatchSpanProcessor({ exporter, scheduledDelayMillis: 1000, exportTimeoutMillis: 45_000 })`; `onStart(span, parentContext)` sets `llmobs.environment`/`llmobs.release` (T5 adds context values); `onEnd(span)` forwards (T9 adds the filter); `forceFlush()`/`shutdown()` delegate. Each method catches and logs per the rules.
+**`processor.ts`** — `class CetraSpanProcessor implements SpanProcessor`: constructor `(exporter: SpanExporter, options: { environment?: string; release?: string; exportFilter?: (s: ReadableSpan) => boolean; defaultFilter: boolean })`; owns `new BatchSpanProcessor({ exporter, scheduledDelayMillis: 1000, exportTimeoutMillis: 45_000 })`; `onStart(span, parentContext)` sets `cetra.environment`/`cetra.release` (T5 adds context values); `onEnd(span)` forwards (T9 adds the filter); `forceFlush()`/`shutdown()` delegate. Each method catches and logs per the rules.
 
 **`runtime.ts`:**
 
@@ -156,13 +156,13 @@ export class Runtime {
   readonly config: Config;
   readonly provider: TracerProvider;     // the sdk-trace class
   readonly ownsProvider: boolean;
-  readonly processor: LlmobsSpanProcessor;
-  readonly tracer: Tracer;               // provider.getTracer("llmobs", VERSION)
+  readonly processor: CetraSpanProcessor;
+  readonly tracer: Tracer;               // provider.getTracer("cetra", VERSION)
   static create(config: Config, seams?: { exporter?: SpanExporter; idGenerator?: IdGenerator; fetch?: FetchLike }): Runtime;
   flush(): Promise<void>;
   shutdown(): Promise<void>;             // idempotent
 }
-export function init(options?: LlmobsOptions): void;
+export function init(options?: CetraOptions): void;
 export function flush(): Promise<void>;
 export function shutdown(): Promise<void>;
 export function tracerProvider(): ApiTracerProvider;   // `new ProxyTracerProvider()` (no delegate → no-op) when not running
@@ -172,12 +172,12 @@ export function installRuntime(runtime: Runtime): void; // internal + test seam
 export function resetForTests(): Promise<void>;       // see below
 ```
 
-- `Runtime.create`, own mode: exporter `seams.exporter ?? new FetchTraceExporter({ url: `${baseUrl}/v1/traces`, apiKey, fetch: seams.fetch })`; resource `defaultResource().merge(resourceFromAttributes({ "telemetry.distro.name": "llmobs", "telemetry.distro.version": VERSION, ...(config.serviceName ? { "service.name": config.serviceName } : {}) }))`; sampler `new ParentBasedSampler({ root: new TraceIdRatioBasedSampler(config.sampleRate) })`; `spanLimits: { attributeCountLimit: 10_000 }`; `idGenerator: seams.idGenerator` when given; `spanProcessors: [processor]`. Never register it globally (global mode comes in T9).
+- `Runtime.create`, own mode: exporter `seams.exporter ?? new FetchTraceExporter({ url: `${baseUrl}/v1/traces`, apiKey, fetch: seams.fetch })`; resource `defaultResource().merge(resourceFromAttributes({ "telemetry.distro.name": "cetra", "telemetry.distro.version": VERSION, ...(config.serviceName ? { "service.name": config.serviceName } : {}) }))`; sampler `new ParentBasedSampler({ root: new TraceIdRatioBasedSampler(config.sampleRate) })`; `spanLimits: { attributeCountLimit: 10_000 }`; `idGenerator: seams.idGenerator` when given; `spanProcessors: [processor]`. Never register it globally (global mode comes in T9).
 - **Context manager:** on **every** `Runtime.create`, build `manager = new AsyncLocalStorageContextManager()` and call `context.setGlobalContextManager(manager.enable())`. If it returns `false` (one is already registered: the app's, or ours from an earlier runtime), call `manager.disable()` and keep the registered one (the API also logs a diag error "Attempted duplicate registration"; that is expected). Never disable the registered manager.
 - `resetForTests()`: `await` shutdown of the current runtime, then `context.disable()`, `trace.disable()`, `propagation.disable()`, clear `warnOnce`, the init-called flag and the instrument list. It never clears the `beforeExit` flag.
-- `init(options)`: if the module-level init-called flag is set → `warnOnce("init-twice", "llmobs: init() was already called; this call is ignored")` and return; set the flag first, so a disabled first `init` also counts (D-F-15); `resolveConfig` (throws `ConfigError`); disabled → return; `installRuntime(Runtime.create(config))`; then, once per process (a module-level flag), when `runtimeGlobals().process?.once` is a function, `process.once("beforeExit", () => void shutdown())`.
+- `init(options)`: if the module-level init-called flag is set → `warnOnce("init-twice", "cetra: init() was already called; this call is ignored")` and return; set the flag first, so a disabled first `init` also counts (D-F-15); `resolveConfig` (throws `ConfigError`); disabled → return; `installRuntime(Runtime.create(config))`; then, once per process (a module-level flag), when `runtimeGlobals().process?.once` is a function, `process.once("beforeExit", () => void shutdown())`.
 - `flush()` resolves after `processor.forceFlush()` (T10 adds scores); never rejects. `shutdown()`: flush, `processor.shutdown()`, and `provider.shutdown()` when owned; idempotent; afterwards `currentRuntime()` is `undefined` while a second `init` is still refused.
-- `testing.test-helpers.ts`: `class SequentialIdGenerator implements IdGenerator` (trace ids and span ids from counters starting at 1, formatted per § Conformance); `startMemory(options?: Partial<LlmobsOptions>, env?: Record<string, string>)` → `{ exporter: InMemorySpanExporter; runtime: Runtime }` building `resolveConfig({ apiKey: "sk-llmobs-test", baseUrl: "http://127.0.0.1:9", ...options }, { OTEL_SERVICE_NAME: "conformance", ...env })`, then `Runtime.create(config, { exporter, idGenerator: new SequentialIdGenerator() })` and `installRuntime`; `finished(exporter)` → `await flush()` then `exporter.getFinishedSpans()`. Every test file calls `await resetForTests()` in `beforeEach` and `afterEach`.
+- `testing.test-helpers.ts`: `class SequentialIdGenerator implements IdGenerator` (trace ids and span ids from counters starting at 1, formatted per § Conformance); `startMemory(options?: Partial<CetraOptions>, env?: Record<string, string>)` → `{ exporter: InMemorySpanExporter; runtime: Runtime }` building `resolveConfig({ apiKey: "sk-cetra-test", baseUrl: "http://127.0.0.1:9", ...options }, { OTEL_SERVICE_NAME: "conformance", ...env })`, then `Runtime.create(config, { exporter, idGenerator: new SequentialIdGenerator() })` and `installRuntime`; `finished(exporter)` → `await flush()` then `exporter.getFinishedSpans()`. Every test file calls `await resetForTests()` in `beforeEach` and `afterEach`.
 
 **Tests:** as P3's list where it applies: disabled/no key; provider not global (`trace.getTracerProvider()` is still the proxy); scope name and version; resource attributes incl. `service.name = conformance`; environment/release stamping; `sampleRate: 0`; second `init` warns, also after a disabled first `init`; `shutdown` idempotent and spans after it dropped; the `beforeExit` listener registered once (spy on `process.once`); the context manager registered, and an existing one kept (register a `AsyncLocalStorageContextManager` first, then `init`, and check `context.with` still uses it); an end-to-end export through `FetchTraceExporter` with an injected `fetch` (pass `seams.fetch`) proving URL, auth and gzip.
 
@@ -189,7 +189,7 @@ export function resetForTests(): Promise<void>;       // see below
 
 **Edit:** `src/context.ts` (new), `src/mask.ts` (new), `src/processor.ts`, `src/index.ts`, `src/context.test.ts` (new), `src/mask.test.ts` (new).
 
-`mask.ts`: `applyMask(value: unknown): unknown` as Python's `_mask.apply` (P4): the running runtime's `mask`, the marker `"[llmobs: mask failed]"` when it throws, the value unchanged without a mask. Tests: no runtime, no mask, a mask, a throwing mask.
+`mask.ts`: `applyMask(value: unknown): unknown` as Python's `_mask.apply` (P4): the running runtime's `mask`, the marker `"[cetra: mask failed]"` when it throws, the value unchanged without a mask. Tests: no runtime, no mask, a mask, a throwing mask.
 
 ```ts
 export interface ContextOptions {
@@ -200,7 +200,7 @@ export function withContext<T>(options: ContextOptions, fn: () => T): T;
 export function currentValues(ctx?: Context): ContextValues;   // internal
 ```
 
-- Same merge rules, validation (invalid values dropped silently, a string `tags` treated as one tag), mask on metadata values, baggage keys and on-start stamping as P4. The values are stored with `ctx.setValue(CONTEXT_KEY, merged)`; with `propagate`, `propagation.setBaggage(ctx, baggage)` where the baggage is the existing one (`propagation.getBaggage(ctx) ?? propagation.createBaggage()`) plus `llmobs.session.id`/`llmobs.user.id` entries. `fn` runs inside `context.with(ctx, fn)`; its return value (a promise included) is returned unchanged.
+- Same merge rules, validation (invalid values dropped silently, a string `tags` treated as one tag), mask on metadata values, baggage keys and on-start stamping as P4. The values are stored with `ctx.setValue(CONTEXT_KEY, merged)`; with `propagate`, `propagation.setBaggage(ctx, baggage)` where the baggage is the existing one (`propagation.getBaggage(ctx) ?? propagation.createBaggage()`) plus `cetra.session.id`/`cetra.user.id` entries. `fn` runs inside `context.with(ctx, fn)`; its return value (a promise included) is returned unchanged.
 
 **Tests:** as P4 adapted: stamping on our spans and on a "third-party" tracer of our provider; nesting; isolation of two concurrent async flows (`Promise.all` of two `withContext` calls each awaiting a timer); baggage only with `propagate` and only the two keys; values read from baggage alone; invalid input dropped; metadata attribute types (`3` → int, `{a:1}` → JSON string, bad key skipped); the processor never throws on garbage under the key.
 
@@ -293,11 +293,11 @@ Exactly § LLM span, as P7 (token counts must be `Number.isSafeInteger` and ≥ 
 
 **Edit:** `src/config.ts`, `src/config.test.ts`, `src/mask.ts`, `src/filter.ts` (new), `src/processor.ts`, `src/runtime.ts`, `src/mask.test.ts`, `src/filter.test.ts` (new), `src/runtime.test.ts`.
 
-- **Options.** `Config` and `LlmobsOptions` gain `useGlobalProvider` (boolean, default `false`, no env var; non-boolean → `ConfigError("useGlobalProvider", "must be a boolean")`) and `exportFilter` (`(span: ReadableSpan) => boolean`; not a function → `ConfigError("exportFilter", "must be callable")`; type from `@opentelemetry/sdk-trace`). Disabled config: `false` / `undefined`. Tests in `config.test.ts`.
+- **Options.** `Config` and `CetraOptions` gain `useGlobalProvider` (boolean, default `false`, no env var; non-boolean → `ConfigError("useGlobalProvider", "must be a boolean")`) and `exportFilter` (`(span: ReadableSpan) => boolean`; not a function → `ConfigError("exportFilter", "must be callable")`; type from `@opentelemetry/sdk-trace`). Disabled config: `false` / `undefined`. Tests in `config.test.ts`.
 
-- **`MaskingExporter implements SpanExporter`**, installed when `config.mask` or `!config.captureContent`: same rules as P8 (a span counts as not `llmobs` when its `instrumentationScope.name` differs). A rewritten span is a new object literal implementing `ReadableSpan` field by field (`name`, `kind`, `spanContext: () => s.spanContext()`, `parentSpanContext`, `startTime`, `endTime`, `status`, `attributes: <new>`, `links`, `events: <new TimedEvent[]>`, `duration`, `ended`, `resource`, `instrumentationScope`, `droppedAttributesCount`, `droppedEventsCount`, `droppedLinksCount`); never spread the original (its `spanContext` is a prototype method). On an unexpected error: fail closed (drop the batch, `FAILED`, warning `llmobs: masking failed; dropped <n> spans`).
+- **`MaskingExporter implements SpanExporter`**, installed when `config.mask` or `!config.captureContent`: same rules as P8 (a span counts as not `cetra` when its `instrumentationScope.name` differs). A rewritten span is a new object literal implementing `ReadableSpan` field by field (`name`, `kind`, `spanContext: () => s.spanContext()`, `parentSpanContext`, `startTime`, `endTime`, `status`, `attributes: <new>`, `links`, `events: <new TimedEvent[]>`, `duration`, `ended`, `resource`, `instrumentationScope`, `droppedAttributesCount`, `droppedEventsCount`, `droppedLinksCount`); never spread the original (its `spanContext` is a prototype method). On an unexpected error: fail closed (drop the batch, `FAILED`, warning `cetra: masking failed; dropped <n> spans`).
 - **Filter**: `defaultFilter(span: ReadableSpan): boolean` per D-F-5; `onEnd` applies `exportFilter` / `defaultFilter` as P8.
-- **Global mode** (D-F-4): an app provider exists unless `trace.getTracerProvider()` is a `ProxyTracerProvider` whose `getDelegate()` is identical (`===`) to `new ProxyTracerProvider().getDelegate()` (the API's shared no-op provider; never compare constructor names, they break under minification). When one exists: `warnOnce("global-provider-exists", "llmobs: a global tracer provider is already registered; llmobs keeps its own provider. Add spanProcessor() to your provider to send its spans to llmobs")` and continue in own mode with `defaultFilter: false`. Otherwise build ours with `defaultFilter: true` and `trace.setGlobalTracerProvider(provider)`.
+- **Global mode** (D-F-4): an app provider exists unless `trace.getTracerProvider()` is a `ProxyTracerProvider` whose `getDelegate()` is identical (`===`) to `new ProxyTracerProvider().getDelegate()` (the API's shared no-op provider; never compare constructor names, they break under minification). When one exists: `warnOnce("global-provider-exists", "cetra: a global tracer provider is already registered; cetra keeps its own provider. Add spanProcessor() to your provider to send its spans to cetra")` and continue in own mode with `defaultFilter: false`. Otherwise build ours with `defaultFilter: true` and `trace.setGlobalTracerProvider(provider)`.
 
 **Tests:** as P8 adapted. Global-mode tests reset the API globals between tests with `trace.disable()` and `context.disable()` in `afterEach` (public API), then re-register what the test needs.
 
@@ -335,7 +335,7 @@ export function uuid7(): string;
 
 **Edit:** `package.json`, `tsdown.config.ts`, `pnpm-lock.yaml`, `src/config.ts`, `src/config.test.ts`, `src/instrument.ts` (new), `src/openai.ts` (new), `src/anthropic.ts` (new), `src/langchain.ts` (new), `src/ai.ts` (new), `src/runtime.ts`, `src/index.ts`, `src/testing.test-helpers.ts`, `src/instrument.test.ts` (new), `src/ai.test.ts` (new).
 
-- **Option.** `instrument` comes back (D-F-7) in `LlmobsOptions`/`Config` as `readonly Instrumentation[]`, with `export interface Instrumentation { setTracerProvider(provider: TracerProvider): void; enable(): void; disable(): void }` in `instrument.ts` (`TracerProvider` from `@opentelemetry/api`). Validation: an array of objects having those three functions, else `ConfigError("instrument", "must be a list of instrumentation objects")`. Disabled config: `[]`.
+- **Option.** `instrument` comes back (D-F-7) in `CetraOptions`/`Config` as `readonly Instrumentation[]`, with `export interface Instrumentation { setTracerProvider(provider: TracerProvider): void; enable(): void; disable(): void }` in `instrument.ts` (`TracerProvider` from `@opentelemetry/api`). Validation: an array of objects having those three functions, else `ConfigError("instrument", "must be a list of instrumentation objects")`. Disabled config: `[]`.
 
 - `package.json`: optional peers and devDependencies of § Dependency pins; `exports` gains `./openai`, `./anthropic`, `./langchain`; `tsdown` entries `src/openai.ts`, `src/anthropic.ts`, `src/langchain.ts`.
 - Helpers (each file imports only its OpenInference package and types):
@@ -349,7 +349,7 @@ export function uuid7(): string;
 - `ai.ts`: `export function aiTelemetry(options?: { sessionId?: string; userId?: string; tags?: readonly string[]; metadata?: Readonly<Record<string, string | number | boolean>>; functionId?: string }): { isEnabled: boolean; tracer?: Tracer; functionId?: string; metadata?: Record<string, AttributeValue> }` → when running: `{ isEnabled: true, tracer: runtime.provider.getTracer("ai"), functionId, metadata: { ...metadata, sessionId, userId, tags } }` with absent keys omitted; when not running: `{ isEnabled: false }`.
 - `index.ts` exports `aiTelemetry` and the `Instrumentation` type.
 
-**Tests:** `openai` end to end: `new OpenAI({ apiKey: "test", baseURL: "http://mock/v1", fetch: fakeFetch })` where `fakeFetch` returns `new Response(JSON.stringify(<the chat completion JSON from P10>), { status: 200, headers: { "content-type": "application/json" } })`; `init` (via `startMemory`) with `instrument: [openai(OpenAI)]`; inside `withContext({ sessionId: "s1" })` and `observe` → one OpenInference span, child of ours, stamped with `llmobs.session.id`; `anthropic` the same with the P10 message JSON; `captureContent: false` on the helper hides inputs; `shutdown` disables (no new span after). `langchain`: construct the helper with the real module and assert it returns an object with the three functions (no end-to-end run). A hand-written fake `Instrumentation` records `setTracerProvider`/`enable`/`disable` calls. `aiTelemetry` shape when running and not running; a span created with its tracer has scope `ai` and passes the default filter.
+**Tests:** `openai` end to end: `new OpenAI({ apiKey: "test", baseURL: "http://mock/v1", fetch: fakeFetch })` where `fakeFetch` returns `new Response(JSON.stringify(<the chat completion JSON from P10>), { status: 200, headers: { "content-type": "application/json" } })`; `init` (via `startMemory`) with `instrument: [openai(OpenAI)]`; inside `withContext({ sessionId: "s1" })` and `observe` → one OpenInference span, child of ours, stamped with `cetra.session.id`; `anthropic` the same with the P10 message JSON; `captureContent: false` on the helper hides inputs; `shutdown` disables (no new span after). `langchain`: construct the helper with the real module and assert it returns an object with the three functions (no end-to-end run). A hand-written fake `Instrumentation` records `setTracerProvider`/`enable`/`disable` calls. `aiTelemetry` shape when running and not running; a span created with its tracer has scope `ai` and passes the default filter.
 
 **Checks:** `just check-ts`, `just check`.
 
@@ -370,7 +370,7 @@ export function feedback(options: FeedbackOptions): Promise<{ ok: boolean }>;
 
 - `exports["./browser"]` and a `tsdown` entry. `browser.ts` imports only `./web.js` (no OTel, no `config.ts`). A test parses `src/browser.ts`'s import statements and asserts the only import is `./web.js`.
 - Move `hasHttpAuthority` from `config.ts` to `web.ts` (exported) and import it in both `config.ts` and `browser.ts`, so the URL rule has one copy and `browser.ts` never imports `config.ts`.
-- Validation (resolve `{ ok: false }` without a request when invalid): `baseUrl` absolute `http(s)` per `hasHttpAuthority`, no query or fragment, trailing slashes removed; `publicKey` starts with `pk-llmobs-`; `traceId` 32 lowercase hex; `spanId` 16 lowercase hex; `value` finite when a number; the JSON body ≤ 4096 bytes (spec 06).
+- Validation (resolve `{ ok: false }` without a request when invalid): `baseUrl` absolute `http(s)` per `hasHttpAuthority`, no query or fragment, trailing slashes removed; `publicKey` starts with `pk-cetra-`; `traceId` 32 lowercase hex; `spanId` 16 lowercase hex; `value` finite when a number; the JSON body ≤ 4096 bytes (spec 06).
 - Request: `POST {baseUrl}/api/public/feedback`, `Content-Type: application/json`, `Authorization: Bearer <publicKey>`, `keepalive: true`, body `{trace_id, span_id?, name?, value, comment?}` (absent keys omitted). `{ ok: response.ok }`; a rejected fetch → `{ ok: false }`. Never throws, never retries.
 
 **Tests:** body and headers; every validation rule; non-2xx → `ok: false`; fetch rejection → `ok: false`; no global fetch and no injected fetch → `ok: false`.
@@ -384,9 +384,9 @@ export function feedback(options: FeedbackOptions): Promise<{ ok: boolean }>;
 **Edit:** `src/conformance.test.ts` (new), `src/conformance.test-helpers.ts` (new), `src/imports.test.ts` (new), `README.md`, `src/readme.test.ts` (new), `src/readme-examples.test-helpers.ts` (new).
 
 - `conformance.test-helpers.ts`: `canonical(spans: ReadableSpan[]): unknown` per § Conformance: `JsonTraceSerializer.serializeRequest(spans)` → `JSON.parse(new TextDecoder().decode(bytes))` → the same rewrites as P11 (ids already hex here; normalize `intValue` to a decimal string with `String(v)`; `kind` and `status.code` are already integers).
-- `conformance.test.ts`: one `it` per scenario, titled with the case directory name (`it("sdk-observe-tool", …)`), each running the TS variant of the scenario row (README § Language differences) through `startMemory` with the scenario's options, then comparing with `fixtures/otlp/llmobs/sdk-<case>/input.json` (read with `node:fs` — allowed in tests). Define `class ScenarioError extends Error { override name = "ScenarioError"; }`. A last test asserts every `sdk-*` directory name appears in an exported `SCENARIOS` list that the `it`s are generated from.
+- `conformance.test.ts`: one `it` per scenario, titled with the case directory name (`it("sdk-observe-tool", …)`), each running the TS variant of the scenario row (README § Language differences) through `startMemory` with the scenario's options, then comparing with `fixtures/otlp/cetra/sdk-<case>/input.json` (read with `node:fs` — allowed in tests). Define `class ScenarioError extends Error { override name = "ScenarioError"; }`. A last test asserts every `sdk-*` directory name appears in an exported `SCENARIOS` list that the `it`s are generated from.
 - `imports.test.ts`: reads every `src/*.ts` file except `*.test.ts` and `*.test-helpers.ts`, and asserts there is no `node:` import, no bare `async_hooks`/`events`/`fs`/`http` import and no `require(`.
-- `README.md`: the same sections as P12, TypeScript versions, plus: the `llmobs/openai|anthropic|langchain` helpers; `aiTelemetry()` with the Vercel AI SDK; edge runtimes and Cloudflare Workers (`nodejs_compat`, `ctx.waitUntil(llmobs.flush())`); `llmobs/browser`.
+- `README.md`: the same sections as P12, TypeScript versions, plus: the `cetra/openai|anthropic|langchain` helpers; `aiTelemetry()` with the Vercel AI SDK; edge runtimes and Cloudflare Workers (`nodejs_compat`, `ctx.waitUntil(cetra.flush())`); `cetra/browser`.
 - README examples: write each tested example as a function in `src/readme-examples.test-helpers.ts`, preceded by a comment `// readme:<name>`. `readme.test.ts` runs each function against `startMemory` and asserts the spans it produced, and checks that every README block preceded by `<!-- readme:<name> -->` is byte-identical to that function's body (dedented). Mark at least the quick start, `withLlmSpan`, `withContext`, `score` and `aiTelemetry` examples.
 
 **Checks:** `just check-ts`, `just check`, and `just ts-smoke` on `pnpm --dir sdks/typescript pack` output.

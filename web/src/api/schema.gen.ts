@@ -13,7 +13,7 @@ export interface paths {
         };
         /**
          * Start an OAuth or OIDC login
-         * @description Redirects to the provider and sets the `llmobs_oauth` cookie. `redirect` is kept when it starts with `/`, does not start with `//` or `/\`, is at most 1024 bytes, and contains no ASCII control character. Otherwise the browser returns to `/`. An unknown provider is 404. When metadata cannot be loaded, the response redirects to `/login?error=provider_unavailable` and sets no cookie.
+         * @description Redirects to the provider and sets the `cetra_oauth` cookie. `redirect` is kept when it starts with `/`, does not start with `//` or `/\`, is at most 1024 bytes, and contains no ASCII control character. Otherwise the browser returns to `/`. An unknown provider is 404. When metadata cannot be loaded, the response redirects to `/login?error=provider_unavailable` and sets no cookie.
          */
         get: operations["get_oauth_authorize"];
         put?: never;
@@ -33,7 +33,7 @@ export interface paths {
         };
         /**
          * Finish an OAuth or OIDC login
-         * @description Clears the login cookie. Success sets the session cookie and redirects to the saved relative path. Failure redirects to `/login?error=<code>`. Codes: `invalid_state`, `provider_error`, `provider_unavailable`, `email_not_verified`, `domain_not_allowed`, `signup_closed`, `account_disabled`, `link_refused`, `setup_required`.
+         * @description Clears the login cookie. Success sets the session cookie and redirects to the saved relative path. Failure redirects to `/login?error=<code>`. Codes: `invalid_state`, `provider_error`, `provider_unavailable`, `email_not_verified`, `domain_not_allowed`, `signup_closed`, `account_disabled`, `link_refused`, `setup_required`, `seat_limit`, `sso_unavailable`, `sso_required`. The provider is `github`, `google`, `oidc:<name>`, or `sso` (an org's provider, started through `/api/auth/sso/authorize`).
          */
         get: operations["get_oauth_callback"];
         put?: never;
@@ -248,6 +248,86 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/auth/sso/authorize": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Start an org's single sign-on login
+         * @description Starts a login through the identity provider of the org that owns the email domain (D-P-60). A domain that is not verified, a disabled provider (except for an owner's Test sign-in, D-P-57) and an unknown domain all redirect to `/login?error=sso_unavailable` with no cookie. Discovery and authorize share 300 requests a minute per client IP; a burst over that is 429. `redirect` is kept as for the instance providers.
+         */
+        get: operations["get_sso_authorize"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/sso/discover": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ask whether an email's domain signs in through an org
+         * @description Answers whether the email's domain has an org provider that is enabled (D-P-60). The answer depends only on the domain, so no account is needed and nothing is logged. Shares the per-IP bucket of 300 a minute with `/api/auth/sso/authorize`; over it is 429.
+         */
+        post: operations["post_sso_discover"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/internal/v1/deletions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List applied org and project drops
+         * @description Needs a `control_plane` bearer token with the `deletions` scope. Applied project and org drops, oldest first, keyset-paged, for the control plane's billing and records. Rows are kept forever. `kind` narrows to `project` or `org`.
+         */
+        get: operations["list_internal_deletions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/internal/v1/memberships/lookup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Look up a user's memberships
+         * @description Needs a `control_plane` bearer token with the `members` scope. The user is the one whose OIDC subject at the control plane's provider (`entitlements.control_plane_provider`) matches `subject`; when no identity has the subject, the user with `email`. Lists the user's active orgs sorted by slug. An unknown user answers 200 with no orgs; an invalid email answers 400 only when the subject finds no user.
+         */
+        post: operations["post_internal_membership_lookup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/internal/v1/orgs": {
         parameters: {
             query?: never;
@@ -259,10 +339,30 @@ export interface paths {
         put?: never;
         /**
          * Create an org
-         * @description Needs a `control_plane` bearer token with the `orgs` scope. The id is the control plane's, and it is a UUIDv7. An existing id answers 200 with the stored org and changes nothing. A new id creates the org and makes the owner its owner: a new user is created verified without a password, and an existing user is reused. A disabled user or an instance admin cannot be the owner (422 `owner_not_allowed`).
+         * @description Needs a `control_plane` bearer token with the `orgs` scope. The id is the control plane's, and it is a UUIDv7. An existing id answers 200 with the stored org and changes nothing. A new id creates the org and makes the owner its owner: a new user is created verified without a password, and an existing user is reused. A disabled user or an instance admin cannot be the owner (422 `owner_not_allowed`). An id that is being deleted, or was deleted, answers 409 `conflict`; a deleted id is never reused.
          */
         post: operations["post_internal_org"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/internal/v1/orgs/{org_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Drop an org
+         * @description Needs a `control_plane` bearer token with the `orgs` scope. Starts the org's drop (D-M-7) with no confirm: the org is gone from every route at once, and its projects and data are erased in the background. Answers 202 with the deletion while it runs and 200 once it is applied. Repeats answer for the org's newest org deletion, so the call is idempotent. An org that was never dropped answers 404.
+         */
+        delete: operations["delete_internal_org"];
         options?: never;
         head?: never;
         patch?: never;
@@ -282,6 +382,106 @@ export interface paths {
          */
         put: operations["put_org_entitlements_token"];
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/internal/v1/orgs/{org_id}/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List an org's members
+         * @description Needs a `control_plane` bearer token with the `members` scope. Members ordered by email, with the email the control plane matches accounts by. `role` is a comma-separated list of `owner`, `admin`, `member` and `viewer`; without it every member is listed. An unknown or inactive org answers 404.
+         */
+        get: operations["list_internal_org_members"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/internal/v1/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List org usage by day
+         * @description Needs a `control_plane` bearer token with the `usage` scope. Usage per UTC day and org, summed over the org's projects, ordered by day and then org id, keyset-paged. `from` and `to` are required inclusive days, and `to - from` is at most 92 days. Rows of deleted orgs stay.
+         */
+        get: operations["list_internal_usage"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/internal/v1/users/delete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Delete a user
+         * @description Needs a `control_plane` bearer token with the `users` scope. The user is named by its OIDC subject at the control plane's provider (`entitlements.control_plane_provider`), or, when no identity has that subject, by its email if that user has no identity at that provider (D-S-9). The email is checked only then (400 for an invalid one). Deletes the user in one transaction. Its invites and API keys stay, without their creator. Orgs where the user was the only owner stay, without an owner, and are listed in `sole_owner_of` for the control plane to resolve. An unknown user answers 200 with an empty list, so a retry is safe. An instance admin cannot be managed (403 `forbidden`).
+         */
+        post: operations["post_internal_user_delete"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/internal/v1/users/disable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Disable a user
+         * @description Needs a `control_plane` bearer token with the `users` scope. The user is named by its OIDC subject at the control plane's provider (`entitlements.control_plane_provider`), or, when no identity has that subject, by its email if that user has no identity at that provider (D-S-9). The email is checked only then (400 for an invalid one). Revokes the user's sessions and personal tokens, as `revoke` does, and sets the user disabled. Unlike the instance admin's disable, the last owner of an org may be disabled: the org stays. An instance admin cannot be managed (403 `forbidden`). An unknown user answers 404.
+         */
+        post: operations["post_internal_user_disable"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/internal/v1/users/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * End a user's sessions and personal tokens
+         * @description Needs a `control_plane` bearer token with the `users` scope. The user is named by its OIDC subject at the control plane's provider (`entitlements.control_plane_provider`), or, when no identity has that subject, by its email if that user has no identity at that provider (D-S-9). The email is checked only then (400 for an invalid one). Deletes the user's web sessions and revokes its personal tokens; the user can sign in again. An instance admin cannot be managed (403 `forbidden`). An unknown user answers 404.
+         */
+        post: operations["post_internal_user_revoke"];
         delete?: never;
         options?: never;
         head?: never;
@@ -527,8 +727,8 @@ export interface paths {
         put?: never;
         post?: never;
         /**
-         * Delete an organization (owners)
-         * @description Answers 202; the organization and all its projects are erased in the background. Its deletion record is then kept in the database and the audit log only.
+         * Delete an organization (owners, session only)
+         * @description Answers 202; the organization and all its projects are erased in the background. Its deletion record is then kept in the database and the audit log only. Needs a browser session: API keys and personal access tokens get 403 (D-P-70).
          */
         delete: operations["delete_org"];
         options?: never;
@@ -716,6 +916,54 @@ export interface paths {
         patch: operations["patch_org_member"];
         trace?: never;
     };
+    "/api/v1/orgs/{org}/models": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List org model prices
+         * @description Any org member can read.
+         */
+        get: operations["list_org_model_prices"];
+        put?: never;
+        /**
+         * Create an org model price
+         * @description Org admins and owners. A PATCH replaces the whole row. A write that would leave a budgeted online rule of any project of the org without a price is 409.
+         */
+        post: operations["post_org_model_price"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/models/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete an org model price
+         * @description Org admins and owners. A PATCH replaces the whole row. A write that would leave a budgeted online rule of any project of the org without a price is 409.
+         */
+        delete: operations["delete_org_model_price"];
+        options?: never;
+        head?: never;
+        /**
+         * Replace an org model price
+         * @description Org admins and owners. A PATCH replaces the whole row. A write that would leave a budgeted online rule of any project of the org without a price is 409.
+         */
+        patch: operations["patch_org_model_price"];
+        trace?: never;
+    };
     "/api/v1/orgs/{org}/projects": {
         parameters: {
             query?: never;
@@ -734,6 +982,134 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/orgs/{org}/sso": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the org's identity provider and domains
+         * @description The provider without its client secret, the email domains with their TXT records, and the callback URL. Owners only, session only (D-P-51). Needs no feature, so the settings stay readable after a lapse (D-P-61).
+         */
+        get: operations["get_org_sso"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Turn the org's identity provider on, off or enforced
+         * @description Sets `enabled` and `enforced`, each optional (D-P-57, D-P-58, D-P-61). Turning enforcement on needs a verified domain, a sign-in through the provider, and this session's own sign-in through it when the caller's domain is covered. It revokes the password sessions and personal access tokens of the covered users, except instance admins (D-P-58). A provider cannot be disabled while enforced. Owners only, session only (D-P-51).
+         */
+        patch: operations["patch_org_sso"];
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/sso/domains": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Add an email domain to the org's SSO
+         * @description Adds a pending domain (D-P-54). The domain is trimmed, lowercased and checked as a DNS name; a domain the server configuration owns is refused. Prove it with the TXT record of the response, then call the verify route. Up to 20 domains per org. Needs the Teams add-on or an enterprise licence (D-P-61). Owners only, session only.
+         */
+        post: operations["post_org_sso_domain"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/sso/domains/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Remove an email domain from the org's SSO
+         * @description Removes the domain, verified or not. The org stops routing its users through the provider. Owners only, session only (D-P-51).
+         */
+        delete: operations["delete_org_sso_domain"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/sso/domains/{id}/verify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Verify an email domain with its DNS TXT record
+         * @description Looks up `_cetra-verify.<domain>` and verifies the domain when its value `cetra-verify=<token>` is there (D-P-54, D-P-64). An already verified domain answers 200 without a lookup. A domain another org holds moves to this org only when the holder's record is gone from the answer. At most 10 lookups per minute per org. A failed lookup answers 503. Needs the Teams add-on or an enterprise licence (D-P-61). Owners only, session only.
+         */
+        post: operations["post_org_sso_domain_verify"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/sso/provider": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Save the org's identity provider
+         * @description Creates or updates the org's one OIDC provider (D-P-52). The issuer's discovery document is loaded before anything is stored. The client secret is write-only: it is needed when creating, and when the issuer or client id changes. A new issuer deletes the org's identities. Needs the Teams add-on or an enterprise licence (D-P-61). Owners only, session only (D-P-51).
+         */
+        put: operations["put_org_sso_provider"];
+        post?: never;
+        /**
+         * Remove the org's identity provider
+         * @description Turn enforcement off first (409 otherwise). The org's identities for the provider go with it. Owners only, session only (D-P-51).
+         */
+        delete: operations["delete_org_sso_provider"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the org's usage by day
+         * @description Units, bytes and judge usage per UTC day, summed over the org's projects (D-P-42). `from` and `to` are inclusive days; the default is this month to today, and `to - from` is at most 365 days. Today's row counts flushed usage only, up to 10 seconds behind. Any org member.
+         */
+        get: operations["get_org_usage"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{project}": {
         parameters: {
             query?: never;
@@ -746,8 +1122,8 @@ export interface paths {
         put?: never;
         post?: never;
         /**
-         * Delete a project (org admins; API keys are refused)
-         * @description Answers 202; the project is gone from every route at once and its data is erased in the background.
+         * Delete a project (org admins; session only)
+         * @description Answers 202; the project is gone from every route at once and its data is erased in the background. Needs a browser session: API keys and personal access tokens get 403 (D-P-70).
          */
         delete: operations["delete_project"];
         options?: never;
@@ -863,7 +1239,7 @@ export interface paths {
         put?: never;
         /**
          * Create a notification channel
-         * @description Needs role member. Email channels need SMTP. At most 20 channels per project (409).
+         * @description Needs role member. Email channels need SMTP. At most 20 channels per project (409). Under open signup every email recipient must be a verified member of the org (400 on recipients).
          */
         post: operations["create_channel"];
         delete?: never;
@@ -886,7 +1262,10 @@ export interface paths {
         delete: operations["delete_channel"];
         options?: never;
         head?: never;
-        /** Update a notification channel */
+        /**
+         * Update a notification channel
+         * @description Under open signup every email recipient must be a verified member of the org (400 on recipients).
+         */
         patch: operations["update_channel"];
         trace?: never;
     };
@@ -901,9 +1280,213 @@ export interface paths {
         put?: never;
         /**
          * Send a test notification
-         * @description Sends one sample message now and reports the result. Nothing is stored. Needs role member.
+         * @description Sends one sample message now and reports the result. Nothing is stored. Needs role member. At most 5 sends per minute per user and 5 per minute per channel (429, Retry-After). Email sends count against the org's daily limit of 1000 messages; over it the result is ok false.
          */
         post: operations["test_channel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/datasets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List datasets
+         * @description Any project member, or an API key with `read`.
+         */
+        get: operations["list_datasets"];
+        put?: never;
+        /**
+         * Create a dataset
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-J-5).
+         */
+        post: operations["post_dataset"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/datasets/{dataset}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get a dataset
+         * @description Any project member, or an API key with `read`.
+         */
+        get: operations["get_dataset"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete a dataset
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Experiments keep their results; their dataset link is cleared.
+         */
+        delete: operations["delete_dataset"];
+        options?: never;
+        head?: never;
+        /**
+         * Update a dataset
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Setting a schema validates every live item first; up to 20 failures are listed (D-J-2).
+         */
+        patch: operations["patch_dataset"];
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/datasets/{dataset}/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Export a dataset version
+         * @description Any project member, or an API key with `read`.
+         */
+        get: operations["get_dataset_export"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/datasets/{dataset}/import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Import items from a CSV or JSONL file
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-J-5, D-J-6). Creates one new version from the valid rows. A file with no valid row writes nothing; the error lists the rejected rows.
+         */
+        post: operations["post_dataset_import"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/datasets/{dataset}/import/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview the head of an import file
+         * @description Any project reader. Shows the columns and the first rows of a CSV or JSONL file and writes nothing (D-J-6).
+         */
+        post: operations["post_dataset_import_preview"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/datasets/{dataset}/items": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the items of a version
+         * @description Any project member, or an API key with `read`.
+         */
+        get: operations["list_dataset_items"];
+        put?: never;
+        /**
+         * Add items
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Creates one new version. A batch with any failing item writes nothing; the error lists the failing items.
+         */
+        post: operations["post_dataset_items"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/datasets/{dataset}/items/from-trace": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Add an item copied from a trace or a span
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-J-5, D-J-8). Creates one new version holding one item copied from the trace root or from `span_id`; the request's fields replace the copied values. A trace that a pending deletion covers answers 404 and writes nothing (D-J-9).
+         */
+        post: operations["post_dataset_item_from_trace"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/datasets/{dataset}/items/{item_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get an item
+         * @description Any project member, or an API key with `read`.
+         */
+        get: operations["get_dataset_item"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete an item
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Creates one new version in which the item is gone; older versions still hold it.
+         */
+        delete: operations["delete_dataset_item"];
+        options?: never;
+        head?: never;
+        /**
+         * Edit an item
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Creates one new version. An edit that changes nothing creates none and answers the item as it is (D-J-3).
+         */
+        patch: operations["patch_dataset_item"];
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/datasets/{dataset}/versions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the versions of a dataset
+         * @description Any project member, or an API key with `read`.
+         */
+        get: operations["list_dataset_versions"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -957,6 +1540,46 @@ export interface paths {
         };
         /** Get a deletion */
         get: operations["get_deletion"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/eval-jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List eval jobs
+         * @description Any project member can read. Newest first. Jobs are kept 7 days after they finish.
+         */
+        get: operations["list_eval_jobs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/eval-jobs/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get an eval job
+         * @description Any project member can read.
+         */
+        get: operations["get_eval_job"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1020,7 +1643,7 @@ export interface paths {
         put?: never;
         /**
          * Run an evaluator once
-         * @description Project members and above. API keys cannot call it. Runs synchronously, writes the judge trace (environment `llmobs-eval`) and the judge usage, and writes no score. Shares the 10 per minute per user limit with connection tests.
+         * @description Project members and above. API keys cannot call it. Runs synchronously, writes the judge trace (environment `cetra-eval`) and the judge usage, and writes no score. Shares the 10 per minute per user limit with connection tests.
          */
         post: operations["post_evaluator_test"];
         delete?: never;
@@ -1045,7 +1668,7 @@ export interface paths {
         post?: never;
         /**
          * Delete an evaluator
-         * @description Project members and above. API keys cannot call it.
+         * @description Project members and above. API keys cannot call it. Refused with 409 while online rules use the evaluator; `errors` lists them.
          */
         delete: operations["delete_evaluator"];
         options?: never;
@@ -1055,6 +1678,154 @@ export interface paths {
          * @description Project members and above. API keys cannot call it.
          */
         patch: operations["patch_evaluator"];
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/evaluators/{id}/run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Run an evaluator on one trace
+         * @description Project members and above. API keys cannot call it. Queues one run at the highest priority and answers the job; poll `GET /eval-jobs/{id}`. Shares the 10 per minute per user limit with test runs.
+         */
+        post: operations["post_evaluator_run"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/experiments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List experiments
+         * @description Any project member, or an API key with `read`.
+         */
+        get: operations["list_experiments"];
+        put?: never;
+        /**
+         * Create an experiment
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Pins the dataset's version and copies its items into the first page of the answer; the SDK pages the rest from the items list.
+         */
+        post: operations["post_experiment"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/experiments/compare": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Compare experiments
+         * @description Project members, a `read` personal access token or a `read` key (D-J-5). Two to four experiments of one dataset, the first the baseline: their summaries, the deltas of each candidate to the baseline, and one page of items with a cell per experiment.
+         */
+        get: operations["compare_experiments"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/experiments/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get an experiment
+         * @description Any project member, or an API key with `read`.
+         */
+        get: operations["get_experiment"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete an experiment
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Deletes the experiment and its results; the traces and scores in storage stay.
+         */
+        delete: operations["delete_experiment"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/experiments/{id}/finish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Finish an experiment
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-J-5).
+         */
+        post: operations["post_experiment_finish"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/experiments/{id}/items": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Post results
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-J-5).
+         */
+        post: operations["post_experiment_results"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/experiments/{id}/results": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get results
+         * @description Any project member, or an API key with `read`.
+         */
+        get: operations["get_experiment_results"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/v1/projects/{project}/media/{sha256}": {
@@ -1121,11 +1892,215 @@ export interface paths {
         };
         /**
          * Get metrics
-         * @description Evaluation traces (`environment = llmobs-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Series have one point per bucket. Latencies and TTFT are nanoseconds. Costs are USD. Results are cached for 10 seconds. The evaluation cost series always counts evaluation traces (spec 05 § Dashboard metrics).
+         * @description Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Series have one point per bucket. Latencies and TTFT are nanoseconds. Costs are USD. Results are cached for 10 seconds. The evaluation cost series always counts evaluation traces (spec 05 § Dashboard metrics).
          */
         get: operations["get_metrics"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/models": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List model prices
+         * @description Any project member can read; a `read` API key too.
+         */
+        get: operations["list_models"];
+        put?: never;
+        /**
+         * Create a project model price
+         * @description Project admins. API keys cannot call it. A PATCH replaces the whole row. A write that would leave a budgeted online rule without a price is 409.
+         */
+        post: operations["post_model_price"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/models/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Resolve the price of a model
+         * @description Any project member can read; a `read` API key too.
+         */
+        get: operations["resolve_model_price"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/models/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete a project model price
+         * @description Project admins. API keys cannot call it. A PATCH replaces the whole row. A write that would leave a budgeted online rule without a price is 409.
+         */
+        delete: operations["delete_model_price"];
+        options?: never;
+        head?: never;
+        /**
+         * Replace a project model price
+         * @description Project admins. API keys cannot call it. A PATCH replaces the whole row. A write that would leave a budgeted online rule without a price is 409.
+         */
+        patch: operations["patch_model_price"];
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/online-rules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List online rules
+         * @description Any project member can read. `org_enabled_rules` counts the enabled rules of the whole org (D-I-32).
+         */
+        get: operations["list_online_rules"];
+        put?: never;
+        /**
+         * Create an online rule
+         * @description Project members and above. API keys cannot call it. 403 `plan_limit` when the org is at its active-rule limit.
+         */
+        post: operations["post_online_rule"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/online-rules/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Count what a rule's filter matches
+         * @description Project members and above. API keys cannot call it. Counts the traces or spans the filter matches in the window (default: the last 24 hours, at most 30 days), at most 10 000, leaving out evaluation and experiment traces whatever the filter says (D-I-9).
+         */
+        post: operations["post_online_rule_preview"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/online-rules/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get an online rule
+         * @description Any project member can read.
+         */
+        get: operations["get_online_rule"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete an online rule
+         * @description Project members and above. API keys cannot call it. Queued jobs of the rule are deleted with it.
+         */
+        delete: operations["delete_online_rule"];
+        options?: never;
+        head?: never;
+        /**
+         * Update an online rule
+         * @description Project members and above. API keys cannot call it. `target` and `evaluator_id` cannot change. Enabling a rule checks the active-rule limit.
+         */
+        patch: operations["patch_online_rule"];
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/online-rules/{id}/backfills": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List an online rule's backfills
+         * @description Any project member can read. The newest 50 backfills of the rule; the list is not paged.
+         */
+        get: operations["list_backfills"];
+        put?: never;
+        /**
+         * Start an online rule backfill
+         * @description Project members and above. API keys cannot call it. Starts a backfill: up to `max_targets` targets of the window, newest first, are sampled and queued at the lowest priority, skipping targets the rule already scored. 409 when the rule is disabled or paused, or already has a running backfill (D-I-25).
+         */
+        post: operations["post_backfill"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/online-rules/{id}/backfills/estimate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Estimate an online rule backfill
+         * @description Project members and above. API keys cannot call it. Counts the rule's targets in the window (at most `max_targets`, newest first, evaluation and experiment traces left out), how many the sample rate keeps, and, for an LLM judge, the tokens and cost they would use. Targets the rule already scored are counted; the run skips them (D-I-38, D-I-40).
+         */
+        post: operations["post_backfill_estimate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/online-rules/{id}/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resume an online rule
+         * @description Project members and above. API keys cannot call it. Clears the rule's pause.
+         */
+        post: operations["post_online_rule_resume"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1163,7 +2138,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * Get a saved view
+         * @description One view by id, with the same visibility as the list: the caller's own and shared views (an API key sees shared views). Any other id is 404. Use it to open a view that is not on the first pages of the list.
+         */
+        get: operations["get_saved_view"];
         put?: never;
         post?: never;
         /**
@@ -1257,7 +2236,7 @@ export interface paths {
         put?: never;
         /**
          * Write scores
-         * @description Writes 1–1000 scores in one batch. The answer has one id per item, in input order.
+         * @description Writes 1–1000 scores in one batch. The answer has one id per item, in input order. With a session or a personal access token, a `score_id` that names another user's `human` score is refused with 403 unless the caller is a project admin.
          */
         post: operations["create_scores"];
         delete?: never;
@@ -1278,7 +2257,7 @@ export interface paths {
         post?: never;
         /**
          * Delete a score
-         * @description Appends a deleted version of the score. Its `created_at` is kept.
+         * @description Appends a deleted version of the score. Its `created_at` is kept. With a session or a personal access token, another user's `human` score can be deleted only by a project admin (403).
          */
         delete: operations["delete_score"];
         options?: never;
@@ -1295,7 +2274,7 @@ export interface paths {
         };
         /**
          * List sessions
-         * @description Evaluation traces (`environment = llmobs-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.
+         * @description Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.
          */
         get: operations["list_sessions"];
         put?: never;
@@ -1315,7 +2294,7 @@ export interface paths {
         };
         /**
          * Get a session
-         * @description Evaluation traces (`environment = llmobs-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Turns are the session's traces by start time, at most 1000. `input` and `output` are the root span's payloads, omitted when the trace has no root.
+         * @description Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Turns are the session's traces by start time, at most 1000. `input` and `output` are the root span's payloads, omitted when the trace has no root.
          */
         get: operations["get_session"];
         put?: never;
@@ -1335,7 +2314,7 @@ export interface paths {
         };
         /**
          * List spans
-         * @description Evaluation traces (`environment = llmobs-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.
+         * @description Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.
          */
         get: operations["list_spans"];
         put?: never;
@@ -1375,7 +2354,7 @@ export interface paths {
         };
         /**
          * List traces
-         * @description Evaluation traces (`environment = llmobs-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.
+         * @description Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.
          */
         get: operations["list_traces"];
         put?: never;
@@ -1395,7 +2374,7 @@ export interface paths {
         };
         /**
          * Stream traces
-         * @description Evaluation traces (`environment = llmobs-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Server-sent events: `trace` data is a TraceSummary; `resync` and `ping` data are `{}`. `ping` is sent every 15 seconds.
+         * @description Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Server-sent events: `trace` data is a TraceSummary; `resync` and `ping` data are `{}`. `ping` is sent every 15 seconds.
          */
         get: operations["stream_traces"];
         put?: never;
@@ -1472,7 +2451,7 @@ export interface paths {
         };
         /**
          * List users
-         * @description Evaluation traces (`environment = llmobs-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. The filter runs on the `traces` view before traces are grouped by user.
+         * @description Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. The filter runs on the `traces` view before traces are grouped by user.
          */
         get: operations["list_users"];
         put?: never;
@@ -1492,7 +2471,7 @@ export interface paths {
         };
         /**
          * Get a user
-         * @description Evaluation traces (`environment = llmobs-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Sessions are the user's 100 most recent.
+         * @description Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Sessions are the user's 100 most recent.
          */
         get: operations["get_user"];
         put?: never;
@@ -1527,6 +2506,26 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @description `POST …/datasets/{dataset}/items` body: 1 to 1 000 items, one new version. */
+        AddItemsRequest: {
+            /** @description The items, 1 to 1 000 of them. Their ids come back in the same order. */
+            items: components["schemas"]["NewDatasetItem"][];
+        };
+        /** @description The new version and the new item ids, in request order. */
+        AddItemsResponse: {
+            /** @description The new item ids, in request order. */
+            item_ids: string[];
+            /**
+             * Format: int64
+             * @description The version the items were added in.
+             */
+            version: number;
+        };
+        /** @description `POST /api/v1/orgs/{org}/sso/domains`. */
+        AddOrgSsoDomain: {
+            /** @description The email domain, e.g. `acme.com`. Punycode for internationalized names. */
+            domain: string;
+        };
         /** @description `GET /api/v1/admin/license`. Never contains the key. */
         AdminLicense: {
             /** @description Customer name. Omitted with `none` and `invalid`. */
@@ -1651,7 +2650,8 @@ export interface components {
             target?: components["schemas"]["LatencyTarget"];
             /**
              * Format: double
-             * @description Fraction for `error_rate` and `pass_rate`, USD for `cost`, milliseconds for `latency_p95`.
+             * @description Fraction for `error_rate` and `pass_rate`, USD for `cost`, milliseconds for `latency_p95`
+             *     (below the window length for a `trace` target).
              */
             threshold: number;
             /** @description Sliding window. */
@@ -1675,7 +2675,7 @@ export interface components {
             channel_name: string;
             /**
              * Format: uuid
-             * @description Delivery id; the webhook's `X-Llmobs-Delivery`.
+             * @description Delivery id; the webhook's `X-Cetra-Delivery`.
              */
             id: string;
             /** @description The last attempt's error. */
@@ -1745,7 +2745,7 @@ export interface components {
          * @description What an event records.
          * @enum {string}
          */
-        AlertEventKind: "fired" | "resolved" | "reminder";
+        AlertEventKind: "fired" | "resolved" | "no_data" | "reminder";
         /** @description One page of results. `next_cursor` is null when there is no next page. */
         AlertEventPage: {
             /** @description Items in this page. */
@@ -1897,7 +2897,10 @@ export interface components {
             org_create_allowed: boolean;
             /** @description Where "New organization" goes when users may not create orgs. Omitted when unset. */
             org_create_url?: string;
-            /** @description Password login is enabled. False when `LLMOBS_AUTH_DISABLE_PASSWORD` is set. */
+            /**
+             * @description Password login is enabled for everyone. False when `CETRA_AUTH_DISABLE_PASSWORD` is
+             *     set; instance admins then still sign in with a password at `/login?password=1` (D-S-4).
+             */
             password_enabled: boolean;
             /** @description Configured OAuth and OIDC providers. */
             providers: components["schemas"]["AuthProvider"][];
@@ -1907,6 +2910,11 @@ export interface components {
             signup: components["schemas"]["SignupPolicy"];
             /** @description SMTP is configured, so password reset and verification email can be sent. */
             smtp_enabled: boolean;
+            /**
+             * @description The login page asks for the email first: some domain signs in through an org's
+             *     provider (D-P-60).
+             */
+            sso_discovery: boolean;
         };
         /**
          * @description One OAuth or OIDC provider the UI can start a login with.
@@ -1919,6 +2927,123 @@ export interface components {
             /** @description Provider id: `github`, `google`, or `oidc:<name>`. */
             id: string;
         };
+        /** @description A backfill of one online rule (D-I-25). */
+        Backfill: {
+            /**
+             * Format: date-time
+             * @description Start time. RFC 3339.
+             */
+            created_at: string;
+            /**
+             * Format: uuid
+             * @description User who started the backfill. Omitted when that user is unknown.
+             */
+            created_by?: string;
+            /**
+             * Format: int64
+             * @description Jobs inserted or re-queued so far.
+             */
+            enqueued: number;
+            /** @description Why the backfill failed. Present exactly when `status` is `failed`. */
+            error?: string;
+            /**
+             * Format: date-time
+             * @description End time. Omitted while the backfill runs. RFC 3339.
+             */
+            finished_at?: string;
+            /**
+             * Format: date-time
+             * @description Window start, inclusive. RFC 3339.
+             */
+            from: string;
+            /**
+             * Format: uuid
+             * @description Backfill id.
+             */
+            id: string;
+            /**
+             * Format: int64
+             * @description Targets read so far, at most `max_targets`.
+             */
+            matched: number;
+            /**
+             * Format: int32
+             * @description Most targets the backfill reads.
+             */
+            max_targets: number;
+            /**
+             * Format: uuid
+             * @description The rule the backfill runs for.
+             */
+            rule_id: string;
+            /**
+             * Format: double
+             * @description Sample rate the backfill used.
+             */
+            sample_rate: number;
+            /** @description Where the backfill stands. */
+            status: components["schemas"]["BackfillStatus"];
+            /**
+             * Format: date-time
+             * @description Window end, exclusive. RFC 3339.
+             */
+            to: string;
+        };
+        /**
+         * @description What a backfill would read and cost (D-I-42). The estimate is an upper bound: it does not
+         *     subtract targets the rule already scored.
+         */
+        BackfillEstimate: {
+            /** @description More than `max_targets` matched. */
+            capped: boolean;
+            /**
+             * Format: double
+             * @description Estimated cost in USD. Judges with a priced model only.
+             */
+            estimated_cost_usd?: number;
+            /**
+             * Format: int64
+             * @description Input tokens the sampled targets would send. Judges only.
+             */
+            estimated_input_tokens?: number;
+            /**
+             * Format: int64
+             * @description Output tokens the sampled targets would ask for. Judges only.
+             */
+            estimated_output_tokens?: number;
+            /**
+             * Format: date-time
+             * @description The window that was counted. RFC 3339.
+             */
+            from: string;
+            /**
+             * Format: int64
+             * @description Targets in the window, at most `max_targets`.
+             */
+            matched: number;
+            /**
+             * Format: int64
+             * @description Targets the sample rate keeps.
+             */
+            sampled: number;
+            /**
+             * Format: date-time
+             * @description The end of the window that was counted. RFC 3339.
+             */
+            to: string;
+        };
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        BackfillPage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["Backfill"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+        };
+        /**
+         * @description Where a backfill stands (D-I-39).
+         * @enum {string}
+         */
+        BackfillStatus: "running" | "done" | "failed";
         /** @description Inline base64 media, before extraction replaces it with a URI. */
         BlobPart: {
             /** @description Base64 payload. */
@@ -1935,6 +3060,11 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /**
+         * @description The period of a rule budget, in UTC.
+         * @enum {string}
+         */
+        BudgetPeriod: "day" | "month";
         /** @description `POST /api/v1/me/password`. */
         ChangePasswordRequest: {
             /** @description The current password. Required when the account has one, and absent when it does not. */
@@ -2000,6 +3130,51 @@ export interface components {
          * @enum {string}
          */
         Comparator: "gt" | "gte" | "lt" | "lte";
+        /** @description One experiment's answer for one item. */
+        CompareCell: {
+            /** @description The error of the item, from its lowest repetition or another one. Omitted when none. */
+            error?: string;
+            /**
+             * Format: uuid
+             * @description The experiment.
+             */
+            experiment_id: string;
+            /**
+             * Format: int64
+             * @description The latency of the item's lowest repetition, in nanoseconds. Omitted when unknown.
+             */
+            latency_ns?: number;
+            /** @description Any JSON value. */
+            output?: unknown;
+            /**
+             * @description Whether this cell regressed against the baseline's cell of the same item. Always false
+             *     for the baseline.
+             */
+            regressed: boolean;
+            /** @description The mean over repetitions, per score name. */
+            scores: {
+                [key: string]: number;
+            };
+            /** @description The trace of the item's lowest repetition. Omitted when none. */
+            trace_id?: components["schemas"]["TraceId"];
+        };
+        /** @description One dataset item, with each experiment's cell. */
+        CompareRow: {
+            /**
+             * @description One cell per experiment that has a result for the item, in request order. Match cells by
+             *     `experiment_id`, never by position (D-J-13).
+             */
+            cells: components["schemas"]["CompareCell"][];
+            /**
+             * Format: uuid
+             * @description The dataset item.
+             */
+            dataset_item_id: string;
+            /** @description Any JSON value. */
+            expected_output?: unknown;
+            /** @description Any JSON value. */
+            input: unknown;
+        };
         /**
          * @description Whether the connection's last test reached the provider.
          * @enum {string}
@@ -2011,7 +3186,7 @@ export interface components {
          *     Spec 01 `conventions` and spec 02 § Convention detection.
          * @enum {string}
          */
-        Convention: "llmobs" | "genai" | "openinference" | "openllmetry" | "vercel" | "langfuse" | "laminar" | "google_adk";
+        Convention: "cetra" | "genai" | "openinference" | "openllmetry" | "vercel" | "langfuse" | "laminar" | "google_adk";
         /**
          * @description Where a span's cost came from.
          *
@@ -2057,6 +3232,29 @@ export interface components {
             /** @description Secret keys default to ingest, read, and write. Public keys default to feedback. */
             scopes?: components["schemas"]["ApiKeyScope"][];
         };
+        /**
+         * @description `POST /api/v1/projects/{project}/online-rules/{id}/backfills` body, and the body of its
+         *     `estimate` operation (D-I-38, D-I-42). Absent `sample_rate` takes the rule's rate.
+         */
+        CreateBackfillRequest: {
+            /** @description Window start, inclusive. RFC 3339 timestamp or epoch milliseconds. */
+            from: components["schemas"]["TimeParam"];
+            /**
+             * Format: int32
+             * @description Most targets the backfill reads, 1 to 10 000 (D-I-25).
+             */
+            max_targets: number;
+            /**
+             * Format: double
+             * @description Sample rate, above 0 and at most 1. Omitted: the rule's sample rate (D-I-40).
+             */
+            sample_rate?: number;
+            /**
+             * @description Window end, exclusive. At least 5 minutes ago; `to - from` at most 30 days. Same
+             *     formats as `from`.
+             */
+            to: components["schemas"]["TimeParam"];
+        };
         /** @description Body of `POST /channels`. Send the fields of `kind` only. */
         CreateChannelRequest: {
             /** @description `webhook`: extra headers, at most 10. */
@@ -2073,6 +3271,17 @@ export interface components {
             secret?: string;
             /** @description `slack` and `webhook`: the URL. */
             url?: string;
+        };
+        /** @description `POST /api/v1/projects/{project}/datasets` body. */
+        CreateDatasetRequest: {
+            /** @description Free text, at most 2 000 characters. */
+            description?: string;
+            /** @description JSON Schema every present expected output must fit, at most 64 KiB. */
+            expected_schema?: Record<string, never>;
+            /** @description JSON Schema (Draft 2020-12) every item input must fit, at most 64 KiB. */
+            input_schema?: Record<string, never>;
+            /** @description Unique in the project, 1 to 200 characters, never a UUID. */
+            name: string;
         };
         /** @description `POST /api/v1/projects/{project}/deletions`. */
         CreateDeletion: {
@@ -2110,6 +3319,42 @@ export interface components {
             output_score: components["schemas"]["OutputScoreBody"];
             /** @description Signing secret of a webhook, 16 to 256 characters. Write-only, and required for a webhook. */
             webhook_secret?: string;
+        };
+        /** @description `POST /api/v1/projects/{project}/experiments` body. */
+        CreateExperimentRequest: {
+            /** @description The dataset, by id or by name. */
+            dataset: string;
+            /**
+             * Format: int64
+             * @description The version to pin. Defaults to the dataset's current version. 0 is refused.
+             */
+            dataset_version?: number;
+            /** @description Free text, at most 2 000 characters. */
+            description?: string;
+            /** @description A JSON object of at most 64 KiB. */
+            metadata?: Record<string, never>;
+            /** @description Experiment name, 1 to 200 characters after trimming. */
+            name: string;
+            /**
+             * Format: int64
+             * @description Repetitions of every item, 1 to 20. Defaults to 1.
+             */
+            repetitions?: number;
+        };
+        /**
+         * @description The created experiment and the first page of its pinned items. The SDK pages the rest with
+         *     `GET …/datasets/{dataset}/items?version=` from `next_cursor`.
+         */
+        CreateExperimentResponse: {
+            /** @description The experiment, `running`. */
+            experiment: components["schemas"]["Experiment"];
+            /** @description The first 1 000 items of the pinned version, by item id. */
+            items: components["schemas"]["DatasetItem"][];
+            /**
+             * @description The item id to pass as `cursor` of `GET …/items` for the next page, or null on the last
+             *     page. Always present.
+             */
+            next_cursor: string | null;
         };
         /** @description `POST /api/internal/v1/orgs` (D-P-29). */
         CreateInternalOrgRequest: {
@@ -2162,6 +3407,43 @@ export interface components {
             /** @description How the provider is asked to fill the answer schema. Default `native`. */
             structured_output?: components["schemas"]["StructuredOutputMode"];
         };
+        /**
+         * @description `POST /api/v1/projects/{project}/online-rules` body. Absent optional fields take their defaults.
+         *
+         *     Optional fields refuse `null` (spec 09 § Conventions). Its `Debug` is derived: a rule holds
+         *     configuration only, no payload or secret.
+         */
+        CreateOnlineRuleRequest: {
+            /** @description Period of the budget. Required with `budget_usd`. */
+            budget_period?: components["schemas"]["BudgetPeriod"];
+            /**
+             * Format: double
+             * @description Budget per period, in USD. Judge evaluators only.
+             */
+            budget_usd?: number;
+            /** @description Whether the rule runs. Default true. */
+            enabled?: boolean;
+            /**
+             * Format: uuid
+             * @description The evaluator the rule runs.
+             */
+            evaluator_id: string;
+            /** @description Filter over the target's view. Absent means no filter. */
+            filter?: string;
+            /** @description Display name, 1 to 128 characters after trimming. */
+            name: string;
+            /**
+             * Format: double
+             * @description Share of the matching targets to evaluate, in `(0, 1]`. Default 1.
+             */
+            sample_rate?: number;
+            /** @description What the rule matches. Immutable once created. */
+            target: components["schemas"]["RuleTarget"];
+            /** @description Prompt variable to mapping expression, 1 to 32 variables. */
+            variable_mapping: {
+                [key: string]: string;
+            };
+        };
         /** @description `POST /api/v1/orgs`. */
         CreateOrgRequest: {
             /** @description Display name. Trimmed to 1–100 characters. */
@@ -2184,10 +3466,10 @@ export interface components {
             name: string;
             /**
              * Format: int32
-             * @description Days to keep data, from 1 to 36500. Absent keeps data forever.
+             * @description Days to keep data, from 1 to 36500. Null or absent keeps data forever.
              */
-            retention_days?: number;
-            /** @description URL slug. Absent derives one from the name. Project slugs are not reserved words. */
+            retention_days?: number | null;
+            /** @description URL slug. Absent derives one from the name. `settings` is reserved. */
             slug?: string;
         };
         /**
@@ -2264,6 +3546,118 @@ export interface components {
             /** @description The stored token, without the secret. */
             token: components["schemas"]["PersonalToken"];
         };
+        /** @description A dataset (D-J-2, D-J-3). */
+        Dataset: {
+            /**
+             * Format: date-time
+             * @description Creation time. JSON is RFC 3339.
+             */
+            created_at: string;
+            /**
+             * Format: int64
+             * @description Latest version; 0 for a dataset with no change yet.
+             */
+            current_version: number;
+            /** @description What the dataset holds. Omitted when unset. */
+            description?: string;
+            /** @description JSON Schema every present expected output must fit. Omitted when unset. */
+            expected_schema?: Record<string, never>;
+            /**
+             * Format: int64
+             * @description Experiments run on this dataset.
+             */
+            experiment_count: number;
+            /**
+             * Format: uuid
+             * @description Dataset id.
+             */
+            id: string;
+            /** @description JSON Schema (Draft 2020-12) every item input must fit. Omitted when unset. */
+            input_schema?: Record<string, never>;
+            /**
+             * Format: int64
+             * @description Live items at the latest version.
+             */
+            item_count: number;
+            /** @description Unique in the project, 1 to 200 characters, never a UUID. */
+            name: string;
+            /**
+             * Format: date-time
+             * @description Last change time. JSON is RFC 3339.
+             */
+            updated_at: string;
+        };
+        /** @description One item as it is in a version. */
+        DatasetItem: {
+            /**
+             * Format: date-time
+             * @description Creation time of this revision. JSON is RFC 3339.
+             */
+            created_at: string;
+            /** @description Any JSON value. */
+            expected_output?: unknown;
+            /**
+             * Format: uuid
+             * @description The item id, stable across versions.
+             */
+            id: string;
+            /** @description Any JSON value. */
+            input: unknown;
+            /** @description A JSON object. Empty when the item has no metadata. */
+            metadata: Record<string, never>;
+            /**
+             * Format: uuid
+             * @description This revision.
+             */
+            revision_id: string;
+            /** @description The span the item was copied from. Omitted when none. */
+            source_span_id?: components["schemas"]["SpanId"];
+            /** @description The trace the item was copied from. Omitted when none. */
+            source_trace_id?: components["schemas"]["TraceId"];
+            /**
+             * Format: int64
+             * @description The version that introduced this revision.
+             */
+            version: number;
+        };
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        DatasetItemPage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["DatasetItem"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+        };
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        DatasetPage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["Dataset"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+        };
+        /** @description One version of a dataset. */
+        DatasetVersion: {
+            /**
+             * Format: date-time
+             * @description Creation time. JSON is RFC 3339.
+             */
+            created_at: string;
+            /** @description The user id, or `key:<key id>` for an API key. Omitted when unknown. */
+            created_by?: string;
+            /** @description What changed, e.g. `add 12 items`. */
+            description: string;
+            /**
+             * Format: int64
+             * @description Version number. Versions start at 1.
+             */
+            version: number;
+        };
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        DatasetVersionPage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["DatasetVersion"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+        };
         /** @description A deletion request and its progress. */
         Deletion: {
             /**
@@ -2323,17 +3717,17 @@ export interface components {
         DeletionActor: {
             /**
              * Format: uuid
-             * @description The user id or the API key id.
+             * @description The user, API key or control-plane token id.
              */
             id: string;
-            /** @description `user` or `api_key`. */
+            /** @description `user`, `api_key` or `control_plane`. */
             kind: components["schemas"]["DeletionActorKind"];
         };
         /**
          * @description Who requested a deletion.
          * @enum {string}
          */
-        DeletionActorKind: "user" | "api_key";
+        DeletionActorKind: "user" | "api_key" | "control_plane";
         /**
          * @description Why a deletion failed.
          * @enum {string}
@@ -2402,6 +3796,11 @@ export interface components {
          */
         DeliveryStatus: "pending" | "sent" | "failed";
         /**
+         * @description Whether the org has proved the domain.
+         * @enum {string}
+         */
+        DomainStatus: "pending" | "verified";
+        /**
          * @description User summary plus the most recent sessions.
          *
          *     Spec 09 § Response shapes.
@@ -2464,6 +3863,100 @@ export interface components {
             /** @description End-user id. */
             user_id: string;
         };
+        /** @description An eval job. Spec 09 § Evaluation & alerts. */
+        EvalJob: {
+            /**
+             * Format: int32
+             * @description Attempts made so far.
+             */
+            attempts: number;
+            /**
+             * Format: double
+             * @description Cost of the judge call, in USD.
+             */
+            cost_usd?: number;
+            /**
+             * Format: date-time
+             * @description Creation time. JSON is RFC 3339.
+             */
+            created_at: string;
+            /** @description The failure text, without payload content or secrets. */
+            error?: string;
+            /** @description What the caller should do with the failure. Omitted unless the job failed or was requeued. */
+            error_class?: components["schemas"]["TestErrorClass"];
+            /**
+             * Format: uuid
+             * @description The evaluator the job runs.
+             */
+            evaluator_id: string;
+            /**
+             * Format: date-time
+             * @description Time the job finished. Omitted while it is queued or running.
+             */
+            finished_at?: string;
+            /**
+             * Format: uuid
+             * @description Job id.
+             */
+            id: string;
+            /**
+             * Format: int64
+             * @description Input tokens of the judge call.
+             */
+            input_tokens?: number;
+            /** @description The judge trace of the run, 32 lowercase hex digits. */
+            judge_trace_id?: components["schemas"]["TraceId"];
+            /** @description Where the job came from. */
+            kind: components["schemas"]["EvalJobKind"];
+            /**
+             * Format: int64
+             * @description Latency of the judge call, in milliseconds.
+             */
+            latency_ms?: number;
+            /**
+             * Format: date-time
+             * @description Earliest time the job may run. JSON is RFC 3339.
+             */
+            not_before: string;
+            /**
+             * Format: int64
+             * @description Output tokens of the judge call.
+             */
+            output_tokens?: number;
+            /**
+             * Format: uuid
+             * @description The rule that queued the job. Omitted for a manual run.
+             */
+            rule_id?: string;
+            /**
+             * Format: uuid
+             * @description The score the run wrote.
+             */
+            score_id?: string;
+            /** @description Target span, 16 lowercase hex digits. Omitted for a trace target. */
+            span_id?: components["schemas"]["SpanId"];
+            /** @description Where the job is in its life. */
+            status: components["schemas"]["EvalJobStatus"];
+            /** @description Target trace, 32 lowercase hex digits. */
+            trace_id: components["schemas"]["TraceId"];
+        };
+        /**
+         * @description Where a job came from. Stored as `eval_jobs.kind`.
+         * @enum {string}
+         */
+        EvalJobKind: "rule" | "manual" | "backfill";
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        EvalJobPage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["EvalJob"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+        };
+        /**
+         * @description Where a job is in its life. Stored as `eval_jobs.status`.
+         * @enum {string}
+         */
+        EvalJobStatus: "queued" | "running" | "done" | "failed" | "skipped";
         /** @description An evaluator. Sealed values (a webhook's signing secret and header values) are not included. */
         Evaluator: {
             /** @description The kind-specific configuration as stored. A webhook keeps only its URL host, timeout and header names. */
@@ -2574,7 +4067,7 @@ export interface components {
         EvaluatorTestResult: {
             /** @description The failure. Omitted when `ok` is true. */
             error?: components["schemas"]["EvaluatorTestError"];
-            /** @description The judge trace the run wrote (environment `llmobs-eval`). Omitted when no judge trace was written. */
+            /** @description The judge trace the run wrote (environment `cetra-eval`). Omitted when no judge trace was written. */
             judge_trace_id?: components["schemas"]["TraceId"];
             /**
              * Format: int64
@@ -2616,11 +4109,187 @@ export interface components {
              */
             output_tokens?: number;
         };
+        /** @description One experiment: a run of a task over a pinned dataset version. */
+        Experiment: {
+            /**
+             * Format: date-time
+             * @description Creation time. JSON is RFC 3339.
+             */
+            created_at: string;
+            /**
+             * Format: uuid
+             * @description The dataset. Omitted once the dataset is deleted.
+             */
+            dataset_id?: string;
+            /** @description The dataset's name when the experiment was created. */
+            dataset_name: string;
+            /**
+             * Format: int64
+             * @description The dataset version the experiment is pinned to.
+             */
+            dataset_version: number;
+            /** @description Free text. Omitted when unset. */
+            description?: string;
+            /** @description The error the experiment finished with. Omitted when none. */
+            error?: string;
+            /**
+             * Format: date-time
+             * @description When the experiment finished. Omitted while it runs. JSON is RFC 3339.
+             */
+            finished_at?: string;
+            /**
+             * Format: uuid
+             * @description Experiment id.
+             */
+            id: string;
+            /**
+             * Format: int64
+             * @description Live items of the pinned version.
+             */
+            item_count: number;
+            /** @description A JSON object. */
+            metadata: Record<string, never>;
+            /** @description Not unique. 1 to 200 characters. */
+            name: string;
+            /**
+             * Format: int64
+             * @description Repetitions of every item, 1 to 20.
+             */
+            repetitions: number;
+            /**
+             * Format: int64
+             * @description Results stored so far.
+             */
+            result_count: number;
+            /** @description `running`, `completed` or `failed`. */
+            status: components["schemas"]["ExperimentStatus"];
+        };
+        /** @description `GET …/experiments/compare`: two to four experiments of one dataset, the first the baseline. */
+        ExperimentComparison: {
+            /** @description The deltas of each candidate. */
+            deltas: components["schemas"]["ScoreDeltas"][];
+            /** @description The experiments in request order; the first is the baseline. */
+            experiments: components["schemas"]["ExperimentSummary"][];
+            /** @description The cursor of the next page, or null on the last page. Always present. */
+            next_cursor: string | null;
+            /** @description One page of items, by item id. */
+            rows: components["schemas"]["CompareRow"][];
+            /**
+             * @description Notes on the comparison, such as differing dataset versions or items left out of the
+             *     deltas.
+             */
+            warnings: string[];
+        };
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        ExperimentPage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["Experiment"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+        };
+        /** @description One result: what the task answered for one item and repetition. */
+        ExperimentResult: {
+            /**
+             * Format: uuid
+             * @description The dataset item. Its input and expected output are copied from the pinned version.
+             */
+            dataset_item_id: string;
+            /** @description What went wrong, at most 4 096 characters. Omitted when none. */
+            error?: string;
+            /**
+             * Format: int64
+             * @description Time the task took, in nanoseconds. Omitted when unknown.
+             */
+            latency_ns?: number;
+            /** @description Any JSON value. */
+            output?: unknown;
+            /**
+             * Format: int64
+             * @description 0 to `repetitions` − 1.
+             */
+            repetition: number;
+            /** @description The trace of the task run. Omitted when none. */
+            trace_id?: components["schemas"]["TraceId"];
+        };
+        /** @description `GET …/experiments/{id}/results`: the summary, and one page of rows. */
+        ExperimentResults: {
+            /** @description The cursor of the next page, or null on the last page. Always present. */
+            next_cursor: string | null;
+            /** @description One page of rows, by item id then repetition. */
+            rows: components["schemas"]["ResultRow"][];
+            /** @description The aggregated experiment. */
+            summary: components["schemas"]["ExperimentSummary"];
+        };
+        /** @description `POST …/experiments/{id}/items` body: 1 to 500 results. */
+        ExperimentResultsRequest: {
+            /** @description The results, 1 to 500 of them. One row per item and repetition: a later post replaces it. */
+            results: components["schemas"]["ExperimentResult"][];
+        };
+        /** @description What `POST …/items` stored. */
+        ExperimentResultsResponse: {
+            /**
+             * Format: int64
+             * @description Rows not stored because their trace is being deleted (D-J-9).
+             */
+            skipped: number;
+            /**
+             * Format: int64
+             * @description Rows written.
+             */
+            stored: number;
+        };
+        /**
+         * @description `running`, `completed` or `failed`.
+         * @enum {string}
+         */
+        ExperimentStatus: "running" | "completed" | "failed";
+        /** @description The results of one experiment, aggregated. */
+        ExperimentSummary: {
+            /**
+             * Format: double
+             * @description The sum of the traces' costs. Omitted when no trace has a cost.
+             */
+            cost_total?: number;
+            /**
+             * Format: int64
+             * @description Results with an error.
+             */
+            error_count: number;
+            /** @description The experiment. */
+            experiment: components["schemas"]["Experiment"];
+            /**
+             * Format: int64
+             * @description The mean latency. Omitted when no result has one.
+             */
+            latency_mean_ns?: number;
+            /**
+             * Format: int64
+             * @description The median latency, by nearest rank. Omitted when no result has one.
+             */
+            latency_p50_ns?: number;
+            /**
+             * Format: int64
+             * @description The 95th percentile latency, by nearest rank. Omitted when no result has one.
+             */
+            latency_p95_ns?: number;
+            /**
+             * Format: int64
+             * @description Results stored.
+             */
+            result_count: number;
+            /** @description One entry per score name, sorted by name. */
+            scores: components["schemas"]["ScoreSummary"][];
+        };
+        /**
+         * @description The format of an export (D-J-7).
+         * @enum {string}
+         */
+        ExportFormat: "jsonl" | "csv";
         /**
          * @description A feature an org may be entitled to. Names are append-only (D-P-12).
          * @enum {string}
          */
-        Feature: "retention_management" | "project_roles" | "sso_enforcement";
+        Feature: "retention_management" | "project_roles" | "sso_enforcement" | "org_sso";
         /** @description `POST /api/public/feedback` body (spec 06 § End-user feedback). */
         FeedbackRequest: {
             /** @description Free-text comment. */
@@ -2657,10 +4326,28 @@ export interface components {
             /** @description Location inside the field value, for filter and SQL errors. */
             position?: components["schemas"]["TextPosition"];
         };
+        /** @description `POST …/experiments/{id}/finish` body. */
+        FinishExperimentRequest: {
+            /** @description Why the run failed, at most 4 096 characters. Omitted for `completed`. */
+            error?: string;
+        };
         /** @description `POST /api/auth/password/forgot`. */
         ForgotPasswordRequest: {
             /** @description Email address. */
             email: string;
+        };
+        /** @description `POST …/items/from-trace` body (D-J-8). Fields left out take the span's values. */
+        FromTraceRequest: {
+            /** @description Any JSON value. */
+            expected_output?: unknown;
+            /** @description Any JSON value. */
+            input?: unknown;
+            /** @description The item's metadata, a JSON object. Absent: `{}`. */
+            metadata?: Record<string, never>;
+            /** @description 16 hex digits. Absent: the trace root. */
+            span_id?: string;
+            /** @description 32 hex digits, either case. */
+            trace_id: string;
         };
         /**
          * @description One function the filter DSL or SQL console can call.
@@ -2679,6 +4366,116 @@ export interface components {
             /** @description Argument and return types, for example `score(name: string) -> float`. */
             signature: string;
         };
+        /** @description Where one CSV column goes (D-J-6). */
+        ImportColumn: {
+            /** @description The header of the column, exactly as in the file. */
+            column: string;
+            /** @description `input`, `input.<key>`, `expected`, `expected.<key>`, `metadata.<key>` or `ignore`. */
+            target: string;
+        };
+        /**
+         * @description The format of an import or a preview (D-J-6).
+         * @enum {string}
+         */
+        ImportFormat: "csv" | "jsonl";
+        /** @description The column mapping of a CSV import. Columns the mapping does not list are ignored. */
+        ImportMapping: {
+            /** @description One entry per mapped column, at most 1,000. */
+            columns: components["schemas"]["ImportColumn"][];
+        };
+        /** @description The head of a file as the import wizard shows it (D-J-6). */
+        ImportPreview: {
+            /** @description CSV: the header. JSONL: the top-level keys of the shown rows, in first-seen order. */
+            columns: string[];
+            /** @description Lines of the head that could not be read. */
+            errors: components["schemas"]["ImportRowError"][];
+            format: components["schemas"]["ImportFormat"];
+            rows: unknown[];
+            /** @description More rows follow, or the head was cut. */
+            truncated: boolean;
+        };
+        /** @description The outcome of an import. */
+        ImportResult: {
+            /**
+             * Format: int64
+             * @description Rows rejected, all of them.
+             */
+            error_count: number;
+            /** @description The first 100 rejected rows. */
+            errors: components["schemas"]["ImportRowError"][];
+            /**
+             * Format: int64
+             * @description Items imported.
+             */
+            imported: number;
+            /**
+             * Format: int64
+             * @description The version the import made.
+             */
+            version: number;
+        };
+        /** @description One rejected row of an import or a preview. */
+        ImportRowError: {
+            /** @description Why the row was rejected. */
+            message: string;
+            /**
+             * Format: int64
+             * @description CSV: the 1-based data record (the header is not counted). JSONL: the 1-based line.
+             */
+            row: number;
+        };
+        /** @description One applied drop in the feed (D-P-49). */
+        InternalDrop: {
+            /**
+             * Format: date-time
+             * @description When the drop was applied.
+             */
+            applied_at: string;
+            /**
+             * Format: uuid
+             * @description The deletion id.
+             */
+            id: string;
+            kind: components["schemas"]["InternalDropKind"];
+            /** Format: uuid */
+            org_id: string;
+            /**
+             * Format: uuid
+             * @description Project drops only.
+             */
+            project_id?: string;
+        };
+        /**
+         * @description A drop kind in the feed of `GET /api/internal/v1/deletions` (D-P-49).
+         * @enum {string}
+         */
+        InternalDropKind: "project" | "org";
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        InternalDropPage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["InternalDrop"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+        };
+        /** @description One member of an org, as `GET /api/internal/v1/orgs/{org_id}/members` lists it. */
+        InternalMember: {
+            /** @description The user's email. Sent to the control plane only; never logged. */
+            email: string;
+            /** @description The user's display name, when it has one. */
+            name?: string;
+            /** @description The member's org role. */
+            role: components["schemas"]["OrgRole"];
+            /**
+             * Format: uuid
+             * @description The user id.
+             */
+            user_id: string;
+        };
+        /** @description Answer of `GET /api/internal/v1/orgs/{org_id}/members`. */
+        InternalMembers: {
+            /** @description The members, ordered by email. */
+            data: components["schemas"]["InternalMember"][];
+        };
         /** @description The created or existing org. */
         InternalOrg: {
             /**
@@ -2695,6 +4492,58 @@ export interface components {
             email: string;
             /** @description Display name for a new user. Ignored when the user exists. */
             name?: string;
+        };
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        InternalUsagePage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["InternalUsageRow"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+        };
+        /** @description One org's usage on one UTC day, summed over its projects (D-P-24). */
+        InternalUsageRow: {
+            /** Format: int64 */
+            bytes: number;
+            /** @description `YYYY-MM-DD`, UTC. */
+            day: string;
+            /** Format: double */
+            judge_cost_usd: number;
+            /** Format: int64 */
+            judge_input_tokens: number;
+            /** Format: int64 */
+            judge_output_tokens: number;
+            /** Format: uuid */
+            org_id: string;
+            /** Format: int64 */
+            scores: number;
+            /** Format: int64 */
+            spans: number;
+            /**
+             * Format: int64
+             * @description `spans + scores`.
+             */
+            units: number;
+        };
+        /** @description Answer of `POST /api/internal/v1/users/delete`. */
+        InternalUserDeleted: {
+            /**
+             * @description Orgs the user was the only owner of. They are kept without an owner; the control
+             *     plane resolves them.
+             */
+            sole_owner_of: string[];
+        };
+        /**
+         * @description Body of the `users` routes (D-P-39, D-S-9): the user's subject at the control plane's
+         *     provider, and its email for a user the subject does not find.
+         */
+        InternalUserRef: {
+            /**
+             * @description Email, normalized like every email (D136). Used only when no identity has the subject,
+             *     and then only for a user with no identity at that provider (D-S-9).
+             */
+            email: string;
+            /** @description The OIDC subject (`identities.subject`) of the user at `entitlements.control_plane_provider`. */
+            subject: string;
         };
         /**
          * @description One pending invitation.
@@ -2758,6 +4607,39 @@ export interface components {
             org: components["schemas"]["InviteOrg"];
             /** @description Role granted on accept. */
             role: components["schemas"]["OrgRole"];
+        };
+        /**
+         * @description Role given to people who join through the org's provider (D-P-56).
+         * @enum {string}
+         */
+        JitRole: "viewer" | "member";
+        /** @description Job counts of a rule, by status. */
+        JobCounts: {
+            /**
+             * Format: int64
+             * @description Finished jobs with a score.
+             */
+            done: number;
+            /**
+             * Format: int64
+             * @description Jobs that failed for good.
+             */
+            failed: number;
+            /**
+             * Format: int64
+             * @description Jobs waiting to run.
+             */
+            queued: number;
+            /**
+             * Format: int64
+             * @description Jobs running now.
+             */
+            running: number;
+            /**
+             * Format: int64
+             * @description Jobs left out before they ran.
+             */
+            skipped: number;
         };
         /**
          * @description One headline number.
@@ -2931,6 +4813,38 @@ export interface components {
             /** @description Display name. Omitted when the user has not set one. */
             name?: string;
         };
+        /** @description Answer of `POST /api/internal/v1/memberships/lookup`. */
+        MembershipLookup: {
+            /** @description The user's active orgs, sorted by slug. */
+            orgs: components["schemas"]["MembershipOrg"][];
+            /**
+             * Format: uuid
+             * @description The user's id. Absent when no user matches.
+             */
+            user_id?: string;
+        };
+        /**
+         * @description Body of `POST /api/internal/v1/memberships/lookup` (D-P-40). The subject is tried first;
+         *     the email only when no identity has the subject.
+         */
+        MembershipLookupRequest: {
+            /** @description Email, normalized like every email (D136), for a user the subject does not find. */
+            email: string;
+            /** @description The OIDC subject at `entitlements.control_plane_provider`. */
+            subject: string;
+        };
+        /** @description One active org the user belongs to. */
+        MembershipOrg: {
+            /**
+             * Format: uuid
+             * @description The org id.
+             */
+            org_id: string;
+            /** @description The user's role in the org. */
+            role: components["schemas"]["OrgRole"];
+            /** @description The org slug. */
+            slug: string;
+        };
         /** @description One message in a conversation. Spec 01 § Canonical message format. */
         Message: {
             /** @description Why generation stopped. Omitted when absent. An explicit `null` from the source is kept (D65). */
@@ -3028,6 +4942,161 @@ export interface components {
         };
         /** @description Media kind. Known values are `image`, `video`, and `audio`. Any other string is kept. */
         Modality: string;
+        /** @description A price row. */
+        ModelPrice: {
+            /**
+             * Format: date-time
+             * @description Creation time. Absent on built-in rows. JSON is RFC 3339.
+             */
+            created_at?: string;
+            /**
+             * Format: uuid
+             * @description Row id. Absent on built-in rows.
+             */
+            id?: string;
+            /** @description Regular expression matched against the span's model, anchored and case-insensitive. */
+            match_pattern: string;
+            /** @description Display name. */
+            model_name: string;
+            /**
+             * Format: double
+             * @description USD per 1M cache-read tokens.
+             */
+            price_cache_read?: number;
+            /**
+             * Format: double
+             * @description USD per 1M cache-write tokens.
+             */
+            price_cache_write?: number;
+            /**
+             * Format: double
+             * @description USD per 1M uncached input tokens.
+             */
+            price_input?: number;
+            /**
+             * Format: double
+             * @description USD per 1M output tokens.
+             */
+            price_output?: number;
+            /**
+             * Format: double
+             * @description USD per 1M reasoning tokens. Absent: the output price.
+             */
+            price_reasoning?: number;
+            /** @description When set, the row prices spans of this provider (or with none). */
+            provider?: string;
+            /** @description Who owns the row. */
+            scope: components["schemas"]["ModelPriceScope"];
+            /** @description Long-context bands, by increasing `min_input_tokens`. Empty when none. */
+            tiers: components["schemas"]["ModelPriceTier"][];
+            /**
+             * Format: date-time
+             * @description Last change. Absent on built-in rows. JSON is RFC 3339.
+             */
+            updated_at?: string;
+            /**
+             * Format: date-time
+             * @description The row prices spans that started at or after this time. JSON is RFC 3339.
+             */
+            valid_from: string;
+        };
+        /**
+         * @description Body of `POST /models` and `PATCH /models/{id}`. A PATCH replaces the whole row: an absent
+         *     optional field becomes null (D-T-7).
+         */
+        ModelPriceInput: {
+            /** @description Regular expression, 1–500 bytes. Absent or blank: exactly `model_name`. */
+            match_pattern?: string;
+            /** @description Display name, 1–200 characters after trimming. */
+            model_name: string;
+            /**
+             * Format: double
+             * @description USD per 1M cache-read tokens.
+             */
+            price_cache_read?: number;
+            /**
+             * Format: double
+             * @description USD per 1M cache-write tokens.
+             */
+            price_cache_write?: number;
+            /**
+             * Format: double
+             * @description USD per 1M uncached input tokens, 0–1 000 000.
+             */
+            price_input?: number;
+            /**
+             * Format: double
+             * @description USD per 1M output tokens, 0–1 000 000.
+             */
+            price_output?: number;
+            /**
+             * Format: double
+             * @description USD per 1M reasoning tokens. Absent: the output price.
+             */
+            price_reasoning?: number;
+            /** @description Provider, such as `openai` or `gcp.vertex_ai`. Absent or blank: any provider. */
+            provider?: string;
+            /** @description Up to 8 bands, by strictly increasing `min_input_tokens`. */
+            tiers?: components["schemas"]["ModelPriceTier"][];
+            /**
+             * Format: date-time
+             * @description Absent: the row applies at any time. JSON is RFC 3339.
+             */
+            valid_from?: string;
+        };
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        ModelPricePage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["ModelPrice"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+        };
+        /** @description The row that would price a span now. */
+        ModelPriceResolution: {
+            /**
+             * @description The winning row. Absent when no row prices the model (spec 09: optional fields are
+             *     absent, never null).
+             */
+            price?: components["schemas"]["ModelPrice"];
+        };
+        /**
+         * @description Who owns a price row. Project beats org, which beats built-in (spec 02 rule 2).
+         * @enum {string}
+         */
+        ModelPriceScope: "builtin" | "org" | "project";
+        /** @description One long-context band. A null price uses the row's base price. */
+        ModelPriceTier: {
+            /**
+             * Format: int64
+             * @description The band applies when the span's input tokens (cache included) are at least this count.
+             */
+            min_input_tokens: number;
+            /**
+             * Format: double
+             * @description USD per 1M cache-read tokens.
+             */
+            price_cache_read?: number;
+            /**
+             * Format: double
+             * @description USD per 1M cache-write tokens.
+             */
+            price_cache_write?: number;
+            /**
+             * Format: double
+             * @description USD per 1M uncached input tokens.
+             */
+            price_input?: number;
+            /**
+             * Format: double
+             * @description USD per 1M output tokens.
+             */
+            price_output?: number;
+            /**
+             * Format: double
+             * @description USD per 1M reasoning tokens.
+             */
+            price_reasoning?: number;
+        };
         /**
          * @description One model in the cost ranking.
          *
@@ -3051,6 +5120,15 @@ export interface components {
              * @description Sum of `total_tokens`. Omitted when every span omitted the field.
              */
             total_tokens?: number;
+        };
+        /** @description One item to add. */
+        NewDatasetItem: {
+            /** @description Any JSON value. */
+            expected_output?: unknown;
+            /** @description Any JSON value. */
+            input: unknown;
+            /** @description A JSON object. Empty when omitted. */
+            metadata?: Record<string, never>;
         };
         /** @description A notification channel. The URL, the secret and header values are never returned (D-K-6). */
         NotificationChannel: {
@@ -3084,7 +5162,123 @@ export interface components {
              */
             updated_at: string;
         };
-        /** @description `GET /api/v1/orgs/{org}/entitlements` (D-P-15). M3 adds the usage. */
+        /** @description An online rule. Spec 09 § Evaluation & alerts. */
+        OnlineRule: {
+            /** @description Period of the budget. Present exactly when `budget_usd` is. */
+            budget_period?: components["schemas"]["BudgetPeriod"];
+            /**
+             * Format: double
+             * @description Budget per period, in USD. Omitted when the rule has none.
+             */
+            budget_usd?: number;
+            /**
+             * Format: date-time
+             * @description Creation time. JSON is RFC 3339.
+             */
+            created_at: string;
+            /**
+             * Format: uuid
+             * @description User who created the rule. Omitted when that user is unknown.
+             */
+            created_by?: string;
+            /**
+             * Format: int64
+             * @description Live matches dropped by the hourly cap in the current UTC hour. Counted in memory, so 0 after a restart.
+             */
+            dropped_last_hour: number;
+            /** @description Whether the rule runs. */
+            enabled: boolean;
+            /**
+             * Format: uuid
+             * @description The evaluator the rule runs. Immutable.
+             */
+            evaluator_id: string;
+            /** @description Filter over the target's view. Omitted when the rule has none. */
+            filter?: string;
+            /**
+             * Format: uuid
+             * @description Rule id.
+             */
+            id: string;
+            /** @description Jobs of the rule created in the last 24 hours, by status. */
+            jobs_last_24h: components["schemas"]["JobCounts"];
+            /** @description Display name, 1 to 128 characters. */
+            name: string;
+            /**
+             * Format: date-time
+             * @description When the rule was paused. Omitted when it is not paused.
+             */
+            paused_at?: string;
+            /** @description Detail of the pause: an error text or a fixed text. Never payload content. */
+            paused_detail?: string;
+            /** @description Why the rule is paused. Omitted when it is not paused. */
+            paused_reason?: components["schemas"]["PauseReason"];
+            /**
+             * Format: double
+             * @description Share of the matching targets that are evaluated, in `(0, 1]`.
+             */
+            sample_rate: number;
+            /** @description Budget spend of the current period. Omitted when the rule has no budget. */
+            spend?: components["schemas"]["RuleSpend"];
+            /** @description What the rule matches. Immutable. */
+            target: components["schemas"]["RuleTarget"];
+            /**
+             * Format: date-time
+             * @description Last change time. JSON is RFC 3339.
+             */
+            updated_at: string;
+            /** @description Prompt variable to mapping expression. */
+            variable_mapping: {
+                [key: string]: string;
+            };
+        };
+        /** @description One page of online rules. `next_cursor` is null when there is no next page. */
+        OnlineRulePage: {
+            /** @description Rules in this page. */
+            data: components["schemas"]["OnlineRule"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+            /** @description Enabled rules of the whole org, counted for the plan's active-rule limit. */
+            org_enabled_rules: number;
+        };
+        /** @description The preview's count (D-I-9). */
+        OnlineRulePreview: {
+            /** @description More than 10 000 matched. */
+            capped: boolean;
+            /**
+             * Format: date-time
+             * @description The window that was counted. RFC 3339.
+             */
+            from: string;
+            /**
+             * Format: int64
+             * @description Matching traces or spans, at most 10 000.
+             */
+            matched: number;
+            /**
+             * Format: date-time
+             * @description The end of the window that was counted. RFC 3339.
+             */
+            to: string;
+        };
+        /**
+         * @description `POST /api/v1/projects/{project}/online-rules/preview` body (D-I-9). Absent fields take their
+         *     defaults.
+         *
+         *     Deserialize only, because `TimeParam` has no `Serialize`. Its `Debug` is derived: the filter
+         *     is a query over stored data, and nothing logs it.
+         */
+        OnlineRulePreviewRequest: {
+            /** @description Filter DSL over the target's view. Absent or blank matches everything. */
+            filter?: string;
+            /** @description Window start. Default: `to` minus 24 hours. */
+            from?: components["schemas"]["TimeParam"];
+            /** @description The rule's target: the view the filter is read on. */
+            target: components["schemas"]["RuleTarget"];
+            /** @description Window end. Default: now. */
+            to?: components["schemas"]["TimeParam"];
+        };
+        /** @description `GET /api/v1/orgs/{org}/entitlements` (D-P-15). */
         OrgEntitlements: {
             /** @description Features the org may use now, in a fixed order. */
             features: components["schemas"]["Feature"][];
@@ -3094,6 +5288,8 @@ export interface components {
             plan: components["schemas"]["OrgPlan"];
             /** @description Where an Upgrade button goes. Omitted when the instance sets none. */
             upgrade_url?: string;
+            /** @description The org's units this month (D-P-16). */
+            usage: components["schemas"]["OrgMonthUsage"];
         };
         /**
          * Format: uuid
@@ -3188,6 +5384,22 @@ export interface components {
             /** @description URL slug. */
             slug: string;
         };
+        /** @description This UTC month's units (D-P-16, D-P-38). */
+        OrgMonthUsage: {
+            /** @description `YYYY-MM`. */
+            month: string;
+            notice: components["schemas"]["UsageNotice"];
+            /**
+             * Format: date-time
+             * @description 00:00 UTC on the 1st of the next month.
+             */
+            resets_at: string;
+            /**
+             * Format: int64
+             * @description Units so far this month, flushed or not.
+             */
+            units: number;
+        };
         /** @description One page of results. `next_cursor` is null when there is no next page. */
         OrgPage: {
             /** @description Items in this page. */
@@ -3226,7 +5438,84 @@ export interface components {
          * @enum {string}
          */
         OrgRole: "owner" | "admin" | "member" | "viewer";
-        /** @description The score an evaluator writes. The JSON of `llmobs_eval::OutputScore`. */
+        /** @description `GET /api/v1/orgs/{org}/sso` and every settings write. */
+        OrgSso: {
+            /** @description The redirect URI to register at the identity provider. */
+            callback_url: string;
+            /** @description Ordered by domain. */
+            domains: components["schemas"]["OrgSsoDomain"][];
+            /** @description The provider, when the org has one. */
+            provider?: components["schemas"]["OrgSsoProvider"];
+        };
+        /** @description One email domain of the org and how to prove it. */
+        OrgSsoDomain: {
+            /**
+             * Format: date-time
+             * @description Creation time.
+             */
+            created_at: string;
+            /** @description Lowercase domain name. */
+            domain: string;
+            /**
+             * Format: uuid
+             * @description The domain row id.
+             */
+            id: string;
+            /**
+             * Format: date-time
+             * @description Last lookup, found or not. Omitted before the first one.
+             */
+            last_checked_at?: string;
+            /** @description Pending or verified. */
+            status: components["schemas"]["DomainStatus"];
+            /** @description TXT record name, `_cetra-verify.<domain>`. */
+            txt_name: string;
+            /** @description TXT record value, `cetra-verify=<token>`. */
+            txt_value: string;
+            /**
+             * Format: date-time
+             * @description When the TXT record was found. Omitted while pending.
+             */
+            verified_at?: string;
+        };
+        /** @description The org's identity provider. The client secret is write-only. */
+        OrgSsoProvider: {
+            /** @description The OAuth client id. */
+            client_id: string;
+            /**
+             * Format: date-time
+             * @description Creation time.
+             */
+            created_at: string;
+            /** @description Shown on the login page. */
+            display_name: string;
+            /** @description Discovery sends users to this provider (D-P-57). */
+            enabled: boolean;
+            /** @description Password and other sign-ins are refused for the org's domains (D-P-58). */
+            enforced: boolean;
+            /** @description The OIDC issuer URL. */
+            issuer: string;
+            /** @description Role of people who join through the provider. */
+            jit_role: components["schemas"]["JitRole"];
+            /**
+             * Format: date-time
+             * @description The last successful sign-in through the provider. Absent before the first one.
+             */
+            last_login_at?: string;
+            /**
+             * Format: date-time
+             * @description Last change to the settings.
+             */
+            updated_at: string;
+        };
+        /** @description `GET /api/v1/orgs/{org}/usage`. */
+        OrgUsage: {
+            /** @description Days with usage, oldest first. Days without usage are absent. */
+            days: components["schemas"]["UsageDay"][];
+            from: string;
+            to: string;
+        };
+        /** @description The score an evaluator writes. The JSON of `cetra_eval::OutputScore`. */
         OutputScoreBody: {
             /** @description Category labels of a categorical score. Omitted otherwise. */
             categories?: string[];
@@ -3237,6 +5526,18 @@ export interface components {
         };
         /** @description One part of a canonical message. Spec 01 § Canonical message format. */
         Part: components["schemas"]["TextPart"] | components["schemas"]["ReasoningPart"] | components["schemas"]["ToolCallPart"] | components["schemas"]["ToolCallResponsePart"] | components["schemas"]["UriPart"] | components["schemas"]["BlobPart"] | components["schemas"]["UnknownPart"];
+        /** @description `PATCH /api/v1/orgs/{org}/sso`: the flags, each optional. */
+        PatchOrgSso: {
+            /** @description Discovery sends users to the provider (D-P-57). */
+            enabled?: boolean;
+            /** @description Enforce SSO for the org's verified domains (D-P-58). */
+            enforced?: boolean;
+        };
+        /**
+         * @description Why a rule is paused (D-I-14, D-I-15).
+         * @enum {string}
+         */
+        PauseReason: "budget" | "errors" | "connection";
         /** @description Parsed span payload: messages, any JSON, or plain text. Spec 09 § Response shapes. */
         Payload: {
             /**
@@ -3341,7 +5642,7 @@ export interface components {
          *     Spec 09 § Conventions. Later endpoints add codes.
          * @enum {string}
          */
-        ProblemCode: "bad_request" | "invalid_filter" | "query_failed" | "query_timeout" | "query_too_large" | "too_many_traces" | "busy" | "unauthorized" | "forbidden" | "sso_required" | "email_not_verified" | "plan_limit" | "plan_required" | "owner_not_allowed" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "range_not_satisfiable" | "conflict" | "rate_limited" | "internal";
+        ProblemCode: "bad_request" | "invalid_filter" | "query_failed" | "query_timeout" | "query_too_large" | "too_many_traces" | "busy" | "restore_mode" | "unauthorized" | "forbidden" | "sso_required" | "email_not_verified" | "plan_limit" | "plan_required" | "owner_not_allowed" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "range_not_satisfiable" | "conflict" | "quota_exceeded" | "rate_limited" | "internal";
         /**
          * @description A project the caller can see.
          *
@@ -3353,6 +5654,13 @@ export interface components {
              * @description Creation time, nanoseconds since the Unix epoch. JSON is RFC 3339.
              */
             created_at: string;
+            /**
+             * Format: int64
+             * @description GenAI content log records received on `/v1/logs` and dropped since the project was
+             *     created (D-G-40). Present when one project is read or updated; omitted in lists and
+             *     when the project is created.
+             */
+            genai_log_events?: number;
             /** @description Project id. */
             id: components["schemas"]["ProjectId"];
             /** @description Display name. */
@@ -3368,6 +5676,12 @@ export interface components {
             role?: components["schemas"]["OrgRole"];
             /** @description URL slug, unique within the org. */
             slug: string;
+            /**
+             * Format: int32
+             * @description Seconds without a new span after which a trace counts as complete for online rules (D-I-7).
+             *     10 to 3600; 60 unless set.
+             */
+            trace_completion_timeout_s: number;
         };
         /**
          * Format: uuid
@@ -3412,6 +5726,19 @@ export interface components {
          * @enum {string}
          */
         ProjectRoleOverride: "admin" | "member" | "viewer" | "none";
+        /** @description `PUT /api/v1/orgs/{org}/sso/provider`. `Debug` omits the client secret. */
+        PutOrgSsoProvider: {
+            /** @description The OAuth client id; 1 to 255 characters. */
+            client_id: string;
+            /** @description Required when creating, and when the issuer or client id changes; omit to keep it. */
+            client_secret?: string;
+            /** @description Shown on the login page; 1 to 100 characters. */
+            display_name: string;
+            /** @description The OIDC issuer URL; `https`, or `http` on a loopback host. */
+            issuer: string;
+            /** @description Role of people who join through the provider. */
+            jit_role: components["schemas"]["JitRole"];
+        };
         /** @description `PUT /api/internal/v1/orgs/{org_id}/entitlements` (D-P-11). The signature is the credential. */
         PutOrgTokenRequest: {
             /** @description A signed `kind: org` token. Never logged. */
@@ -3440,6 +5767,96 @@ export interface components {
             password: string;
             /** @description The token from the reset link. */
             token: string;
+        };
+        /** @description One result of an experiment, with its input and output. */
+        ResultRow: {
+            /**
+             * Format: double
+             * @description The cost of the trace. Omitted when unpriced.
+             */
+            cost_total?: number;
+            /**
+             * Format: uuid
+             * @description The dataset item.
+             */
+            dataset_item_id: string;
+            /** @description What went wrong. Omitted when none. */
+            error?: string;
+            /** @description Any JSON value. */
+            expected_output?: unknown;
+            /** @description Any JSON value. */
+            input: unknown;
+            /**
+             * Format: int64
+             * @description The time the task took, in nanoseconds. Omitted when unknown.
+             */
+            latency_ns?: number;
+            /** @description Any JSON value. */
+            output?: unknown;
+            /**
+             * Format: int64
+             * @description The repetition, 0 to `repetitions` − 1.
+             */
+            repetition: number;
+            /** @description The row's scores by name. */
+            scores: {
+                [key: string]: components["schemas"]["ResultScore"];
+            };
+            /** @description The trace of the task run. Omitted when none. */
+            trace_id?: components["schemas"]["TraceId"];
+        };
+        /** @description One score of a result row. The design calls it `ScoreValue`; core already has that name. */
+        ResultScore: {
+            /** @description The kind of value the score carries. */
+            data_type: components["schemas"]["ScoreDataType"];
+            /**
+             * Format: double
+             * @description The mean of the row's numeric values of this score. Omitted when none.
+             */
+            value_num?: number;
+            /** @description The label of a categorical score or the text of a text score. Omitted when none. */
+            value_str?: string;
+        };
+        /** @description Spend of a rule budget in the current period. */
+        RuleSpend: {
+            /**
+             * Format: date-time
+             * @description Start of the current UTC day or month.
+             */
+            period_start: string;
+            /**
+             * Format: double
+             * @description Estimated cost of the running jobs, in USD.
+             */
+            reserved_usd: number;
+            /**
+             * Format: double
+             * @description Cost of the finished jobs in the period, in USD.
+             */
+            spent_usd: number;
+        };
+        /**
+         * @description What an online rule matches: a trace, or a span of a trace (D-I-9).
+         * @enum {string}
+         */
+        RuleTarget: "trace" | "span";
+        /**
+         * @description `POST /api/v1/projects/{project}/evaluators/{id}/run` body.
+         *
+         *     Deserialize only, because `TimeParam` has no `Serialize`. Its `Debug` is derived: the
+         *     mapping holds expressions, not payload.
+         */
+        RunEvaluatorRequest: {
+            /** @description Span of the trace to target, 16 hex digits. Omitted for a trace target; `null` is refused. */
+            span_id?: string;
+            /** @description Trace to run on, 32 hex digits. */
+            trace_id: string;
+            /** @description The trace's `start_time`, from the trace detail the UI loaded. */
+            trace_start: components["schemas"]["TimeParam"];
+            /** @description Prompt variable to mapping expression, 1 to 32 variables. */
+            variable_mapping: {
+                [key: string]: string;
+            };
         };
         /**
          * @description A saved list view or SQL query.
@@ -3607,6 +6024,17 @@ export interface components {
         };
         /** @description One score to write. Spec 06 § Scores, D-F-1, D-G-28. */
         ScoreCreate: {
+            /**
+             * Format: uuid
+             * @description Dataset item (stable id) the score is about; set together with `experiment_id`.
+             */
+            dataset_item_id?: string;
+            /**
+             * Format: uuid
+             * @description Experiment the score belongs to; set together with `dataset_item_id`, on a trace target
+             *     (D-J-12).
+             */
+            experiment_id?: string;
             /** @description String metadata stored with the score. */
             metadata?: {
                 [key: string]: string;
@@ -3696,6 +6124,31 @@ export interface components {
             /** @description Opaque cursor for the next page, or null when this is the last page. */
             next_cursor: string | null;
         };
+        /** @description One score's delta of a candidate to the baseline. */
+        ScoreDelta: {
+            /**
+             * Format: double
+             * @description The candidate's mean minus the baseline's, over the items both ran without error.
+             */
+            delta: number;
+            /**
+             * Format: int64
+             * @description The items that were compared.
+             */
+            n_compared: number;
+        };
+        /** @description The deltas of one candidate, per score name. */
+        ScoreDeltas: {
+            /**
+             * Format: uuid
+             * @description The candidate.
+             */
+            experiment_id: string;
+            /** @description One delta per score name with at least one compared item. */
+            scores: {
+                [key: string]: components["schemas"]["ScoreDelta"];
+            };
+        };
         /** @description One page of results. `next_cursor` is null when there is no next page. */
         ScorePage: {
             /** @description Items in this page. */
@@ -3710,6 +6163,47 @@ export interface components {
          * @enum {string}
          */
         ScoreSource: "api" | "sdk" | "human" | "end_user" | "llm_judge" | "check" | "webhook";
+        /** @description One score of an experiment, over its rows. */
+        ScoreSummary: {
+            /**
+             * Format: int64
+             * @description Rows with at least one score of this name.
+             */
+            count: number;
+            /** @description The data type the experiment's scores of this name mostly carry. */
+            data_type: components["schemas"]["ScoreDataType"];
+            /** @description Categoricals only: the rows per label. */
+            labels: {
+                [key: string]: number;
+            };
+            /**
+             * Format: double
+             * @description The largest value. Omitted when none.
+             */
+            max?: number;
+            /**
+             * Format: double
+             * @description Numeric and categorical scores: the mean over the rows that have a value. Omitted when none.
+             */
+            mean?: number;
+            /**
+             * Format: double
+             * @description The median of the same values. Omitted when none.
+             */
+            median?: number;
+            /**
+             * Format: double
+             * @description The smallest value. Omitted when none.
+             */
+            min?: number;
+            /** @description The score's name. */
+            name: string;
+            /**
+             * Format: double
+             * @description Booleans only: the share of rows that passed (the mean of 0 and 1). Omitted otherwise.
+             */
+            pass_rate?: number;
+        };
         /**
          * @description What a score is attached to.
          *
@@ -3913,7 +6407,7 @@ export interface components {
         /**
          * @description Who may register after the first user exists.
          *
-         *     Spec 08 `LLMOBS_AUTH_SIGNUP`.
+         *     Spec 08 `CETRA_AUTH_SIGNUP`.
          * @enum {string}
          */
         SignupPolicy: "open" | "invite_only" | "disabled";
@@ -4315,6 +6809,19 @@ export interface components {
             /** @description More rows matched than `limit`; `rows` holds the first `limit`. */
             truncated: boolean;
         };
+        /** @description `POST /api/auth/sso/discover`. `Debug` omits the email. */
+        SsoDiscoverRequest: {
+            /** @description The address the person typed on the login page. */
+            email: string;
+        };
+        /**
+         * @description Whether the email's domain signs in through an org's provider (D-P-60). A function of the
+         *     domain only.
+         */
+        SsoDiscovery: {
+            /** @description True when the domain's org has an enabled provider. */
+            sso: boolean;
+        };
         /**
          * @description How the provider is asked to fill the answer schema.
          * @enum {string}
@@ -4625,6 +7132,20 @@ export interface components {
             url?: string;
         };
         /**
+         * @description `PATCH /api/v1/projects/{project}/datasets/{dataset}` body. An absent field is unchanged;
+         *     `null` clears `description` or a schema.
+         */
+        UpdateDatasetRequest: {
+            /** @description New description, when present. `null` clears it. */
+            description?: string | null;
+            /** @description New expected-output schema, when present. `null` clears it. */
+            expected_schema?: Record<string, never> | null;
+            /** @description New input schema, when present. `null` clears it. */
+            input_schema?: Record<string, never> | null;
+            /** @description New name, when present. Same rules as on create. */
+            name?: string;
+        };
+        /**
          * @description `PATCH /api/v1/projects/{project}/evaluators/{id}` body. Absent means unchanged.
          *
          *     Its `Debug` prints flags, not the config or the secret.
@@ -4644,6 +7165,18 @@ export interface components {
              *     `config`, so a saved secret never signs requests to a new URL. An empty string is refused.
              */
             webhook_secret?: string;
+        };
+        /**
+         * @description `PATCH …/items/{item_id}` body. An absent field is unchanged; `expected_output: null` clears
+         *     it. `input` and `metadata` must not be null (400).
+         */
+        UpdateItemRequest: {
+            /** @description Any JSON value. */
+            expected_output?: unknown;
+            /** @description Any JSON value but null. */
+            input?: unknown;
+            /** @description New metadata, when present. A JSON object; must not be null. */
+            metadata?: Record<string, never>;
         };
         /**
          * @description `PATCH /api/v1/orgs/{org}/llm-connections/{id}` body. Absent means
@@ -4686,6 +7219,38 @@ export interface components {
             /** @description Display name. Null or omitted clears it. A present value is trimmed to 1–100 characters. */
             name?: string;
         };
+        /**
+         * @description `PATCH /api/v1/projects/{project}/online-rules/{id}` body. Absent means unchanged.
+         *
+         *     There is no `evaluator_id` or `target`: sending either is a 400 (unknown field). Optional
+         *     fields refuse `null`; removing the budget is `clear_budget: true`.
+         */
+        UpdateOnlineRuleRequest: {
+            /** @description Period of the budget. Needed with `budget_usd` when the rule has none yet. */
+            budget_period?: components["schemas"]["BudgetPeriod"];
+            /**
+             * Format: double
+             * @description Budget per period, in USD. Judge evaluators only.
+             */
+            budget_usd?: number;
+            /** @description Removes the budget. Cannot come with `budget_usd` or `budget_period`. */
+            clear_budget?: boolean;
+            /** @description Turns the rule on or off. */
+            enabled?: boolean;
+            /** @description Filter over the target's view. `""` clears it. */
+            filter?: string;
+            /** @description Display name, 1 to 128 characters after trimming. */
+            name?: string;
+            /**
+             * Format: double
+             * @description Share of the matching targets to evaluate, in `(0, 1]`.
+             */
+            sample_rate?: number;
+            /** @description Replaces the whole mapping, 1 to 32 variables. */
+            variable_mapping?: {
+                [key: string]: string;
+            };
+        };
         /** @description `PATCH /api/v1/orgs/{org}/members/{user}`. */
         UpdateOrgMemberRequest: {
             /** @description The new org role. */
@@ -4708,7 +7273,13 @@ export interface components {
              * Format: int32
              * @description Days to keep data, from 1 to 36500. Null keeps data forever. Absent leaves retention unchanged.
              */
-            retention_days?: number;
+            retention_days?: number | null;
+            /**
+             * Format: int32
+             * @description Seconds without a new span after which a trace counts as complete for online rules, 10 to 3600.
+             *     Absent leaves it unchanged.
+             */
+            trace_completion_timeout_s?: number;
         };
         /**
          * @description Body of `PATCH /api/v1/projects/{project}/saved-views/{id}`.
@@ -4766,6 +7337,33 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** @description One UTC day of an org's usage, summed over its projects. */
+        UsageDay: {
+            /** Format: int64 */
+            bytes: number;
+            /** @description `YYYY-MM-DD`. */
+            day: string;
+            /** Format: double */
+            judge_cost_usd: number;
+            /** Format: int64 */
+            judge_input_tokens: number;
+            /** Format: int64 */
+            judge_output_tokens: number;
+            /** Format: int64 */
+            scores: number;
+            /** Format: int64 */
+            spans: number;
+            /**
+             * Format: int64
+             * @description `spans + scores`.
+             */
+            units: number;
+        };
+        /**
+         * @description Usage level against `units_included`.
+         * @enum {string}
+         */
+        UsageNotice: "none" | "warning" | "reached";
         /**
          * @description A user account.
          *
@@ -4774,6 +7372,10 @@ export interface components {
         User: {
             /** @description Email address. */
             email: string;
+            /** @description The address has been verified. */
+            email_verified: boolean;
+            /** @description A password is set. SSO-only accounts are false. */
+            has_password: boolean;
             /**
              * Format: uuid
              * @description User id.
@@ -5404,6 +8006,203 @@ export interface operations {
             };
         };
     };
+    get_sso_authorize: {
+        parameters: {
+            query?: {
+                /** @description The email domain, e.g. `acme.com`. */
+                domain?: string;
+                /** @description Relative path to open after a successful login. */
+                redirect?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Redirect to the identity provider, or to `/login?error=sso_unavailable`. */
+            302: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_sso_discover: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SsoDiscoverRequest"];
+            };
+        };
+        responses: {
+            /** @description Whether the domain signs in through an org. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SsoDiscovery"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_internal_deletions: {
+        parameters: {
+            query?: {
+                /** @description `project` or `org`; both when omitted. */
+                kind?: components["schemas"]["InternalDropKind"];
+                /** @description Rows per page, 1–10 000. Default 1 000. */
+                limit?: number;
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of applied drops, oldest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InternalDropPage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_internal_membership_lookup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MembershipLookupRequest"];
+            };
+        };
+        responses: {
+            /** @description The user's active memberships. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MembershipLookup"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     post_internal_org: {
         parameters: {
             query?: never;
@@ -5462,8 +8261,85 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_internal_org: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID. */
+                org_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The org drop is applied. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Deletion"];
+                };
+            };
+            /** @description The org drop, in status pending or resolving. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Deletion"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -5543,6 +8419,339 @@ export interface operations {
             };
         };
     };
+    list_internal_org_members: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Comma-separated roles to keep: `owner`, `admin`, `member`, `viewer`. Absent lists every
+                 *     member.
+                 */
+                role?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Org UUID. */
+                org_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The org's members. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InternalMembers"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_internal_usage: {
+        parameters: {
+            query: {
+                /** @description First day, inclusive, `YYYY-MM-DD`. Required. */
+                from: string;
+                /** @description Last day, inclusive, `YYYY-MM-DD`. Required. `to - from` is at most 92 days. */
+                to: string;
+                /** @description Rows per page, 1–10 000. Default 1 000. */
+                limit?: number;
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of org usage by day. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InternalUsagePage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_internal_user_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InternalUserRef"];
+            };
+        };
+        responses: {
+            /** @description The user is deleted, with the orgs it solely owned. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InternalUserDeleted"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_internal_user_disable: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InternalUserRef"];
+            };
+        };
+        responses: {
+            /** @description The user is disabled and its access is revoked. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_internal_user_revoke: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InternalUserRef"];
+            };
+        };
+        responses: {
+            /** @description The user's sessions and tokens were revoked. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     post_feedback: {
         parameters: {
             query?: never;
@@ -5576,6 +8785,15 @@ export interface operations {
             };
             /** @description No credentials, or the credentials are invalid. */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The organization reached its monthly units cap (code quota_exceeded). Retry-After gives the seconds until it resets. */
+            402: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -7802,6 +11020,315 @@ export interface operations {
             };
         };
     };
+    list_org_model_prices: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The org's own price rows (at most 500), without paging. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelPricePage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_org_model_price: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ModelPriceInput"];
+            };
+        };
+        responses: {
+            /** @description The created price. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelPrice"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_org_model_price: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+                /** @description Price row id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    patch_org_model_price: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+                /** @description Price row id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ModelPriceInput"];
+            };
+        };
+        responses: {
+            /** @description The replaced price. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelPrice"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     list_projects: {
         parameters: {
             query?: {
@@ -7938,6 +11465,585 @@ export interface operations {
             };
             /** @description The request conflicts with the current state. */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_org_sso: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The org's SSO settings. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrgSso"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    patch_org_sso: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PatchOrgSso"];
+            };
+        };
+        responses: {
+            /** @description The SSO settings. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrgSso"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_org_sso_domain: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AddOrgSsoDomain"];
+            };
+        };
+        responses: {
+            /** @description The SSO settings, with the new domain pending. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrgSso"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_org_sso_domain: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+                /** @description Domain id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The domain is removed. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_org_sso_domain_verify: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+                /** @description Domain id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The SSO settings, with the domain verified. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrgSso"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    put_org_sso_provider: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PutOrgSsoProvider"];
+            };
+        };
+        responses: {
+            /** @description The saved SSO settings. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrgSso"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_org_sso_provider: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The provider is removed. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_org_usage: {
+        parameters: {
+            query?: {
+                /** @description First day, inclusive, `YYYY-MM-DD` (UTC). Default: the 1st of this month. */
+                from?: string;
+                /** @description Last day, inclusive, `YYYY-MM-DD` (UTC). Default: today. `to - from` at most 365 days. */
+                to?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The org's usage by day. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrgUsage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -9195,6 +13301,1234 @@ export interface operations {
             };
         };
     };
+    list_datasets: {
+        parameters: {
+            query?: {
+                /** @description Case-insensitive substring of the name. */
+                q?: string;
+                /** @description Maximum number of items to return (1–1000, default 50). */
+                limit?: components["schemas"]["Limit"];
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of datasets. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DatasetPage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_dataset: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateDatasetRequest"];
+            };
+        };
+        responses: {
+            /** @description The created dataset. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Dataset"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_dataset: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dataset id, or its name. */
+                dataset: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The dataset. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Dataset"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_dataset: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dataset id, or its name. */
+                dataset: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    patch_dataset: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dataset id, or its name. */
+                dataset: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateDatasetRequest"];
+            };
+        };
+        responses: {
+            /** @description The updated dataset. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Dataset"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_dataset_export: {
+        parameters: {
+            query?: {
+                /** @description The version to export; default the latest. */
+                version?: number;
+                /** @description Default `jsonl`. */
+                format?: components["schemas"]["ExportFormat"];
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dataset id, or its name. */
+                dataset: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The version's items, one per line (JSONL) or one per row (CSV), with `Content-Disposition: attachment`. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/x-ndjson": string;
+                    "text/csv": string;
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_dataset_import: {
+        parameters: {
+            query: {
+                /** @description The file's format. */
+                format: components["schemas"]["ImportFormat"];
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dataset id, or its name. */
+                dataset: string;
+            };
+            cookie?: never;
+        };
+        /** @description A file part (at most 100 MiB) and, for CSV, a mapping part. */
+        requestBody: {
+            content: {
+                "multipart/form-data": {
+                    /** Format: binary */
+                    file: string;
+                    mapping?: components["schemas"]["ImportMapping"];
+                };
+            };
+        };
+        responses: {
+            /** @description The version the import made. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportResult"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is not JSON. */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_dataset_import_preview: {
+        parameters: {
+            query: {
+                /** @description The file's format. */
+                format: components["schemas"]["ImportFormat"];
+                /** @description The body is the first part of a larger file (the browser sends at most 1 MiB). */
+                partial?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dataset id, or its name. */
+                dataset: string;
+            };
+            cookie?: never;
+        };
+        /** @description The first bytes of the file, at most 1 MiB. */
+        requestBody: {
+            content: {
+                "application/octet-stream": string;
+            };
+        };
+        responses: {
+            /** @description The columns and the first rows. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportPreview"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_dataset_items: {
+        parameters: {
+            query?: {
+                /** @description Version to read, 0 to the current version. Default: the current version. */
+                version?: number;
+                /** @description Maximum number of items to return (1–1000, default 50). */
+                limit?: components["schemas"]["Limit"];
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dataset id, or its name. */
+                dataset: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of items, by item id. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DatasetItemPage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_dataset_items: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dataset id, or its name. */
+                dataset: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AddItemsRequest"];
+            };
+        };
+        responses: {
+            /** @description The new version and the new item ids. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AddItemsResponse"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_dataset_item_from_trace: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dataset id, or its name. */
+                dataset: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FromTraceRequest"];
+            };
+        };
+        responses: {
+            /** @description The new item. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DatasetItem"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_dataset_item: {
+        parameters: {
+            query?: {
+                /** @description Version to read, 0 to the current version. Default: the current version. */
+                version?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dataset id, or its name. */
+                dataset: string;
+                /** @description Item id, stable across versions. */
+                item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The item's revision in the version. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DatasetItem"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_dataset_item: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dataset id, or its name. */
+                dataset: string;
+                /** @description Item id, stable across versions. */
+                item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The new version. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DatasetVersion"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    patch_dataset_item: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dataset id, or its name. */
+                dataset: string;
+                /** @description Item id, stable across versions. */
+                item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateItemRequest"];
+            };
+        };
+        responses: {
+            /** @description The item after the edit. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DatasetItem"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_dataset_versions: {
+        parameters: {
+            query?: {
+                /** @description Maximum number of items to return (1–1000, default 50). */
+                limit?: components["schemas"]["Limit"];
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dataset id, or its name. */
+                dataset: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of versions, newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DatasetVersionPage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     list_deletions: {
         parameters: {
             query?: {
@@ -9338,7 +14672,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -9428,7 +14762,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -9478,6 +14812,157 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Deletion"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_eval_jobs: {
+        parameters: {
+            query?: {
+                /** @description Jobs queued by this online rule. */
+                rule_id?: string;
+                /** @description Jobs of this evaluator. */
+                evaluator_id?: string;
+                /** @description Jobs with this status. */
+                status?: components["schemas"]["EvalJobStatus"];
+                /** @description Jobs of this kind. */
+                kind?: components["schemas"]["EvalJobKind"];
+                /** @description Maximum number of jobs to return (1–1000, default 50). */
+                limit?: components["schemas"]["Limit"];
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of eval jobs. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvalJobPage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_eval_job: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Eval job id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The job. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvalJob"];
                 };
             };
             /** @description The request is malformed or a filter is invalid. */
@@ -9948,6 +15433,15 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Too many requests. */
             429: {
                 headers: {
@@ -10033,6 +15527,732 @@ export interface operations {
             };
             /** @description Too many requests. */
             429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_evaluator_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Evaluator id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RunEvaluatorRequest"];
+            };
+        };
+        responses: {
+            /** @description The queued job. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvalJob"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_experiments: {
+        parameters: {
+            query?: {
+                /** @description Keep one dataset's experiments: its id or name. */
+                dataset?: string;
+                /** @description Maximum number of items to return (1–1000, default 50). */
+                limit?: components["schemas"]["Limit"];
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of experiments, newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExperimentPage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_experiment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateExperimentRequest"];
+            };
+        };
+        responses: {
+            /** @description The experiment and the first page of its pinned items. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreateExperimentResponse"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    compare_experiments: {
+        parameters: {
+            query: {
+                /** @description Two to four distinct experiment ids, comma-separated; the first is the baseline. */
+                ids: string;
+                /** @description The regression threshold, absolute, 0 to 1000 (default 0.1). */
+                threshold?: number;
+                /** @description Keep only the items with a regressed cell. */
+                regressions_only?: boolean;
+                /** @description Maximum number of items to return (1–1000, default 50). */
+                limit?: components["schemas"]["Limit"];
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The comparison and one page of its items. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExperimentComparison"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_experiment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Experiment id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The experiment. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Experiment"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_experiment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Experiment id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_experiment_finish: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Experiment id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FinishExperimentRequest"];
+            };
+        };
+        responses: {
+            /** @description The experiment after the finish. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Experiment"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_experiment_results: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Experiment id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExperimentResultsRequest"];
+            };
+        };
+        responses: {
+            /** @description The rows stored and skipped. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExperimentResultsResponse"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_experiment_results: {
+        parameters: {
+            query?: {
+                /** @description Keep only the rows with an error. */
+                errors_only?: boolean;
+                /** @description Maximum number of rows to return (1–1000, default 50). */
+                limit?: components["schemas"]["Limit"];
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Experiment id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The summary of the experiment and one page of its rows. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExperimentResults"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -10422,7 +16642,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -10442,6 +16662,1177 @@ export interface operations {
             };
             /** @description The server is busy or a dependency is unavailable. Retry later. */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_models: {
+        parameters: {
+            query?: {
+                /** @description Only rows of this scope. */
+                scope?: components["schemas"]["ModelPriceScope"];
+                /** @description Case-insensitive substring of `model_name`. */
+                q?: string;
+                /** @description Maximum number of items to return (1–1000, default 50). */
+                limit?: components["schemas"]["Limit"];
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of the project's effective price table. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelPricePage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_model_price: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ModelPriceInput"];
+            };
+        };
+        responses: {
+            /** @description The created price. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelPrice"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    resolve_model_price: {
+        parameters: {
+            query: {
+                /** @description The model name a span would carry. */
+                model: string;
+                /** @description The provider a span would carry. Absent: none. */
+                provider?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The row that prices the model now, or none. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelPriceResolution"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_model_price: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Price row id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    patch_model_price: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Price row id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ModelPriceInput"];
+            };
+        };
+        responses: {
+            /** @description The replaced price. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelPrice"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_online_rules: {
+        parameters: {
+            query?: {
+                /** @description Maximum number of items to return (1–1000, default 50). */
+                limit?: components["schemas"]["Limit"];
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of online rules. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OnlineRulePage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_online_rule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateOnlineRuleRequest"];
+            };
+        };
+        responses: {
+            /** @description The created rule. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OnlineRule"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_online_rule_preview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OnlineRulePreviewRequest"];
+            };
+        };
+        responses: {
+            /** @description What the filter matches. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OnlineRulePreview"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_online_rule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Online rule id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The rule. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OnlineRule"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_online_rule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Online rule id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    patch_online_rule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Online rule id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateOnlineRuleRequest"];
+            };
+        };
+        responses: {
+            /** @description The updated rule. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OnlineRule"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_backfills: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Online rule id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The rule's latest 50 backfills, newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackfillPage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_backfill: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Online rule id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateBackfillRequest"];
+            };
+        };
+        responses: {
+            /** @description The started backfill. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Backfill"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_backfill_estimate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Online rule id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateBackfillRequest"];
+            };
+        };
+        responses: {
+            /** @description What the backfill would read and cost. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackfillEstimate"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_online_rule_resume: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Online rule id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The rule, not paused. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OnlineRule"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -10607,6 +17998,76 @@ export interface operations {
             };
             /** @description The request body is not JSON. */
             415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_saved_view: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Saved view id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The saved view. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SavedView"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -11175,6 +18636,10 @@ export interface operations {
                 name?: string;
                 /** @description Who wrote the score. */
                 source?: components["schemas"]["ScoreSource"];
+                /** @description Scores written by this evaluator. */
+                evaluator_id?: string;
+                /** @description Scores written by this online rule. */
+                rule_id?: string;
                 /** @description Inclusive `created_at` start. RFC 3339 or epoch milliseconds. */
                 from?: components["schemas"]["TimeParam"];
                 /** @description Exclusive `created_at` end. RFC 3339 or epoch milliseconds. */
@@ -11238,7 +18703,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11303,6 +18768,15 @@ export interface operations {
             };
             /** @description No credentials, or the credentials are invalid. */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The organization reached its monthly units cap (code quota_exceeded). Retry-After gives the seconds until it resets. */
+            402: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -11510,7 +18984,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11603,7 +19077,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11710,7 +19184,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11821,7 +19295,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11928,7 +19402,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -12027,7 +19501,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -12118,7 +19592,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -12208,7 +19682,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -12383,7 +19857,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -12476,7 +19950,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -12538,6 +20012,15 @@ export interface operations {
             };
             /** @description No credentials, or the credentials are invalid. */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The organization reached its monthly units cap (code quota_exceeded). Retry-After gives the seconds until it resets. */
+            402: {
                 headers: {
                     [name: string]: unknown;
                 };

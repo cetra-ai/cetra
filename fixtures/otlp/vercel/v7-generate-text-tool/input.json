@@ -41,15 +41,15 @@
           },
           "spans": [
             {
-              "traceId": "e42866328d520e442bd357b8eccd5b19",
-              "spanId": "7667c4112e02a136",
+              "traceId": "c4b480a8480973ba1e4375de4c9064da",
+              "spanId": "b2861ced323af2be",
               "traceState": "",
               "parentSpanId": "",
               "flags": 257,
               "name": "invoke_agent gpt-4o-mini-2024-07-18",
               "kind": 1,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590109000000",
+              "endTimeUnixNano": "1767225590108000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",
@@ -156,15 +156,15 @@
               "status": null
             },
             {
-              "traceId": "e42866328d520e442bd357b8eccd5b19",
-              "spanId": "4dd908561493403c",
+              "traceId": "c4b480a8480973ba1e4375de4c9064da",
+              "spanId": "711745f4e11c5c3e",
               "traceState": "",
-              "parentSpanId": "7667c4112e02a136",
+              "parentSpanId": "b2861ced323af2be",
               "flags": 257,
               "name": "step 1",
               "kind": 1,
               "startTimeUnixNano": "1767225590002000000",
-              "endTimeUnixNano": "1767225590069000000",
+              "endTimeUnixNano": "1767225590068000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",
@@ -199,10 +199,10 @@
               "status": null
             },
             {
-              "traceId": "e42866328d520e442bd357b8eccd5b19",
-              "spanId": "d494d74b44de1486",
+              "traceId": "c4b480a8480973ba1e4375de4c9064da",
+              "spanId": "6614349b927fe4be",
               "traceState": "",
-              "parentSpanId": "4dd908561493403c",
+              "parentSpanId": "711745f4e11c5c3e",
               "flags": 257,
               "name": "chat gpt-4o-mini-2024-07-18",
               "kind": 3,
@@ -248,7 +248,7 @@
                 {
                   "key": "gen_ai.client.operation.duration",
                   "value": {
-                    "doubleValue": 0.05924106900000001
+                    "doubleValue": 0.05866784599999997
                   }
                 },
                 {
@@ -314,10 +314,10 @@
               "status": null
             },
             {
-              "traceId": "e42866328d520e442bd357b8eccd5b19",
-              "spanId": "d5c2a7aa9c7ce38d",
+              "traceId": "c4b480a8480973ba1e4375de4c9064da",
+              "spanId": "c1246b22bc7270bc",
               "traceState": "",
-              "parentSpanId": "4dd908561493403c",
+              "parentSpanId": "711745f4e11c5c3e",
               "flags": 257,
               "name": "execute_tool get_weather",
               "kind": 1,
@@ -357,7 +357,7 @@
                 {
                   "key": "gen_ai.execute_tool.duration",
                   "value": {
-                    "doubleValue": 0.00008871000000004869
+                    "doubleValue": 0.00008607000000000653
                   }
                 },
                 {
@@ -375,10 +375,10 @@
               "status": null
             },
             {
-              "traceId": "e42866328d520e442bd357b8eccd5b19",
-              "spanId": "0d044d0ccabbb293",
+              "traceId": "c4b480a8480973ba1e4375de4c9064da",
+              "spanId": "0a3851526ee9aed6",
               "traceState": "",
-              "parentSpanId": "7667c4112e02a136",
+              "parentSpanId": "b2861ced323af2be",
               "flags": 257,
               "name": "step 2",
               "kind": 1,
@@ -418,10 +418,10 @@
               "status": null
             },
             {
-              "traceId": "e42866328d520e442bd357b8eccd5b19",
-              "spanId": "9ef376ac2f2b8ceb",
+              "traceId": "c4b480a8480973ba1e4375de4c9064da",
+              "spanId": "d259126b6384480c",
               "traceState": "",
-              "parentSpanId": "0d044d0ccabbb293",
+              "parentSpanId": "0a3851526ee9aed6",
               "flags": 257,
               "name": "chat gpt-4o-mini-2024-07-18",
               "kind": 3,
@@ -467,7 +467,7 @@
                 {
                   "key": "gen_ai.client.operation.duration",
                   "value": {
-                    "doubleValue": 0.037206988000000024
+                    "doubleValue": 0.03727828000000005
                   }
                 },
                 {

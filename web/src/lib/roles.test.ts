@@ -1,10 +1,12 @@
 import { expect, it } from "vitest";
 import {
   atLeast,
+  canAnnotate,
   canChangeRole,
   canHaveOverride,
   canManageAlerts,
   canManageConnections,
+  canManageDatasets,
   canManageEvaluation,
   canRemoveMember,
   grantableRoles,
@@ -52,6 +54,14 @@ it("removes members like the server", () => {
   expect(canRemoveMember("member", "viewer", false)).toBe(false);
 });
 
+it("lets members and above annotate", () => {
+  expect(canAnnotate("owner")).toBe(true);
+  expect(canAnnotate("admin")).toBe(true);
+  expect(canAnnotate("member")).toBe(true);
+  expect(canAnnotate("viewer")).toBe(false);
+  expect(canAnnotate(undefined)).toBe(false);
+});
+
 it("lets only admins and owners manage connections", () => {
   expect(canManageConnections("owner")).toBe(true);
   expect(canManageConnections("admin")).toBe(true);
@@ -66,6 +76,14 @@ it("lets members and above manage alerts", () => {
   expect(canManageAlerts("member")).toBe(true);
   expect(canManageAlerts("viewer")).toBe(false);
   expect(canManageAlerts(undefined)).toBe(false);
+});
+
+it("lets members and above manage datasets", () => {
+  expect(canManageDatasets("owner")).toBe(true);
+  expect(canManageDatasets("admin")).toBe(true);
+  expect(canManageDatasets("member")).toBe(true);
+  expect(canManageDatasets("viewer")).toBe(false);
+  expect(canManageDatasets(undefined)).toBe(false);
 });
 
 it("overrides only members and viewers", () => {

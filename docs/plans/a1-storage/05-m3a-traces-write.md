@@ -48,7 +48,7 @@ User answers behind this plan: keep the anchor; a Rust merge operator; the S1 ta
 ## Versions
 
 No new dependency is expected.
-- `proptest` and `tempfile` are already dev-dependencies of `llmobs-storage`.
+- `proptest` and `tempfile` are already dev-dependencies of `cetra-storage`.
 - `parquet` is a normal dependency with the `async` and `object_store` features. Integration tests in `crates/storage/tests/` can use it directly.
 
 If something else turns out to be needed, add it to the root `[workspace.dependencies]`, re-check it with `cargo info`, and report the exact version.
@@ -132,7 +132,7 @@ pub(crate) enum FileTable { Spans, Traces, Scores }
 - time column `start_time`, ingest column `last_ingest_time`. So a traces file's `min_time` / `max_time` are the smallest and largest partial `start_time`, and its ingest range is the partials' `last_ingest_time` range. Both differ from its spans file's ranges, which is expected.
 - bloom filters on `trace_id`, `session_id` and `user_id`, fpp 0.01;
 - dictionary columns: a hard-coded `TRACES_DICTIONARY_COLUMNS`, like the spans and scores lists. Use `status`, `environment`, `release` and `name`, the low-cardinality strings. Add a test that the list names real `traces_schema()` columns, like `dictionary_lists_match_the_schemas`.
-- the same KV metadata keys, with `llmobs.table = traces`.
+- the same KV metadata keys, with `cetra.table = traces`.
 
 Add a round-trip test like `spans_round_trip_sorted_with_the_file_settings`, for `traces`.
 

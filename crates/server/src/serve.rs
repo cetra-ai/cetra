@@ -1,12 +1,15 @@
-//! `llmobs serve`: open storage, open `meta.db`, bind, and shut down (D137).
+//! `cetra serve`: open storage, open `meta.db`, bind, and shut down (D137).
 //!
 //! Startup creates `data_dir`, then `Storage::open` (which takes `LOCK`), then
 //! `meta.db`. A second process fails on the lock before `meta.db`.
 //!
-//! Shutdown stops accepting, drains in-flight HTTP for at most [`DRAIN`],
-//! aborts background tasks, gives storage [`STORAGE_SHUTDOWN`] (spec 12's
-//! 30 s flush budget; `Storage::shutdown` also caps each flush at 30 s), then
-//! closes `meta.db`.
+//! Shutdown closes live streams, stops accepting, drains in-flight HTTP for at
+//! most [`DRAIN`], waits at most [`USAGE_STOP_WAIT`] for the usage loop to finish
+//! any flush in progress, aborts background tasks, waits at most [`COMMIT_WAIT`]
+//! for detached commits (D-G-38), and gives storage [`STORAGE_SHUTDOWN`] (spec
+//! 12's 30 s flush budget; `Storage::shutdown` also caps each flush at 30 s). These
+//! bounded steps add up to 57 s, inside the 60 s grace period the packaging sets. The `last_used` and usage flushes and the `meta.db` close are
+//! short meta writes outside that bound.
 
 use std::future::Future;
 use std::io;
@@ -15,13 +18,14 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use llmobs_otel::{PriceError, PriceTable, builtin_price_rows};
-use llmobs_storage::Storage;
-use llmobs_storage::error::OpenError;
+use cetra_otel::{PriceError, PriceTable, builtin_price_rows};
+use cetra_storage::Storage;
+use cetra_storage::error::OpenError;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
+use crate::admin_socket;
 use crate::auth::Limits;
 use crate::clock::Clock;
 use crate::config::{ConfigError, ServerConfig};
@@ -35,8 +39,64 @@ use tonic::transport::server::TcpIncoming;
 /// How long in-flight HTTP may finish after stop-accepting (spec 12).
 const DRAIN: Duration = Duration::from_secs(20);
 
+/// How long shutdown waits for the usage loop to finish an in-flight flush.
+const USAGE_STOP_WAIT: Duration = Duration::from_secs(2);
+
+/// How long shutdown waits for detached commits (D-G-38, spec 12).
+const COMMIT_WAIT: Duration = Duration::from_secs(5);
+
 /// Best-effort cap on `Storage::shutdown` (spec 12).
 const STORAGE_SHUTDOWN: Duration = Duration::from_secs(30);
+
+/// Concurrent HTTP/2 streams per gRPC connection (G-1). A stream holds a reservation before its
+/// body is read, so this bounds the requests one client can hold open.
+const GRPC_MAX_STREAMS: u32 = 100;
+
+/// Requests in flight per gRPC connection (G-1), across all its streams.
+const GRPC_CONCURRENCY_PER_CONNECTION: usize = 32;
+
+/// The time one gRPC request may take, from its headers to its response, body included (G-1,
+/// D-G-29). A stream that stalls is cut here, and its reservation goes with the dropped request.
+const GRPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The OTLP/gRPC router: the admission layer behind the stream and concurrency limits, with
+/// [`GRPC_REQUEST_TIMEOUT`] (or, in tests, a shorter one) on every request.
+fn grpc_router(state: AppState, timeout: Duration) -> tonic::transport::server::Router {
+    tonic::transport::Server::builder()
+        .timeout(timeout)
+        .max_concurrent_streams(Some(GRPC_MAX_STREAMS))
+        .concurrency_limit_per_connection(GRPC_CONCURRENCY_PER_CONNECTION)
+        .add_service(grpc::service(state.clone()))
+        .add_service(grpc::logs_service(state.clone()))
+        .add_service(grpc::metrics_service(state))
+}
+
+/// The Prometheus listener's router: `GET /metrics` and nothing else (N M3, D-N-28). Any other
+/// path is axum's 404. There is no authentication, so the docs say to bind it privately.
+fn metrics_router(state: AppState) -> axum::Router {
+    axum::Router::new()
+        .route("/metrics", axum::routing::get(metrics))
+        .with_state(state)
+}
+
+/// The OpenMetrics document, refreshed on each scrape (`telemetry::Telemetry::render`). An encoding
+/// failure answers 500 with an empty body, never a partial document.
+async fn metrics(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match state.telemetry.render(&state).await {
+        Some(body) => (
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "application/openmetrics-text; version=1.0.0; charset=utf-8",
+            )],
+            body,
+        )
+            .into_response(),
+        None => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
 
 /// How often idle rate-limit keys are dropped (D143).
 const PRUNE_EVERY: Duration = Duration::from_secs(60);
@@ -47,13 +107,24 @@ const LAST_USED_EVERY: Duration = Duration::from_secs(60);
 /// How often usage counters are written (D-G-11).
 const USAGE_EVERY: Duration = Duration::from_secs(10);
 
+/// How often org SSO routing is reloaded from `meta.db` (D-P-62).
+const ORG_SSO_EVERY: Duration = Duration::from_secs(60);
+/// How often verified domains due for their daily re-proof are checked (D-P-72).
+const ORG_SSO_RECHECK_EVERY: Duration = Duration::from_secs(60 * 60);
+/// When dropped orgs' usage is first pruned, then how often (D-P-46).
+const USAGE_PRUNE_FIRST: Duration = Duration::from_secs(60);
+const USAGE_PRUNE_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// How often the 80 % and 100 % usage notices are checked (D-P-38).
+const NOTICES_EVERY: Duration = Duration::from_secs(60);
+
 /// How often expired web sessions are deleted.
 const PURGE_EVERY: Duration = Duration::from_secs(60 * 60);
 
-/// Why `llmobs serve` stopped before it was listening, or the accept loop failed.
+/// Why `cetra serve` stopped before it was listening, or the accept loop failed.
 #[derive(Debug, thiserror::Error)]
 pub enum ServeError {
-    /// The config file or a `LLMOBS_*` value was rejected.
+    /// The config file or a `CETRA_*` value was rejected.
     #[error(transparent)]
     Config(#[from] ConfigError),
     /// `Storage::open` failed. A held `LOCK` says the data directory is in use.
@@ -128,15 +199,26 @@ pub struct Running {
     pub otlp_local_addr: Option<SocketAddr>,
     /// The OTLP/gRPC listener's address, when `grpc_addr` is set (D-G-21).
     pub grpc_local_addr: Option<SocketAddr>,
+    /// The Prometheus listener's address, when `metrics_addr` is set (N M3, D-N-28).
+    pub metrics_local_addr: Option<SocketAddr>,
     serve: Option<JoinHandle<io::Result<()>>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     otlp_serve: Option<JoinHandle<io::Result<()>>>,
     otlp_shutdown_tx: Option<oneshot::Sender<()>>,
     grpc_serve: Option<JoinHandle<io::Result<()>>>,
     grpc_shutdown_tx: Option<oneshot::Sender<()>>,
+    metrics_serve: Option<JoinHandle<io::Result<()>>>,
+    metrics_shutdown_tx: Option<oneshot::Sender<()>>,
+    usage_stop_tx: Option<oneshot::Sender<()>>,
+    usage_task: Option<JoinHandle<()>>,
     state: Option<AppState>,
+    /// The control socket's accept task, when it bound (D-N-17). Shutdown stops it
+    /// first, before the HTTP drain.
+    admin_socket: Option<JoinHandle<()>>,
     /// Background work. Shutdown aborts whatever is here.
     tasks: Vec<JoinHandle<()>>,
+    /// The eval loops. Shutdown stops them before the storage flush (D-I-12).
+    eval_tasks: Option<crate::eval::EvalTasks>,
 }
 
 impl std::fmt::Debug for Running {
@@ -159,8 +241,20 @@ impl Drop for Running {
         if let Some(serve) = self.grpc_serve.take() {
             serve.abort();
         }
+        if let Some(serve) = self.metrics_serve.take() {
+            serve.abort();
+        }
+        if let Some(task) = &self.usage_task {
+            task.abort();
+        }
+        if let Some(socket) = self.admin_socket.take() {
+            socket.abort();
+        }
         for task in &self.tasks {
             task.abort();
+        }
+        if let Some(eval) = &self.eval_tasks {
+            eval.abort();
         }
     }
 }
@@ -177,7 +271,8 @@ pub async fn run(
     ui: Option<axum::Router>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<(), ServeError> {
-    let running = bind(config, ui).await?;
+    // Boxed: `bind`'s future is large, and the CLI awaits this one (clippy's `large_futures`).
+    let running = Box::pin(bind(config, ui)).await?;
     shutdown.await;
     running.shutdown().await
 }
@@ -194,6 +289,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
     let http_addr = config.http_addr;
     let otlp_http_addr = config.otlp_http_addr;
     let grpc_addr = config.grpc_addr;
+    let metrics_addr = config.metrics_addr;
     if let Err(source) = tokio::fs::create_dir_all(&data_dir).await {
         return Err(directory_error(&data_dir, &source));
     }
@@ -213,8 +309,9 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
             return Err(error.into());
         }
     };
-    let eval_runner = match llmobs_eval::EvalRunner::new(llmobs_eval::EgressPolicy {
+    let eval_runner = match cetra_eval::EvalRunner::new(cetra_eval::EgressPolicy {
         allow_private_network: config.security.allow_private_network_egress,
+        restore_mode: config.restore_mode,
     }) {
         Ok(runner) => Arc::new(runner),
         Err(_error) => {
@@ -234,8 +331,17 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
             return Err(ServeError::Prices(error));
         }
     };
-    let ingest = Ingest::new(&config.ingest, &config.media, prices);
-    let mailer = match crate::email::Mailer::from_config(&config) {
+    let prices = match crate::prices::Prices::load(meta.reader(), prices).await {
+        Ok(prices) => prices,
+        Err(error) => {
+            release_storage(storage).await;
+            meta.close().await;
+            return Err(ServeError::Meta(error));
+        }
+    };
+    let ingest = Ingest::new(&config.ingest, &config.media, Arc::new(prices));
+    let telemetry = crate::telemetry::Telemetry::new(config.restore_mode);
+    let mailer = match crate::email::Mailer::from_config(&config, telemetry.emails.clone()) {
         Ok(mailer) => mailer.map(Arc::new),
         Err(_error) => {
             release_storage(storage).await;
@@ -247,7 +353,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         }
     };
     let providers = match crate::auth::oidc::identity_client()
-        .and_then(|http| crate::auth::oidc::Providers::from_config(&config.auth, &http))
+        .and_then(|http| crate::auth::oidc::Providers::for_config(&config, &http))
     {
         Ok(providers) => providers,
         Err(error) => {
@@ -289,6 +395,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         license,
         defaults,
         config.public_url.origin(),
+        config.entitlements.control_plane,
     )
     .await
     {
@@ -299,11 +406,43 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
             return Err(ServeError::Meta(error));
         }
     };
+    let org_sso = match crate::ee::org_sso::OrgSso::new(
+        cetra_eval::EgressPolicy {
+            allow_private_network: config.security.allow_private_network_egress,
+            restore_mode: config.restore_mode,
+        },
+        txt_resolver(&config),
+    ) {
+        Ok(org_sso) => org_sso,
+        Err(error) => {
+            release_storage(storage).await;
+            meta.close().await;
+            return Err(ServeError::Init {
+                reason: error.to_string(),
+            });
+        }
+    };
+    let reloaded = match org_sso.reload(&meta, &secrets, &config.auth).await {
+        Ok(reloaded) => reloaded,
+        Err(error) => {
+            release_storage(storage).await;
+            meta.close().await;
+            return Err(ServeError::Meta(error));
+        }
+    };
+    if reloaded.claimed > 0 {
+        tracing::error!(
+            domains = reloaded.claimed,
+            "verified org SSO domains are ignored: the server configuration lists them"
+        );
+    }
     let storage = Arc::new(storage);
+    let eval = crate::eval::EvalQueue::new(config.eval.workers);
     let state = AppState::new(AppInner {
         config,
         meta,
         storage,
+        ready: crate::http::health::ReadyCache::default(),
         clock: Clock::System,
         limits: Limits::new(),
         key_cache: crate::auth::principal::ApiKeyCache::new(),
@@ -319,18 +458,33 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         live: crate::live::LiveBus::new(crate::live::StreamTiming::DEFAULT),
         metrics_cache: crate::routes::metrics::MetricsCache::default(),
         usage: crate::usage::Usage::default(),
+        alert_email_count: crate::alerts::quota::DailyEmailCount::default(),
         deletions: crate::deletion::Deletions::new(),
         secrets,
         eval_runner,
         connections: crate::eval::connection::ConnectionCache::default(),
         entitlements,
+        ingest_rate: crate::entitlements::rate::IngestRate::default(),
         trace_loads: crate::eval::trace_load::TraceLoads::default(),
         definitions: crate::eval::definitions::DefinitionCache::default(),
+        org_sso,
+        backup_slot: tokio::sync::Mutex::new(()),
+        eval,
+        pending: crate::eval::pending::PendingTraces::default(),
+        telemetry,
     });
     crate::ee::sso_enforcement::warn_if_unlicensed(&state);
     if let Err(error) = crate::bootstrap::prepare(&state).await {
         release_state(state).await;
         return Err(serve_bootstrap(error));
+    }
+    if let Err(error) = crate::eval::recover(&state).await {
+        release_state(state).await;
+        return Err(ServeError::Meta(error));
+    }
+    // Losing the load only stops tracking of the traces that were pending, so startup goes on.
+    if let Err(error) = crate::eval::trigger::load(&state).await {
+        tracing::warn!(error = %error, "pending traces could not be loaded; tracking starts empty");
     }
     // The guard is a safety net for judge runs; the server starts without it.
     if let Err(error) = state
@@ -370,6 +524,16 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
             }
         },
     };
+    let metrics = match metrics_addr {
+        None => None,
+        Some(addr) => match bind_listener(addr).await {
+            Ok(bound) => Some(bound),
+            Err(error) => {
+                release_state(state).await;
+                return Err(error);
+            }
+        },
+    };
     let mut tasks = vec![
         spawn_prune(state.clone()),
         spawn_purge(state.clone()),
@@ -379,9 +543,25 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         &state,
         crate::alerts::AlertTiming::DEFAULT,
     ));
+    let eval_tasks = crate::eval::spawn(&state, crate::eval::EvalTiming::DEFAULT);
     tasks.push(spawn_deletions(state.clone()));
     tasks.push(spawn_retention(state.clone()));
-    tasks.push(spawn_usage(state.clone()));
+    let (usage_stop_tx, usage_stop_rx) = oneshot::channel();
+    let usage_task = spawn_usage(state.clone(), usage_stop_rx);
+    tasks.push(spawn_usage_prune(state.clone()));
+    // Usage notices send email, and the org-SSO recheck looks up DNS, which restore mode does
+    // not do (N M3, D-N-25). `spawn_org_sso` only reloads from `meta.db`, so it keeps running.
+    if !state.config.restore_mode {
+        tasks.push(spawn_notices(state.clone()));
+        tasks.push(spawn_org_sso_recheck(state.clone()));
+    }
+    tasks.push(spawn_org_sso(state.clone()));
+    if state.config.restore_mode {
+        tracing::warn!(
+            "restore mode: outbound work is off (alerts, webhooks, judges, email, identity providers)"
+        );
+    }
+    let admin_socket = admin_socket::spawn(state.clone(), &data_dir);
     tracing::info!(%local_addr, "listening");
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let app = router(state.clone(), ui).into_make_service_with_connect_info::<SocketAddr>();
@@ -414,10 +594,9 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         Some((listener, addr)) => {
             tracing::info!(grpc_local_addr = %addr, "listening");
             let (tx, rx) = oneshot::channel();
-            let service = grpc::service(state.clone());
+            let router = grpc_router(state.clone(), GRPC_REQUEST_TIMEOUT);
             let serve = tokio::spawn(async move {
-                tonic::transport::Server::builder()
-                    .add_service(service)
+                router
                     .serve_with_incoming_shutdown(TcpIncoming::from(listener), async move {
                         let _ = rx.await;
                     })
@@ -427,19 +606,51 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
             (Some(addr), Some(serve), Some(tx))
         }
     };
+    let (metrics_local_addr, metrics_serve, metrics_shutdown_tx) = match metrics {
+        None => (None, None, None),
+        Some((listener, addr)) => {
+            tracing::info!(metrics_local_addr = %addr, "listening");
+            let (tx, rx) = oneshot::channel();
+            let app = metrics_router(state.clone());
+            let serve = tokio::spawn(async move {
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async move {
+                        let _ = rx.await;
+                    })
+                    .await
+            });
+            (Some(addr), Some(serve), Some(tx))
+        }
+    };
     Ok(Running {
         local_addr,
         otlp_local_addr,
         grpc_local_addr,
+        metrics_local_addr,
         serve: Some(serve),
         shutdown_tx: Some(shutdown_tx),
         otlp_serve,
         otlp_shutdown_tx,
         grpc_serve,
         grpc_shutdown_tx,
+        metrics_serve,
+        metrics_shutdown_tx,
+        usage_stop_tx: Some(usage_stop_tx),
+        usage_task: Some(usage_task),
         state: Some(state),
+        admin_socket,
         tasks,
+        eval_tasks: Some(eval_tasks),
     })
+}
+
+/// The DNS resolver of org-SSO domain verification. Restore mode looks nothing up (N M3, D-N-25).
+fn txt_resolver(config: &ServerConfig) -> crate::ee::org_sso::dns::TxtResolver {
+    if config.restore_mode {
+        crate::ee::org_sso::dns::TxtResolver::Unconfigured
+    } else {
+        crate::ee::org_sso::dns::TxtResolver::system()
+    }
 }
 
 /// Finishes an interrupted rotation, loads the key, then checks it (D-I-1, D-I-3).
@@ -553,15 +764,87 @@ fn spawn_retention(state: AppState) -> JoinHandle<()> {
     })
 }
 
-fn spawn_usage(state: AppState) -> JoinHandle<()> {
+/// The usage flush loop. A send on `stop` (or dropping it) ends the loop. The flush runs in the
+/// branch body rather than inside the `select!`, so a stop that arrives during a flush waits for
+/// that flush to commit; it is never cancelled mid-write (D-G-11).
+fn spawn_usage(state: AppState, mut stop: oneshot::Receiver<()>) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(USAGE_EVERY);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         interval.tick().await;
         loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    if let Err(error) = state.usage.flush(&state.meta).await {
+                        tracing::error!(error = %error, "usage flush failed");
+                    }
+                }
+                _ = &mut stop => break,
+            }
+        }
+    })
+}
+
+fn spawn_org_sso(state: AppState) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(ORG_SSO_EVERY);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
             interval.tick().await;
-            if let Err(error) = state.usage.flush(&state.meta).await {
-                tracing::error!(error = %error, "usage flush failed");
+            crate::ee::org_sso::refresh(&state).await;
+        }
+    })
+}
+
+fn spawn_org_sso_recheck(state: AppState) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(ORG_SSO_RECHECK_EVERY);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            match crate::ee::org_sso::recheck::recheck_once(&state, state.clock.now_ns()).await {
+                Ok(run) if run.lapsed > 0 || run.failed > 0 => tracing::info!(
+                    kept = run.kept,
+                    lapsed = run.lapsed,
+                    failed = run.failed,
+                    "org sso domain recheck"
+                ),
+                Ok(_) => {}
+                Err(error) => tracing::warn!(error = %error, "org sso domain recheck failed"),
+            }
+        }
+    })
+}
+
+fn spawn_usage_prune(state: AppState) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        tokio::time::sleep(USAGE_PRUNE_FIRST).await;
+        loop {
+            match crate::usage::prune_dropped_orgs(&state.meta, state.clock.now_ns()).await {
+                Ok(0) => {}
+                Ok(rows) => tracing::info!(rows, "dropped orgs' usage pruned"),
+                Err(error) => tracing::warn!(error = %error, "usage prune failed"),
+            }
+            tokio::time::sleep(USAGE_PRUNE_EVERY).await;
+        }
+    })
+}
+
+fn spawn_notices(state: AppState) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(NOTICES_EVERY);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            match crate::entitlements::notices::notices_once(&state).await {
+                Ok(0) => {}
+                Ok(count) => {
+                    tracing::info!(notices = count, "usage notices recorded");
+                }
+                Err(error) => tracing::warn!(error = %error, "usage notices failed"),
             }
         }
     })
@@ -580,18 +863,43 @@ fn spawn_prune(state: AppState) -> JoinHandle<()> {
 }
 
 impl Running {
-    /// Stop accepting, drain HTTP, stop background tasks, flush storage, close `meta.db`.
+    /// The server state, while the server runs.
+    #[cfg(test)]
+    pub(crate) fn state(&self) -> &AppState {
+        self.state
+            .as_ref()
+            .expect("state is present until shutdown")
+    }
+
+    /// Stop the control socket, stop accepting, drain HTTP, stop the eval loops and background
+    /// tasks, wait for detached commits, flush the pending traces, the last-used stamps and the
+    /// usage counters, flush storage, close `meta.db`.
     ///
-    /// A storage flush error is logged. The lock is released inside
-    /// `Storage::shutdown` before that error, and this method still closes
-    /// `meta.db`.
+    /// The metrics listener is told to stop first, before the control socket. It drains with the
+    /// HTTP listeners, under the same bound, so a scrape during the drain does not add time. The
+    /// control socket goes next: a backup in progress is cancelled, and no
+    /// new one starts during the drain. A storage flush error is logged. The lock
+    /// is released inside `Storage::shutdown` before that error, and this method
+    /// still closes `meta.db`.
     ///
     /// # Errors
     ///
     /// Returns the accept loop's error when it failed before the drain finished.
     pub async fn shutdown(mut self) -> Result<(), ServeError> {
+        if let Some(sender) = self.metrics_shutdown_tx.take() {
+            let _ = sender.send(());
+        }
         if let Some(state) = &self.state {
             state.live.close();
+        }
+        if let Some(socket) = self.admin_socket.take() {
+            socket.abort();
+            let _ = socket.await;
+        }
+        if let Some(state) = &self.state
+            && let Err(error) = admin_socket::remove_socket_file(&state.config.data_dir)
+        {
+            tracing::warn!(error = %error, "could not remove the admin socket");
         }
         if let Some(sender) = self.shutdown_tx.take() {
             let _ = sender.send(());
@@ -602,12 +910,36 @@ impl Running {
         if let Some(sender) = self.grpc_shutdown_tx.take() {
             let _ = sender.send(());
         }
-        let (serve_result, otlp_result, grpc_result) = tokio::join!(
+        let (serve_result, otlp_result, grpc_result, metrics_result) = tokio::join!(
             drain_optional(self.serve.take()),
             drain_optional(self.otlp_serve.take()),
             drain_optional(self.grpc_serve.take()),
+            drain_optional(self.metrics_serve.take()),
         );
-        let serve_error = serve_result.or(otlp_result).or(grpc_result);
+        let serve_error = serve_result
+            .or(otlp_result)
+            .or(grpc_result)
+            .or(metrics_result);
+        // The usage loop stops cooperatively, so an in-flight flush commits before the final one.
+        if let Some(sender) = self.usage_stop_tx.take() {
+            let _ = sender.send(());
+        }
+        // Bounded so a stuck `meta.db` cannot hold shutdown past the grace period. On expiry the
+        // task is aborted, and an aborted flush keeps its counts for the final flush.
+        if let Some(mut task) = self.usage_task.take() {
+            match tokio::time::timeout(USAGE_STOP_WAIT, &mut task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => tracing::error!(error = %error, "usage task failed"),
+                Err(_elapsed) => {
+                    tracing::error!("usage task did not stop before shutdown");
+                    task.abort();
+                    let _ = task.await;
+                }
+            }
+        }
+        if let (Some(eval), Some(state)) = (self.eval_tasks.take(), self.state.as_ref()) {
+            eval.shutdown(state).await;
+        }
         for task in self.tasks.drain(..) {
             task.abort();
             let _ = task.await;
@@ -615,11 +947,14 @@ impl Running {
         if let Some(state) = self.state.take() {
             // Commits whose request was dropped still run (D-G-38): they append and count
             // before the final flushes.
-            if tokio::time::timeout(STORAGE_SHUTDOWN, state.ingest.wait_for_commits())
+            if tokio::time::timeout(COMMIT_WAIT, state.ingest.wait_for_commits())
                 .await
                 .is_err()
             {
                 tracing::error!("ingest commits did not finish before shutdown");
+            }
+            if let Err(error) = crate::eval::trigger::flush_all(&state).await {
+                tracing::error!(error = %error, "pending traces flush failed");
             }
             if let Err(error) = state.last_used.flush(&state.meta).await {
                 tracing::error!(error = %error, "last_used flush failed");
@@ -701,27 +1036,91 @@ fn directory_error(path: &Path, source: &io::Error) -> ServeError {
 mod tests {
     use std::time::Instant;
 
-    use llmobs_storage::config::{
-        AnchorConfig, FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
-    };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
 
     use bytesize::ByteSize;
-    use llmobs_otel::decode_json;
+    use cetra_otel::decode_json;
     use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
     use opentelemetry_proto::tonic::collector::trace::v1::trace_service_client::TraceServiceClient;
     use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue, any_value};
     use tonic::codec::CompressionEncoding;
 
     use super::*;
-    use crate::config::{
-        AuthSettings, EntitlementsConfig, EvalConfig, IngestConfig, InitConfig, LogConfig,
-        MediaConfig, OrgsConfig, PublicUrl, Secret, SecurityConfig,
-    };
+    use crate::config::Secret;
     use crate::crypto::{decode_key, encode_key, random_key, write_key_file};
     use crate::meta::instance_settings::put_setting;
-    use llmobs_core::ids::OrgId;
+    use crate::test_support::{OTLP_KEY, config, with_init};
+    use cetra_core::ids::OrgId;
+
+    #[test]
+    fn restore_mode_uses_no_dns() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut restore = config(dir.path());
+        restore.restore_mode = true;
+        assert!(matches!(
+            txt_resolver(&restore),
+            crate::ee::org_sso::dns::TxtResolver::Unconfigured
+        ));
+    }
+
+    /// Restore mode starts four fewer loops in `Running.tasks`: the two alert loops that send
+    /// (evaluation and delivery), usage notices (email) and the org-SSO recheck (DNS). The eval
+    /// dispatcher and backfill runner live in `eval_tasks`, which is not counted here.
+    #[tokio::test]
+    async fn restore_mode_skips_the_sending_and_dns_loops() {
+        let dir = tempfile::tempdir().unwrap();
+        let normal = bind(config(dir.path()), None).await.unwrap();
+        let normal_tasks = normal.tasks.len();
+        normal.shutdown().await.unwrap();
+        let mut restore = config(dir.path());
+        restore.restore_mode = true;
+        let restored = bind(restore, None).await.unwrap();
+        let restore_tasks = restored.tasks.len();
+        restored.shutdown().await.unwrap();
+        assert_eq!(normal_tasks - restore_tasks, 4);
+    }
+
+    #[tokio::test]
+    async fn restore_mode_logs_at_startup() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut restore = config(dir.path());
+        restore.restore_mode = true;
+        let (running, logs) =
+            crate::test_support::capture_logs(Box::pin(bind(restore, None))).await;
+        let running = running.unwrap();
+        assert!(
+            logs.contains("restore mode: outbound work is off"),
+            "{logs}"
+        );
+        let body = http_get(running.local_addr, "/healthz", "close").await;
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.starts_with("HTTP/1.1 200"), "{text}");
+        running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn restore_mode_opens_storage_without_object_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut restore = config(dir.path());
+        restore.restore_mode = true;
+        let (running, logs) =
+            crate::test_support::capture_logs(Box::pin(bind(restore, None))).await;
+        running.unwrap().shutdown().await.unwrap();
+        assert!(
+            logs.contains("object deletion is off (restore mode)"),
+            "{logs}"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let (running, logs) =
+            crate::test_support::capture_logs(Box::pin(bind(config(dir.path()), None))).await;
+        running.unwrap().shutdown().await.unwrap();
+        assert!(
+            !logs.contains("object deletion is off (restore mode)"),
+            "{logs}"
+        );
+    }
 
     #[tokio::test]
     async fn an_empty_database_logs_the_setup_url_once() {
@@ -744,7 +1143,7 @@ mod tests {
         let mut config = config(dir.path());
         config.init = serde_json::from_value(serde_json::json!({
             "admin_email": "ada@example.com",
-            "admin_password": "llmobs-ok1",
+            "admin_password": "cetra-ok-1",
             "org": "Acme",
             "project": "Support bot",
             "secret_key": "not-a-secret-key",
@@ -753,7 +1152,7 @@ mod tests {
         let error = bind(config, None).await.unwrap_err();
         let text = error.to_string();
         assert!(matches!(error, ServeError::Init { .. }), "{text}");
-        assert!(text.contains("LLMOBS_INIT_SECRET_KEY"), "{text}");
+        assert!(text.contains("CETRA_INIT_SECRET_KEY"), "{text}");
         assert!(!text.contains("not-a-secret-key"), "{text}");
     }
 
@@ -858,6 +1257,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_dropped_running_releases_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let running = bind(config(dir.path()), None).await.unwrap();
+        drop(running);
+        // The aborted tasks drop their state a few polls later, so retry for a short while.
+        let started = Instant::now();
+        loop {
+            match bind(config(dir.path()), None).await {
+                Ok(again) => {
+                    again.shutdown().await.unwrap();
+                    break;
+                }
+                Err(error) => {
+                    assert!(started.elapsed() < Duration::from_secs(5), "{error}");
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn idle_keepalive_shuts_down_within_the_drain() {
         let dir = tempfile::tempdir().unwrap();
         let running = bind(config(dir.path()), None).await.unwrap();
@@ -927,7 +1347,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_flushes_usage() {
         use crate::meta::MetaDb;
-        use llmobs_core::ids::{OrgId, ProjectId};
+        use cetra_core::ids::{OrgId, ProjectId};
 
         let dir = tempfile::tempdir().unwrap();
         let running = bind(config(dir.path()), None).await.unwrap();
@@ -945,6 +1365,113 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(spans, 3);
+    }
+
+    #[tokio::test]
+    async fn the_usage_loop_stops_when_signalled() {
+        let dir = tempfile::tempdir().unwrap();
+        let running = bind(config(dir.path()), None).await.unwrap();
+        let state = running.state.as_ref().unwrap().clone();
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let task = spawn_usage(state, stop_rx);
+        stop_tx.send(()).unwrap();
+        // Not aborted: the loop returns by itself, well before its 10 s interval.
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the loop stops on its signal")
+            .unwrap();
+        running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_flushes_the_map() {
+        use crate::meta::MetaDb;
+        use crate::meta::evaluators::{EvaluatorFields, insert_evaluator};
+        use crate::meta::online_rules::{NewRule, RuleFields, insert_rule};
+        use cetra_core::ids::{ProjectId, SpanId};
+
+        let dir = tempfile::tempdir().unwrap();
+        let running = bind(with_init(config(dir.path())), None).await.unwrap();
+        let state = running.state.as_ref().unwrap().clone();
+        let project_text: String = sqlx::query_scalar("SELECT id FROM projects")
+            .fetch_one(state.meta.reader())
+            .await
+            .unwrap();
+        let project = ProjectId::from_uuid(uuid::Uuid::parse_str(&project_text).unwrap());
+        // A trace rule keeps the project tracked, as the sweeper's per-tick refresh would.
+        let evaluator = uuid::Uuid::now_v7();
+        let rule = uuid::Uuid::now_v7();
+        let now = state.clock.now_ns();
+        state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    insert_evaluator(
+                        conn,
+                        evaluator,
+                        project,
+                        "check",
+                        EvaluatorFields {
+                            name: "Same".to_owned(),
+                            config: "{}".to_owned(),
+                            output_score: "{}".to_owned(),
+                            connection_id: None,
+                            secret_enc: None,
+                            version: 1,
+                        },
+                        None,
+                        now,
+                    )
+                    .await?;
+                    insert_rule(
+                        conn,
+                        NewRule {
+                            id: rule,
+                            project_id: project,
+                            evaluator_id: evaluator,
+                            target: "trace".to_owned(),
+                            created_by: None,
+                        },
+                        RuleFields {
+                            name: "Every trace".to_owned(),
+                            filter: None,
+                            variable_mapping: "{}".to_owned(),
+                            sample_rate: 1.0,
+                            budget_usd: None,
+                            budget_period: None,
+                            enabled: true,
+                        },
+                        now,
+                    )
+                    .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        crate::eval::trigger::refresh_rules(&state).await.unwrap();
+        // A sweep that read the rules before the insert may still hold a stale tracked set. Every
+        // tick that starts after this sleep tracks the project, so refreshing again is enough.
+        tokio::time::sleep(crate::eval::EvalTiming::DEFAULT.sweep_every * 2).await;
+        crate::eval::trigger::refresh_rules(&state).await.unwrap();
+        // An unrooted span: the trace stays pending for the 60 s timeout, so nothing completes it.
+        let mut span = crate::test_support::dataset_span(0);
+        span.parent_span_id = Some(SpanId::from_bytes([0, 0, 0, 0, 0, 0, 0, 1]).unwrap());
+        span.environment = None;
+        span.metadata.clear();
+        state
+            .pending
+            .observe(project, &[span], state.clock.now_ns());
+        running.shutdown().await.unwrap();
+        let meta = MetaDb::open(dir.path()).await.unwrap();
+        let rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM pending_traces WHERE project_id = ?")
+                .bind(project.to_string())
+                .fetch_one(meta.reader())
+                .await
+                .unwrap();
+        assert_eq!(rows, 1);
+        meta.close().await;
     }
 
     #[tokio::test]
@@ -990,6 +1517,7 @@ mod tests {
                             name: None,
                             password_hash: None,
                             email_verified_at: None,
+                            email_verified_via: None,
                             is_instance_admin: true,
                         },
                         now,
@@ -1006,7 +1534,7 @@ mod tests {
                             kind: "secret",
                             scopes: vec![KeyScope::Read],
                             name: None,
-                            prefix: "sk-llmobs-abcdef".to_owned(),
+                            prefix: "sk-cetra-abcdef".to_owned(),
                             hash: "ab".repeat(32),
                             created_by: user.id,
                             expires_at: None,
@@ -1032,21 +1560,8 @@ mod tests {
         meta.close().await;
     }
 
-    const OTLP_KEY: &str = "sk-llmobs-0123456789ABCDEFGHIJKLMNOPQRSTUV";
     const TRACES: &str =
         include_str!("../../../fixtures/otlp/genai/finish-reasons-fill/input.json");
-
-    fn with_init(mut config: ServerConfig) -> ServerConfig {
-        config.init = serde_json::from_value(serde_json::json!({
-            "admin_email": "ada@example.com",
-            "admin_password": "llmobs-ok1",
-            "org": "Acme",
-            "project": "Support bot",
-            "secret_key": OTLP_KEY,
-        }))
-        .unwrap();
-        config
-    }
 
     async fn send_raw(addr: SocketAddr, request: &[u8]) -> String {
         let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -1193,6 +1708,22 @@ mod tests {
         running.shutdown().await.unwrap();
     }
 
+    /// `TRACES` with a 4 KiB attribute, which is over a 1 KiB `max_grpc_message_bytes`.
+    fn oversized() -> ExportTraceServiceRequest {
+        let mut message = decode_json(TRACES.as_bytes()).expect("fixture decodes");
+        let padding = KeyValue {
+            key: "pad".to_owned(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::StringValue("x".repeat(4096))),
+            }),
+            ..Default::default()
+        };
+        message.resource_spans[0].scope_spans[0].spans[0]
+            .attributes
+            .push(padding);
+        message
+    }
+
     #[tokio::test]
     async fn grpc_refuses_a_message_over_the_configured_size() {
         let dir = tempfile::tempdir().unwrap();
@@ -1205,26 +1736,163 @@ mod tests {
         .await
         .unwrap();
         let addr = running.grpc_local_addr.expect("the gRPC listener is bound");
-        let mut message = decode_json(TRACES.as_bytes()).expect("fixture decodes");
-        let padding = KeyValue {
-            key: "pad".to_owned(),
-            value: Some(AnyValue {
-                value: Some(any_value::Value::StringValue("x".repeat(4096))),
-            }),
-            ..Default::default()
-        };
-        message.resource_spans[0].scope_spans[0].spans[0]
-            .attributes
-            .push(padding);
 
         let mut client = TraceServiceClient::connect(format!("http://{addr}"))
             .await
             .unwrap();
         let status = client
-            .export(authorized(message))
+            .export(authorized(oversized()))
             .await
             .expect_err("the message is over the limit");
         assert_eq!(status.code(), tonic::Code::OutOfRange, "{status:?}");
+        drop(client);
+        running.shutdown().await.unwrap();
+    }
+
+    /// A gRPC export whose headers arrive and whose body never does (G-1, D-G-29): the admitted
+    /// reservation is held while it stalls, and the request timeout cuts it and gives it back.
+    #[tokio::test]
+    async fn a_stalled_grpc_export_is_cut_and_releases_its_reservation() {
+        let dir = tempfile::tempdir().unwrap();
+        let budget = ByteSize::mib(10);
+        let running = bind(
+            with_grpc(dir.path(), |config| {
+                config.ingest.max_grpc_message_bytes = budget;
+                config.ingest.max_inflight_bytes = budget;
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+        let state = running.state.clone().expect("the server is running");
+        // A second listener with a short timeout: the default one is 30 s.
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        let serve =
+            tokio::spawn(
+                grpc_router(state.clone(), Duration::from_millis(300))
+                    .serve_with_incoming_shutdown(TcpIncoming::from(listener), async move {
+                        let _ = stop_rx.await;
+                    }),
+            );
+
+        // The channel, with the body swapped for one that never yields: headers go out, then
+        // nothing, so the server waits in the body read while holding its reservation.
+        let channel = tonic::transport::Channel::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let stalled = tower::ServiceBuilder::new()
+            .map_request(|request: axum::http::Request<tonic::body::Body>| {
+                let (parts, _) = request.into_parts();
+                let never =
+                    futures::stream::pending::<Result<http_body::Frame<bytes::Bytes>, io::Error>>();
+                let body = http_body_util::StreamBody::new(never);
+                axum::http::Request::from_parts(parts, tonic::body::Body::new(body))
+            })
+            .service(channel);
+        let mut client = TraceServiceClient::new(stalled);
+        let export = tokio::spawn(async move {
+            client
+                .export(authorized(decode_json(TRACES.as_bytes()).unwrap()))
+                .await
+        });
+
+        // While it stalls, the budget is held.
+        let mut held = false;
+        for _ in 0..500 {
+            if state.ingest.reserve_exact(budget.as_u64()).is_err() {
+                held = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(held, "the stalled export holds its reservation");
+
+        // The timeout cuts it, and the reservation comes back.
+        let outcome = tokio::time::timeout(Duration::from_secs(10), export)
+            .await
+            .expect("the stalled export is cut")
+            .unwrap();
+        assert!(outcome.is_err(), "a cut export is not accepted");
+        let mut freed = false;
+        for _ in 0..500 {
+            if state.ingest.reserve_exact(budget.as_u64()).is_ok() {
+                freed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(freed, "the reservation is released after the timeout");
+
+        let _ = stop_tx.send(());
+        serve.await.unwrap().unwrap();
+        running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_unauthenticated_oversized_message_is_refused_before_it_is_decoded() {
+        let dir = tempfile::tempdir().unwrap();
+        let running = bind(
+            with_grpc(dir.path(), |config| {
+                config.ingest.max_grpc_message_bytes = ByteSize::kib(1);
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+        let addr = running.grpc_local_addr.expect("the gRPC listener is bound");
+
+        let mut client = TraceServiceClient::connect(format!("http://{addr}"))
+            .await
+            .unwrap();
+        let status = client
+            .export(tonic::Request::new(oversized()))
+            .await
+            .expect_err("no credentials");
+        assert_eq!(status.code(), tonic::Code::Unauthenticated, "{status:?}");
+        assert_eq!(status.message(), "missing or invalid credentials");
+        drop(client);
+        running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_authenticated_export_is_busy_while_the_budget_is_held() {
+        let dir = tempfile::tempdir().unwrap();
+        // The smallest budget config accepts: at least `max_request_bytes` (10 MiB by default).
+        let budget = ByteSize::mib(10);
+        let running = bind(
+            with_grpc(dir.path(), |config| {
+                config.ingest.max_grpc_message_bytes = budget;
+                config.ingest.max_inflight_bytes = budget;
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+        let addr = running.grpc_local_addr.expect("the gRPC listener is bound");
+        // One reservation of the whole budget: the next admission cannot reserve its message.
+        let state = running.state.as_ref().expect("the server is running");
+        let held = state
+            .ingest
+            .reserve_exact(budget.as_u64())
+            .expect("the budget is free");
+
+        let mut client = TraceServiceClient::connect(format!("http://{addr}"))
+            .await
+            .unwrap();
+        let message = decode_json(TRACES.as_bytes()).expect("fixture decodes");
+        let status = client
+            .export(authorized(message))
+            .await
+            .expect_err("the budget is held");
+        assert_eq!(status.code(), tonic::Code::Unavailable, "{status:?}");
+        assert_eq!(status.message(), "server is busy, retry later");
+        drop(held);
         drop(client);
         running.shutdown().await.unwrap();
     }
@@ -1240,9 +1908,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn metrics_listener_serves_and_stops() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut metrics = config(dir.path());
+        metrics.metrics_addr = Some(SocketAddr::from(([127, 0, 0, 1], 0)));
+        let running = bind(metrics, None).await.unwrap();
+        let addr = running.metrics_local_addr.expect("metrics listener");
+
+        let scrape = http_get(addr, "/metrics", "close").await;
+        let text = String::from_utf8_lossy(&scrape);
+        assert!(text.starts_with("HTTP/1.1 200"), "{text}");
+        assert!(
+            text.to_ascii_lowercase().contains(
+                "content-type: application/openmetrics-text; version=1.0.0; charset=utf-8"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("cetra_build_info"), "{text}");
+
+        let other = http_get(addr, "/", "close").await;
+        assert!(
+            String::from_utf8_lossy(&other).starts_with("HTTP/1.1 404"),
+            "the metrics listener serves only /metrics"
+        );
+
+        let main = http_get(running.local_addr, "/metrics", "close").await;
+        let main_text = String::from_utf8_lossy(&main);
+        assert!(!main_text.contains("cetra_build_info"), "{main_text}");
+
+        running.shutdown().await.unwrap();
+        assert!(TcpStream::connect(addr).await.is_err());
+    }
+
+    #[tokio::test]
     async fn empty_otlp_address_in_toml_binds_one_listener() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("llmobs.toml");
+        let path = dir.path().join("cetra.toml");
         std::fs::write(
             &path,
             format!(
@@ -1291,43 +1992,5 @@ mod tests {
 
         let again = bind(config(dir.path()), None).await.unwrap();
         again.shutdown().await.unwrap();
-    }
-
-    fn config(data_dir: &Path) -> ServerConfig {
-        ServerConfig {
-            data_dir: data_dir.to_path_buf(),
-            public_url: PublicUrl::default(),
-            http_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
-            trusted_proxies: Vec::new(),
-            otlp_http_addr: None,
-            grpc_addr: None,
-            storage: StorageConfig {
-                data_dir: data_dir.to_path_buf(),
-                min_free_bytes: ByteSize::b(0),
-                object_store: None,
-                s3: S3Config::default(),
-                wal: WalConfig::default(),
-                flush: FlushConfig::default(),
-                memtable: MemtableConfig::default(),
-                query: QueryConfig::default(),
-                anchor: AnchorConfig::default(),
-                gc: Default::default(),
-                compaction: Default::default(),
-                deletion: Default::default(),
-            },
-            ingest: IngestConfig::default(),
-            media: MediaConfig::default(),
-            eval: EvalConfig::default(),
-            security: SecurityConfig::default(),
-            entitlements: EntitlementsConfig::default(),
-            orgs: OrgsConfig::default(),
-            encryption_key: None,
-            license_key: None,
-            auth: AuthSettings::default(),
-            smtp_url: None,
-            email_from: None,
-            init: InitConfig::default(),
-            log: LogConfig::default(),
-        }
     }
 }

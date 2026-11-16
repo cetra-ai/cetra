@@ -83,10 +83,14 @@ pub(crate) enum OrgPerm {
     ManageMembers,
     /// Create, edit, delete and test LLM connections (D-I-24).
     ManageConnections,
+    /// Create, replace and delete the org's model prices (D-T-6).
+    ManagePrices,
     /// Delete the org (owner only, spec 08).
     Delete,
     /// The org's deletion history (D-M-8).
     ViewDeletions,
+    /// The org's identity provider, domains and enforcement (owner only, D-P-51).
+    ManageSso,
 }
 
 /// What a project route requires.
@@ -98,12 +102,18 @@ pub(crate) enum ProjectPerm {
     ManageSettings,
     /// Project member overrides.
     ManageMembers,
+    /// The org's member list as seen from a project: names, emails and roles. An API key never
+    /// reads it (D-P-67).
+    ViewMembers,
     /// Write and delete scores (spec 08: member and above).
     Annotate,
     /// Evaluators, online rules, score definitions, test and manual runs (D-I-24).
     ManageEvaluation,
     /// Alert rules and notification channels (spec 08: member and above; D-K-9).
     ManageAlerts,
+    /// Datasets and experiments: create, edit, delete, items, import, add from trace, experiment
+    /// results (D-J-5). Member and above; a `write` API key; a read-write personal access token.
+    ManageDatasets,
     /// Read project data through a POST with a body, such as the SQL console (D-H-4).
     /// Same holders as `View`; a read-only PAT and a `read` key may use it on POST.
     Query,
@@ -198,8 +208,9 @@ impl OrgPerm {
             | Self::CreateProject
             | Self::ManageMembers
             | Self::ManageConnections
+            | Self::ManagePrices
             | Self::ViewDeletions => OrgRole::Admin,
-            Self::Delete => OrgRole::Owner,
+            Self::Delete | Self::ManageSso => OrgRole::Owner,
         }
     }
 }
@@ -208,8 +219,10 @@ impl ProjectPerm {
     /// Lowest effective project role that may perform this.
     pub(crate) fn min_role(self) -> Role {
         match self {
-            Self::View | Self::Query => Role::Viewer,
-            Self::Annotate | Self::ManageEvaluation | Self::ManageAlerts => Role::Member,
+            Self::View | Self::Query | Self::ViewMembers => Role::Viewer,
+            Self::Annotate | Self::ManageEvaluation | Self::ManageAlerts | Self::ManageDatasets => {
+                Role::Member
+            }
             Self::ManageSettings | Self::ManageMembers | Self::Delete | Self::Drop => Role::Admin,
         }
     }
@@ -218,11 +231,12 @@ impl ProjectPerm {
     pub(crate) fn key_scope(self) -> Option<KeyScope> {
         match self {
             Self::View | Self::Query => Some(KeyScope::Read),
-            Self::Annotate | Self::Delete => Some(KeyScope::Write),
+            Self::Annotate | Self::Delete | Self::ManageDatasets => Some(KeyScope::Write),
             Self::ManageEvaluation
             | Self::ManageSettings
             | Self::ManageMembers
             | Self::ManageAlerts
+            | Self::ViewMembers
             | Self::Drop => None,
         }
     }
@@ -278,8 +292,10 @@ mod tests {
         assert_eq!(OrgPerm::CreateProject.min_role(), OrgRole::Admin);
         assert_eq!(OrgPerm::ManageMembers.min_role(), OrgRole::Admin);
         assert_eq!(OrgPerm::ManageConnections.min_role(), OrgRole::Admin);
+        assert_eq!(OrgPerm::ManagePrices.min_role(), OrgRole::Admin);
         assert_eq!(OrgPerm::Delete.min_role(), OrgRole::Owner);
         assert_eq!(OrgPerm::ViewDeletions.min_role(), OrgRole::Admin);
+        assert_eq!(OrgPerm::ManageSso.min_role(), OrgRole::Owner);
         assert_eq!(ProjectPerm::View.min_role(), Role::Viewer);
         assert_eq!(ProjectPerm::ManageSettings.min_role(), Role::Admin);
         assert_eq!(ProjectPerm::ManageMembers.min_role(), Role::Admin);
@@ -292,6 +308,8 @@ mod tests {
         assert!(ProjectPerm::Drop.key_scope().is_none());
         assert!(ProjectPerm::ManageSettings.key_scope().is_none());
         assert!(ProjectPerm::ManageMembers.key_scope().is_none());
+        assert_eq!(ProjectPerm::ViewMembers.min_role(), Role::Viewer);
+        assert!(ProjectPerm::ViewMembers.key_scope().is_none());
         // Score writes: viewer no; member, admin and owner yes.
         assert_eq!(ProjectPerm::Annotate.min_role(), Role::Member);
         assert_eq!(ProjectPerm::Annotate.key_scope(), Some(KeyScope::Write));
@@ -300,6 +318,12 @@ mod tests {
         assert!(ProjectPerm::ManageEvaluation.key_scope().is_none());
         assert_eq!(ProjectPerm::ManageAlerts.min_role(), Role::Member);
         assert!(ProjectPerm::ManageAlerts.key_scope().is_none());
+        // Datasets and experiments: member and above, and a `write` key (D-J-5).
+        assert_eq!(ProjectPerm::ManageDatasets.min_role(), Role::Member);
+        assert_eq!(
+            ProjectPerm::ManageDatasets.key_scope(),
+            Some(KeyScope::Write)
+        );
         let viewer =
             effective_project_role(OrgRole::Viewer, None).expect("viewer sees the project");
         assert!(viewer < ProjectPerm::Annotate.min_role());

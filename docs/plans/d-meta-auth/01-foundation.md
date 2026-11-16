@@ -1,6 +1,6 @@
 # Part 1 · Foundation (P1–P5)
 
-Config, `meta.db`, the axum app and `llmobs serve`. At the end of P5, `llmobs serve` starts, opens storage and `meta.db`, answers `/healthz` and `/readyz`, and shuts down cleanly. There are no auth routes yet.
+Config, `meta.db`, the axum app and `cetra serve`. At the end of P5, `cetra serve` starts, opens storage and `meta.db`, answers `/healthz` and `/readyz`, and shuts down cleanly. There are no auth routes yet.
 
 ---
 
@@ -19,11 +19,11 @@ Find the highest `D<n>` in `docs/mvp-decisions.md` on `main`. If it is below 135
 ### `docs/mvp-decisions.md`
 
 - Append D135–D151 to the decision log, one row each, with the wording of the README table (shortened to one or two sentences each, as the other rows are, ending with the spec section they change).
-- D43 contradicts spec 08: change it to "Email/password on by default (argon2id, spec 08 § Passwords); sign-up policy `LLMOBS_AUTH_SIGNUP` (default `invite_only`) and `LLMOBS_AUTH_DISABLE_PASSWORD`; the first user becomes instance admin and owner of the first org; GitHub, Google, generic OIDC; works without email (copyable invite links, CLI password reset). No SAML in v1." This is a wording fix, not a new decision.
+- D43 contradicts spec 08: change it to "Email/password on by default (argon2id, spec 08 § Passwords); sign-up policy `CETRA_AUTH_SIGNUP` (default `invite_only`) and `CETRA_AUTH_DISABLE_PASSWORD`; the first user becomes instance admin and owner of the first org; GitHub, Google, generic OIDC; works without email (copyable invite links, CLI password reset). No SAML in v1." This is a wording fix, not a new decision.
 
 ### Spec 04
 
-- Header paragraph: `synchronous=FULL` instead of `NORMAL`, with "writes are rare; every commit is durable before the response (D136)". "one writer connection (serialized writes through a `Mutex`) and a read pool of 4 read-only connections". Add: "`llmobs admin` commands open `meta.db` without running migrations and refuse a database at another migration version (D136)."
+- Header paragraph: `synchronous=FULL` instead of `NORMAL`, with "writes are rare; every commit is durable before the response (D136)". "one writer connection (serialized writes through a `Mutex`) and a read pool of 4 read-only connections". Add: "`cetra admin` commands open `meta.db` without running migrations and refuse a database at another migration version (D136)."
 - `users.email`: `TEXT NOT NULL UNIQUE` without `COLLATE NOCASE`, comment "normalized: trimmed, NFC, lowercase (D136)". Same for `invites.email`.
 - `invites`: add `CREATE UNIQUE INDEX invites_pending ON invites(org_id, email) WHERE accepted_at IS NULL;` and the sentence "A new invite for the same (org, email) replaces the pending one (D147)."
 - New table after `password_resets`:
@@ -36,20 +36,20 @@ CREATE TABLE email_verifications (
 );
 ```
 
-- `api_keys.prefix` and `personal_tokens.prefix` comment: "type prefix + first 6 random characters, e.g. `sk-llmobs-a1B2c3` (D140)".
+- `api_keys.prefix` and `personal_tokens.prefix` comment: "type prefix + first 6 random characters, e.g. `sk-cetra-a1B2c3` (D140)".
 - `web_sessions.id` comment: "SHA-256 hex of the cookie value (32 random bytes, base64url)".
 - § Metering & instance: after the `instance_settings` DDL, add "Created by track E with its first use (D135)."
 
 ### Spec 08
 
 Edit in place; keep the structure.
-- § Bootstrapping: the setup page needs the setup token of D144 (`/setup?token=…`, logged once at startup while no user exists). Headless init runs once, in one transaction, only when `users` is empty; `LLMOBS_INIT_SECRET_KEY`, when set, must match the secret key format (`sk-llmobs-` + 32 base62 characters) or startup fails.
-- § Sign-up policy: add "An invite token admits its own email only (D147). Signup under `open` with an email already registered answers 409 (D145)." In the `LLMOBS_AUTH_ENFORCE_SSO_DOMAINS` row, add "any configured OAuth/OIDC provider satisfies it".
+- § Bootstrapping: the setup page needs the setup token of D144 (`/setup?token=…`, logged once at startup while no user exists). Headless init runs once, in one transaction, only when `users` is empty; `CETRA_INIT_SECRET_KEY`, when set, must match the secret key format (`sk-cetra-` + 32 base62 characters) or startup fails.
+- § Sign-up policy: add "An invite token admits its own email only (D147). Signup under `open` with an email already registered answers 409 (D145)." In the `CETRA_AUTH_ENFORCE_SSO_DOMAINS` row, add "any configured OAuth/OIDC provider satisfies it".
 - § Passwords: NFC normalization, the length counted in Unicode scalar values, the list source (SecLists `10k-most-common.txt`, entries of 10+ characters), the hashing semaphore, the dummy hash, the rate limits and lockout of D143 (in memory; keys; lockout does not block OAuth/OIDC login or password reset; reset clears it). Uniform answers of D145. Password change: `POST /api/v1/me/password` revokes every other web session and all PATs.
 - § Web sessions: CSRF rule of D141 replaces the current bullet. Add: "A bearer token wins over the cookie (D140)." Add: "Disabling a user deletes their sessions."
 - § OAuth / OIDC: per-provider `link_existing_by_email` (GitHub and Google default `true`, `[[auth.oidc]]` default `false`); the linking rules of D148 replace the "Account linking" bullet; refuse multi-tenant Entra issuers; `allowed_domains` checks the verified email's domain, and for Google also the `hd` claim; state cookie signed with a per-process key, 10 minutes, `SameSite=Lax`, `Path=/api/auth/callback`; the callback redirects to the relative path given to `/authorize?redirect=` (must start with `/` and not `//`), and errors redirect to `/login?error=<code>`.
 - § Authorization: the override rule of D139 (who can be overridden, who edits overrides, ceilings, last owner); instance admins have no implicit access to org data; any signed-in user creates orgs. "404 for what you cannot see, 403 for what you can see but not change" (D138). Session-only operations and PAT scopes of D140. Replace "Deletion by user/project still requires `admin` (PAT or session), not an API key." with "Deletion by user or project requires `admin` with a session or a `read, write` PAT, never an API key."
-- § API keys: prefix of D140; cache eviction on revoke; credentials only in the `Authorization` header. CLI login: the browser page is `/cli-auth?port=…&state=…`, the callback host is always `127.0.0.1`; `llmobs logout` revokes the PAT with `DELETE /api/v1/me/tokens/current`.
+- § API keys: prefix of D140; cache eviction on revoke; credentials only in the `Authorization` header. CLI login: the browser page is `/cli-auth?port=…&state=…`, the callback host is always `127.0.0.1`; `cetra logout` revokes the PAT with `DELETE /api/v1/me/tokens/current`.
 - § Email: transactional emails are sent by a background task (D145). Templates add `verify_email` links `<public_url>/verify?token=…`, reset links `<public_url>/reset?token=…`, invite links `<public_url>/invite/<token>`.
 - § Auth events log: D150 (ids only; `account = "unknown"`).
 - New § Client IP: D142.
@@ -62,7 +62,7 @@ Edit in place; keep the structure.
 
 ### Spec 12
 
-- § Configuration table: add `trusted_proxies` (env `LLMOBS_TRUSTED_PROXIES`, comma-separated CIDRs, default empty, D142) and `log.format`/`log.level` stay. Add the `[init]` section keys with their `LLMOBS_INIT_*` aliases.
+- § Configuration table: add `trusted_proxies` (env `CETRA_TRUSTED_PROXIES`, comma-separated CIDRs, default empty, D142) and `log.format`/`log.level` stay. Add the `[init]` section keys with their `CETRA_INIT_*` aliases.
 - § Process lifecycle, Startup: "lock data dir and open storage (`catalog.db`, replay WAL) → open `meta.db` + migrations → (log the setup URL if no user exists) → start background tasks → bind ports → `/readyz` = 200" (D137). Remove "verify encryption key" from the D-era order and add "(track E adds: verify encryption key, after `meta.db`)".
 - § Security checklist: add "credentials never in query strings; request logs carry route templates, not raw URIs (D150)".
 
@@ -78,7 +78,7 @@ The final decision numbers, and any spec sentence you could not reconcile.
 
 ## P2 — Server config
 
-**Goal:** `ServerConfig::load` reads defaults, `llmobs.toml` and env vars with figment, rejects unknown keys and invalid values, and never prints a secret.
+**Goal:** `ServerConfig::load` reads defaults, `cetra.toml` and env vars with figment, rejects unknown keys and invalid values, and never prints a secret.
 
 **Edit only:** `crates/server/src/config.rs` (new), `crates/server/src/lib.rs`, `crates/server/Cargo.toml`, root `Cargo.toml` (`figment`, `ipnet`, plus `thiserror`/`tracing`/`url` if the server crate lacks them; `url` only if already in `Cargo.lock`, else parse with `http::Uri` from axum in P4 and keep a `String` here).
 
@@ -90,7 +90,7 @@ The final decision numbers, and any spec sentence you could not reconcile.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
-    pub data_dir: PathBuf,                 // default "./llmobs-data"
+    pub data_dir: PathBuf,                 // default "./cetra-data"
     pub public_url: PublicUrl,             // default "http://localhost:8080"
     pub http_addr: SocketAddr,             // default 0.0.0.0:8080
     pub trusted_proxies: Vec<IpNet>,       // default empty (D142)
@@ -108,33 +108,33 @@ pub struct ServerConfig {
 - `InitConfig`: `admin_email`, `admin_password` (a `Secret<String>`), `org`, `project`, `secret_key` (`Secret<String>`), all `Option`.
 - `LogConfig`: `format: LogFormat` (`pretty` | `json`, default: decided by the CLI from `isatty`, so `Option<LogFormat>` here), `level: String` (default `info`, an `EnvFilter` directive).
 - `Secret<T>`: a newtype whose `Debug` prints `Secret(***)` and that has no `Display`; `expose(&self) -> &T`. It exists because config values are logged with `{:?}` in errors and must never show secrets. Tests assert the `Debug` output.
-- `StorageSection`: how it maps to `llmobs_storage::StorageConfig` depends on that type. `StorageConfig` has `data_dir` and `#[serde(deny_unknown_fields)]`. Deserialize the `[storage]` table into `StorageConfig` directly, then set its `data_dir` from the top-level `data_dir`; if the user set `storage.data_dir`, fail with "set `data_dir` at the top level". Check whether `StorageConfig`'s `data_dir` is `#[serde(default)]`; if it is required, deserialize the section through a `serde_json::Value`/figment value with `data_dir` inserted. Choose the simplest path that keeps one source of truth, and describe it in a doc comment.
+- `StorageSection`: how it maps to `cetra_storage::StorageConfig` depends on that type. `StorageConfig` has `data_dir` and `#[serde(deny_unknown_fields)]`. Deserialize the `[storage]` table into `StorageConfig` directly, then set its `data_dir` from the top-level `data_dir`; if the user set `storage.data_dir`, fail with "set `data_dir` at the top level". Check whether `StorageConfig`'s `data_dir` is `#[serde(default)]`; if it is required, deserialize the section through a `serde_json::Value`/figment value with `data_dir` inserted. Choose the simplest path that keeps one source of truth, and describe it in a doc comment.
 
 `impl ServerConfig { pub fn load(path: Option<&Path>) -> Result<Self, ConfigError>; pub fn storage_config(&self) -> StorageConfig; }`
 
 ### Sources (spec 12)
 
 1. Defaults (`Serialized::defaults` of a `Default`-like struct, or `#[serde(default = …)]` per field).
-2. The TOML file at `path`, else `$LLMOBS_CONFIG`, else none. A path given but missing is an error.
-3. Env: `Env::prefixed("LLMOBS_").split("__")` maps `LLMOBS_STORAGE__WAL__SYNC` to `storage.wal.sync` (D90). Then the **aliases**, which win over the split form:
+2. The TOML file at `path`, else `$CETRA_CONFIG`, else none. A path given but missing is an error.
+3. Env: `Env::prefixed("CETRA_").split("__")` maps `CETRA_STORAGE__WAL__SYNC` to `storage.wal.sync` (D90). Then the **aliases**, which win over the split form:
 
 | Env | Key |
 |---|---|
-| `LLMOBS_DATA_DIR` | `data_dir` |
-| `LLMOBS_PUBLIC_URL` | `public_url` |
-| `LLMOBS_HTTP_ADDR` | `http_addr` |
-| `LLMOBS_TRUSTED_PROXIES` | `trusted_proxies` (comma-separated) |
-| `LLMOBS_OBJECT_STORE` | `storage.object_store` |
-| `LLMOBS_SMTP_URL`, `LLMOBS_EMAIL_FROM` | `smtp_url`, `email_from` |
-| `LLMOBS_AUTH_SIGNUP` | `auth.signup` |
-| `LLMOBS_AUTH_SIGNUP_DOMAINS` | `auth.signup_domains` (comma-separated) |
-| `LLMOBS_AUTH_DISABLE_PASSWORD` | `auth.disable_password` |
-| `LLMOBS_AUTH_REQUIRE_EMAIL_VERIFICATION` | `auth.require_email_verification` |
-| `LLMOBS_AUTH_ENFORCE_SSO_DOMAINS` | `auth.enforce_sso_domains` (comma-separated) |
-| `LLMOBS_INIT_ADMIN_EMAIL`, `…_ADMIN_PASSWORD`, `…_ORG`, `…_PROJECT`, `…_SECRET_KEY` | `init.*` |
-| `LLMOBS_LOG` | `log.level` |
+| `CETRA_DATA_DIR` | `data_dir` |
+| `CETRA_PUBLIC_URL` | `public_url` |
+| `CETRA_HTTP_ADDR` | `http_addr` |
+| `CETRA_TRUSTED_PROXIES` | `trusted_proxies` (comma-separated) |
+| `CETRA_OBJECT_STORE` | `storage.object_store` |
+| `CETRA_SMTP_URL`, `CETRA_EMAIL_FROM` | `smtp_url`, `email_from` |
+| `CETRA_AUTH_SIGNUP` | `auth.signup` |
+| `CETRA_AUTH_SIGNUP_DOMAINS` | `auth.signup_domains` (comma-separated) |
+| `CETRA_AUTH_DISABLE_PASSWORD` | `auth.disable_password` |
+| `CETRA_AUTH_REQUIRE_EMAIL_VERIFICATION` | `auth.require_email_verification` |
+| `CETRA_AUTH_ENFORCE_SSO_DOMAINS` | `auth.enforce_sso_domains` (comma-separated) |
+| `CETRA_INIT_ADMIN_EMAIL`, `…_ADMIN_PASSWORD`, `…_ORG`, `…_PROJECT`, `…_SECRET_KEY` | `init.*` |
+| `CETRA_LOG` | `log.level` |
 
-Aliased names must not also be read by the split provider (`LLMOBS_AUTH_SIGNUP` would otherwise become a top-level `auth_signup` and fail `deny_unknown_fields`): filter them out of the prefixed provider. `LLMOBS_CONFIG` is not a key; filter it too. Comma-separated values: split, trim, drop empty items.
+Aliased names must not also be read by the split provider (`CETRA_AUTH_SIGNUP` would otherwise become a top-level `auth_signup` and fail `deny_unknown_fields`): filter them out of the prefixed provider. `CETRA_CONFIG` is not a key; filter it too. Comma-separated values: split, trim, drop empty items.
 
 ### Validation (after extraction)
 
@@ -150,8 +150,8 @@ Aliased names must not also be read by the split provider (`LLMOBS_AUTH_SIGNUP` 
 Use `figment::Jail` only if it does not need the `test` feature at runtime; otherwise build figments from `Toml::string` and an explicit env map (refactor `load` into `load_from(toml: Option<String>, env: &[(&str, &str)])` used by `load` and the tests; no process-env mutation in tests).
 - defaults: every default of spec 12 and spec 08;
 - TOML overrides defaults; env overrides TOML; an alias overrides the split form;
-- `LLMOBS_STORAGE__WAL__SYNC="5ms"` reaches `storage.wal.sync`;
-- unknown key in TOML → error naming it; unknown `LLMOBS_FOO` → error;
+- `CETRA_STORAGE__WAL__SYNC="5ms"` reaches `storage.wal.sync`;
+- unknown key in TOML → error naming it; unknown `CETRA_FOO` → error;
 - `storage.data_dir` set → error; the top-level `data_dir` reaches `storage_config().data_dir`;
 - comma lists; `trusted_proxies` with an invalid CIDR → error naming the key;
 - `public_url` with a path, a query, `ftp://` → errors; `origin()` for `http://localhost:8080/` is `http://localhost:8080`;
@@ -196,11 +196,11 @@ Name the file the way `crates/storage/migrations/catalog/0001_catalog.sql` is na
 pub(crate) struct MetaDb { writer: tokio::sync::Mutex<SqliteConnection>, readers: SqlitePool }
 
 impl MetaDb {
-    /// Creates `meta.db` if missing, applies pragmas, runs migrations. `llmobs serve` only.
+    /// Creates `meta.db` if missing, applies pragmas, runs migrations. `cetra serve` only.
     pub(crate) async fn open(data_dir: &Path) -> Result<Self, MetaError>;
     /// Opens an existing `meta.db` without migrating. Fails with `MetaError::NotInitialized`
     /// when the file is missing, and `MetaError::SchemaMismatch { found, expected }` when the
-    /// latest applied migration is not the binary's latest. `llmobs admin` only.
+    /// latest applied migration is not the binary's latest. `cetra admin` only.
     pub(crate) async fn open_existing(data_dir: &Path) -> Result<Self, MetaError>;
     pub(crate) fn reader(&self) -> &SqlitePool;
     /// Runs `f` in one `BEGIN IMMEDIATE` transaction on the writer and commits.
@@ -258,7 +258,7 @@ pub(crate) struct AppState(Arc<AppInner>);
 pub(crate) struct AppInner {
     pub(crate) config: ServerConfig,
     pub(crate) meta: MetaDb,
-    pub(crate) storage: Arc<llmobs_storage::Storage>,
+    pub(crate) storage: Arc<cetra_storage::Storage>,
     pub(crate) clock: Clock,
 }
 pub(crate) fn router(state: AppState) -> Router;
@@ -328,13 +328,13 @@ The axum mechanisms used for 404/405 bodies and whether `JsonRejection` messages
 
 ---
 
-## P5 — `llmobs serve`
+## P5 — `cetra serve`
 
-**Goal:** `llmobs serve [--config path]` starts the server and shuts it down cleanly; the startup order is D137.
+**Goal:** `cetra serve [--config path]` starts the server and shuts it down cleanly; the startup order is D137.
 
 **Edit only:** `crates/server/src/serve.rs` (new), `crates/server/src/lib.rs`, `crates/cli/src/main.rs`, `crates/cli/Cargo.toml` (`tokio`, `tracing`, `tracing-subscriber`, `anyhow`), `crates/server/Cargo.toml`.
 
-**Commit:** `cli: add llmobs serve`
+**Commit:** `cli: add cetra serve`
 
 ### `serve::run`
 
@@ -358,21 +358,21 @@ Shutdown (spec 12): stop accepting, drain in-flight requests for at most 20 s (t
 ### CLI
 
 ```
-llmobs serve [--config <path>]
+cetra serve [--config <path>]
 ```
 
-- `--config` overrides `LLMOBS_CONFIG`.
+- `--config` overrides `CETRA_CONFIG`.
 - Logging: `tracing_subscriber` with `EnvFilter` from `config.log.level`; format from `config.log.format`, else `pretty` when stdout is a terminal (`std::io::IsTerminal`), else `json`.
 - Signals: SIGINT and SIGTERM (`tokio::signal::unix` on Unix, `ctrl_c` elsewhere) trigger shutdown; a second signal exits immediately with status 130.
 - Errors: `anyhow` with context (`"loading config"`, `"opening storage"`, …); exit status 1. Config errors print the key, never the value (P2 guarantees it).
-- `llmobs version` stays.
+- `cetra version` stays.
 
 ### Tests
 
 - `serve.rs`: `bind` on `127.0.0.1:0` with a temp data dir; `GET /healthz` over real TCP (use `tokio::net::TcpStream` and a hand-written HTTP/1.1 request, or `hyper`'s client if it is already a dependency through axum; do not add `reqwest` for this) returns 200; `shutdown` returns `Ok` and the data dir LOCK is released (a second `bind` on the same dir then succeeds).
 - A second `bind` on the same data dir while the first runs fails with `ServeError::Storage` (it stopped at step 2, before `meta.db`).
 - Shutdown with an open keep-alive connection that is idle completes within the drain limit.
-- CLI: `llmobs serve --config /missing.toml` exits 1 with a message naming the path (an `assert_cmd`-style test is not available; test the `run_cli(args) -> anyhow::Result<()>` function that `main` calls).
+- CLI: `cetra serve --config /missing.toml` exits 1 with a message naming the path (an `assert_cmd`-style test is not available; test the `run_cli(args) -> anyhow::Result<()>` function that `main` calls).
 
 ### Report
 

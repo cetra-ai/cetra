@@ -19,6 +19,9 @@ use std::sync::Arc;
 
 use arrow::array::RecordBatch;
 use arrow::datatypes::{DataType, SchemaRef};
+use cetra_core::ids::ProjectId;
+use cetra_core::ids::TraceId;
+use cetra_core::schema::traces as trace_schema;
 use chrono::{Datelike, NaiveDate};
 use datafusion::catalog::Session;
 use datafusion::common::{DFSchema, ScalarValue};
@@ -39,9 +42,6 @@ use datafusion_datasource::file_groups::FileGroup;
 use datafusion_datasource::file_scan_config::FileScanConfigBuilder;
 use datafusion_datasource::memory::MemorySourceConfig;
 use datafusion_datasource::source::DataSourceExec;
-use llmobs_core::ids::ProjectId;
-use llmobs_core::ids::TraceId;
-use llmobs_core::schema::traces as trace_schema;
 
 use crate::catalog::{Catalog, FileMeta, FileTable};
 use crate::deletion::{PendingDeletion, applicable, covered_predicate, key_columns};
@@ -268,7 +268,7 @@ fn literal_ns(expr: &Expr) -> Option<i64> {
         ScalarValue::TimestampSecond(Some(value), _) => value.checked_mul(1_000_000_000),
         ScalarValue::Utf8(Some(text))
         | ScalarValue::LargeUtf8(Some(text))
-        | ScalarValue::Utf8View(Some(text)) => llmobs_core::time_serde::parse_rfc3339(text).ok(),
+        | ScalarValue::Utf8View(Some(text)) => cetra_core::time_serde::parse_rfc3339(text).ok(),
         _ => None,
     }
 }
@@ -608,7 +608,11 @@ pub(crate) fn scan_union(
 ///
 /// The predicate is built against every pending deletion of the project, not
 /// only the applicable ones: applying a deletion to a file already clean of it
-/// removes nothing, and the cut-off is tested per row.
+/// removes nothing, and the cut-off is tested per row. That shortcut holds only
+/// for a table with a per-row cut-off (`spans`, `scores`, the only tables
+/// [`scan_union`] serves). A `traces` partial carries no ingest time, so the
+/// traces gate is built per group of files from the deletions each has not
+/// applied (`traces.rs`, `build_range_plan`).
 fn gated_file_plan(
     scan: &ScanUnion<'_>,
     gated: &[Arc<FileMeta>],
@@ -692,7 +696,7 @@ fn file_plan(
         builder = builder.with_limit(limit);
     }
     let builder = builder.with_projection_indices(scan.projection.cloned())?;
-    Ok(DataSourceExec::from_data_source(builder.build()))
+    Ok(crate::unwind::guarded_scan(builder.build()))
 }
 
 /// Whole files, packed into at most `target` groups by object size.
@@ -809,9 +813,9 @@ mod tests {
     use std::sync::Arc;
 
     use arrow::array::{Array, TimestampNanosecondArray};
+    use cetra_core::ids::ProjectId;
     use datafusion::common::ScalarValue;
     use datafusion::logical_expr::{Cast, Expr, Operator, col, lit};
-    use llmobs_core::ids::ProjectId;
     use proptest::prelude::*;
 
     use super::*;

@@ -993,7 +993,7 @@ mod tests {
     use arrow::buffer::Buffer;
     use arrow::datatypes::{Field, Schema};
     use counting::Counting;
-    use llmobs_core::schema::spans_schema;
+    use cetra_core::schema::spans_schema;
     use object_store::PutPayload;
     use object_store::memory::InMemory;
     use proptest::prelude::*;

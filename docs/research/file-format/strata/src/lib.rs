@@ -5,7 +5,7 @@
 //! block-table index. A reader opens a file from any `object_store` with one suffix
 //! read.
 //!
-//! This crate is a research prototype outside the llmobs workspace. The design is in
+//! This crate is a research prototype outside the cetra workspace. The design is in
 //! `docs/research/file-format/prototype-plan.md` (one level up from this crate).
 //!
 //! The current limits are:

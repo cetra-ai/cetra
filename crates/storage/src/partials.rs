@@ -21,9 +21,9 @@ use arrow::array::{
 use arrow::datatypes::{
     DataType, Float64Type, Int32Type, Int64Type, Schema, TimeUnit, TimestampNanosecondType,
 };
-use llmobs_core::enums::{SpanKind, SpanStatus};
-use llmobs_core::ids::TraceId;
-use llmobs_core::schema::{spans, spans_schema, traces, traces_schema};
+use cetra_core::enums::{SpanKind, SpanStatus};
+use cetra_core::ids::TraceId;
+use cetra_core::schema::{spans, spans_schema, traces, traces_schema};
 
 use crate::error::PartialsError;
 
@@ -1124,11 +1124,11 @@ mod tests {
     use arrow::array::{Array, ArrayRef, AsArray, Int32Array, Int64Array, RecordBatch};
     use arrow::compute::{SortColumn, lexsort_to_indices, take_record_batch};
     use arrow::datatypes::{DataType, Field, Float64Type, Schema};
-    use llmobs_core::batch::spans_to_record_batch;
-    use llmobs_core::enums::{SpanKind, SpanStatus};
-    use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-    use llmobs_core::schema::{traces, traces_schema};
-    use llmobs_core::span::Span;
+    use cetra_core::batch::spans_to_record_batch;
+    use cetra_core::enums::{SpanKind, SpanStatus};
+    use cetra_core::ids::{ProjectId, SpanId, TraceId};
+    use cetra_core::schema::{traces, traces_schema};
+    use cetra_core::span::Span;
     use proptest::prelude::*;
 
     use super::{Acc, Column, MergeColumns, TraceMerger, partials_from_spans};
@@ -1789,7 +1789,7 @@ mod tests {
         let fields: Vec<Field> = names
             .iter()
             .map(|name| {
-                if *name == llmobs_core::schema::spans::START_TIME {
+                if *name == cetra_core::schema::spans::START_TIME {
                     Field::new(*name, DataType::Int64, true)
                 } else {
                     good.schema().field_with_name(name).unwrap().clone()
@@ -1799,7 +1799,7 @@ mod tests {
         let columns: Vec<ArrayRef> = names
             .iter()
             .map(|name| {
-                if *name == llmobs_core::schema::spans::START_TIME {
+                if *name == cetra_core::schema::spans::START_TIME {
                     Arc::new(Int64Array::from(vec![10_i64])) as ArrayRef
                 } else {
                     Arc::clone(good.column_by_name(name).unwrap())

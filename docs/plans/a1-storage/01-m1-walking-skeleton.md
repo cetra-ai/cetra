@@ -35,7 +35,7 @@ Each of these is stated in the crate docs (`lib.rs`) so nobody mistakes M1 for a
 | # | Summary |
 |---|---|
 | D59 | Each crate owns its config section; the server assembles the full config. |
-| D60 | Storage consumes Arrow `RecordBatch`es in the `llmobs-core` schemas. |
+| D60 | Storage consumes Arrow `RecordBatch`es in the `cetra-core` schemas. |
 | D83 | Storage owns `catalog.db` (not used in M1: `flushed_seq` is 0 until M2). |
 | D87 | Durability and commit protocol. M1 covers the WAL half: fsync before ack, final WAL errors, no seq reuse. |
 | D89 | Providers expose the stored schemas and are not registered by name; A2 builds the views. |
@@ -81,7 +81,7 @@ Do not add `arc-swap`, `parking_lot`, `crossbeam`, `fs2`/`fs4` or `anyhow`. Use 
   - `error` for WAL failures.
 
   Fields are IDs, counts and sizes only.
-- **Public items** get doc comments; `lib.rs` gets `#![warn(missing_docs)]` like `llmobs-core`.
+- **Public items** get doc comments; `lib.rs` gets `#![warn(missing_docs)]` like `cetra-core`.
 - **Tests** live next to the code (`#[cfg(test)] mod tests`) except the crash harness (`crates/storage/tests/crash.rs`). Every test uses its own `tempfile::TempDir`.
 
 ## Final layout after M1
@@ -159,7 +159,7 @@ Merge or split modules if the code shows a better cut, and say so in the report.
 
 ### Done when
 
-`just check` is green, and `cargo tree -p llmobs-storage` shows the new crates at the versions reported.
+`just check` is green, and `cargo tree -p cetra-storage` shows the new crates at the versions reported.
 
 **Commit:** `storage: add dependencies, errors and configuration`
 
@@ -186,7 +186,7 @@ All integers are little-endian; spec 03 §1 doesn't say, so add "little-endian" 
 
 ### Steps
 
-1. `wal/mod.rs`: `pub(crate) enum Table { Spans, Scores }` with `name()` (`"spans"`, `"scores"`) and `schema()` (`llmobs_core::schema::{spans_schema, scores_schema}`).
+1. `wal/mod.rs`: `pub(crate) enum Table { Spans, Scores }` with `name()` (`"spans"`, `"scores"`) and `schema()` (`cetra_core::schema::{spans_schema, scores_schema}`).
 2. `record.rs`:
    - `pub(crate) const HEADER_LEN: usize = 17;`
    - `pub(crate) const MAX_PAYLOAD: u32 = 256 MiB;` A record bigger than that is rejected on write and treated as invalid on read. That stops a corrupt length from causing a 4 GiB allocation.
@@ -207,7 +207,7 @@ All integers are little-endian; spec 03 §1 doesn't say, so add "little-endian" 
 
 ### Tests
 
-- A round-trip of a spans batch and a scores batch built with `llmobs_core::batch` from a few `Span`/`Score` values covering nulls, nested lists and maps.
+- A round-trip of a spans batch and a scores batch built with `cetra_core::batch` from a few `Span`/`Score` values covering nulls, nested lists and maps.
 - Several records in one buffer decode in order, and `End` comes after the last one.
 - Every truncation point of a two-record buffer (each byte length from 0 to full) gives `Record`s for the complete records, then `Short` (or `End` exactly at a boundary).
 - Flipping any single bit in a record gives `Invalid` (CRC), except bits of `payload_len`, which may give `Short` or `Invalid`. Never a panic, never a wrong `Record`.
@@ -519,7 +519,7 @@ impl Storage {
 
 Literals:
 - `ScalarValue::TimestampNanosecond/Microsecond/Millisecond/Second` (any timezone, interpreted as UTC instants), converted to ns with checked arithmetic;
-- `Utf8` RFC 3339 strings, if DataFusion leaves them uncast, parsed with `llmobs_core::time_serde::parse_rfc3339`.
+- `Utf8` RFC 3339 strings, if DataFusion leaves them uncast, parsed with `cetra_core::time_serde::parse_rfc3339`.
 
 Anything else (`OR`, functions on the column, casts of the column, `NOT`) contributes no bound. Strict comparisons adjust by 1 ns. Contradictory bounds give an empty scan, not an error.
 
@@ -576,16 +576,16 @@ Register the providers in the returned `ctx` under test names and run SQL.
 One integration test file with two tests.
 
 **`crash_child`**, `#[ignore = "run by crash_recovery as a child process"]`:
-1. Returns at once unless `LLMOBS_CRASH_CHILD_DIR` is set.
+1. Returns at once unless `CETRA_CRASH_CHILD_DIR` is set.
 2. Opens a `Storage` in that directory with `wal.segment_bytes = 1MiB` (the minimum, to force rotations) and `memtable.hard_limit = 256MiB`.
-3. Runs 4 tasks that each append, in a loop, deterministic span batches of 1–50 rows. Batch ids are unique per run (`run_id * 1_000_000 + n`, with `run_id` from `LLMOBS_CRASH_RUN`). The batch id goes into each span's `name` (`"b<batch_id>/<row>"`) and into its `span_id`.
+3. Runs 4 tasks that each append, in a loop, deterministic span batches of 1–50 rows. Batch ids are unique per run (`run_id * 1_000_000 + n`, with `run_id` from `CETRA_CRASH_RUN`). The batch id goes into each span's `name` (`"b<batch_id>/<row>"`) and into its `span_id`.
 4. After each acknowledged batch, appends `"<batch_id> <rows> <seq>\n"` to `acked.log` in the directory, and calls `sync_data` on it. `seq` comes from the `AppendReceipt`.
 5. Never returns.
 
 **`crash_recovery`**, a normal test:
-- For `i` in `0..iterations` (env `LLMOBS_CRASH_ITERATIONS`, default 25):
+- For `i` in `0..iterations` (env `CETRA_CRASH_ITERATIONS`, default 25):
   1. Spawn `std::env::current_exe()` with `--exact crash_child --ignored --nocapture --test-threads=1` and the env vars.
-  2. Sleep a pseudo-random 50–400 ms. Use a small xorshift seeded from `LLMOBS_CRASH_SEED`, default fixed, and print the seed on failure.
+  2. Sleep a pseudo-random 50–400 ms. Use a small xorshift seeded from `CETRA_CRASH_SEED`, default fixed, and print the seed on failure.
   3. `kill()` the child (SIGKILL) and `wait()`.
   4. Reopen in the parent and check the invariants:
      - every batch listed in `acked.log` (ignoring a final partial line) is present with exactly its row count;
@@ -596,7 +596,7 @@ One integration test file with two tests.
 - All iterations share one directory, so the WAL accumulates many segments and torn tails across runs, as a real crash loop would.
 - Budget: the default run takes about 15 s. If it takes more than 30 s in CI, lower the default and say so in the report.
 
-Add one line to `AGENTS.md` § Tests: "`LLMOBS_CRASH_ITERATIONS=N just test` runs the storage crash harness longer (default 25)."
+Add one line to `AGENTS.md` § Tests: "`CETRA_CRASH_ITERATIONS=N just test` runs the storage crash harness longer (default 25)."
 
 ### Race tests (unit tests in `lib.rs`, using `Storage`'s hooks)
 
@@ -611,7 +611,7 @@ Add one line to `AGENTS.md` § Tests: "`LLMOBS_CRASH_ITERATIONS=N just test` run
 ### Done when
 
 - `just check` is green, and `just test` time grew by at most ~20 s.
-- `LLMOBS_CRASH_ITERATIONS=500 cargo test -p llmobs-storage --test crash` passes locally. Report how long it took.
+- `CETRA_CRASH_ITERATIONS=500 cargo test -p cetra-storage --test crash` passes locally. Report how long it took.
 
 **Commit:** `storage: add crash harness and race tests`
 
@@ -620,7 +620,7 @@ Add one line to `AGENTS.md` § Tests: "`LLMOBS_CRASH_ITERATIONS=N just test` run
 ## After M1
 
 In the report of M1.8, also list:
-- every public item of `llmobs-storage`, compared with `00-design.md` § Public API (only differences, with reasons);
+- every public item of `cetra-storage`, compared with `00-design.md` § Public API (only differences, with reasons);
 - the exact versions of the new dependencies;
 - measured numbers, if cheap to get: appends per second with 4 tasks and 50-row batches on the dev machine, in both sync modes. A rough number from the crash child is enough;
 - anything the M2 plan should know (APIs that were awkward, DataFusion surprises).

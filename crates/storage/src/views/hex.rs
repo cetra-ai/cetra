@@ -176,9 +176,9 @@ mod tests {
     use std::sync::Arc;
 
     use arrow::array::{Array, AsArray, RecordBatch};
+    use cetra_core::ids::TraceId;
+    use cetra_core::score::ScoreTarget;
     use datafusion::execution::runtime_env::RuntimeEnv;
-    use llmobs_core::ids::TraceId;
-    use llmobs_core::score::ScoreTarget;
 
     use crate::test_support::{
         RecordingTable, dataset_scores, dataset_spans, live_scores, live_scores_table, rows,
@@ -208,6 +208,7 @@ mod tests {
                 target_partitions: NonZeroUsize::new(2).expect("two partitions"),
                 optimizer_rules: Vec::new(),
                 suspects: crate::verify::Suspects::detached(),
+                visible_from: None,
             },
             None,
         )
@@ -480,7 +481,7 @@ mod tests {
             .value(0)
     }
 
-    fn score_trace(score: &llmobs_core::score::Score) -> Option<TraceId> {
+    fn score_trace(score: &cetra_core::score::Score) -> Option<TraceId> {
         match score.target {
             ScoreTarget::Span { trace_id, .. } | ScoreTarget::Trace { trace_id } => Some(trace_id),
             ScoreTarget::Session { .. } => None,

@@ -11,7 +11,7 @@ Read [README.md](README.md) first.
 - `crates/server/src/admin.rs` (the test `schema_mismatch_names_the_versions` only, below);
 - `docs/spec/04-metadata-db.md` only if it differs from the SQL below. The plan commit already rewrote § Deletion requests with this SQL and lifecycle. Compare them. If they differ, fix the spec, not the SQL, unless the SQL here is wrong.
 
-No `Cargo.toml` change: `serde`, `serde_json`, `uuid` and `sqlx` (with `QueryBuilder`, already used in `meta/users.rs`) are dependencies of `llmobs-server`. At the time of writing the highest migration is `0004_connections.sql`, so `NNNN` is `0005` unless another track merged one first.
+No `Cargo.toml` change: `serde`, `serde_json`, `uuid` and `sqlx` (with `QueryBuilder`, already used in `meta/users.rs`) are dependencies of `cetra-server`. At the time of writing the highest migration is `0004_connections.sql`, so `NNNN` is `0005` unless another track merged one first.
 
 Two existing tests hard-code the migration count: `meta/mod.rs::open_existing_checks_the_file_and_the_version` and `admin.rs::schema_mismatch_names_the_versions` inserts a "future" migration with a literal version and asserts the literal message `"this binary expects schema 4, found 5"`. Every new migration breaks them. Make both independent of the count (in `meta/mod.rs` the same way, with the local `expected_version()`): compute `let expected = crate::meta::expected_version();` (make that function `pub(crate)` in `meta/mod.rs` if it is private), bind `expected + 1` as the inserted version, and assert `format!("this binary expects schema {expected}, found {}", expected + 1)`.
 
@@ -22,7 +22,7 @@ Two existing tests hard-code the migration count: `meta/mod.rs::open_existing_ch
 - `crates/server/src/meta/mod.rs`: `MetaDb::write` (a boxed-future closure inside `BEGIN IMMEDIATE`), `MetaDb::reader`, `MetaError` (`Db`, `Conflict`, `Corrupt { table, column }`), and `test_db()`.
 - `crates/server/src/meta/api_keys.rs`: the style to copy. A `…Row` struct, a private `…Record` with `#[derive(sqlx::FromRow)]`, and `row_from(record) -> Result<Row, MetaError>`, which maps a bad stored value to `MetaError::Corrupt`.
 - `crates/server/migrations/meta/0001_identity.sql`: the migration style (four-space indent, one statement per `CREATE`).
-- `llmobs_core::ids`:
+- `cetra_core::ids`:
   - `TraceId::from_slice(&[u8])` and `TraceId::as_bytes()`;
   - `ProjectId` and `OrgId` (`Display`, `FromStr`, `from_uuid`, `as_uuid`).
 
@@ -88,7 +88,7 @@ Column values:
 All in `crates/server/src/meta/deletions.rs`. Start the file with `//! \`deletions\` rows and their scope tables (spec 04 § Deletion requests, D-M-8).`. Do not add a `dead_code` attribute: `meta/mod.rs` already has `#![cfg_attr(not(test), allow(dead_code))]` for every child module.
 
 ```rust
-use llmobs_core::ids::{OrgId, ProjectId, TraceId};
+use cetra_core::ids::{OrgId, ProjectId, TraceId};
 use serde::{Deserialize, Serialize};
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;

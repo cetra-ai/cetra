@@ -99,7 +99,7 @@ impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new(
-                llmobs_core::names::PRODUCT,
+                cetra_core::names::PRODUCT,
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(INSTRUCTIONS)
@@ -276,7 +276,7 @@ pub(crate) mod test_helpers {
     }
 
     /// Runs `future` under its own subscriber that keeps what production keeps: `info` and
-    /// above, `rmcp` at `warn` (the directive `llmobs serve` adds, step 11). Returns the
+    /// above, `rmcp` at `warn` (the directive `cetra serve` adds, step 11). Returns the
     /// formatted output. Use it, not `test_support::capture_logs` (which captures every level,
     /// rmcp's debug dumps included), for MCP log tests, on a current-thread runtime.
     pub(crate) async fn capture_info_logs<T>(future: impl Future<Output = T>) -> (T, String) {
@@ -344,7 +344,7 @@ mod tests {
     use crate::meta::projects::insert_project;
     use crate::meta::users::{self, NewUser, insert_user};
     use crate::test_support::TestApp;
-    use llmobs_core::ids::OrgId;
+    use cetra_core::ids::OrgId;
 
     const TOOLS: [&str; 7] = [
         "list_projects",
@@ -400,7 +400,7 @@ mod tests {
         assert_eq!(body["result"]["protocolVersion"], json!("2025-11-25"));
         assert_eq!(
             body["result"]["serverInfo"]["name"],
-            json!(llmobs_core::names::PRODUCT)
+            json!(cetra_core::names::PRODUCT)
         );
         assert_eq!(
             body["result"]["serverInfo"]["version"],
@@ -780,7 +780,7 @@ mod tests {
         let now = app.state.clock.now_ns();
 
         // (a) a token that was never issued.
-        let bogus = format!("pat-llmobs-{}", "A".repeat(32));
+        let bogus = format!("pat-cetra-{}", "A".repeat(32));
         let response = rpc(&app, Some(bogus.as_str()), &list).await;
         assert_eq!(response.status, StatusCode::UNAUTHORIZED, "never issued");
 
@@ -1044,6 +1044,7 @@ mod tests {
                             name: None,
                             password_hash: None,
                             email_verified_at: None,
+                            email_verified_via: None,
                             is_instance_admin: false,
                         },
                         0,
@@ -1251,6 +1252,7 @@ mod tests {
                             name: None,
                             password_hash: None,
                             email_verified_at: None,
+                            email_verified_via: None,
                             is_instance_admin: false,
                         },
                         0,

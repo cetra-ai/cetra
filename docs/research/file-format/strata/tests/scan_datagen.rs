@@ -13,8 +13,8 @@ use arrow::array::{
 use arrow::compute::{concat, filter};
 use arrow::datatypes::TimestampNanosecondType;
 use fmt_testdata::datagen;
-use llmobs_core::batch::spans_to_record_batch;
-use llmobs_core::schema::spans_schema;
+use cetra_core::batch::spans_to_record_batch;
+use cetra_core::schema::spans_schema;
 use object_store::memory::InMemory;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};

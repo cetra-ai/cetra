@@ -1,8 +1,8 @@
 # 04 — Metadata database (SQLite)
 
-`meta.db`, SQLite ≥ 3.45, `journal_mode=WAL`, `synchronous=FULL`, `foreign_keys=ON`, `busy_timeout=5000`. Writes are rare; every commit is durable before the response (D136). Accessed through `sqlx` with one writer connection (serialized writes through a `Mutex`) and a read pool of 4 read-only connections. Migrations are embedded (`sqlx::migrate!`) and run in `llmobs serve`; downgrade is not supported (12 §Upgrades). `llmobs admin` commands open `meta.db` without running migrations and refuse a database at another migration version (D136).
+`meta.db`, SQLite ≥ 3.45, `journal_mode=WAL`, `synchronous=FULL`, `foreign_keys=ON`, `busy_timeout=5000`. Writes are rare; every commit is durable before the response (D136). Accessed through `sqlx` with one writer connection (serialized writes through a `Mutex`) and a read pool of 4 read-only connections. Migrations are embedded (`sqlx::migrate!`) and run in `cetra serve`; downgrade is not supported (12 §Upgrades). `cetra admin` commands open `meta.db` without running migrations and refuse a database at another migration version (D136). A `meta.db` of a newer format or with a migration the binary lacks is refused before anything is written (§ Format versions).
 
-`meta.db` belongs to `llmobs-server`. The storage engine keeps its own catalog in `catalog.db` (03 §4, D83): data files, WAL checkpoints, media index and its side of deletions. The two databases share no transaction; the only link is the deletion handoff (§ Deletion requests).
+`meta.db` belongs to `cetra-server`. The storage engine keeps its own catalog in `catalog.db` (03 §4, D83): data files, WAL checkpoints, media index and its side of deletions. The two databases share no transaction; the only link is the deletion handoff (§ Deletion requests).
 
 The SQL is written in the common subset of SQLite and Postgres where practical (no `AUTOINCREMENT` except where noted, `TEXT` UUIDs, timestamps as `INTEGER` ns), to keep the later Postgres port mechanical.
 
@@ -17,6 +17,7 @@ CREATE TABLE users (
   name TEXT,
   password_hash TEXT,                 -- argon2id PHC string; NULL for SSO-only users
   email_verified_at INTEGER,
+  email_verified_via TEXT,            -- 'mail_token' | 'idp' | 'invite' | 'control_plane' | 'operator' (D-P-66)
   is_instance_admin INTEGER NOT NULL DEFAULT 0,   -- first user; can manage instance settings
   disabled_at INTEGER,
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
@@ -36,7 +37,9 @@ CREATE TABLE web_sessions (
   id TEXT PRIMARY KEY,                -- SHA-256 hex of the cookie value (32 random bytes, base64url)
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   created_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
-  user_agent TEXT, ip TEXT
+  user_agent TEXT, ip TEXT,
+  sso_org_id TEXT REFERENCES orgs(id) ON DELETE SET NULL, -- the org whose provider started it (D-P-59, track P M5)
+  via_provider INTEGER NOT NULL DEFAULT 0  -- 1 when any identity provider started it (D-P-69)
 );
 
 CREATE TABLE orgs (
@@ -58,7 +61,7 @@ CREATE TABLE projects (
   org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
   name TEXT NOT NULL, slug TEXT NOT NULL,
   retention_days INTEGER,             -- NULL = forever
-  settings TEXT NOT NULL DEFAULT '{}',-- JSON: trace_completion_timeout_s, media settings, …
+  settings TEXT NOT NULL DEFAULT '{}',-- JSON: trace_completion_timeout_s (integer seconds, 10–3600; absent means 60, D-I-7), media settings, …
   state TEXT NOT NULL DEFAULT 'active',
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
   UNIQUE(org_id, slug)
@@ -106,7 +109,7 @@ CREATE TABLE api_keys (
   kind TEXT NOT NULL,                 -- 'public' | 'secret'
   scopes TEXT NOT NULL,               -- JSON array: ['ingest'] | ['ingest','read','write'] | ['feedback']
   name TEXT,
-  prefix TEXT NOT NULL,               -- type prefix + first 6 random characters, e.g. `sk-llmobs-a1B2c3` (D140)
+  prefix TEXT NOT NULL,               -- type prefix + first 6 random characters, e.g. `sk-cetra-a1B2c3` (D140)
   key_hash TEXT NOT NULL UNIQUE,      -- SHA-256 hex
   created_by TEXT REFERENCES users(id),
   created_at INTEGER NOT NULL, expires_at INTEGER, last_used_at INTEGER, revoked_at INTEGER
@@ -116,7 +119,7 @@ CREATE TABLE personal_tokens (        -- for CLI / MCP; act as the user, with th
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   name TEXT,
-  prefix TEXT NOT NULL,               -- type prefix + first 6 random characters, e.g. `pat-llmobs-a1B2c3` (D140)
+  prefix TEXT NOT NULL,               -- type prefix + first 6 random characters, e.g. `pat-cetra-a1B2c3` (D140)
   token_hash TEXT NOT NULL UNIQUE,
   scopes TEXT NOT NULL,               -- ['read'] | ['read','write']
   created_at INTEGER NOT NULL, expires_at INTEGER, last_used_at INTEGER, revoked_at INTEGER
@@ -150,7 +153,7 @@ Connections belong to the org (D-I-4). `secret_enc` and `extra_headers_enc` are 
 
 ## Deletion requests
 
-The storage catalog (data files, WAL checkpoints, media) is in `catalog.db` (03 §4). `meta.db` keeps the deletion requests (D-M-3). The API creates a row; a background worker then resolves its scope (the traces of a filter or of an end user, plus their evaluation traces), stores it here together with the `meta.db` cascades (03 §7), hands it to storage (`register_deletion`, idempotent by id) and sets `handed_over_at`, then polls `deletion_status` until it is applied. Project and org drops are created `pending` and run `drop_project` before their rows are deleted. At startup the worker picks up every open row. Rows and their scope are kept forever, with no foreign keys to `orgs` or `projects`, as the audit trail of erasure requests and so `llmobs admin reapply-deletions` can redo them after a restore (D-M-8, D-M-9).
+The storage catalog (data files, WAL checkpoints, media) is in `catalog.db` (03 §4). `meta.db` keeps the deletion requests (D-M-3). The API creates a row; a background worker then resolves its scope (the traces of a filter or of an end user, plus their evaluation traces), stores it here together with the `meta.db` cascades (03 §7), hands it to storage (`register_deletion`, idempotent by id) and sets `handed_over_at`, then polls `deletion_status` until it is applied. Project and org drops are created `pending` and run `drop_project` before their rows are deleted. At startup the worker picks up every open row. Rows and their scope are kept forever, with no foreign keys to `orgs` or `projects`, as the audit trail of erasure requests and so `cetra admin reapply-deletions` can redo them after a restore (D-M-8, D-M-9).
 
 ```sql
 CREATE TABLE deletions (
@@ -198,11 +201,13 @@ CREATE TABLE deletion_projects (
 
 ## Pricing
 
+Custom prices of an org (`project_id` NULL, applies to every project of the org) or of one project (D-T-2). The built-in snapshot is not stored here: it stays embedded and is compiled once at startup (spec 02 § Cost computation).
+
 ```sql
 CREATE TABLE model_prices (
   id TEXT PRIMARY KEY,
-  scope TEXT NOT NULL,                -- 'builtin' | 'org' | 'project'
-  org_id TEXT, project_id TEXT,
+  org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,  -- NULL: an org row
   model_name TEXT NOT NULL,           -- display name
   match_pattern TEXT NOT NULL,        -- regex, anchored, case-insensitive
   provider TEXT,
@@ -211,9 +216,13 @@ CREATE TABLE model_prices (
   tiers TEXT,                         -- JSON [{min_input_tokens, price_input, …}]
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );
+CREATE UNIQUE INDEX model_prices_key ON model_prices(
+  org_id, coalesce(project_id, ''), match_pattern, coalesce(provider, ''), valid_from
+);
+CREATE INDEX model_prices_project ON model_prices(project_id) WHERE project_id IS NOT NULL;
 ```
 
-Built-in rows are re-seeded at each startup from the embedded snapshot (delete `scope='builtin'` + insert, in one transaction). The compiled matcher (`RegexSet` per scope) is cached in memory and rebuilt on change.
+At most 500 org rows per org and 500 rows per project (D-T-4). The server loads every row at startup and keeps one compiled table per org and per project that has rows; each write reloads its org (D-T-9). A write that would take away the price a budgeted online rule's judge model has is refused (D-T-8).
 
 ## Scores definitions
 
@@ -256,24 +265,28 @@ Names are not unique: several visible views may share a name. Visibility, sharin
 
 ## Datasets & experiments
 
-Dataset versioning uses validity ranges: an item revision is visible in version *v* iff `valid_from_version ≤ v < coalesce(valid_to_version, ∞)`. Editing an item closes the old revision and inserts a new one in a new version.
+Track J (D-J-1–D-J-19, [`plans/j-datasets/00-design.md`](../plans/j-datasets/00-design.md)). Dataset versioning uses validity ranges: an item revision is visible in version *v* iff `valid_from_version ≤ v < coalesce(valid_to_version, ∞)`. Every mutating request makes version `current_version + 1` with one `dataset_versions` row; editing an item closes the old revision and inserts a new one in the new version; a new dataset is at version 0 with no items (D-J-3). An experiment pins a dataset version and snapshots each item's input and expected output into its results, so later edits, item deletions and dataset deletions leave it intact (D-J-10). Experiments have no server evaluators (D-J-11).
 
 ```sql
 CREATE TABLE datasets (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  name TEXT NOT NULL, description TEXT,
-  input_schema TEXT, expected_schema TEXT,    -- optional JSON Schema
+  name TEXT NOT NULL,
+  description TEXT,
+  input_schema TEXT,                  -- JSON Schema text, or NULL
+  expected_schema TEXT,
   current_version INTEGER NOT NULL DEFAULT 0,
-  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
   UNIQUE(project_id, name)
 );
 
 CREATE TABLE dataset_versions (
   dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
   version INTEGER NOT NULL,
-  description TEXT,                   -- e.g. "import data.csv (120 items)"
-  created_by TEXT, created_at INTEGER NOT NULL,
+  description TEXT NOT NULL,
+  created_by TEXT,                    -- user id, or 'key:<key id>'
+  created_at INTEGER NOT NULL,
   PRIMARY KEY (dataset_id, version)
 );
 
@@ -282,42 +295,58 @@ CREATE TABLE dataset_items (
   item_id TEXT NOT NULL,              -- stable across revisions
   dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
   input TEXT NOT NULL,                -- JSON
-  expected_output TEXT,               -- JSON
+  expected_output TEXT,               -- JSON, NULL when absent
   metadata TEXT NOT NULL DEFAULT '{}',
-  source_trace_id BLOB, source_span_id BLOB,
+  source_trace_id BLOB,               -- 16 bytes
+  source_span_id BLOB,                -- 8 bytes
   valid_from_version INTEGER NOT NULL,
   valid_to_version INTEGER,
   created_at INTEGER NOT NULL
 );
-CREATE INDEX dataset_items_live ON dataset_items(dataset_id, valid_to_version);
+CREATE INDEX dataset_items_live ON dataset_items(dataset_id, valid_to_version, item_id);
+CREATE INDEX dataset_items_item ON dataset_items(dataset_id, item_id, valid_from_version);
 CREATE INDEX dataset_items_source ON dataset_items(source_trace_id) WHERE source_trace_id IS NOT NULL;
+CREATE UNIQUE INDEX dataset_items_one_live ON dataset_items(dataset_id, item_id) WHERE valid_to_version IS NULL;
 
 CREATE TABLE experiments (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   dataset_id TEXT REFERENCES datasets(id) ON DELETE SET NULL,
-  dataset_version INTEGER,
-  name TEXT NOT NULL, description TEXT,
-  metadata TEXT NOT NULL DEFAULT '{}',   -- model, prompt, git sha, params…
-  server_evaluators TEXT NOT NULL DEFAULT '[]',  -- evaluator ids to run server-side
-  status TEXT NOT NULL,               -- 'running' | 'completed' | 'failed'
-  created_at INTEGER NOT NULL, finished_at INTEGER
+  dataset_name TEXT NOT NULL,         -- copied at create, shown after the dataset is deleted
+  dataset_version INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT,
+  metadata TEXT NOT NULL DEFAULT '{}',
+  repetitions INTEGER NOT NULL DEFAULT 1,
+  item_count INTEGER NOT NULL,        -- live items of the pinned version
+  status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+  error TEXT,
+  created_by TEXT,
+  created_at INTEGER NOT NULL,
+  finished_at INTEGER
 );
+CREATE INDEX experiments_project ON experiments(project_id, created_at);
+CREATE INDEX experiments_dataset ON experiments(dataset_id, created_at);
 
 CREATE TABLE experiment_items (
   experiment_id TEXT NOT NULL REFERENCES experiments(id) ON DELETE CASCADE,
   dataset_item_id TEXT NOT NULL,      -- item_id (stable)
-  repetition INTEGER NOT NULL DEFAULT 0,
-  trace_id BLOB,                      -- trace of the task execution
-  output TEXT,                        -- JSON copy of the task output (small; full data in trace)
+  repetition INTEGER NOT NULL,
+  revision_id TEXT NOT NULL,          -- the pinned revision; no FK (D-J-9 deletes by it)
+  input TEXT NOT NULL,                -- snapshot of the revision
+  expected_output TEXT,
+  trace_id BLOB,
+  output TEXT,                        -- JSON
   error TEXT,
-  latency_ns INTEGER, cost_total REAL,
+  latency_ns INTEGER,
   created_at INTEGER NOT NULL,
   PRIMARY KEY (experiment_id, dataset_item_id, repetition)
 );
+CREATE INDEX experiment_items_trace ON experiment_items(trace_id) WHERE trace_id IS NOT NULL;
+CREATE INDEX experiment_items_revision ON experiment_items(revision_id);
 ```
 
-Experiment scores are rows in the columnar `scores` table with `experiment_id` + `dataset_item_id` set.
+Experiment scores are rows in the columnar `scores` table with `experiment_id` + `dataset_item_id` set (D-J-12). Per-item cost comes from the item's trace at read time (D-J-13). A trace deletion hard-deletes the dataset item revisions copied from the trace and the experiment results that point at it or snapshot such a revision (D-J-9).
 
 ## Evaluation
 
@@ -341,50 +370,104 @@ CREATE INDEX evaluators_connection ON evaluators(connection_id) WHERE connection
 CREATE TABLE online_rules (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  evaluator_id TEXT NOT NULL REFERENCES evaluators(id) ON DELETE CASCADE,
+  evaluator_id TEXT NOT NULL REFERENCES evaluators(id),
   name TEXT NOT NULL,
-  target TEXT NOT NULL,               -- 'trace' | 'span'
-  filter TEXT,                        -- filter DSL expression (05)
-  variable_mapping TEXT NOT NULL,     -- JSON {var: path} (06)
+  target TEXT NOT NULL,
+  filter TEXT,
+  variable_mapping TEXT NOT NULL,
   sample_rate REAL NOT NULL DEFAULT 1.0,
-  budget_usd REAL, budget_period TEXT,-- 'day' | 'month'
+  budget_usd REAL,
+  budget_period TEXT,
   enabled INTEGER NOT NULL DEFAULT 1,
-  paused_reason TEXT,                 -- 'budget' | 'errors' | NULL
-  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+  paused_reason TEXT,
+  paused_at INTEGER,
+  paused_detail TEXT,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(project_id, name)
 );
+CREATE INDEX online_rules_evaluator ON online_rules(evaluator_id);
 
-CREATE TABLE eval_jobs (              -- durable work queue
+CREATE TABLE eval_jobs (
   id TEXT PRIMARY KEY,
-  project_id TEXT NOT NULL,
-  rule_id TEXT, experiment_id TEXT, evaluator_id TEXT NOT NULL,
-  trace_id BLOB, span_id BLOB, dataset_item_id TEXT,
-  status TEXT NOT NULL,               -- 'queued' | 'running' | 'done' | 'failed'
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  priority INTEGER NOT NULL,
+  rule_id TEXT REFERENCES online_rules(id) ON DELETE CASCADE,
+  evaluator_id TEXT NOT NULL REFERENCES evaluators(id) ON DELETE CASCADE,
+  variable_mapping TEXT,
+  trace_id BLOB NOT NULL,
+  span_id BLOB,
+  trace_start_ns INTEGER NOT NULL,
+  dedup_key TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL,
   attempts INTEGER NOT NULL DEFAULT 0,
-  not_before INTEGER NOT NULL,        -- scheduling / backoff
-  lease_until INTEGER,
+  claims INTEGER NOT NULL DEFAULT 0,
+  load_retries INTEGER NOT NULL DEFAULT 0,
+  interruptions INTEGER NOT NULL DEFAULT 0,
+  not_before INTEGER NOT NULL,
+  error_class TEXT,
   error TEXT,
+  judge_trace_id BLOB,
+  score_id TEXT,
+  evaluator_version INTEGER,
+  input_tokens INTEGER,
+  output_tokens INTEGER,
   cost_usd REAL,
-  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+  latency_ms INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  finished_at INTEGER
 );
-CREATE INDEX eval_jobs_ready ON eval_jobs(status, not_before);
+CREATE INDEX eval_jobs_ready ON eval_jobs(status, priority, not_before);
+CREATE INDEX eval_jobs_rule ON eval_jobs(rule_id, created_at);
+CREATE INDEX eval_jobs_project ON eval_jobs(project_id, created_at);
+CREATE INDEX eval_jobs_finished ON eval_jobs(finished_at) WHERE finished_at IS NOT NULL;
 
 CREATE TABLE rule_spend (
   rule_id TEXT NOT NULL REFERENCES online_rules(id) ON DELETE CASCADE,
-  period_start INTEGER NOT NULL,
+  day INTEGER NOT NULL,
   spent_usd REAL NOT NULL DEFAULT 0,
-  PRIMARY KEY (rule_id, period_start)
+  PRIMARY KEY (rule_id, day)
 );
 
-CREATE TABLE pending_traces (         -- trace-completion detector state (06)
-  project_id TEXT NOT NULL, trace_id BLOB NOT NULL,
-  last_ingest_at INTEGER NOT NULL, root_ended INTEGER NOT NULL DEFAULT 0,
+CREATE TABLE pending_traces (
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  trace_id BLOB NOT NULL,
+  first_seen INTEGER NOT NULL,
+  last_seen INTEGER NOT NULL,
+  min_start INTEGER NOT NULL,
+  root_ended INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (project_id, trace_id)
 );
+
+CREATE TABLE backfills (
+  id TEXT PRIMARY KEY,
+  rule_id TEXT NOT NULL REFERENCES online_rules(id) ON DELETE CASCADE,
+  from_ns INTEGER NOT NULL,
+  to_ns INTEGER NOT NULL,
+  max_targets INTEGER NOT NULL,
+  sample_rate REAL NOT NULL,
+  status TEXT NOT NULL,
+  matched INTEGER NOT NULL DEFAULT 0,
+  enqueued INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  finished_at INTEGER
+);
+CREATE UNIQUE INDEX backfills_running ON backfills(rule_id) WHERE status = 'running';
+CREATE INDEX backfills_rule ON backfills(rule_id, created_at);
 ```
+
+`pending_traces` is the persisted copy of the trigger's in-memory map (spec 06 § Online rules › Triggering, D-I-8): the flusher writes the changed entries every 5 s and at shutdown, and startup loads them. `first_seen` and `last_seen` are ingest times; `min_start` is the earliest span `start_time` seen.
+
+`backfills` holds an online rule's runs over stored traces (spec 06 § Online rules › Backfill; D-I-25, D-I-39 to D-I-42). A backfill is `running` until the runner reads its last page; `matched` counts the targets read and `enqueued` the jobs inserted or re-queued. At most one backfill per rule is `running` (partial unique index). Startup marks the ones left `running` `failed` with `error = 'interrupted'`. Rows go with their rule.
 
 `connection_id` is derived from a judge's config; `secret_enc` holds a webhook's sealed `{signing_secret, url, headers}`, and `config` then keeps `{url_host, timeout_ms, header_names}` (D-I-19).
 
-Done/failed `eval_jobs` are pruned after 7 days.
+`eval_jobs` is the durable queue (spec 06 § Online rules › Execution; D-I-11, D-I-12): `dedup_key` makes enqueues idempotent, `claims` fences a worker's finish, and there is no lease. Every hour, finished jobs older than 7 days are deleted, queued jobs older than 24 h (7 days for backfill) are skipped as `expired`, and jobs of inactive projects or orgs are deleted (D-I-28). `rule_spend` holds one row per rule and UTC day; a month is the sum of its days; rows older than 62 days are deleted.
 
 ## Alerts
 
@@ -481,6 +564,13 @@ CREATE TABLE org_window_ends (            -- data windows that stopped applying,
   data_access_days INTEGER,               -- NULL = unlimited
   PRIMARY KEY (org_id, ended_at)
 );
+CREATE TABLE usage_notices (              -- one row per org, month and threshold: each notice is sent once (D-P-18, D-P-38)
+  org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  month TEXT NOT NULL,                    -- YYYY-MM, UTC
+  threshold INTEGER NOT NULL,             -- 80 or 100
+  sent_at INTEGER NOT NULL,
+  PRIMARY KEY (org_id, month, threshold)
+);
 ```
 
 `orgs` has no `limits` column: track P's M2 drops it (D179, D-P-9).
@@ -503,12 +593,64 @@ CREATE TABLE instance_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 `instance_settings` is created by track I (migration `0004`, D156).
 
-Usage counters are accumulated in memory and flushed to `usage_daily` every 10 s (upsert-add).
+Usage counters are accumulated in memory and flushed to `usage_daily` every 10 s (upsert-add). A dropped org's rows stay 40 days after its org deletion is applied, then a daily task deletes them (D-P-46).
 
-`spans` counts billable spans: spans in the reserved `llmobs-eval` environment (judge traces) are stored but not counted (D-I-31). Judge calls add their tokens and cost to `judge_input_tokens`, `judge_output_tokens` and `judge_cost_usd`.
+`spans` counts billable spans: spans in the reserved `cetra-eval` environment (judge traces) are stored but not counted (D-I-31). Judge calls add their tokens and cost to `judge_input_tokens`, `judge_output_tokens` and `judge_cost_usd`.
+
+## Per-org SSO (track P, `ee`)
+
+One OIDC provider and any number of email domains per org (D-P-52, D-P-54). The provider's client secret is sealed like an LLM connection key (§ Encryption of secrets); `org_sso_providers.client_secret_enc` is listed in `crypto::ENCRYPTED_COLUMNS`. The sealed value's associated data is the row's `id`, so a sealed secret is bound to its row. A domain is verified by at most one org at a time (the partial unique index). `jit_role` is the role of people who join through the provider (D-P-56). `last_login_at` is set by a successful sign-in through the provider and gates enforcement (D-P-57); changing the issuer or client id resets it, so a new Test sign-in is needed.
+
+```sql
+CREATE TABLE org_sso_providers (
+    id TEXT PRIMARY KEY,                -- UUIDv7; the row id in client_secret_enc's associated data
+    org_id TEXT NOT NULL UNIQUE REFERENCES orgs(id) ON DELETE CASCADE,
+    display_name TEXT NOT NULL,
+    issuer TEXT NOT NULL,
+    client_id TEXT NOT NULL,
+    client_secret_enc BLOB NOT NULL,    -- sealed (D-I-2)
+    enabled INTEGER NOT NULL DEFAULT 0,
+    enforced INTEGER NOT NULL DEFAULT 0,
+    jit_role TEXT NOT NULL DEFAULT 'viewer',   -- 'viewer' | 'member'
+    last_login_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE org_sso_domains (
+    id TEXT PRIMARY KEY,
+    org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    domain TEXT NOT NULL,               -- lowercase, no trailing dot
+    token TEXT NOT NULL,                -- 32 lowercase hex; the TXT value's random part (public)
+    verified_at INTEGER,
+    last_checked_at INTEGER,
+    created_at INTEGER NOT NULL,
+    UNIQUE (org_id, domain)
+);
+
+CREATE UNIQUE INDEX org_sso_domains_verified ON org_sso_domains(domain) WHERE verified_at IS NOT NULL;
+```
+
+Deleting an org deletes its provider and domains by cascade, and its identities (`identities.provider = 'org:<org_id>'`) explicitly, since no key references the org from `identities`.
 
 ## Encryption of secrets
 
-The key is 32 bytes in standard base64. Source order (D-I-1): the `encryption_key` config value (`LLMOBS_ENCRYPTION_KEY`) wins and the file is neither read nor written; otherwise `<data_dir>/secret.key`; otherwise the server generates a key, but only while `instance_settings` has no `encryption.check` — once a check value exists, a missing key fails startup. The file holds the base64 of the 32 key bytes plus one trailing newline, mode 0600, written through a `.tmp` file and a rename so a crash leaves either no file or a whole one; a mode readable by group or other is warned about and still used. `llmobs admin rotate-encryption-key` re-encrypts every sealed column in one transaction, writing `secret.key.new` first; a start that finds a `secret.key.new` whose check value matches the stored one renames it over `secret.key`, finishing an interrupted rotation, and otherwise deletes it (D-I-3).
+The key is 32 bytes in standard base64. Source order (D-I-1): the `encryption_key` config value (`CETRA_ENCRYPTION_KEY`) wins and the file is neither read nor written; otherwise `<data_dir>/secret.key`; otherwise the server generates a key, but only while `instance_settings` has no `encryption.check` — once a check value exists, a missing key fails startup. The file holds the base64 of the 32 key bytes plus one trailing newline, mode 0600, written through a `.tmp` file and a rename so a crash leaves either no file or a whole one; a mode readable by group or other is warned about and still used. `cetra admin rotate-encryption-key` re-encrypts every sealed column in one transaction, writing `secret.key.new` first; a start that finds a `secret.key.new` whose check value matches the stored one renames it over `secret.key`, finishing an interrupted rotation, and otherwise deletes it (D-I-3).
 
-A sealed value is `0x01` ‖ key id (4 bytes) ‖ nonce (12) ‖ AES-256-GCM ciphertext and tag (D-I-2). The key id is `HMAC-SHA256(key, "llmobs.key-id.v1")[0..4]`; the associated data is `table:column:row_id`, with the row id a hyphenated lowercase UUID; the nonce is 96 random bits. `instance_settings['encryption.check']` holds the lowercase hex of `HMAC-SHA256(key, "llmobs.encryption-check.v1")`: the server records it on the first start of a data directory and refuses a different key afterwards.
+A sealed value is `0x01` ‖ key id (4 bytes) ‖ nonce (12) ‖ AES-256-GCM ciphertext and tag (D-I-2). The key id is `HMAC-SHA256(key, "cetra.key-id.v1")[0..4]`; the associated data is `table:column:row_id`, with the row id a hyphenated lowercase UUID; the nonce is 96 random bits. `instance_settings['encryption.check']` holds the lowercase hex of `HMAC-SHA256(key, "cetra.encryption-check.v1")`: the server records it on the first start of a data directory and refuses a different key afterwards.
+
+## Format versions (D-R-33 to D-R-38)
+
+From the first public release (D185), a `meta.db`, `secret.key` and backup written by any release must open with every later one, and an older binary must refuse a newer one without changing it. Before that release there is no constraint. The storage side (`catalog.db`, WAL, Parquet) is 03 § 12. Markers "(SF<n>)" name the sub-phase of `docs/plans/server-format/` that makes a sentence true.
+
+**Two numbers.** The applied migrations (`_sqlx_migrations`) are the schema. `PRAGMA user_version` holds `META_FORMAT_VERSION` (`crates/server/src/meta/mod.rs`, a `u16`, 1 at the first release): the format of what `meta.db` means, and of `secret.key` and the sealed envelope (§ Encryption of secrets). It is the high-water mark: a binary writes it before it first writes anything in a newer format, and never lowers it. `VACUUM INTO` keeps it, so pre-migration copies and backups carry it. (SF1)
+
+**Opening.** One check runs before any write, in this order: a `user_version` other than 0 or this build's is refused (`meta.db has format version N, which this build … does not read`); an applied migration this build does not embed is refused (`meta.db has applied migration N, which this build does not have`); `user_version` 0 with a row in `users` or `orgs` is a pre-release database and is refused (`PreFormat`); `user_version` 0 without rows is stamped after the migrations. `cetra serve`, `cetra admin migrate` and `cetra admin gc-orphans` run this check on `<data_dir>/meta.db` **before storage opens** (the preflight), so a newer `meta.db` stops them before `LOCK`, the WAL or the object store is touched; the other admin commands run it when they open `meta.db`. `reapply-deletions --from` accepts a newer schema of the same format (D-M-9) but not a newer format. Downgrading is not supported: restore the backup taken before the upgrade. (SF1)
+
+**What is a format change.** Not one: a migration that only adds (`CREATE TABLE`, `CREATE INDEX`, `CREATE UNIQUE INDEX`, `ALTER TABLE … ADD COLUMN` that is nullable or has a default). A format change, which bumps `META_FORMAT_VERSION`: any other migration (a dropped or renamed column or table, an `UPDATE` of existing rows, a table rebuild); a new value in a TEXT enum column (roles, kinds, states, statuses); a changed JSON shape in a JSON column; a changed sealed envelope, key id label, check label or associated data; a changed `secret.key` format. A lint requires migrations to be additive unless listed as format-changing (`0008`, which drops `orgs.limits`, is the one pre-release exception); every migration that alters a table has a test that its rows survive; the schema snapshot (`crates/server/tests/snapshots/meta_schema.snap`) shows every schema change. A migration that has been in a release is never edited. (SF2)
+
+**`secret.key` and sealed values** keep the formats of § Encryption of secrets: no version byte in the file. A key file this build does not decode is refused and never rewritten; a new file format would bump `META_FORMAT_VERSION`, which is checked first. Key rotation is the offline `cetra admin rotate-encryption-key` (D-I-3). Known-answer tests pin the file text, the key id, the check value and one sealed value for a fixed public test key. (SF3)
+
+**A release that changes the format** bumps `META_FORMAT_VERSION`, migrates at open (the migration or the open code rewrites what the older release wrote), has tests that restore the previous releases' golden backups, and adds a line under `### Upgrade notes` in `CHANGELOG.md`.
+
+**Golden backups.** `fixtures/server/golden/<version>/` is an online backup taken by the release's own build of a scenario server with a row in every table (`just golden-dir <version>`), with the `admin.sock` lines that produced it and `expected.json`. A test restores a copy of each one with the current build by the procedure of 12 § Backups, compares the rows by column name, the decoded reads, the opened secrets and the sign-ins, serves it, writes to it and rotates its key. None is committed before the first stable release; until then the test builds one into a temp dir and checks it. `fixtures/storage/golden/RELEASES` lists the released versions for both (03 § 12). (SF6, SF7)

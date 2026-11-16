@@ -10,7 +10,7 @@
       "openinference-instrumentation-openai": "0.1.69",
       "opentelemetry-sdk": "1.45.2"
     },
-    "captured_at": "2026-11-11T11:18:12Z"
+    "captured_at": "2026-11-16T08:54:34Z"
   },
   "spec_refs": [
     "02 § Convention detection",

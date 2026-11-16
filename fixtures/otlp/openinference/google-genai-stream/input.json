@@ -41,8 +41,8 @@
           },
           "spans": [
             {
-              "traceId": "97b6ccb437d1ded230a0dcfbefd527e9",
-              "spanId": "2f5d9de763d028a4",
+              "traceId": "6b9a59326bf227819cff3849c1d9bacc",
+              "spanId": "4097194e34c540c5",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,

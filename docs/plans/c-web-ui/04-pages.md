@@ -227,7 +227,7 @@ When the traces list is empty **and** no filter, search or custom range is set, 
 The panel has tabs **OTel env vars**, **Python**, **TypeScript** and **Vercel AI SDK**, with copyable snippets:
 - the OTLP endpoint is built from `window.location.origin` (`<origin>/v1/traces`, spec 02);
 - the SDK base URL from the same origin;
-- the key is written as `sk-llmobs-…` with a note "Create a secret key in Settings → API keys". The key-prefix version of spec 11 waits for the API keys contract (D123, R1).
+- the key is written as `sk-cetra-…` with a note "Create a secret key in Settings → API keys". The key-prefix version of spec 11 waits for the API keys contract (D123, R1).
 
 Snippet content follows spec 10 § Configuration: env var names and `init()` options. Read spec 10 and use the exact names. There's also a "Waiting for the first trace…" line that polls the list every 5 s while the panel is shown (`refetchInterval`), so the page switches to the table as soon as data arrives.
 

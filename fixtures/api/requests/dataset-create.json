@@ -1,0 +1,15 @@
+{
+  "name": "faq",
+  "description": "Support questions and expected answers",
+  "input_schema": {
+    "type": "object",
+    "required": [
+      "question"
+    ],
+    "properties": {
+      "question": {
+        "type": "string"
+      }
+    }
+  }
+}

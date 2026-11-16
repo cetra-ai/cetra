@@ -66,7 +66,7 @@ just fmt
 just check
 ```
 
-`just check` before every commit (over 20 minutes). Quick loops: `cargo test -p llmobs-server <filter>`, `just lint`, `just check-web`, `just check-py`, `just check-ts`.
+`just check` before every commit (over 20 minutes). Quick loops: `cargo test -p cetra-server <filter>`, `just lint`, `just check-web`, `just check-py`, `just check-ts`.
 
 ## Sub-phases
 
@@ -88,7 +88,7 @@ just check
 
 P1–P10 run in order (they edit the same server files and the generated contract). P11 and P12 touch only their SDK and depend only on the HTTP contract (402 with `Retry-After`), so each can run in parallel with P1–P10 in its own worktree. P13 runs last.
 
-**SDK warning text** (both SDKs, exactly): `llmobs: the organization reached its monthly units cap; telemetry is dropped until <reset> (retrying at most every hour)`, where `<reset>` is the UTC instant `now + Retry-After` formatted `YYYY-MM-DDTHH:MM:SSZ`.
+**SDK warning text** (both SDKs, exactly): `cetra: the organization reached its monthly units cap; telemetry is dropped until <reset> (retrying at most every hour)`, where `<reset>` is the UTC instant `now + Retry-After` formatted `YYYY-MM-DDTHH:MM:SSZ`.
 
 ---
 
@@ -399,7 +399,7 @@ pub struct OrgMonthUsage {
     /// Units so far this month, flushed or not.
     pub units: u64,
     /// 00:00 UTC on the 1st of the next month.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub resets_at: i64,
     pub notice: UsageNotice,
@@ -435,7 +435,7 @@ CREATE TABLE usage_notices (
 );
 ```
 
-Regenerate `crates/server/tests/snapshots/meta_schema.snap` (`INSTA_UPDATE=always cargo test -p llmobs-server schema_matches_the_snapshot`, review: one new table), and commit it. Spec 04 § Entitlements gains this table (copy the SQL).
+Regenerate `crates/server/tests/snapshots/meta_schema.snap` (`INSTA_UPDATE=always cargo test -p cetra-server schema_matches_the_snapshot`, review: one new table), and commit it. Spec 04 § Entitlements gains this table (copy the SQL).
 
 ### Task (`crates/server/src/entitlements/notices.rs`, new; `pub(crate) mod notices;`)
 
@@ -511,7 +511,7 @@ pub struct InternalUsageQuery {
 
 ### Route (`crates/server/src/routes/internal_usage.rs`, new)
 
-`GET /api/internal/v1/usage`, `Access::ControlPlane { scope: "usage" }`. Rows summed per org and day over projects, ordered by `(day, org_id)`, keyset-paged: the cursor is base64url (no padding) of `{"day": "…", "org_id": "…"}` (`deny_unknown_fields`; new private helpers `encode_cursor` / `decode_cursor`; bad cursor → `field_error("cursor", "invalid cursor")`). SQL: `… WHERE day >= ? AND day <= ? AND (day, org_id) > (?, ?) GROUP BY day, org_id ORDER BY day, org_id LIMIT ?` (fetch `limit + 1` to know whether a next page exists). Response `Page<InternalUsageRow>`, registered in `collect_schemas` as a named page: `set.insert_page::<InternalUsageRow>("InternalUsagePage")` (as `InvitePage` is). Rows of dropped orgs stay (`usage_daily` has no foreign key).
+`GET /api/internal/v1/usage`, `Access::ControlPlane { scope: "usage" }`. Rows summed per org and day over projects, ordered by `(day, org_id)`, keyset-paged: the cursor is base64url (no padding) of `{"day": "…", "org_id": "…"}` (`deny_unknown_fields`; new private helpers `encode_cursor` / `decode_cursor`; bad cursor → `field_error("cursor", "invalid cursor")`). SQL: `… WHERE day >= ? AND day <= ? AND (day, org_id) > (?, ?) GROUP BY day, org_id ORDER BY day, org_id LIMIT ?` (fetch `limit + 1` to know whether a next page exists). Response `Page<InternalUsageRow>`, registered in `collect_schemas` as a named page: `set.insert_page::<InternalUsageRow>("InternalUsagePage")` (as `InvitePage` is). Rows of dropped orgs stay 40 days after the drop is applied (D-P-46); until P's M4 changes track M's org drop, the drop still deletes them.
 
 OpenAPI per § Conventions: `list_internal_usage`, tag `internal`, bearer-only, errors `400, 401, 403, 429`, `QUERY_OR_BODY`; in `tests/api_examples.rs` `manifest_covers_the_read_operations`, skip operations whose first tag is `internal`.
 
@@ -579,7 +579,7 @@ Tests: lookup by subject; by email when the subject is unknown; unknown both →
 
 ## P11 — Python SDK pauses on 402 (D-P-34)
 
-- `sdks/python/src/llmobs/_quota.py` (new):
+- `sdks/python/src/cetra/_quota.py` (new):
 
 ```python
 class QuotaState:
@@ -589,7 +589,7 @@ class QuotaState:
     def on_402(self, retry_after: str | None) -> None:   # pause min(seconds, 3600); warn once per pause start
 ```
 
-  `on_402`: `seconds = int(retry_after)` if it parses and is > 0, else 3600; `self.until = clock() + min(seconds, 3600)`; when not already paused, log the SDK warning (§ Sub-phases, `<reset>` = `wall() + seconds`, UTC) through the SDK's logger (`llmobs._log`).
+  `on_402`: `seconds = int(retry_after)` if it parses and is > 0, else 3600; `self.until = clock() + min(seconds, 3600)`; when not already paused, log the SDK warning (§ Sub-phases, `<reset>` = `wall() + seconds`, UTC) through the SDK's logger (`cetra._log`).
   `class QuotaPauseExporter(SpanExporter)`: wraps an exporter; `export` returns `SpanExportResult.SUCCESS` without calling it while `state.paused()`; else delegates. `shutdown` and `force_flush` delegate.
 - `_runtime.py` `create`: build one `QuotaState`; a `requests.Session()` whose `hooks["response"]` gets a function calling `state.on_402(response.headers.get("Retry-After"))` when `response.status_code == 402`; pass `session=` to `OTLPSpanExporter` (supported by `opentelemetry-exporter-otlp-proto-http`); wrap the masking exporter in `QuotaPauseExporter(state, …)`. Pass the same `state` to the score queue.
 - `_scores.py` `ScoreQueue.__init__` gains a keyword `quota: QuotaState | None = None` (None → its own `QuotaState()`); `_runtime.py` passes the shared one; existing constructors in `tests/test_scores.py` keep working. In `_send`: when `quota.paused()`, drop the batch without sending; a 402 response is handled **before** the existing non-retryable-status warning: `quota.on_402(...)`, drop the batch, no other warning. The pause warning is logged with `logger.warning` (not `warn_once`, which is once per process).

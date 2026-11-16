@@ -344,7 +344,7 @@ mod tests {
     use crate::meta::projects::insert_project;
     use crate::meta::users::{NewUser, insert_user};
     use crate::test_support::{TestApp, capture_logs};
-    use llmobs_core::ids::OrgId;
+    use cetra_core::ids::OrgId;
 
     struct Owner {
         cookie: String,
@@ -365,6 +365,7 @@ mod tests {
                             name: None,
                             password_hash: None,
                             email_verified_at: None,
+                            email_verified_via: None,
                             is_instance_admin: true,
                         },
                         now,
@@ -379,9 +380,15 @@ mod tests {
             })
             .await
             .unwrap();
-        let header = start_session(&app.state, user_id, None, None)
-            .await
-            .unwrap();
+        let header = start_session(
+            &app.state,
+            user_id,
+            None,
+            None,
+            crate::auth::session::SessionOrigin::Password,
+        )
+        .await
+        .unwrap();
         let cookie = header
             .to_str()
             .unwrap()
@@ -728,14 +735,14 @@ mod tests {
             .send()
             .await;
         assert_eq!(short.status, 401);
-        let bad = format!("Bearer sk-llmobs-{}", "!".repeat(32));
+        let bad = format!("Bearer sk-cetra-{}", "!".repeat(32));
         let alphabet = app
             .request(Method::GET, "/api/v1/projects/current")
             .header(header::AUTHORIZATION.as_str(), &bad)
             .send()
             .await;
         assert_eq!(alphabet.status, 401);
-        let personal = format!("Bearer pat-llmobs-{}", "A".repeat(31));
+        let personal = format!("Bearer pat-cetra-{}", "A".repeat(31));
         let pat = app
             .request(Method::GET, "/api/v1/projects/current")
             .header(header::AUTHORIZATION.as_str(), &personal)

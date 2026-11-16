@@ -29,7 +29,7 @@
 6. Password hashing parameters, rehash on login, NFC, policy, dummy hash for unknown users: one argon2 verification per login attempt in every branch.
 7. Login, forgot and resend answers do not depend on whether the account exists (status, body, headers, and no SMTP on the request path).
 8. Rate limits and lockout keyed as D143; lockout cannot lock out OAuth login or password reset; memory bounded.
-9. Setup: token required, single use, constant-time compare, concurrency-safe (one transaction re-checking `users`), refused once a user exists; headless init runs once and validates `LLMOBS_INIT_SECRET_KEY`.
+9. Setup: token required, single use, constant-time compare, concurrency-safe (one transaction re-checking `users`), refused once a user exists; headless init runs once and validates `CETRA_INIT_SECRET_KEY`.
 
 **Authorization**
 10. Every route in the router comes from `routes()`; nothing is mounted outside the table (search for `.route(`, `.nest(`, `.merge(` outside `build_router`).

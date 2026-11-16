@@ -7,19 +7,90 @@
 //! Called from tests until the writer task lands.
 #![allow(dead_code)]
 
-use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use crate::error::WalError;
+use crate::error::{HeaderProblem, WalError};
+use crate::format::FORMAT_VERSION;
+use crate::fs::{self, File, OpenOptions};
 use crate::hooks::{HookPoint, Hooks};
-use crate::wal::{segment_name, sync_dir};
+use crate::wal::segment_name;
+
+/// First bytes of every segment.
+pub(crate) const SEGMENT_MAGIC: [u8; 4] = *b"LWAL";
+/// Length of the segment header.
+pub(crate) const SEGMENT_HEADER_LEN: usize = 8;
+
+/// The header this build writes: the magic, the format version as a `u16`
+/// little-endian, and flags, which are 0.
+pub(crate) fn segment_header() -> [u8; SEGMENT_HEADER_LEN] {
+    let mut header = [0; SEGMENT_HEADER_LEN];
+    header[..4].copy_from_slice(&SEGMENT_MAGIC);
+    header[4..6].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
+    header
+}
+
+/// The header followed by `bytes`: the file a segment holds after `bytes` are written.
+#[cfg(test)]
+pub(crate) fn with_header(bytes: &[u8]) -> Vec<u8> {
+    let mut out = segment_header().to_vec();
+    out.extend_from_slice(bytes);
+    out
+}
+
+/// What a segment's first bytes say.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum HeaderState {
+    /// A complete, supported header.
+    Valid,
+    /// Fewer than `SEGMENT_HEADER_LEN` bytes, all equal to the start of the header:
+    /// a crash created the file before its header was complete.
+    Torn,
+}
+
+/// Checks `bytes` (the whole file, or its first bytes) against the header.
+///
+/// Errors: `WalError::Header` with `NotAWalSegment` (the magic differs, or the file
+/// is shorter than the header and is not a prefix of it), `NewerFormat { found, supported }`
+/// (the version is not `FORMAT_VERSION`; no older version exists, so the name says newer and the message does not) or `UnknownFlags`.
+pub(crate) fn check_header(
+    table: &'static str,
+    segment: &str,
+    bytes: &[u8],
+) -> Result<HeaderState, WalError> {
+    let fail = |problem| WalError::Header {
+        table,
+        segment: segment.to_owned(),
+        problem,
+    };
+    if bytes.len() < SEGMENT_HEADER_LEN {
+        return if segment_header().starts_with(bytes) {
+            Ok(HeaderState::Torn)
+        } else {
+            Err(fail(HeaderProblem::NotAWalSegment))
+        };
+    }
+    if bytes[..4] != SEGMENT_MAGIC {
+        return Err(fail(HeaderProblem::NotAWalSegment));
+    }
+    let found = u16::from_le_bytes([bytes[4], bytes[5]]);
+    if found != FORMAT_VERSION {
+        return Err(fail(HeaderProblem::NewerFormat {
+            found,
+            supported: FORMAT_VERSION,
+        }));
+    }
+    if bytes[6..8] != [0, 0] {
+        return Err(fail(HeaderProblem::UnknownFlags));
+    }
+    Ok(HeaderState::Valid)
+}
 
 /// An append-only segment file.
 #[derive(Debug)]
 pub(crate) struct SegmentWriter {
     dir: PathBuf,
-    file: std::fs::File,
+    file: File,
     name: String,
     len: u64,
     segment_bytes: u64,
@@ -27,11 +98,12 @@ pub(crate) struct SegmentWriter {
 }
 
 impl SegmentWriter {
-    /// Creates `dir/<first_seq>.wal` and fsyncs `dir`.
+    /// Creates `dir/<first_seq>.wal` with its header, fsyncs the file, then fsyncs `dir`.
     ///
-    /// An empty file of that name is reused. A crash can create the segment
-    /// and exit before the first record; `create_new` would then fail on the
-    /// next open. A non-empty file is left alone and this returns an error.
+    /// A file of that name that holds no record is reused: an empty one, or one
+    /// whose header was torn by a crash, is rewritten with the header; a complete
+    /// header is left as it is. A file with records is left alone and this
+    /// returns an error.
     pub(crate) fn create(
         dir: &Path,
         first_seq: u64,
@@ -41,11 +113,13 @@ impl SegmentWriter {
         let name = segment_name(first_seq);
         let path = dir.join(&name);
         let file = open_segment(&path)?;
-        sync_dir(dir).map_err(|source| WalError::io("syncing WAL directory", dir, source))?;
-        let len = file
-            .metadata()
-            .map_err(|source| WalError::io("reading WAL segment", &path, source))?
-            .len();
+        // From here a failure leaves the file behind, possibly without its
+        // header. The rotation path removes it; see `writer::remove_stray_segment`.
+        if let Some(source) = hooks.fail(HookPoint::WalSegmentDirSync) {
+            return Err(WalError::io("syncing WAL directory", dir, source));
+        }
+        fs::sync_dir(dir).map_err(|source| WalError::io("syncing WAL directory", dir, source))?;
+        let len = SEGMENT_HEADER_LEN as u64;
         tracing::info!(segment = name.as_str(), bytes = len, "created WAL segment");
         Ok(Self {
             dir: dir.to_path_buf(),
@@ -62,9 +136,14 @@ impl SegmentWriter {
         &self.name
     }
 
-    /// Bytes written through this writer, including a reused empty file's length.
+    /// Bytes in the file: the header, then the records written through this writer.
     pub(crate) fn len(&self) -> u64 {
         self.len
+    }
+
+    /// Whether the segment holds a record, as opposed to only its header.
+    pub(crate) fn has_records(&self) -> bool {
+        self.len > SEGMENT_HEADER_LEN as u64
     }
 
     /// Absolute path of the segment file.
@@ -127,24 +206,59 @@ impl SegmentWriter {
     }
 }
 
-fn open_segment(path: &Path) -> Result<std::fs::File, WalError> {
+/// Opens `path` for appending with a complete header in place, and syncs the
+/// file when it writes the header.
+///
+/// A new file gets the header. An existing file is reused only when it holds no
+/// record: a complete header is left untouched (opening writes nothing), and a
+/// file shorter than the header that is a prefix of it is truncated and
+/// rewritten. Anything else is an error.
+fn open_segment(path: &Path) -> Result<File, WalError> {
     let mut options = OpenOptions::new();
     options.append(true);
     match options.create_new(true).open(path) {
-        Ok(file) => Ok(file),
+        Ok(file) => write_header(file, path),
         Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
-            let meta = std::fs::metadata(path)
+            let meta = fs::metadata(path)
                 .map_err(|source| WalError::io("creating WAL segment", path, source))?;
-            if meta.len() != 0 {
+            if meta.len() > SEGMENT_HEADER_LEN as u64 {
                 return Err(WalError::io("creating WAL segment", path, source));
             }
-            OpenOptions::new()
+            let bytes = fs::read(path)
+                .map_err(|source| WalError::io("creating WAL segment", path, source))?;
+            if !segment_header().starts_with(&bytes) {
+                return Err(WalError::io("creating WAL segment", path, source));
+            }
+            let file = OpenOptions::new()
                 .append(true)
                 .open(path)
-                .map_err(|source| WalError::io("creating WAL segment", path, source))
+                .map_err(|source| WalError::io("creating WAL segment", path, source))?;
+            if bytes.len() == SEGMENT_HEADER_LEN {
+                // A header left by a creation whose sync failed may not be
+                // durable yet: sync it before records land behind it. A sync
+                // needs no free space.
+                file.sync_data()
+                    .map_err(|source| WalError::io("syncing WAL segment", path, source))?;
+                return Ok(file);
+            }
+            file.set_len(0)
+                .map_err(|source| WalError::io("creating WAL segment", path, source))?;
+            write_header(file, path)
         }
         Err(source) => Err(WalError::io("creating WAL segment", path, source)),
     }
+}
+
+/// Writes the header at the end of the empty `file` and syncs it. The header
+/// is synced at creation, before any record, so a power loss can cut a segment
+/// only inside its records (spec 03 § 1). The `WalWrite` and `WalSync` hooks
+/// are not consulted: they model record writes.
+fn write_header(mut file: File, path: &Path) -> Result<File, WalError> {
+    file.write_all(&segment_header())
+        .map_err(|source| WalError::io("writing WAL segment", path, source))?;
+    file.sync_data()
+        .map_err(|source| WalError::io("syncing WAL segment", path, source))?;
+    Ok(file)
 }
 
 #[cfg(test)]
@@ -185,16 +299,27 @@ mod tests {
     }
 
     #[test]
+    fn a_new_segment_starts_with_the_header_and_counts_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let writer = SegmentWriter::create(dir.path(), 1, 1024, Hooks::default()).unwrap();
+        assert_eq!(writer.len(), SEGMENT_HEADER_LEN as u64);
+        assert!(!writer.has_records());
+        let bytes = fs::read(dir.path().join(writer.name())).unwrap();
+        assert_eq!(bytes, [0x4c, 0x57, 0x41, 0x4c, 0x01, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
     fn a_group_may_pass_the_segment_limit() {
         let dir = tempfile::tempdir().unwrap();
         let mut writer = SegmentWriter::create(dir.path(), 1, 64, Hooks::default()).unwrap();
         assert!(!writer.needs_rotation());
         writer.write(&[0; 80]).unwrap();
         assert!(writer.needs_rotation());
-        assert_eq!(writer.len(), 80);
+        assert!(writer.has_records());
+        assert_eq!(writer.len(), SEGMENT_HEADER_LEN as u64 + 80);
         assert_eq!(
             fs::metadata(dir.path().join(writer.name())).unwrap().len(),
-            80
+            SEGMENT_HEADER_LEN as u64 + 80
         );
     }
 
@@ -205,7 +330,85 @@ mod tests {
         fs::write(&path, b"").unwrap();
         let mut writer = SegmentWriter::create(dir.path(), 7, 1024, Hooks::default()).unwrap();
         writer.write(b"abc").unwrap();
-        assert_eq!(fs::read(&path).unwrap(), b"abc");
+        assert_eq!(fs::read(&path).unwrap(), with_header(b"abc"));
+    }
+
+    #[test]
+    fn a_header_only_segment_is_reused_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(segment_name(7));
+        fs::write(&path, segment_header()).unwrap();
+        let writer = SegmentWriter::create(dir.path(), 7, 1024, Hooks::default()).unwrap();
+        assert!(!writer.has_records());
+        assert_eq!(fs::read(&path).unwrap(), segment_header());
+    }
+
+    #[test]
+    fn a_torn_header_is_rewritten_in_full() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(segment_name(7));
+        for cut in 1..SEGMENT_HEADER_LEN {
+            fs::write(&path, &segment_header()[..cut]).unwrap();
+            let writer = SegmentWriter::create(dir.path(), 7, 1024, Hooks::default()).unwrap();
+            assert_eq!(writer.len(), SEGMENT_HEADER_LEN as u64, "cut {cut}");
+            assert_eq!(fs::read(&path).unwrap(), segment_header(), "cut {cut}");
+        }
+    }
+
+    #[test]
+    fn a_torn_header_lookalike_is_not_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(segment_name(7));
+        fs::write(&path, b"LWAX").unwrap();
+        let err = SegmentWriter::create(dir.path(), 7, 1024, Hooks::default()).unwrap_err();
+        assert!(matches!(
+            err,
+            WalError::Io {
+                action: "creating WAL segment",
+                ..
+            }
+        ));
+        assert_eq!(fs::read(&path).unwrap(), b"LWAX");
+    }
+
+    /// Without the header's `sync_data` this file is empty after the crash:
+    /// its directory entry is synced, its unsynced bytes are not.
+    #[test]
+    fn a_created_segment_keeps_its_header_through_a_lossy_crash() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        fs::create_dir(&data).unwrap();
+        let lossy = crate::fs::lossy::Lossy::enable(&data, &dir.path().join("shadow"));
+        let writer = SegmentWriter::create(&data, 1, 1024, Hooks::default()).unwrap();
+        let path = writer.path();
+        drop(writer);
+        lossy.crash_with(crate::fs::lossy::CrashMode::DropAll, 0);
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            segment_header(),
+            "the header was lost with the crash"
+        );
+    }
+
+    #[test]
+    fn a_reused_unsynced_header_is_synced() {
+        // A creation whose header sync failed leaves the header unsynced; the
+        // retry reuses the file and must make the header durable.
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        fs::create_dir(&data).unwrap();
+        let lossy = crate::fs::lossy::Lossy::enable(&data, &dir.path().join("shadow"));
+        let path = data.join(segment_name(1));
+        crate::fs::write(&path, segment_header()).unwrap();
+        crate::fs::sync_dir(&data).unwrap();
+        let writer = SegmentWriter::create(&data, 1, 1024, Hooks::default()).unwrap();
+        drop(writer);
+        lossy.crash_with(crate::fs::lossy::CrashMode::DropAll, 0);
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            segment_header(),
+            "the reused header was lost with the crash"
+        );
     }
 
     #[test]
@@ -229,18 +432,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let hooks = Hooks::default();
         hooks.arm_fail(HookPoint::WalWrite);
+        // Creation is not hooked: the armed fault hits the first record.
         let mut writer = SegmentWriter::create(dir.path(), 1, 1024, hooks.clone()).unwrap();
         assert_io(writer.write(b"nope").unwrap_err(), "writing WAL segment");
-        assert_eq!(writer.len(), 0);
+        assert_eq!(writer.len(), SEGMENT_HEADER_LEN as u64);
         assert_eq!(
-            fs::metadata(dir.path().join(writer.name())).unwrap().len(),
-            0
+            fs::read(dir.path().join(writer.name())).unwrap(),
+            segment_header()
         );
 
         writer.write(b"kept").unwrap();
         hooks.arm_fail(HookPoint::WalSync);
         assert_io(writer.sync().unwrap_err(), "syncing WAL segment");
-        assert_eq!(fs::read(dir.path().join(writer.name())).unwrap(), b"kept");
+        assert_eq!(
+            fs::read(dir.path().join(writer.name())).unwrap(),
+            with_header(b"kept")
+        );
         writer.sync().unwrap();
     }
 

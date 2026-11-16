@@ -30,7 +30,7 @@ The user answered the open questions. This plan fixes everything the review foun
 | Optional fields the server omits are generated as `T \| null` in `schema.gen.ts` | Omitted optionals are not nullable. Only fields that can really be `null` stay nullable. |
 | A matching price row has a null unit price for tokens that are present; `cost_output` on embedding spans | No fallback (except the existing `reasoning` → `output`): that part and `cost_total` are null. Embedding `cost_output` is null. (D82) |
 | `.cursor/` is untracked while D58 says it is kept | Ignore it. This plan does not touch `.cursor/` or its Open-list entry. |
-| Which `LLMOBS_SAMPLE_RATE` strings both SDKs accept | Plain ASCII decimal: `^(?:[0-9]+(?:\.[0-9]*)?\|\.[0-9]+)$`, then the `[0, 1]` range check. |
+| Which `CETRA_SAMPLE_RATE` strings both SDKs accept | Plain ASCII decimal: `^(?:[0-9]+(?:\.[0-9]*)?\|\.[0-9]+)$`, then the `[0, 1]` range check. |
 
 One detail differs from the wording of the Vercel question. The question proposed reading `finish_reason` from `ai.response.finishReason` first. Spec 02 § Convention detection says GenAI attributes take precedence over Vercel ones. So R8 reads `gen_ai.response.finish_reasons` first and falls back to `ai.response.finishReason`. The existing fixture carries both, with the same value.
 
@@ -149,7 +149,7 @@ Test in `enums.rs`: deserializing `"\"" + 200 × 'x' + "\""` as `SpanKind` fails
    - In the root `[workspace.dependencies]`, write `arrow = { version = "59.2", default-features = false }`.
    - In `crates/core/Cargo.toml`, enable only the features core needs. Find them by building. The IPC round-trip test probably needs `ipc`; enable that in `[dev-dependencies]` if only tests use it.
    - Keep the version unchanged: the DataFusion family stays pinned together (AGENTS.md).
-   - Done when `cargo tree -e features -p llmobs-core` shows no `arrow-csv` and no `arrow-json`.
+   - Done when `cargo tree -e features -p cetra-core` shows no `arrow-csv` and no `arrow-json`.
 4. **Remove `prost` from the root `[workspace.dependencies]`.**
    - No crate uses it. Check with `grep -rn prost crates/*/Cargo.toml`.
    - It comes back with the crate that needs it (AGENTS.md § Dependencies).
@@ -269,7 +269,7 @@ Spec 01 § Session lists `tags` among the session aggregates ("distinct union"),
    |---|---|
    | `b100000000000011` (trace 1 root) | `["beta"]` |
    | `b100000000000021` (trace 2 root) | `["beta", "refund"]` |
-   | `b100000000000051` (trace 5 root, `llmobs-eval`) | `["eval"]` |
+   | `b100000000000051` (trace 5 root, `cetra-eval`) | `["eval"]` |
 
    Session `sess-001` then has tags `["beta", "refund"]` by default. With `include_eval=true` (R5) they are `["beta", "eval", "refund"]`.
 4. Add a scenario assertion in `api_examples.rs` next to the existing ones: `sess-001` has `tags == ["beta", "refund"]`, and `sess-002` has `tags == []`.
@@ -348,7 +348,7 @@ Done when the lint and scenario assertions pass and `just check` is green.
 
 Today the fixture tests check that each response round-trips through its Rust type. That proves serde symmetry, not that the JSON matches `openapi.json`. That gap is how the D65 nullability bug went unnoticed.
 
-- Add `jsonschema` as a dev-dependency of `llmobs-server`. Look up the latest version released at least 7 days ago with `cargo search jsonschema` and `cargo info jsonschema`.
+- Add `jsonschema` as a dev-dependency of `cetra-server`. Look up the latest version released at least 7 days ago with `cargo search jsonschema` and `cargo info jsonschema`.
   - Declare it in the root `[workspace.dependencies]` with `default-features = false`. Enable only what's needed for local `$ref` resolution, with no HTTP or file resolvers.
   - `just deny` must pass.
   - Report the version and the features you enabled.
@@ -378,9 +378,9 @@ Only `responses/` has a missing/extra/different check today.
 
 ### 4. Write switches need `=1`
 
-`tests/openapi.rs` (around line 122) and `tests/api_examples.rs` (around line 478) write files when `LLMOBS_OPENAPI_WRITE` / `LLMOBS_API_EXAMPLES_WRITE` is set to any value, including `0`.
+`tests/openapi.rs` (around line 122) and `tests/api_examples.rs` (around line 478) write files when `CETRA_OPENAPI_WRITE` / `CETRA_API_EXAMPLES_WRITE` is set to any value, including `0`.
 - Write only when the value is exactly `1`.
-- Any other non-empty value fails the test with: "set LLMOBS_OPENAPI_WRITE=1 to write, or unset it" (and the same for the other variable).
+- Any other non-empty value fails the test with: "set CETRA_OPENAPI_WRITE=1 to write, or unset it" (and the same for the other variable).
 
 The `just` recipes already pass `=1`.
 
@@ -452,7 +452,7 @@ Each new check gets one negative unit test on an in-memory case, next to the exi
 
 ### 4. Stale comment
 
-`support/mod.rs` line 349 says `time_serde` "borrows a `&str`". `time_serde` deserializes an owned `String` now (and after R1, calls `parse_rfc3339`). Remove the workaround the comment justifies. Deserialize the timestamp straight from the `serde_json::Value`, or call `llmobs_core::time_serde::parse_rfc3339` directly, then fix the comment.
+`support/mod.rs` line 349 says `time_serde` "borrows a `&str`". `time_serde` deserializes an owned `String` now (and after R1, calls `parse_rfc3339`). Remove the workaround the comment justifies. Deserialize the timestamp straight from the `serde_json::Value`, or call `cetra_core::time_serde::parse_rfc3339` directly, then fix the comment.
 
 ### 5. OTLP/JSON conformance test
 
@@ -553,7 +553,7 @@ Follow `fixtures/otlp/README.md` § Workflows for hand-written cases: write `cas
    - One trace with two spans:
      - the root has `parentSpanId` `"0000000000000000"`;
      - its child points at the root.
-   - Use `chain` kind spans (no tokens, so no cost) and the `llmobs` convention, or no convention.
+   - Use `chain` kind spans (no tokens, so no cost) and the `cetra` convention, or no convention.
    - In `expected.json`, the root has no `parent_span_id` and the child keeps its parent. Nothing is rejected.
    - `spec_refs`: `"02 § Normalization rules / 15"`.
 2. **New case `edge/media-before-truncation`:** pins rule 14's "Payloads are measured **after** media extraction".
@@ -605,18 +605,18 @@ Error messages stay the same: `must be an absolute http or https URL` for rules 
 
 Python `_check_sample_rate` calls `float(value)`, which raises `OverflowError` for `10**400`. Catch `OverflowError` there and raise the usual `ConfigError("sample_rate: must be a number between 0 and 1")`. TypeScript needs no change: a too-large `number` is already out of range, and a `bigint` is not a `number`.
 
-### 3. One `LLMOBS_SAMPLE_RATE` grammar
+### 3. One `CETRA_SAMPLE_RATE` grammar
 
 Python `float(raw)` accepts `0.2_5` and Unicode digits; TypeScript `Number(raw)` accepts `0x1`, `0b1`, `0o1` and `Infinity`. In both SDKs, after the existing trim and blank-means-unset handling:
 - the env string must match `^(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)$`. In Python, write the class as `[0-9]` (not `\d`, which matches Unicode digits);
-- otherwise raise `LLMOBS_SAMPLE_RATE: must be a number between 0 and 1`;
+- otherwise raise `CETRA_SAMPLE_RATE: must be a number between 0 and 1`;
 - then convert and apply the existing finite `[0, 1]` check.
 
 The argument path (`sample_rate=` / `sampleRate:`) is unchanged.
 
 Spec 10 rule 7 becomes:
 
-> 7. `sample_rate` must be a finite number in `[0, 1]`. From `LLMOBS_SAMPLE_RATE` it must also be a plain ASCII decimal (`1`, `0.25`, `.5`, `1.`): no sign, exponent, digit separators, hex, or non-ASCII digits.
+> 7. `sample_rate` must be a finite number in `[0, 1]`. From `CETRA_SAMPLE_RATE` it must also be a plain ASCII decimal (`1`, `0.25`, `.5`, `1.`): no sign, exponent, digit separators, hex, or non-ASCII digits.
 
 ### 4. Tests, the same cases in both SDKs
 
@@ -630,8 +630,8 @@ Spec 10 rule 7 becomes:
 - **Sample rate argument:** Python `10**400` raises `ConfigError`.
 - **TypeScript precedence:** `config.test.ts` (lines 75–91) checks only that an argument beats env. Add "env beats default" for every option, mirroring the Python cases, including env-only `environment`, `baseUrl` and `sampleRate`.
 - **Test isolation:**
-  - Python `test_env_none_reads_os_environ` (`test_config.py`, line 360) sets only `LLMOBS_API_KEY`. Make it `monkeypatch.delenv(name, raising=False)` every `LLMOBS_*` name from the env constants, plus `GIT_COMMIT` and `SOURCE_VERSION`, before setting the key.
-  - TypeScript `config.test.ts` around line 264 deletes `LLMOBS_API_KEY` without restoring its earlier value. Save and restore it the way the same test restores `LLMOBS_BASE_URL`.
+  - Python `test_env_none_reads_os_environ` (`test_config.py`, line 360) sets only `CETRA_API_KEY`. Make it `monkeypatch.delenv(name, raising=False)` every `CETRA_*` name from the env constants, plus `GIT_COMMIT` and `SOURCE_VERSION`, before setting the key.
+  - TypeScript `config.test.ts` around line 264 deletes `CETRA_API_KEY` without restoring its earlier value. Save and restore it the way the same test restores `CETRA_BASE_URL`.
 
 ### 5. Duplicate Biome pin
 
@@ -724,7 +724,7 @@ Done when the new tests pass and `just check` is green.
 | `genai` case scope is OpenLLMetry's | R9 |
 | Python invalid IPv6 URL raises `ValueError` | R10 |
 | Python huge `sample_rate` raises `OverflowError` | R10 |
-| `LLMOBS_SAMPLE_RATE` parsed differently by the two SDKs | R10 |
+| `CETRA_SAMPLE_RATE` parsed differently by the two SDKs | R10 |
 | TS precedence test misses env over default; test isolation | R10 |
 | Duplicate Biome pin in the TS SDK | R10 |
 | Stale theme after switching back to System | R11 |

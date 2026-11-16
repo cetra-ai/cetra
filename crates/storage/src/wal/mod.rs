@@ -5,19 +5,25 @@
 
 mod record;
 mod replay;
-mod segment;
+pub(crate) mod segment;
 pub(crate) mod writer;
 
-pub(crate) use replay::replay;
+pub(crate) use replay::{check_headers, replay};
 pub(crate) use segment::SegmentWriter;
 
-use std::fs::File;
+#[cfg(test)]
+pub(crate) use record::HEADER_LEN;
+#[cfg(any(test, fuzzing))]
+pub(crate) use record::{Decoded, decode_next, encode, push_framed, read_batch};
+
 use std::io;
 use std::path::{Path, PathBuf};
 
 use arrow::datatypes::SchemaRef;
 
-use llmobs_core::schema::{scores_schema, spans_schema};
+use cetra_core::schema::{scores_schema, spans_schema};
+
+use crate::fs;
 
 /// Which WAL a record belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,16 +56,16 @@ impl Table {
     /// Spans use `start_time` until the trace anchor lands. Scores use `created_at`.
     pub(crate) fn time_column(self) -> &'static str {
         match self {
-            Self::Spans => llmobs_core::schema::spans::START_TIME,
-            Self::Scores => llmobs_core::schema::scores::CREATED_AT,
+            Self::Spans => cetra_core::schema::spans::START_TIME,
+            Self::Scores => cetra_core::schema::scores::CREATED_AT,
         }
     }
 
     /// The `ingest_time` column, non-null in both tables (spec 03 §7).
     pub(crate) fn ingest_column(self) -> &'static str {
         match self {
-            Self::Spans => llmobs_core::schema::spans::INGEST_TIME,
-            Self::Scores => llmobs_core::schema::scores::INGEST_TIME,
+            Self::Spans => cetra_core::schema::spans::INGEST_TIME,
+            Self::Scores => cetra_core::schema::scores::INGEST_TIME,
         }
     }
 }
@@ -79,12 +85,6 @@ pub(crate) fn parse_segment_name(name: &str) -> Option<u64> {
         return None;
     }
     digits.parse().ok()
-}
-
-/// Makes a new directory entry durable. `path` is the directory itself.
-pub(crate) fn sync_dir(path: &Path) -> io::Result<()> {
-    let dir = File::open(path)?;
-    dir.sync_all()
 }
 
 /// How many segment files [`truncate_segments`] deleted.
@@ -109,18 +109,18 @@ pub(crate) fn truncate_segments(dir: &Path, flushed_seq: u64) -> io::Result<Trun
     for index in 0..segments.len() - 1 {
         let covered = segments[index + 1].0.saturating_sub(1);
         if covered <= flushed_seq {
-            std::fs::remove_file(&segments[index].1)?;
+            fs::remove_file(&segments[index].1)?;
             deleted += 1;
         }
     }
     if deleted > 0 {
-        sync_dir(dir)?;
+        fs::sync_dir(dir)?;
     }
     Ok(TruncateOutcome { deleted })
 }
 
 fn list_segment_files(dir: &Path) -> io::Result<Vec<(u64, PathBuf)>> {
-    let entries = std::fs::read_dir(dir)?;
+    let entries = fs::read_dir(dir)?;
     let mut segments = Vec::new();
     for entry in entries {
         let entry = entry?;
@@ -164,10 +164,10 @@ pub(crate) fn spans_keyed(
 ) -> arrow::array::RecordBatch {
     use std::collections::BTreeMap;
 
-    use llmobs_core::batch::spans_to_record_batch;
-    use llmobs_core::enums::{SpanKind, SpanStatus};
-    use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-    use llmobs_core::span::Span;
+    use cetra_core::batch::spans_to_record_batch;
+    use cetra_core::enums::{SpanKind, SpanStatus};
+    use cetra_core::ids::{ProjectId, SpanId, TraceId};
+    use cetra_core::span::Span;
 
     let project_id = "018f6b4e-7c1a-7c1a-8c1a-000000000001"
         .parse::<ProjectId>()

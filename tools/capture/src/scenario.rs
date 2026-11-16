@@ -17,7 +17,7 @@ use crate::error::CaptureError;
 
 /// Fixture groups a capture may write.
 ///
-/// `fixtures/otlp/README.md` § Layout, without `llmobs` (D121).
+/// `fixtures/otlp/README.md` § Layout, without `cetra` (D121).
 pub const GROUPS: &[&str] = &[
     "genai",
     "openinference",
@@ -690,7 +690,7 @@ mod tests {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir()
-            .join(format!("llmobs-capture-{}-{n}", std::process::id()))
+            .join(format!("cetra-capture-{}-{n}", std::process::id()))
             .join(group)
             .join(case_name);
         fs::create_dir_all(&dir).expect("create scenario dir");
@@ -1072,12 +1072,12 @@ mod tests {
             "edge/a1"
         );
 
-        let error = "llmobs/chat-tool".parse::<CasePath>().expect_err("llmobs");
+        let error = "cetra/chat-tool".parse::<CasePath>().expect_err("cetra");
         let CaptureError::ScenarioInvalid { case, reason } = error else {
             panic!("expected ScenarioInvalid");
         };
-        assert_eq!(case, "llmobs/chat-tool");
-        assert!(reason.contains("unknown group \"llmobs\""), "{reason}");
+        assert_eq!(case, "cetra/chat-tool");
+        assert!(reason.contains("unknown group \"cetra\""), "{reason}");
 
         let error = "nope/chat-tool".parse::<CasePath>().expect_err("bad group");
         let CaptureError::ScenarioInvalid { reason, .. } = error else {

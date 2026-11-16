@@ -32,22 +32,22 @@ These were settled with the user on 2026-11-10. K1 writes them into `docs/mvp-de
 | # | Decision | Source |
 |---|---|---|
 | D114 | **Responses come from a local mock provider at the HTTP layer.** It serves the OpenAI Chat Completions, Responses and Embeddings APIs, Anthropic Messages, and Gemini `generateContent`, `streamGenerateContent` and `embedContent`/`batchEmbedContents`, streaming (SSE) included. Each scenario scripts its turns in a provider-neutral form (text, reasoning, tool calls, finish reason, usage, model, delays). The mock renders the script into each provider's wire format. No API keys, no cost, deterministic, synthetic content only. SDK internals are never patched (MLflow's openai/httpx2 breakage). | User, research |
-| D115 | **The harness is a Rust tool, `llmobs-capture`, in `tools/capture`.** It's a workspace member that is never shipped. It runs the mock and an OTLP/HTTP receiver on loopback ports, starts the scenario program with a clean environment pointing at both, waits for it, then writes `case.json` and `input.json` through `opentelemetry-proto`'s serde encoding. Scenario programs live in two standalone projects: `tools/capture/py` (uv) and `tools/capture/ts` (pnpm). | User |
+| D115 | **The harness is a Rust tool, `cetra-capture`, in `tools/capture`.** It's a workspace member that is never shipped. It runs the mock and an OTLP/HTTP receiver on loopback ports, starts the scenario program with a clean environment pointing at both, waits for it, then writes `case.json` and `input.json` through `opentelemetry-proto`'s serde encoding. Scenario programs live in two standalone projects: `tools/capture/py` (uv) and `tools/capture/ts` (pnpm). | User |
 | D116 | **Captures are deterministic except for timing.** Trace and span IDs are re-minted from the case path in order of appearance. Times are shifted so the first span starts at `ingest_time − 10 s`, keeping real durations rounded to the millisecond, and timestamp-valued attributes get the same shift. The mock's delays are scripted (time to first chunk, delay between chunks), so timings stay stable to a few milliseconds. Machine-specific values are pinned or dropped: `server.address`/`server.port` become the real provider host and 443, `host.name` becomes `capture-host`, and process, OS-version and path attributes are dropped. Instrumentation and SDK versions are kept. A final leak check refuses to write if a loopback address, the mock or receiver port, the home directory, the repository path or the machine's hostname is still present. A recapture of an unchanged scenario differs only in timing values and `captured_at`. | User, research (LangWatch's plan) |
 | D117 | **Captures are run by hand, never in CI.** `just capture <group>/<case>` records one, `just capture-all` records all of them, and `just check-capture` runs the scenario projects' lint and type checks plus a recapture of every scenario compared with the committed `input.json` (timing excluded). The scenario projects are outside the root pnpm workspace and `just check`, so CI never installs LangChain, ADK or three majors of `ai`. Versions are exact pins, bumped by hand when someone recaptures. Dependabot doesn't watch these projects. The 7-day release-age rule still applies: pnpm `minimumReleaseAge` and uv `exclude-newer = "7 days"`. The Rust crate is a workspace member, so its unit tests run in `just check` and CI like any other crate. | User |
 | D118 | **A captured case may be committed with only `case.json` and `input.json`.** B1 writes `expected.json` in bless mode when its convention sub-phase lands, then reviews it line by line. The fixture validation test accepts a missing `expected.json` for `origin: "captured"` cases only. The golden test skips those cases and lists them as awaiting bless. This needs request R1 from B1 (below). | User |
-| D121 | **What is captured.** Spec 02 § Testing's list is replaced by this matrix: the official OTel GenAI instrumentations (OpenAI v2, Google GenAI); OpenInference and OpenLLMetry for the OpenAI, Anthropic and Gemini clients and for LangChain, LangGraph and the OpenAI Agents SDK, where each has an instrumentation; the Vercel AI SDK v5, v6 and v7; the Langfuse SDK (current major, 5.x, Python); Laminar (Python); Google ADK's native spans and OpenInference's ADK instrumentation. The `llmobs` group (our SDKs) is not captured: spec 10's SDK integration tests cover it. | User |
+| D121 | **What is captured.** Spec 02 § Testing's list is replaced by this matrix: the official OTel GenAI instrumentations (OpenAI v2, Google GenAI); OpenInference and OpenLLMetry for the OpenAI, Anthropic and Gemini clients and for LangChain, LangGraph and the OpenAI Agents SDK, where each has an instrumentation; the Vercel AI SDK v5, v6 and v7; the Langfuse SDK (current major, 5.x, Python); Laminar (Python); Google ADK's native spans and OpenInference's ADK instrumentation. The `cetra` group (our SDKs) is not captured: spec 10's SDK integration tests cover it. | User |
 | D122 | **Case policy.** A recapture replaces `input.json` and `case.json` in place, and git history keeps the old shapes. A captured `input.json` is never edited by hand: change the scenario and recapture. Each instrumentation × provider gets one non-streaming chat case (with a tool call where the API has one) and one streaming case, plus scenario-specific cases (cache tokens, multimodal input, embeddings, agent runs). Majors are kept side by side only where this plan says so (the Vercel AI SDK). | User |
 
 ## Boundaries
 
 ```
-llmobs-capture run <group>/<case>
+cetra-capture run <group>/<case>
   ├─ mock provider  (127.0.0.1:0)  ◀── HTTP ── scenario program (uv run / node) ── real client library + instrumentation
   ├─ OTLP receiver  (127.0.0.1:0)  ◀── OTLP/HTTP protobuf ── same program
   └─ after exit: merge → re-mint IDs → shift times → prune defaults → scrub → leak check
        └─ writes fixtures/otlp/<group>/<case>/{case.json, input.json}
-B1 golden test, LLMOBS_BLESS=1 ── writes expected.json ── human review ── commit
+B1 golden test, CETRA_BLESS=1 ── writes expected.json ── human review ── commit
 ```
 
 - **B2 owns:**
@@ -66,9 +66,9 @@ B1 golden test, LLMOBS_BLESS=1 ── writes expected.json ── human review �
   - the normalization rules.
 
   B2 never writes an `expected.json` and never changes `crates/otel`.
-- **Core:** nothing. B2 uses `opentelemetry-proto` directly and never depends on a workspace crate. The tool must not depend on `llmobs-otel`, so captures don't change when the normalizer does.
+- **Core:** nothing. B2 uses `opentelemetry-proto` directly and never depends on a workspace crate. The tool must not depend on `cetra-otel`, so captures don't change when the normalizer does.
 - **CI:** nothing beyond the new workspace crate, whose tests run in `check-rust`. No new job, no Dependabot entry.
-- **SDKs (track F):** nothing. The `llmobs` group stays hand-written or comes from spec 10's integration suite.
+- **SDKs (track F):** nothing. The `cetra` group stays hand-written or comes from spec 10's integration suite.
 
 ### Requests
 
@@ -77,7 +77,7 @@ These go to the coordinating session. Each must be on `main` before the sub-phas
 | # | To | Needed by | Request |
 |---|---|---|---|
 | R1 | B1 | K10 | **Captured cases without `expected.json`** (D118). In `crates/otel/tests/support/mod.rs` and `fixtures.rs`:<br>• a case directory with `origin: "captured"` may hold only `case.json` and `input.json`; every other check still applies to those two files, and a hand-written case still needs all three;<br>• `fixtures/otlp/README.md` § Layout, § Workflows › Captured case and § expected.json say so.<br>In B1's golden test (N4):<br>• a case without `expected.json` is skipped, and the test prints `awaiting bless: <group>/<case>` for each one;<br>• `just fixtures-bless` writes `expected.json` for these cases too.<br>If N4 hasn't landed when R1 is done, the golden-test half becomes part of N4. |
-| R2 | B1 | — | **Re-check against captures.** Once K10–K20 land, B1 blesses each captured case after its convention sub-phase and reviews it. Each D111 behaviour marked "pinned by a captured fixture" is confirmed or corrected against the real capture: the Vercel ≤ v5 + Anthropic exclusive input, event-based TTFT, and the OpenLLMetry Anthropic and ADK token semantics. The `notes` of the hand-written fixtures that said "re-check against a B2 capture" are updated. |
+| R2 | B1 | — | **Re-check against captures.** Once K10–K20 land, B1 blesses each captured case after its convention sub-phase and reviews it. Each D113 behaviour marked "pinned by a captured fixture" is confirmed or corrected against the real capture: the Vercel ≤ v5 + Anthropic exclusive input, event-based TTFT, and the OpenLLMetry Anthropic and ADK token semantics. The `notes` of the hand-written fixtures that said "re-check against a B2 capture" are updated. |
 | R3 | B1 | K6 | **`prost` in the root `Cargo.toml`.** B1's N2 and B2's K6 both add `prost = "0.14"` (matching `opentelemetry-proto` 0.33.1). Whichever lands second reuses the existing entry instead of adding one. |
 
 ## The scenario format
@@ -131,7 +131,7 @@ A scenario is a directory `tools/capture/{py,ts}/scenarios/<group>/<case>/` hold
 
 ```
 tools/capture/
-  Cargo.toml                 llmobs-capture (lib + bin), publish = false
+  Cargo.toml                 cetra-capture (lib + bin), publish = false
   src/
     lib.rs, main.rs          K2, K9
     error.rs                 K2 CaptureError
@@ -153,7 +153,7 @@ tools/capture/
 
 - **Edit only** the files the sub-phase lists. The boundary exceptions above are allowed only in the sub-phases that name them.
 - **Rust code follows AGENTS.md** like product code:
-  - errors are a `thiserror` enum (`CaptureError`); `anyhow` stays reserved for `llmobs-cli`;
+  - errors are a `thiserror` enum (`CaptureError`); `anyhow` stays reserved for `cetra-cli`;
   - no `unwrap`/`expect` without an invariant comment;
   - no panics on data from the program, the network or scenario files;
   - `print_stdout`/`print_stderr` are warned workspace-wide, so the CLI reports through `tracing` (or allows the lint on `main` only, with a comment).

@@ -138,7 +138,7 @@ pub async fn profile(loc: &Location, runs: usize, register: impl AsyncFn(&Sessio
         t0 + 15 * h
     );
     println!("loadavg before: {}   runs per figure: {runs}", loadavg());
-    let variants: Vec<String> = std::env::var("FMT_VARIANTS").map(|v| v.split(',').map(str::to_owned).collect()).unwrap_or_else(|_| vec!["pq_llmobs".into(), "pq_tuned".into(), "pq_default".into(), "vx_compact".into(), "st".into()]);
+    let variants: Vec<String> = std::env::var("FMT_VARIANTS").map(|v| v.split(',').map(str::to_owned).collect()).unwrap_or_else(|_| vec!["pq_cetra".into(), "pq_tuned".into(), "pq_default".into(), "vx_compact".into(), "st".into()]);
     for variant in variants.iter().map(String::as_str) {
         if !has_files(loc, variant).await? {
             continue;

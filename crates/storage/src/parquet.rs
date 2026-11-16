@@ -14,7 +14,7 @@ use arrow::compute::{
 };
 use arrow::datatypes::{SchemaRef, TimestampNanosecondType};
 use bytes::Bytes;
-use llmobs_core::schema::{scores, scores_schema, spans, spans_schema, traces, traces_schema};
+use cetra_core::schema::{scores, scores_schema, spans, spans_schema, traces, traces_schema};
 use parquet::arrow::ArrowSchemaConverter;
 use parquet::arrow::arrow_writer::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
@@ -24,19 +24,23 @@ use parquet::schema::types::{ColumnPath, SchemaDescriptor};
 
 use crate::catalog::FileTable;
 use crate::error::ParquetWriteError;
+use crate::format::FORMAT_VERSION;
 
-/// `llmobs.schema_version` written into every file.
+/// `cetra.schema_version` written into every file: the row normalization
+/// version (spec 01), **not** the file format version (`cetra.format_version`,
+/// spec 03 § 12).
 ///
 /// It follows the stored row `schema_version` (spec 01). Rows are version 1.
 const SCHEMA_VERSION: &str = "1";
 
-const KEY_TABLE: &str = "llmobs.table";
-const KEY_SCHEMA_VERSION: &str = "llmobs.schema_version";
-const KEY_LEVEL: &str = "llmobs.level";
-const KEY_MIN_TIME: &str = "llmobs.min_time";
-const KEY_MAX_TIME: &str = "llmobs.max_time";
-const KEY_MIN_INGEST_TIME: &str = "llmobs.min_ingest_time";
-const KEY_MAX_INGEST_TIME: &str = "llmobs.max_ingest_time";
+const KEY_TABLE: &str = "cetra.table";
+const KEY_SCHEMA_VERSION: &str = "cetra.schema_version";
+const KEY_FORMAT_VERSION: &str = "cetra.format_version";
+const KEY_LEVEL: &str = "cetra.level";
+const KEY_MIN_TIME: &str = "cetra.min_time";
+const KEY_MAX_TIME: &str = "cetra.max_time";
+const KEY_MIN_INGEST_TIME: &str = "cetra.min_ingest_time";
+const KEY_MAX_INGEST_TIME: &str = "cetra.max_ingest_time";
 
 /// Columns spec 01 marks `(dict)` for `spans`, in schema order.
 ///
@@ -465,6 +469,7 @@ fn file_metadata(table: FileTable, level: u8, bounds: &Bounds) -> Vec<KeyValue> 
     let pairs = [
         (KEY_TABLE, table.as_str().to_owned()),
         (KEY_SCHEMA_VERSION, SCHEMA_VERSION.to_owned()),
+        (KEY_FORMAT_VERSION, FORMAT_VERSION.to_string()),
         (KEY_LEVEL, level.to_string()),
         (KEY_MIN_TIME, bounds.min_time.to_string()),
         (KEY_MAX_TIME, bounds.max_time.to_string()),
@@ -475,6 +480,26 @@ fn file_metadata(table: FileTable, level: u8, bounds: &Bounds) -> Vec<KeyValue> 
         .into_iter()
         .map(|(key, value)| KeyValue::new(key.to_owned(), value))
         .collect()
+}
+
+/// The `cetra.format_version` of a file, if it has one that parses.
+///
+/// Only tests read it (golden tests, the compaction tests). No production path
+/// checks it (D-R-26): the directory marker comes first, and a file the marker
+/// admits has this or an older version.
+#[cfg(test)]
+pub(crate) fn file_format_version(
+    metadata: &parquet::file::metadata::ParquetMetaData,
+) -> Option<u16> {
+    metadata
+        .file_metadata()
+        .key_value_metadata()?
+        .iter()
+        .find(|pair| pair.key == KEY_FORMAT_VERSION)?
+        .value
+        .as_deref()?
+        .parse()
+        .ok()
 }
 
 fn footer_size(bytes: &[u8]) -> Result<u64, ParquetWriteError> {
@@ -539,14 +564,14 @@ mod tests {
         SortColumn, SortOptions, concat_batches, lexsort_to_indices, take_record_batch,
     };
     use arrow::datatypes::{DataType, Field, TimestampNanosecondType};
-    use llmobs_core::batch::{scores_to_record_batch, spans_to_record_batch};
-    use llmobs_core::enums::{
+    use cetra_core::batch::{scores_to_record_batch, spans_to_record_batch};
+    use cetra_core::enums::{
         Convention, CostSource, PayloadFormat, ScoreSource, SpanKind, SpanStatus,
     };
-    use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-    use llmobs_core::schema::{scores, scores_schema, spans, spans_schema, traces, traces_schema};
-    use llmobs_core::score::{Score, ScoreTarget, ScoreValue};
-    use llmobs_core::span::{Span, SpanEvent, SpanLink};
+    use cetra_core::ids::{ProjectId, SpanId, TraceId};
+    use cetra_core::schema::{scores, scores_schema, spans, spans_schema, traces, traces_schema};
+    use cetra_core::score::{Score, ScoreTarget, ScoreValue};
+    use cetra_core::span::{Span, SpanEvent, SpanLink};
     use parquet::arrow::arrow_reader::{ArrowReaderOptions, ParquetRecordBatchReaderBuilder};
     use parquet::basic::{Compression, Encoding};
     use parquet::bloom_filter::Sbbf;
@@ -555,10 +580,12 @@ mod tests {
 
     use super::{
         FileWriter, SCHEMA_VERSION, SCORES_DICTIONARY_COLUMNS, SPANS_DICTIONARY_COLUMNS,
-        TRACES_DICTIONARY_COLUMNS, footer_size, footer_size_from_tail, write_file,
+        TRACES_DICTIONARY_COLUMNS, file_format_version, footer_size, footer_size_from_tail,
+        write_file,
     };
     use crate::catalog::FileTable;
     use crate::error::ParquetWriteError;
+    use crate::format::FORMAT_VERSION;
     use crate::wal::spans_named;
 
     fn project() -> ProjectId {
@@ -628,7 +655,7 @@ mod tests {
             tool_definitions: Some("[]".to_owned()),
             attributes,
             resource_attributes: resource,
-            scope_name: Some("llmobs".to_owned()),
+            scope_name: Some("cetra".to_owned()),
             scope_version: Some("0".to_owned()),
             events: vec![SpanEvent {
                 time: start,
@@ -642,7 +669,7 @@ mod tests {
             }],
             media_refs: vec!["ab".repeat(32)],
             truncated: vec!["input".to_owned()],
-            conventions: vec![Convention::Llmobs],
+            conventions: vec![Convention::Cetra],
             ingest_time: ingest,
             schema_version: 1,
         }
@@ -1135,17 +1162,19 @@ mod tests {
                 .and_then(|pair| pair.value.clone())
                 .unwrap()
         };
-        assert_eq!(value("llmobs.table"), table);
-        assert_eq!(value("llmobs.schema_version"), SCHEMA_VERSION);
-        assert_eq!(value("llmobs.level"), level);
-        assert_eq!(value("llmobs.min_time"), written.min_time.to_string());
-        assert_eq!(value("llmobs.max_time"), written.max_time.to_string());
+        assert_eq!(value("cetra.table"), table);
+        assert_eq!(value("cetra.schema_version"), SCHEMA_VERSION);
+        assert_eq!(value("cetra.format_version"), FORMAT_VERSION.to_string());
+        assert_eq!(file_format_version(&file), Some(FORMAT_VERSION));
+        assert_eq!(value("cetra.level"), level);
+        assert_eq!(value("cetra.min_time"), written.min_time.to_string());
+        assert_eq!(value("cetra.max_time"), written.max_time.to_string());
         assert_eq!(
-            value("llmobs.min_ingest_time"),
+            value("cetra.min_ingest_time"),
             written.min_ingest_time.to_string()
         );
         assert_eq!(
-            value("llmobs.max_ingest_time"),
+            value("cetra.max_ingest_time"),
             written.max_ingest_time.to_string()
         );
         let tail = &bytes[bytes.len() - 8..];

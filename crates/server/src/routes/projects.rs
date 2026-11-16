@@ -5,18 +5,22 @@ use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
-use llmobs_core::ids::OrgId;
+use cetra_core::ids::OrgId;
 
 use crate::api::account::{CreateProjectRequest, OrgRole, Project, UpdateProjectRequest};
 use crate::api::common::{FieldError, Page, PageParams};
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::{self, OrgPerm, ProjectPerm, Role};
+use crate::entitlements::{over_limit, plan_limit};
 use crate::http::AppState;
 use crate::http::access::{Access, OrgAccess, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
 use crate::meta::members::project_override;
 use crate::meta::orgs::{self, SlugError};
-use crate::meta::projects::{self, ProjectPatch, ProjectRow};
+use crate::meta::projects::{
+    self, COMPLETION_TIMEOUT_MAX_S, COMPLETION_TIMEOUT_MIN_S, ProjectPatch, ProjectRow,
+};
+use crate::meta::usage::genai_log_events;
 
 use super::orgs::page_named;
 
@@ -96,6 +100,12 @@ async fn list_projects(
     )?))
 }
 
+enum ProjectCreate {
+    Created(ProjectRow),
+    /// The org's project limit, which is what the caller hit.
+    OverLimit(u64),
+}
+
 async fn create_project(
     State(state): State<AppState>,
     Extension(access): Extension<OrgAccess>,
@@ -103,7 +113,7 @@ async fn create_project(
 ) -> Result<Response, ApiError> {
     let name = trimmed_name(&body.name)?;
     if let Some(slug) = &body.slug {
-        orgs::validate_slug_shape(slug).map_err(slug_error)?;
+        orgs::validate_project_slug(slug).map_err(slug_error)?;
     }
     let retention = body.retention_days.map(checked_retention).transpose()?;
     if retention.is_some() && !may_manage_retention(&state, access.org.id) {
@@ -114,11 +124,18 @@ async fn create_project(
     let org_id = access.org.id;
     let slug = body.slug;
     let now = state.clock.now_ns();
-    let project = state
+    let max_projects = state.entitlements.resolve(org_id, now).limits.max_projects;
+    let created = state
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                match &slug {
+                if let Some(limit) = max_projects {
+                    let active = projects::active_projects_tx(conn, org_id).await?;
+                    if over_limit(Some(limit), active, 1) {
+                        return Ok(ProjectCreate::OverLimit(limit));
+                    }
+                }
+                let project = match &slug {
                     Some(slug) => {
                         projects::insert_project(conn, org_id, &name, slug, retention, now).await
                     }
@@ -128,10 +145,17 @@ async fn create_project(
                         )
                         .await
                     }
-                }
+                }?;
+                Ok(ProjectCreate::Created(project))
             })
         })
         .await?;
+    let project = match created {
+        ProjectCreate::Created(project) => project,
+        ProjectCreate::OverLimit(limit) => {
+            return Err(plan_limit(limit, ("project", "projects")));
+        }
+    };
     // CreateProject requires an org admin, whose effective project role is admin.
     Ok((
         StatusCode::CREATED,
@@ -140,8 +164,14 @@ async fn create_project(
         .into_response())
 }
 
-async fn get_project(Extension(access): Extension<ProjectAccess>) -> error::Json<Project> {
-    error::Json(project_json(&access.project, access.role))
+async fn get_project(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+) -> Result<error::Json<Project>, ApiError> {
+    let mut project = project_json(&access.project, access.role);
+    project.genai_log_events =
+        Some(genai_log_events(state.meta.reader(), access.project.id).await?);
+    Ok(error::Json(project))
 }
 
 async fn update_project(
@@ -160,13 +190,17 @@ async fn update_project(
         Some(None) => Some(None),
         Some(Some(days)) => Some(Some(checked_retention(days)?)),
     };
-    if retention_needs_entitlement(retention_days)
+    if retention_needs_entitlement(retention_days, access.project.retention_days)
         && !may_manage_retention(&state, access.project.org_id)
     {
         return Err(ApiError::PlanRequired {
             detail: RETENTION_PLAN,
         });
     }
+    let timeout = body
+        .trace_completion_timeout_s
+        .map(checked_timeout)
+        .transpose()?;
     let id = access.project.id;
     let role = access.role;
     let now = state.clock.now_ns();
@@ -181,6 +215,7 @@ async fn update_project(
                     ProjectPatch {
                         name,
                         retention_days,
+                        trace_completion_timeout_s: timeout,
                     },
                     now,
                 )
@@ -195,10 +230,15 @@ async fn update_project(
             crate::retention::apply_now(&state, id, days).await;
         }
     }
+    if let Some(seconds) = timeout {
+        tracing::info!(target: "audit", project_id = %id, actor_id = %actor_id, seconds, "trace completion timeout changed");
+    }
     let Some(project) = projects::project_by_id(state.meta.reader(), id).await? else {
         return Err(ApiError::NotFound);
     };
-    Ok(error::Json(project_json(&project, role)))
+    let mut json = project_json(&project, role);
+    json.genai_log_events = Some(genai_log_events(state.meta.reader(), id).await?);
+    Ok(error::Json(json))
 }
 
 fn project_json(project: &ProjectRow, role: Option<Role>) -> Project {
@@ -208,6 +248,8 @@ fn project_json(project: &ProjectRow, role: Option<Role>) -> Project {
         slug: project.slug.clone(),
         name: project.name.clone(),
         retention_days: project.retention_days,
+        trace_completion_timeout_s: project.completion_timeout_s(),
+        genai_log_events: None,
         role: role.map(api_role),
         created_at: project.created_at,
     }
@@ -229,10 +271,11 @@ fn may_manage_retention(state: &AppState, org: OrgId) -> bool {
 
 const RETENTION_PLAN: &str = "data retention management is part of the Pro plan";
 
-/// Whether a `PATCH` sets a retention value, which needs the entitlement (D177). Clearing it
-/// (`Some(None)`) and leaving it alone (`None`) do not.
-fn retention_needs_entitlement(value: Option<Option<u32>>) -> bool {
-    matches!(value, Some(Some(_)))
+/// Whether a `PATCH` changes retention to a set value, which needs the entitlement (D177).
+/// Clearing it (`Some(None)`), leaving it alone (`None`) and sending the stored value again
+/// do not: a rename that echoes the form's value must not be refused.
+fn retention_needs_entitlement(value: Option<Option<u32>>, stored: Option<u32>) -> bool {
+    matches!(value, Some(Some(days)) if Some(days) != stored)
 }
 
 fn checked_retention(days: u32) -> Result<u32, ApiError> {
@@ -240,6 +283,17 @@ fn checked_retention(days: u32) -> Result<u32, ApiError> {
         Ok(days)
     } else {
         Err(field_error("retention_days", "must be 1 to 36500"))
+    }
+}
+
+fn checked_timeout(seconds: u32) -> Result<u32, ApiError> {
+    if (COMPLETION_TIMEOUT_MIN_S..=COMPLETION_TIMEOUT_MAX_S).contains(&seconds) {
+        Ok(seconds)
+    } else {
+        Err(field_error(
+            "trace_completion_timeout_s",
+            "must be 10 to 3600",
+        ))
     }
 }
 
@@ -279,13 +333,19 @@ mod tests {
     use crate::auth::session::start_session;
     use crate::meta::members::{add_org_member, set_project_override};
     use crate::meta::users::{NewUser, insert_user};
-    use crate::test_support::{Seeded, TestApp, capture_logs, dataset_span};
+    use crate::test_support::{Seeded, TestApp, capture_logs, dataset_span, set_limits};
 
     #[test]
     fn only_a_set_retention_needs_the_entitlement() {
-        assert!(retention_needs_entitlement(Some(Some(7))));
-        assert!(!retention_needs_entitlement(Some(None)));
-        assert!(!retention_needs_entitlement(None));
+        assert!(retention_needs_entitlement(Some(Some(7)), None));
+        assert!(retention_needs_entitlement(Some(Some(7)), Some(30)));
+        assert!(!retention_needs_entitlement(Some(None), Some(30)));
+        assert!(!retention_needs_entitlement(None, Some(30)));
+    }
+
+    #[test]
+    fn the_stored_retention_needs_no_entitlement() {
+        assert!(!retention_needs_entitlement(Some(Some(7)), Some(7)));
     }
 
     fn cookie_pair(set_cookie: &axum::http::HeaderValue) -> String {
@@ -313,6 +373,9 @@ mod tests {
                             name: None,
                             password_hash: None,
                             email_verified_at: Some(now),
+                            email_verified_via: Some(
+                                crate::meta::users::EmailVerifiedVia::MailToken,
+                            ),
                             is_instance_admin: false,
                         },
                         now,
@@ -322,9 +385,15 @@ mod tests {
             })
             .await
             .unwrap();
-        let cookie = start_session(&app.state, user.id, None, None)
-            .await
-            .unwrap();
+        let cookie = start_session(
+            &app.state,
+            user.id,
+            None,
+            None,
+            crate::auth::session::SessionOrigin::Password,
+        )
+        .await
+        .unwrap();
         (user.id, cookie_pair(&cookie))
     }
 
@@ -337,6 +406,95 @@ mod tests {
             })
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn create_reserves_settings_and_takes_null_retention() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let org = app
+            .request(Method::POST, "/api/v1/orgs")
+            .header(header::COOKIE.as_str(), &ada)
+            .json(&serde_json::json!({ "name": "Acme", "slug": "acme" }))
+            .send()
+            .await;
+        assert_eq!(org.status, 201);
+        let create = |body: serde_json::Value| {
+            app.request(Method::POST, "/api/v1/orgs/acme/projects")
+                .header(header::COOKIE.as_str(), &ada)
+                .json(&body)
+                .send()
+        };
+
+        let reserved = create(serde_json::json!({ "name": "Settings", "slug": "settings" })).await;
+        assert_eq!(reserved.status, 400);
+        let problem = reserved.problem();
+        assert_eq!(problem.errors[0].field, "slug");
+
+        let derived = create(serde_json::json!({ "name": "Settings" })).await;
+        assert_eq!(derived.status, 201);
+        let derived: Project = derived.json();
+        assert_eq!(derived.slug, "settings-1");
+
+        let forever = create(serde_json::json!({
+            "name": "Keeper",
+            "slug": "keeper",
+            "retention_days": null
+        }))
+        .await;
+        assert_eq!(forever.status, 201);
+        let forever: Project = forever.json();
+        assert!(forever.retention_days.is_none());
+
+        let zero = create(serde_json::json!({
+            "name": "Zero",
+            "slug": "zero",
+            "retention_days": 0
+        }))
+        .await;
+        assert_eq!(zero.status, 400);
+    }
+
+    #[tokio::test]
+    async fn projects_are_limited() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let org: OrgMembership = app
+            .request(Method::POST, "/api/v1/orgs")
+            .header(header::COOKIE.as_str(), &ada)
+            .json(&serde_json::json!({ "name": "Acme", "slug": "acme" }))
+            .send()
+            .await
+            .json();
+        let create = |name: &'static str| {
+            app.request(Method::POST, "/api/v1/orgs/acme/projects")
+                .header(header::COOKIE.as_str(), &ada)
+                .json(&serde_json::json!({ "name": name }))
+                .send()
+        };
+        assert_eq!(create("one").await.status, 201);
+
+        set_limits(
+            &app,
+            org.id,
+            "2026-01-01T00:00:00Z",
+            &serde_json::json!({"max_projects": 1}),
+        );
+        let refused = create("two").await;
+        assert_eq!(refused.status, 403);
+        assert_eq!(refused.problem().code, ProblemCode::PlanLimit);
+        assert_eq!(
+            refused.problem().detail.as_deref(),
+            Some("Your plan allows 1 project.")
+        );
+
+        set_limits(
+            &app,
+            org.id,
+            "2026-01-01T00:01:00Z",
+            &serde_json::json!({"max_projects": 2}),
+        );
+        assert_eq!(create("two").await.status, 201);
     }
 
     #[tokio::test]
@@ -561,6 +719,222 @@ mod tests {
         assert!(still.retention_days.is_none());
     }
 
+    /// Creates org `acme` and project `support-bot` as the caller, and returns the project.
+    async fn support_bot(app: &TestApp, cookie: &str) -> Project {
+        let org = app
+            .request(Method::POST, "/api/v1/orgs")
+            .header(header::COOKIE.as_str(), cookie)
+            .json(&serde_json::json!({ "name": "Acme", "slug": "acme" }))
+            .send()
+            .await;
+        assert_eq!(org.status, 201);
+        let created = app
+            .request(Method::POST, "/api/v1/orgs/acme/projects")
+            .header(header::COOKIE.as_str(), cookie)
+            .json(&serde_json::json!({ "name": "Support bot", "slug": "support-bot" }))
+            .send()
+            .await;
+        assert_eq!(created.status, 201);
+        created.json()
+    }
+
+    /// Writes `projects.settings` of a project by SQL.
+    async fn set_settings(app: &TestApp, project: &Project, settings: &'static str) {
+        let id = project.id.to_string();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    sqlx::query("UPDATE projects SET settings = ? WHERE id = ?")
+                        .bind(settings)
+                        .bind(id)
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+    }
+
+    /// `projects.settings` of a project, read by SQL.
+    async fn stored_settings(app: &TestApp, project: &Project) -> serde_json::Value {
+        let text: String = sqlx::query_scalar("SELECT settings FROM projects WHERE id = ?")
+            .bind(project.id.to_string())
+            .fetch_one(app.state.meta.reader())
+            .await
+            .unwrap();
+        serde_json::from_str(&text).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_new_project_has_the_default_timeout() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let created = support_bot(&app, &ada).await;
+        assert_eq!(created.trace_completion_timeout_s, 60);
+        let path = format!("/api/v1/projects/{}", created.id);
+        let fetched = app
+            .request(Method::GET, &path)
+            .header(header::COOKIE.as_str(), &ada)
+            .send()
+            .await;
+        let fetched: Project = fetched.json();
+        assert_eq!(fetched.trace_completion_timeout_s, 60);
+    }
+
+    #[tokio::test]
+    async fn a_project_reports_the_genai_log_events_it_dropped() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let created = support_bot(&app, &ada).await;
+        assert_eq!(created.genai_log_events, None, "not in a create answer");
+        let path = format!("/api/v1/projects/{}", created.id);
+        let read = |method| {
+            app.request(method, &path)
+                .header(header::COOKIE.as_str(), &ada)
+        };
+        let fetched: Project = read(Method::GET).send().await.json();
+        assert_eq!(fetched.genai_log_events, Some(0));
+
+        let org = created.org_id;
+        app.state
+            .usage
+            .add_log_events(org, created.id, app.state.clock.now_ns(), 5);
+        app.state.usage.flush(&app.state.meta).await.unwrap();
+        let fetched: Project = read(Method::GET).send().await.json();
+        assert_eq!(fetched.genai_log_events, Some(5));
+        let patched: Project = read(Method::PATCH)
+            .json(&serde_json::json!({ "name": "Renamed" }))
+            .send()
+            .await
+            .json();
+        assert_eq!(patched.genai_log_events, Some(5));
+    }
+
+    #[tokio::test]
+    async fn patch_sets_the_timeout() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let created = support_bot(&app, &ada).await;
+        let path = format!("/api/v1/projects/{}", created.id);
+        let patched = app
+            .request(Method::PATCH, &path)
+            .header(header::COOKIE.as_str(), &ada)
+            .json(&serde_json::json!({ "trace_completion_timeout_s": 120 }))
+            .send()
+            .await;
+        assert_eq!(patched.status, 200);
+        let patched: Project = patched.json();
+        assert_eq!(patched.trace_completion_timeout_s, 120);
+        assert_eq!(patched.name, "Support bot");
+        assert!(patched.retention_days.is_none());
+
+        let fetched = app
+            .request(Method::GET, &path)
+            .header(header::COOKIE.as_str(), &ada)
+            .send()
+            .await;
+        let fetched: Project = fetched.json();
+        assert_eq!(fetched.trace_completion_timeout_s, 120);
+        assert_eq!(
+            stored_settings(&app, &created).await,
+            serde_json::json!({ "trace_completion_timeout_s": 120 })
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_refuses_an_out_of_range_timeout() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let created = support_bot(&app, &ada).await;
+        let path = format!("/api/v1/projects/{}", created.id);
+        for seconds in [9, 3601] {
+            let rejected = app
+                .request(Method::PATCH, &path)
+                .header(header::COOKIE.as_str(), &ada)
+                .json(&serde_json::json!({ "trace_completion_timeout_s": seconds }))
+                .send()
+                .await;
+            assert_eq!(rejected.status, 400);
+            assert_eq!(
+                rejected.problem().errors[0].field,
+                "trace_completion_timeout_s"
+            );
+            assert_eq!(rejected.problem().errors[0].message, "must be 10 to 3600");
+        }
+        assert_eq!(stored_settings(&app, &created).await, serde_json::json!({}));
+    }
+
+    #[tokio::test]
+    async fn a_timeout_change_is_audited() {
+        let app = TestApp::new().await;
+        let (user_id, ada) = signed_in(&app, "ada@example.com").await;
+        let created = support_bot(&app, &ada).await;
+        let path = format!("/api/v1/projects/{}", created.id);
+
+        let (status, logs) = capture_logs(async {
+            app.request(Method::PATCH, &path)
+                .header(header::COOKIE.as_str(), &ada)
+                .json(&serde_json::json!({ "trace_completion_timeout_s": 120 }))
+                .send()
+                .await
+                .status
+        })
+        .await;
+        assert_eq!(status, 200);
+        assert!(logs.contains("trace completion timeout changed"), "{logs}");
+        assert!(logs.contains(&user_id.to_string()), "{logs}");
+
+        let (status, logs) = capture_logs(async {
+            app.request(Method::PATCH, &path)
+                .header(header::COOKIE.as_str(), &ada)
+                .json(&serde_json::json!({ "name": "Renamed" }))
+                .send()
+                .await
+                .status
+        })
+        .await;
+        assert_eq!(status, 200);
+        assert!(!logs.contains("trace completion timeout changed"), "{logs}");
+    }
+
+    #[tokio::test]
+    async fn patch_keeps_other_settings_keys() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let created = support_bot(&app, &ada).await;
+        set_settings(&app, &created, r#"{"other": 1}"#).await;
+        let path = format!("/api/v1/projects/{}", created.id);
+        let patched = app
+            .request(Method::PATCH, &path)
+            .header(header::COOKIE.as_str(), &ada)
+            .json(&serde_json::json!({ "trace_completion_timeout_s": 30 }))
+            .send()
+            .await;
+        assert_eq!(patched.status, 200);
+        assert_eq!(
+            stored_settings(&app, &created).await,
+            serde_json::json!({ "other": 1, "trace_completion_timeout_s": 30 })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_garbage_settings_value_reads_as_the_default() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let created = support_bot(&app, &ada).await;
+        set_settings(&app, &created, r#"{"trace_completion_timeout_s": 99999}"#).await;
+        let path = format!("/api/v1/projects/{}", created.id);
+        let fetched = app
+            .request(Method::GET, &path)
+            .header(header::COOKIE.as_str(), &ada)
+            .send()
+            .await;
+        let fetched: Project = fetched.json();
+        assert_eq!(fetched.trace_completion_timeout_s, 60);
+    }
+
     /// 2026-01-01T00:00:00Z, the manual clock's start.
     const NOW: i64 = 1_767_225_600_000_000_000;
     const DAY: i64 = 86_400 * 1_000_000_000;
@@ -570,9 +944,9 @@ mod tests {
     /// Commits one span of `trace` to `project`, starting at `start_time`.
     async fn commit_at(app: &TestApp, project: &ProjectRow, trace: &str, start_time: i64) {
         let mut row = dataset_span(0);
-        row.trace_id = trace.parse::<llmobs_core::ids::TraceId>().unwrap();
+        row.trace_id = trace.parse::<cetra_core::ids::TraceId>().unwrap();
         row.span_id = "b4000000000000aa"
-            .parse::<llmobs_core::ids::SpanId>()
+            .parse::<cetra_core::ids::SpanId>()
             .unwrap();
         row.parent_span_id = None;
         row.start_time = start_time;
@@ -685,6 +1059,16 @@ mod tests {
     /// Sends `PATCH retention_days: 30` to a project of org `acme`, after the org holds a
     /// token with `features` (`None`: no token, so the instance defaults apply).
     async fn patch_retention_with(features: Option<&[&str]>) -> crate::test_support::TestResponse {
+        patch_with(features, None, serde_json::json!({ "retention_days": 30 })).await
+    }
+
+    /// Sends `body` as a `PATCH` to a project of org `acme` whose stored retention is `stored`
+    /// (set before the org holds a token with `features`).
+    async fn patch_with(
+        features: Option<&[&str]>,
+        stored: Option<u32>,
+        body: serde_json::Value,
+    ) -> crate::test_support::TestResponse {
         let app = TestApp::new().await;
         let (_, ada) = signed_in(&app, "ada@example.com").await;
         let org = app
@@ -701,6 +1085,15 @@ mod tests {
             .send()
             .await;
         let created: Project = created.json();
+        if let Some(days) = stored {
+            let set = app
+                .request(Method::PATCH, &format!("/api/v1/projects/{}", created.id))
+                .header(header::COOKIE.as_str(), &ada)
+                .json(&serde_json::json!({ "retention_days": days }))
+                .send()
+                .await;
+            assert_eq!(set.status, 200);
+        }
         if let Some(features) = features {
             let org_id = orgs::org_by_slug(app.state.meta.reader(), "acme")
                 .await
@@ -726,7 +1119,7 @@ mod tests {
         }
         app.request(Method::PATCH, &format!("/api/v1/projects/{}", created.id))
             .header(header::COOKIE.as_str(), &ada)
-            .json(&serde_json::json!({ "retention_days": 30 }))
+            .json(&body)
             .send()
             .await
     }
@@ -742,5 +1135,15 @@ mod tests {
 
         let defaults = patch_retention_with(None).await;
         assert_eq!(defaults.status, 200);
+    }
+
+    #[tokio::test]
+    async fn a_locked_org_may_rename_and_echo_the_stored_retention() {
+        let body = serde_json::json!({ "name": "Renamed", "retention_days": 30 });
+        let echoed = patch_with(Some(&[]), Some(30), body.clone()).await;
+        assert_eq!(echoed.status, 200);
+        let changed = patch_with(Some(&[]), Some(7), body).await;
+        assert_eq!(changed.status, 403);
+        assert_eq!(changed.problem().code, ProblemCode::PlanRequired);
     }
 }

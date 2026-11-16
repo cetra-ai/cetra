@@ -8,8 +8,8 @@ use std::str::FromStr;
 use axum::extract::{Extension, State};
 use axum::http::{Method, StatusCode};
 use axum::routing::{delete, get, post};
-use llmobs_core::ids::{ProjectId, TraceId};
-use llmobs_storage::{FilterDeletionRequest, QueryContext, TimeWindow, filter_trace_ids};
+use cetra_core::ids::{ProjectId, TraceId};
+use cetra_storage::{FilterDeletionRequest, QueryContext, TimeWindow, filter_trace_ids};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -21,14 +21,14 @@ use crate::api::deletions::{
 use crate::auth::OrgRole;
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::{OrgPerm, ProjectPerm};
+use crate::entitlements::Visibility;
 use crate::http::AppState;
 use crate::http::access::{Access, OrgAccess, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
 use crate::meta::MetaError;
 use crate::meta::deletions as store;
 use crate::meta::members::org_role;
-use crate::meta::orgs::mark_org_deleting;
-use crate::meta::projects::{mark_project_deleting, project_ids_of_org};
+use crate::meta::projects::mark_project_deleting;
 use crate::routes::read::{self, READ_TIMEOUT};
 use crate::routes::time_cursor::{decode_time_cursor, encode_time_cursor};
 
@@ -52,7 +52,7 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             path: "/api/v1/projects/{project}",
             access: Access::Project {
                 perm: ProjectPerm::Drop,
-                session_only: false,
+                session_only: true,
             },
             documented: true,
             handler: delete(drop_project),
@@ -62,7 +62,7 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             path: "/api/v1/orgs/{org}",
             access: Access::Org {
                 perm: OrgPerm::Delete,
-                session_only: false,
+                session_only: true,
             },
             documented: true,
             handler: delete(drop_org),
@@ -239,51 +239,12 @@ async fn drop_org(
             "type the organization slug to confirm",
         ));
     }
-    let id = Uuid::now_v7();
-    let now = state.clock.now_ns();
-    let org = access.org.id;
-    let new = store::NewDeletion {
-        id,
-        org_id: org,
-        project_id: None,
-        kind: store::DeletionKind::Org,
-        user_id: None,
-        request: store::RequestDetails {
-            name: Some(access.org.name.clone()),
-            slug: Some(access.org.slug.clone()),
-            ..Default::default()
-        },
-        actor_kind: store::ActorKind::User,
-        actor_id: user_id,
-        state: store::DeletionState::Pending,
-        created_at: now,
-    };
-    let row = state
-        .meta
-        .write(move |conn| {
-            Box::pin(async move {
-                if !mark_org_deleting(conn, org, now).await? {
-                    return Err(MetaError::Conflict(
-                        "the organization is already being deleted",
-                    ));
-                }
-                let projects = project_ids_of_org(&mut *conn, org).await?;
-                let row = store::insert_deletion(conn, &new).await?;
-                store::insert_projects(conn, id, &projects).await?;
-                Ok(row)
-            })
-        })
-        .await?;
-    state.deletions.wake.notify_one();
-    tracing::info!(
-        target: "audit",
-        deletion_id = %id,
-        kind = store::DeletionKind::Org.as_str(),
-        org_id = %org,
-        actor_kind = store::ActorKind::User.as_str(),
-        actor_id = %user_id,
-        "deletion requested"
-    );
+    let row =
+        crate::deletion::request_org_drop(&state, &access.org, (store::ActorKind::User, user_id))
+            .await?
+            .ok_or(MetaError::Conflict(
+                "the organization is already being deleted",
+            ))?;
     Ok((StatusCode::ACCEPTED, error::Json(deletion_json(&row))))
 }
 
@@ -302,9 +263,10 @@ async fn create_deletion(
     let (actor_kind, actor_id) = actor(&principal)?;
     let project = access.project.id;
     let org = access.project.org_id;
-    let now = state.clock.now_ns();
     let id = Uuid::now_v7();
 
+    // A filter's matched ids, for the guard only (the worker resolves them again).
+    let mut guard_traces: Vec<TraceId> = Vec::new();
     let (kind, user_id, request, traces) = match body {
         CreateDeletion::TraceIds { trace_ids } => {
             let traces = parse_trace_ids(&trace_ids)?;
@@ -333,7 +295,8 @@ async fn create_deletion(
                 include_eval,
                 include_experiments,
             };
-            // The count only checks the cap now; the worker resolves the traces again.
+            // The count checks the cap; the worker resolves the traces again. The matched ids
+            // go to the guard at once, so judge runs stop before resolution (D-M-6).
             let matched = matching(&state, project, &selection).await?;
             if matched.len() > state.deletions.filter_cap() {
                 return Err(ApiError::TooManyTraces);
@@ -347,6 +310,7 @@ async fn create_deletion(
                 include_experiments: Some(include_experiments),
                 ..Default::default()
             };
+            guard_traces = matched;
             (store::DeletionKind::Filter, None, request, Vec::new())
         }
         CreateDeletion::User { user_id } => {
@@ -361,6 +325,28 @@ async fn create_deletion(
             )
         }
     };
+
+    // The guard learns the request before the cut-off is read, and again with the cut-off
+    // (the later entry wins). A judge copy stamped after the cut-off is then committed after
+    // the guard knew its trace, so the executor's check after the commit sees it (D-M-6).
+    let fill_guard = |at: i64| {
+        let guard = &state.deletions.guard;
+        match kind {
+            store::DeletionKind::TraceIds => guard.add_traces(project, &traces, id, at),
+            // Not stored until resolution: after a restart, a `resolving` filter row guards
+            // nothing until the worker resolves it (accepted, D-M-6).
+            store::DeletionKind::Filter => guard.add_traces(project, &guard_traces, id, at),
+            store::DeletionKind::User => {
+                if let Some(user) = &user_id {
+                    guard.add_user(project, user, id, at);
+                }
+            }
+            store::DeletionKind::Project | store::DeletionKind::Org => {}
+        }
+    };
+    fill_guard(state.clock.now_ns());
+    let now = state.clock.now_ns();
+    fill_guard(now);
 
     let new = store::NewDeletion {
         id,
@@ -389,15 +375,6 @@ async fn create_deletion(
         })
         .await?;
 
-    match kind {
-        store::DeletionKind::TraceIds => state.deletions.guard.add_traces(project, &traces, now),
-        store::DeletionKind::User => {
-            if let Some(user) = &user_id {
-                state.deletions.guard.add_user(project, user, now);
-            }
-        }
-        store::DeletionKind::Filter | store::DeletionKind::Project | store::DeletionKind::Org => {}
-    }
     state.deletions.wake.notify_one();
     tracing::info!(
         target: "audit",
@@ -465,7 +442,8 @@ async fn matching(
     project: ProjectId,
     selection: &FilterSelection,
 ) -> Result<Vec<TraceId>, ApiError> {
-    let ctx: QueryContext = read::open_query(state, project, None).await?;
+    let ctx: QueryContext =
+        read::open_query_on(&state.storage, project, Visibility::exempt(), None, None).await?;
     let ids = filter_trace_ids(
         &ctx,
         FilterDeletionRequest {
@@ -604,6 +582,7 @@ fn actor_kind_json(kind: store::ActorKind) -> DeletionActorKind {
     match kind {
         store::ActorKind::User => DeletionActorKind::User,
         store::ActorKind::ApiKey => DeletionActorKind::ApiKey,
+        store::ActorKind::ControlPlane => DeletionActorKind::ControlPlane,
     }
 }
 
@@ -612,8 +591,8 @@ mod tests {
     use std::time::Duration;
 
     use axum::http::header;
-    use llmobs_core::ids::{SpanId, TraceId};
-    use llmobs_storage::error::DeletionError;
+    use cetra_core::ids::{SpanId, TraceId};
+    use cetra_storage::error::DeletionError;
     use serde_json::{Value, json};
 
     use super::*;
@@ -624,7 +603,9 @@ mod tests {
     use crate::meta::members::{add_org_member, set_project_override};
     use crate::meta::orgs::insert_org;
     use crate::meta::projects::{ProjectRow, insert_project, project_by_id};
-    use crate::test_support::{TestApp, TestRequest, TestResponse, capture_logs, dataset_span};
+    use crate::test_support::{
+        TestApp, TestRequest, TestResponse, capture_logs, dataset_span, raw_span_count, set_limits,
+    };
 
     const A: &str = "a1000000000000000000000000000001";
     const B: &str = "a1000000000000000000000000000002";
@@ -1230,8 +1211,38 @@ mod tests {
             app.state
                 .deletions
                 .guard
-                .blocks(project, trace, &["u9"], now, now)
+                .blocking(project, trace, &[("u9", now)], now)
+                .is_some()
         );
+    }
+
+    /// A filter deletion guards its matched traces from the `POST` on, before the worker
+    /// resolves it (D-M-6, plan review M-1).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn filter_guard_is_filled_at_creation() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let auth = Auth::Cookie(seeded.cookie.clone());
+        commit(&app, &seeded.project, A, 1, "x").await;
+        commit(&app, &seeded.project, B, 2, "y").await;
+        app.state.clock.advance(Duration::from_secs(1));
+
+        let body = json!({"kind": "filter", "filter": "name = 'x'", "from": FROM, "to": TO});
+        let response = post(&app, project, "/deletions", body, &auth).await;
+        assert_eq!(response.status, StatusCode::ACCEPTED);
+        let id: Uuid = response.json::<Value>()["id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let now = app.state.clock.now_ns();
+        let guard = &app.state.deletions.guard;
+        assert_eq!(
+            guard.blocking(project, A.parse().unwrap(), &[], now),
+            Some(id)
+        );
+        assert_eq!(guard.blocking(project, B.parse().unwrap(), &[], now), None);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1445,7 +1456,8 @@ mod tests {
             None,
         )
         .await;
-        assert_eq!(write_try.status, StatusCode::ACCEPTED);
+        // Dropping needs the session (D-P-70): a stolen read-write token cannot do it.
+        assert_eq!(write_try.status, StatusCode::FORBIDDEN);
         // The refused project is still active, so the owner may drop it.
         let owner_try = send(&app, Method::DELETE, &drop_path(&overridden), &owner, None).await;
         assert_eq!(owner_try.status, StatusCode::ACCEPTED);
@@ -1476,7 +1488,7 @@ mod tests {
             .write(move |conn| {
                 Box::pin(async move {
                     let beta =
-                        insert_org(conn, llmobs_core::ids::OrgId::new_v7(), "Beta", "beta", now)
+                        insert_org(conn, cetra_core::ids::OrgId::new_v7(), "Beta", "beta", now)
                             .await?;
                     add_org_member(conn, beta.id, user_id, OrgRole::Owner, now).await?;
                     let b1 = insert_project(conn, beta.id, "b1", "b1", None, now).await?;
@@ -1551,7 +1563,7 @@ mod tests {
                 Box::pin(async move {
                     let gamma = insert_org(
                         conn,
-                        llmobs_core::ids::OrgId::new_v7(),
+                        cetra_core::ids::OrgId::new_v7(),
                         "Gamma",
                         "gamma",
                         now,
@@ -1737,5 +1749,86 @@ mod tests {
         assert_eq!(response.status, StatusCode::ACCEPTED);
         assert!(logs.contains("deletion requested"));
         assert!(!logs.contains("secret-slug-1"));
+    }
+
+    /// D-P-21: a deletion counts, scopes and deletes the traces the org's window hides, since
+    /// deletion reads are exempt from the window.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deletion_counts_include_hidden_traces() {
+        let app = TestApp::with_config(|config| {
+            config.storage.flush.max_age = Duration::from_millis(100);
+        })
+        .await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let auth = Auth::Cookie(seeded.cookie.clone());
+        let day = 86_400_000_000_000_i64;
+        let now = app.state.clock.now_ns();
+        let old: TraceId = A.parse().unwrap();
+        let new: TraceId = B.parse().unwrap();
+        app.commit_trace_at(&seeded.project, old, 1, now - 40 * day)
+            .await;
+        app.commit_trace_at(&seeded.project, new, 2, now - day)
+            .await;
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-01T00:00:00Z",
+            &json!({"data_access_days": 30}),
+        );
+        app.state.clock.advance(Duration::from_secs(1));
+        let window = json!({"from": "2025-11-01T00:00:00Z", "to": TO});
+
+        let preview = post(&app, project, "/deletions/preview", window, &auth).await;
+        assert_eq!(preview.status, StatusCode::OK);
+        assert_eq!(
+            preview.json::<Value>(),
+            json!({"matched_traces": 2, "capped": false})
+        );
+
+        let name = dataset_span(0).name;
+        let body = json!({
+            "kind": "filter",
+            "filter": format!("name = '{name}'"),
+            "from": "2025-11-01T00:00:00Z",
+            "to": TO,
+        });
+        let created = post(&app, project, "/deletions", body, &auth).await;
+        assert_eq!(created.status, StatusCode::ACCEPTED);
+        let id = id_of(&created.json());
+        assert_eq!(raw_span_count(&app.state.storage, project).await, 2);
+
+        run_once(&app.state).await.unwrap();
+        let uuid: Uuid = id.parse().unwrap();
+        let mut scope = store::scope_traces(app.state.meta.reader(), uuid)
+            .await
+            .unwrap();
+        scope.sort();
+        let mut expected = vec![old, new];
+        expected.sort();
+        assert_eq!(scope, expected);
+
+        let mut status = Value::Null;
+        for _ in 0..100 {
+            let now = i64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+            )
+            .unwrap();
+            app.state.storage.apply_deletions(now).await.unwrap();
+            run_once(&app.state).await.unwrap();
+            let got: Value = get(&app, project, &format!("/deletions/{id}"), &auth)
+                .await
+                .json();
+            status = got["status"].clone();
+            if status == "applied" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(status, "applied");
+        assert_eq!(raw_span_count(&app.state.storage, project).await, 0);
     }
 }

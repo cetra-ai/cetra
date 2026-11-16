@@ -1,8 +1,8 @@
 //! Opt-in calls to real providers. `just check` does not run them (D167).
 //!
 //! `just eval-live` runs this file with `--ignored`. A provider whose
-//! `LLMOBS_LIVE_<PROVIDER>_API_KEY` is unset prints `skipped: <provider> (no key)`
-//! and passes. `LLMOBS_LIVE_<PROVIDER>_MODEL` overrides the default model.
+//! `CETRA_LIVE_<PROVIDER>_API_KEY` is unset prints `skipped: <provider> (no key)`
+//! and passes. `CETRA_LIVE_<PROVIDER>_MODEL` overrides the default model.
 //!
 //! This file is an integration test, so clippy's test allow does not apply.
 #![allow(clippy::expect_used)]
@@ -11,16 +11,16 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use llmobs_core::enums::{PayloadFormat, ScoreDataType, SpanKind, SpanStatus};
-use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-use llmobs_core::span::Span;
-use llmobs_eval::{
+use cetra_core::enums::{PayloadFormat, ScoreDataType, SpanKind, SpanStatus};
+use cetra_core::ids::{ProjectId, SpanId, TraceId};
+use cetra_core::span::Span;
+use cetra_eval::{
     Adapter, EgressPolicy, EvalError, EvalOrigin, EvalRunner, EvalTarget, Evaluator,
     EvaluatorConfig, ItemData, JudgeConfig, JudgeConnection, JudgeError, JudgeOutput,
     JudgeTemplate, OutputScore, RunInput, Secret, StructuredOutput, TraceData, VariableMapping,
     Variables, builtin_templates, resolve,
 };
-use llmobs_otel::{IngestContext, IngestLimits, PriceTable, builtin_price_rows};
+use cetra_otel::{IngestContext, IngestLimits, PriceTable, builtin_price_rows};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
@@ -56,8 +56,8 @@ async fn openai() {
     provider(
         "openai",
         Adapter::OpenAi,
-        "LLMOBS_LIVE_OPENAI_API_KEY",
-        "LLMOBS_LIVE_OPENAI_MODEL",
+        "CETRA_LIVE_OPENAI_API_KEY",
+        "CETRA_LIVE_OPENAI_MODEL",
         DEFAULT_OPENAI_MODEL,
     )
     .await;
@@ -69,8 +69,8 @@ async fn anthropic() {
     provider(
         "anthropic",
         Adapter::Anthropic,
-        "LLMOBS_LIVE_ANTHROPIC_API_KEY",
-        "LLMOBS_LIVE_ANTHROPIC_MODEL",
+        "CETRA_LIVE_ANTHROPIC_API_KEY",
+        "CETRA_LIVE_ANTHROPIC_MODEL",
         DEFAULT_ANTHROPIC_MODEL,
     )
     .await;
@@ -82,8 +82,8 @@ async fn gemini() {
     provider(
         "gemini",
         Adapter::Gemini,
-        "LLMOBS_LIVE_GEMINI_API_KEY",
-        "LLMOBS_LIVE_GEMINI_MODEL",
+        "CETRA_LIVE_GEMINI_API_KEY",
+        "CETRA_LIVE_GEMINI_MODEL",
         DEFAULT_GEMINI_MODEL,
     )
     .await;
@@ -109,6 +109,7 @@ async fn provider(
         .unwrap_or_else(|| default_model.to_owned());
     let runner = EvalRunner::new(EgressPolicy {
         allow_private_network: false,
+        restore_mode: false,
     })
     .expect("runner");
     let connection = JudgeConnection {

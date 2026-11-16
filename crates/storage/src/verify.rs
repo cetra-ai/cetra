@@ -19,6 +19,7 @@ use parquet::file::metadata::PageIndexPolicy;
 
 use crate::catalog::{self, FileId, FileMeta};
 use crate::query_error::root;
+use crate::unwind::{GuardedStream, decoder_panicked, guard, guard_sync};
 
 /// Whether `error` may come from a corrupt Parquet file rather than the object
 /// store or the query (spec 03 §10). False positives only cost a verification.
@@ -246,12 +247,16 @@ pub(crate) async fn verify_file(store: &Arc<dyn ObjectStore>, file: &FileMeta) -
     #[allow(deprecated)]
     let reader = ParquetObjectReader::new(Arc::clone(store), path).with_file_size(file.size);
     let options = ArrowReaderOptions::new().with_page_index_policy(PageIndexPolicy::Required);
-    let builder = match ParquetRecordBatchStreamBuilder::new_with_options(reader, options).await {
+    let builder = match guard(ParquetRecordBatchStreamBuilder::new_with_options(
+        reader, options,
+    ))
+    .await
+    {
         Ok(builder) => builder,
         Err(error) => return failed(&error),
     };
-    let mut stream = match builder.build() {
-        Ok(stream) => stream,
+    let mut stream = match guard_sync(move || builder.build()) {
+        Ok(stream) => GuardedStream::new(stream, || Err(decoder_panicked())),
         Err(error) => return failed(&error),
     };
     let mut rows = 0_u64;
@@ -276,7 +281,9 @@ mod tests {
     use std::sync::Arc;
 
     use arrow::error::ArrowError;
+    use bytes::Bytes;
     use datafusion::error::DataFusionError;
+    use object_store::PutPayload;
     use parquet::errors::ParquetError;
     use uuid::Uuid;
 
@@ -446,5 +453,77 @@ mod tests {
         let ids = (0..QUEUE_MAX as u128 + 5).map(|n| file_id(n + 1));
         assert_eq!(queue.suspect(ids, 0), QUEUE_MAX);
         assert_eq!(queue.take(usize::MAX).len(), QUEUE_MAX);
+    }
+
+    /// The committed `parquet_file` regression input (21 bytes, read as the fuzz
+    /// entry reads it): table byte 0x19 (traces), footer hint 0x00ffffff, a time
+    /// bound, then the file. The file is the 8 bytes `2f 15 00 00 "PAR1"`, whose
+    /// footer claims 0x152f bytes of metadata. Upstream's push decoder underflows
+    /// on it (parquet `push_decoder.rs:391`). The guard turns that panic into a
+    /// decode failure, so every read reports the file corrupt.
+    #[test]
+    fn a_footer_claiming_more_metadata_than_the_file_is_corrupt() {
+        const DAY_NS: i64 = 86_400_000_000_000;
+        const REGRESSION: &[u8] = include_bytes!(
+            "../../../fuzz/regressions/parquet_file/min-crash-3c4803703fcac6d6394de27518277ee19c29540a"
+        );
+        assert_eq!(REGRESSION.len(), 21);
+        let footer_hint = u64::from(u32::from_le_bytes(REGRESSION[1..5].try_into().unwrap()));
+        let file = Bytes::copy_from_slice(&REGRESSION[13..]);
+        assert_eq!(
+            &file[..4],
+            &0x152f_u32.to_le_bytes(),
+            "the footer claims 0x152f bytes"
+        );
+        let size = u64::try_from(file.len()).unwrap();
+        let store: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let runtime = crate::fuzz_entry::runtime();
+
+        let traces = crate::fuzz_entry::parquet_meta(FileTable::Traces, size, footer_hint);
+        runtime.block_on(async {
+            store
+                .put(
+                    &ObjectPath::from(traces.path.as_str()),
+                    PutPayload::from(file.clone()),
+                )
+                .await
+                .unwrap();
+            let verdict = verify_file(&store, &traces).await;
+            assert!(
+                matches!(
+                    verdict,
+                    Verdict::Corrupt {
+                        reason: "decode failed"
+                    }
+                ),
+                "the footer is reported corrupt"
+            );
+            let mut anchors = crate::anchor::Anchors::new(DAY_NS);
+            assert!(
+                anchors
+                    .rebuild_file(&traces, Arc::clone(&store), 0)
+                    .await
+                    .is_err()
+            );
+        });
+
+        let spans = crate::fuzz_entry::parquet_meta(FileTable::Spans, size, footer_hint);
+        runtime.block_on(async {
+            store
+                .put(
+                    &ObjectPath::from(spans.path.as_str()),
+                    PutPayload::from(file),
+                )
+                .await
+                .unwrap();
+            let files = [Arc::new(spans)];
+            let read = crate::compaction::slice::time_values(
+                Arc::clone(&store),
+                &files,
+                cetra_core::schema::spans::START_TIME,
+            )
+            .await;
+            assert!(read.is_err(), "the start times do not read");
+        });
     }
 }

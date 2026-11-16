@@ -17,8 +17,8 @@ use sha2::Sha256;
 use crate::auth::AuthError;
 use crate::auth::secret::constant_time_eq;
 
-/// `llmobs_oauth`.
-pub(crate) const OAUTH_COOKIE: &str = llmobs_core::llmobs_name!("_oauth");
+/// `cetra_oauth`.
+pub(crate) const OAUTH_COOKIE: &str = cetra_core::cetra_name!("_oauth");
 
 /// Cookie lifetime. Ten minutes.
 const MAX_AGE_SECS: u64 = 600;
@@ -49,6 +49,15 @@ pub(crate) struct OAuthState {
     pub(crate) setup_token: Option<String>,
     /// `Clock::now_ns` when the cookie was issued.
     pub(crate) created_ns: i64,
+    /// The org of an org-provider login (D-P-65).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) org_id: Option<uuid::Uuid>,
+    /// An owner's Test sign-in of a disabled provider (D-P-57).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) test: bool,
+    /// The owner who started the Test sign-in; only that user may complete it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) test_owner: Option<uuid::Uuid>,
 }
 
 impl fmt::Debug for OAuthState {
@@ -58,6 +67,9 @@ impl fmt::Debug for OAuthState {
             .field("provider", &self.provider)
             .field("redirect", &self.redirect)
             .field("created_ns", &self.created_ns)
+            .field("org_id", &self.org_id)
+            .field("test", &self.test)
+            .field("test_owner", &self.test_owner)
             .finish_non_exhaustive()
     }
 }
@@ -207,6 +219,9 @@ mod tests {
             redirect: redirect.to_owned(),
             setup_token: None,
             created_ns,
+            org_id: None,
+            test: false,
+            test_owner: None,
         }
     }
 

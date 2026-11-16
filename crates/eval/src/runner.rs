@@ -8,9 +8,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use llmobs_core::ids::TraceId;
-use llmobs_core::score::ScoreValue;
-use llmobs_otel::{IngestContext, Normalized, PriceTable};
+use cetra_core::ids::TraceId;
+use cetra_core::score::ScoreValue;
+use cetra_otel::{IngestContext, Normalized, PriceTable};
 
 use crate::check::{CheckInput, run_check};
 use crate::config::{Check, Evaluator, EvaluatorConfig, JudgeConfig, WebhookConfig};
@@ -44,7 +44,7 @@ pub struct RunInput<'a> {
     pub target: EvalTarget,
     /// Rule, experiment, or the test panel.
     pub origin: EvalOrigin,
-    /// Id of the judge trace. A retry reuses the job's id.
+    /// Id of the judge trace. The server derives one per attempt (D-I-16).
     pub judge_trace_id: TraceId,
     /// Project, clock, and limits for normalization. The project is `project_id`.
     pub ingest: &'a IngestContext,

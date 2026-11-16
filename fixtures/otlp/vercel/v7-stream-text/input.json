@@ -41,8 +41,8 @@
           },
           "spans": [
             {
-              "traceId": "f86e5c7754c9181e677e8720e4204a85",
-              "spanId": "13f9ecf35f8da464",
+              "traceId": "21cc45aa17ce2c2c042dc6416055223f",
+              "spanId": "b138d4eededae715",
               "traceState": "",
               "parentSpanId": "",
               "flags": 257,
@@ -126,10 +126,10 @@
               "status": null
             },
             {
-              "traceId": "f86e5c7754c9181e677e8720e4204a85",
-              "spanId": "e8112ebd938c9ade",
+              "traceId": "21cc45aa17ce2c2c042dc6416055223f",
+              "spanId": "46c9fd575ae5a510",
               "traceState": "",
-              "parentSpanId": "13f9ecf35f8da464",
+              "parentSpanId": "b138d4eededae715",
               "flags": 257,
               "name": "step 1",
               "kind": 1,
@@ -151,15 +151,15 @@
               "status": null
             },
             {
-              "traceId": "f86e5c7754c9181e677e8720e4204a85",
-              "spanId": "380d862c550ff4b6",
+              "traceId": "21cc45aa17ce2c2c042dc6416055223f",
+              "spanId": "20b59deab1cb3993",
               "traceState": "",
-              "parentSpanId": "e8112ebd938c9ade",
+              "parentSpanId": "46c9fd575ae5a510",
               "flags": 257,
               "name": "chat gpt-4o-mini-2024-07-18",
               "kind": 3,
-              "startTimeUnixNano": "1767225590003000000",
-              "endTimeUnixNano": "1767225590195000000",
+              "startTimeUnixNano": "1767225590004000000",
+              "endTimeUnixNano": "1767225590196000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",
@@ -188,19 +188,19 @@
                 {
                   "key": "gen_ai.client.operation.duration",
                   "value": {
-                    "doubleValue": 0.191433788
+                    "doubleValue": 0.190894399
                   }
                 },
                 {
                   "key": "gen_ai.client.operation.time_to_first_chunk",
                   "value": {
-                    "doubleValue": 0.15777839400000002
+                    "doubleValue": 0.15756727200000004
                   }
                 },
                 {
                   "key": "gen_ai.client.operation.time_per_output_chunk",
                   "value": {
-                    "doubleValue": 0.004438502999999988
+                    "doubleValue": 0.004418998666666653
                   }
                 },
                 {

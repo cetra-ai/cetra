@@ -4,5 +4,5 @@
   "spec_refs": [
     "02 § Normalization rules / 15"
   ],
-  "notes": "Both spans are chain spans with the llmobs convention and no tokens. The root parentSpanId is 0000000000000000."
+  "notes": "Both spans are chain spans with the cetra convention and no tokens. The root parentSpanId is 0000000000000000."
 }

@@ -12,7 +12,7 @@
       "input": "[{\"role\":\"user\",\"parts\":[{\"type\":\"blob\",\"modality\":\"image\",\"mime_type\":\"image/png\",\"content\":\"YQ==\"}]}]",
       "input_format": "messages",
       "conventions": [
-        "llmobs"
+        "cetra"
       ],
       "ingest_time": "2026-01-01T00:00:00.000000000Z",
       "schema_version": 1

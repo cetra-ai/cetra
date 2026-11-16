@@ -4,8 +4,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use llmobs_core::enums::{ScoreSource, ScoreTargetKind};
-use llmobs_core::score::Score;
+use cetra_core::enums::{ScoreSource, ScoreTargetKind};
+use cetra_core::score::Score;
 use utoipa::openapi::path::{
     HttpMethod, OperationBuilder, Parameter, ParameterBuilder, ParameterIn, PathItem, Paths,
     PathsBuilder,
@@ -39,24 +39,48 @@ use super::alerts::{
     CreateAlertRuleRequest, CreateChannelRequest, DeliveryStatus, LatencyTarget,
     NotificationChannel, ScoreAggregation, UpdateAlertRuleRequest, UpdateChannelRequest,
 };
+use super::backfills::{Backfill, BackfillEstimate, BackfillStatus, CreateBackfillRequest};
 use super::common::{ExclusionParams, Limit, Page, PageParams, Problem, SortOrder, TimeParam};
 use super::connections::{
     ConnectionStatus, CreateLlmConnectionRequest, LlmAdapter, LlmConnection,
     LlmConnectionTestError, LlmConnectionTestResult, StructuredOutputMode, TestErrorClass,
     TestLlmConnectionRequest, UpdateLlmConnectionRequest,
 };
+use super::datasets::{
+    AddItemsRequest, AddItemsResponse, CreateDatasetRequest, Dataset, DatasetItem,
+    DatasetItemListParams, DatasetItemParams, DatasetListParams, DatasetVersion,
+    DatasetVersionListParams, ExportFormat, ExportParams, FromTraceRequest, ImportColumn,
+    ImportFormat, ImportMapping, ImportParams, ImportPreview, ImportResult, ImportRowError,
+    NewDatasetItem, PreviewParams, UpdateDatasetRequest, UpdateItemRequest,
+};
 use super::deletions::{
     CreateDeletion, Deletion, DeletionPreview, DeletionPreviewRequest, DropParams,
 };
 use super::entitlements::{
-    Feature, OrgEntitlements, OrgLimits, OrgPlan, PlanSource, PlanStatus, PutOrgTokenRequest,
+    Feature, OrgEntitlements, OrgLimits, OrgMonthUsage, OrgPlan, PlanSource, PlanStatus,
+    PutOrgTokenRequest, UsageNotice,
+};
+use super::eval_jobs::{
+    EvalJob, EvalJobKind, EvalJobListParams, EvalJobStatus, RunEvaluatorRequest,
 };
 use super::evaluators::{
     CreateEvaluatorRequest, Evaluator, EvaluatorKind, EvaluatorTemplate, EvaluatorTemplateList,
     EvaluatorTestError, EvaluatorTestRequest, EvaluatorTestResult, EvaluatorTestUsage,
     OutputScoreBody, TemplateMapping, TestEvaluatorBody, UpdateEvaluatorRequest,
 };
-use super::internal::{CreateInternalOrgRequest, InternalOrg, InternalOwner};
+use super::experiments::{
+    CompareCell, CompareParams, CompareRow, CreateExperimentRequest, CreateExperimentResponse,
+    Experiment, ExperimentComparison, ExperimentListParams, ExperimentResult, ExperimentResults,
+    ExperimentResultsRequest, ExperimentResultsResponse, ExperimentStatus, ExperimentSummary,
+    FinishExperimentRequest, ResultRow, ResultScore, ResultsParams, ScoreDelta, ScoreDeltas,
+    ScoreSummary,
+};
+use super::internal::{
+    CreateInternalOrgRequest, InternalDrop, InternalDropKind, InternalDropsQuery, InternalMember,
+    InternalMembers, InternalMembersQuery, InternalOrg, InternalOwner, InternalUsageQuery,
+    InternalUsageRow, InternalUserDeleted, InternalUserRef, MembershipLookup,
+    MembershipLookupRequest, MembershipOrg,
+};
 use super::invites::{CreateInviteRequest, CreatedInvite, Invite, InvitePreview};
 use super::keys::{
     ApiKey as ProjectApiKey, CreateApiKeyRequest, CreatePersonalTokenRequest, CreatedApiKey,
@@ -64,6 +88,19 @@ use super::keys::{
 };
 use super::members::{OrgMember, ProjectMember, SetProjectOverrideRequest, UpdateOrgMemberRequest};
 use super::metrics::{MetricsBucket, MetricsGroupBy, MetricsParams, MetricsResponse};
+use super::model_prices::{
+    ModelPrice, ModelPriceInput, ModelPriceListParams, ModelPriceResolution,
+    ModelPriceResolveParams, ModelPriceScope, ModelPriceTier,
+};
+use super::online_rules::{
+    BudgetPeriod, CreateOnlineRuleRequest, JobCounts, OnlineRule, OnlineRulePage,
+    OnlineRulePreview, OnlineRulePreviewRequest, PauseReason, RuleSpend, RuleTarget,
+    UpdateOnlineRuleRequest,
+};
+use super::org_sso::{
+    AddOrgSsoDomain, DomainStatus, JitRole, OrgSso, OrgSsoDomain, OrgSsoProvider, PatchOrgSso,
+    PutOrgSsoProvider, SsoDiscoverRequest, SsoDiscovery,
+};
 use super::saved_views::{CreateSavedView, SavedView, SavedViewListParams, UpdateSavedView};
 use super::schema::SchemaResponse;
 use super::score_definitions::{
@@ -80,10 +117,11 @@ use super::traces::{
     SpanDetail, SpanListParams, SpanSort, SpanSummary, TraceDetail, TraceDetailParams,
     TraceListParams, TraceSort, TraceStreamParams, TraceSummary,
 };
+use super::usage::{OrgUsage, UsageDay, UsageParams};
 use super::users::{EndUserDetail, EndUserSummary, UserListParams, UserSort};
 
 const PROJECT: &str = "/api/v1/projects/{project}";
-const COOKIE_NAME: &str = concat!(llmobs_core::llmobs_name!(), "_session");
+const COOKIE_NAME: &str = concat!(cetra_core::cetra_name!(), "_session");
 
 const AUTH_ERRORS: &[u16] = &[401, 403, 404, 429];
 const QUERY_ERRORS: &[u16] = &[400, 401, 403, 404, 429];
@@ -155,6 +193,20 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<AdminSettings>();
     set.insert::<AdminLicense>();
     set.insert::<OrgEntitlements>();
+    set.insert::<OrgMonthUsage>();
+    set.insert::<UsageNotice>();
+    set.insert::<OrgUsage>();
+    set.insert::<UsageDay>();
+    set.insert::<JitRole>();
+    set.insert::<OrgSsoProvider>();
+    set.insert::<DomainStatus>();
+    set.insert::<OrgSsoDomain>();
+    set.insert::<OrgSso>();
+    set.insert::<PutOrgSsoProvider>();
+    set.insert::<AddOrgSsoDomain>();
+    set.insert::<PatchOrgSso>();
+    set.insert::<SsoDiscoverRequest>();
+    set.insert::<SsoDiscovery>();
     set.insert::<OrgPlan>();
     set.insert::<PlanSource>();
     set.insert::<PlanStatus>();
@@ -163,6 +215,16 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<CreateInternalOrgRequest>();
     set.insert::<InternalOwner>();
     set.insert::<InternalOrg>();
+    set.insert::<InternalUserRef>();
+    set.insert::<InternalUserDeleted>();
+    set.insert::<MembershipLookupRequest>();
+    set.insert::<MembershipOrg>();
+    set.insert::<MembershipLookup>();
+    set.insert::<InternalMember>();
+    set.insert::<InternalMembers>();
+    set.insert_page::<InternalUsageRow>("InternalUsagePage");
+    set.insert::<InternalDropKind>();
+    set.insert_page::<InternalDrop>("InternalDropPage");
     set.insert::<Feature>();
     set.insert::<OrgMembership>();
     set.insert::<CreateOrgRequest>();
@@ -245,6 +307,51 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<CreateScoreDefinitionRequest>();
     set.insert::<UpdateScoreDefinitionRequest>();
     set.insert_page::<ScoreDefinition>("ScoreDefinitionPage");
+    set.insert::<Dataset>();
+    set.insert::<CreateDatasetRequest>();
+    set.insert::<UpdateDatasetRequest>();
+    set.insert_page::<Dataset>("DatasetPage");
+    set.insert::<DatasetVersion>();
+    set.insert::<DatasetItem>();
+    set.insert::<NewDatasetItem>();
+    set.insert::<AddItemsRequest>();
+    set.insert::<AddItemsResponse>();
+    set.insert::<UpdateItemRequest>();
+    set.insert::<FromTraceRequest>();
+    set.insert_page::<DatasetVersion>("DatasetVersionPage");
+    set.insert_page::<DatasetItem>("DatasetItemPage");
+    set.insert::<ImportFormat>();
+    set.insert::<ExportFormat>();
+    set.insert::<ImportColumn>();
+    set.insert::<ImportMapping>();
+    set.insert::<ImportRowError>();
+    set.insert::<ImportPreview>();
+    set.insert::<ImportResult>();
+    set.insert::<Experiment>();
+    set.insert::<ExperimentStatus>();
+    set.insert::<CreateExperimentRequest>();
+    set.insert::<CreateExperimentResponse>();
+    set.insert::<ExperimentResult>();
+    set.insert::<ExperimentResultsRequest>();
+    set.insert::<ExperimentResultsResponse>();
+    set.insert::<FinishExperimentRequest>();
+    set.insert_page::<Experiment>("ExperimentPage");
+    set.insert::<ExperimentSummary>();
+    set.insert::<ScoreSummary>();
+    set.insert::<ResultScore>();
+    set.insert::<ResultRow>();
+    set.insert::<ExperimentResults>();
+    set.insert::<CompareCell>();
+    set.insert::<CompareRow>();
+    set.insert::<ScoreDelta>();
+    set.insert::<ScoreDeltas>();
+    set.insert::<ExperimentComparison>();
+    set.insert::<ModelPriceScope>();
+    set.insert::<ModelPriceTier>();
+    set.insert::<ModelPrice>();
+    set.insert::<ModelPriceInput>();
+    set.insert::<ModelPriceResolution>();
+    set.insert_page::<ModelPrice>("ModelPricePage");
     set.insert::<ChannelKind>();
     set.insert::<DeliveryStatus>();
     set.insert::<ChannelDelivery>();
@@ -268,6 +375,27 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<AlertEvent>();
     set.insert_page::<AlertRule>("AlertRulePage");
     set.insert_page::<AlertEvent>("AlertEventPage");
+    set.insert::<BudgetPeriod>();
+    set.insert::<RuleTarget>();
+    set.insert::<PauseReason>();
+    set.insert::<RuleSpend>();
+    set.insert::<JobCounts>();
+    set.insert::<OnlineRule>();
+    set.insert::<OnlineRulePage>();
+    set.insert::<CreateOnlineRuleRequest>();
+    set.insert::<UpdateOnlineRuleRequest>();
+    set.insert::<OnlineRulePreviewRequest>();
+    set.insert::<OnlineRulePreview>();
+    set.insert::<EvalJobKind>();
+    set.insert::<EvalJobStatus>();
+    set.insert::<EvalJob>();
+    set.insert_page::<EvalJob>("EvalJobPage");
+    set.insert::<RunEvaluatorRequest>();
+    set.insert::<BackfillStatus>();
+    set.insert::<Backfill>();
+    set.insert_page::<Backfill>("BackfillPage");
+    set.insert::<CreateBackfillRequest>();
+    set.insert::<BackfillEstimate>();
     set
 }
 
@@ -322,7 +450,7 @@ pub fn openapi() -> OpenApi {
     let mut document = OpenApiBuilder::new()
         .info(
             InfoBuilder::new()
-                .title(concat!(llmobs_core::llmobs_name!(), " API"))
+                .title(concat!(cetra_core::cetra_name!(), " API"))
                 .version(env!("CARGO_PKG_VERSION"))
                 .description(Some(
                     "Observability read API. The rules are in docs/spec/09-api.md.",
@@ -357,6 +485,12 @@ pub fn openapi() -> OpenApi {
                 "score_definitions",
                 "Named score shapes that score writes and evaluators must fit.",
             ),
+            tag("datasets", "Versioned datasets and their items."),
+            tag(
+                "experiments",
+                "Experiments run by the SDK and their results.",
+            ),
+            tag("model_prices", "Custom and built-in model prices"),
             tag("schema", "Filter and SQL catalog."),
             tag("saved_views", "Saved list views and SQL queries."),
             tag("sql", "SQL console over the project's views."),
@@ -387,7 +521,8 @@ pub fn openapi() -> OpenApi {
 ///
 /// utoipa marks every `Option<T>` nullable. This removes `null` from every property
 /// that is not `required` and from every optional query parameter. The D65 message and
-/// part components are skipped: their optional fields can really be `null`.
+/// part components are skipped: their optional fields can really be `null`. So are the
+/// `NULL_IS_A_VALUE` properties.
 fn drop_null_from_omitted_optionals(openapi: &mut OpenApi) {
     let skip = d65_component_names();
     if let Some(components) = openapi.components.as_mut() {
@@ -395,7 +530,11 @@ fn drop_null_from_omitted_optionals(openapi: &mut OpenApi) {
             if skip.contains(name.as_str()) {
                 continue;
             }
+            let kept = take_null_is_a_value(name, schema);
             strip_nested(schema);
+            if let RefOr::T(Schema::Object(object)) = schema {
+                object.properties.extend(kept);
+            }
         }
     }
     for path_item in openapi.paths.paths.values_mut() {
@@ -412,10 +551,34 @@ fn drop_null_from_omitted_optionals(openapi: &mut OpenApi) {
     }
 }
 
+/// Properties where `null` is a value of their own, so the contract keeps it: `null`
+/// on a request means "keep data forever", while an absent field leaves the default
+/// (spec 09). The server takes both (`api/account.rs`).
+const NULL_IS_A_VALUE: &[(&str, &str)] = &[
+    ("CreateProjectRequest", "retention_days"),
+    ("UpdateProjectRequest", "retention_days"),
+    ("UpdateDatasetRequest", "description"),
+    ("UpdateDatasetRequest", "input_schema"),
+    ("UpdateDatasetRequest", "expected_schema"),
+];
+
+/// Removes the `NULL_IS_A_VALUE` properties of `name` from `schema` so that
+/// [`strip_nested`] leaves them alone. The caller puts them back.
+fn take_null_is_a_value(name: &str, schema: &mut RefOr<Schema>) -> BTreeMap<String, RefOr<Schema>> {
+    let RefOr::T(Schema::Object(object)) = schema else {
+        return BTreeMap::new();
+    };
+    NULL_IS_A_VALUE
+        .iter()
+        .filter(|(component, _)| *component == name)
+        .filter_map(|(_, field)| object.properties.remove_entry(*field))
+        .collect()
+}
+
 fn d65_component_names() -> BTreeSet<String> {
     let mut names = BTreeSet::new();
-    names.insert(<llmobs_core::message::Message as ToSchema>::name().into_owned());
-    for name in llmobs_core::message::part_component_names() {
+    names.insert(<cetra_core::message::Message as ToSchema>::name().into_owned());
+    for name in cetra_core::message::part_component_names() {
         names.insert((*name).to_owned());
     }
     names
@@ -638,6 +801,7 @@ fn paths() -> Paths {
     let paths = auth_paths(paths);
     let paths = admin_paths(paths);
     let paths = invite_paths(paths);
+    let paths = org_sso_paths(paths);
     let paths = project_paths(paths);
     let paths = member_paths(paths);
     let paths = connection_paths(paths);
@@ -647,7 +811,14 @@ fn paths() -> Paths {
     let paths = session_paths(paths);
     let paths = score_paths(paths);
     let paths = evaluator_paths(paths);
+    let paths = online_rule_paths(paths);
+    let paths = eval_job_paths(paths);
+    let paths = backfill_paths(paths);
     let paths = score_definition_paths(paths);
+    let paths = dataset_paths(paths);
+    let paths = experiment_paths(paths);
+    let paths = model_price_paths(paths);
+    let paths = org_model_price_paths(paths);
     let paths = saved_view_paths(paths);
     let paths = sql_paths(paths);
     let paths = deletion_paths(paths);
@@ -764,7 +935,7 @@ fn auth_paths(paths: PathsBuilder) -> PathsBuilder {
         "Start an OAuth or OIDC login",
     )
     .description(Some(
-        "Redirects to the provider and sets the `llmobs_oauth` cookie. `redirect` is kept when it \
+        "Redirects to the provider and sets the `cetra_oauth` cookie. `redirect` is kept when it \
          starts with `/`, does not start with `//` or `/\\`, is at most 1024 bytes, and contains \
          no ASCII control character. Otherwise the browser returns to `/`. An unknown provider is \
          404. When metadata cannot be loaded, the response redirects to \
@@ -802,7 +973,7 @@ fn auth_paths(paths: PathsBuilder) -> PathsBuilder {
         "Clears the login cookie. Success sets the session cookie and redirects to the saved \
          relative path. Failure redirects to `/login?error=<code>`. Codes: `invalid_state`, \
          `provider_error`, `provider_unavailable`, `email_not_verified`, `domain_not_allowed`, \
-         `signup_closed`, `account_disabled`, `link_refused`, `setup_required`.",
+         `signup_closed`, `account_disabled`, `link_refused`, `setup_required`, `seat_limit`, `sso_unavailable`, `sso_required`. The provider is `github`, `google`, `oidc:<name>`, or `sso` (an org's provider, started through `/api/auth/sso/authorize`).",
     ))
     .securities(Some(Vec::new()))
     .parameters(Some(vec![
@@ -987,7 +1158,54 @@ fn auth_paths(paths: PathsBuilder) -> PathsBuilder {
             &[401, 403, 404, 429],
         ))
         .build();
+    let sso_authorize = operation(
+        "get_sso_authorize",
+        "auth",
+        "Start an org's single sign-on login",
+    )
+    .description(Some(
+        "Starts a login through the identity provider of the org that owns the email domain (D-P-60). A domain that is not verified, a disabled provider (except for an owner's Test sign-in, D-P-57) and an unknown domain all redirect to `/login?error=sso_unavailable` with no cookie. Discovery and authorize share 300 requests a minute per client IP; a burst over that is 429. `redirect` is kept as for the instance providers.",
+    ))
+    .securities(Some(Vec::new()))
+    .parameters(Some(vec![
+        query_string("domain", "The email domain, e.g. `acme.com`.", false),
+        query_string(
+            "redirect",
+            "Relative path to open after a successful login.",
+            false,
+        ),
+    ]))
+    .responses(responses(
+        "302",
+        redirect_to("Redirect to the identity provider, or to `/login?error=sso_unavailable`."),
+        &[429],
+    ))
+    .build();
+    let sso_discover = operation(
+        "post_sso_discover",
+        "auth",
+        "Ask whether an email's domain signs in through an org",
+    )
+    .description(Some(
+        "Answers whether the email's domain has an org provider that is enabled (D-P-60). The answer depends only on the domain, so no account is needed and nothing is logged. Shares the per-IP bucket of 300 a minute with `/api/auth/sso/authorize`; over it is 429.",
+    ))
+    .securities(Some(Vec::new()))
+    .request_body(Some(json_body("SsoDiscoverRequest")))
+    .responses(responses(
+        "200",
+        json_of::<SsoDiscovery>("Whether the domain signs in through an org."),
+        &[400, 429],
+    ))
+    .build();
     paths
+        .path(
+            "/api/auth/sso/discover",
+            PathItem::new(HttpMethod::Post, sso_discover),
+        )
+        .path(
+            "/api/auth/sso/authorize",
+            PathItem::new(HttpMethod::Get, sso_authorize),
+        )
         .path(
             "/api/auth/authorize/{provider}",
             PathItem::new(HttpMethod::Get, authorize),
@@ -1033,6 +1251,158 @@ fn auth_paths(paths: PathsBuilder) -> PathsBuilder {
         )
 }
 
+fn org_sso_paths(paths: PathsBuilder) -> PathsBuilder {
+    let session_only = vec![SecurityRequirement::new("session", [] as [&str; 0])];
+    let org_param = path_string("org", "Org UUID or slug.");
+    let get = operation(
+        "get_org_sso",
+        "orgs",
+        "Read the org's identity provider and domains",
+    )
+    .description(Some(
+        "The provider without its client secret, the email domains with their TXT records, and the callback URL. Owners only, session only (D-P-51). Needs no feature, so the settings stay readable after a lapse (D-P-61).",
+    ))
+    .securities(Some(session_only.clone()))
+    .parameters(Some(vec![org_param.clone()]))
+    .responses(responses(
+        "200",
+        json_of::<OrgSso>("The org's SSO settings."),
+        AUTH_ERRORS,
+    ))
+    .build();
+    let put = operation(
+        "put_org_sso_provider",
+        "orgs",
+        "Save the org's identity provider",
+    )
+    .description(Some(
+        "Creates or updates the org's one OIDC provider (D-P-52). The issuer's discovery document is loaded before anything is stored. The client secret is write-only: it is needed when creating, and when the issuer or client id changes. A new issuer deletes the org's identities. Needs the Teams add-on or an enterprise licence (D-P-61). Owners only, session only (D-P-51).",
+    ))
+    .securities(Some(session_only.clone()))
+    .parameters(Some(vec![org_param.clone()]))
+    .request_body(Some(json_body("PutOrgSsoProvider")))
+    .responses(responses(
+        "200",
+        json_of::<OrgSso>("The saved SSO settings."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    let delete = operation(
+        "delete_org_sso_provider",
+        "orgs",
+        "Remove the org's identity provider",
+    )
+    .description(Some(
+        "Turn enforcement off first (409 otherwise). The org's identities for the provider go with it. Owners only, session only (D-P-51).",
+    ))
+    .securities(Some(session_only))
+    .parameters(Some(vec![org_param]))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new()
+            .description("The provider is removed.")
+            .build(),
+        &[401, 403, 404, 409, 429],
+    ))
+    .build();
+    let mut provider = PathItem::new(HttpMethod::Put, put);
+    provider.delete = Some(delete);
+    let patch_settings = operation(
+        "patch_org_sso",
+        "orgs",
+        "Turn the org's identity provider on, off or enforced",
+    )
+    .description(Some(
+        "Sets `enabled` and `enforced`, each optional (D-P-57, D-P-58, D-P-61). Turning enforcement on needs a verified domain, a sign-in through the provider, and this session's own sign-in through it when the caller's domain is covered. It revokes the password sessions and personal access tokens of the covered users, except instance admins (D-P-58). A provider cannot be disabled while enforced. Owners only, session only (D-P-51).",
+    ))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
+    .parameters(Some(vec![path_string("org", "Org UUID or slug.")]))
+    .request_body(Some(json_body("PatchOrgSso")))
+    .responses(responses(
+        "200",
+        json_of::<OrgSso>("The SSO settings."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    let add_domain = operation(
+        "post_org_sso_domain",
+        "orgs",
+        "Add an email domain to the org's SSO",
+    )
+    .description(Some(
+        "Adds a pending domain (D-P-54). The domain is trimmed, lowercased and checked as a DNS name; a domain the server configuration owns is refused. Prove it with the TXT record of the response, then call the verify route. Up to 20 domains per org. Needs the Teams add-on or an enterprise licence (D-P-61). Owners only, session only.",
+    ))
+    .securities(Some(vec![SecurityRequirement::new("session", [] as [&str; 0])]))
+    .parameters(Some(vec![path_string("org", "Org UUID or slug.")]))
+    .request_body(Some(json_body("AddOrgSsoDomain")))
+    .responses(responses(
+        "201",
+        json_of::<OrgSso>("The SSO settings, with the new domain pending."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    let verify = operation(
+        "post_org_sso_domain_verify",
+        "orgs",
+        "Verify an email domain with its DNS TXT record",
+    )
+    .description(Some(
+        "Looks up `_cetra-verify.<domain>` and verifies the domain when its value `cetra-verify=<token>` is there (D-P-54, D-P-64). An already verified domain answers 200 without a lookup. A domain another org holds moves to this org only when the holder's record is gone from the answer. At most 10 lookups per minute per org. A failed lookup answers 503. Needs the Teams add-on or an enterprise licence (D-P-61). Owners only, session only.",
+    ))
+    .securities(Some(vec![SecurityRequirement::new("session", [] as [&str; 0])]))
+    .parameters(Some(vec![
+        path_string("org", "Org UUID or slug."),
+        path_uuid("id", "Domain id."),
+    ]))
+    .responses(responses(
+        "200",
+        json_of::<OrgSso>("The SSO settings, with the domain verified."),
+        &[401, 403, 404, 409, 429, 503],
+    ))
+    .build();
+    let remove_domain = operation(
+        "delete_org_sso_domain",
+        "orgs",
+        "Remove an email domain from the org's SSO",
+    )
+    .description(Some(
+        "Removes the domain, verified or not. The org stops routing its users through the provider. Owners only, session only (D-P-51).",
+    ))
+    .securities(Some(vec![SecurityRequirement::new("session", [] as [&str; 0])]))
+    .parameters(Some(vec![
+        path_string("org", "Org UUID or slug."),
+        path_uuid("id", "Domain id."),
+    ]))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new()
+            .description("The domain is removed.")
+            .build(),
+        AUTH_ERRORS,
+    ))
+    .build();
+    let mut settings = PathItem::new(HttpMethod::Get, get);
+    settings.patch = Some(patch_settings);
+    paths
+        .path("/api/v1/orgs/{org}/sso", settings)
+        .path("/api/v1/orgs/{org}/sso/provider", provider)
+        .path(
+            "/api/v1/orgs/{org}/sso/domains",
+            PathItem::new(HttpMethod::Post, add_domain),
+        )
+        .path(
+            "/api/v1/orgs/{org}/sso/domains/{id}/verify",
+            PathItem::new(HttpMethod::Post, verify),
+        )
+        .path(
+            "/api/v1/orgs/{org}/sso/domains/{id}",
+            PathItem::new(HttpMethod::Delete, remove_domain),
+        )
+}
+
 fn invite_paths(paths: PathsBuilder) -> PathsBuilder {
     let session_only = vec![SecurityRequirement::new("session", [] as [&str; 0])];
     let org_param = path_string("org", "Org UUID or slug.");
@@ -1048,7 +1418,10 @@ fn invite_paths(paths: PathsBuilder) -> PathsBuilder {
         ))
         .build();
     let create = operation("post_org_invite", "orgs", "Invite a member by email")
-        .securities(Some(session_only.clone()))
+        .securities(Some(vec![SecurityRequirement::new(
+            "session",
+            [] as [&str; 0],
+        )]))
         .parameters(Some(vec![org_param.clone()]))
         .request_body(Some(json_body("CreateInviteRequest")))
         .responses(responses(
@@ -1149,10 +1522,14 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
         .build();
     let mut orgs = PathItem::new(HttpMethod::Get, list_orgs);
     orgs.post = Some(post_org);
-    let delete_org = operation("delete_org", "orgs", "Delete an organization (owners)")
+    let delete_org = operation("delete_org", "orgs", "Delete an organization (owners, session only)")
         .description(Some(
-            "Answers 202; the organization and all its projects are erased in the background. Its deletion record is then kept in the database and the audit log only.",
+            "Answers 202; the organization and all its projects are erased in the background. Its deletion record is then kept in the database and the audit log only. Needs a browser session: API keys and personal access tokens get 403 (D-P-70).",
         ))
+        .securities(Some(vec![SecurityRequirement::new(
+            "session",
+            [] as [&str; 0],
+        )]))
         .parameters(Some(with_query::<DropParams>(vec![path_string(
             "org",
             "Org UUID or slug.",
@@ -1178,6 +1555,20 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
         AUTH_ERRORS,
     ))
     .build();
+    let get_usage = operation("get_org_usage", "orgs", "Read the org's usage by day")
+        .description(Some(
+            "Units, bytes and judge usage per UTC day, summed over the org's projects (D-P-42). `from` and `to` are inclusive days; the default is this month to today, and `to - from` is at most 365 days. Today's row counts flushed usage only, up to 10 seconds behind. Any org member.",
+        ))
+        .parameters(Some(with_query::<UsageParams>(vec![path_string(
+            "org",
+            "Org UUID or slug.",
+        )])))
+        .responses(responses(
+            "200",
+            json_of::<OrgUsage>("The org's usage by day."),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
     let put_entitlements = operation(
         "put_org_entitlements_token",
         "internal",
@@ -1199,7 +1590,7 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
     .build();
     let post_internal_org = operation("post_internal_org", "internal", "Create an org")
         .description(Some(
-            "Needs a `control_plane` bearer token with the `orgs` scope. The id is the control plane's, and it is a UUIDv7. An existing id answers 200 with the stored org and changes nothing. A new id creates the org and makes the owner its owner: a new user is created verified without a password, and an existing user is reused. A disabled user or an instance admin cannot be the owner (422 `owner_not_allowed`).",
+            "Needs a `control_plane` bearer token with the `orgs` scope. The id is the control plane's, and it is a UUIDv7. An existing id answers 200 with the stored org and changes nothing. A new id creates the org and makes the owner its owner: a new user is created verified without a password, and an existing user is reused. A disabled user or an instance admin cannot be the owner (422 `owner_not_allowed`). An id that is being deleted, or was deleted, answers 409 `conflict`; a deleted id is never reused.",
         ))
         .securities(Some(vec![SecurityRequirement::new(
             "bearer",
@@ -1214,9 +1605,151 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
                     json_of::<InternalOrg>("The org with this id already exists."),
                 ),
             ],
-            &[400, 401, 403, 422, 429],
+            &[400, 401, 403, 409, 422, 429],
         ))
         .build();
+    let delete_internal_org = operation("delete_internal_org", "internal", "Drop an org")
+        .description(Some(
+            "Needs a `control_plane` bearer token with the `orgs` scope. Starts the org's drop (D-M-7) with no confirm: the org is gone from every route at once, and its projects and data are erased in the background. Answers 202 with the deletion while it runs and 200 once it is applied. Repeats answer for the org's newest org deletion, so the call is idempotent. An org that was never dropped answers 404.",
+        ))
+        .securities(Some(vec![SecurityRequirement::new(
+            "bearer",
+            [] as [&str; 0],
+        )]))
+        .parameters(Some(vec![path_uuid("org_id", "Org UUID.")]))
+        .responses(responses_with(
+            [
+                (
+                    "202",
+                    json_of::<Deletion>("The org drop, in status pending or resolving."),
+                ),
+                ("200", json_of::<Deletion>("The org drop is applied.")),
+            ],
+            &[401, 403, 404, 429],
+        ))
+        .build();
+    let list_internal_usage = operation("list_internal_usage", "internal", "List org usage by day")
+        .description(Some(
+            "Needs a `control_plane` bearer token with the `usage` scope. Usage per UTC day and org, summed over the org's projects, ordered by day and then org id, keyset-paged. `from` and `to` are required inclusive days, and `to - from` is at most 92 days. Rows of deleted orgs stay.",
+        ))
+        .securities(Some(vec![SecurityRequirement::new(
+            "bearer",
+            [] as [&str; 0],
+        )]))
+        .parameters(Some(with_query::<InternalUsageQuery>(Vec::new())))
+        .responses(responses(
+            "200",
+            json_named("InternalUsagePage", "One page of org usage by day."),
+            &[400, 401, 403, 429],
+        ))
+        .build();
+    let list_internal_deletions = operation(
+        "list_internal_deletions",
+        "internal",
+        "List applied org and project drops",
+    )
+    .description(Some(
+        "Needs a `control_plane` bearer token with the `deletions` scope. Applied project and org drops, oldest first, keyset-paged, for the control plane's billing and records. Rows are kept forever. `kind` narrows to `project` or `org`.",
+    ))
+    .securities(Some(vec![SecurityRequirement::new(
+        "bearer",
+        [] as [&str; 0],
+    )]))
+    .parameters(Some(with_query::<InternalDropsQuery>(Vec::new())))
+    .responses(responses(
+        "200",
+        json_named("InternalDropPage", "One page of applied drops, oldest first."),
+        &[400, 401, 403, 429],
+    ))
+    .build();
+    let internal_user_security = || vec![SecurityRequirement::new("bearer", [] as [&str; 0])];
+    let post_internal_user_revoke = operation(
+        "post_internal_user_revoke",
+        "internal",
+        "End a user's sessions and personal tokens",
+    )
+    .description(Some(
+        "Needs a `control_plane` bearer token with the `users` scope. The user is named by its OIDC subject at the control plane's provider (`entitlements.control_plane_provider`), or, when no identity has that subject, by its email if that user has no identity at that provider (D-S-9). The email is checked only then (400 for an invalid one). Deletes the user's web sessions and revokes its personal tokens; the user can sign in again. An instance admin cannot be managed (403 `forbidden`). An unknown user answers 404.",
+    ))
+    .securities(Some(internal_user_security()))
+    .request_body(Some(json_body("InternalUserRef")))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new()
+            .description("The user's sessions and tokens were revoked.")
+            .build(),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    let post_internal_user_disable = operation(
+        "post_internal_user_disable",
+        "internal",
+        "Disable a user",
+    )
+    .description(Some(
+        "Needs a `control_plane` bearer token with the `users` scope. The user is named by its OIDC subject at the control plane's provider (`entitlements.control_plane_provider`), or, when no identity has that subject, by its email if that user has no identity at that provider (D-S-9). The email is checked only then (400 for an invalid one). Revokes the user's sessions and personal tokens, as `revoke` does, and sets the user disabled. Unlike the instance admin's disable, the last owner of an org may be disabled: the org stays. An instance admin cannot be managed (403 `forbidden`). An unknown user answers 404.",
+    ))
+    .securities(Some(internal_user_security()))
+    .request_body(Some(json_body("InternalUserRef")))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new()
+            .description("The user is disabled and its access is revoked.")
+            .build(),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    let post_internal_user_delete = operation(
+        "post_internal_user_delete",
+        "internal",
+        "Delete a user",
+    )
+    .description(Some(
+        "Needs a `control_plane` bearer token with the `users` scope. The user is named by its OIDC subject at the control plane's provider (`entitlements.control_plane_provider`), or, when no identity has that subject, by its email if that user has no identity at that provider (D-S-9). The email is checked only then (400 for an invalid one). Deletes the user in one transaction. Its invites and API keys stay, without their creator. Orgs where the user was the only owner stay, without an owner, and are listed in `sole_owner_of` for the control plane to resolve. An unknown user answers 200 with an empty list, so a retry is safe. An instance admin cannot be managed (403 `forbidden`).",
+    ))
+    .securities(Some(internal_user_security()))
+    .request_body(Some(json_body("InternalUserRef")))
+    .responses(responses(
+        "200",
+        json_of::<InternalUserDeleted>("The user is deleted, with the orgs it solely owned."),
+        &[400, 401, 403, 429],
+    ))
+    .build();
+    let post_membership_lookup = operation(
+        "post_internal_membership_lookup",
+        "internal",
+        "Look up a user's memberships",
+    )
+    .description(Some(
+        "Needs a `control_plane` bearer token with the `members` scope. The user is the one whose OIDC subject at the control plane's provider (`entitlements.control_plane_provider`) matches `subject`; when no identity has the subject, the user with `email`. Lists the user's active orgs sorted by slug. An unknown user answers 200 with no orgs; an invalid email answers 400 only when the subject finds no user.",
+    ))
+    .securities(Some(internal_user_security()))
+    .request_body(Some(json_body("MembershipLookupRequest")))
+    .responses(responses(
+        "200",
+        json_of::<MembershipLookup>("The user's active memberships."),
+        &[400, 401, 403, 429],
+    ))
+    .build();
+    let list_internal_org_members = operation(
+        "list_internal_org_members",
+        "internal",
+        "List an org's members",
+    )
+    .description(Some(
+        "Needs a `control_plane` bearer token with the `members` scope. Members ordered by email, with the email the control plane matches accounts by. `role` is a comma-separated list of `owner`, `admin`, `member` and `viewer`; without it every member is listed. An unknown or inactive org answers 404.",
+    ))
+    .securities(Some(internal_user_security()))
+    .parameters(Some(with_query::<InternalMembersQuery>(vec![path_uuid(
+        "org_id",
+        "Org UUID.",
+    )])))
+    .responses(responses(
+        "200",
+        json_of::<InternalMembers>("The org's members."),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
     let mut org = PathItem::new(HttpMethod::Get, get_org);
     org.patch = Some(patch_org);
     org.delete = Some(delete_org);
@@ -1225,11 +1758,15 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
     let delete_project = operation(
         "delete_project",
         "projects",
-        "Delete a project (org admins; API keys are refused)",
+        "Delete a project (org admins; session only)",
     )
     .description(Some(
-        "Answers 202; the project is gone from every route at once and its data is erased in the background.",
+        "Answers 202; the project is gone from every route at once and its data is erased in the background. Needs a browser session: API keys and personal access tokens get 403 (D-P-70).",
     ))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
     .parameters(Some(with_query::<DropParams>(vec![project_param()])))
     .responses(responses(
         "202",
@@ -1248,12 +1785,48 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
             PathItem::new(HttpMethod::Get, get_entitlements),
         )
         .path(
+            "/api/v1/orgs/{org}/usage",
+            PathItem::new(HttpMethod::Get, get_usage),
+        )
+        .path(
             "/api/internal/v1/orgs/{org_id}/entitlements",
             PathItem::new(HttpMethod::Put, put_entitlements),
         )
         .path(
             "/api/internal/v1/orgs",
             PathItem::new(HttpMethod::Post, post_internal_org),
+        )
+        .path(
+            "/api/internal/v1/orgs/{org_id}",
+            PathItem::new(HttpMethod::Delete, delete_internal_org),
+        )
+        .path(
+            "/api/internal/v1/usage",
+            PathItem::new(HttpMethod::Get, list_internal_usage),
+        )
+        .path(
+            "/api/internal/v1/deletions",
+            PathItem::new(HttpMethod::Get, list_internal_deletions),
+        )
+        .path(
+            "/api/internal/v1/users/revoke",
+            PathItem::new(HttpMethod::Post, post_internal_user_revoke),
+        )
+        .path(
+            "/api/internal/v1/users/disable",
+            PathItem::new(HttpMethod::Post, post_internal_user_disable),
+        )
+        .path(
+            "/api/internal/v1/users/delete",
+            PathItem::new(HttpMethod::Post, post_internal_user_delete),
+        )
+        .path(
+            "/api/internal/v1/memberships/lookup",
+            PathItem::new(HttpMethod::Post, post_membership_lookup),
+        )
+        .path(
+            "/api/internal/v1/orgs/{org_id}/members",
+            PathItem::new(HttpMethod::Get, list_internal_org_members),
         )
         .path("/api/v1/orgs/{org}/projects", projects)
         .path("/api/v1/projects/{project}", project)
@@ -1272,7 +1845,10 @@ fn member_paths(paths: PathsBuilder) -> PathsBuilder {
         ))
         .build();
     let patch_org = operation("patch_org_member", "orgs", "Change an organization role")
-        .securities(Some(session_only.clone()))
+        .securities(Some(vec![SecurityRequirement::new(
+            "session",
+            [] as [&str; 0],
+        )]))
         .parameters(Some(vec![org_param, user_param.clone()]))
         .request_body(Some(json_body("UpdateOrgMemberRequest")))
         .responses(responses(
@@ -1282,7 +1858,10 @@ fn member_paths(paths: PathsBuilder) -> PathsBuilder {
         ))
         .build();
     let delete_org = operation("delete_org_member", "orgs", "Remove an organization member")
-        .securities(Some(session_only.clone()))
+        .securities(Some(vec![SecurityRequirement::new(
+            "session",
+            [] as [&str; 0],
+        )]))
         .parameters(Some(vec![
             path_string("org", "Org UUID or slug."),
             user_param.clone(),
@@ -1311,7 +1890,10 @@ fn member_paths(paths: PathsBuilder) -> PathsBuilder {
         "projects",
         "Set a project role override",
     )
-    .securities(Some(session_only.clone()))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
     .parameters(Some(vec![project_param(), user_param.clone()]))
     .request_body(Some(json_body("SetProjectOverrideRequest")))
     .responses(responses(
@@ -1465,7 +2047,10 @@ fn connection_paths(paths: PathsBuilder) -> PathsBuilder {
 fn api_key_paths(paths: PathsBuilder) -> PathsBuilder {
     let session_only = vec![SecurityRequirement::new("session", [] as [&str; 0])];
     let list = operation("list_api_keys", "projects", "List API keys")
-        .securities(Some(session_only.clone()))
+        .securities(Some(vec![SecurityRequirement::new(
+            "session",
+            [] as [&str; 0],
+        )]))
         .parameters(Some(with_query::<PageParams>(vec![project_param()])))
         .responses(responses(
             "200",
@@ -1477,7 +2062,10 @@ fn api_key_paths(paths: PathsBuilder) -> PathsBuilder {
         ))
         .build();
     let create = operation("post_api_key", "projects", "Create an API key")
-        .securities(Some(session_only.clone()))
+        .securities(Some(vec![SecurityRequirement::new(
+            "session",
+            [] as [&str; 0],
+        )]))
         .parameters(Some(vec![project_param()]))
         .request_body(Some(json_body("CreateApiKeyRequest")))
         .responses(responses(
@@ -1514,7 +2102,10 @@ fn token_paths(paths: PathsBuilder) -> PathsBuilder {
         "auth",
         "List personal access tokens",
     )
-    .securities(Some(session_only.clone()))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
     .parameters(Some(with_query::<PageParams>(Vec::new())))
     .responses(responses(
         "200",
@@ -1530,7 +2121,10 @@ fn token_paths(paths: PathsBuilder) -> PathsBuilder {
         "auth",
         "Create a personal access token",
     )
-    .securities(Some(session_only.clone()))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
     .request_body(Some(json_body("CreatePersonalTokenRequest")))
     .responses(responses(
         "201",
@@ -1756,19 +2350,19 @@ fn score_paths(paths: PathsBuilder) -> PathsBuilder {
         .build();
     let create = operation("create_scores", "scores", "Write scores")
         .description(Some(
-            "Writes 1–1000 scores in one batch. The answer has one id per item, in input order.",
+            "Writes 1–1000 scores in one batch. The answer has one id per item, in input order. With a session or a personal access token, a `score_id` that names another user's `human` score is refused with 403 unless the caller is a project admin.",
         ))
         .parameters(Some(vec![project_param()]))
         .request_body(Some(json_body("ScoreBatch")))
         .responses(responses(
             "200",
             json_of::<ScoreWriteResult>("The id of each written score, in input order."),
-            &[400, 401, 403, 404, 413, 429, 503],
+            &[400, 401, 402, 403, 404, 413, 429, 503],
         ))
         .build();
     let delete = operation("delete_score", "scores", "Delete a score")
         .description(Some(
-            "Appends a deleted version of the score. Its `created_at` is kept.",
+            "Appends a deleted version of the score. Its `created_at` is kept. With a session or a personal access token, another user's `human` score can be deleted only by a project admin (403).",
         ))
         .parameters(Some(vec![
             project_param(),
@@ -1796,7 +2390,7 @@ fn score_paths(paths: PathsBuilder) -> PathsBuilder {
     .responses(responses(
         "200",
         json_of::<ScoreWriteResult>("The id of each written score, in input order."),
-        &[400, 401, 403, 404, 413, 429, 503],
+        &[400, 401, 402, 403, 404, 413, 429, 503],
     ))
     .build();
     let feedback = operation("post_feedback", "scores", "Send end-user feedback")
@@ -1811,7 +2405,7 @@ fn score_paths(paths: PathsBuilder) -> PathsBuilder {
         .responses(responses(
             "200",
             json_of::<FeedbackResult>("The stored feedback score."),
-            &[400, 401, 403, 404, 413, 429],
+            &[400, 401, 402, 403, 404, 413, 429],
         ))
         .build();
     let schema = operation("get_schema", "schema", "Get the schema")
@@ -1929,12 +2523,14 @@ fn evaluator_paths(paths: PathsBuilder) -> PathsBuilder {
         ))
         .build();
     let delete = operation("delete_evaluator", "evaluation", "Delete an evaluator")
-        .description(Some("Project members and above. API keys cannot call it."))
+        .description(Some(
+            "Project members and above. API keys cannot call it. Refused with 409 while online rules use the evaluator; `errors` lists them.",
+        ))
         .parameters(Some(vec![project_param(), id]))
         .responses(responses(
             "204",
             ResponseBuilder::new().description("Deleted.").build(),
-            &[400, 401, 403, 404, 429],
+            &[400, 401, 403, 404, 409, 429],
         ))
         .build();
     let templates = operation(
@@ -1954,7 +2550,7 @@ fn evaluator_paths(paths: PathsBuilder) -> PathsBuilder {
     .build();
     let test = operation("post_evaluator_test", "evaluation", "Run an evaluator once")
         .description(Some(
-            "Project members and above. API keys cannot call it. Runs synchronously, writes the judge trace (environment `llmobs-eval`) and the judge usage, and writes no score. Shares the 10 per minute per user limit with connection tests.",
+            "Project members and above. API keys cannot call it. Runs synchronously, writes the judge trace (environment `cetra-eval`) and the judge usage, and writes no score. Shares the 10 per minute per user limit with connection tests.",
         ))
         .parameters(Some(vec![project_param()]))
         .request_body(Some(json_body("EvaluatorTestRequest")))
@@ -1994,6 +2590,850 @@ fn evaluator_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/evaluators/test"),
             PathItem::new(HttpMethod::Post, test),
+        )
+}
+
+fn online_rule_paths(paths: PathsBuilder) -> PathsBuilder {
+    let id = path_uuid("id", "Online rule id.");
+    let list = operation("list_online_rules", "evaluation", "List online rules")
+        .description(Some(
+            "Any project member can read. `org_enabled_rules` counts the enabled rules of the whole org (D-I-32).",
+        ))
+        .parameters(Some(with_query::<PageParams>(vec![project_param()])))
+        .responses(responses(
+            "200",
+            json_named("OnlineRulePage", "One page of online rules."),
+            QUERY_ERRORS,
+        ))
+        .build();
+    let create = operation("post_online_rule", "evaluation", "Create an online rule")
+        .description(Some(
+            "Project members and above. API keys cannot call it. 403 `plan_limit` when the org is at its active-rule limit.",
+        ))
+        .parameters(Some(vec![project_param()]))
+        .request_body(Some(json_body("CreateOnlineRuleRequest")))
+        .responses(responses(
+            "201",
+            json_of::<OnlineRule>("The created rule."),
+            &[400, 401, 403, 404, 409, 429],
+        ))
+        .build();
+    let get = operation("get_online_rule", "evaluation", "Get an online rule")
+        .description(Some("Any project member can read."))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .responses(responses(
+            "200",
+            json_of::<OnlineRule>("The rule."),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    let patch = operation("patch_online_rule", "evaluation", "Update an online rule")
+        .description(Some(
+            "Project members and above. API keys cannot call it. `target` and `evaluator_id` cannot change. Enabling a rule checks the active-rule limit.",
+        ))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .request_body(Some(json_body("UpdateOnlineRuleRequest")))
+        .responses(responses(
+            "200",
+            json_of::<OnlineRule>("The updated rule."),
+            &[400, 401, 403, 404, 409, 429],
+        ))
+        .build();
+    let delete = operation("delete_online_rule", "evaluation", "Delete an online rule")
+        .description(Some(
+            "Project members and above. API keys cannot call it. Queued jobs of the rule are deleted with it.",
+        ))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .responses(responses(
+            "204",
+            ResponseBuilder::new().description("Deleted.").build(),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    let preview = operation(
+        "post_online_rule_preview",
+        "evaluation",
+        "Count what a rule's filter matches",
+    )
+    .description(Some(
+        "Project members and above. API keys cannot call it. Counts the traces or spans the filter matches in the window (default: the last 24 hours, at most 30 days), at most 10 000, leaving out evaluation and experiment traces whatever the filter says (D-I-9).",
+    ))
+    .parameters(Some(vec![project_param()]))
+    .request_body(Some(json_body("OnlineRulePreviewRequest")))
+    .responses(responses(
+        "200",
+        json_of::<OnlineRulePreview>("What the filter matches."),
+        READ_ERRORS,
+    ))
+    .build();
+    let resume = operation(
+        "post_online_rule_resume",
+        "evaluation",
+        "Resume an online rule",
+    )
+    .description(Some(
+        "Project members and above. API keys cannot call it. Clears the rule's pause.",
+    ))
+    .parameters(Some(vec![project_param(), id]))
+    .responses(responses(
+        "200",
+        json_of::<OnlineRule>("The rule, not paused."),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    paths
+        .path(
+            format!("{PROJECT}/online-rules"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/online-rules"),
+            PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/online-rules/{{id}}"),
+            PathItem::new(HttpMethod::Get, get),
+        )
+        .path(
+            format!("{PROJECT}/online-rules/{{id}}"),
+            PathItem::new(HttpMethod::Patch, patch),
+        )
+        .path(
+            format!("{PROJECT}/online-rules/{{id}}"),
+            PathItem::new(HttpMethod::Delete, delete),
+        )
+        .path(
+            format!("{PROJECT}/online-rules/preview"),
+            PathItem::new(HttpMethod::Post, preview),
+        )
+        .path(
+            format!("{PROJECT}/online-rules/{{id}}/resume"),
+            PathItem::new(HttpMethod::Post, resume),
+        )
+}
+
+fn eval_job_paths(paths: PathsBuilder) -> PathsBuilder {
+    let job_id = path_uuid("id", "Eval job id.");
+    let list = operation("list_eval_jobs", "evaluation", "List eval jobs")
+        .description(Some(
+            "Any project member can read. Newest first. Jobs are kept 7 days after they finish.",
+        ))
+        .parameters(Some(with_query::<EvalJobListParams>(vec![project_param()])))
+        .responses(responses(
+            "200",
+            json_named("EvalJobPage", "One page of eval jobs."),
+            QUERY_ERRORS,
+        ))
+        .build();
+    let get = operation("get_eval_job", "evaluation", "Get an eval job")
+        .description(Some("Any project member can read."))
+        .parameters(Some(vec![project_param(), job_id]))
+        .responses(responses(
+            "200",
+            json_of::<EvalJob>("The job."),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    let evaluator_id = path_uuid("id", "Evaluator id.");
+    let run = operation(
+        "post_evaluator_run",
+        "evaluation",
+        "Run an evaluator on one trace",
+    )
+    .description(Some(
+        "Project members and above. API keys cannot call it. Queues one run at the highest priority and answers the job; poll `GET /eval-jobs/{id}`. Shares the 10 per minute per user limit with test runs.",
+    ))
+    .parameters(Some(vec![project_param(), evaluator_id]))
+    .request_body(Some(json_body("RunEvaluatorRequest")))
+    .responses(responses(
+        "202",
+        json_of::<EvalJob>("The queued job."),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    paths
+        .path(
+            format!("{PROJECT}/eval-jobs"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/eval-jobs/{{id}}"),
+            PathItem::new(HttpMethod::Get, get),
+        )
+        .path(
+            format!("{PROJECT}/evaluators/{{id}}/run"),
+            PathItem::new(HttpMethod::Post, run),
+        )
+}
+
+fn backfill_paths(paths: PathsBuilder) -> PathsBuilder {
+    let id = path_uuid("id", "Online rule id.");
+    let list = operation(
+        "list_backfills",
+        "evaluation",
+        "List an online rule's backfills",
+    )
+    .description(Some(
+        "Any project member can read. The newest 50 backfills of the rule; the list is not paged.",
+    ))
+    .parameters(Some(vec![project_param(), id.clone()]))
+    .responses(responses(
+        "200",
+        json_named(
+            "BackfillPage",
+            "The rule's latest 50 backfills, newest first.",
+        ),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    let estimate = operation(
+        "post_backfill_estimate",
+        "evaluation",
+        "Estimate an online rule backfill",
+    )
+    .description(Some(
+        "Project members and above. API keys cannot call it. Counts the rule's targets in the window (at most `max_targets`, newest first, evaluation and experiment traces left out), how many the sample rate keeps, and, for an LLM judge, the tokens and cost they would use. Targets the rule already scored are counted; the run skips them (D-I-38, D-I-40).",
+    ))
+    .parameters(Some(vec![project_param(), id.clone()]))
+    .request_body(Some(json_body("CreateBackfillRequest")))
+    .responses(responses(
+        "200",
+        json_of::<BackfillEstimate>("What the backfill would read and cost."),
+        READ_ERRORS,
+    ))
+    .build();
+    let create = operation("post_backfill", "evaluation", "Start an online rule backfill")
+        .description(Some(
+            "Project members and above. API keys cannot call it. Starts a backfill: up to `max_targets` targets of the window, newest first, are sampled and queued at the lowest priority, skipping targets the rule already scored. 409 when the rule is disabled or paused, or already has a running backfill (D-I-25).",
+        ))
+        .parameters(Some(vec![project_param(), id]))
+        .request_body(Some(json_body("CreateBackfillRequest")))
+        .responses(responses(
+            "202",
+            json_of::<Backfill>("The started backfill."),
+            &[400, 401, 403, 404, 409, 429],
+        ))
+        .build();
+    paths
+        .path(
+            format!("{PROJECT}/online-rules/{{id}}/backfills"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/online-rules/{{id}}/backfills"),
+            PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/online-rules/{{id}}/backfills/estimate"),
+            PathItem::new(HttpMethod::Post, estimate),
+        )
+}
+
+fn model_price_paths(paths: PathsBuilder) -> PathsBuilder {
+    let id = path_uuid("id", "Price row id.");
+    let read = "Any project member can read; a `read` API key too.";
+    let write = "Project admins. API keys cannot call it. A PATCH replaces the whole row. A write that would leave a budgeted online rule without a price is 409.";
+    let list = operation("list_models", "model_prices", "List model prices")
+        .description(Some(read))
+        .parameters(Some(with_query::<ModelPriceListParams>(vec![
+            project_param(),
+        ])))
+        .responses(responses(
+            "200",
+            json_named(
+                "ModelPricePage",
+                "One page of the project's effective price table.",
+            ),
+            QUERY_ERRORS,
+        ))
+        .build();
+    let resolve = operation(
+        "resolve_model_price",
+        "model_prices",
+        "Resolve the price of a model",
+    )
+    .description(Some(read))
+    .parameters(Some(with_query::<ModelPriceResolveParams>(vec![
+        project_param(),
+    ])))
+    .responses(responses(
+        "200",
+        json_of::<ModelPriceResolution>("The row that prices the model now, or none."),
+        QUERY_ERRORS,
+    ))
+    .build();
+    let create = operation(
+        "post_model_price",
+        "model_prices",
+        "Create a project model price",
+    )
+    .description(Some(write))
+    .parameters(Some(vec![project_param()]))
+    .request_body(Some(json_body("ModelPriceInput")))
+    .responses(responses(
+        "201",
+        json_of::<ModelPrice>("The created price."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    let patch = operation(
+        "patch_model_price",
+        "model_prices",
+        "Replace a project model price",
+    )
+    .description(Some(write))
+    .parameters(Some(vec![project_param(), id.clone()]))
+    .request_body(Some(json_body("ModelPriceInput")))
+    .responses(responses(
+        "200",
+        json_of::<ModelPrice>("The replaced price."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    let delete = operation(
+        "delete_model_price",
+        "model_prices",
+        "Delete a project model price",
+    )
+    .description(Some(write))
+    .parameters(Some(vec![project_param(), id]))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new().description("Deleted.").build(),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    paths
+        .path(
+            format!("{PROJECT}/models"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/models/resolve"),
+            PathItem::new(HttpMethod::Get, resolve),
+        )
+        .path(
+            format!("{PROJECT}/models"),
+            PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/models/{{id}}"),
+            PathItem::new(HttpMethod::Patch, patch),
+        )
+        .path(
+            format!("{PROJECT}/models/{{id}}"),
+            PathItem::new(HttpMethod::Delete, delete),
+        )
+}
+
+fn org_model_price_paths(paths: PathsBuilder) -> PathsBuilder {
+    let org = path_string("org", "Org UUID or slug.");
+    let id = path_uuid("id", "Price row id.");
+    let read = "Any org member can read.";
+    let write = "Org admins and owners. A PATCH replaces the whole row. A write that would leave a budgeted online rule of any project of the org without a price is 409.";
+    let list = operation(
+        "list_org_model_prices",
+        "model_prices",
+        "List org model prices",
+    )
+    .description(Some(read))
+    .parameters(Some(vec![org.clone()]))
+    .responses(responses(
+        "200",
+        json_named(
+            "ModelPricePage",
+            "The org's own price rows (at most 500), without paging.",
+        ),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    let create = operation(
+        "post_org_model_price",
+        "model_prices",
+        "Create an org model price",
+    )
+    .description(Some(write))
+    .parameters(Some(vec![org.clone()]))
+    .request_body(Some(json_body("ModelPriceInput")))
+    .responses(responses(
+        "201",
+        json_of::<ModelPrice>("The created price."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    let patch = operation(
+        "patch_org_model_price",
+        "model_prices",
+        "Replace an org model price",
+    )
+    .description(Some(write))
+    .parameters(Some(vec![org.clone(), id.clone()]))
+    .request_body(Some(json_body("ModelPriceInput")))
+    .responses(responses(
+        "200",
+        json_of::<ModelPrice>("The replaced price."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    let delete = operation(
+        "delete_org_model_price",
+        "model_prices",
+        "Delete an org model price",
+    )
+    .description(Some(write))
+    .parameters(Some(vec![org, id]))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new().description("Deleted.").build(),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    paths
+        .path(
+            "/api/v1/orgs/{org}/models",
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            "/api/v1/orgs/{org}/models",
+            PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            "/api/v1/orgs/{org}/models/{id}",
+            PathItem::new(HttpMethod::Patch, patch),
+        )
+        .path(
+            "/api/v1/orgs/{org}/models/{id}",
+            PathItem::new(HttpMethod::Delete, delete),
+        )
+}
+
+const DATASET_READ: &str = "Any project member, or an API key with `read`.";
+const DATASET_WRITE: &str = "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5).";
+
+fn dataset_paths(paths: PathsBuilder) -> PathsBuilder {
+    let dataset = path_string("dataset", "Dataset id, or its name.");
+    let list = operation("list_datasets", "datasets", "List datasets")
+        .description(Some(DATASET_READ))
+        .parameters(Some(with_query::<DatasetListParams>(vec![project_param()])))
+        .responses(responses(
+            "200",
+            json_named("DatasetPage", "One page of datasets."),
+            QUERY_ERRORS,
+        ))
+        .build();
+    let create = operation("post_dataset", "datasets", "Create a dataset")
+        .description(Some(DATASET_WRITE))
+        .parameters(Some(vec![project_param()]))
+        .request_body(Some(json_body("CreateDatasetRequest")))
+        .responses(responses(
+            "201",
+            json_of::<Dataset>("The created dataset."),
+            &[400, 401, 403, 404, 409, 413, 429],
+        ))
+        .build();
+    let get = operation("get_dataset", "datasets", "Get a dataset")
+        .description(Some(DATASET_READ))
+        .parameters(Some(vec![project_param(), dataset.clone()]))
+        .responses(responses(
+            "200",
+            json_of::<Dataset>("The dataset."),
+            &[401, 403, 404, 429],
+        ))
+        .build();
+    let patch = operation("patch_dataset", "datasets", "Update a dataset")
+        .description(Some(
+            "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Setting a schema validates every live item first; up to 20 failures are listed (D-J-2).",
+        ))
+        .parameters(Some(vec![project_param(), dataset.clone()]))
+        .request_body(Some(json_body("UpdateDatasetRequest")))
+        .responses(responses(
+            "200",
+            json_of::<Dataset>("The updated dataset."),
+            &[400, 401, 403, 404, 409, 413, 429],
+        ))
+        .build();
+    let delete = operation("delete_dataset", "datasets", "Delete a dataset")
+        .description(Some(
+            "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Experiments keep their results; their dataset link is cleared.",
+        ))
+        .parameters(Some(vec![project_param(), dataset.clone()]))
+        .responses(responses(
+            "204",
+            ResponseBuilder::new().description("Deleted.").build(),
+            &[401, 403, 404, 429],
+        ))
+        .build();
+    let item = path_uuid("item_id", "Item id, stable across versions.");
+    let version_list = operation(
+        "list_dataset_versions",
+        "datasets",
+        "List the versions of a dataset",
+    )
+    .description(Some(DATASET_READ))
+    .parameters(Some(with_query::<DatasetVersionListParams>(vec![
+        project_param(),
+        dataset.clone(),
+    ])))
+    .responses(responses(
+        "200",
+        json_named("DatasetVersionPage", "One page of versions, newest first."),
+        QUERY_ERRORS,
+    ))
+    .build();
+    let item_list = operation(
+        "list_dataset_items",
+        "datasets",
+        "List the items of a version",
+    )
+    .description(Some(DATASET_READ))
+    .parameters(Some(with_query::<DatasetItemListParams>(vec![
+        project_param(),
+        dataset.clone(),
+    ])))
+    .responses(responses(
+        "200",
+        json_named("DatasetItemPage", "One page of items, by item id."),
+        QUERY_ERRORS,
+    ))
+    .build();
+    let item_add = operation("post_dataset_items", "datasets", "Add items")
+        .description(Some(
+            "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Creates one new version. A batch with any failing item writes nothing; the error lists the failing items.",
+        ))
+        .parameters(Some(vec![project_param(), dataset.clone()]))
+        .request_body(Some(json_body("AddItemsRequest")))
+        .responses(responses(
+            "201",
+            json_of::<AddItemsResponse>("The new version and the new item ids."),
+            &[400, 401, 403, 404, 409, 413, 429],
+        ))
+        .build();
+    let item_get = operation("get_dataset_item", "datasets", "Get an item")
+        .description(Some(DATASET_READ))
+        .parameters(Some(with_query::<DatasetItemParams>(vec![
+            project_param(),
+            dataset.clone(),
+            item.clone(),
+        ])))
+        .responses(responses(
+            "200",
+            json_of::<DatasetItem>("The item's revision in the version."),
+            QUERY_ERRORS,
+        ))
+        .build();
+    let item_patch = operation("patch_dataset_item", "datasets", "Edit an item")
+        .description(Some(
+            "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Creates one new version. An edit that changes nothing creates none and answers the item as it is (D-J-3).",
+        ))
+        .parameters(Some(vec![project_param(), dataset.clone(), item.clone()]))
+        .request_body(Some(json_body("UpdateItemRequest")))
+        .responses(responses(
+            "200",
+            json_of::<DatasetItem>("The item after the edit."),
+            &[400, 401, 403, 404, 413, 429],
+        ))
+        .build();
+    let item_delete = operation("delete_dataset_item", "datasets", "Delete an item")
+        .description(Some(
+            "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Creates one new version in which the item is gone; older versions still hold it.",
+        ))
+        .parameters(Some(vec![project_param(), dataset.clone(), item]))
+        .responses(responses(
+            "200",
+            json_of::<DatasetVersion>("The new version."),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    let item_from_trace = operation(
+        "post_dataset_item_from_trace",
+        "datasets",
+        "Add an item copied from a trace or a span",
+    )
+    .description(Some(
+        "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5, D-J-8). Creates one new version holding one item copied from the trace root or from `span_id`; the request's fields replace the copied values. A trace that a pending deletion covers answers 404 and writes nothing (D-J-9).",
+    ))
+    .parameters(Some(vec![project_param(), dataset.clone()]))
+    .request_body(Some(json_body("FromTraceRequest")))
+    .responses(responses(
+        "201",
+        json_of::<DatasetItem>("The new item."),
+        &[400, 401, 403, 404, 409, 429, 503],
+    ))
+    .build();
+    let import_preview = operation(
+        "post_dataset_import_preview",
+        "datasets",
+        "Preview the head of an import file",
+    )
+    .description(Some(
+        "Any project reader. Shows the columns and the first rows of a CSV or JSONL file and writes nothing (D-J-6).",
+    ))
+    .parameters(Some(with_query::<PreviewParams>(vec![
+        project_param(),
+        dataset.clone(),
+    ])))
+    .request_body(Some(import_preview_body()))
+    .responses(responses(
+        "200",
+        json_of::<ImportPreview>("The columns and the first rows."),
+        &[400, 401, 403, 404, 413, 429],
+    ))
+    .build();
+    let export = operation("get_dataset_export", "datasets", "Export a dataset version")
+        .description(Some(DATASET_READ))
+        .parameters(Some(with_query::<ExportParams>(vec![
+            project_param(),
+            dataset.clone(),
+        ])))
+        .responses(responses("200", export_result(), QUERY_ERRORS))
+        .build();
+    let import_op = operation(
+        "post_dataset_import",
+        "datasets",
+        "Import items from a CSV or JSONL file",
+    )
+    .description(Some(
+        "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5, D-J-6). Creates one new version from the valid rows. A file with no valid row writes nothing; the error lists the rejected rows.",
+    ))
+    .parameters(Some(with_query::<ImportParams>(vec![
+        project_param(),
+        dataset,
+    ])))
+    .request_body(Some(import_upload_body()))
+    .responses(responses(
+        "201",
+        json_of::<ImportResult>("The version the import made."),
+        &[400, 401, 403, 404, 409, 413, 415, 429, 503],
+    ))
+    .build();
+    paths
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}/versions"),
+            PathItem::new(HttpMethod::Get, version_list),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}/items"),
+            PathItem::new(HttpMethod::Get, item_list),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}/items"),
+            PathItem::new(HttpMethod::Post, item_add),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}/items/{{item_id}}"),
+            PathItem::new(HttpMethod::Get, item_get),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}/items/{{item_id}}"),
+            PathItem::new(HttpMethod::Patch, item_patch),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}/items/{{item_id}}"),
+            PathItem::new(HttpMethod::Delete, item_delete),
+        )
+        .path(
+            format!("{PROJECT}/datasets"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/datasets"),
+            PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}"),
+            PathItem::new(HttpMethod::Get, get),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}"),
+            PathItem::new(HttpMethod::Patch, patch),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}"),
+            PathItem::new(HttpMethod::Delete, delete),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}/items/from-trace"),
+            PathItem::new(HttpMethod::Post, item_from_trace),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}/import/preview"),
+            PathItem::new(HttpMethod::Post, import_preview),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}/import"),
+            PathItem::new(HttpMethod::Post, import_op),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}/export"),
+            PathItem::new(HttpMethod::Get, export),
+        )
+}
+
+/// The body of an export: the items as JSONL or CSV, as a file download (D-J-7).
+fn export_result() -> Response {
+    ResponseBuilder::new()
+        .description("The version's items, one per line (JSONL) or one per row (CSV), with `Content-Disposition: attachment`.")
+        .content("application/x-ndjson", Content::new(Some(string_schema())))
+        .content("text/csv", Content::new(Some(string_schema())))
+        .build()
+}
+
+/// The body of the preview: the first bytes of the file, raw.
+fn import_preview_body() -> utoipa::openapi::request_body::RequestBody {
+    RequestBodyBuilder::new()
+        .required(Some(Required::True))
+        .description(Some("The first bytes of the file, at most 1 MiB."))
+        .content(
+            "application/octet-stream",
+            Content::new(Some(binary_string())),
+        )
+        .build()
+}
+
+/// The body of an import: a `file` part and, for CSV, a `mapping` part.
+fn import_upload_body() -> utoipa::openapi::request_body::RequestBody {
+    let schema = ObjectBuilder::new()
+        .property("file", binary_string())
+        .property("mapping", Ref::from_schema_name("ImportMapping"))
+        .required("file");
+    RequestBodyBuilder::new()
+        .required(Some(Required::True))
+        .description(Some(
+            "A file part (at most 100 MiB) and, for CSV, a mapping part.",
+        ))
+        .content("multipart/form-data", Content::new(Some(schema)))
+        .build()
+}
+
+const EXPERIMENT_READ: &str = "Any project member, or an API key with `read`.";
+const EXPERIMENT_WRITE: &str = "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5).";
+
+fn experiment_paths(paths: PathsBuilder) -> PathsBuilder {
+    let id = path_uuid("id", "Experiment id.");
+    let list = operation("list_experiments", "experiments", "List experiments")
+        .description(Some(EXPERIMENT_READ))
+        .parameters(Some(with_query::<ExperimentListParams>(vec![
+            project_param(),
+        ])))
+        .responses(responses(
+            "200",
+            json_named("ExperimentPage", "One page of experiments, newest first."),
+            QUERY_ERRORS,
+        ))
+        .build();
+    let create = operation("post_experiment", "experiments", "Create an experiment")
+        .description(Some(
+            "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Pins the dataset's version and copies its items into the first page of the answer; the SDK pages the rest from the items list.",
+        ))
+        .parameters(Some(vec![project_param()]))
+        .request_body(Some(json_body("CreateExperimentRequest")))
+        .responses(responses(
+            "201",
+            json_of::<CreateExperimentResponse>(
+                "The experiment and the first page of its pinned items.",
+            ),
+            &[400, 401, 403, 404, 413, 429],
+        ))
+        .build();
+    let get = operation("get_experiment", "experiments", "Get an experiment")
+        .description(Some(EXPERIMENT_READ))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .responses(responses(
+            "200",
+            json_of::<Experiment>("The experiment."),
+            QUERY_ERRORS,
+        ))
+        .build();
+    let delete = operation("delete_experiment", "experiments", "Delete an experiment")
+        .description(Some(
+            "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Deletes the experiment and its results; the traces and scores in storage stay.",
+        ))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .responses(responses(
+            "204",
+            ResponseBuilder::new().description("Deleted.").build(),
+            &[401, 403, 404, 429],
+        ))
+        .build();
+    let results = operation("post_experiment_results", "experiments", "Post results")
+        .description(Some(EXPERIMENT_WRITE))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .request_body(Some(json_body("ExperimentResultsRequest")))
+        .responses(responses(
+            "200",
+            json_of::<ExperimentResultsResponse>("The rows stored and skipped."),
+            &[400, 401, 403, 404, 409, 413, 429],
+        ))
+        .build();
+    let experiment_results = operation("get_experiment_results", "experiments", "Get results")
+        .description(Some(EXPERIMENT_READ))
+        .parameters(Some(with_query::<ResultsParams>(vec![
+            project_param(),
+            id.clone(),
+        ])))
+        .responses(responses(
+            "200",
+            json_of::<ExperimentResults>("The summary of the experiment and one page of its rows."),
+            READ_ERRORS,
+        ))
+        .build();
+    let compare = operation("compare_experiments", "experiments", "Compare experiments")
+        .description(Some(
+            "Project members, a `read` personal access token or a `read` key (D-J-5). Two to four experiments of one dataset, the first the baseline: their summaries, the deltas of each candidate to the baseline, and one page of items with a cell per experiment.",
+        ))
+        .parameters(Some(with_query::<CompareParams>(vec![project_param()])))
+        .responses(responses(
+            "200",
+            json_of::<ExperimentComparison>("The comparison and one page of its items."),
+            READ_ERRORS,
+        ))
+        .build();
+    let finish = operation(
+        "post_experiment_finish",
+        "experiments",
+        "Finish an experiment",
+    )
+    .description(Some(EXPERIMENT_WRITE))
+    .parameters(Some(vec![project_param(), id]))
+    .request_body(Some(json_body("FinishExperimentRequest")))
+    .responses(responses(
+        "200",
+        json_of::<Experiment>("The experiment after the finish."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    paths
+        .path(
+            format!("{PROJECT}/experiments"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/experiments"),
+            PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/experiments/{{id}}"),
+            PathItem::new(HttpMethod::Get, get),
+        )
+        .path(
+            format!("{PROJECT}/experiments/{{id}}"),
+            PathItem::new(HttpMethod::Delete, delete),
+        )
+        .path(
+            format!("{PROJECT}/experiments/{{id}}/items"),
+            PathItem::new(HttpMethod::Post, results),
+        )
+        .path(
+            format!("{PROJECT}/experiments/{{id}}/finish"),
+            PathItem::new(HttpMethod::Post, finish),
+        )
+        .path(
+            format!("{PROJECT}/experiments/{{id}}/results"),
+            PathItem::new(HttpMethod::Get, experiment_results),
+        )
+        .path(
+            format!("{PROJECT}/experiments/compare"),
+            PathItem::new(HttpMethod::Get, compare),
         )
 }
 
@@ -2102,6 +3542,20 @@ fn saved_view_paths(paths: PathsBuilder) -> PathsBuilder {
             &[400, 401, 403, 404, 409, 413, 415, 429],
         ))
         .build();
+    let get = operation("get_saved_view", "saved_views", "Get a saved view")
+        .description(Some(
+            "One view by id, with the same visibility as the list: the caller's own and shared views (an API key sees shared views). Any other id is 404. Use it to open a view that is not on the first pages of the list.",
+        ))
+        .parameters(Some(vec![
+            project_param(),
+            path_uuid("id", "Saved view id."),
+        ]))
+        .responses(responses(
+            "200",
+            json_of::<SavedView>("The saved view."),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
     let update = operation("update_saved_view", "saved_views", "Update a saved view")
         .description(Some(
             "The owner changes name, state, shared and is_default; sharing, or editing a shared view, needs role member. A project admin may also unshare another user's shared view. Setting is_default clears the other default of the same scope: the caller's private views of that kind, or the project's shared views of that kind.",
@@ -2139,6 +3593,10 @@ fn saved_view_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/saved-views"),
             PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/saved-views/{{id}}"),
+            PathItem::new(HttpMethod::Get, get),
         )
         .path(
             format!("{PROJECT}/saved-views/{{id}}"),
@@ -2232,7 +3690,8 @@ fn channel_paths(paths: PathsBuilder) -> PathsBuilder {
         .build();
     let create = operation("create_channel", "alerts", "Create a notification channel")
         .description(Some(
-            "Needs role member. Email channels need SMTP. At most 20 channels per project (409).",
+            "Needs role member. Email channels need SMTP. At most 20 channels per project (409). \
+             Under open signup every email recipient must be a verified member of the org (400 on recipients).",
         ))
         .parameters(Some(vec![project_param()]))
         .request_body(Some(json_body("CreateChannelRequest")))
@@ -2243,6 +3702,9 @@ fn channel_paths(paths: PathsBuilder) -> PathsBuilder {
         ))
         .build();
     let update = operation("update_channel", "alerts", "Update a notification channel")
+        .description(Some(
+            "Under open signup every email recipient must be a verified member of the org (400 on recipients).",
+        ))
         .parameters(Some(vec![project_param(), path_uuid("id", "Channel id.")]))
         .request_body(Some(json_body("UpdateChannelRequest")))
         .responses(responses(
@@ -2263,7 +3725,9 @@ fn channel_paths(paths: PathsBuilder) -> PathsBuilder {
         .build();
     let test = operation("test_channel", "alerts", "Send a test notification")
         .description(Some(
-            "Sends one sample message now and reports the result. Nothing is stored. Needs role member.",
+            "Sends one sample message now and reports the result. Nothing is stored. Needs role member. \
+             At most 5 sends per minute per user and 5 per minute per channel (429, Retry-After). \
+             Email sends count against the org's daily limit of 1000 messages; over it the result is ok false.",
         ))
         .parameters(Some(vec![project_param(), path_uuid("id", "Channel id.")]))
         .responses(responses(
@@ -2419,7 +3883,7 @@ fn media_paths(paths: PathsBuilder) -> PathsBuilder {
 
 const EXCLUSIONS: &str = concat!(
     "Evaluation traces (`environment = ",
-    llmobs_core::llmobs_name!("-eval"),
+    cetra_core::cetra_name!("-eval"),
     "`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set."
 );
 
@@ -2614,6 +4078,9 @@ fn problem(code: u16) -> Response {
     let description = match code {
         400 => "The request is malformed or a filter is invalid.",
         401 => "No credentials, or the credentials are invalid.",
+        402 => {
+            "The organization reached its monthly units cap (code quota_exceeded). Retry-After gives the seconds until it resets."
+        }
         403 => {
             "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required)."
         }
@@ -2623,7 +4090,7 @@ fn problem(code: u16) -> Response {
         416 => "The Range header does not overlap the blob.",
         415 => "The request body is not JSON.",
         422 => {
-            "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed)."
+            "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed)."
         }
         429 => "Too many requests.",
         503 => "The server is busy or a dependency is unavailable. Retry later.",

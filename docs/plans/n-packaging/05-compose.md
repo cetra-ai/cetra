@@ -3,7 +3,7 @@
 Read [README.md](README.md) first, especially § Design › docker-compose.
 
 **Goal:**
-- `deploy/compose/` runs llmobs on one machine with a named volume (`compose.yaml`).
+- `deploy/compose/` runs cetra on one machine with a named volume (`compose.yaml`).
 - An overlay, `compose.s3.yaml`, moves the Parquet files and media to a bucket on a local
   single-node Garage (D-N-9).
 - `just compose-smoke [tag] [s3]` runs either variant from a temporary copy and smoke-tests it. In
@@ -11,7 +11,7 @@ Read [README.md](README.md) first, especially § Design › docker-compose.
 
 **Edit only:**
 - `deploy/compose/compose.yaml`, `deploy/compose/compose.s3.yaml`, `deploy/compose/garage.toml`,
-  `deploy/compose/garage-init.sh`, `deploy/compose/llmobs.env.example`,
+  `deploy/compose/garage-init.sh`, `deploy/compose/cetra.env.example`,
   `deploy/compose/.env.example`, `tools/packaging/compose-smoke.sh` (new);
 - `.gitignore`;
 - `justfile`.
@@ -23,16 +23,16 @@ Read [README.md](README.md) first, especially § Design › docker-compose.
 ## How it works
 
 - **Two settings files.** Compose reads `.env` to fill in `${…}` in the compose files: image,
-  bind address, ports, and the Garage secrets. Server settings go in `llmobs.env`, passed whole
+  bind address, ports, and the Garage secrets. Server settings go in `cetra.env`, passed whole
   with `env_file` (`required: false`, so the file is optional). They are separate because the
   server's config loader:
-  - rejects unknown `LLMOBS_*` variables, so `LLMOBS_IMAGE` in the server's environment would
+  - rejects unknown `CETRA_*` variables, so `CETRA_IMAGE` in the server's environment would
     stop it;
-  - treats `LLMOBS_X=` (empty) as a set value.
+  - treats `CETRA_X=` (empty) as a set value.
 
   Compose therefore passes no `${VAR:-}` defaults to the server.
 - **Image default.** It is the workspace version, `0.0.0` now. N8's `release-prep` rewrites the
-  `image:` line and the `#LLMOBS_IMAGE=` comment of `.env.example`, and `versions-check` checks
+  `image:` line and the `#CETRA_IMAGE=` comment of `.env.example`, and `versions-check` checks
   both lines, so keep them exactly as given.
 - **Garage:**
   - `dxflrs/garage:v2.5.0` is a scratch image whose binary is `/garage`. It reads
@@ -47,17 +47,17 @@ Read [README.md](README.md) first, especially § Design › docker-compose.
   - The access key is imported from `.env`. Garage's documentation reserves `ImportKey` for
     migrations because a hand-made key ID can collide. The commands in `.env.example` generate
     random IDs in Garage's own format (`GK` + 24 hex, secret 64 hex), which is equivalent.
-- **llmobs in S3 mode.** It starts after `garage-init` completed successfully, with:
-  - `LLMOBS_OBJECT_STORE=s3://llmobs`;
+- **cetra in S3 mode.** It starts after `garage-init` completed successfully, with:
+  - `CETRA_OBJECT_STORE=s3://cetra`;
   - endpoint `http://garage:3900`, path style, `allow_http`;
   - `AWS_REGION=garage`, which is `s3_region` in `garage.toml`;
   - the key.
 - **`compose-smoke.sh`:**
-  1. Copies `deploy/compose/.` into a temporary directory, so `.env` and `llmobs.env` never
+  1. Copies `deploy/compose/.` into a temporary directory, so `.env` and `cetra.env` never
      appear in the checkout.
   2. Picks free ports and writes both files with random Garage secrets.
-  3. Sets `LLMOBS_STORAGE__FLUSH__MAX_AGE=5s` so S3 mode flushes quickly.
-  4. Runs `docker compose -p llmobs-smoke-<pid> up -d`, then `smoke.sh`.
+  3. Sets `CETRA_STORAGE__FLUSH__MAX_AGE=5s` so S3 mode flushes quickly.
+  4. Runs `docker compose -p cetra-smoke-<pid> up -d`, then `smoke.sh`.
   5. In S3 mode, polls Garage's `GetBucketInfo` from a throwaway `garage-init` container until
      `"objects"` is not 0.
   6. Always runs `down -v`.
@@ -69,34 +69,34 @@ Read [README.md](README.md) first, especially § Design › docker-compose.
 ### `deploy/compose/compose.yaml`
 
 ```yaml
-# llmobs on one machine, data on a local volume (D-N-9).
-#   cp llmobs.env.example llmobs.env    # server settings: any LLMOBS_* key of spec 12
+# cetra on one machine, data on a local volume (D-N-9).
+#   cp cetra.env.example cetra.env    # server settings: any CETRA_* key of spec 12
 #   docker compose up -d
 # With S3-compatible object storage (a local Garage) for Parquet files and media:
 #   cp .env.example .env                # and set the Garage keys and secrets in it
 #   docker compose -f compose.yaml -f compose.s3.yaml up -d
 # Docs: docs/self-hosting/docker-compose.md
-name: llmobs
+name: cetra
 
 services:
-  llmobs:
-    image: ${LLMOBS_IMAGE:-ghcr.io/sebastiencs/llmobs:0.0.0}
+  cetra:
+    image: ${CETRA_IMAGE:-ghcr.io/cetra-ai/cetra:0.0.0}
     restart: unless-stopped
     # Shutdown drains requests (20 s) and flushes memtables (30 s) (spec 12 § Process lifecycle).
     stop_grace_period: 60s
     ports:
-      - "${LLMOBS_BIND:-127.0.0.1}:${LLMOBS_HTTP_PORT:-8080}:8080"
-      - "${LLMOBS_BIND:-127.0.0.1}:${LLMOBS_OTLP_GRPC_PORT:-4317}:4317"
-      - "${LLMOBS_BIND:-127.0.0.1}:${LLMOBS_OTLP_HTTP_PORT:-4318}:4318"
+      - "${CETRA_BIND:-127.0.0.1}:${CETRA_HTTP_PORT:-8080}:8080"
+      - "${CETRA_BIND:-127.0.0.1}:${CETRA_OTLP_GRPC_PORT:-4317}:4317"
+      - "${CETRA_BIND:-127.0.0.1}:${CETRA_OTLP_HTTP_PORT:-4318}:4318"
     # Server settings. Only variables present in the file reach the server: an empty
-    # LLMOBS_* variable is a set (and usually invalid) value, not an unset one.
+    # CETRA_* variable is a set (and usually invalid) value, not an unset one.
     env_file:
-      - path: llmobs.env
+      - path: cetra.env
         required: false
     volumes:
-      - llmobs-data:/data
+      - cetra-data:/data
     healthcheck:
-      test: ["CMD", "/usr/local/bin/llmobs", "health"]
+      test: ["CMD", "/usr/local/bin/cetra", "health"]
       interval: 30s
       timeout: 10s
       start_period: 120s
@@ -104,18 +104,18 @@ services:
       retries: 3
 
 volumes:
-  llmobs-data:
+  cetra-data:
 ```
 
 ### `deploy/compose/compose.s3.yaml`
 
 ```yaml
 # Overlay of compose.yaml: Parquet files and media go to a bucket on a local single-node Garage
-# (S3-compatible) instead of the llmobs volume, which keeps the WAL, catalog.db, meta.db and
+# (S3-compatible) instead of the cetra volume, which keeps the WAL, catalog.db, meta.db and
 # secret.key (D-N-9). Set the four GARAGE_* values in .env first (.env.example).
 #   docker compose -f compose.yaml -f compose.s3.yaml up -d
-# To use another S3-compatible service instead, drop this file and set LLMOBS_OBJECT_STORE,
-# LLMOBS_STORAGE__S3__* and AWS_* in llmobs.env (docs/self-hosting/s3.md).
+# To use another S3-compatible service instead, drop this file and set CETRA_OBJECT_STORE,
+# CETRA_STORAGE__S3__* and AWS_* in cetra.env (docs/self-hosting/s3.md).
 services:
   garage:
     image: dxflrs/garage:v2.5.0
@@ -149,15 +149,15 @@ services:
       - ./garage-init.sh:/garage-init.sh:ro
     entrypoint: ["/bin/sh", "/garage-init.sh"]
 
-  llmobs:
+  cetra:
     depends_on:
       garage-init:
         condition: service_completed_successfully
     environment:
-      LLMOBS_OBJECT_STORE: s3://llmobs
-      LLMOBS_STORAGE__S3__ENDPOINT: http://garage:3900
-      LLMOBS_STORAGE__S3__FORCE_PATH_STYLE: "true"
-      LLMOBS_STORAGE__S3__ALLOW_HTTP: "true"
+      CETRA_OBJECT_STORE: s3://cetra
+      CETRA_STORAGE__S3__ENDPOINT: http://garage:3900
+      CETRA_STORAGE__S3__FORCE_PATH_STYLE: "true"
+      CETRA_STORAGE__S3__ALLOW_HTTP: "true"
       AWS_REGION: garage
       AWS_ACCESS_KEY_ID: ${GARAGE_ACCESS_KEY_ID:?set GARAGE_ACCESS_KEY_ID in .env}
       AWS_SECRET_ACCESS_KEY: ${GARAGE_SECRET_ACCESS_KEY:?set GARAGE_SECRET_ACCESS_KEY in .env}
@@ -193,7 +193,7 @@ api_bind_addr = "[::]:3903"
 ```bash
 #!/bin/sh
 # One-shot setup of the single-node Garage of compose.s3.yaml through its admin API (v2):
-# a layout with this node, the access key from .env, and the bucket `llmobs` with read and
+# a layout with this node, the access key from .env, and the bucket `cetra` with read and
 # write for that key. Safe to run again: each step checks what already exists (D-N-9).
 set -eu
 
@@ -234,14 +234,14 @@ fi
 
 if ! call GET "/v2/GetKeyInfo?id=${GARAGE_ACCESS_KEY_ID}" >/dev/null 2>&1; then
   call POST /v2/ImportKey \
-    "{\"accessKeyId\":\"${GARAGE_ACCESS_KEY_ID}\",\"secretAccessKey\":\"${GARAGE_SECRET_ACCESS_KEY}\",\"name\":\"llmobs\"}" >/dev/null
+    "{\"accessKeyId\":\"${GARAGE_ACCESS_KEY_ID}\",\"secretAccessKey\":\"${GARAGE_SECRET_ACCESS_KEY}\",\"name\":\"cetra\"}" >/dev/null
   echo "garage-init: access key imported"
 fi
 
-bucket="$(call GET '/v2/GetBucketInfo?globalAlias=llmobs' 2>/dev/null | tr -d ' \n' | grep -o '"id":"[0-9a-f]\{64\}"' | head -n1 | cut -d'"' -f4 || true)"
+bucket="$(call GET '/v2/GetBucketInfo?globalAlias=cetra' 2>/dev/null | tr -d ' \n' | grep -o '"id":"[0-9a-f]\{64\}"' | head -n1 | cut -d'"' -f4 || true)"
 if [ -z "$bucket" ]; then
-  bucket="$(call POST /v2/CreateBucket '{"globalAlias":"llmobs"}' | tr -d ' \n' | grep -o '"id":"[0-9a-f]\{64\}"' | head -n1 | cut -d'"' -f4)"
-  echo "garage-init: bucket llmobs created"
+  bucket="$(call POST /v2/CreateBucket '{"globalAlias":"cetra"}' | tr -d ' \n' | grep -o '"id":"[0-9a-f]\{64\}"' | head -n1 | cut -d'"' -f4)"
+  echo "garage-init: bucket cetra created"
 fi
 
 call POST /v2/AllowBucketKey \
@@ -249,58 +249,58 @@ call POST /v2/AllowBucketKey \
 echo "garage-init: done"
 ```
 
-### `deploy/compose/llmobs.env.example`
+### `deploy/compose/cetra.env.example`
 
 ```bash
-# llmobs server settings for compose.yaml (copy to llmobs.env). Every key of spec 12 can be set
-# as LLMOBS_ + the upper-snake path, e.g. LLMOBS_STORAGE__FLUSH__MAX_AGE=60s. Leave a line
+# cetra server settings for compose.yaml (copy to cetra.env). Every key of spec 12 can be set
+# as CETRA_ + the upper-snake path, e.g. CETRA_STORAGE__FLUSH__MAX_AGE=60s. Leave a line
 # commented out rather than empty: an empty value is a set value. The data directory is /data
 # (set by the image).
 
 # The URL users open; links in emails and OAuth redirects use it.
-LLMOBS_PUBLIC_URL=http://localhost:8080
+CETRA_PUBLIC_URL=http://localhost:8080
 
 # First start only: create the first admin, org, project and an ingest key without the setup
-# page. Set the first four together. The key is sk-llmobs- followed by 32 letters or digits.
-#LLMOBS_INIT_ADMIN_EMAIL=admin@example.com
-#LLMOBS_INIT_ADMIN_PASSWORD=change-me
-#LLMOBS_INIT_ORG=My org
-#LLMOBS_INIT_PROJECT=My project
-#LLMOBS_INIT_SECRET_KEY=sk-llmobs-0123456789abcdefghijklmnopqrstuv
+# page. Set the first four together. The key is sk-cetra- followed by 32 letters or digits.
+#CETRA_INIT_ADMIN_EMAIL=admin@example.com
+#CETRA_INIT_ADMIN_PASSWORD=change-me
+#CETRA_INIT_ORG=My org
+#CETRA_INIT_PROJECT=My project
+#CETRA_INIT_SECRET_KEY=sk-cetra-0123456789abcdefghijklmnopqrstuv
 
 # Email (invites, password reset). Unset: email is off.
-#LLMOBS_SMTP_URL=smtps://user:password@smtp.example.com:465
-#LLMOBS_EMAIL_FROM=llmobs <llmobs@example.com>
+#CETRA_SMTP_URL=smtps://user:password@smtp.example.com:465
+#CETRA_EMAIL_FROM=cetra <noreply@cetra.sh>
 
 # Encryption key for stored secrets (32 bytes, standard base64). Unset: generated on the first
 # start into /data/secret.key; back it up with the data (docs/self-hosting/backup.md).
-#LLMOBS_ENCRYPTION_KEY=
+#CETRA_ENCRYPTION_KEY=
 
 # Enterprise licence key (D172). Unset: core features only.
-#LLMOBS_LICENSE_KEY=
+#CETRA_LICENSE_KEY=
 ```
 
 Track P adds the `license_key` setting. Before writing this file, run
 `grep -q license_key crates/server/src/config.rs`. If it fails, leave out the last three lines
-(the licence comment, `#LLMOBS_LICENSE_KEY=` and the empty line before them), and say so in your
+(the licence comment, `#CETRA_LICENSE_KEY=` and the empty line before them), and say so in your
 report.
 
 ### `deploy/compose/.env.example`
 
 ```bash
 # Compose settings (copy to .env). These choose the image and the published ports, and hold the
-# Garage secrets of compose.s3.yaml. They are not passed to the llmobs server: its settings go
-# in llmobs.env.
+# Garage secrets of compose.s3.yaml. They are not passed to the cetra server: its settings go
+# in cetra.env.
 
 # Image. Pin a version; there is no `latest` in the docs on purpose.
-#LLMOBS_IMAGE=ghcr.io/sebastiencs/llmobs:0.0.0
+#CETRA_IMAGE=ghcr.io/cetra-ai/cetra:0.0.0
 
 # Address the ports are published on. 127.0.0.1 keeps them local (put a TLS reverse proxy in
 # front); 0.0.0.0 publishes them on every interface.
-#LLMOBS_BIND=127.0.0.1
-#LLMOBS_HTTP_PORT=8080
-#LLMOBS_OTLP_GRPC_PORT=4317
-#LLMOBS_OTLP_HTTP_PORT=4318
+#CETRA_BIND=127.0.0.1
+#CETRA_HTTP_PORT=8080
+#CETRA_OTLP_GRPC_PORT=4317
+#CETRA_OTLP_HTTP_PORT=4318
 
 # compose.s3.yaml only. Generate each value once with the command next to it.
 # openssl rand -hex 32
@@ -334,8 +334,8 @@ if [[ $# -lt 1 || $# -gt 2 || ( $# -eq 2 && "$2" != "s3" ) ]]; then
 fi
 image="$1"
 mode="${2:-local}"
-project="llmobs-smoke-$$"
-key="sk-llmobs-SMOKE0123456789ABCDEFGHIJKLMNOPQ"
+project="cetra-smoke-$$"
+key="sk-cetra-SMOKE0123456789ABCDEFGHIJKLMNOPQ"
 
 dir="$(mktemp -d)"
 cp -R "$root/deploy/compose/." "$dir/"
@@ -364,24 +364,24 @@ for sock in socks:
 ')
 
 cat >"$dir/.env" <<EOF
-LLMOBS_IMAGE=$image
-LLMOBS_BIND=127.0.0.1
-LLMOBS_HTTP_PORT=$http_port
-LLMOBS_OTLP_GRPC_PORT=$grpc_port
-LLMOBS_OTLP_HTTP_PORT=$otlp_port
+CETRA_IMAGE=$image
+CETRA_BIND=127.0.0.1
+CETRA_HTTP_PORT=$http_port
+CETRA_OTLP_GRPC_PORT=$grpc_port
+CETRA_OTLP_HTTP_PORT=$otlp_port
 GARAGE_RPC_SECRET=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
 GARAGE_ADMIN_TOKEN=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
 GARAGE_ACCESS_KEY_ID=GK$(python3 -c 'import secrets; print(secrets.token_hex(12))')
 GARAGE_SECRET_ACCESS_KEY=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
 EOF
-cat >"$dir/llmobs.env" <<EOF
-LLMOBS_PUBLIC_URL=http://127.0.0.1:$http_port
-LLMOBS_INIT_ADMIN_EMAIL=smoke@example.com
-LLMOBS_INIT_ADMIN_PASSWORD=llmobs-smoke-1
-LLMOBS_INIT_ORG=Smoke
-LLMOBS_INIT_PROJECT=Smoke
-LLMOBS_INIT_SECRET_KEY=$key
-LLMOBS_STORAGE__FLUSH__MAX_AGE=5s
+cat >"$dir/cetra.env" <<EOF
+CETRA_PUBLIC_URL=http://127.0.0.1:$http_port
+CETRA_INIT_ADMIN_EMAIL=smoke@example.com
+CETRA_INIT_ADMIN_PASSWORD=cetra-smoke-1
+CETRA_INIT_ORG=Smoke
+CETRA_INIT_PROJECT=Smoke
+CETRA_INIT_SECRET_KEY=$key
+CETRA_STORAGE__FLUSH__MAX_AGE=5s
 EOF
 
 # Not `--wait`: garage-init is a one-shot container. smoke.sh waits for /readyz instead.
@@ -398,7 +398,7 @@ fi
 if [[ "$mode" == "s3" ]]; then
   # The span is flushed to Parquet in the bucket within flush.max_age (5 s here).
   # shellcheck disable=SC2016 # expanded by the container's shell
-  check='curl -sSf -H "Authorization: Bearer $GARAGE_ADMIN_TOKEN" "http://garage:3903/v2/GetBucketInfo?globalAlias=llmobs" | tr -d " \n" | grep -q "\"objects\":[1-9]"'
+  check='curl -sSf -H "Authorization: Bearer $GARAGE_ADMIN_TOKEN" "http://garage:3903/v2/GetBucketInfo?globalAlias=cetra" | tr -d " \n" | grep -q "\"objects\":[1-9]"'
   for _ in $(seq 1 60); do
     if compose run --rm --no-deps --entrypoint /bin/sh garage-init -c "$check" >/dev/null 2>&1; then
       echo "compose-smoke: objects written to the Garage bucket"
@@ -426,7 +426,7 @@ echo "compose-smoke: $image passed ($mode)"
 After the line `!.env.example`, add:
 
 ```text
-deploy/compose/llmobs.env
+deploy/compose/cetra.env
 ```
 
 ### `justfile`
@@ -434,8 +434,8 @@ deploy/compose/llmobs.env
 Append after the `image-smoke` recipe:
 
 ```just
-# Run deploy/compose with an image and smoke-test it; `just compose-smoke llmobs:dev s3` adds Garage (D-N-9)
-compose-smoke tag="llmobs:dev" *mode:
+# Run deploy/compose with an image and smoke-test it; `just compose-smoke cetra:dev s3` adds Garage (D-N-9)
+compose-smoke tag="cetra:dev" *mode:
     tools/packaging/compose-smoke.sh {{tag}} {{mode}}
 ```
 
@@ -444,9 +444,9 @@ compose-smoke tag="llmobs:dev" *mode:
 ```bash
 export PATH="$HOME/.local/share/nvm/v26.13.0/bin:$PATH"
 (cd deploy/compose && docker compose config --quiet && docker compose -f compose.yaml -f compose.s3.yaml config --quiet) || true
-just image llmobs:dev            # after just dist, as in N4
-just compose-smoke llmobs:dev
-just compose-smoke llmobs:dev s3
+just image cetra:dev            # after just dist, as in N4
+just compose-smoke cetra:dev
+just compose-smoke cetra:dev s3
 just check
 just assert-clean
 ```
@@ -455,13 +455,13 @@ just assert-clean
   run from the checkout without a `.env`, they print `set GARAGE_RPC_SECRET in .env` (a
   `:?` guard). That is expected, hence the `|| true`. A YAML error would also show here, so read
   the output.
-- `compose-smoke llmobs:dev` ends with `compose-smoke: llmobs:dev passed (local)`.
-- `compose-smoke llmobs:dev s3` prints `compose-smoke: objects written to the Garage bucket` and
+- `compose-smoke cetra:dev` ends with `compose-smoke: cetra:dev passed (local)`.
+- `compose-smoke cetra:dev s3` prints `compose-smoke: objects written to the Garage bucket` and
   ends with `… passed (s3)`. On failure it prints `docker compose logs`. Look for a
   `garage-init:` line first: the init's `curl -f` reports the failing admin call.
 - In S3 mode it also prints `garage-init: done` from a second run of the init, then
   `compose-smoke: garage-init is idempotent`.
-- `docker volume ls | grep llmobs-smoke` prints nothing afterwards.
+- `docker volume ls | grep cetra-smoke` prints nothing afterwards.
 - If `up -d` stalls before `garage-init` starts, Garage's healthcheck (`/garage status`) is failing:
   `docker inspect --format '{{json .State.Health.Log}}' <garage container>` shows its output.
 

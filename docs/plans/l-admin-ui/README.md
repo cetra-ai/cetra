@@ -67,11 +67,11 @@ Adding server endpoints or fields is out of scope for L. These are reported to t
 
 | # | Gap | Effect in L | Request |
 |---|---|---|---|
-| CG1 | `User` in `GET /api/auth/me` has no `email_verified` and no `has_password` | No unverified-email banner (D-L-7). The password form cannot tell whether "Current password" is needed (D-L-12). | Add both fields to `User` (spec 09 `GET /me`). |
-| CG2 | Project slugs are not reserved (`orgs.rs`: "Project slugs do not use this list") | A project with slug `settings` has the same URL prefix as `/$org/settings/…`. L's routes are static, so `/$org/settings/general` and `/$org/settings/members` win over that project's pages. Its `traces`, `spans` and other pages still resolve, because `/$org/settings` has no children with those names. | Reserve `settings` as a project slug, or accept this and document it in spec 11. |
-| CG3 | `/cli-auth` has no host name in spec 08 | L defines `host` (D-L-9). | The CLI (track H) sends `host`; spec 08 names it. |
-| CG4 | `GET /api/v1/me` (spec 09) is not implemented; only `GET /api/auth/me` exists | None. L reads `GET /api/auth/me`. | Drop `GET /api/v1/me` from spec 09, or add it. |
-| CG5 | `UpdateProjectRequest.retention_days` is not nullable in `openapi.json`, but the server takes `null` as "keep forever" | L15 sends `null` through one commented cast in `projectPatch()`. | Mark the field nullable in the contract. |
+| CG1 | `User` in `GET /api/auth/me` has no `email_verified` and no `has_password` | No unverified-email banner (D-L-7). The password form cannot tell whether "Current password" is needed (D-L-12). | **Closed.** `User` has both fields; spec 09 `GET /me` lists them. |
+| CG2 | Project slugs are not reserved (`orgs.rs`: "Project slugs do not use this list") | A project with slug `settings` has the same URL prefix as `/$org/settings/…`. L's routes are static, so `/$org/settings/general` and `/$org/settings/members` win over that project's pages. Its `traces`, `spans` and other pages still resolve, because `/$org/settings` has no children with those names. | **Closed.** `settings` is a reserved project slug (spec 09); spec 11 documents the overlap. |
+| CG3 | `/cli-auth` has no host name in spec 08 | L defines `host` (D-L-9). | **Closed** by the CLI login commits: track H sends `host`, and spec 08 names it. |
+| CG4 | `GET /api/v1/me` (spec 09) is not implemented; only `GET /api/auth/me` exists | None. L reads `GET /api/auth/me`. | **Closed.** Spec 09 drops `GET /api/v1/me`; `GET /api/auth/me` is the read. |
+| CG5 | `UpdateProjectRequest.retention_days` is not nullable in `openapi.json`, but the server takes `null` as "keep forever" | L15 sends `null` through one commented cast in `projectPatch()`. | **Closed.** `retention_days` is nullable with `minimum: 1` and `maximum: 36500` on both project requests. The web cast is gone. |
 
 ## Routes
 
@@ -196,7 +196,7 @@ L1 also wraps the root route's `<Outlet />` in `<TooltipProvider>` (`web/src/rou
 
 | File | Export | What |
 |---|---|---|
-| `web/src/components/onboarding/snippets.ts` | `PLACEHOLDER_KEY = "sk-llmobs-…"`; `otelSnippet(origin, key = PLACEHOLDER_KEY)`, `pythonSnippet(…)`, `typescriptSnippet(…)`, `vercelSnippet(…)` | It gains the `key` parameter. `KEY` is renamed `PLACEHOLDER_KEY` and exported. |
+| `web/src/components/onboarding/snippets.ts` | `PLACEHOLDER_KEY = "sk-cetra-…"`; `otelSnippet(origin, key = PLACEHOLDER_KEY)`, `pythonSnippet(…)`, `typescriptSnippet(…)`, `vercelSnippet(…)` | It gains the `key` parameter. `KEY` is renamed `PLACEHOLDER_KEY` and exported. |
 | `web/src/components/onboarding/snippet-tabs.tsx` | `SnippetTabs` | `origin: string; apiKey?: string`. The tabs block that is in `panel.tsx` today, moved here. `OnboardingPanel` uses it. |
 | `web/src/components/copy-button.tsx` | `CopyButton` | It gains `onCopied?: () => void`, called after a successful clipboard write. |
 | `web/src/components/secret-dialog.tsx` | `SecretDialog` | `open: boolean; title: string; secret: string; description?: string; showSnippets?: boolean; onDone: () => void`. D-L-5's dialog. |
@@ -353,8 +353,20 @@ just web-dev
 
 Then open `http://localhost:5173/acme/support-bot/settings/general` (port from Vite's output). The mocks sign you in as Ada. Writes answer from `web/src/mocks/writes.ts` and keep no state, so a list does not change after a create or a delete.
 
+## Real-server check (2026-11-15, full plan review L-3)
+
+D-L-2 said G's M5 would check these pages on the real server; it did not, so the web-fix session did it by hand: a debug `cetra serve` (fresh data dir, `CETRA_PUBLIC_URL=http://localhost:5173`, no SMTP, no licence) behind `just web-dev-server`, driven in a browser.
+
+Checked and working: `/setup` from the logged setup URL (cookie set, lands on `/acme`); org General, Members (invite without SMTP shows the copyable link), project General (retention in days, then "keep forever" saved as `null`), API keys (create shows the secret once with snippets), project Members (Teams gate shown without a licence); `/account` (tokens list with expiry); `/admin/users`, `/admin/settings` (test email disabled without SMTP); a session ended behind the app's back sends the next navigation to `/login?redirect=…`; `/invite/<token>` signed out creates the account and joins as Member; a Member gets the "no access" page on `/admin` and API keys and disabled controls on org General; sign-out from the user menu; `/login` wrong password ("Incorrect email or password.") and success; `/reset` without SMTP explains the admin path; `/verify` with a bad token offers a new link; `/cli-auth` Authorize (token POSTed to the callback, 90-day expiry accepted by the server) and Cancel (`error=access_denied`).
+
+The `/cli-auth` form POST was then re-run on a debug binary with the UI embedded (`ui: embedded`, public URL on the binary's own port), because the Vite dev server sends no CSP: with `form-action 'self' http://127.0.0.1:*` the POST reaches the callback.
+
+Found and fixed: the embedded UI's CSP had `form-action 'self'`, which blocks the `/cli-auth` POST to `127.0.0.1`; the org project list labelled a `null` retention "Default"; it means keep forever.
+
+Not checked: OAuth/OIDC sign-in and the `/login?error=` codes from a real provider, the SMTP paths (emails, verification required), password reset with a real token, `/setup` redirect from the gate on a fresh instance, and the origin check behind a reverse proxy.
+
 ## Notes for other tracks
 
 - **G (coordinator):** D-L-2 amends D-G-19. G's M5 no longer builds `/login` or the 401 handling; it checks L's pages against the real server. If G's M5 lands before L5, it must not add a second login page; it waits for L or uses L's branch.
-- **H (CLI):** send `host` to `/cli-auth` (D-L-9), and handle `error=access_denied` on the callback.
-- **D owners (contract):** CG1–CG4 above.
+- **H (CLI):** done. `cetra login` sends `host` to `/cli-auth`, handles `error=access_denied` on the callback, and receives the token by form POST (D-L-9, spec 08). The token expires after 90 days.
+- **D owners (contract):** CG1, CG2, CG4 and CG5 above are closed; spec 09 and `openapi.json` match the server.

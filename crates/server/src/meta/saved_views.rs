@@ -1,6 +1,6 @@
 //! `saved_views` rows (spec 04): saved list views and SQL queries (D-H-6).
 
-use llmobs_core::ids::ProjectId;
+use cetra_core::ids::ProjectId;
 use serde_json::{Map, Value};
 use sqlx::{AssertSqlSafe, SqliteConnection, SqlitePool};
 use uuid::Uuid;
@@ -512,7 +512,7 @@ mod tests {
 
     use super::*;
     use crate::meta::{MetaDb, orgs, projects, users};
-    use llmobs_core::ids::OrgId;
+    use cetra_core::ids::OrgId;
 
     const NOW: i64 = 1_767_225_600_000_000_000;
 
@@ -532,6 +532,7 @@ mod tests {
             name: None,
             password_hash: None,
             email_verified_at: None,
+            email_verified_via: None,
             is_instance_admin: false,
         }
     }

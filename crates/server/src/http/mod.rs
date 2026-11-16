@@ -1,15 +1,16 @@
 //! axum router, shared state, and the request log (D150).
 //!
-//! `llmobs serve` binds [`router`] with
+//! `cetra serve` binds [`router`] with
 //! `into_make_service_with_connect_info::<SocketAddr>()` so [`ClientIp`] can
 //! read the socket peer. That binding is P5.
-#![cfg_attr(not(test), allow(dead_code))] // `llmobs serve` binds this in P5
+#![cfg_attr(not(test), allow(dead_code))] // `cetra serve` binds this in P5
 
 pub(crate) mod access;
 pub(crate) mod client_ip;
 mod csrf;
 pub(crate) mod error;
-mod health;
+pub(crate) mod health;
+pub(crate) mod restore;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -20,7 +21,7 @@ use axum::Router;
 use axum::extract::{DefaultBodyLimit, MatchedPath, Request};
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use llmobs_storage::Storage;
+use cetra_storage::Storage;
 use tower::ServiceExt;
 
 use crate::auth::Limits;
@@ -41,6 +42,8 @@ pub(crate) struct AppInner {
     pub(crate) config: ServerConfig,
     pub(crate) meta: MetaDb,
     pub(crate) storage: Arc<Storage>,
+    /// The last object-store probe behind `/readyz`, cached 10 s (D-N-36).
+    pub(crate) ready: health::ReadyCache,
     pub(crate) clock: Clock,
     pub(crate) limits: Limits,
     /// Successful API-key lookups, cached 60 s by hash.
@@ -68,12 +71,14 @@ pub(crate) struct AppInner {
     pub(crate) metrics_cache: crate::routes::metrics::MetricsCache,
     /// Usage counters, flushed every 10 s (D-G-11).
     pub(crate) usage: crate::usage::Usage,
+    /// Alert emails sent per org on the current UTC day (D-K-19).
+    pub(crate) alert_email_count: crate::alerts::quota::DailyEmailCount,
     /// Deletion worker state: wake-up, guard, attempts (D-M-3).
     pub(crate) deletions: crate::deletion::Deletions,
     /// Seals and opens secret columns (D-I-2).
     pub(crate) secrets: crate::crypto::SecretBox,
     /// One egress client for judges, webhooks and connection tests (D-I-29).
-    pub(crate) eval_runner: Arc<llmobs_eval::EvalRunner>,
+    pub(crate) eval_runner: Arc<cetra_eval::EvalRunner>,
     /// Decrypted connections, keyed by id and `updated_at`.
     pub(crate) connections: crate::eval::connection::ConnectionCache,
     /// Trace-load permits (D-I-23).
@@ -82,6 +87,18 @@ pub(crate) struct AppInner {
     pub(crate) definitions: crate::eval::definitions::DefinitionCache,
     /// Licence and (from M2) org entitlements (D179, D-P-10).
     pub(crate) entitlements: crate::entitlements::EntitlementsState,
+    /// The single backup slot: a second backup answers `busy` (N M2, D-N-19).
+    pub(crate) backup_slot: tokio::sync::Mutex<()>,
+    /// The eval queue's in-memory state (D-I-6).
+    pub(crate) eval: crate::eval::EvalQueue,
+    /// Traces the online-rule trigger waits on (D-I-8).
+    pub(crate) pending: crate::eval::pending::PendingTraces,
+    /// Per-org span rate (D-P-19, D-P-35).
+    pub(crate) ingest_rate: crate::entitlements::rate::IngestRate,
+    /// Per-org SSO routing (track P M5).
+    pub(crate) org_sso: crate::ee::org_sso::OrgSso,
+    /// The Prometheus registry served on `metrics_addr` (N M3, D-N-28).
+    pub(crate) telemetry: crate::telemetry::Telemetry,
 }
 
 impl AppState {
@@ -141,7 +158,8 @@ pub(crate) fn serve_router(state: AppState, routes: Vec<access::RouteDef>) -> Ro
     finish(state, routed, None)
 }
 
-/// The OTLP/HTTP listener's router: `/v1/traces` and nothing else (D-G-21).
+/// The OTLP/HTTP listener's router: the OTLP routes `/v1/traces`, `/v1/logs` and `/v1/metrics`
+/// and nothing else (D-G-21, D-G-40).
 pub(crate) fn otlp_router(state: AppState) -> Router {
     serve_router(state, crate::routes::otlp::routes())
 }
@@ -156,6 +174,10 @@ fn finish(state: AppState, routed: Router<AppState>, ui: Option<Router>) -> Rout
         .layer(middleware::from_fn_with_state(state.clone(), csrf::csrf))
         .layer(middleware::from_fn_with_state(state.clone(), authenticate))
         .layer(middleware::from_fn(log_request))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::telemetry::track_http,
+        ))
         .with_state(state)
 }
 
@@ -407,6 +429,13 @@ mod tests {
             403
         );
         assert_eq!(status_of(ApiError::PlanRequired { detail: "x" }), 403);
+        let quota = ApiError::QuotaExceeded {
+            detail: "over the cap".to_owned(),
+            retry_after_s: 90,
+        }
+        .into_response();
+        assert_eq!(quota.status(), 402);
+        assert_eq!(quota.headers().get("retry-after").unwrap(), "90");
         assert_eq!(status_of(ApiError::NotFound), 404);
         assert_eq!(
             status_of(ApiError::Conflict {

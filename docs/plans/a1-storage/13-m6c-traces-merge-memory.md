@@ -312,7 +312,7 @@ In `config`, remove `max_memory: ByteSize::gib(8)` and `max_memory_total: Some(B
 
 ### Run
 
-Run 3 of `docs/research/storage/benchmarks.md` again (local disk, `LLMOBS_TRACE_BENCH_TRACES=1000000`, same command), on a freshly generated dataset or a copy of an existing one (a run replays the WAL tail and may compact; don't reuse a directory another session is using). Also run, by hand from a scratch test or `just run`, the range-mode queries of the Investigation table (`count(*)`, `session_list` over 7 days, A2 `trace_list` with the list rule removed) with the default config and `target_partitions` 8. Record time, process peak RSS (`VmHWM`) and the peak size of `<data_dir>/tmp/query`.
+Run 3 of `docs/research/storage/benchmarks.md` again (local disk, `CETRA_TRACE_BENCH_TRACES=1000000`, same command), on a freshly generated dataset or a copy of an existing one (a run replays the WAL tail and may compact; don't reuse a directory another session is using). Also run, by hand from a scratch test or `just run`, the range-mode queries of the Investigation table (`count(*)`, `session_list` over 7 days, A2 `trace_list` with the list rule removed) with the default config and `target_partitions` 8. Record time, process peak RSS (`VmHWM`) and the peak size of `<data_dir>/tmp/query`.
 
 Pass criteria:
 - the benchmark completes with the default memory config;

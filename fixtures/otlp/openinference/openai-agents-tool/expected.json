@@ -2,12 +2,12 @@
   "spans": [
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "76f368acf285e583c171752c2ed19ad7",
-      "span_id": "7b3bf3f37ab53947",
+      "trace_id": "6481a5ab40ab6492a444edeac3c8d313",
+      "span_id": "40b46eee6afd1991",
       "name": "Agent workflow",
       "span_kind": "agent",
       "start_time": "2025-12-31T23:59:50.000000000Z",
-      "end_time": "2025-12-31T23:59:50.178000000Z",
+      "end_time": "2025-12-31T23:59:50.206000000Z",
       "status": "ok",
       "service_name": "capture-app",
       "attributes": {
@@ -28,13 +28,40 @@
     },
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "76f368acf285e583c171752c2ed19ad7",
-      "span_id": "bf93f46c62524283",
-      "parent_span_id": "eb24ef516dcf4fa4",
+      "trace_id": "6481a5ab40ab6492a444edeac3c8d313",
+      "span_id": "82637cd0b67aa302",
+      "parent_span_id": "40b46eee6afd1991",
+      "name": "Agent workflow",
+      "span_kind": "chain",
+      "start_time": "2025-12-31T23:59:50.000000000Z",
+      "end_time": "2025-12-31T23:59:50.205000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "attributes": {
+        "openinference.span.kind": "CHAIN"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.openai_agents",
+      "scope_version": "2.7.0",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 1
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "6481a5ab40ab6492a444edeac3c8d313",
+      "span_id": "b6f9e594a575d1d7",
+      "parent_span_id": "82637cd0b67aa302",
       "name": "weather",
       "span_kind": "agent",
       "start_time": "2025-12-31T23:59:50.000000000Z",
-      "end_time": "2025-12-31T23:59:50.177000000Z",
+      "end_time": "2025-12-31T23:59:50.204000000Z",
       "status": "ok",
       "service_name": "capture-app",
       "attributes": {
@@ -57,67 +84,13 @@
     },
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "76f368acf285e583c171752c2ed19ad7",
-      "span_id": "eb24ef516dcf4fa4",
-      "parent_span_id": "7b3bf3f37ab53947",
-      "name": "Agent workflow",
-      "span_kind": "chain",
-      "start_time": "2025-12-31T23:59:50.000000000Z",
-      "end_time": "2025-12-31T23:59:50.178000000Z",
-      "status": "ok",
-      "service_name": "capture-app",
-      "attributes": {
-        "openinference.span.kind": "CHAIN"
-      },
-      "resource_attributes": {
-        "telemetry.sdk.language": "python",
-        "telemetry.sdk.name": "opentelemetry",
-        "telemetry.sdk.version": "1.45.2"
-      },
-      "scope_name": "openinference.instrumentation.openai_agents",
-      "scope_version": "2.7.0",
-      "conventions": [
-        "openinference"
-      ],
-      "ingest_time": "2026-01-01T00:00:00.000000000Z",
-      "schema_version": 1
-    },
-    {
-      "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "76f368acf285e583c171752c2ed19ad7",
-      "span_id": "7bb78bf5922b9093",
-      "parent_span_id": "bf93f46c62524283",
-      "name": "turn",
-      "span_kind": "chain",
-      "start_time": "2025-12-31T23:59:50.001000000Z",
-      "end_time": "2025-12-31T23:59:50.139000000Z",
-      "status": "ok",
-      "service_name": "capture-app",
-      "attributes": {
-        "openinference.span.kind": "CHAIN"
-      },
-      "resource_attributes": {
-        "telemetry.sdk.language": "python",
-        "telemetry.sdk.name": "opentelemetry",
-        "telemetry.sdk.version": "1.45.2"
-      },
-      "scope_name": "openinference.instrumentation.openai_agents",
-      "scope_version": "2.7.0",
-      "conventions": [
-        "openinference"
-      ],
-      "ingest_time": "2026-01-01T00:00:00.000000000Z",
-      "schema_version": 1
-    },
-    {
-      "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "76f368acf285e583c171752c2ed19ad7",
-      "span_id": "dd2e1a97a902792b",
-      "parent_span_id": "7bb78bf5922b9093",
+      "trace_id": "6481a5ab40ab6492a444edeac3c8d313",
+      "span_id": "cb3c78ff842e3722",
+      "parent_span_id": "f7be581426487156",
       "name": "response",
       "span_kind": "llm",
       "start_time": "2025-12-31T23:59:50.001000000Z",
-      "end_time": "2025-12-31T23:59:50.134000000Z",
+      "end_time": "2025-12-31T23:59:50.161000000Z",
       "status": "ok",
       "service_name": "capture-app",
       "provider": "openai",
@@ -168,13 +141,40 @@
     },
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "76f368acf285e583c171752c2ed19ad7",
-      "span_id": "d038b876b2c372c4",
-      "parent_span_id": "7bb78bf5922b9093",
+      "trace_id": "6481a5ab40ab6492a444edeac3c8d313",
+      "span_id": "f7be581426487156",
+      "parent_span_id": "b6f9e594a575d1d7",
+      "name": "turn",
+      "span_kind": "chain",
+      "start_time": "2025-12-31T23:59:50.001000000Z",
+      "end_time": "2025-12-31T23:59:50.166000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "attributes": {
+        "openinference.span.kind": "CHAIN"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.openai_agents",
+      "scope_version": "2.7.0",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 1
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "6481a5ab40ab6492a444edeac3c8d313",
+      "span_id": "9259ae61be918190",
+      "parent_span_id": "f7be581426487156",
       "name": "get_weather",
       "span_kind": "tool",
-      "start_time": "2025-12-31T23:59:50.137000000Z",
-      "end_time": "2025-12-31T23:59:50.138000000Z",
+      "start_time": "2025-12-31T23:59:50.164000000Z",
+      "end_time": "2025-12-31T23:59:50.165000000Z",
       "status": "ok",
       "service_name": "capture-app",
       "input": "{\"city\":\"Paris\"}",
@@ -206,13 +206,13 @@
     },
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "76f368acf285e583c171752c2ed19ad7",
-      "span_id": "6bb37497e0ee55a8",
-      "parent_span_id": "ed299bd22fe1f19c",
+      "trace_id": "6481a5ab40ab6492a444edeac3c8d313",
+      "span_id": "aff59dd441d87937",
+      "parent_span_id": "ccad5923e23edac4",
       "name": "response",
       "span_kind": "llm",
-      "start_time": "2025-12-31T23:59:50.140000000Z",
-      "end_time": "2025-12-31T23:59:50.175000000Z",
+      "start_time": "2025-12-31T23:59:50.167000000Z",
+      "end_time": "2025-12-31T23:59:50.202000000Z",
       "status": "ok",
       "service_name": "capture-app",
       "provider": "openai",
@@ -264,13 +264,13 @@
     },
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "76f368acf285e583c171752c2ed19ad7",
-      "span_id": "ed299bd22fe1f19c",
-      "parent_span_id": "bf93f46c62524283",
+      "trace_id": "6481a5ab40ab6492a444edeac3c8d313",
+      "span_id": "ccad5923e23edac4",
+      "parent_span_id": "b6f9e594a575d1d7",
       "name": "turn",
       "span_kind": "chain",
-      "start_time": "2025-12-31T23:59:50.140000000Z",
-      "end_time": "2025-12-31T23:59:50.177000000Z",
+      "start_time": "2025-12-31T23:59:50.167000000Z",
+      "end_time": "2025-12-31T23:59:50.204000000Z",
       "status": "ok",
       "service_name": "capture-app",
       "attributes": {

@@ -28,7 +28,7 @@ Also the deletion guard, the live-stream `resync` event and the metrics-cache in
 ## Read first
 
 - `crates/server/src/meta/deletions.rs` (M1): every function, `DeletionRow`, `RequestDetails`.
-- `llmobs_storage`:
+- `cetra_storage`:
   - `Storage::{query, register_deletion, deletion_status, drop_project, apply_deletions}`;
   - `Deletion`, `DeletionScope`, `DeletionStatus`, `QueryOptions`, `QueryContext::new`;
   - `filter_trace_ids`, `user_deletion_scope`, `eval_trace_ids`, `FilterDeletionRequest`, `MAX_FILTER_DELETION_TRACES`, `TimeWindow`;
@@ -137,12 +137,12 @@ impl MetricsCache {
 ```rust
 //! Trace ids and end users of recent deletions, so a judge run that started before a
 //! deletion does not write a copy of deleted data after its cut-off (D-M-6).
-#![cfg_attr(not(test), allow(dead_code))] // `blocks` is called by I's executor from M8 on
+#![cfg_attr(not(test), allow(dead_code))] // `blocking` is called by I's executor from M8 on
 
 use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 
-use llmobs_core::ids::{ProjectId, TraceId};
+use cetra_core::ids::{ProjectId, TraceId};
 
 use crate::meta::{MetaDb, MetaError};
 
@@ -161,19 +161,20 @@ struct GuardState {
 }
 
 impl DeletionGuard {
-    /// Records `traces` of `project` from a deletion created at `created_at`. An existing entry
-    /// keeps the later `created_at`.
-    pub(crate) fn add_traces(&self, project: ProjectId, traces: &[TraceId], created_at: i64);
-    /// Records an end user of `project`.
-    pub(crate) fn add_user(&self, project: ProjectId, user_id: &str, created_at: i64);
-    /// Whether a judge run about `trace` must not go on (D-M-6). Only entries with
-    /// `created_at > now - GUARD_NS` count:
+    // Amended after the plan review (M-1): every entry carries its deletion's id, and a user
+    // entry looks at the user's oldest span. The code in `deletion/guard.rs` is the reference.
+    /// Records `traces` of `project` from `deletion`, created at `created_at`. An existing entry
+    /// keeps the later deletion.
+    pub(crate) fn add_traces(&self, project: ProjectId, traces: &[TraceId], deletion: Uuid, created_at: i64);
+    /// Records an end user of `project` from `deletion`.
+    pub(crate) fn add_user(&self, project: ProjectId, user_id: &str, deletion: Uuid, created_at: i64);
+    /// The deletion that forbids a judge run about `trace` to go on, if any (D-M-6). Only
+    /// entries with `created_at > now - GUARD_NS` count:
     /// - a trace-id entry for `trace` blocks;
-    /// - a user entry for one of `users` blocks only when `newest_ingest_ns <= entry.created_at`
-    ///   (the trace's data predates that user's deletion; newer data is not covered, spec S5).
-    /// `users` are the distinct user ids of the trace's loaded spans; `newest_ingest_ns` their
-    /// largest `ingest_time`. Callers that know neither pass `&[]` and `0`.
-    pub(crate) fn blocks(&self, project: ProjectId, trace: TraceId, users: &[&str], newest_ingest_ns: i64, now: i64) -> bool;
+    /// - a user entry blocks when `users` holds that user with an oldest ingest time at or
+    ///   before the entry's `created_at` (spec S5: a trace with only newer data is not covered).
+    /// `users` pairs each user id of the loaded spans with its smallest `ingest_time`.
+    pub(crate) fn blocking(&self, project: ProjectId, trace: TraceId, users: &[(&str, i64)], now: i64) -> Option<Uuid>;
     /// Removes entries with `created_at <= now - GUARD_NS`, and empty project maps.
     pub(crate) fn prune(&self, now: i64);
     /// Adds `meta::deletions::guard_entries(now - GUARD_NS)`.
@@ -230,7 +231,7 @@ struct Attempt {
 }
 
 impl Deletions {
-    pub(crate) fn new() -> Self;   // filter_cap = llmobs_storage::MAX_FILTER_DELETION_TRACES
+    pub(crate) fn new() -> Self;   // filter_cap = cetra_storage::MAX_FILTER_DELETION_TRACES
     /// The filter cap in force (M4's POST count uses it too).
     pub(crate) fn filter_cap(&self) -> usize;
     #[cfg(test)]
@@ -348,7 +349,7 @@ async fn data_step(state: &AppState, row: &DeletionRow, now: i64) -> Result<(), 
    - `meta.write` → `mark_applied(row.id, now)`;
    - log `deletion applied` (audit, below);
    - return `Ok(())`.
-2. For a `User` row, `state.deletions.guard.add_user(project, user_id, row.created_at)` (idempotent; M4 also adds it at creation, and this covers rows left by a previous process or copied by M7). For a `TraceIds` row whose `trace_count` is `None`, add its requested ids (`scope_traces`) with `add_traces` the same way.
+2. For a `User` row, `state.deletions.guard.add_user(project, user_id, row.id, row.created_at)` (idempotent; M4 also adds it at creation, and this covers rows left by a previous process or copied by M7). For a `TraceIds` row whose `trace_count` is `None`, add its requested ids (`scope_traces`) with `add_traces` the same way.
 3. Then by state:
    - `Resolving` with `trace_count == None`: `if !resolve::resolve(state, row, project).await? { return Ok(()) }`, then `register(state, row, project, now)`. `resolve` returns `Ok(false)` when `store_counts` found the row no longer `resolving`.
    - `Resolving` with `trace_count == Some(_)`, or `Pending` with `handed_over_at == None`: `register(state, row, project, now)`.
@@ -384,8 +385,8 @@ async fn data_step(state: &AppState, row: &DeletionRow, now: i64) -> Result<(), 
    - return. Storage refuses an empty `Traces` scope.
 
    A `User` row always registers: its `user_id` covers spans even with no trace.
-3. `state.deletions.guard.add_traces(project, &traces, row.created_at)`.
-4. Build `llmobs_storage::Deletion { id: row.id, project, cutoff: row.created_at, scope }`:
+3. `state.deletions.guard.add_traces(project, &traces, row.id, row.created_at)`.
+4. Build `cetra_storage::Deletion { id: row.id, project, cutoff: row.created_at, scope }`:
    - `TraceIds` and `Filter`: `scope = DeletionScope::Traces { trace_ids: traces }`;
    - `User`: `scope = DeletionScope::User { user_id, trace_ids: traces, session_ids: sessions }`.
 5. `state.storage.register_deletion(deletion).await`. `DeletionError` → `Step` per the table.
@@ -413,7 +414,7 @@ Audit for applied, in every place above: `tracing::info!(target: "audit", deleti
 3. `state.storage.drop_project(project).await` → on error `Err(Step::RetryForever("storage"))`. `drop_project` is idempotent (spec 03 § 7).
 4. One `meta.write`: `crate::meta::projects::delete_project(conn, project)`, then `mark_dropped(conn, row.id, now)`.
 5. `state.live.publish_resync(project)`; `state.metrics_cache.clear_project(project)`.
-6. When `mark_dropped` returned `true`: audit `deletion applied`, then `on_dropped(state, &Dropped { deletion_id: row.id, org_id: row.org_id, projects: vec![project], whole_org: false })`.
+6. When `mark_dropped` returned `true`: audit `deletion applied`, then `on_dropped(&Dropped { deletion_id: row.id, org_id: row.org_id, projects: vec![project], whole_org: false })`.
 
 `drop_org_step(state, row, now)`:
 1. `projects = scope_projects(reader, row.id)` ∪ `project_ids_of_org(reader, row.org_id)` (sorted, deduped). The second list catches a project created by a request that passed the access check just before the org became `deleting` (D-M-7).
@@ -421,7 +422,7 @@ Audit for applied, in every place above: `tracing::info!(target: "audit", deleti
 3. `state.usage.flush(&state.meta).await` → on error `RetryForever("meta")`. Usage counted in memory for these projects must not land in `usage_daily` after the rows are deleted.
 4. One `meta.write`: `crate::usage::delete_org_usage(conn, row.org_id)`, then `crate::meta::orgs::delete_org(conn, row.org_id)`, then `mark_dropped(conn, row.id, now)`.
 5. For each project: `publish_resync`, `clear_project`.
-6. When `mark_dropped` returned `true`: audit `deletion applied`, then `on_dropped(state, &Dropped { deletion_id: row.id, org_id: row.org_id, projects, whole_org: true })`.
+6. When `mark_dropped` returned `true`: audit `deletion applied`, then `on_dropped(&Dropped { deletion_id: row.id, org_id: row.org_id, projects, whole_org: true })`.
 
 ### The `dropped` hook (D-M-17)
 
@@ -437,10 +438,10 @@ pub(crate) struct Dropped {
     pub(crate) whole_org: bool,
 }
 
-/// Called exactly once per drop, after its `meta.db` transaction committed (D-M-17).
-/// Track Q adds the control-plane notification here (org → cell mapping, D170), through
-/// its own outbox. Today it records the audit event.
-pub(crate) fn on_dropped(_state: &AppState, dropped: &Dropped) {
+/// Records the audit event of a drop, once, after its `meta.db` transaction committed
+/// (D-M-17). The control plane does not hook in here: it pulls the applied `project`/`org`
+/// rows of `deletions` (request R5, track P's M4), which are kept forever.
+pub(crate) fn on_dropped(dropped: &Dropped) {
     if dropped.whole_org {
         tracing::info!(target: "audit", deletion_id = %dropped.deletion_id, org_id = %dropped.org_id, projects = dropped.projects.len(), "org dropped");
     } else {
@@ -512,7 +513,7 @@ To build a span, take `dataset_span(0)`, then set `trace_id`, `span_id`, `parent
    - `trace_status(A) == 404` and `trace_status(B) == 200`.
    - `storage.deletion_status(id) == Pending`.
 2. `eval_traces_join_the_scope`:
-   - Trace A, plus trace E with `environment = Some("llmobs-eval")` and `metadata[EVAL_TARGET_TRACE_ID] = A`'s hex.
+   - Trace A, plus trace E with `environment = Some("cetra-eval")` and `metadata[EVAL_TARGET_TRACE_ID] = A`'s hex.
    - `trace_status(E) == 200` first. Then a `trace_ids` row for A, then `run_once`.
    - `trace_count == Some(2)`, `scope_traces` is `[A, E]` sorted, and `trace_status(E) == 404`.
 3. `filter_resolves_matching_traces`:
@@ -545,7 +546,7 @@ To build a span, take `dataset_span(0)`, then set `trace_id`, `span_id`, `parent
     - A `project` row (`Pending`, `request.name`/`slug`) → `run_once`.
     - The row is `applied` with `handed_over_at == applied_at == Some(now)`.
     - `project_by_id` is `None`; `SELECT COUNT(*) FROM api_keys WHERE project_id = ?` is 0.
-    - Appending to it fails: `app.state.storage.append_spans(project, batch)` with `batch = llmobs_core::batch::spans_to_record_batch(&[span]).unwrap()` (as `test_support/mod.rs` imports it; do not use `commit_spans`, which unwraps) returns `Err(AppendError::ProjectDropped)`.
+    - Appending to it fails: `app.state.storage.append_spans(project, batch)` with `batch = cetra_core::batch::spans_to_record_batch(&[span]).unwrap()` (as `test_support/mod.rs` imports it; do not use `commit_spans`, which unwraps) returns `Err(AppendError::ProjectDropped)`.
     - The seeded project is untouched: `trace_status(seeded, S) == 200`. (`trace_status(A)` is not checked: the project route is 404 once the row is gone, which proves nothing about storage.)
 13a. `drop_hook_logs_once`: wrap test 12's `run_once` in `capture_logs`; exactly one log line contains both `audit` and `project dropped` (storage logs its own non-audit `project dropped` line too; `capture_logs` prints targets, so filter on `audit`). A second `run_once` adds nothing (the row is applied).
 13b. `org_drop_includes_projects_created_late`: an org row whose `deletion_projects` lists only project P1, while the org also has P2 (inserted after the row, as a racing `create_project` would). `run_once` drops both: P2's row is gone and appending to P2 fails with `ProjectDropped`.
@@ -563,7 +564,7 @@ To build a span, take `dataset_span(0)`, then set `trace_id`, `span_id`, `parent
 
 `deletion/guard.rs` tests:
 
-16. `blocks_known_traces_and_users_for_a_day`:
+16. `blocks_known_traces_and_users_for_a_day` (as amended for `blocking`, M-1; the code's test is the reference):
     - `add_traces(P, [T], 100)` and `add_user(P, "u", 100)`.
     - `blocks(P, T, &[], 0, 101)` is true. `blocks(P, T2, &["u"], 100, 101)` is true (data ingested at the cut-off).
     - `blocks(P, T2, &["u"], 101, 102)` is false: that trace's data is newer than the deletion.

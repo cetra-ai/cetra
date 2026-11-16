@@ -41,15 +41,15 @@
           },
           "spans": [
             {
-              "traceId": "4530775690d10cfa25ea93a0bcad7f50",
-              "spanId": "2d6d4dd0a9ec3cb9",
+              "traceId": "3284df3b1e219b62fc05ba45a5fba4b3",
+              "spanId": "04046e34e472d0b9",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
               "name": "anthropic.chat",
               "kind": 3,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590045000000",
+              "endTimeUnixNano": "1767225590046000000",
               "attributes": [
                 {
                   "key": "gen_ai.provider.name",

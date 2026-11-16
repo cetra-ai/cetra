@@ -14,8 +14,8 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, Method};
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use llmobs_core::ids::{ProjectId, TraceId};
-use llmobs_storage::{
+use cetra_core::ids::{OrgId, ProjectId, TraceId};
+use cetra_storage::{
     MAX_REFRESH_IDS, QueryContext, RunError, Storage, TimeWindow, TraceRefreshRequest,
 };
 use serde::{Deserialize, Serialize};
@@ -28,11 +28,12 @@ use crate::api::convert;
 use crate::api::traces::{TraceStreamParams, TraceSummary};
 use crate::auth::principal::Principal;
 use crate::auth::roles::ProjectPerm;
+use crate::entitlements::Visibility;
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
 use crate::live::{LiveEvent, StreamOwner, StreamSlot, StreamTiming, shut};
-use crate::routes::read::{attach_trace_scores, check_search, open_query, open_query_on};
+use crate::routes::read::{Deadline, attach_trace_scores, check_search, open_query, open_query_on};
 
 /// Events the task may have queued for one client before it waits.
 const CLIENT_BUFFER: usize = 16;
@@ -96,6 +97,7 @@ async fn stream_trace(
     let stream = SpanStream {
         project: access.project.id,
         trace_id,
+        visible_from: Visibility::window(&state, access.project.org_id).visible_from(),
         resume: has_last_event_id(&headers),
         bus: state.live.subscribe(),
         closed: state.live.closed(),
@@ -111,6 +113,8 @@ async fn stream_trace(
 struct SpanStream {
     project: ProjectId,
     trace_id: TraceId,
+    /// Spans that start before this instant are not sent (the org's data window, D-P-21).
+    visible_from: Option<i64>,
     /// The request sent `Last-Event-ID`: the client missed events, so it is told to refetch.
     resume: bool,
     bus: broadcast::Receiver<Arc<LiveEvent>>,
@@ -124,6 +128,7 @@ async fn run_span_stream(stream: SpanStream, tx: mpsc::Sender<Event>) {
     let SpanStream {
         project,
         trace_id,
+        visible_from,
         resume,
         mut bus,
         mut closed,
@@ -160,7 +165,10 @@ async fn run_span_stream(stream: SpanStream, tx: mpsc::Sender<Event>) {
                         }
                         continue;
                     }
-                    for span in event.spans.iter().filter(|span| span.trace_id == trace_id) {
+                    for span in event.spans.iter().filter(|span| {
+                        span.trace_id == trace_id
+                            && visible_from.is_none_or(|from| span.start_time >= from)
+                    }) {
                         let Some(message) = json_event("span", event.id, span) else {
                             tracing::warn!("a span event could not be encoded");
                             continue;
@@ -194,9 +202,11 @@ async fn stream_traces(
     // Subscribed before the filter is checked, so no event is missed. Both drop on an error.
     let bus = state.live.subscribe();
     let project = access.project.id;
-    check_filter(&state, project, &params).await?;
+    let visibility = Visibility::window(&state, access.project.org_id);
+    check_filter(&state, access.project.org_id, project, &params).await?;
     let stream = TraceStream {
         project,
+        visibility,
         params,
         resume: has_last_event_id(&headers),
         storage: Arc::clone(&state.storage),
@@ -213,17 +223,21 @@ async fn stream_traces(
 /// Parses the filter (D-G-22). An invalid one is `400 invalid_filter`, so no stream opens.
 async fn check_filter(
     state: &AppState,
+    org: OrgId,
     project: ProjectId,
     params: &TraceStreamParams,
 ) -> Result<(), ApiError> {
-    let ctx = open_query(state, project, None).await?;
-    llmobs_storage::trace_refresh(&ctx, refresh_request(params, &[], None)).await?;
+    let ctx = open_query(state, org, project, None).await?;
+    cetra_storage::trace_refresh(&ctx, refresh_request(params, &[], None)).await?;
     Ok(())
 }
 
 /// What the trace stream's task needs. The task holds no `AppState`.
 struct TraceStream {
     project: ProjectId,
+    /// The org's data window when the stream opened (stale by at most a stream's life, D-G-34;
+    /// accepted, D-P-47).
+    visibility: Visibility,
     params: TraceStreamParams,
     /// The request sent `Last-Event-ID`: the client missed events, so it is told to refetch.
     resume: bool,
@@ -238,6 +252,7 @@ struct TraceStream {
 async fn run_trace_stream(stream: TraceStream, tx: mpsc::Sender<Event>) {
     let TraceStream {
         project,
+        visibility,
         params,
         resume,
         storage,
@@ -313,7 +328,7 @@ async fn run_trace_stream(stream: TraceStream, tx: mpsc::Sender<Event>) {
                     biased;
                     () = shut(&mut closed) => return,
                     () = tx.closed() => return,
-                    outcome = refresh(&storage, project, &params, search, &batch, &mut matched) => outcome,
+                    outcome = refresh(&storage, project, visibility, &params, search, &batch, &mut matched) => outcome,
                 };
                 match outcome {
                     Ok(refreshed) => {
@@ -379,12 +394,13 @@ enum RefreshError {
 async fn refresh(
     storage: &Storage,
     project: ProjectId,
+    visibility: Visibility,
     params: &TraceStreamParams,
     search: Option<&str>,
     batch: &Pending,
     matched: &mut HashSet<TraceId>,
 ) -> Result<Refreshed, RefreshError> {
-    let ctx = open_query_on(storage, project, None, None)
+    let ctx = open_query_on(storage, project, visibility, None, None)
         .await
         .map_err(|error| match error {
             ApiError::Unavailable { .. } => RefreshError::Retry,
@@ -422,10 +438,13 @@ async fn refresh(
             rows
         }
     };
-    attach_trace_scores(&ctx, &mut rows).await.map_err(|_| {
-        tracing::warn!("a trace stream could not read scores");
-        RefreshError::Resync
-    })?;
+    // The stream's refresh budget is its own (REFRESH_TIMEOUT); the score lookup gets a fresh one.
+    attach_trace_scores(&ctx, &mut rows, Deadline::start())
+        .await
+        .map_err(|_| {
+            tracing::warn!("a trace stream could not read scores");
+            RefreshError::Resync
+        })?;
     Ok(Refreshed { rows, overflowed })
 }
 
@@ -438,7 +457,7 @@ async fn read_summaries(
 ) -> Result<Vec<TraceSummary>, RefreshError> {
     let texts: Vec<String> = ids.iter().map(TraceId::to_string).collect();
     let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-    let batches = llmobs_storage::trace_refresh(ctx, refresh_request(params, &refs, search))
+    let batches = cetra_storage::trace_refresh(ctx, refresh_request(params, &refs, search))
         .await
         .map_err(|error| {
             tracing::warn!(kind = error.kind(), "a trace stream re-read failed");
@@ -464,6 +483,7 @@ fn refresh_request<'a>(
         trace_ids,
         include_eval: params.include_eval,
         include_experiments: params.include_experiments,
+        strict_exclusions: false,
         timeout: REFRESH_TIMEOUT,
     }
 }
@@ -548,13 +568,15 @@ mod tests {
     use std::time::Duration;
 
     use axum::http::StatusCode;
-    use llmobs_core::ids::{ProjectId, SpanId, TraceId};
+    use cetra_core::ids::{ProjectId, SpanId, TraceId};
     use serde_json::Value;
 
     use crate::api::traces::{SpanSummary, TraceSummary};
     use crate::live::{StreamOwner, StreamSlot};
     use crate::meta::users;
-    use crate::test_support::{Seeded, TestApp, TestStream, assert_logs_clean, dataset_span};
+    use crate::test_support::{
+        Seeded, TestApp, TestStream, assert_logs_clean, dataset_span, set_limits,
+    };
 
     const TRACE_1: &str = "a1000000000000000000000000000001";
     const TRACE_2: &str = "a1000000000000000000000000000002";
@@ -1138,7 +1160,7 @@ mod tests {
             &judged,
             "b100000000000030",
             "judge",
-            "llmobs-eval",
+            "cetra-eval",
         )
         .await;
         let shown = next_trace(&mut including).await;
@@ -1286,5 +1308,83 @@ mod tests {
             assert_eq!(event.span_count, 1);
         })
         .await;
+    }
+
+    /// One day, in nanoseconds.
+    const DAY: i64 = 86_400_000_000_000;
+
+    /// D-P-21: a span stream sends no span that starts before the org's data window.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_span_stream_drops_spans_before_the_window() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-01T00:00:00Z",
+            &serde_json::json!({"data_access_days": 30}),
+        );
+        let now = app.state.clock.now_ns();
+        let trace: TraceId = "a8000000000000000000000000000001".parse().unwrap();
+        let mut stream = app
+            .request(
+                axum::http::Method::GET,
+                &stream_path(&seeded, &trace.to_string()),
+            )
+            .header("cookie", &seeded.cookie)
+            .send_stream()
+            .await;
+        assert_eq!(stream.status, StatusCode::OK);
+
+        app.commit_trace_at(&seeded.project, trace, 1, now - 40 * DAY)
+            .await;
+        app.commit_trace_at(&seeded.project, trace, 2, now).await;
+        let event = stream
+            .next_non_ping(WAIT)
+            .await
+            .expect("the visible span arrives");
+        let span: SpanSummary = serde_json::from_str(&event.data).unwrap();
+        assert_eq!(span.span_id.to_string(), "c400000000000002");
+        assert!(
+            stream
+                .next_non_ping(Duration::from_millis(300))
+                .await
+                .is_none(),
+            "the span before the window is not sent"
+        );
+    }
+
+    /// D-P-21: the trace stream reads through the window, so a span of an old trace produces no
+    /// summary event.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_trace_stream_reads_through_the_window() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-01T00:00:00Z",
+            &serde_json::json!({"data_access_days": 30}),
+        );
+        let now = app.state.clock.now_ns();
+        let old: TraceId = "a8000000000000000000000000000002".parse().unwrap();
+        let fresh: TraceId = "a8000000000000000000000000000003".parse().unwrap();
+        let mut stream = open_traces(&app, &seeded, "").await;
+        assert_eq!(stream.status, StatusCode::OK);
+
+        app.commit_trace_at(&seeded.project, old, 1, now - 40 * DAY)
+            .await;
+        assert!(
+            stream
+                .next_non_ping(Duration::from_millis(500))
+                .await
+                .is_none(),
+            "an old trace produces no summary"
+        );
+
+        app.commit_trace_at(&seeded.project, fresh, 2, now - DAY)
+            .await;
+        let summary = next_trace(&mut stream).await;
+        assert_eq!(summary.trace_id.to_string(), fresh.to_string());
     }
 }

@@ -147,6 +147,7 @@ struct Inner {
     discovery_hits: AtomicU64,
     landed_hits: AtomicU64,
     fail_discovery: AtomicBool,
+    authorization_endpoint: Mutex<Option<String>>,
 }
 
 struct Store {
@@ -183,6 +184,7 @@ impl MockIdp {
             discovery_hits: AtomicU64::new(0),
             landed_hits: AtomicU64::new(0),
             fail_discovery: AtomicBool::new(false),
+            authorization_endpoint: Mutex::new(None),
         });
         let router = routes(Arc::clone(&inner));
         let task = tokio::spawn(async move {
@@ -210,6 +212,15 @@ impl MockIdp {
     /// Later discovery requests answer 500.
     pub(crate) fn fail_discovery(&self) {
         self.inner.fail_discovery.store(true, Ordering::Relaxed);
+    }
+
+    /// Discovery publishes `url` as the authorization endpoint from now on.
+    pub(crate) fn set_authorization_endpoint(&self, url: &str) {
+        *self
+            .inner
+            .authorization_endpoint
+            .lock()
+            .expect("mock idp lock") = Some(url.to_owned());
     }
 
     /// `kid` of the key currently published at `/jwks`.
@@ -260,9 +271,15 @@ async fn configuration(State(inner): State<Arc<Inner>>) -> Response {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
     let base = &inner.base;
+    let authorization_endpoint = inner
+        .authorization_endpoint
+        .lock()
+        .expect("mock idp lock")
+        .clone()
+        .unwrap_or_else(|| format!("{base}/authorize"));
     Json(json!({
         "issuer": base,
-        "authorization_endpoint": format!("{base}/authorize"),
+        "authorization_endpoint": authorization_endpoint,
         "token_endpoint": format!("{base}/token"),
         "jwks_uri": format!("{base}/jwks"),
         "response_types_supported": ["code"],

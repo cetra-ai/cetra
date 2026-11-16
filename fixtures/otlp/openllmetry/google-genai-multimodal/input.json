@@ -41,15 +41,15 @@
           },
           "spans": [
             {
-              "traceId": "31a77d2db98dac1062d3ac00620f2858",
-              "spanId": "5b48137eef628e36",
+              "traceId": "d97f73dd1d039bcdf45be59cbf1d78c1",
+              "spanId": "e9faf5bb377a79ad",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
               "name": "generate_content gemini-2.5-flash",
               "kind": 3,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590050000000",
+              "endTimeUnixNano": "1767225590055000000",
               "attributes": [
                 {
                   "key": "gen_ai.provider.name",

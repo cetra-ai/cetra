@@ -139,6 +139,28 @@ pub enum StorageError {
     Media(#[from] MediaError),
 }
 
+/// Why [`crate::Storage::flush_now`] failed.
+#[derive(Debug, thiserror::Error)]
+pub enum FlushNowError {
+    /// A WAL writer has stopped on an I/O error; nothing more will flush.
+    #[error("the {table} WAL writer has failed")]
+    WriterFailed {
+        /// `spans` or `scores`.
+        table: &'static str,
+    },
+    /// The flush did not commit within the timeout.
+    #[error("the {table} flush did not commit within {timeout:?}")]
+    Timeout {
+        /// `spans` or `scores`.
+        table: &'static str,
+        /// The timeout the caller passed.
+        timeout: std::time::Duration,
+    },
+    /// The storage is shutting down.
+    #[error("storage is shutting down")]
+    ShuttingDown,
+}
+
 /// `Storage::query` failed.
 #[derive(Debug, thiserror::Error)]
 pub enum QueryError {
@@ -202,6 +224,16 @@ pub enum WalError {
         /// Byte offset of the corrupt record.
         offset: u64,
     },
+    /// A segment's header is not one this build reads (spec 03 § 12).
+    #[error("WAL segment {segment} of table {table}: {problem}")]
+    Header {
+        /// `spans` or `scores`.
+        table: &'static str,
+        /// Segment file name, for example `00000000000000000042.wal`.
+        segment: String,
+        /// What is wrong with the header.
+        problem: HeaderProblem,
+    },
     /// A segment file or its directory could not be read or written.
     #[error("{action} {path}: {source}")]
     Io {
@@ -213,6 +245,29 @@ pub enum WalError {
         #[source]
         source: io::Error,
     },
+}
+
+/// Why a WAL segment's header is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum HeaderProblem {
+    /// The magic differs, or the file is shorter than the header and not a
+    /// prefix of it. Files written before format versions have no header.
+    #[error("not a WAL segment of this storage (it may predate format versions)")]
+    NotAWalSegment,
+    /// The version is not the one this build reads. No older version exists,
+    /// so the segment was written by a newer release.
+    #[error(
+        "format {found} is not the {supported} this build reads; the segment was written by a different release: run the release that wrote it, or restore the backup taken before the upgrade"
+    )]
+    NewerFormat {
+        /// The version in the segment header.
+        found: u16,
+        /// The version this build reads.
+        supported: u16,
+    },
+    /// The flags are not 0.
+    #[error("unknown flags; run the newer release")]
+    UnknownFlags,
 }
 
 impl WalError {
@@ -248,6 +303,13 @@ pub enum CatalogError {
         #[source]
         source: sqlx::migrate::MigrateError,
     },
+    /// The copy of `catalog.db` taken before a migration failed (D-N-22).
+    #[error("catalog pre-migration copy: {source}")]
+    PreMigrationCopy {
+        /// The SQLite error, or the file error as `sqlx::Error::Io`.
+        #[source]
+        source: sqlx::Error,
+    },
     /// A query failed.
     #[error("catalog database: {source}")]
     Db {
@@ -267,6 +329,33 @@ pub enum CatalogError {
         /// The offending `data_files.id`.
         file: Uuid,
     },
+    /// The directory was written by a newer format (spec 03 § 12).
+    #[error(
+        "this data directory has format version {found}, which this build (format {supported}) does not read; run the newer release, or restore the backup taken before the upgrade"
+    )]
+    FormatTooNew {
+        /// The `PRAGMA user_version` of `catalog.db`.
+        found: i64,
+        /// The format version this build reads and writes.
+        supported: u16,
+    },
+    /// A directory from before format versions existed (pre-release).
+    #[error(
+        "this data directory has no format version: it was written before format versions were introduced; create a new data directory"
+    )]
+    PreFormat,
+    /// `catalog.db` has applied a migration this build does not have.
+    #[error(
+        "catalog.db has applied migration {version}, which this build does not have; run the newer release, or restore the backup taken before the upgrade"
+    )]
+    SchemaTooNew {
+        /// The version recorded in `_sqlx_migrations`.
+        version: i64,
+    },
+    /// A commit failed with a fatal SQLite I/O error earlier in this process.
+    /// Every catalog call is refused until a restart (D-R-6).
+    #[error("catalog stopped after an I/O error; restart required")]
+    Stopped,
 }
 
 /// One staged-object collection failed.
@@ -284,6 +373,19 @@ pub enum GcError {
     /// A test fault armed at a GC hook point.
     #[error("garbage collection was interrupted")]
     Fault,
+}
+
+impl GcError {
+    /// The variant name in snake case. GC logs print this instead of the error
+    /// text: [`GcError::Object`] displays a staged path, and staged rows include
+    /// media paths, which hold the blob's hash (spec 03 §9).
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            Self::Catalog(_) => "catalog",
+            Self::Object(_) => "object",
+            Self::Fault => "fault",
+        }
+    }
 }
 
 impl CatalogError {
@@ -315,6 +417,10 @@ pub enum CommitError {
         #[source]
         source: sqlx::Error,
     },
+    /// A commit failed with a fatal SQLite I/O error earlier in this process.
+    /// Every catalog call is refused until a restart (D-R-6).
+    #[error("catalog stopped after an I/O error; restart required")]
+    Stopped,
 }
 
 impl CommitError {
@@ -431,6 +537,10 @@ pub enum ObjectError {
         /// Relative object key.
         path: String,
     },
+    /// A local fsync failed earlier in this process. Local object writes and
+    /// deletes are refused until a restart (D-R-6).
+    #[error("local object store stopped after a failed fsync; restart required")]
+    SyncFailed,
     /// A remote `put` or multipart upload failed.
     ///
     /// The object may already exist: a failed completion is ambiguous. The
@@ -464,9 +574,28 @@ pub enum ObjectError {
         #[source]
         source: Box<object_store::Error>,
     },
+    /// Object deletion is off (restore mode, D-N-34). Every deletion is refused, and
+    /// the caller keeps its catalog row for a later server to retry.
+    #[error("object deletion is off (restore mode)")]
+    DeletionOff,
 }
 
 impl ObjectError {
+    /// The variant name in snake case. Logs and [`OrphanError::Delete`] use it
+    /// instead of the error text, which names the object key.
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            Self::Io { .. } => "io",
+            Self::AlreadyExists { .. } => "already_exists",
+            Self::Upload { .. } => "upload",
+            Self::Store { .. } => "store",
+            Self::InvalidPath => "invalid_path",
+            Self::Client { .. } => "client",
+            Self::SyncFailed => "sync_failed",
+            Self::DeletionOff => "deletion_off",
+        }
+    }
+
     pub(crate) fn io(action: &'static str, path: &Path, source: io::Error) -> Self {
         Self::Io {
             action,
@@ -495,6 +624,14 @@ impl ObjectError {
             source: Box::new(source),
         }
     }
+}
+
+/// The object store did not answer a probe (`Storage::probe_objects`).
+#[derive(Debug, thiserror::Error)]
+pub enum ProbeError {
+    /// Neither the HEAD nor the PUT of the marker succeeded. The text names no key and no host.
+    #[error("the object store is unreachable")]
+    Unreachable,
 }
 
 /// Encoding a partition as one Parquet file failed.
@@ -651,6 +788,98 @@ impl CompactionError {
             Self::Deletion { .. } => "deletion",
             Self::DiskFull => "disk_full",
         }
+    }
+}
+
+/// Why [`crate::Storage::snapshot_catalog`] failed.
+#[derive(Debug, thiserror::Error)]
+pub enum SnapshotError {
+    /// The snapshot target already exists.
+    #[error("the snapshot target already exists")]
+    Exists,
+    /// The snapshot target is not valid UTF-8.
+    #[error("the snapshot target is not valid UTF-8")]
+    NonUtf8Path,
+    /// SQLite failed, or a value of the copy is invalid.
+    #[error("catalog snapshot: {0}")]
+    Db(#[from] sqlx::Error),
+    /// A `media` row of the copy names a project id that does not parse.
+    #[error("catalog snapshot: invalid project id in the copy")]
+    BadProjectId,
+}
+
+/// Why [`crate::Storage::copy_objects`] failed.
+#[derive(Debug, thiserror::Error)]
+pub enum CopyObjectsError {
+    /// The objects are in a remote store, not on this machine.
+    #[error("objects are in a remote store; back up the bucket instead")]
+    RemoteStore,
+    /// Object `key_index` of the snapshot is missing, or could not be linked or copied.
+    #[error("object {key_index} of the snapshot: {source}")]
+    Io {
+        /// Position of the object in the snapshot's list. Never the path.
+        key_index: usize,
+        /// The filesystem error.
+        source: io::Error,
+    },
+    /// Creating or syncing the destination directory failed.
+    #[error("backup directory: {source}")]
+    Dir {
+        /// The filesystem error.
+        source: io::Error,
+    },
+    /// The blocking copy task panicked.
+    #[error("copy task panicked")]
+    Task,
+    /// The copy was cancelled before it finished: its caller gave up on it.
+    #[error("copy cancelled")]
+    Cancelled,
+}
+
+/// Why [`crate::Maintenance::collect_orphans`] failed.
+#[derive(Debug, thiserror::Error)]
+pub enum OrphanError {
+    /// Listing the object store failed.
+    #[error("listing the object store: {0}")]
+    List(object_store::Error),
+    /// Deleting an orphan failed. Holds the [`ObjectError::label`] only: the error
+    /// text names the object key, which holds the blob's hash (spec 03 §9).
+    #[error("deleting an orphan: {0}")]
+    Delete(&'static str),
+    /// Reading the catalog failed.
+    #[error("reading the catalog: {0}")]
+    Db(#[from] sqlx::Error),
+    /// A `media` row names a project id that does not parse.
+    #[error("reading the catalog: invalid project id")]
+    BadProjectId,
+}
+
+impl OrphanError {
+    /// The delete failure of one orphan, keeping only the object error's label.
+    pub(crate) fn delete(error: &ObjectError) -> Self {
+        Self::Delete(error.label())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ObjectError, OrphanError};
+
+    #[test]
+    fn an_orphan_delete_error_does_not_show_the_object_key() {
+        let key = "media/0190f2a4-7c3d-7e21-9b8a-1234567890ab/9f86d081884c7d659a2feaa0c55ad015";
+        let error = ObjectError::store(
+            "deleting object",
+            key,
+            object_store::Error::Generic {
+                store: "test",
+                source: "refused".into(),
+            },
+        );
+        let text = OrphanError::delete(&error).to_string();
+        assert!(!text.contains(key), "{text}");
+        assert!(!text.contains("9f86d081"), "{text}");
+        assert_eq!(text, "deleting an orphan: store");
     }
 }
 

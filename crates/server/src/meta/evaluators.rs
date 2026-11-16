@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use llmobs_core::ids::ProjectId;
+use cetra_core::ids::ProjectId;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
@@ -323,7 +323,7 @@ fn optional_uuid(value: Option<String>, column: &'static str) -> Result<Option<U
 
 #[cfg(test)]
 mod tests {
-    use llmobs_core::ids::{OrgId, ProjectId};
+    use cetra_core::ids::{OrgId, ProjectId};
     use uuid::Uuid;
 
     use super::{EvaluatorFields, EvaluatorRow, PROJECT_CAP};
@@ -406,6 +406,7 @@ mod tests {
                             name: None,
                             password_hash: None,
                             email_verified_at: None,
+                            email_verified_via: None,
                             is_instance_admin: false,
                         },
                         NOW,

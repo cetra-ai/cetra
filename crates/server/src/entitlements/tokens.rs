@@ -1,8 +1,8 @@
 //! Org tokens (D-P-11): validation and the in-memory grants. The window history (D-P-30)
 //! lives in `meta::entitlements`.
 
-use llmobs_core::ids::OrgId;
-use llmobs_token::{Claims, LimitsClaim, TokenError};
+use cetra_core::ids::OrgId;
+use cetra_token::{Claims, LimitsClaim, TokenError};
 use uuid::Uuid;
 
 use super::{FeatureSet, Limits};
@@ -59,7 +59,7 @@ pub(crate) enum OrgTokenError {
 
 /// Verifies `token` as an org token for this cell and returns its org and grant.
 ///
-/// Checks, in order: `llmobs_token::verify` (a non-org kind is `Token(WrongKind)`),
+/// Checks, in order: `cetra_token::verify` (a non-org kind is `Token(WrongKind)`),
 /// `audience == public_url` (`Audience`), then `issued_at <= expires_at <= grace_ends_at`
 /// and a plan id and name of 1 to 64 characters (`Fields`). Dates against now are the
 /// caller's.
@@ -68,7 +68,7 @@ pub(crate) fn grant_from_token(
     public_url: &str,
     defaults: &Limits,
 ) -> Result<(OrgId, OrgGrant), OrgTokenError> {
-    let verified = llmobs_token::verify(token)?;
+    let verified = cetra_token::verify(token)?;
     let Claims::Org(claims) = verified.claims else {
         return Err(TokenError::WrongKind.into());
     };
@@ -124,8 +124,8 @@ fn merge(claim: Option<Option<u64>>, default: Option<u64>) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use llmobs_core::ids::OrgId;
-    use llmobs_token::TokenError;
+    use cetra_core::ids::OrgId;
+    use cetra_token::TokenError;
     use serde_json::json;
     use uuid::Uuid;
 
@@ -187,7 +187,7 @@ mod tests {
             OrgTokenError::Token(TokenError::WrongKind)
         );
         assert_eq!(
-            refuse(&control_plane_token("orgs")),
+            refuse(&control_plane_token("orgs", "GET", "/")),
             OrgTokenError::Token(TokenError::WrongKind)
         );
 

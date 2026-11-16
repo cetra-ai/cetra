@@ -137,7 +137,7 @@ it("ignores a poll's 401 while signing out", async () => {
 
     answerLogout(new HttpResponse(null, { status: 204 }));
     await waitFor(() => expect(router.state.location.pathname).toBe("/login"));
-    expect(router.state.location.search).toEqual({});
+    expect(router.state.location.search).toEqual({ signed_out: true });
   } finally {
     setSigningOut(false);
   }

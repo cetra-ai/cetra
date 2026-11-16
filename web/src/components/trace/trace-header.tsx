@@ -2,7 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { cn } from "cn";
 import { SquareArrowOutUpRight, Trash2, X } from "lucide-react";
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 import { $api } from "@/api/client";
 import { problemMessage } from "@/api/problem";
 import { traceDetailQuery } from "@/api/queries";
@@ -37,12 +37,15 @@ export function TraceHeader({
   mode,
   onClose,
   live,
+  actions,
 }: {
   trace: Schema<"TraceSummary">;
   spanId?: string;
   mode?: TraceMode;
   onClose?: () => void | Promise<void>;
   live?: { status: StreamStatus; onStop: () => void };
+  /** Buttons placed before the copy button. */
+  actions?: ReactNode;
 }) {
   const { org, project, ref, data } = useProject();
   const search = pageSearch(spanId, mode);
@@ -125,6 +128,7 @@ export function TraceHeader({
                 <Trash2 />
               </Button>
             </DisabledReason>
+            {actions}
             <CopyButton value={href} label="link" />
             {onClose ? (
               <Link
@@ -200,7 +204,7 @@ export function TraceHeader({
         open={confirmOpen}
         onOpenChange={setConfirmOpen}
         title="Delete this trace?"
-        description="Its spans, scores and evaluation traces are hidden within seconds and erased within 24 hours. This cannot be undone."
+        description="Its spans, scores and evaluation traces are hidden within seconds and removed within 24 hours; stored copies are purged after the storage grace period. This cannot be undone."
         confirmLabel="Delete trace"
         destructive
         pending={deletion.isPending}

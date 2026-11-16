@@ -1,7 +1,7 @@
 //! `score_definitions` rows (spec 04, D-I-26). A name is unique among live (non-archived) rows.
 
-use llmobs_core::enums::ScoreDataType;
-use llmobs_core::ids::ProjectId;
+use cetra_core::enums::ScoreDataType;
+use cetra_core::ids::ProjectId;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
@@ -322,8 +322,8 @@ fn categories_json(categories: &[DefinitionCategory]) -> Result<Option<String>, 
 
 #[cfg(test)]
 mod tests {
-    use llmobs_core::enums::ScoreDataType;
-    use llmobs_core::ids::{OrgId, ProjectId};
+    use cetra_core::enums::ScoreDataType;
+    use cetra_core::ids::{OrgId, ProjectId};
     use uuid::Uuid;
 
     use super::{DefinitionCategory, DefinitionFields, DefinitionRow, PROJECT_CAP};

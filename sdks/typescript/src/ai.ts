@@ -1,7 +1,7 @@
 /**
  * `aiTelemetry` (spec 10 § Vercel AI SDK): the Vercel AI SDK sends spans to
  * the global tracer unless it is given one, so this hands out a tracer from
- * the llmobs provider (scope `ai`, which the default export filter keeps,
+ * the cetra provider (scope `ai`, which the default export filter keeps,
  * D-F-5) plus the context values as telemetry metadata. Users pass the result
  * as `experimental_telemetry`. Before `init()` (or when disabled) it returns
  * `{ isEnabled: false }` and the AI SDK traces nothing.

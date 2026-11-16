@@ -10,7 +10,7 @@ Adds `alerts::evaluate`: the pure state machine `step` (D-K-4) and `evaluate_onc
 - K1 (`alert_value`, `AlertValueRequest`, `AlertValue`), K3 (`AlertCondition`, `Comparator::breaches`, `AlertWindow::ns`, `interval_ns`, `alerts::condition::measure`), K4 (`meta::alerts`, `RuleRow`), K6 (`EventDetails`, `EventRow`, `DeliveryRow`, `list_events`, `deliveries_for_events`).
 - `crates/server/src/routes/read.rs` (`open_query_on`: every read builds its query context through it), `crates/server/src/clock.rs` (`Clock::Manual`, `advance`, `set`).
 - `crates/server/src/test_support/mod.rs`: `TestApp`, `seed`, `commit_spans`, `dataset_span`, `assert_logs_clean`, `capture_logs`. The manual clock starts at 2026-01-01T00:00:00Z (`MANUAL_NOW_NS` is private; use `app.state.clock.now_ns()`).
-- `crates/storage/src/lib.rs`: `Storage::query`, `QueryOptions` (derives `Default`), `QueryContext::new`, `RunError`; `QueryError` is `llmobs_storage::error::QueryError` (not re-exported at the root).
+- `crates/storage/src/lib.rs`: `Storage::query`, `QueryOptions` (derives `Default`), `QueryContext::new`, `RunError`; `QueryError` is `cetra_storage::error::QueryError` (not re-exported at the root).
 
 ## Files
 
@@ -182,7 +182,7 @@ Steps:
 
 `async fn evaluate_rule(state: &AppState, rule: RuleRow, now: i64) -> (Uuid, bool, Result<Recorded, MetaError>)` returns the rule id, whether the query failed, and the write's result. The report counts: `evaluated` += 1 for every rule; `failed` += 1 (once per rule) when the query failed, the write returned `Err`, or both; `events` += 1 for `Recorded::Event`; `stale` += 1 for `Recorded::Stale`.
 
-Imports: `futures::StreamExt`, `llmobs_core::ids::ProjectId`, `llmobs_storage::{AlertValue, AlertValueRequest, RunError, TimeWindow, alert_value}`, `crate::http::error::ApiError`, `crate::alerts::condition::measure`, `crate::api::alerts::{AlertCondition, AlertEventKind, AlertState}`, `crate::http::AppState`, `crate::meta::MetaError`, `crate::meta::alerts::{EventDetails, Evaluation, Recorded, RuleRow, due_rules, record_evaluation}`, `std::time::Duration`, `uuid::Uuid`. Remove any the compiler reports unused; run `just fmt`.
+Imports: `futures::StreamExt`, `cetra_core::ids::ProjectId`, `cetra_storage::{AlertValue, AlertValueRequest, RunError, TimeWindow, alert_value}`, `crate::http::error::ApiError`, `crate::alerts::condition::measure`, `crate::api::alerts::{AlertCondition, AlertEventKind, AlertState}`, `crate::http::AppState`, `crate::meta::MetaError`, `crate::meta::alerts::{EventDetails, Evaluation, Recorded, RuleRow, due_rules, record_evaluation}`, `std::time::Duration`, `uuid::Uuid`. Remove any the compiler reports unused; run `just fmt`.
 
 `rule` is taken by value and moved apart (clippy's `needless_pass_by_value`): copy `let rule_id = rule.id; let project = rule.project_id; let expected_updated_at = rule.updated_at;` first, and move `rule.name` into `EventDetails` without cloning.
 
@@ -209,7 +209,7 @@ async fn measure_rule(state: &AppState, project: ProjectId, condition: &AlertCon
 
 ### Pure (`alerts::evaluate::tests`)
 
-Build a `RuleRow` with a helper `fn rule(state: AlertState, streak: i64) -> RuleRow` (`id: Uuid::now_v7()`, `project_id: ProjectId::new_v7()` — use the constructor `llmobs_core::ids` has —, an `error_rate` condition, threshold 0.1, `min_count Some(10)`, `notify_while_firing false`, `cooldown_s 3600`, `last_notified_at None`, other optional fields `None`, `enabled true`, times 0).
+Build a `RuleRow` with a helper `fn rule(state: AlertState, streak: i64) -> RuleRow` (`id: Uuid::now_v7()`, `project_id: ProjectId::new_v7()` — use the constructor `cetra_core::ids` has —, an `error_rate` condition, threshold 0.1, `min_count Some(10)`, `notify_while_firing false`, `cooldown_s 3600`, `last_notified_at None`, other optional fields `None`, `enabled true`, times 0).
 
 1. `reading_classifies`: count 9 → `Insufficient` (whatever the value); count 10, value 0.2 → `Breaching`; value 0.1 → `Clear` (`gt`); value `None` → `Clear`; a `cost` condition (`min_count None`) with count 0 and value 0.0, threshold 0.0, `gte` → `Breaching`.
 2. `step_table`: one assertion per row of the table above (nine rows), comparing the whole `Step`. For the row "Breaching, reminder due" set `notify_while_firing = true` and `last_notified_at = None`; every other row uses the helper as is.
@@ -217,7 +217,7 @@ Build a `RuleRow` with a helper `fn rule(state: AlertState, streak: i64) -> Rule
 
 ### Store (`meta::alerts::tests`)
 
-Test imports: `std::time::Duration`, `llmobs_core::enums::SpanStatus`, `llmobs_core::ids::{SpanId, TraceId}`, `llmobs_core::span::Span`, `crate::test_support::TestApp`, `crate::meta::alerts::{self, NewChannel, NewRule}`. Insert channels with `alerts::insert_channel(conn, NewChannel { id, project_id, kind: ChannelKind::Slack, name, config_enc: seal_config(&app.state.secrets, &id, &config)?, target_hint: config.target_hint() }, now)` and rules with `alerts::insert_rule(conn, NewRule { … }, now)` inside `app.state.meta.write(move |conn| Box::pin(async move { … }))`. After every `clock.advance`, read `let now = app.state.clock.now_ns();` again.
+Test imports: `std::time::Duration`, `cetra_core::enums::SpanStatus`, `cetra_core::ids::{SpanId, TraceId}`, `cetra_core::span::Span`, `crate::test_support::TestApp`, `crate::meta::alerts::{self, NewChannel, NewRule}`. Insert channels with `alerts::insert_channel(conn, NewChannel { id, project_id, kind: ChannelKind::Slack, name, config_enc: seal_config(&app.state.secrets, &id, &config)?, target_hint: config.target_hint() }, now)` and rules with `alerts::insert_rule(conn, NewRule { … }, now)` inside `app.state.meta.write(move |conn| Box::pin(async move { … }))`. After every `clock.advance`, read `let now = app.state.clock.now_ns();` again.
 
 4. `due_rules_respects_interval_and_state`: rules (inserted with `insert_rule`, no channels) with windows `5m` and `1h`, both marked evaluated at `t` by `UPDATE alert_rules SET last_evaluated_at = ?`: at `t + 54 s` neither of the two evaluated rules is due (a never-evaluated rule is due at every step); at `t + 55 s` (slack 5 s) the `5m` rule is due; at `t + 295 s` both; a disabled rule, and a never-evaluated rule of a second project set to `state = 'deleting'` by SQL, are never due; a never-evaluated enabled rule is due at once.
 5. `record_evaluation_is_fenced`: `Measured` with `expected_updated_at = rule.updated_at + 1` → `Stale` and no change; with the right one and `event Some(Fired)` and two channels → `Event { deliveries: 2 }`, the rule row shows `state firing`, `last_fired_at`, `last_notified_at`, `last_error NULL`, and two `pending` deliveries with `next_attempt_at = now`; `Failed` sets `last_error` and `last_evaluated_at` and keeps the state.
@@ -243,7 +243,7 @@ fn root_span(app: &TestApp, index: u8, ago: Duration, error: bool) -> Span {
 }
 ```
 
-(Check `TraceId::from_bytes`/`SpanId::from_bytes` in `llmobs_core::ids`; use the constructor that exists. `index` starts at 1: an all-zero id is invalid in OTel.) Commit them with `app.commit_spans(&seeded.project, spans).await`. Insert the rule and a Slack channel through `meta::alerts` (seal with `alerts::channel::seal_config(&app.state.secrets, …)`).
+(Check `TraceId::from_bytes`/`SpanId::from_bytes` in `cetra_core::ids`; use the constructor that exists. `index` starts at 1: an all-zero id is invalid in OTel.) Commit them with `app.commit_spans(&seeded.project, spans).await`. Insert the rule and a Slack channel through `meta::alerts` (seal with `alerts::channel::seal_config(&app.state.secrets, …)`).
 
 6. `fires_then_resolves_with_the_manual_clock`: rule `error_rate`, `5m`, `gt 0.4`, `min_count 2`, one channel. Commit 3 traces 1 minute ago, 2 with errors.
    Use rule `cooldown_s 3600`, `notify_while_firing false`. Read events with `list_events(app.state.meta.reader(), rule.id, None, 10)` (newest first) and deliveries with `deliveries_for_events`.
@@ -264,11 +264,11 @@ just fmt
 ```
 
 ```bash
-cargo test -p llmobs-server alerts::evaluate
+cargo test -p cetra-server alerts::evaluate
 ```
 
 ```bash
-cargo test -p llmobs-server meta::alerts
+cargo test -p cetra-server meta::alerts
 ```
 
 ```bash

@@ -30,8 +30,8 @@ pub(crate) const RESERVED_HEADERS: &[&str] = &[
     "content-length",
     "host",
     "user-agent",
-    "x-llmobs-signature",
-    "x-llmobs-delivery",
+    "x-cetra-signature",
+    "x-cetra-delivery",
 ];
 
 /// The decrypted configuration of one channel. Never logged: [`fmt::Debug`] prints the kind only.
@@ -343,7 +343,7 @@ mod tests {
             problem("headers", "at most 10 headers")
         );
         assert_eq!(
-            problems(&webhook(url, &secret, &[("X-Llmobs-Signature", "v")])),
+            problems(&webhook(url, &secret, &[("X-Cetra-Signature", "v")])),
             problem("headers", "header is set by the server")
         );
         assert_eq!(

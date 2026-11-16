@@ -1,7 +1,7 @@
-# llmobs for TypeScript
+# cetra for TypeScript
 
-The `llmobs` package (MIT, ESM only) is the TypeScript SDK of
-[llmobs](../../docs/spec/10-sdk.md), an open-source LLM observability platform.
+The `cetra` package (MIT, ESM only) is the TypeScript SDK of
+[cetra](../../docs/spec/10-sdk.md), an open-source LLM observability platform.
 It is a thin layer over OpenTelemetry: tracing goes out as OTLP/HTTP protobuf,
 scores and feedback over a small REST surface. Runs on Node ≥ 22.12, Bun, Deno
 and edge runtimes (D77) — one `fetch`-based transport everywhere.
@@ -9,7 +9,7 @@ and edge runtimes (D77) — one `fetch`-based transport everywhere.
 ## Install
 
 ```sh
-pnpm add llmobs
+pnpm add @cetra-ai/sdk
 ```
 
 The instrumentation helpers need their OpenInference packages (optional peers,
@@ -22,12 +22,12 @@ pnpm add @arizeai/openinference-instrumentation-openai openai
 ## Quick start
 
 ```ts
-import { flush, init, observe } from "llmobs";
+import { flush, init, observe } from "@cetra-ai/sdk";
 ```
 
 <!-- readme:quick-start -->
 ```ts
-init({ apiKey: process.env.LLMOBS_API_KEY });
+init({ apiKey: process.env.CETRA_API_KEY });
 const searchDocs = observe(({ query }: { query: string }) => `results for ${query}`, {
   kind: "tool",
   name: "search_docs",
@@ -37,25 +37,25 @@ await flush();
 ```
 
 `init()` is once per process: a second call logs one warning and changes
-nothing (D-F-15). Without an API key (argument and `LLMOBS_API_KEY` both
-unset) it warns once and runs disabled; `LLMOBS_ENABLED=false` silences the
+nothing (D-F-15). Without an API key (argument and `CETRA_API_KEY` both
+unset) it warns once and runs disabled; `CETRA_ENABLED=false` silences the
 warning.
 
 ## Configuration
 
-| Option              | Env                      | Default                           |
-| ------------------- | ------------------------ | --------------------------------- |
-| `apiKey`            | `LLMOBS_API_KEY`         | unset → one warning, SDK disabled |
-| `baseUrl`           | `LLMOBS_BASE_URL`        | `http://localhost:8080`           |
-| `environment`       | `LLMOBS_ENVIRONMENT`     | unset                             |
-| `release`           | `LLMOBS_RELEASE`         | unset                             |
-| `captureContent`    | `LLMOBS_CAPTURE_CONTENT` | `true`                            |
-| `sampleRate`        | `LLMOBS_SAMPLE_RATE`     | `1` (trace-id ratio sampler)      |
-| `useGlobalProvider` | —                        | `false`                           |
-| `instrument`        | —                        | `[]`                              |
-| `mask`              | —                        | none                              |
-| `exportFilter`      | —                        | none                              |
-| `enabled`           | `LLMOBS_ENABLED`         | `true` (no-op mode when `false`)  |
+| Option              | Env                     | Default                           |
+| ------------------- | ----------------------- | --------------------------------- |
+| `apiKey`            | `CETRA_API_KEY`         | unset → one warning, SDK disabled |
+| `baseUrl`           | `CETRA_BASE_URL`        | `http://localhost:8080`           |
+| `environment`       | `CETRA_ENVIRONMENT`     | unset                             |
+| `release`           | `CETRA_RELEASE`         | unset                             |
+| `captureContent`    | `CETRA_CAPTURE_CONTENT` | `true`                            |
+| `sampleRate`        | `CETRA_SAMPLE_RATE`     | `1` (trace-id ratio sampler)      |
+| `useGlobalProvider` | —                       | `false`                           |
+| `instrument`        | —                       | `[]`                              |
+| `mask`              | —                       | none                              |
+| `exportFilter`      | —                       | none                              |
+| `enabled`           | `CETRA_ENABLED`         | `true` (no-op mode when `false`)  |
 
 An explicit argument wins over the env var, which wins over the default. Env
 values are trimmed; an empty value counts as unset. An invalid value throws a
@@ -105,7 +105,7 @@ withLlmSpan(
 );
 ```
 
-`withLlmSpan` writes the GenAI attributes (`gen_ai.*`), `llmobs.span.kind =
+`withLlmSpan` writes the GenAI attributes (`gen_ai.*`), `cetra.span.kind =
 "llm"` and, through the handle, the response model, usage, cost
 (`setCost(totalUsd)`) and time-to-first-token (`recordFirstToken()`).
 Messages may be the canonical `{ role, parts }` format or the short
@@ -148,6 +148,130 @@ Values map: `boolean` → boolean, `number` → numeric, `string` → categorica
 label (or `dataType: "text"`). `user_id` comes from the active
 `withContext` unless passed.
 
+## Datasets and experiments
+
+`new cetra.Client()` is the REST client for datasets and experiments. It reads
+`apiKey` and `baseUrl` the way `init()` does (argument, then
+`CETRA_API_KEY` / `CETRA_BASE_URL`, then the default), and throws
+`ConfigError` without a key. Unlike tracing and scores, its calls reject on
+failure (see [Errors](#errors)).
+
+### Datasets
+
+```ts
+import { Client } from "@cetra-ai/sdk";
+
+const client = new Client(); // the key and URL come from the environment
+
+let dataset = await client.datasets.create("faq-v1", { description: "FAQ questions" });
+dataset = await dataset.addItems([
+  {
+    input: { q: "How do I cancel?" },
+    expectedOutput: { a: "Settings > Billing > Cancel" },
+    metadata: { topic: "billing" },
+  },
+]);
+dataset = await client.datasets.get("faq-v1", { version: 1 }); // the items of version 1
+console.log((await client.datasets.list()).map((info) => info.name));
+await client.datasets.delete("faq-v1"); // the dataset and its items
+```
+
+- An item is `input` (any JSON value, required), `expectedOutput` (optional)
+  and `metadata` (an object, default `{}`). Any other key throws a `TypeError`
+  before a request is sent.
+- `addItems` sends batches of 1,000 items, and each batch makes a new
+  version. Versions are integers: a new dataset is at version 0 and has no
+  items. `addItems` resolves to the dataset at its latest version. If a later
+  batch fails, the earlier batches are already stored (each made a version),
+  and the promise rejects.
+- `get(nameOrId, { version })` reads a version with all its items; without
+  `version` it reads the current one.
+- `create(name, { inputSchema, expectedSchema })` takes JSON Schemas (Draft
+  2020-12). The server checks every item written afterwards against them; a
+  refused item rejects with an `ApiError`, and its `errors` array names the
+  failing fields.
+
+### Experiments
+
+`evaluate` runs your task on every item of a dataset version, scores each
+run, and stores the results on the server. It needs `init()` first.
+
+```ts
+import { evaluate, init, type Score } from "@cetra-ai/sdk";
+
+init(); // the key comes from CETRA_API_KEY
+
+function exact({ output, expected }: { output: unknown; expected: unknown }): boolean {
+  return String(output).trim() === (expected as { a: string }).a.trim();
+}
+
+function lengthOk({ output }: { output: unknown }): Score {
+  const text = String(output);
+  return { value: text.length < 500, reason: `${text.length} chars` };
+}
+
+const result = await evaluate({
+  dataset: "faq-v1",
+  task: (input) => myApp.answer((input as { q: string }).q),
+  scorers: [exact, lengthOk],
+  experimentName: "gpt-5-mini prompt v3",
+  metadata: { model: "gpt-5-mini", prompt: "v3" },
+  concurrency: 8,
+  repetitions: 1,
+});
+console.log(result.summary());
+result.assertMin("exact", 0.8); // throws when the mean is below 0.8
+```
+
+- **Dataset.** A name, an id or a `Dataset` object. A `Dataset` runs at the
+  version it holds; `datasetVersion` pins another one. A `Dataset` at
+  version 0 has no items, so no version is sent and the server uses its
+  current version.
+- **Task.** `task(input, item)` receives `item.input` and the `DatasetItem`.
+  It may return a promise.
+- **Scorers.** A scorer's name is its function's name: a named function or a
+  `const` works, while an anonymous function or a duplicate name is refused
+  with a `TypeError` before any request. It receives one object with `input`,
+  `output`, `expected` (the item's `expectedOutput`), `metadata`, `traceId`
+  and `item`.
+- **Scorer return values.** `boolean` is a boolean score, `number` a numeric
+  one (finite), `string` a categorical label. A `Score`
+  (`{ value, reason, dataType, metadata }`) adds the reason and metadata;
+  `undefined` or `null` means no score. Anything else counts as a scorer
+  error.
+- **Concurrency and repetitions.** `concurrency` is 1 to 64 (default 8);
+  `repetitions` is 1 to 20 (default 1). Each run records its 0-based
+  `repetition`. `experimentName` is 1 to 200 characters; by default it is the
+  dataset name and the UTC time.
+- **Result.** `summary()` prints one line per scorer with its mean and count,
+  and the experiment id. `errorCount` counts runs whose task threw;
+  `assertMin(name, threshold)` throws when a score's mean is below the
+  threshold, which is what a CI gate needs.
+
+### What gets recorded
+
+- Each run is one trace: its root span (kind `chain`, named after the
+  experiment) carries the input and the task's output, and every span the
+  task starts carries the experiment id, the dataset item id and the
+  environment `experiment`. The default trace lists leave these traces out.
+- A score needs its trace, so with `sampleRate` below 1 some runs have no
+  trace and no score. Scores are queued and posted in batches, and
+  `await flush()` waits for them.
+- Nothing is scored on the server: a judge runs inside a scorer.
+- Results are uploaded in batches; each upload is retried on transient
+  failures.
+
+### Keys
+
+The API key needs the `ingest`, `read` and `write` scopes.
+
+### Errors
+
+`ConfigError` names the option that is missing or invalid, never its value.
+`ApiError` carries `status`, `code`, `detail` and `errors` (the field errors of
+a refused dataset item). A task or scorer that throws does not stop the run:
+the error is recorded on that run, and `errorCount` and the summary count it.
+
 ## Instrumentation (OpenAI, Anthropic, LangChain)
 
 `init({ instrument: [...] })` takes instrumentation objects (anything with
@@ -156,14 +280,14 @@ OpenInference instrumentation and patch the module by hand, so ESM works
 without loader flags:
 
 ```ts
-import { openai } from "llmobs/openai";
+import { openai } from "@cetra-ai/sdk/openai";
 import OpenAI from "openai";
 
 init({ apiKey, instrument: [openai(OpenAI)] });
 ```
 
-The same shape exists as `llmobs/anthropic` (takes the `Anthropic` class from
-`@anthropic-ai/sdk`) and `llmobs/langchain` (takes the LangChain global from
+The same shape exists as `cetra/anthropic` (takes the `Anthropic` class from
+`@anthropic-ai/sdk`) and `cetra/langchain` (takes the LangChain global from
 `@langchain/core`). The OpenInference packages are optional peers. Pass the
 helpers' `captureContent` the same value as `init`'s.
 
@@ -176,7 +300,7 @@ metadata.
 <!-- readme:ai-telemetry -->
 ```ts
 // Pass `telemetry` as `experimental_telemetry` to the Vercel AI SDK; the
-// tracer it hands out is the llmobs one, so AI spans land in llmobs.
+// tracer it hands out is the cetra one, so AI spans land in cetra.
 const telemetry = aiTelemetry({ sessionId: "chat-42", functionId: "chat" });
 telemetry.tracer?.startSpan("ai.chat").end();
 ```
@@ -205,7 +329,7 @@ always the global one, so instrumentor spans nest under ours.
 - `spanProcessor()` returns our span processor, for apps that build their own
   OTel pipeline and add it to their provider.
 - `exportFilter(span)` replaces the default export rule (which, in global
-  mode, keeps spans whose scope is `llmobs` or `ai` or that carry known
+  mode, keeps spans whose scope is `cetra` or `ai` or that carry known
   LLM attribute prefixes).
 - `tracerProvider()` returns the provider in use.
 
@@ -215,7 +339,7 @@ always the global one, so instrumentor spans nest under ours.
 LLM messages) before serialization, and at export time on payload keys of
 other spans (instrumentor spans included). It gets the decoded value and must
 return a new one; a string stays a string, anything else is serialized back.
-If it throws, the value becomes `"[llmobs: mask failed]"` (fail closed).
+If it throws, the value becomes `"[cetra: mask failed]"` (fail closed).
 
 `captureContent: false` records no payload attributes on our spans and
 deletes the payload keys from other spans; token counts, models and costs
@@ -254,15 +378,15 @@ export default {
 
 ## Browser feedback
 
-The `llmobs/browser` subpath imports nothing from OpenTelemetry; it posts an
-end-user feedback score with a public key (`pk-llmobs-…`) and never throws:
+The `cetra/browser` subpath imports nothing from OpenTelemetry; it posts an
+end-user feedback score with a public key (`pk-cetra-…`) and never throws:
 
 ```ts
-import { feedback } from "llmobs/browser";
+import { feedback } from "@cetra-ai/sdk/browser";
 
 const { ok } = await feedback({
-  baseUrl: "https://llmobs.example.org",
-  publicKey: "pk-llmobs-…",
+  baseUrl: "https://cetra.example.org",
+  publicKey: "pk-cetra-…",
   traceId, // 32 hex chars, from traceparent or your app
   value: 1,
 });
@@ -278,6 +402,10 @@ const { ok } = await feedback({
   server reads both. `bigint` becomes a decimal string in payloads.
 - **Resource attributes**: only `OTEL_SERVICE_NAME` is read (from the
   config's env source); `OTEL_RESOURCE_ATTRIBUTES` is not (Python reads it).
+- **Usage counts**: `setUsage` records only safe integers
+  (`Number.isSafeInteger`); a larger value, a non-integer or a negative one is
+  skipped with a debug line. Python's `set_usage` records any non-negative
+  `int`, including values beyond 2^53.
 - **Abandoned generators**: a half-consumed generator is left unexported
   (TypeScript has no finalizer); Python's garbage collector ends it with
   status ok.
@@ -291,5 +419,5 @@ const { ok } = await feedback({
 
 Logs and warnings never contain payloads (prompts, completions, attribute
 values), API keys or email addresses — ids, sizes and counts only. An invalid
-score logs `llmobs: score not queued: <reason>` with the reason, never the
+score logs `cetra: score not queued: <reason>` with the reason, never the
 value. The API key never appears in errors or serialized config.

@@ -15,16 +15,18 @@ use arrow::compute::{cast, concat_batches};
 use arrow::datatypes::SchemaRef;
 use axum::http::{Method, StatusCode};
 use bytesize::ByteSize;
-use datafusion::prelude::{SessionConfig, SessionContext};
-use llmobs_core::batch::spans_to_record_batch;
-use llmobs_core::ids::ProjectId;
-use llmobs_core::span::Span;
-use llmobs_core::time_serde::parse_rfc3339;
-use llmobs_otel::{IngestContext, PriceRow, PriceTable, decode_json, normalize};
-use llmobs_storage::config::{
+use cetra_core::batch::spans_to_record_batch;
+use cetra_core::ids::ProjectId;
+use cetra_core::span::Span;
+use cetra_core::time_serde::parse_rfc3339;
+use cetra_otel::{IngestContext, PriceRow, PriceTable, decode_json, normalize};
+use cetra_storage::Storage;
+use cetra_storage::config::{
     AnchorConfig, FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
 };
-use llmobs_storage::{QueryOptions, Storage};
+use datafusion::prelude::{SessionConfig, SessionContext};
+
+use crate::test_support::raw_query;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceResponse;
 use prost::Message;
 use serde_json::Value;
@@ -46,7 +48,7 @@ const DEFAULT_INGEST_TIME: &str = "2026-01-01T00:00:00.000000000Z";
 const DEFAULT_MAX_ATTRIBUTE_BYTES: u64 = 8_388_608;
 const DEFAULT_MEDIA_MIN_BYTES: u64 = 4_096;
 const DEFAULT_MEDIA_MAX_BYTES: u64 = 33_554_432;
-const OTLP_KEY: &str = "sk-llmobs-0123456789ABCDEFGHIJKLMNOPQRSTUV";
+const OTLP_KEY: &str = "sk-cetra-0123456789ABCDEFGHIJKLMNOPQRSTUV";
 
 /// The `settings` that change the app's configuration. Cases with equal bounds share an app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -184,8 +186,8 @@ fn load_cases(root: &Path) -> (Vec<Case>, usize) {
 fn span_key(
     span: &Span,
 ) -> (
-    llmobs_core::ids::TraceId,
-    llmobs_core::ids::SpanId,
+    cetra_core::ids::TraceId,
+    cetra_core::ids::SpanId,
     i64,
     i64,
     &str,
@@ -201,10 +203,7 @@ fn span_key(
 
 /// Every stored span of `project`, in the order of the expected batch.
 async fn stored_batch(storage: &Storage, project: ProjectId) -> RecordBatch {
-    let query = storage
-        .query(project, QueryOptions::default())
-        .await
-        .expect("query opens");
+    let query = raw_query(storage, project).await;
     // The query's runtime carries the object store that the Parquet files are read from.
     let ctx = SessionContext::new_with_config_rt(SessionConfig::new(), query.runtime);
     ctx.register_table("raw_spans", query.spans)
@@ -320,7 +319,7 @@ async fn check_case(app: &TestApp, seeded: &Seeded, case: &Case, prices: &PriceT
         let read = app
             .state
             .storage
-            .get_media(project.id, &sha, None)
+            .get_media(project.id, &sha, None, None)
             .await
             .unwrap_or_else(|error| panic!("{label}: media {hash} is not stored: {error}"));
         assert_eq!(
@@ -361,7 +360,7 @@ async fn every_fixture_is_stored_as_normalized() {
         .await;
         let seeded = app.seed().await;
         let prices = PriceTable::new(rows.clone()).expect("prices.json compiles");
-        app.state.ingest.replace_prices(prices.clone());
+        app.state.ingest.prices().set_builtin(prices.clone());
         for case in &group {
             check_case(&app, &seeded, case, &prices, Wire::Json).await;
             check_case(&app, &seeded, case, &prices, Wire::Protobuf).await;
@@ -438,7 +437,10 @@ fn serve_config(data_dir: &Path) -> ServerConfig {
         trusted_proxies: Vec::new(),
         otlp_http_addr: None,
         grpc_addr: None,
+        metrics_addr: None,
+        restore_mode: false,
         storage: StorageConfig {
+            delete_objects: true,
             data_dir: data_dir.to_path_buf(),
             object_store: None,
             s3: S3Config::default(),
@@ -468,7 +470,7 @@ fn serve_config(data_dir: &Path) -> ServerConfig {
     };
     config.init = serde_json::from_value(serde_json::json!({
         "admin_email": "ada@example.com",
-        "admin_password": "llmobs-ok1",
+        "admin_password": "cetra-ok-1",
         "org": "Acme",
         "project": "Support bot",
         "secret_key": OTLP_KEY,
@@ -499,10 +501,7 @@ async fn post_over_tcp(addr: SocketAddr, body: &str) -> Option<u16> {
 
 /// Span ids stored for `project`, read from the raw `spans` provider.
 async fn stored_span_ids(storage: &Storage, project: ProjectId) -> HashSet<u64> {
-    let query = storage
-        .query(project, QueryOptions::default())
-        .await
-        .expect("query opens");
+    let query = raw_query(storage, project).await;
     // The query's runtime carries the object store that the Parquet files are read from.
     let ctx = SessionContext::new_with_config_rt(SessionConfig::new(), query.runtime);
     ctx.register_table("raw_spans", query.spans)

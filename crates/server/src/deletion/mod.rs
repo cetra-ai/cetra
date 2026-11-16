@@ -9,9 +9,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
-use llmobs_core::ids::{OrgId, ProjectId};
-use llmobs_storage::error::{DeletionError, QueryError};
-use llmobs_storage::{
+use cetra_core::ids::{OrgId, ProjectId, TraceId};
+use cetra_storage::error::{DeletionError, QueryError};
+use cetra_storage::{
     Deletion, DeletionScope, DeletionStatus, MAX_FILTER_DELETION_TRACES, RunError,
 };
 use tokio::sync::Notify;
@@ -20,11 +20,12 @@ use uuid::Uuid;
 use crate::http::AppState;
 use crate::meta::MetaError;
 use crate::meta::deletions::{
-    DeletionKind, DeletionRow, DeletionState, FailReason, clear_handover, log_undecodable,
-    mark_applied, mark_dropped, mark_failed, mark_handed_over, open_deletions, scope_projects,
-    scope_sessions, scope_traces,
+    ActorKind, DeletionKind, DeletionRow, DeletionState, FailReason, NewDeletion, RequestDetails,
+    clear_handover, deletion_by_id, insert_deletion, insert_follow_up, insert_projects,
+    log_undecodable, mark_applied, mark_dropped, mark_failed, mark_handed_over, open_deletions,
+    scope_projects, scope_sessions, scope_traces,
 };
-use crate::meta::orgs::{delete_org, org_by_id};
+use crate::meta::orgs::{OrgRow, delete_org, mark_org_deleting, org_by_id};
 use crate::meta::projects::{delete_project, project_by_id, project_ids_of_org};
 
 /// Time between two runs when nothing wakes the worker.
@@ -189,10 +190,10 @@ pub(crate) struct Dropped {
     pub(crate) whole_org: bool,
 }
 
-/// Called exactly once per drop, after its `meta.db` transaction committed (D-M-17).
-/// Track Q adds the control-plane notification here (org → cell mapping, D170), through
-/// its own outbox. Today it records the audit event.
-pub(crate) fn on_dropped(_state: &AppState, dropped: &Dropped) {
+/// Records the audit event of a drop, once, after its `meta.db` transaction committed
+/// (D-M-17). The control plane does not hook in here: it pulls the applied `project`/`org`
+/// rows of `deletions` (request R5, track P's M4), which are kept forever.
+pub(crate) fn on_dropped(dropped: &Dropped) {
     if dropped.whole_org {
         tracing::info!(target: "audit", deletion_id = %dropped.deletion_id, org_id = %dropped.org_id, projects = dropped.projects.len(), "org dropped");
     } else {
@@ -200,6 +201,75 @@ pub(crate) fn on_dropped(_state: &AppState, dropped: &Dropped) {
             tracing::info!(target: "audit", deletion_id = %dropped.deletion_id, org_id = %dropped.org_id, project_id = %project, "project dropped");
         }
     }
+}
+
+/// Asks for the deletion of copies committed after `parent`'s cut-off (D-M-6): a judge trace
+/// and the target it scored. Stores the follow-up row, wakes the worker and writes the audit
+/// event `deletion requested` with `follow_up_of = parent`.
+///
+/// The guard learns a deletion before `create_deletion` stores its row, so a `parent` that is not
+/// stored yet is waited for: the row is read up to [`PARENT_READS`] times, [`PARENT_WAIT`] apart.
+/// If it is still missing, the entry comes from a request that failed after it filled the guard;
+/// no deletion happened, so there is nothing to erase: `warn!` with the id and return `Ok(())`.
+/// A `parent` without a project is a bug: `warn!` and return `Ok(())`.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the parent cannot be read or the row cannot be stored.
+pub(crate) async fn follow_up(
+    state: &AppState,
+    parent: Uuid,
+    traces: &[TraceId],
+) -> Result<(), MetaError> {
+    let Some(row) = parent_row(state, parent).await? else {
+        tracing::warn!(deletion_id = %parent, "follow-up of an unknown deletion; no deletion was stored");
+        return Ok(());
+    };
+    let Some(project) = row.project_id else {
+        tracing::warn!(deletion_id = %parent, "follow-up of a deletion without a project");
+        return Ok(());
+    };
+    let id = Uuid::now_v7();
+    let now = state.clock.now_ns();
+    let (org, actor_kind, actor_id) = (row.org_id, row.actor_kind, row.actor_id);
+    let traces = traces.to_vec();
+    state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move { insert_follow_up(conn, &row, id, &traces, now).await })
+        })
+        .await?;
+    state.deletions.wake.notify_one();
+    tracing::info!(
+        target: "audit",
+        deletion_id = %id,
+        follow_up_of = %parent,
+        kind = DeletionKind::TraceIds.as_str(),
+        org_id = %org,
+        project_id = %project,
+        actor_kind = actor_kind.as_str(),
+        actor_id = %actor_id,
+        "deletion requested"
+    );
+    Ok(())
+}
+
+/// Reads per wait for a `parent` row that is not stored yet (see [`follow_up`]).
+const PARENT_READS: u32 = 20;
+/// Time between two reads of a missing `parent` row (about one second in all).
+const PARENT_WAIT: Duration = Duration::from_millis(50);
+
+/// The row of `parent`, read up to [`PARENT_READS`] times, [`PARENT_WAIT`] apart.
+async fn parent_row(state: &AppState, parent: Uuid) -> Result<Option<DeletionRow>, MetaError> {
+    for read in 1..=PARENT_READS {
+        if let Some(row) = deletion_by_id(state.meta.reader(), parent).await? {
+            return Ok(Some(row));
+        }
+        if read < PARENT_READS {
+            tokio::time::sleep(PARENT_WAIT).await;
+        }
+    }
+    Ok(None)
 }
 
 /// Processes every open deletion once: drops first, then cheap rows (see [`priority`]), oldest
@@ -358,7 +428,7 @@ async fn data_step(state: &AppState, row: &DeletionRow, now: i64) -> Result<(), 
                 state
                     .deletions
                     .guard
-                    .add_user(project, user, row.created_at);
+                    .add_user(project, user, row.id, row.created_at);
             }
         }
         DeletionKind::TraceIds if row.trace_count.is_none() => {
@@ -368,7 +438,7 @@ async fn data_step(state: &AppState, row: &DeletionRow, now: i64) -> Result<(), 
             state
                 .deletions
                 .guard
-                .add_traces(project, &requested, row.created_at);
+                .add_traces(project, &requested, row.id, row.created_at);
         }
         _ => {}
     }
@@ -420,7 +490,7 @@ async fn register(
     state
         .deletions
         .guard
-        .add_traces(project, &traces, row.created_at);
+        .add_traces(project, &traces, row.id, row.created_at);
     let scope = match row.kind {
         DeletionKind::User => DeletionScope::User {
             user_id: row
@@ -529,23 +599,87 @@ async fn drop_project_step(state: &AppState, row: &DeletionRow, now: i64) -> Res
         .map_err(|error| forever_meta(&error))?;
     state.live.publish_resync(project);
     state.metrics_cache.clear_project(project);
+    {
+        // A price reload that read the rows before the delete must not reinstall them (D-T-9).
+        let _writes = state.ingest.prices().lock_writes().await;
+        state.ingest.prices().forget_project(project);
+    }
     if dropped {
         tracing::info!(target: "audit", deletion_id = %row.id, "deletion applied");
-        on_dropped(
-            state,
-            &Dropped {
-                deletion_id: row.id,
-                org_id: row.org_id,
-                projects: vec![project],
-                whole_org: false,
-            },
-        );
+        on_dropped(&Dropped {
+            deletion_id: row.id,
+            org_id: row.org_id,
+            projects: vec![project],
+            whole_org: false,
+        });
     }
     Ok(())
 }
 
-/// Drops every project of the org (including any created after the request), its usage
-/// and the org row.
+/// Starts the drop of `org` (D-M-7): marks it `deleting`, records the deletion and its
+/// projects in one write, wakes the worker and logs the audit event. `Ok(None)` when the
+/// org is no longer active (another drop started first).
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the write fails.
+pub(crate) async fn request_org_drop(
+    state: &AppState,
+    org: &OrgRow,
+    actor: (ActorKind, Uuid),
+) -> Result<Option<DeletionRow>, MetaError> {
+    let (actor_kind, actor_id) = actor;
+    let id = Uuid::now_v7();
+    let now = state.clock.now_ns();
+    let org_id = org.id;
+    let new = NewDeletion {
+        id,
+        org_id,
+        project_id: None,
+        kind: DeletionKind::Org,
+        user_id: None,
+        request: RequestDetails {
+            name: Some(org.name.clone()),
+            slug: Some(org.slug.clone()),
+            ..RequestDetails::default()
+        },
+        actor_kind,
+        actor_id,
+        state: DeletionState::Pending,
+        created_at: now,
+    };
+    let row = state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                if !mark_org_deleting(conn, org_id, now).await? {
+                    return Ok(None);
+                }
+                let projects = project_ids_of_org(&mut *conn, org_id).await?;
+                let row = insert_deletion(conn, &new).await?;
+                insert_projects(conn, id, &projects).await?;
+                Ok(Some(row))
+            })
+        })
+        .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    state.deletions.wake.notify_one();
+    tracing::info!(
+        target: "audit",
+        deletion_id = %id,
+        kind = DeletionKind::Org.as_str(),
+        org_id = %org_id,
+        actor_kind = actor_kind.as_str(),
+        actor_id = %actor_id,
+        "deletion requested"
+    );
+    Ok(Some(row))
+}
+
+/// Drops every project of the org (including any created after the request) and the org row.
+/// The org's `usage_daily` rows stay for the control plane's billing (D-P-46).
 async fn drop_org_step(state: &AppState, row: &DeletionRow, now: i64) -> Result<(), Step> {
     let reader = state.meta.reader();
     let mut projects = scope_projects(reader, row.id)
@@ -578,7 +712,6 @@ async fn drop_org_step(state: &AppState, row: &DeletionRow, now: i64) -> Result<
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                crate::usage::delete_org_usage(conn, org).await?;
                 delete_org(conn, org).await?;
                 mark_dropped(conn, id, now).await
             })
@@ -589,17 +722,19 @@ async fn drop_org_step(state: &AppState, row: &DeletionRow, now: i64) -> Result<
         state.live.publish_resync(*project);
         state.metrics_cache.clear_project(*project);
     }
+    {
+        // A price reload that read the rows before the delete must not reinstall them (D-T-9).
+        let _writes = state.ingest.prices().lock_writes().await;
+        state.ingest.prices().forget_org(row.org_id);
+    }
     if dropped {
         tracing::info!(target: "audit", deletion_id = %row.id, "deletion applied");
-        on_dropped(
-            state,
-            &Dropped {
-                deletion_id: row.id,
-                org_id: row.org_id,
-                projects,
-                whole_org: true,
-            },
-        );
+        on_dropped(&Dropped {
+            deletion_id: row.id,
+            org_id: row.org_id,
+            projects,
+            whole_org: true,
+        });
     }
     Ok(())
 }
@@ -609,18 +744,26 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use axum::http::{Method, StatusCode};
-    use llmobs_core::batch::spans_to_record_batch;
-    use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-    use llmobs_core::names::metadata_key;
-    use llmobs_core::span::Span;
-    use llmobs_storage::DeletionStatus;
-    use llmobs_storage::error::{AppendError, DeletionError};
+    use cetra_core::batch::spans_to_record_batch;
+    use cetra_core::ids::{ProjectId, SpanId, TraceId};
+    use cetra_core::names::metadata_key;
+    use cetra_core::span::Span;
+    use cetra_storage::DeletionStatus;
+    use cetra_storage::error::{AppendError, DeletionError};
 
     use super::*;
+    use crate::meta::datasets::{
+        DatasetFields, NewRevision, VersionChange, insert_dataset, write_version,
+    };
     use crate::meta::deletions::{
         ActorKind, DeletionState, NewDeletion, RequestDetails, deletion_by_id, insert_deletion,
         insert_projects, insert_traces, mark_handed_over, scope_sessions, scope_traces,
         store_counts,
+    };
+    use crate::meta::eval_jobs::{KIND_MANUAL, NewJob, insert_job};
+    use crate::meta::evaluators::{EvaluatorFields, insert_evaluator};
+    use crate::meta::experiments::{
+        NewExperiment, NewResult, insert_tx as insert_experiment, upsert_results_tx,
     };
     use crate::meta::orgs::{insert_org, org_by_id};
     use crate::meta::projects::{ProjectRow, insert_project, project_by_id};
@@ -786,7 +929,7 @@ mod tests {
         let (a, e) = (trace_id(1), trace_id(3));
         commit(&app, project, &a, &span_id(1), |_| {}).await;
         commit(&app, project, &e, &span_id(3), |row| {
-            row.environment = Some("llmobs-eval".to_owned());
+            row.environment = Some("cetra-eval".to_owned());
             row.metadata
                 .insert(metadata_key::EVAL_TARGET_TRACE_ID.to_owned(), a.clone());
         })
@@ -1253,7 +1396,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn org_drop_removes_the_org_and_its_usage() {
+    async fn org_drop_keeps_the_usage() {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
         let now = app.state.clock.now_ns();
@@ -1319,14 +1462,14 @@ mod tests {
                     .is_none()
             );
         }
-        assert_eq!(
+        assert!(
             count_rows(
                 &app,
                 "SELECT COUNT(*) FROM usage_daily WHERE org_id = ?",
                 globex.to_string()
             )
-            .await,
-            0
+            .await
+                > 0
         );
         assert!(
             count_rows(
@@ -1574,5 +1717,472 @@ mod tests {
             ),
             Step::Fail(FailReason::ResolutionFailed)
         ));
+    }
+
+    /// A queued manual job of `project` for `trace`, with a check evaluator of its own.
+    async fn queued_job(app: &TestApp, project: &ProjectRow, trace: TraceId) -> Uuid {
+        let evaluator = Uuid::now_v7();
+        let job = Uuid::now_v7();
+        let project_id = project.id;
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    insert_evaluator(
+                        conn,
+                        evaluator,
+                        project_id,
+                        "check",
+                        EvaluatorFields {
+                            name: "Same".to_owned(),
+                            config: r#"{"check":"exact_match"}"#.to_owned(),
+                            output_score: r#"{"name":"same","data_type":"boolean"}"#.to_owned(),
+                            connection_id: None,
+                            secret_enc: None,
+                            version: 1,
+                        },
+                        None,
+                        now,
+                    )
+                    .await?;
+                    insert_job(
+                        conn,
+                        NewJob {
+                            id: job,
+                            project_id,
+                            kind: KIND_MANUAL,
+                            rule_id: None,
+                            evaluator_id: evaluator,
+                            variable_mapping: Some(r#"{"input":"trace.input"}"#.to_owned()),
+                            trace_id: trace,
+                            span_id: None,
+                            trace_start_ns: now,
+                        },
+                        now,
+                    )
+                    .await
+                    .map(|_| ())
+                })
+            })
+            .await
+            .unwrap();
+        job
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resolution_cascades_to_eval_jobs() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = &seeded.project;
+        let a = trace_id(1);
+        commit(&app, project, &a, &span_id(1), |_| {}).await;
+        app.state.clock.advance(Duration::from_secs(1));
+        let job = queued_job(&app, project, trace(1)).await;
+
+        let id = insert(
+            &app,
+            new_row(&app, project, DeletionKind::TraceIds),
+            &[trace(1)],
+        )
+        .await;
+        worker(&app).await;
+
+        let gone: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM eval_jobs WHERE id = ?")
+            .bind(job.to_string())
+            .fetch_one(app.state.meta.reader())
+            .await
+            .unwrap();
+        assert_eq!(gone, 0, "the queued job of the deleted trace is deleted");
+        assert_eq!(deletion_row(&app, id).await.state, DeletionState::Pending);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn follow_up_of_a_missing_parent_does_nothing() {
+        let app = TestApp::new().await;
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deletions")
+            .fetch_one(app.state.meta.reader())
+            .await
+            .unwrap();
+        follow_up(&app.state, Uuid::now_v7(), &[trace(1)])
+            .await
+            .unwrap();
+        let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deletions")
+            .fetch_one(app.state.meta.reader())
+            .await
+            .unwrap();
+        assert_eq!(before, after);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn follow_up_waits_for_a_parent_being_stored() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let now = app.state.clock.now_ns();
+        let parent = Uuid::now_v7();
+        let state = app.state.clone();
+        let copy = trace(1);
+        let task = tokio::spawn(async move { follow_up(&state, parent, &[copy]).await });
+
+        // The guard knows the deletion; its row is stored about 100 ms later.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let parent_row = NewDeletion {
+            id: parent,
+            org_id: seeded.org_id,
+            project_id: Some(project),
+            kind: DeletionKind::TraceIds,
+            user_id: None,
+            request: RequestDetails::default(),
+            actor_kind: ActorKind::User,
+            actor_id: seeded.user_id,
+            state: DeletionState::Resolving,
+            created_at: now,
+        };
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move { insert_deletion(conn, &parent_row).await.map(|_| ()) })
+            })
+            .await
+            .unwrap();
+        task.await.unwrap().unwrap();
+
+        let follow_up: String =
+            sqlx::query_scalar("SELECT id FROM deletions WHERE project_id = ? AND id <> ?")
+                .bind(project.to_string())
+                .bind(parent.to_string())
+                .fetch_one(app.state.meta.reader())
+                .await
+                .unwrap();
+        let follow_up = Uuid::parse_str(&follow_up).unwrap();
+        let row = deletion_row(&app, follow_up).await;
+        assert_eq!(row.actor_kind, ActorKind::User);
+        assert_eq!(row.actor_id, seeded.user_id, "the parent's actor");
+        assert_eq!(row.kind, DeletionKind::TraceIds);
+        assert_eq!(row.state, DeletionState::Resolving);
+        assert_eq!(row.request.requested, Some(1));
+    }
+
+    /// A dataset `faq` of `project` at version 1 with two items: `item` is copied from `trace`
+    /// (its revision is `copied`), `plain` has no source. An experiment `baseline` pins it with
+    /// two results: `item` on `trace`, `plain` on another trace. Returns (dataset, item, plain,
+    /// experiment).
+    async fn copy_of(
+        app: &TestApp,
+        project: ProjectId,
+        trace: TraceId,
+    ) -> (Uuid, Uuid, Uuid, Uuid) {
+        let (dataset, item, experiment) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let (copied, plain, plain_rev) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let other = trace_id(200).parse::<TraceId>().unwrap();
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    insert_dataset(
+                        conn,
+                        dataset,
+                        project,
+                        DatasetFields {
+                            name: "faq".to_owned(),
+                            description: None,
+                            input_schema: None,
+                            expected_schema: None,
+                        },
+                        now,
+                    )
+                    .await?;
+                    write_version(
+                        conn,
+                        dataset,
+                        VersionChange {
+                            close: vec![],
+                            insert: vec![
+                                NewRevision {
+                                    revision_id: copied,
+                                    item_id: item,
+                                    input: serde_json::json!("copied"),
+                                    expected_output: None,
+                                    metadata: serde_json::Map::new(),
+                                    source_trace_id: Some(trace),
+                                    source_span_id: None,
+                                },
+                                NewRevision {
+                                    revision_id: plain_rev,
+                                    item_id: plain,
+                                    input: serde_json::json!("plain"),
+                                    expected_output: None,
+                                    metadata: serde_json::Map::new(),
+                                    source_trace_id: None,
+                                    source_span_id: None,
+                                },
+                            ],
+                            description: "add 2 items".to_owned(),
+                            created_by: None,
+                        },
+                        now,
+                    )
+                    .await?;
+                    insert_experiment(
+                        conn,
+                        &NewExperiment {
+                            id: experiment,
+                            project_id: project,
+                            dataset_id: dataset,
+                            dataset_name: "faq".to_owned(),
+                            dataset_version: 1,
+                            name: "baseline".to_owned(),
+                            description: None,
+                            metadata: "{}".to_owned(),
+                            repetitions: 1,
+                            item_count: 2,
+                            created_by: None,
+                            created_at: now,
+                        },
+                    )
+                    .await?;
+                    let result = |dataset_item_id, revision_id, trace_id| NewResult {
+                        dataset_item_id,
+                        repetition: 0,
+                        revision_id,
+                        input: "\"in\"".to_owned(),
+                        expected_output: None,
+                        trace_id: Some(trace_id),
+                        output: Some("\"out\"".to_owned()),
+                        error: None,
+                        latency_ns: Some(7),
+                    };
+                    upsert_results_tx(
+                        conn,
+                        experiment,
+                        &[result(item, copied, trace), result(plain, plain_rev, other)],
+                        now,
+                    )
+                    .await?;
+                    Ok::<_, MetaError>(())
+                })
+            })
+            .await
+            .unwrap();
+        (dataset, item, plain, experiment)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn trace_deletion_erases_copies() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = &seeded.project;
+        commit(&app, project, &trace_id(1), &span_id(1), |_| {}).await;
+        app.state.clock.advance(Duration::from_secs(1));
+        let (_, item, plain, experiment) = copy_of(&app, project.id, trace(1)).await;
+
+        insert(
+            &app,
+            new_row(&app, project, DeletionKind::TraceIds),
+            &[trace(1)],
+        )
+        .await;
+        worker(&app).await;
+
+        assert_eq!(
+            count_rows(
+                &app,
+                "SELECT COUNT(*) FROM dataset_items WHERE item_id = ?",
+                item.to_string()
+            )
+            .await,
+            0,
+            "every revision of the copied item is gone"
+        );
+        assert_eq!(
+            count_rows(
+                &app,
+                "SELECT COUNT(*) FROM dataset_items WHERE item_id = ?",
+                plain.to_string()
+            )
+            .await,
+            1,
+            "an item without a source stays"
+        );
+        assert_eq!(
+            count_rows(
+                &app,
+                "SELECT COUNT(*) FROM experiment_items WHERE experiment_id = ?",
+                experiment.to_string()
+            )
+            .await,
+            1,
+            "only the result on the other trace stays"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn edited_copies_go_too() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = &seeded.project;
+        commit(&app, project, &trace_id(1), &span_id(1), |_| {}).await;
+        app.state.clock.advance(Duration::from_secs(1));
+        let (dataset, item, _, _) = copy_of(&app, project.id, trace(1)).await;
+        let (edited, now) = (Uuid::now_v7(), app.state.clock.now_ns());
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    write_version(
+                        conn,
+                        dataset,
+                        VersionChange {
+                            close: vec![item],
+                            insert: vec![NewRevision {
+                                revision_id: edited,
+                                item_id: item,
+                                input: serde_json::json!("edited"),
+                                expected_output: None,
+                                metadata: serde_json::Map::new(),
+                                source_trace_id: Some(trace(1)),
+                                source_span_id: None,
+                            }],
+                            description: "edit the copied item".to_owned(),
+                            created_by: None,
+                        },
+                        now,
+                    )
+                    .await
+                    .map(|_| ())
+                })
+            })
+            .await
+            .unwrap();
+        let revisions = "SELECT COUNT(*) FROM dataset_items WHERE item_id = ?";
+        assert_eq!(count_rows(&app, revisions, item.to_string()).await, 2);
+
+        insert(
+            &app,
+            new_row(&app, project, DeletionKind::TraceIds),
+            &[trace(1)],
+        )
+        .await;
+        worker(&app).await;
+
+        assert_eq!(count_rows(&app, revisions, item.to_string()).await, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn user_deletion_erases_copies() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = &seeded.project;
+        commit(&app, project, &trace_id(2), &span_id(2), |row| {
+            row.user_id = Some("u-1".to_owned());
+        })
+        .await;
+        app.state.clock.advance(Duration::from_secs(1));
+        let (_, item, _, _) = copy_of(&app, project.id, trace(2)).await;
+
+        let mut new = new_row(&app, project, DeletionKind::User);
+        new.user_id = Some("u-1".to_owned());
+        insert(&app, new, &[]).await;
+        worker(&app).await;
+
+        assert_eq!(
+            count_rows(
+                &app,
+                "SELECT COUNT(*) FROM dataset_items WHERE item_id = ?",
+                item.to_string()
+            )
+            .await,
+            0
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn other_projects_are_untouched() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = &seeded.project;
+        let (other, _key) = app.add_project(&seeded, "other", None).await;
+        commit(&app, project, &trace_id(1), &span_id(1), |_| {}).await;
+        app.state.clock.advance(Duration::from_secs(1));
+        let (_, mine, _, _) = copy_of(&app, project.id, trace(1)).await;
+        let (_, theirs, _, _) = copy_of(&app, other.id, trace(1)).await;
+
+        insert(
+            &app,
+            new_row(&app, project, DeletionKind::TraceIds),
+            &[trace(1)],
+        )
+        .await;
+        worker(&app).await;
+
+        let live = "SELECT COUNT(*) FROM dataset_items WHERE item_id = ?";
+        assert_eq!(count_rows(&app, live, mine.to_string()).await, 0);
+        assert_eq!(count_rows(&app, live, theirs.to_string()).await, 1);
+    }
+
+    #[tokio::test]
+    async fn nothing_to_cascade_logs_nothing() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = &seeded.project;
+        commit(&app, project, &trace_id(1), &span_id(1), |_| {}).await;
+        commit(&app, project, &trace_id(2), &span_id(2), |_| {}).await;
+        app.state.clock.advance(Duration::from_secs(1));
+        let (_, kept, _, _) = copy_of(&app, project.id, trace(2)).await;
+
+        insert(
+            &app,
+            new_row(&app, project, DeletionKind::TraceIds),
+            &[trace(1)],
+        )
+        .await;
+        let ((), logs) = capture_logs(async { worker(&app).await }).await;
+
+        assert!(
+            !logs.contains("deletion removed dataset and experiment copies"),
+            "{logs}"
+        );
+        assert_eq!(
+            count_rows(
+                &app,
+                "SELECT COUNT(*) FROM dataset_items WHERE item_id = ?",
+                kept.to_string()
+            )
+            .await,
+            1
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn project_drop_removes_everything() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let (doomed, _key) = app.add_project(&seeded, "doomed", None).await;
+        commit(&app, &doomed, &trace_id(1), &span_id(1), |_| {}).await;
+        app.state.clock.advance(Duration::from_secs(1));
+        let (dataset, item, _, experiment) = copy_of(&app, doomed.id, trace(1)).await;
+
+        let mut new = new_row(&app, &doomed, DeletionKind::Project);
+        new.request = RequestDetails {
+            name: Some("doomed".to_owned()),
+            slug: Some("doomed".to_owned()),
+            ..RequestDetails::default()
+        };
+        insert(&app, new, &[]).await;
+        worker(&app).await;
+
+        for (sql, id) in [
+            ("SELECT COUNT(*) FROM datasets WHERE id = ?", dataset),
+            ("SELECT COUNT(*) FROM dataset_items WHERE item_id = ?", item),
+            ("SELECT COUNT(*) FROM experiments WHERE id = ?", experiment),
+            (
+                "SELECT COUNT(*) FROM experiment_items WHERE experiment_id = ?",
+                experiment,
+            ),
+        ] {
+            assert_eq!(count_rows(&app, sql, id.to_string()).await, 0, "{sql}");
+        }
     }
 }

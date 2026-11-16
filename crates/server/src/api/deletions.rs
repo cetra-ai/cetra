@@ -1,7 +1,7 @@
 //! Deletion request and response types (spec 09 § Pricing & GDPR, D-M-2).
 
-use llmobs_core::ids::{OrgId, ProjectId};
-use llmobs_core::time_serde;
+use cetra_core::ids::{OrgId, ProjectId};
+use cetra_core::time_serde;
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
@@ -31,7 +31,7 @@ pub enum DeletionKind {
 pub enum DeletionStatus {
     /// Finding the traces it covers. The data is still visible.
     Resolving,
-    /// Hidden from every read; bytes are erased within 24 h.
+    /// Hidden from every read; removed from live data within 24 h and from storage after `gc.grace` (D181).
     Pending,
     /// Erased.
     Applied,
@@ -57,14 +57,16 @@ pub enum DeletionActorKind {
     User,
     /// A project API key.
     ApiKey,
+    /// The cloud control plane. `id` is its request token's id.
+    ControlPlane,
 }
 
 /// The requester.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct DeletionActor {
-    /// `user` or `api_key`.
+    /// `user`, `api_key` or `control_plane`.
     pub kind: DeletionActorKind,
-    /// The user id or the API key id.
+    /// The user, API key or control-plane token id.
     pub id: Uuid,
 }
 

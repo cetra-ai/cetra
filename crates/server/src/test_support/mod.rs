@@ -5,6 +5,7 @@ pub(crate) mod hook_receiver;
 pub(crate) mod mock_idp;
 pub(crate) mod mock_llm;
 pub(crate) mod mock_webhook;
+pub(crate) mod oauth;
 
 use std::future::Future;
 use std::io::{self, Write};
@@ -20,16 +21,16 @@ use axum::body::{Body, Bytes};
 use axum::extract::ConnectInfo;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode};
 use bytesize::ByteSize;
-use http_body_util::BodyExt;
-use llmobs_core::batch::{scores_to_record_batch, spans_to_record_batch};
-use llmobs_core::ids::{OrgId, ProjectId};
-use llmobs_core::names::PRODUCT;
-use llmobs_core::score::Score;
-use llmobs_core::span::Span;
-use llmobs_storage::config::{
+use cetra_core::batch::{scores_to_record_batch, spans_to_record_batch};
+use cetra_core::ids::{OrgId, ProjectId, SpanId, TraceId};
+use cetra_core::names::PRODUCT;
+use cetra_core::score::Score;
+use cetra_core::span::Span;
+use cetra_storage::config::{
     AnchorConfig, FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
 };
-use llmobs_storage::{MediaBlob, Storage};
+use cetra_storage::{MediaBlob, ProjectQuery, QueryContext, Storage};
+use http_body_util::BodyExt;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sqlx::SqliteConnection;
@@ -41,7 +42,7 @@ use crate::api::common::Problem;
 use crate::auth::Limits;
 use crate::auth::roles::{KeyScope, OrgRole};
 use crate::auth::secret::{self, KeyKind, NewKey};
-use crate::auth::session::start_session;
+use crate::auth::session::{SessionOrigin, start_session};
 use crate::clock::Clock;
 use crate::config::{
     AuthSettings, EntitlementsConfig, EvalConfig, IngestConfig, InitConfig, LogConfig, MediaConfig,
@@ -50,10 +51,13 @@ use crate::config::{
 use crate::http::access::RouteDef;
 use crate::http::{AppInner, AppState, router, router_with, serve_router};
 use crate::meta::api_keys::{self, NewApiKey};
+use crate::meta::datasets::{self as store, DatasetFields, NewRevision, VersionChange};
 use crate::meta::members::add_org_member;
 use crate::meta::orgs::insert_org;
 use crate::meta::personal_tokens::{NewToken, insert_token};
 use crate::meta::projects::{ProjectRow, insert_project};
+use crate::meta::users::EmailVerifiedVia;
+use crate::meta::users::set_email_verified;
 use crate::meta::users::{self, NewUser, insert_user};
 use crate::meta::{MetaDb, MetaError};
 
@@ -86,7 +90,7 @@ pub(crate) fn sign_token(payload: &serde_json::Value) -> String {
 
 /// Signs the bytes `payload` as a `dev-1` token, whatever they are (not necessarily JSON).
 pub(crate) fn sign_raw(payload: &[u8]) -> String {
-    llmobs_token::sign_raw(&dev_signing_key(), "dev-1", payload).expect("dev key signs")
+    cetra_token::sign_raw(&dev_signing_key(), "dev-1", payload).expect("dev key signs")
 }
 
 /// A `dev-1` licence listing `features`, issued 2025-01-01, active until 2099-01-01.
@@ -137,9 +141,37 @@ pub(crate) fn org_token(
     }))
 }
 
+/// Gives `org_id` a valid org token (issued at `issued_at`, valid until 2099) with these
+/// limits, through `grant_from_token` and `state.entitlements.put_grant`. `limits` is the
+/// JSON object of the `limits` claim; missing keys take the defaults. Use a later
+/// `issued_at` to lower a limit.
+pub(crate) fn set_limits(
+    app: &TestApp,
+    org_id: OrgId,
+    issued_at: &str,
+    limits: &serde_json::Value,
+) {
+    let token = org_token(
+        org_id,
+        issued_at,
+        "2099-01-01T00:00:00Z",
+        "2099-02-01T00:00:00Z",
+        &[],
+        limits,
+    );
+    let defaults = app.state.entitlements.defaults().limits;
+    let (org, grant) = crate::entitlements::tokens::grant_from_token(
+        &token,
+        app.state.config.public_url.origin(),
+        &defaults,
+    )
+    .expect("the test token verifies");
+    app.state.entitlements.put_grant(org, grant);
+}
+
 /// A `dev-1` control-plane token for the default test `public_url`, issued at the manual
-/// clock (2026-01-01T00:00:00Z), valid 5 minutes, with this scope.
-pub(crate) fn control_plane_token(scope: &str) -> String {
+/// clock (2026-01-01T00:00:00Z), valid 5 minutes, with this scope, for one request (D-P-71).
+pub(crate) fn control_plane_token(scope: &str, method: &str, path: &str) -> String {
     sign_token(&serde_json::json!({
         "kind": "control_plane",
         "id": Uuid::now_v7().to_string(),
@@ -147,6 +179,8 @@ pub(crate) fn control_plane_token(scope: &str) -> String {
         "expires_at": "2026-01-01T00:05:00Z",
         "audience": PublicUrl::default().origin(),
         "scope": scope,
+        "method": method,
+        "path": path,
     }))
 }
 
@@ -161,19 +195,19 @@ pub(crate) struct TestApp {
 impl TestApp {
     /// Defaults, `data_dir` in a temp directory, `public_url` `http://localhost:8080`.
     pub(crate) async fn new() -> Self {
-        Self::open(|_| {}, None, None, false, None, None).await
+        Self::open(|_| {}, None, None, false, None, None, None).await
     }
 
     /// `tweak` runs before storage and `meta.db` open.
     ///
     /// `storage.data_dir` is then copied from the top-level `data_dir`.
     pub(crate) async fn with_config(tweak: impl FnOnce(&mut ServerConfig)) -> Self {
-        Self::open(tweak, None, None, false, None, None).await
+        Self::open(tweak, None, None, false, None, None, None).await
     }
 
     /// Same as [`Self::new`] with extra routes inside the shared layers.
     pub(crate) async fn with_routes(routes: Router<AppState>) -> Self {
-        Self::open(|_| {}, Some(routes), None, false, None, None).await
+        Self::open(|_| {}, Some(routes), None, false, None, None, None).await
     }
 
     /// [`Self::with_config`] and [`Self::with_routes`] together.
@@ -181,7 +215,7 @@ impl TestApp {
         tweak: impl FnOnce(&mut ServerConfig),
         routes: Router<AppState>,
     ) -> Self {
-        Self::open(tweak, Some(routes), None, false, None, None).await
+        Self::open(tweak, Some(routes), None, false, None, None, None).await
     }
 
     /// Serves this app's router on `127.0.0.1` at an ephemeral port, in a background task that
@@ -205,17 +239,23 @@ impl TestApp {
 
     /// The given route table instead of the server's, with the same layers.
     pub(crate) async fn with_route_table(routes: Vec<RouteDef>) -> Self {
-        Self::open(|_| {}, None, Some(routes), false, None, None).await
+        Self::open(|_| {}, None, Some(routes), false, None, None, None).await
+    }
+
+    /// [`Self::new`] with a trace load waiting `permit_wait` for a permit (a job's `Saturated`
+    /// requeue, § I3.6), so a test does not wait 30 s.
+    pub(crate) async fn with_permit_wait(permit_wait: Duration) -> Self {
+        Self::open(|_| {}, None, None, false, None, None, Some(permit_wait)).await
     }
 
     /// The stub mailer. [`Self::sent`] reads what it accepted.
     pub(crate) async fn with_mailer() -> Self {
-        Self::open(|_| {}, None, None, true, None, None).await
+        Self::open(|_| {}, None, None, true, None, None, None).await
     }
 
     /// [`Self::with_config`] with the stub mailer.
     pub(crate) async fn with_mailer_config(tweak: impl FnOnce(&mut ServerConfig)) -> Self {
-        Self::open(tweak, None, None, true, None, None).await
+        Self::open(tweak, None, None, true, None, None, None).await
     }
 
     /// An app whose licence lists `features`.
@@ -229,12 +269,12 @@ impl TestApp {
 
     /// [`Self::with_config`] with GitHub's endpoints pointed at `base`.
     pub(crate) async fn with_github(base: &str, tweak: impl FnOnce(&mut ServerConfig)) -> Self {
-        Self::open(tweak, None, None, false, Some(base), None).await
+        Self::open(tweak, None, None, false, Some(base), None, None).await
     }
 
     /// [`Self::with_config`] with Google's issuer pointed at `issuer`.
     pub(crate) async fn with_google(issuer: &str, tweak: impl FnOnce(&mut ServerConfig)) -> Self {
-        Self::open(tweak, None, None, false, None, Some(issuer)).await
+        Self::open(tweak, None, None, false, None, Some(issuer), None).await
     }
 
     /// Messages the stub mailer accepted. Empty when the stub is not installed.
@@ -253,6 +293,7 @@ impl TestApp {
         stub_mailer: bool,
         github_base: Option<&str>,
         google_issuer: Option<&str>,
+        permit_wait: Option<Duration>,
     ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let mut config = default_config(dir.path());
@@ -271,23 +312,27 @@ impl TestApp {
         .await
         .expect("check value");
         let eval_runner = Arc::new(
-            llmobs_eval::EvalRunner::new(llmobs_eval::EgressPolicy {
+            cetra_eval::EvalRunner::new(cetra_eval::EgressPolicy {
                 allow_private_network: config.security.allow_private_network_egress,
+                restore_mode: config.restore_mode,
             })
             .expect("eval runner"),
         );
+        let telemetry = crate::telemetry::Telemetry::new(config.restore_mode);
         let mailer = if stub_mailer {
             let from = format!("{PRODUCT} <noreply@example.com>");
-            Some(Arc::new(crate::email::Mailer::stub(&from)))
+            Some(Arc::new(crate::email::Mailer::stub(
+                &from,
+                telemetry.emails.clone(),
+            )))
         } else {
-            crate::email::Mailer::from_config(&config)
+            crate::email::Mailer::from_config(&config, telemetry.emails.clone())
                 .expect("smtp settings build a mailer")
                 .map(Arc::new)
         };
         let mut providers = {
             let http = crate::auth::oidc::identity_client().expect("identity client");
-            crate::auth::oidc::Providers::from_config(&config.auth, &http)
-                .expect("identity providers")
+            crate::auth::oidc::Providers::for_config(&config, &http).expect("identity providers")
         };
         if let Some(base) = github_base {
             providers.retarget_github(base);
@@ -295,9 +340,13 @@ impl TestApp {
         if let Some(issuer) = google_issuer {
             providers.retarget_google(issuer);
         }
-        let prices = llmobs_otel::PriceTable::new(llmobs_otel::builtin_price_rows())
+        let prices = cetra_otel::PriceTable::new(cetra_otel::builtin_price_rows())
             .expect("built-in price table");
-        let ingest = crate::ingest::Ingest::new(&config.ingest, &config.media, prices);
+        let ingest = crate::ingest::Ingest::new(
+            &config.ingest,
+            &config.media,
+            Arc::new(crate::prices::Prices::new(prices)),
+        );
         let license = crate::ee::license::LicenseState::from_key(
             config.license_key.as_ref().map(|key| key.expose().as_str()),
         );
@@ -307,13 +356,24 @@ impl TestApp {
             license,
             defaults,
             config.public_url.origin(),
+            config.entitlements.control_plane,
         )
         .await
         .expect("stored org tokens load");
+        let eval = crate::eval::EvalQueue::new(config.eval.workers);
+        let org_sso = crate::ee::org_sso::OrgSso::new(
+            cetra_eval::EgressPolicy {
+                allow_private_network: config.security.allow_private_network_egress,
+                restore_mode: config.restore_mode,
+            },
+            crate::ee::org_sso::dns::TxtResolver::fixed(),
+        )
+        .expect("org SSO state");
         let state = AppState::new(AppInner {
             config,
             meta,
             storage: Arc::new(storage),
+            ready: crate::http::health::ReadyCache::default(),
             clock: Clock::Manual(Arc::new(AtomicI64::new(MANUAL_NOW_NS))),
             limits: Limits::new(),
             key_cache: crate::auth::principal::ApiKeyCache::new(),
@@ -329,14 +389,28 @@ impl TestApp {
             live: crate::live::LiveBus::new(crate::live::StreamTiming::TEST),
             metrics_cache: crate::routes::metrics::MetricsCache::default(),
             usage: crate::usage::Usage::default(),
+            alert_email_count: crate::alerts::quota::DailyEmailCount::default(),
             deletions: crate::deletion::Deletions::new(),
             secrets,
             eval_runner,
             connections: crate::eval::connection::ConnectionCache::default(),
             entitlements,
-            trace_loads: crate::eval::trace_load::TraceLoads::default(),
+            ingest_rate: crate::entitlements::rate::IngestRate::default(),
+            trace_loads: crate::eval::trace_load::TraceLoads::new(
+                permit_wait.unwrap_or(crate::routes::read::READ_TIMEOUT),
+            ),
             definitions: crate::eval::definitions::DefinitionCache::default(),
+            org_sso,
+            backup_slot: tokio::sync::Mutex::new(()),
+            eval,
+            pending: crate::eval::pending::PendingTraces::default(),
+            telemetry,
         });
+        state
+            .org_sso
+            .reload(&state.meta, &state.secrets, &state.config.auth)
+            .await
+            .expect("org SSO reload");
         let router = if let Some(table) = table {
             serve_router(state.clone(), table)
         } else if let Some(routes) = routes {
@@ -349,6 +423,16 @@ impl TestApp {
             state,
             router,
         }
+    }
+
+    /// Sets the TXT records the fixed resolver answers for `name`.
+    pub(crate) fn dns_txt(&self, name: &str, values: &[&str]) {
+        self.state.org_sso.dns.set(name, values);
+    }
+
+    /// Makes every TXT lookup fail (P8's 503 test).
+    pub(crate) fn dns_fail(&self, fail: bool) {
+        self.state.org_sso.dns.set_fail(fail);
     }
 
     pub(crate) fn request(&self, method: Method, path: &str) -> TestRequest {
@@ -373,11 +457,11 @@ pub(crate) struct Seeded {
     pub(crate) org_id: OrgId,
     pub(crate) project: ProjectRow,
     pub(crate) cookie: String,
-    /// `sk-llmobs-…` with `["ingest"]`.
+    /// `sk-cetra-…` with `["ingest"]`.
     pub(crate) ingest_key: String,
-    /// `sk-llmobs-…` with `["read"]`.
+    /// `sk-cetra-…` with `["read"]`.
     pub(crate) read_key: String,
-    /// `pk-llmobs-…` with `["feedback"]`.
+    /// `pk-cetra-…` with `["feedback"]`.
     pub(crate) public_key: String,
 }
 
@@ -403,6 +487,7 @@ impl TestApp {
                             name: None,
                             password_hash: None,
                             email_verified_at: None,
+                            email_verified_via: None,
                             is_instance_admin: true,
                         },
                         now,
@@ -425,7 +510,7 @@ impl TestApp {
             })
             .await
             .unwrap();
-        let cookie = session_cookie(self, user_id).await;
+        let cookie = session_cookie_via(self, user_id, None).await;
         Seeded {
             user_id,
             org_id,
@@ -486,42 +571,29 @@ impl TestApp {
 pub(crate) struct Member {
     /// `users.id`.
     pub(crate) id: Uuid,
-    /// `llmobs_session=…`, ready for a `cookie` header.
+    /// `cetra_session=…`, ready for a `cookie` header.
     pub(crate) cookie: String,
 }
 
 impl TestApp {
-    /// A new user `email` with org role `role` in `seeded`'s org (no project override), and a
-    /// session cookie for them.
-    pub(crate) async fn add_member(&self, seeded: &Seeded, email: &str, role: OrgRole) -> Member {
+    /// Marks `user_id`'s email address verified.
+    pub(crate) async fn verify_email(&self, user_id: Uuid) {
         let now = self.state.clock.now_ns();
-        let org_id = seeded.org_id;
-        let email = email.to_owned();
-        let id = self
-            .state
+        self.state
             .meta
             .write(move |conn| {
                 Box::pin(async move {
-                    let user = insert_user(
-                        conn,
-                        NewUser {
-                            email,
-                            name: None,
-                            password_hash: None,
-                            email_verified_at: None,
-                            is_instance_admin: false,
-                        },
-                        now,
-                    )
-                    .await?;
-                    add_org_member(conn, org_id, user.id, role, now).await?;
-                    Ok(user.id)
+                    set_email_verified(conn, user_id, now, EmailVerifiedVia::MailToken).await
                 })
             })
             .await
             .unwrap();
-        let cookie = session_cookie(self, id).await;
-        Member { id, cookie }
+    }
+
+    /// A new user `email` with org role `role` in `seeded`'s org (no project override), and a
+    /// session cookie for them.
+    pub(crate) async fn add_member(&self, seeded: &Seeded, email: &str, role: OrgRole) -> Member {
+        member_in_org(self, seeded.org_id, email, role).await
     }
 
     /// A personal access token for `user_id`, returned as its plaintext: scope `read`, plus
@@ -582,6 +654,7 @@ impl TestApp {
                             name: Some("Ada Example".to_owned()),
                             password_hash: None,
                             email_verified_at: None,
+                            email_verified_via: None,
                             is_instance_admin: true,
                         },
                         now,
@@ -604,7 +677,124 @@ impl TestApp {
             })
             .await
             .unwrap();
-        session_cookie(self, user_id).await
+        session_cookie_via(self, user_id, None).await
+    }
+}
+
+impl TestApp {
+    /// The example dataset `faq` of `fixtures/api/README.md` § Fixed identifiers, written
+    /// through the store into the example project. Call after `seed_examples`.
+    /// Not to be confused with `load_example_dataset`, which loads the example spans and
+    /// scores of `fixtures/api/dataset/` into storage.
+    pub(crate) async fn seed_example_faq_dataset(&self) {
+        const FAQ: &str = "01900000-0000-7000-8000-000000000c01";
+        const SCHEMA: &str = r#"{"type":"object","required":["question"],"properties":{"question":{"type":"string"}}}"#;
+        let now = self.state.clock.now_ns();
+        let project: ProjectId = EXAMPLE_PROJECT.parse().unwrap();
+        let id: Uuid = FAQ.parse().unwrap();
+        let revision = |revision: &str,
+                        item: &str,
+                        input: serde_json::Value,
+                        expected: Option<serde_json::Value>,
+                        metadata: serde_json::Value| {
+            NewRevision {
+                revision_id: revision.parse().unwrap(),
+                item_id: item.parse().unwrap(),
+                input,
+                expected_output: expected,
+                metadata: metadata.as_object().cloned().unwrap_or_default(),
+                source_trace_id: None,
+                source_span_id: None,
+            }
+        };
+        let first = revision(
+            "01900000-0000-7000-8000-000000000d11",
+            "01900000-0000-7000-8000-000000000d01",
+            serde_json::json!({"question": "How do I reset my password?"}),
+            Some(serde_json::json!({"answer": "Use the Forgot password link on the login page."})),
+            serde_json::json!({"topic": "account"}),
+        );
+        let second_v1 = revision(
+            "01900000-0000-7000-8000-000000000d12",
+            "01900000-0000-7000-8000-000000000d02",
+            serde_json::json!({"question": "Can I export my traces?"}),
+            Some(serde_json::json!({"answer": "Yes, as CSV."})),
+            serde_json::json!({"topic": "data"}),
+        );
+        let mut third = revision(
+            "01900000-0000-7000-8000-000000000d13",
+            "01900000-0000-7000-8000-000000000d03",
+            serde_json::json!({"question": "Which plans include SSO?"}),
+            None,
+            serde_json::json!({}),
+        );
+        third.source_trace_id = Some("a1000000000000000000000000000001".parse().unwrap());
+        third.source_span_id = Some("b100000000000011".parse().unwrap());
+        let second_v2 = revision(
+            "01900000-0000-7000-8000-000000000d14",
+            "01900000-0000-7000-8000-000000000d02",
+            serde_json::json!({"question": "Can I export my traces?"}),
+            Some(serde_json::json!({"answer": "Yes, as JSONL or CSV."})),
+            serde_json::json!({"topic": "data"}),
+        );
+        self.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    let fields = DatasetFields {
+                        name: "faq".to_owned(),
+                        description: Some("Support questions and expected answers".to_owned()),
+                        input_schema: Some(SCHEMA.to_owned()),
+                        expected_schema: None,
+                    };
+                    store::insert_dataset(conn, id, project, fields, now).await?;
+                    let v1 = VersionChange {
+                        close: Vec::new(),
+                        insert: vec![first, second_v1, third],
+                        description: "add 3 items".to_owned(),
+                        created_by: None,
+                    };
+                    store::write_version(conn, id, v1, now).await?;
+                    let v2 = VersionChange {
+                        close: vec!["01900000-0000-7000-8000-000000000d02".parse().unwrap()],
+                        insert: vec![second_v2],
+                        description: "edit item 01900000-0000-7000-8000-000000000d02".to_owned(),
+                        created_by: None,
+                    };
+                    store::write_version(conn, id, v2, now).await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+    }
+
+    /// A `sk-cetra-…` key with `["read", "write"]` on `seeded.project`, as its plaintext.
+    pub(crate) async fn write_key(&self, seeded: &Seeded) -> String {
+        let key = secret::new_key(KeyKind::Secret).unwrap();
+        let plaintext = key.plaintext.clone();
+        let now = self.state.clock.now_ns();
+        let project = seeded.project.id;
+        let user_id = seeded.user_id;
+        self.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    insert_key(
+                        conn,
+                        project,
+                        key,
+                        "secret",
+                        vec![KeyScope::Read, KeyScope::Write],
+                        user_id,
+                        now,
+                    )
+                    .await
+                })
+            })
+            .await
+            .unwrap();
+        plaintext
     }
 }
 
@@ -623,7 +813,60 @@ pub(crate) fn dataset_span(index: usize) -> Span {
         .expect("the dataset has that many spans")
 }
 
+/// Every row of `project`, no window: for tests that read storage directly.
+pub(crate) async fn raw_query(storage: &Storage, project: ProjectId) -> ProjectQuery {
+    storage
+        .query(
+            project,
+            crate::entitlements::query_options(crate::entitlements::Visibility::unlimited(), None),
+        )
+        .await
+        .expect("query opens")
+}
+
+/// Spans of `project` in storage, no window: `SELECT count(*) FROM spans` over
+/// `QueryContext::new(raw_query(storage, project).await, None)`.
+pub(crate) async fn raw_span_count(storage: &Storage, project: ProjectId) -> u64 {
+    let ctx = QueryContext::new(raw_query(storage, project).await, None).expect("context");
+    let batches = ctx
+        .session()
+        .sql("SELECT count(*) AS n FROM spans")
+        .await
+        .expect("count plans")
+        .collect()
+        .await
+        .expect("count runs");
+    let count = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .expect("count is Int64")
+        .value(0);
+    u64::try_from(count).unwrap_or(0)
+}
+
 impl TestApp {
+    /// Commits one span of `trace` that starts at `start_time`, through [`Self::commit_spans`].
+    /// `span_index` makes the span id distinct within the trace.
+    pub(crate) async fn commit_trace_at(
+        &self,
+        project: &ProjectRow,
+        trace: TraceId,
+        span_index: u8,
+        start_time: i64,
+    ) {
+        let mut span: Span = dataset_span(0);
+        span.trace_id = trace;
+        span.span_id = format!("c4{span_index:014x}")
+            .parse::<SpanId>()
+            .expect("span id hex");
+        span.parent_span_id = None;
+        span.start_time = start_time;
+        span.end_time = start_time + 1_000_000_000;
+        span.ingest_time = self.state.clock.now_ns();
+        self.commit_spans(project, vec![span]).await;
+    }
+
     /// Commits `spans` to `project` through the ingest path: the live bus sees them and the
     /// usage counters count them. The spans' `project_id` is set to `project`.
     pub(crate) async fn commit_spans(&self, project: &ProjectRow, mut spans: Vec<Span>) {
@@ -636,16 +879,17 @@ impl TestApp {
                 &self.state.storage,
                 &self.state.usage,
                 &self.state.live,
+                &self.state.pending,
                 crate::ingest::CommitTarget {
                     org_id: project.org_id,
                     project_id: project.id,
                     request_bytes: 0,
                     now_ns: self.state.clock.now_ns(),
                 },
-                llmobs_otel::Normalized {
+                cetra_otel::Normalized {
                     spans,
                     media: Vec::new(),
-                    rejections: llmobs_otel::Rejections::default(),
+                    rejections: cetra_otel::Rejections::default(),
                 },
             )
             .await
@@ -681,6 +925,7 @@ impl TestApp {
             .await
             .unwrap();
 
+        let starts = crate::ingest::newest_span_starts(&spans);
         let media_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/api/media");
         for entry in std::fs::read_dir(media_dir).unwrap() {
             let path = entry.unwrap().path();
@@ -690,10 +935,12 @@ impl TestApp {
             let stem = path.file_stem().and_then(|stem| stem.to_str()).unwrap();
             let sha256: [u8; 32] = hex::decode(stem).unwrap().try_into().unwrap();
             let bytes = std::fs::read(&path).unwrap();
+            let newest_span_start = starts.get(stem).copied().unwrap_or(i64::MIN);
             let blob = MediaBlob {
                 sha256,
                 mime_type: "image/png".to_owned(),
                 bytes: Bytes::from(bytes),
+                newest_span_start,
             };
             self.state.storage.put_media(project, blob).await.unwrap();
         }
@@ -727,10 +974,22 @@ async fn insert_key(
     Ok(())
 }
 
-async fn session_cookie(app: &TestApp, user_id: Uuid) -> String {
-    let header = start_session(&app.state, user_id, None, None)
-        .await
-        .unwrap();
+/// A session for `user_id`, started through `sso_org`'s provider when given, as a `cookie`
+/// header value (`cetra_session=<token>`): the `Set-Cookie` value up to its first `;`.
+pub(crate) async fn session_cookie_via(
+    app: &TestApp,
+    user_id: Uuid,
+    sso_org: Option<OrgId>,
+) -> String {
+    let header = start_session(
+        &app.state,
+        user_id,
+        None,
+        None,
+        sso_org.map_or(SessionOrigin::Password, SessionOrigin::OrgProvider),
+    )
+    .await
+    .unwrap();
     header
         .to_str()
         .unwrap()
@@ -750,7 +1009,10 @@ fn default_config(data_dir: &std::path::Path) -> ServerConfig {
         otlp_http_addr: None,
         // Tests must not bind the gRPC port (4317).
         grpc_addr: None,
+        metrics_addr: None,
+        restore_mode: false,
         storage: StorageConfig {
+            delete_objects: true,
             data_dir: data_dir.to_path_buf(),
             min_free_bytes: ByteSize::b(0),
             object_store: None,
@@ -768,7 +1030,11 @@ fn default_config(data_dir: &std::path::Path) -> ServerConfig {
         media: MediaConfig::default(),
         eval: EvalConfig::default(),
         security: SecurityConfig::default(),
-        entitlements: EntitlementsConfig::default(),
+        // Most tests act as a cloud cell (D-P-50); a test of the default turns it off.
+        entitlements: EntitlementsConfig {
+            control_plane: true,
+            ..EntitlementsConfig::default()
+        },
         orgs: OrgsConfig::default(),
         encryption_key: None,
         license_key: None,
@@ -816,6 +1082,17 @@ impl TestRequest {
         self
     }
 
+    /// Authenticates as the control plane with a token of `scope` for this request only: its
+    /// method and path (D-P-71).
+    pub(crate) fn control_plane(self, scope: &str) -> Self {
+        let token = control_plane_token(
+            scope,
+            self.method.as_str(),
+            self.path.split('?').next().unwrap_or_default(),
+        );
+        self.header("authorization", &format!("Bearer {token}"))
+    }
+
     pub(crate) fn body(mut self, body: impl Into<Bytes>) -> Self {
         self.body = body.into();
         self
@@ -835,7 +1112,8 @@ impl TestRequest {
         let (router, request) = self.build();
         let response = router.oneshot(request).await.unwrap();
         let (parts, body) = response.into_parts();
-        let body = axum::body::to_bytes(body, 8 * 1024 * 1024)
+        // A results page may hold 16 MiB of text (D-J-13), so the cap is above that.
+        let body = axum::body::to_bytes(body, 32 * 1024 * 1024)
             .await
             .expect("response body");
         TestResponse {
@@ -1099,5 +1377,219 @@ impl Write for LogBuffer {
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+/// A new user `email` with org role `role` in `org`, and a session cookie for them.
+pub(crate) async fn member_in_org(app: &TestApp, org: OrgId, email: &str, role: OrgRole) -> Member {
+    let now = app.state.clock.now_ns();
+    let email = email.to_owned();
+    let id = app
+        .state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                let user = insert_user(
+                    conn,
+                    NewUser {
+                        email,
+                        name: None,
+                        password_hash: None,
+                        email_verified_at: None,
+                        email_verified_via: None,
+                        is_instance_admin: false,
+                    },
+                    now,
+                )
+                .await?;
+                add_org_member(conn, org, user.id, role, now).await?;
+                Ok(user.id)
+            })
+        })
+        .await
+        .unwrap();
+    let cookie = session_cookie_via(app, id, None).await;
+    Member { id, cookie }
+}
+
+/// Saves the org's provider pointing at `idp` (the mock's client id and secret), with the
+/// flags given, verifies `domain` in `meta.db`, sets `last_login_at` to now (as if Test
+/// sign-in had run), and reloads the routing.
+pub(crate) async fn configure_org_sso(
+    app: &TestApp,
+    org: OrgId,
+    idp: &mock_idp::MockIdp,
+    domain: &str,
+    enabled: bool,
+    enforced: bool,
+) {
+    use crate::api::org_sso::JitRole;
+    use crate::ee::org_sso::store::{self, DomainRow, ProviderWrite};
+    let id = Uuid::now_v7();
+    let sealed = app
+        .state
+        .secrets
+        .seal(mock_idp::CLIENT_SECRET.as_bytes(), store::secret_aad(&id))
+        .expect("seal");
+    let token = crate::ee::org_sso::dns::new_token().expect("token");
+    let now = app.state.clock.now_ns();
+    let issuer = idp.issuer().to_owned();
+    let domain = domain.to_owned();
+    app.state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                let write = ProviderWrite {
+                    display_name: "Acme Okta".to_owned(),
+                    issuer,
+                    client_id: mock_idp::CLIENT_ID.to_owned(),
+                    client_secret_enc: Some(sealed),
+                    jit_role: JitRole::Viewer,
+                };
+                store::put_provider(conn, org, id, write, now).await?;
+                store::set_flags(conn, org, enabled, enforced, now).await?;
+                store::set_last_login(conn, org, now).await?;
+                let row = DomainRow {
+                    id: Uuid::now_v7(),
+                    org_id: org,
+                    domain,
+                    token,
+                    verified_at: None,
+                    last_checked_at: None,
+                    created_at: now,
+                };
+                let domain_id = row.id;
+                store::insert_domain(conn, &row).await?;
+                store::mark_verified(conn, domain_id, now).await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+    reload_org_sso(app).await;
+}
+
+/// Rebuilds the routing from `meta.db`, the job the server runs after every org SSO write.
+pub(crate) async fn reload_org_sso(app: &TestApp) {
+    app.state
+        .org_sso
+        .reload(&app.state.meta, &app.state.secrets, &app.state.config.auth)
+        .await
+        .expect("org SSO reload");
+}
+
+/// Makes `user_id` an instance admin.
+pub(crate) async fn make_instance_admin(app: &TestApp, user_id: Uuid) {
+    let now = app.state.clock.now_ns();
+    app.state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                users::set_instance_admin(conn, user_id, true, now).await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+}
+
+/// A second org `slug` (name = slug) with a new non-admin owner `owner_email` and that owner's
+/// session.
+pub(crate) async fn second_org(app: &TestApp, slug: &str, owner_email: &str) -> (OrgId, Member) {
+    let org = OrgId::new_v7();
+    let now = app.state.clock.now_ns();
+    let slug = slug.to_owned();
+    app.state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                insert_org(conn, org, &slug, &slug, now).await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+    let owner = member_in_org(app, org, owner_email, OrgRole::Owner).await;
+    (org, owner)
+}
+
+/// An org SSO test app: private egress allowed, a licence listing `org_sso`, `seed()`, and a
+/// non-admin owner `owner@acme.test` of the seeded org `acme`.
+pub(crate) async fn org_sso_app() -> (TestApp, Seeded, Member) {
+    org_sso_app_with(|_| {}).await
+}
+
+/// [`org_sso_app`] with `tweak` applied after its settings.
+pub(crate) async fn org_sso_app_with(
+    tweak: impl FnOnce(&mut ServerConfig),
+) -> (TestApp, Seeded, Member) {
+    let app = TestApp::with_config(move |config| {
+        config.security.allow_private_network_egress = true;
+        config.license_key = Some(crate::config::Secret::new(license_key(&["org_sso"])));
+        tweak(config);
+    })
+    .await;
+    let seeded = app.seed().await;
+    let owner = app
+        .add_member(&seeded, "owner@acme.test", OrgRole::Owner)
+        .await;
+    (app, seeded, owner)
+}
+
+/// The OTLP key the tests send with, also the project key of [`with_init`].
+pub(crate) const OTLP_KEY: &str = "sk-cetra-0123456789ABCDEFGHIJKLMNOPQRSTUV";
+
+/// A server config with `init` set, so `bind` seeds an admin, an org, a project and [`OTLP_KEY`].
+pub(crate) fn with_init(mut config: ServerConfig) -> ServerConfig {
+    config.init = serde_json::from_value(serde_json::json!({
+        "admin_email": "ada@example.com",
+        "admin_password": "cetra-ok-1",
+        "org": "Acme",
+        "project": "Support bot",
+        "secret_key": OTLP_KEY,
+    }))
+    .unwrap();
+    config
+}
+
+/// A config for a server on `data_dir`, on ephemeral loopback ports, with the defaults.
+pub(crate) fn config(data_dir: &std::path::Path) -> ServerConfig {
+    ServerConfig {
+        data_dir: data_dir.to_path_buf(),
+        public_url: PublicUrl::default(),
+        http_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+        trusted_proxies: Vec::new(),
+        otlp_http_addr: None,
+        grpc_addr: None,
+        metrics_addr: None,
+        restore_mode: false,
+        storage: StorageConfig {
+            delete_objects: true,
+            data_dir: data_dir.to_path_buf(),
+            min_free_bytes: ByteSize::b(0),
+            object_store: None,
+            s3: S3Config::default(),
+            wal: WalConfig::default(),
+            flush: FlushConfig::default(),
+            memtable: MemtableConfig::default(),
+            query: QueryConfig::default(),
+            anchor: AnchorConfig::default(),
+            gc: Default::default(),
+            compaction: Default::default(),
+            deletion: Default::default(),
+        },
+        ingest: IngestConfig::default(),
+        media: MediaConfig::default(),
+        eval: EvalConfig::default(),
+        security: SecurityConfig::default(),
+        entitlements: EntitlementsConfig::default(),
+        orgs: OrgsConfig::default(),
+        encryption_key: None,
+        license_key: None,
+        auth: AuthSettings::default(),
+        smtp_url: None,
+        email_from: None,
+        init: InitConfig::default(),
+        log: LogConfig::default(),
     }
 }

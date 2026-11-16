@@ -2,7 +2,7 @@
 
 Read [README.md](README.md) first: decisions D91–D101, boundaries, verified DataFusion facts, crate layout, public API.
 
-`llmobs_storage::reads` holds the queries behind the read endpoints of spec 09 § Observability data (D92). Each function:
+`cetra_storage::reads` holds the queries behind the read endpoints of spec 09 § Observability data (D92). Each function:
 - takes `&QueryContext` and a request struct;
 - runs under the request's `timeout` (`tokio::time::timeout`, `RunError::Timeout`);
 - maps DataFusion errors through `classify` (Q12);
@@ -133,7 +133,7 @@ pub async fn span_list(ctx: &QueryContext, request: SpanListRequest<'_>) -> Resu
 ```
 
 - Same plan as the trace list, on the `spans` view with `FilterView::Spans`, `search(Spans, …)` and tie columns `["span_id", "trace_id"]`.
-- **Light columns:** `llmobs_core::schema::SPANS_LIGHT_COLUMNS` without `project_id`, in that order, with `duration_ms` after `duration_ns`. Name the list `pub const SPAN_LIST_COLUMNS: &[&str]` so the server can rely on it.
+- **Light columns:** `cetra_core::schema::SPANS_LIGHT_COLUMNS` without `project_id`, in that order, with `duration_ms` after `duration_ns`. Name the list `pub const SPAN_LIST_COLUMNS: &[&str]` so the server can rely on it.
 - Default exclusions apply to the span's own `environment` and `metadata` (spec 05).
 
 ### Trace detail
@@ -284,7 +284,7 @@ pub struct ScoreListRequest<'a> {
 pub async fn score_list(ctx: &QueryContext, request: ScoreListRequest<'_>) -> Result<Page, RunError>;
 ```
 
-- `ScoreTargetKind` and `ScoreSource` come from `llmobs_core::enums`. Compare with their serialized names, not string literals.
+- `ScoreTargetKind` and `ScoreSource` come from `cetra_core::enums`. Compare with their serialized names, not string literals.
 - The IDs are validated as in Q15.
 - Equality conjuncts for each present field, plus the `created_at` window.
 - Order `created_at DESC, score_id DESC`, fixed. The cursor's sort name is `created_at`, and `order` is always `Desc`.

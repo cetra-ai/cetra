@@ -10,7 +10,7 @@
       "end_time": "2025-12-31T23:59:52.000000000Z",
       "status": "unset",
       "attributes": {
-        "llmobs.normalize_warning": "[\"end_before_start\"]"
+        "cetra.normalize_warning": "[\"end_before_start\"]"
       },
       "ingest_time": "2026-01-01T00:00:00.000000000Z",
       "schema_version": 1
@@ -25,7 +25,7 @@
       "end_time": "2025-12-31T23:59:54.000000000Z",
       "status": "unset",
       "attributes": {
-        "llmobs.normalize_warning": "[\"end_before_start\"]"
+        "cetra.normalize_warning": "[\"end_before_start\"]"
       },
       "ingest_time": "2026-01-01T00:00:00.000000000Z",
       "schema_version": 1

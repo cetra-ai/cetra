@@ -8,17 +8,20 @@
 //! reads the `obsolete` rows of `data_files`, honours `gc.grace`, and leaves
 //! objects that an older catalog still references (spec 03 §5).
 
+use std::ffi::OsStr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
+use futures::TryStreamExt;
+use object_store::{ObjectMeta, ObjectStore, path::Path as ObjectPath};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::catalog::{Committer, FileId, ObsoleteRemoval, StagedRemoval, now_ns};
-use crate::error::GcError;
+use crate::error::{GcError, OrphanError};
 use crate::hooks::Hooks;
 use crate::media::{MEDIA_INTERVAL, MediaGc};
-use crate::objects::Objects;
+use crate::objects::{Objects, is_temp_name};
 
 /// How often the background task collects, after the pass at open.
 pub(crate) const INTERVAL: Duration = Duration::from_secs(10 * 60);
@@ -90,9 +93,10 @@ pub(crate) fn spawn(start: GcStart) -> GcHandle {
                     )
                     .await
                     {
-                        // The error names the object key. Keys contain project ids.
+                        // The label only: the error names a staged path, which
+                        // can be a media path (spec 03 §9).
                         tracing::warn!("staged object collection failed");
-                        tracing::debug!(%error, "staged object collection error");
+                        tracing::debug!(error = error.label(), "staged object collection error");
                     }
                     if let Err(error) = collect_obsolete(
                         &start.committer,
@@ -103,9 +107,9 @@ pub(crate) fn spawn(start: GcStart) -> GcHandle {
                     )
                     .await
                     {
-                        // The error names the object key. Keys contain project ids.
+                        // The label only: the error names an object key.
                         tracing::warn!("obsolete file collection failed");
-                        tracing::debug!(%error, "obsolete file collection error");
+                        tracing::debug!(error = error.label(), "obsolete file collection error");
                     }
                     if tokio::time::Instant::now() >= next_media {
                         if let Err(error) = start.media.collect_all(now_ns()).await {
@@ -151,13 +155,15 @@ pub(crate) async fn collect_once(
         {
             StagedRemoval::Deleted { bytes: size } => {
                 deleted += 1;
+                // Per deletion, not at the summary: a later error returns before the summary.
+                committer.counters().gc_deleted(1);
                 bytes = bytes.saturating_add(size);
-                tracing::debug!(path, "deleted staged object");
+                tracing::debug!(path = %loggable_path(path), "deleted staged object");
             }
             StagedRemoval::Published => {
                 conflicts += 1;
                 tracing::error!("staged object is also a catalog file; left in place");
-                tracing::debug!(path, "staged path is present in data_files");
+                tracing::debug!(path = %loggable_path(path), "staged path is present in data_files");
             }
             StagedRemoval::MediaStored => {
                 // No fields: the path holds the blob's hash (spec 03 §9).
@@ -170,6 +176,20 @@ pub(crate) async fn collect_once(
         tracing::info!(deleted, bytes, conflicts, "collected staged objects");
     }
     Ok(())
+}
+
+/// A staged path for logs. Staged rows include media paths,
+/// `media/<project>/<sha256>`, and the SHA-256 identifies the blob's content
+/// (spec 03 §9), so a media path logs only `media/<project>`. Other paths hold
+/// project ids and UUIDs only and are logged as they are.
+fn loggable_path(path: &str) -> String {
+    match path.strip_prefix("media/") {
+        Some(rest) => match rest.split_once('/') {
+            Some((project, _sha)) => format!("media/{project}"),
+            None => "media".to_owned(),
+        },
+        None => path.to_owned(),
+    }
 }
 
 fn cutoff_ns(now: i64, max_age: Duration) -> i64 {
@@ -205,12 +225,20 @@ pub(crate) async fn collect_obsolete(
             .obsolete_before(cutoff, after, PAGE as u32)
             .await?;
         for file in &page {
-            match committer
-                .collect_obsolete_file(file, hooks, || objects.delete_len(&file.path))
-                .await?
-            {
+            // Taken outside the committer lock. Files a backup's verify pass
+            // quarantines leave the catalog without entering `retired`, so
+            // the gate is what keeps them (N M2, D-N-18).
+            let removal = {
+                let _gate = committer.object_gc_gate.read().await;
+                committer
+                    .collect_obsolete_file(file, hooks, || objects.delete_len(&file.path))
+                    .await?
+            };
+            match removal {
                 ObsoleteRemoval::Deleted { bytes } => {
                     report.deleted += 1;
+                    // Per deletion, not at the summary: a later error returns before the summary.
+                    committer.counters().gc_deleted(1);
                     report.bytes = report.bytes.saturating_add(bytes);
                     tracing::debug!(path = file.path, "deleted obsolete file");
                 }
@@ -237,6 +265,101 @@ pub(crate) async fn collect_obsolete(
     Ok(report)
 }
 
+/// What [`crate::Maintenance::collect_orphans`] found.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OrphanReport {
+    /// Unknown objects older than `min_age` (deleted unless `dry_run`).
+    pub orphans: u64,
+    /// Bytes of the objects counted in `orphans`.
+    pub orphan_bytes: u64,
+    /// Unknown objects younger than `min_age`, left alone.
+    pub recent_unknown: u64,
+    /// Data files the catalog needs that the store does not have.
+    pub missing: u64,
+    /// Media blobs the catalog references that the store does not have (a warning:
+    /// media follows its own deletion rule, see N M2's design § Backup layout).
+    pub missing_media: u64,
+    /// Whether the run only reported and deleted nothing.
+    pub dry_run: bool,
+}
+
+/// Lists `tables/` and `media/` in the store. Deletes the objects the catalog does
+/// not know that are older than `min_age` (unless `dry_run`), and counts the
+/// objects it needs that are missing (N M2, D-N-21). The periodic GC never lists.
+pub(crate) async fn collect_orphans(
+    committer: &Committer,
+    objects: &Objects,
+    min_age: Duration,
+    dry_run: bool,
+) -> Result<OrphanReport, OrphanError> {
+    // Taken before the committer lock (the lock order of N M2, D-N-18). Object
+    // deletions by the GC, media GC and a snapshot wait for it.
+    let _gate = committer.object_gc_gate.write().await;
+    // Needed is read before the listing and known after it: an object published
+    // during the listing is then known, never an orphan.
+    let mut missing = committer.needed_keys().await?;
+    let store = objects.raw_store();
+    let mut listed: Vec<ObjectMeta> = Vec::new();
+    for prefix in ["tables", "media"] {
+        let mut stream = store.list(Some(&ObjectPath::from(prefix)));
+        while let Some(meta) = stream.try_next().await.map_err(OrphanError::List)? {
+            listed.push(meta);
+        }
+    }
+    let known = committer.known_keys().await?;
+    let now = SystemTime::now();
+    let mut report = OrphanReport {
+        dry_run,
+        ..OrphanReport::default()
+    };
+    for meta in &listed {
+        let key = meta.location.as_ref();
+        let segment = key.rsplit('/').next().unwrap_or(key);
+        if is_temp_name(OsStr::new(segment)) {
+            continue;
+        }
+        missing.remove(key);
+        if known.contains(key) {
+            continue;
+        }
+        // A modification time in the future (clock skew) counts as recent, so
+        // the object is never deleted, whatever `min_age` is.
+        let recent = match now.duration_since(SystemTime::from(meta.last_modified)) {
+            Ok(age) => age < min_age,
+            Err(_) => true,
+        };
+        if recent {
+            report.recent_unknown += 1;
+            continue;
+        }
+        report.orphans += 1;
+        report.orphan_bytes = report.orphan_bytes.saturating_add(meta.size);
+        if !dry_run {
+            objects
+                .delete(key)
+                .await
+                .map_err(|error| OrphanError::delete(&error))?;
+        }
+    }
+    for key in &missing {
+        if key.starts_with("media/") {
+            report.missing_media += 1;
+        } else {
+            report.missing += 1;
+        }
+    }
+    tracing::info!(
+        orphans = report.orphans,
+        orphan_bytes = report.orphan_bytes,
+        recent_unknown = report.recent_unknown,
+        missing = report.missing,
+        missing_media = report.missing_media,
+        dry_run,
+        "collected orphan objects"
+    );
+    Ok(report)
+}
+
 #[cfg(test)]
 mod tests {
     use bytesize::ByteSize;
@@ -245,18 +368,26 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use bytes::Bytes;
+    use cetra_core::ids::ProjectId;
     use chrono::NaiveDate;
-    use llmobs_core::ids::ProjectId;
     use sqlx::ConnectOptions;
 
-    use super::{ObsoleteReport, collect_obsolete, collect_once};
+    use futures::TryStreamExt;
+    use object_store::{ObjectStore, ObjectStoreExt, path::Path as ObjectPath};
+    use sha2::{Digest, Sha256};
+
+    use super::{ObsoleteReport, OrphanReport, collect_obsolete, collect_once, loggable_path};
+    use crate::MediaBlob;
     use crate::catalog::{CatalogEdit, Committer, FileId, FileMeta, FileState, FileTable, now_ns};
+    use crate::compaction::job::tests as job;
     use crate::config::{
         FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
     };
+    use crate::deletion::{Deletion, DeletionScope};
     use crate::error::GcError;
     use crate::hooks::{HookPoint, Hooks};
     use crate::objects::Objects;
+    use crate::test_support::{span_row, span_rows};
     use crate::wal::{Table, spans_at};
 
     fn project() -> ProjectId {
@@ -265,6 +396,7 @@ mod tests {
 
     fn config_in(dir: &Path) -> StorageConfig {
         StorageConfig {
+            delete_objects: true,
             data_dir: dir.to_path_buf(),
             min_free_bytes: ByteSize::b(0),
             object_store: None,
@@ -623,6 +755,7 @@ mod tests {
                 in_use: 0,
             }
         );
+        assert_eq!(f.committer.counters().snapshot().gc_objects_deleted, 2);
         assert!(!object_exists(f.dir.path(), &spans_path));
         assert!(!object_exists(f.dir.path(), &traces_path));
         assert_eq!(
@@ -633,6 +766,50 @@ mod tests {
             scalar(f.dir.path(), "SELECT COUNT(*) FROM file_sources").await,
             0
         );
+    }
+
+    /// D-N-34: with deletion off, a collection deletes no object and keeps the rows obsolete.
+    #[tokio::test]
+    async fn no_object_is_deleted_when_delete_objects_is_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = config_in(dir.path());
+        config.delete_objects = false;
+        let committer = Committer::open(dir.path(), Hooks::default()).await.unwrap();
+        let objects = Arc::new(Objects::new(&config, Hooks::default()).await.unwrap());
+        let f = Fixture {
+            dir,
+            committer,
+            objects,
+        };
+        let (_ids, (spans_path, traces_path)) = obsolete_pair(&f).await;
+
+        let result = collect_obsolete(
+            &f.committer,
+            &f.objects,
+            &Hooks::default(),
+            now_ns(),
+            Duration::ZERO,
+        )
+        .await;
+
+        assert!(
+            matches!(
+                result,
+                Err(GcError::Object(crate::error::ObjectError::DeletionOff))
+            ),
+            "{result:?}"
+        );
+        assert!(object_exists(f.dir.path(), &spans_path));
+        assert!(object_exists(f.dir.path(), &traces_path));
+        assert_eq!(
+            scalar(
+                f.dir.path(),
+                "SELECT COUNT(*) FROM data_files WHERE state = 'obsolete'"
+            )
+            .await,
+            2
+        );
+        assert_eq!(f.committer.counters().snapshot().gc_objects_deleted, 0);
     }
 
     #[tokio::test]
@@ -833,5 +1010,513 @@ mod tests {
             ObsoleteReport::default()
         );
         storage.shutdown().await.unwrap();
+    }
+
+    /// One `traces` deletion of the given traces, cut off at `cutoff`.
+    fn traces_deletion(traces: &[u16], cutoff: i64) -> Deletion {
+        Deletion {
+            id: uuid::Uuid::now_v7(),
+            project: job::project(),
+            cutoff,
+            scope: DeletionScope::Traces {
+                trace_ids: traces
+                    .iter()
+                    .map(|trace| span_row(*trace, 0, 0, 0).trace_id)
+                    .collect(),
+            },
+        }
+    }
+
+    /// A deletion raises a clean file: a reader that took its snapshot before
+    /// the raise still reads the file, so GC must keep it after the file is
+    /// removed (spec 03 §5).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn gc_keeps_a_file_a_snapshot_from_before_its_raise_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = job::config_in(
+            dir.path(),
+            job::quiet_compaction(8),
+            Duration::from_secs(3_600),
+        );
+        let mut storage = crate::Storage::open(config.clone()).await.unwrap();
+        let time = job::at(10, 0, 0);
+        storage = job::flush_cycle(
+            &config,
+            storage,
+            span_rows(&[span_row(2, 0, time, time + 1)]),
+        )
+        .await;
+        // Keep ids and paths, not `Arc`s: a held `FileMeta` would count as a reader.
+        let (file_id, file_path) = {
+            let files = storage.catalog_files(Table::Spans);
+            (files[0].id, files[0].path.clone())
+        };
+
+        // The snapshot from before the raise.
+        let held = storage
+            .query(job::project(), crate::QueryOptions::new(None, None))
+            .await
+            .unwrap();
+
+        storage
+            .register_deletion(traces_deletion(&[1], job::at(11, 0, 0)))
+            .await
+            .unwrap();
+        let report = storage.apply_deletions(job::at(11, 0, 0)).await.unwrap();
+        assert_eq!(
+            (
+                report.rewritten,
+                report.raised,
+                report.applied,
+                report.failed
+            ),
+            (0, 1, 1, 0),
+            "{report:?}"
+        );
+        {
+            let raised = storage.catalog_files(Table::Spans);
+            assert_eq!(raised.len(), 1);
+            assert_eq!(raised[0].id, file_id, "the file is unchanged");
+            assert_eq!(raised[0].deletions_applied_seq, 1);
+        }
+
+        // Remove the file: retention drops every partition of its day.
+        let next_day = job::day().succ_opt().unwrap();
+        let retained = storage
+            .apply_retention(job::project(), next_day)
+            .await
+            .unwrap();
+        assert!(retained.files >= 1, "{retained:?}");
+        assert!(storage.catalog_files(Table::Spans).is_empty());
+
+        let collected = storage.collect_obsolete(Duration::ZERO).await.unwrap();
+        assert_eq!(collected.deleted, 0, "{collected:?}");
+        assert!(collected.in_use >= 1, "{collected:?}");
+        assert!(object_exists(dir.path(), &file_path));
+
+        // The old snapshot still reads its one row.
+        let ctx = datafusion::execution::context::SessionContext::new_with_config_rt(
+            datafusion::execution::context::SessionConfig::new(),
+            Arc::clone(&held.runtime),
+        );
+        ctx.register_table("spans_t", held.spans.clone()).unwrap();
+        let counted = ctx
+            .sql("SELECT count(*) FROM spans_t")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let total = counted[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(total, 1, "the pre-raise snapshot reads its row");
+
+        // Once the snapshot is gone, every obsolete file goes.
+        drop(ctx);
+        drop(held);
+        let collected = storage.collect_obsolete(Duration::ZERO).await.unwrap();
+        assert!(collected.deleted >= 1, "{collected:?}");
+        assert!(!object_exists(dir.path(), &file_path));
+        assert_eq!(
+            scalar(
+                dir.path(),
+                "SELECT COUNT(*) FROM data_files WHERE state = 'obsolete'"
+            )
+            .await,
+            0
+        );
+        storage.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn media_paths_log_the_project_only() {
+        let sha = "ab".repeat(32);
+        assert_eq!(
+            loggable_path(&format!("media/p-1/{sha}")),
+            "media/p-1",
+            "the hash must not reach the log"
+        );
+        assert_eq!(loggable_path("media/p-1"), "media");
+        assert_eq!(loggable_path("media/"), "media");
+    }
+
+    #[test]
+    fn other_staged_paths_are_logged_as_they_are() {
+        assert_eq!(
+            loggable_path("tables/spans/0190f1a2-7c3d-7e4f-8a9b-0c1d2e3f4a5b/x.parquet"),
+            "tables/spans/0190f1a2-7c3d-7e4f-8a9b-0c1d2e3f4a5b/x.parquet"
+        );
+        assert_eq!(loggable_path("mediaish/p/x"), "mediaish/p/x");
+    }
+
+    #[test]
+    fn gc_errors_log_a_static_label() {
+        let object = GcError::Object(crate::error::ObjectError::io(
+            "deleting object",
+            Path::new("media/p-1/secret-hash"),
+            std::io::Error::other("boom"),
+        ));
+        assert_eq!(object.label(), "object");
+        assert!(!object.label().contains("secret-hash"));
+        assert_eq!(GcError::Fault.label(), "fault");
+    }
+
+    // ---- Orphan collection (N M2, D-N-21) ----
+
+    const ORPHAN_BYTES: &[u8] = b"orphan-bytes";
+
+    /// A spans key that no catalog row names.
+    fn unknown_spans_key(day: &str) -> String {
+        format!(
+            "tables/spans/project={}/day={day}/0-{}.parquet",
+            project(),
+            uuid::Uuid::now_v7()
+        )
+    }
+
+    async fn put_raw(storage: &crate::Storage, key: &str, bytes: &'static [u8]) {
+        storage
+            .objects
+            .raw_store()
+            .put(&ObjectPath::from(key), Bytes::from_static(bytes).into())
+            .await
+            .unwrap();
+    }
+
+    async fn delete_raw(storage: &crate::Storage, key: &str) {
+        storage
+            .objects
+            .raw_store()
+            .delete(&ObjectPath::from(key))
+            .await
+            .unwrap();
+    }
+
+    /// Every store key under `prefix`, as the store lists it.
+    async fn listed(storage: &crate::Storage, prefix: &str) -> Vec<String> {
+        storage
+            .objects
+            .raw_store()
+            .list(Some(&ObjectPath::from(prefix)))
+            .map_ok(|meta| meta.location.to_string())
+            .try_collect()
+            .await
+            .unwrap()
+    }
+
+    async fn only_key(storage: &crate::Storage, prefix: &str) -> String {
+        let keys = listed(storage, prefix).await;
+        assert_eq!(keys.len(), 1, "{keys:?}");
+        keys.into_iter().next().unwrap()
+    }
+
+    fn media_blob() -> MediaBlob {
+        let bytes = Bytes::from_static(b"orphan-test-blob");
+        MediaBlob {
+            sha256: Sha256::digest(&bytes).into(),
+            mime_type: "image/png".to_owned(),
+            bytes,
+            newest_span_start: 0,
+        }
+    }
+
+    /// Writes the project's state into catalog.db from a second connection. A real
+    /// drop deletes the media first, so this is the only way to keep a dropping
+    /// project's media in place.
+    async fn set_project_state(dir: &Path, state: &'static str) {
+        let mut connection = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(dir.join("catalog.db"))
+            .connect()
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT OR REPLACE INTO projects (project_id, state, dropped_at) VALUES (?, ?, 0)",
+        )
+        .bind(project().to_string())
+        .bind(state)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    }
+
+    /// Runs [`crate::Maintenance::collect_orphans`] on a data directory whose server has
+    /// stopped, as the admin commands do.
+    async fn orphans(dir: &Path, min_age: Duration, dry_run: bool) -> OrphanReport {
+        let maintenance = crate::Maintenance::open(config_in(dir)).await.unwrap();
+        let report = maintenance.collect_orphans(min_age, dry_run).await.unwrap();
+        maintenance.close().await.unwrap();
+        report
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn collect_orphans_deletes_unknown_old_objects() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::Storage::open(config_in(dir.path())).await.unwrap();
+        storage
+            .append_spans(project(), spans_at(&[1]))
+            .await
+            .unwrap();
+        storage.flush_now(Duration::from_secs(10)).await.unwrap();
+        let orphan = unknown_spans_key("2026-01-01");
+        put_raw(&storage, &orphan, ORPHAN_BYTES).await;
+        let spans: Vec<String> = storage
+            .catalog_files(Table::Spans)
+            .iter()
+            .map(|file| file.path.clone())
+            .collect();
+        assert!(!spans.is_empty());
+        storage.shutdown().await.unwrap();
+
+        let report = orphans(dir.path(), Duration::ZERO, false).await;
+
+        assert_eq!(
+            report,
+            OrphanReport {
+                orphans: 1,
+                orphan_bytes: u64::try_from(ORPHAN_BYTES.len()).unwrap(),
+                ..OrphanReport::default()
+            }
+        );
+        assert!(!object_exists(dir.path(), &orphan));
+        for path in spans {
+            assert!(object_exists(dir.path(), &path));
+        }
+    }
+
+    /// D-N-34: `gc-orphans` deletes even when its config says object deletion is off.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn maintenance_deletes_even_when_delete_objects_is_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::Storage::open(config_in(dir.path())).await.unwrap();
+        storage
+            .append_spans(project(), spans_at(&[1]))
+            .await
+            .unwrap();
+        storage.flush_now(Duration::from_secs(10)).await.unwrap();
+        let orphan = unknown_spans_key("2026-01-01");
+        put_raw(&storage, &orphan, ORPHAN_BYTES).await;
+        storage.shutdown().await.unwrap();
+
+        let mut config = config_in(dir.path());
+        config.delete_objects = false;
+        let maintenance = crate::Maintenance::open(config).await.unwrap();
+        let report = maintenance
+            .collect_orphans(Duration::ZERO, false)
+            .await
+            .unwrap();
+        maintenance.close().await.unwrap();
+
+        assert_eq!(report.orphans, 1);
+        assert!(!object_exists(dir.path(), &orphan));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn collect_orphans_dry_run_deletes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::Storage::open(config_in(dir.path())).await.unwrap();
+        let orphan = unknown_spans_key("2026-01-01");
+        put_raw(&storage, &orphan, ORPHAN_BYTES).await;
+        storage.shutdown().await.unwrap();
+
+        let report = orphans(dir.path(), Duration::ZERO, true).await;
+
+        assert_eq!(
+            report,
+            OrphanReport {
+                orphans: 1,
+                orphan_bytes: u64::try_from(ORPHAN_BYTES.len()).unwrap(),
+                dry_run: true,
+                ..OrphanReport::default()
+            }
+        );
+        assert!(object_exists(dir.path(), &orphan));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn collect_orphans_leaves_recent_unknown_objects() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::Storage::open(config_in(dir.path())).await.unwrap();
+        let recent = unknown_spans_key("2026-01-01");
+        put_raw(&storage, &recent, ORPHAN_BYTES).await;
+        storage.shutdown().await.unwrap();
+
+        let report = orphans(dir.path(), Duration::from_secs(3_600), false).await;
+
+        assert_eq!(
+            report,
+            OrphanReport {
+                recent_unknown: 1,
+                ..OrphanReport::default()
+            }
+        );
+        assert!(object_exists(dir.path(), &recent));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn collect_orphans_keeps_an_object_from_the_future() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::Storage::open(config_in(dir.path())).await.unwrap();
+        let future = unknown_spans_key("2026-01-01");
+        put_raw(&storage, &future, ORPHAN_BYTES).await;
+        // A modification time an hour ahead, as a clock that ran fast would leave.
+        std::fs::File::options()
+            .write(true)
+            .open(dir.path().join("objects").join(&future))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + Duration::from_secs(3_600))
+            .unwrap();
+        storage.shutdown().await.unwrap();
+
+        // `min_age` is zero: only the future mtime keeps the object.
+        let report = orphans(dir.path(), Duration::ZERO, false).await;
+
+        assert_eq!(
+            report,
+            OrphanReport {
+                recent_unknown: 1,
+                ..OrphanReport::default()
+            }
+        );
+        assert!(object_exists(dir.path(), &future));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn collect_orphans_reports_missing_needed_objects() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::Storage::open(config_in(dir.path())).await.unwrap();
+        storage
+            .append_spans(project(), spans_at(&[1]))
+            .await
+            .unwrap();
+        storage.flush_now(Duration::from_secs(10)).await.unwrap();
+        let path = storage.catalog_files(Table::Spans)[0].path.clone();
+        delete_raw(&storage, &path).await;
+        storage.shutdown().await.unwrap();
+
+        let report = orphans(dir.path(), Duration::ZERO, false).await;
+
+        assert_eq!(
+            report,
+            OrphanReport {
+                missing: 1,
+                ..OrphanReport::default()
+            }
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn collect_orphans_keeps_staged_and_obsolete_objects() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::Storage::open(config_in(dir.path())).await.unwrap();
+        storage
+            .append_spans(project(), spans_at(&[1]))
+            .await
+            .unwrap();
+        storage.flush_now(Duration::from_secs(10)).await.unwrap();
+        let staged = unknown_spans_key("2026-01-02");
+        put_raw(&storage, &staged, b"staged").await;
+        storage
+            .committer
+            .stage(std::slice::from_ref(&staged))
+            .await
+            .unwrap();
+        // Removing the files obsoletes them, as a compaction commit does.
+        let files: Vec<Arc<FileMeta>> = storage
+            .catalog_files(Table::Spans)
+            .into_iter()
+            .chain(storage.catalog_files(FileTable::Traces))
+            .collect();
+        assert!(!files.is_empty());
+        let remove = CatalogEdit {
+            add: Vec::new(),
+            remove: files
+                .iter()
+                .map(|file| (file.id, FileState::Active))
+                .collect(),
+            flushed_seq: None,
+            sources: Vec::new(),
+            raise: Vec::new(),
+            quarantine: Vec::new(),
+        };
+        storage.committer.commit(&remove, |_| {}).await.unwrap();
+        assert_eq!(storage.staged_paths().await.unwrap(), vec![staged.clone()]);
+        storage.shutdown().await.unwrap();
+
+        let report = orphans(dir.path(), Duration::ZERO, false).await;
+
+        assert_eq!(report, OrphanReport::default());
+        for file in &files {
+            assert!(object_exists(dir.path(), &file.path));
+        }
+        assert!(object_exists(dir.path(), &staged));
+        assert_eq!(
+            scalar(
+                dir.path(),
+                "SELECT COUNT(*) FROM data_files WHERE state = 'obsolete'"
+            )
+            .await,
+            i64::try_from(files.len()).unwrap()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn collect_orphans_reports_missing_media() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::Storage::open(config_in(dir.path())).await.unwrap();
+        storage.put_media(project(), media_blob()).await.unwrap();
+        let key = only_key(&storage, "media").await;
+        delete_raw(&storage, &key).await;
+        storage.shutdown().await.unwrap();
+
+        let report = orphans(dir.path(), Duration::ZERO, false).await;
+
+        assert_eq!(
+            report,
+            OrphanReport {
+                missing_media: 1,
+                ..OrphanReport::default()
+            }
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn collect_orphans_keeps_dropping_project_media() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::Storage::open(config_in(dir.path())).await.unwrap();
+        storage.put_media(project(), media_blob()).await.unwrap();
+        let key = only_key(&storage, "media").await;
+        delete_raw(&storage, &key).await;
+        set_project_state(dir.path(), "dropping").await;
+        storage.shutdown().await.unwrap();
+
+        let report = orphans(dir.path(), Duration::ZERO, false).await;
+
+        // Known but not needed: the missing blob is not counted.
+        assert_eq!(report, OrphanReport::default());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn collect_orphans_skips_temp_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::Storage::open(config_in(dir.path())).await.unwrap();
+        let temp = format!(
+            "tables/spans/project={}/day=2026-01-01/.0-{}.parquet.tmp-{}",
+            project(),
+            uuid::Uuid::now_v7(),
+            uuid::Uuid::now_v7()
+        );
+        put_raw(&storage, &temp, ORPHAN_BYTES).await;
+        // The store lists it, so the skip is what keeps it.
+        assert!(listed(&storage, "tables").await.contains(&temp));
+        storage.shutdown().await.unwrap();
+
+        let report = orphans(dir.path(), Duration::ZERO, false).await;
+
+        assert_eq!(report, OrphanReport::default());
+        assert!(object_exists(dir.path(), &temp));
     }
 }

@@ -13,8 +13,8 @@ use axum::extract::{DefaultBodyLimit, Extension, State};
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{options, post};
-use llmobs_core::enums::ScoreSource;
-use llmobs_core::score::{ScoreTarget, ScoreValue};
+use cetra_core::enums::ScoreSource;
+use cetra_core::score::{ScoreTarget, ScoreValue};
 
 use crate::api::common::ProblemCode;
 use crate::api::scores::{FeedbackRequest, FeedbackResult, FeedbackValue, ScoreCreate};
@@ -138,6 +138,8 @@ fn score_of(body: FeedbackRequest) -> ScoreCreate {
         reason: body.comment,
         source: Some(ScoreSource::EndUser),
         metadata: BTreeMap::new(),
+        experiment_id: None,
+        dataset_item_id: None,
     }
 }
 
@@ -185,8 +187,8 @@ mod tests {
     use std::str::FromStr;
 
     use axum::http::{Method, StatusCode};
-    use llmobs_core::ids::TraceId;
-    use llmobs_core::score::Score;
+    use cetra_core::ids::TraceId;
+    use cetra_core::score::Score;
 
     use super::*;
     use crate::api::common::Page;

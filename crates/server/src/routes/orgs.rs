@@ -17,7 +17,7 @@ use crate::http::access::{Access, OrgAccess, RouteDef};
 use crate::http::error::{self, ApiError};
 use crate::meta::members::add_org_member;
 use crate::meta::orgs::{self, OrgRow, SlugError};
-use llmobs_core::ids::OrgId;
+use cetra_core::ids::OrgId;
 
 /// Org routes. Any signed-in caller may list and create orgs (spec 08).
 pub(crate) fn routes() -> Vec<RouteDef> {
@@ -250,7 +250,7 @@ mod tests {
     use crate::api::common::ProblemCode;
     use crate::auth::session::start_session;
     use crate::meta::users::{NewUser, insert_user};
-    use crate::test_support::{TestApp, capture_logs, control_plane_token};
+    use crate::test_support::{TestApp, capture_logs};
 
     fn cookie_pair(set_cookie: &axum::http::HeaderValue) -> String {
         set_cookie
@@ -277,6 +277,9 @@ mod tests {
                             name: None,
                             password_hash: None,
                             email_verified_at: Some(now),
+                            email_verified_via: Some(
+                                crate::meta::users::EmailVerifiedVia::MailToken,
+                            ),
                             is_instance_admin: false,
                         },
                         now,
@@ -286,9 +289,15 @@ mod tests {
             })
             .await
             .unwrap();
-        let cookie = start_session(&app.state, user.id, None, None)
-            .await
-            .unwrap();
+        let cookie = start_session(
+            &app.state,
+            user.id,
+            None,
+            None,
+            crate::auth::session::SessionOrigin::Password,
+        )
+        .await
+        .unwrap();
         (user.id, cookie_pair(&cookie))
     }
 
@@ -415,10 +424,7 @@ mod tests {
         let id = Uuid::now_v7();
         let created = app
             .request(Method::POST, "/api/internal/v1/orgs")
-            .header(
-                header::AUTHORIZATION.as_str(),
-                &format!("Bearer {}", control_plane_token("orgs")),
-            )
+            .control_plane("orgs")
             .json(&serde_json::json!({
                 "id": id,
                 "name": "Cloud",

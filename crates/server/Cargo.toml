@@ -1,5 +1,5 @@
 [package]
-name = "llmobs-server"
+name = "cetra-server"
 description = "HTTP and gRPC API, auth, metadata DB, evaluation, and alerts"
 version.workspace = true
 edition.workspace = true
@@ -13,11 +13,11 @@ workspace = true
 [dependencies]
 aes-gcm.workspace = true
 arrow.workspace = true
-llmobs-core.workspace = true
-llmobs-eval.workspace = true
-llmobs-otel.workspace = true
-llmobs-storage.workspace = true
-llmobs-token.workspace = true
+cetra-core.workspace = true
+cetra-eval.workspace = true
+cetra-otel.workspace = true
+cetra-storage.workspace = true
+cetra-token.workspace = true
 utoipa.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -41,13 +41,18 @@ unicode-normalization.workspace = true
 argon2.workspace = true
 rand.workspace = true
 subtle.workspace = true
+prometheus-client.workspace = true
 sha2.workspace = true
 chrono.workspace = true
+datafusion.workspace = true
 base64.workspace = true
+csv.workspace = true
 openidconnect.workspace = true
 oauth2.workspace = true
 reqwest.workspace = true
+hickory-resolver.workspace = true
 hmac.workspace = true
+jsonschema.workspace = true
 bytes.workspace = true
 flate2.workspace = true
 http-body-util.workspace = true
@@ -60,13 +65,14 @@ hex.workspace = true
 rmcp.workspace = true
 
 [dev-dependencies]
-datafusion.workspace = true
 ed25519-dalek.workspace = true
+http-body.workspace = true
 tracing-subscriber.workspace = true
 insta.workspace = true
 tempfile.workspace = true
-jsonschema.workspace = true
 sha2.workspace = true
 strum.workspace = true
 # Mock IdP signatures. `pkcs1v15` is the RS256 signer. `rand_core` 0.10 matches workspace `rand` 0.10.
 rsa = { workspace = true, features = ["pkcs1v15"] }
+# Paused time for the export watchdog test (`start_paused`).
+tokio = { workspace = true, features = ["test-util"] }

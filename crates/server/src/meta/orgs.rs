@@ -1,7 +1,7 @@
 //! `orgs` rows and slug rules (spec 04, spec 11).
 #![cfg_attr(not(test), allow(dead_code))]
 
-use llmobs_core::ids::OrgId;
+use cetra_core::ids::OrgId;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
@@ -36,11 +36,15 @@ pub(crate) struct OrgRow {
     pub(crate) updated_at: i64,
 }
 
-/// UI routes a slug must not take. Project slugs do not use this list.
+/// UI routes an org slug must not take. Project slugs use [`PROJECT_RESERVED`] instead.
 const RESERVED: &[&str] = &[
     "account", "admin", "api", "assets", "cli-auth", "healthz", "invite", "login", "logout", "mcp",
-    "readyz", "reset", "settings", "setup", "signup", "static", "v1", "verify",
+    "readyz", "reset", "settings", "setup", "signup", "sso", "static", "v1", "verify",
 ];
+
+/// Org-level UI routes a project slug must not take. A project `settings` would take the
+/// URL prefix of `/{org}/settings/…` (spec 11).
+const PROJECT_RESERVED: &[&str] = &["settings"];
 
 #[derive(Debug, sqlx::FromRow)]
 struct OrgRecord {
@@ -65,8 +69,22 @@ pub(crate) fn validate_slug(slug: &str) -> Result<(), SlugError> {
     Ok(())
 }
 
-/// Shape only. Project slugs use this and skip [`RESERVED`].
-pub(crate) fn validate_slug_shape(slug: &str) -> Result<(), SlugError> {
+/// Shape and [`PROJECT_RESERVED`] for a project slug.
+///
+/// # Errors
+///
+/// Returns [`SlugError::Invalid`] for the shape and [`SlugError::Reserved`] for `settings`.
+pub(crate) fn validate_project_slug(slug: &str) -> Result<(), SlugError> {
+    validate_slug_shape(slug)?;
+    if PROJECT_RESERVED.contains(&slug) {
+        return Err(SlugError::Reserved);
+    }
+    Ok(())
+}
+
+/// The shape every slug has: 2–48 characters of `[a-z0-9-]` with no leading, trailing or
+/// doubled `-`.
+fn validate_slug_shape(slug: &str) -> Result<(), SlugError> {
     let chars: Vec<char> = slug.chars().collect();
     let length = chars.len();
     if !(2..=48).contains(&length) {
@@ -89,12 +107,13 @@ pub(crate) fn validate_slug_shape(slug: &str) -> Result<(), SlugError> {
 ///
 /// Empty becomes `"org"`. A reserved result gets `-1` appended.
 pub(crate) fn slug_from_name(name: &str) -> String {
-    derive_slug(name, "org", true)
+    derive_slug(name, "org", RESERVED)
 }
 
-/// [`slug_from_name`] for a project: empty becomes `"project"`, and reserved words stay.
+/// [`slug_from_name`] for a project: empty becomes `"project"`, and a [`PROJECT_RESERVED`]
+/// result gets `-1` appended.
 pub(crate) fn project_slug_from_name(name: &str) -> String {
-    derive_slug(name, "project", false)
+    derive_slug(name, "project", PROJECT_RESERVED)
 }
 
 /// `base`, then `base-2` … `base-99`, each cut so the result is at most 48 characters.
@@ -106,7 +125,7 @@ pub(crate) fn slug_candidates(base: &str) -> Vec<String> {
     slugs
 }
 
-fn derive_slug(name: &str, empty: &str, reserved_suffix: bool) -> String {
+fn derive_slug(name: &str, empty: &str, reserved: &[&str]) -> String {
     let lower = name.to_lowercase();
     let mut slug = String::new();
     let mut dash = false;
@@ -125,7 +144,7 @@ fn derive_slug(name: &str, empty: &str, reserved_suffix: bool) -> String {
     if slug.is_empty() {
         slug = empty.to_owned();
     }
-    if reserved_suffix && RESERVED.contains(&slug.as_str()) {
+    if reserved.contains(&slug.as_str()) {
         slug.push_str("-1");
     }
     slug
@@ -169,11 +188,17 @@ pub(crate) async fn insert_org(
 }
 
 /// Deletes the org row; foreign keys cascade to members, invites, connections and projects.
+/// The org's SSO identities go too: they reference users, not the org, so no key cascades
+/// them (track P M5, D-P-52).
 ///
 /// # Errors
 ///
-/// Returns [`MetaError::Db`] when the delete fails.
+/// Returns [`MetaError::Db`] when a delete fails.
 pub(crate) async fn delete_org(conn: &mut SqliteConnection, id: OrgId) -> Result<(), MetaError> {
+    sqlx::query("DELETE FROM identities WHERE provider = ?")
+        .bind(format!("org:{id}"))
+        .execute(&mut *conn)
+        .await?;
     sqlx::query("DELETE FROM orgs WHERE id = ?")
         .bind(id.to_string())
         .execute(&mut *conn)
@@ -388,11 +413,21 @@ mod tests {
             assert_eq!(validate_slug(slug), Err(SlugError::Invalid), "{slug}");
         }
         assert_eq!(validate_slug("admin"), Err(SlugError::Reserved));
+        assert_eq!(validate_slug("sso"), Err(SlugError::Reserved));
         assert_eq!(slug_from_name("Acme, Inc."), "acme-inc");
         assert_eq!(slug_from_name("!!!"), "org");
         assert_eq!(slug_from_name("Admin"), "admin-1");
         assert_eq!(project_slug_from_name("!!!"), "project");
-        assert!(validate_slug_shape("login").is_ok());
+        assert_eq!(project_slug_from_name("Settings"), "settings-1");
+        assert_eq!(project_slug_from_name("Admin"), "admin");
+    }
+
+    #[test]
+    fn project_slugs_reserve_only_settings() {
+        assert!(validate_project_slug("admin").is_ok());
+        assert!(validate_project_slug("support-bot").is_ok());
+        assert_eq!(validate_project_slug("settings"), Err(SlugError::Reserved));
+        assert_eq!(validate_project_slug("a"), Err(SlugError::Invalid));
     }
 
     #[tokio::test]
@@ -408,6 +443,7 @@ mod tests {
                             name: None,
                             password_hash: None,
                             email_verified_at: None,
+                            email_verified_via: None,
                             is_instance_admin: false,
                         },
                         1,

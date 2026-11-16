@@ -12,11 +12,11 @@ from typing import Any, Protocol
 
 import pytest
 
-import llmobs
-from llmobs._runtime import Runtime
-from llmobs._scores import ScoreQueue, uuid7
+import cetra
+from cetra._runtime import Runtime
+from cetra._scores import ScoreQueue, uuid7
 
-TEST_API_KEY = "sk-llmobs-test"
+TEST_API_KEY = "sk-cetra-test"
 # Fills the score buffer to capacity once one batch is stuck in a retry.
 _MAX_BUFFER_FILL = 10_000
 
@@ -62,14 +62,14 @@ def record_waits(waited: list[float]) -> Callable[[float], bool]:
 
 def test_body_span_target(score_runtime: ScoreSetup) -> None:
     recorder, _ = score_runtime
-    the_id = llmobs.score(
+    the_id = cetra.score(
         name="accuracy",
         value=0.8,
         trace_id="0" * 31 + "1",
         span_id="0" * 15 + "2",
     )
     assert the_id is not None
-    llmobs.flush()
+    cetra.flush()
     method, path, headers, _ = recorder.requests[0]
     assert method == "POST"
     assert path == "/api/v1/scores"
@@ -93,9 +93,9 @@ def test_body_span_target(score_runtime: ScoreSetup) -> None:
 
 def test_body_trace_target(score_runtime: ScoreSetup) -> None:
     recorder, _ = score_runtime
-    the_id = llmobs.score(name="quality", value=True, trace_id="f" * 32)
+    the_id = cetra.score(name="quality", value=True, trace_id="f" * 32)
     assert the_id is not None
-    llmobs.flush()
+    cetra.flush()
     assert score_batches(recorder)[0] == [
         {
             "score_id": the_id,
@@ -109,9 +109,9 @@ def test_body_trace_target(score_runtime: ScoreSetup) -> None:
 
 def test_body_session_target(score_runtime: ScoreSetup) -> None:
     recorder, _ = score_runtime
-    the_id = llmobs.score(name="thumb", value="good", session_id="chat-42")
+    the_id = cetra.score(name="thumb", value="good", session_id="chat-42")
     assert the_id is not None
-    llmobs.flush()
+    cetra.flush()
     assert score_batches(recorder)[0] == [
         {
             "score_id": the_id,
@@ -136,8 +136,8 @@ def test_value_encodings(
     score_runtime: ScoreSetup, value: bool | int | float | str, expected: dict[str, Any]
 ) -> None:
     recorder, _ = score_runtime
-    assert llmobs.score(name="v", value=value, session_id="s") is not None
-    llmobs.flush()
+    assert cetra.score(name="v", value=value, session_id="s") is not None
+    cetra.flush()
     assert score_batches(recorder)[0][0]["value"] == expected
 
 
@@ -158,15 +158,15 @@ def test_data_type_forcing(
     expected: dict[str, Any],
 ) -> None:
     recorder, _ = score_runtime
-    the_id = llmobs.score(name="v", value=value, session_id="s", data_type=data_type)  # type: ignore[arg-type]
+    the_id = cetra.score(name="v", value=value, session_id="s", data_type=data_type)  # type: ignore[arg-type]
     assert the_id is not None
-    llmobs.flush()
+    cetra.flush()
     assert score_batches(recorder)[0][0]["value"] == expected
 
 
 def test_reason_metadata_and_user_id(score_runtime: ScoreSetup) -> None:
     recorder, _ = score_runtime
-    the_id = llmobs.score(
+    the_id = cetra.score(
         name="annotated",
         value=1,
         session_id="s",
@@ -175,7 +175,7 @@ def test_reason_metadata_and_user_id(score_runtime: ScoreSetup) -> None:
         user_id="u-99",
     )
     assert the_id is not None
-    llmobs.flush()
+    cetra.flush()
     assert score_batches(recorder)[0][0] == {
         "score_id": the_id,
         "target": {"type": "session", "session_id": "s"},
@@ -190,12 +190,12 @@ def test_reason_metadata_and_user_id(score_runtime: ScoreSetup) -> None:
 
 def test_user_id_from_context(score_runtime: ScoreSetup) -> None:
     recorder, _ = score_runtime
-    with llmobs.context(user_id="u-17"):
-        from_context = llmobs.score(name="a", value=1, session_id="s")
-        explicit = llmobs.score(name="b", value=1, session_id="s", user_id="u-1")
+    with cetra.context(user_id="u-17"):
+        from_context = cetra.score(name="a", value=1, session_id="s")
+        explicit = cetra.score(name="b", value=1, session_id="s", user_id="u-1")
     assert from_context is not None
     assert explicit is not None
-    llmobs.flush()
+    cetra.flush()
     items = score_batches(recorder)[0]
     assert items[0]["user_id"] == "u-17"
     assert items[1]["user_id"] == "u-1"
@@ -203,8 +203,8 @@ def test_user_id_from_context(score_runtime: ScoreSetup) -> None:
 
 def test_absent_keys_omitted(score_runtime: ScoreSetup) -> None:
     recorder, _ = score_runtime
-    assert llmobs.score(name="bare", value=1, session_id="s") is not None
-    llmobs.flush()
+    assert cetra.score(name="bare", value=1, session_id="s") is not None
+    cetra.flush()
     assert score_batches(recorder)[0][0] == {
         "score_id": score_batches(recorder)[0][0]["score_id"],
         "target": {"type": "session", "session_id": "s"},
@@ -217,9 +217,9 @@ def test_absent_keys_omitted(score_runtime: ScoreSetup) -> None:
 def test_score_id_normalized_lowercase(score_runtime: ScoreSetup) -> None:
     recorder, _ = score_runtime
     given = "0193DCEF-9C1A-7C2A-9C1A-9C1A9C1A9C1A"
-    the_id = llmobs.score(name="update", value=1, session_id="s", score_id=given)
+    the_id = cetra.score(name="update", value=1, session_id="s", score_id=given)
     assert the_id == given.lower()
-    llmobs.flush()
+    cetra.flush()
     assert score_batches(recorder)[0][0]["score_id"] == given.lower()
 
 
@@ -260,11 +260,11 @@ def test_invalid_input_warns_and_queues_nothing(
     reason: str,
 ) -> None:
     recorder, _ = score_runtime
-    with caplog.at_level(logging.WARNING, logger="llmobs"):
-        assert llmobs.score(**options) is None
-    llmobs.flush()
-    messages = [record.getMessage() for record in caplog.records if record.name == "llmobs"]
-    assert messages == [f"llmobs: score not queued: {reason}"]
+    with caplog.at_level(logging.WARNING, logger="cetra"):
+        assert cetra.score(**options) is None
+    cetra.flush()
+    messages = [record.getMessage() for record in caplog.records if record.name == "cetra"]
+    assert messages == [f"cetra: score not queued: {reason}"]
     assert recorder.requests == []
 
 
@@ -272,10 +272,10 @@ def test_validation_reason_order(
     score_runtime: ScoreSetup, caplog: pytest.LogCaptureFixture
 ) -> None:
     """The first failing rule wins: empty name before no target, trace id before span id."""
-    with caplog.at_level(logging.WARNING, logger="llmobs"):
-        assert llmobs.score(name="", value=1) is None
+    with caplog.at_level(logging.WARNING, logger="cetra"):
+        assert cetra.score(name="", value=1) is None
         assert (
-            llmobs.score(
+            cetra.score(
                 name="x",
                 value=1,
                 trace_id="zz" * 16,
@@ -284,15 +284,15 @@ def test_validation_reason_order(
             )
             is None
         )
-    messages = [record.getMessage() for record in caplog.records if record.name == "llmobs"]
+    messages = [record.getMessage() for record in caplog.records if record.name == "cetra"]
     assert messages == [
-        "llmobs: score not queued: empty name",
-        "llmobs: score not queued: invalid trace_id",
+        "cetra: score not queued: empty name",
+        "cetra: score not queued: invalid trace_id",
     ]
 
 
 def test_score_without_runtime_returns_none() -> None:
-    assert llmobs.score(name="x", value=1, session_id="s") is None
+    assert cetra.score(name="x", value=1, session_id="s") is None
 
 
 def test_uuid7_layout_uniqueness_and_monotone_ms() -> None:
@@ -311,8 +311,8 @@ def test_mask_applies_to_reason_and_metadata(http_recorder: Recorder) -> None:
     def upper(value: object) -> object:
         return value.upper() if isinstance(value, str) else value
 
-    llmobs.init(api_key=TEST_API_KEY, base_url=http_recorder.url, mask=upper)
-    the_id = llmobs.score(
+    cetra.init(api_key=TEST_API_KEY, base_url=http_recorder.url, mask=upper)
+    the_id = cetra.score(
         name="masked",
         value="good",
         session_id="s",
@@ -320,7 +320,7 @@ def test_mask_applies_to_reason_and_metadata(http_recorder: Recorder) -> None:
         metadata={"kept": "a", "count": 3},
     )
     assert the_id is not None
-    llmobs.flush()
+    cetra.flush()
     item = score_batches(http_recorder)[0][0]
     assert item["reason"] == "THUMBS UP"
     assert item["metadata"] == {"kept": "A", "count": "3"}
@@ -330,17 +330,17 @@ def test_mask_non_string_reason_is_serialized(http_recorder: Recorder) -> None:
     def replace_reason(value: object) -> object:
         return 42 if value == "why" else value
 
-    llmobs.init(api_key=TEST_API_KEY, base_url=http_recorder.url, mask=replace_reason)
-    assert llmobs.score(name="m", value=1, session_id="s", reason="why") is not None
-    llmobs.flush()
+    cetra.init(api_key=TEST_API_KEY, base_url=http_recorder.url, mask=replace_reason)
+    assert cetra.score(name="m", value=1, session_id="s", reason="why") is not None
+    cetra.flush()
     assert score_batches(http_recorder)[0][0]["reason"] == "42"
 
 
 def test_batching_2500_scores(score_runtime: ScoreSetup) -> None:
     recorder, _ = score_runtime
     for i in range(2500):
-        assert llmobs.score(name="bulk", value=i, session_id="s") is not None
-    llmobs.flush()
+        assert cetra.score(name="bulk", value=i, session_id="s") is not None
+    cetra.flush()
     sizes = [len(batch) for batch in score_batches(recorder)]
     assert sorted(sizes) == [500, 1000, 1000]
 
@@ -350,8 +350,8 @@ def test_retry_on_503_then_200_resends_the_same_batch(score_runtime: ScoreSetup)
     waited: list[float] = []
     runtime.scores.wait = record_waits(waited)
     recorder.queue_response(503, {}, b"")
-    assert llmobs.score(name="retry", value=0.5, session_id="s") is not None
-    llmobs.flush()
+    assert cetra.score(name="retry", value=0.5, session_id="s") is not None
+    cetra.flush()
     batches = score_batches(recorder)
     assert len(batches) == 2
     assert batches[0] == batches[1]
@@ -364,8 +364,8 @@ def test_backoff_sequence_1_2_4(score_runtime: ScoreSetup) -> None:
     runtime.scores.wait = record_waits(waited)
     for _ in range(3):
         recorder.queue_response(503, {}, b"")
-    assert llmobs.score(name="retry", value=0.5, session_id="s") is not None
-    llmobs.flush()
+    assert cetra.score(name="retry", value=0.5, session_id="s") is not None
+    cetra.flush()
     assert waited == [1.0, 2.0, 4.0]
     assert len(score_batches(recorder)) == 4
 
@@ -375,12 +375,12 @@ def test_retry_after_header_honoured_and_capped(score_runtime: ScoreSetup) -> No
     waited: list[float] = []
     runtime.scores.wait = record_waits(waited)
     recorder.queue_response(429, {"Retry-After": "1"}, b"")
-    assert llmobs.score(name="ra", value=1, session_id="s") is not None
-    llmobs.flush()
+    assert cetra.score(name="ra", value=1, session_id="s") is not None
+    cetra.flush()
     assert waited == [1.0]
     recorder.queue_response(429, {"Retry-After": "60"}, b"")
-    assert llmobs.score(name="ra", value=1, session_id="s") is not None
-    llmobs.flush()
+    assert cetra.score(name="ra", value=1, session_id="s") is not None
+    cetra.flush()
     assert waited == [1.0, 30.0]
 
 
@@ -389,9 +389,35 @@ def test_http_date_retry_after_uses_the_default(score_runtime: ScoreSetup) -> No
     waited: list[float] = []
     runtime.scores.wait = record_waits(waited)
     recorder.queue_response(429, {"Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"}, b"")
-    assert llmobs.score(name="ra", value=1, session_id="s") is not None
-    llmobs.flush()
+    assert cetra.score(name="ra", value=1, session_id="s") is not None
+    cetra.flush()
     assert waited == [1.0]
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        ("5", 5.0),
+        (" 5 ", 5.0),  # surrounding whitespace is ignored, as in the TypeScript SDK
+        ("+5", 1.0),  # not ASCII digits: the default backoff
+        ("1_0", 1.0),
+        ("\uff15", 1.0),  # fullwidth digit five
+        ("-1", 1.0),
+        ("", 1.0),
+        ("9" * 400, 30.0),  # a huge integer converts, then is capped
+        ("9" * 5000, 30.0),  # more digits than int() converts: capped, not the default
+    ],
+)
+def test_retry_after_accepts_only_ascii_digits(
+    score_runtime: ScoreSetup, header: str, expected: float
+) -> None:
+    recorder, runtime = score_runtime
+    waited: list[float] = []
+    runtime.scores.wait = record_waits(waited)
+    recorder.queue_response(429, {"Retry-After": header}, b"")
+    assert cetra.score(name="ra", value=1, session_id="s") is not None
+    cetra.flush()
+    assert waited == [expected]
 
 
 def test_400_drops_the_batch_at_once(
@@ -399,12 +425,12 @@ def test_400_drops_the_batch_at_once(
 ) -> None:
     recorder, _ = score_runtime
     recorder.queue_response(400, {}, b"")
-    with caplog.at_level(logging.WARNING, logger="llmobs"):
-        assert llmobs.score(name="bad", value=1, session_id="s") is not None
-        llmobs.flush()
+    with caplog.at_level(logging.WARNING, logger="cetra"):
+        assert cetra.score(name="bad", value=1, session_id="s") is not None
+        cetra.flush()
     assert len(score_batches(recorder)) == 1
-    messages = [record.getMessage() for record in caplog.records if record.name == "llmobs"]
-    assert messages == ["llmobs: score batch rejected with status 400; dropped 1 scores"]
+    messages = [record.getMessage() for record in caplog.records if record.name == "cetra"]
+    assert messages == ["cetra: score batch rejected with status 400; dropped 1 scores"]
 
 
 def test_retries_exhausted_drops_the_batch(
@@ -415,12 +441,12 @@ def test_retries_exhausted_drops_the_batch(
     runtime.scores.wait = record_waits(waited)
     for _ in range(4):
         recorder.queue_response(503, {}, b"")
-    with caplog.at_level(logging.WARNING, logger="llmobs"):
-        assert llmobs.score(name="doomed", value=1, session_id="s") is not None
-        llmobs.flush()
+    with caplog.at_level(logging.WARNING, logger="cetra"):
+        assert cetra.score(name="doomed", value=1, session_id="s") is not None
+        cetra.flush()
     assert len(score_batches(recorder)) == 4
-    messages = [record.getMessage() for record in caplog.records if record.name == "llmobs"]
-    assert messages == ["llmobs: score batch failed after retries; dropped 1 scores"]
+    messages = [record.getMessage() for record in caplog.records if record.name == "cetra"]
+    assert messages == ["cetra: score batch failed after retries; dropped 1 scores"]
     assert waited == [1.0, 2.0, 4.0]
 
 
@@ -429,11 +455,11 @@ def test_network_failure_retried_like_a_5xx(caplog: pytest.LogCaptureFixture) ->
     waited: list[float] = []
     queue.wait = record_waits(waited)
     assert queue.put({"score_id": uuid7(), "name": "net", "source": "sdk"})
-    with caplog.at_level(logging.WARNING, logger="llmobs"):
+    with caplog.at_level(logging.WARNING, logger="cetra"):
         assert queue.flush(10.0)
     assert waited == [1.0, 2.0, 4.0]
-    messages = [record.getMessage() for record in caplog.records if record.name == "llmobs"]
-    assert messages == ["llmobs: score batch failed after retries; dropped 1 scores"]
+    messages = [record.getMessage() for record in caplog.records if record.name == "cetra"]
+    assert messages == ["cetra: score batch failed after retries; dropped 1 scores"]
     queue.shutdown()
 
 
@@ -451,39 +477,39 @@ def test_buffer_full_warns_once(
 
     runtime.scores.wait = blocking_wait
     recorder.queue_response(503, {}, b"")
-    assert llmobs.score(name="stuck", value=1, session_id="s") is not None
+    assert cetra.score(name="stuck", value=1, session_id="s") is not None
     # The worker holds that batch inside the retry wait, so the buffer fills.
     wait_for_request(recorder, 1)
-    with caplog.at_level(logging.WARNING, logger="llmobs"):
+    with caplog.at_level(logging.WARNING, logger="cetra"):
         for i in range(_MAX_BUFFER_FILL):
-            assert llmobs.score(name="fill", value=i, session_id="s") is not None
-        assert llmobs.score(name="overflow", value=0, session_id="s") is None
-    messages = [record.getMessage() for record in caplog.records if record.name == "llmobs"]
-    assert messages == ["llmobs: score buffer full; dropped 1 scores in the last minute"]
+            assert cetra.score(name="fill", value=i, session_id="s") is not None
+        assert cetra.score(name="overflow", value=0, session_id="s") is None
+    messages = [record.getMessage() for record in caplog.records if record.name == "cetra"]
+    assert messages == ["cetra: score buffer full; dropped 1 scores in the last minute"]
     blocked.set()
-    llmobs.flush()
+    cetra.flush()
 
 
 def test_flush_waits_for_delivery(score_runtime: ScoreSetup) -> None:
     recorder, _ = score_runtime
-    assert llmobs.score(name="delivered", value=1, session_id="s") is not None
-    llmobs.flush()
+    assert cetra.score(name="delivered", value=1, session_id="s") is not None
+    cetra.flush()
     names = [item["name"] for batch in score_batches(recorder) for item in batch]
     assert names == ["delivered"]
 
 
 def test_shutdown_flushes_the_queue(score_runtime: ScoreSetup) -> None:
     recorder, _ = score_runtime
-    assert llmobs.score(name="last", value=True, session_id="s") is not None
-    llmobs.shutdown()
+    assert cetra.score(name="last", value=True, session_id="s") is not None
+    cetra.shutdown()
     names = [item["name"] for batch in score_batches(recorder) for item in batch]
     assert names == ["last"]
 
 
 def test_score_after_shutdown_returns_none(score_runtime: ScoreSetup) -> None:
     recorder, _ = score_runtime
-    llmobs.shutdown()
-    assert llmobs.score(name="late", value=1, session_id="s") is None
+    cetra.shutdown()
+    assert cetra.score(name="late", value=1, session_id="s") is None
     assert recorder.requests == []
 
 
@@ -491,18 +517,18 @@ def test_score_after_shutdown_returns_none(score_runtime: ScoreSetup) -> None:
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="os.fork is unavailable")
 def test_fork_child_scores_and_parent_items_are_not_sent_twice(score_runtime: ScoreSetup) -> None:
     recorder, _ = score_runtime
-    parent_id = llmobs.score(name="parent", value=1, session_id="s")
+    parent_id = cetra.score(name="parent", value=1, session_id="s")
     assert parent_id is not None
     pid = os.fork()
     if pid == 0:
         # The child re-creates the worker (D-F-15), queues only its own item
         # and leaves through os._exit, so no atexit flush runs twice.
-        queued = llmobs.score(name="child", value=2, session_id="s") is not None
-        llmobs.flush()
+        queued = cetra.score(name="child", value=2, session_id="s") is not None
+        cetra.flush()
         os._exit(0 if queued else 1)
     _, status = os.waitpid(pid, 0)
     assert status == 0
-    llmobs.flush()
+    cetra.flush()
     ids = [item["score_id"] for batch in score_batches(recorder) for item in batch]
     assert ids.count(parent_id) == 1
     assert len([value for value in ids if value != parent_id]) == 1

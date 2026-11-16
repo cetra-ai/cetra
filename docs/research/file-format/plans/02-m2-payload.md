@@ -627,7 +627,7 @@ pub(crate) const HEADER_FIXED_LEN: usize = 32;
 - **Empty values:** `payload_min_avg: 0` with every value an empty string. It round trips, with 0 frames and 0 unique chunks.
 
 **`tests/roundtrip_payload.rs`** (integration target, `#[ignore]`d, run in release as part of Done when):
-- Copy the generation, sorting and batch-building code of M1.4's `tests/roundtrip_light.rs` (3,000 traces instead of 10,000) **without** its payload-clearing block. Use the same dev-dependencies (`fmt_testdata`, `llmobs-core`, `parquet`).
+- Copy the generation, sorting and batch-building code of M1.4's `tests/roundtrip_light.rs` (3,000 traces instead of 10,000) **without** its payload-clearing block. Use the same dev-dependencies (`fmt_testdata`, `cetra-core`, `parquet`).
 - Write with sort key `["trace_id", "start_time"]`, open from `InMemory`, and `read_column` every column; each equals the input.
 - Assert only that `input` is a payload column. Print the layer of every other column.
 - Print, per payload column: raw value bytes, stored bytes, unique chunks, frames and chunk refs. Print the total file size against `pq_default` as `roundtrip_light` does.

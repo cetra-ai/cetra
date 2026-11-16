@@ -3,19 +3,24 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use arrow::array::{Array, RecordBatch};
 use bytesize::ByteSize;
-use llmobs_core::ids::ProjectId;
-use llmobs_core::score::ScoreTarget;
+use cetra_core::ids::ProjectId;
+use cetra_core::score::ScoreTarget;
 use uuid::Uuid;
 
 use crate::QueryOptions;
+use crate::compaction::job::CompactionReport;
+use crate::compaction::rewrite::DeletionReport;
 use crate::config::{FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig};
 use crate::deletion::{Deletion, DeletionScope, DeletionStatus};
-use crate::error::DeletionError;
+use crate::error::{CatalogError, DeletionError};
+use crate::hooks::HookPoint;
 use crate::test_support::{rows, score_row, score_rows, span_row, span_rows};
 use crate::views::QueryContext;
+use crate::wal::Table;
 
 fn project() -> ProjectId {
     "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().unwrap()
@@ -23,6 +28,7 @@ fn project() -> ProjectId {
 
 fn config_in(dir: &Path) -> StorageConfig {
     StorageConfig {
+        delete_objects: true,
         data_dir: dir.to_path_buf(),
         min_free_bytes: ByteSize::b(0),
         object_store: None,
@@ -56,7 +62,7 @@ fn traces_deletion(traces: &[u16], cutoff: i64) -> Deletion {
 async fn context(storage: &crate::Storage) -> QueryContext {
     QueryContext::new(
         storage
-            .query(project(), QueryOptions::default())
+            .query(project(), QueryOptions::new(None, None))
             .await
             .unwrap(),
         None,
@@ -128,7 +134,7 @@ async fn trace_count(storage: &crate::Storage, trace: u16) -> i64 {
 /// The single flushed spans file of the project.
 async fn spans_file(storage: &crate::Storage) -> crate::catalog::FileMeta {
     let query = storage
-        .query(project(), QueryOptions::default())
+        .query(project(), QueryOptions::new(None, None))
         .await
         .unwrap();
     let files = query
@@ -158,7 +164,7 @@ fn spans_trace_ids(dir: &Path, file: &crate::catalog::FileMeta) -> Vec<[u8; 16]>
         .collect();
     let all = arrow::compute::concat_batches(&schema, &batches).unwrap();
     let column = all
-        .column_by_name(llmobs_core::schema::spans::TRACE_ID)
+        .column_by_name(cetra_core::schema::spans::TRACE_ID)
         .unwrap();
     let array = column
         .as_any()
@@ -332,6 +338,43 @@ async fn a_user_deletion_hides_user_rows_and_session_scores_only() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn explain_does_not_show_an_erased_users_identifiers() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = flushed_with_score(&dir, &[(1, 0)]).await;
+    storage
+        .register_deletion(Deletion {
+            id: Uuid::now_v7(),
+            project: project(),
+            cutoff: INGEST,
+            scope: DeletionScope::User {
+                user_id: "erased@example.com".to_owned(),
+                trace_ids: Vec::new(),
+                session_ids: vec!["erased-session".to_owned()],
+            },
+        })
+        .await
+        .unwrap();
+
+    for table in ["spans", "scores"] {
+        let plan = text(&storage, &format!("EXPLAIN SELECT * FROM {table}")).await;
+        assert!(
+            plan.contains("user_id IN (<1 redacted>)"),
+            "the {table} plan shows the redacted term:\n{plan}"
+        );
+        assert!(
+            !plan.contains("erased@example.com") && !plan.contains("erased-session"),
+            "the {table} plan hides the identifiers:\n{plan}"
+        );
+    }
+    let scores = text(&storage, "EXPLAIN SELECT * FROM scores").await;
+    assert!(
+        scores.contains("session_id IN (<1 redacted>)"),
+        "the scores plan redacts the session ids:\n{scores}"
+    );
+    storage.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_raised_file_escapes_the_tombstone_filter() {
     let dir = tempfile::tempdir().unwrap();
     let storage = flushed_with_score(&dir, &[(1, 0)]).await;
@@ -401,7 +444,7 @@ async fn a_limit_over_clean_and_gated_sides_sits_above_the_union() {
 
     // Raise the file with no covered row: it becomes the clean side.
     let query = storage
-        .query(project(), QueryOptions::default())
+        .query(project(), QueryOptions::new(None, None))
         .await
         .unwrap();
     let files = query
@@ -500,5 +543,200 @@ async fn register_deletion_is_idempotent_and_status_reports_the_state() {
     invalid.cutoff = 0;
     let error = storage.register_deletion(invalid).await.unwrap_err();
     assert!(matches!(error, DeletionError::Invalid { .. }), "{error}");
+    storage.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stopped_store_runs_no_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = crate::Storage::open(config_in(dir.path())).await.unwrap();
+    storage
+        .append_spans(project(), span_rows(&[span_row(1, 0, INGEST, INGEST)]))
+        .await
+        .unwrap();
+    storage
+        .register_deletion(traces_deletion(&[1], INGEST))
+        .await
+        .unwrap();
+
+    // The next catalog commit fails with a fsync error, which stops the
+    // committer (D-R-6). The deletion above stays pending.
+    storage.hooks().arm_fail(HookPoint::CatalogFsync);
+    storage
+        .register_deletion(traces_deletion(&[2], INGEST))
+        .await
+        .unwrap_err();
+    assert!(storage.health().catalog_failed);
+
+    // Neither pass attempts its work: each returns an empty report.
+    let deletions = storage.apply_deletions(INGEST + 1).await.unwrap();
+    assert_eq!(deletions, DeletionReport::default());
+    let compacted = storage.compact(INGEST + 1).await.unwrap();
+    assert_eq!(compacted, CompactionReport::default());
+    // A status read goes through the stopped committer too, so it is refused.
+    let error = storage.deletion_status(Uuid::now_v7()).await.unwrap_err();
+    assert!(
+        matches!(error, DeletionError::Catalog(CatalogError::Stopped)),
+        "{error}"
+    );
+    storage.shutdown().await.unwrap();
+}
+
+/// Marks a span's name so the test can find its bytes in a WAL file.
+const MARKER: &str = "erased-span-marker-4c1e9a7b";
+
+/// Whether any file under `dir` holds `marker`.
+fn files_contain(dir: &Path, marker: &[u8]) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if files_contain(&path, marker) {
+                return true;
+            }
+        } else if std::fs::read(&path)
+            .is_ok_and(|bytes| bytes.windows(marker.len()).any(|window| window == marker))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Appends a span named [`MARKER`] on trace 1 and a plain span on trace 2, with
+/// the flush parked after its freeze. Returns once the flush is parked and the
+/// marker is in the WAL, so the later check cannot pass for the wrong reason.
+async fn park_flush_over_marked_span(storage: &crate::Storage, dir: &Path) {
+    let hooks = storage.hooks().clone();
+    hooks.hold(HookPoint::FlushAfterFreeze);
+    let mut marked = span_row(1, 0, INGEST, INGEST);
+    marked.name = MARKER.to_owned();
+    storage
+        .append_spans(
+            project(),
+            span_rows(&[marked, span_row(2, 0, INGEST, INGEST)]),
+        )
+        .await
+        .unwrap();
+    let started = Instant::now();
+    while hooks.waiting_at(HookPoint::FlushAfterFreeze) == 0 {
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "flush did not freeze"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(
+        files_contain(&dir.join("wal"), MARKER.as_bytes()),
+        "the marker is in the WAL before the flush"
+    );
+}
+
+/// Waits until the parked flush has committed and the memtable is empty.
+async fn wait_for_flush_commit(storage: &crate::Storage, rows: u64) {
+    let started = Instant::now();
+    while storage.catalog_rows(Table::Spans) != rows || storage.published_rows(Table::Spans) != 0 {
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "flush did not commit {rows} rows"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// Waits until no file under `dir/wal` holds [`MARKER`]. The flush deletes the
+/// drained segment just after its commit, so the check is polled.
+async fn wait_until_wal_lacks_marker(dir: &Path) {
+    let started = Instant::now();
+    while files_contain(&dir.join("wal"), MARKER.as_bytes()) {
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "the WAL still holds the marker"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_erased_span_leaves_no_wal_bytes_once_its_deletion_applies() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config_in(dir.path());
+    config.flush.max_age = Duration::from_millis(100);
+    let storage = crate::Storage::open(config).await.unwrap();
+    park_flush_over_marked_span(&storage, dir.path()).await;
+
+    let deletion = traces_deletion(&[1], INGEST);
+    let id = deletion.id;
+    storage.register_deletion(deletion).await.unwrap();
+    storage.hooks().release(HookPoint::FlushAfterFreeze);
+    // The flush read its tombstones before the registration, so both rows reach
+    // a file; the deletion pass then rewrites the file without trace 1.
+    wait_for_flush_commit(&storage, 2).await;
+
+    let mut status = storage.deletion_status(id).await.unwrap();
+    for _ in 0..50 {
+        if matches!(status, DeletionStatus::Applied { .. }) {
+            break;
+        }
+        storage
+            .apply_deletions(crate::catalog::now_ns())
+            .await
+            .unwrap();
+        status = storage.deletion_status(id).await.unwrap();
+    }
+    assert!(
+        matches!(status, DeletionStatus::Applied { .. }),
+        "deletion not applied: {status:?}"
+    );
+    wait_until_wal_lacks_marker(dir.path()).await;
+    storage.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dropped_project_leaves_no_wal_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config_in(dir.path());
+    config.flush.max_age = Duration::from_millis(100);
+    let storage = crate::Storage::open(config).await.unwrap();
+    park_flush_over_marked_span(&storage, dir.path()).await;
+
+    storage.drop_project(project()).await.unwrap();
+    storage.hooks().release(HookPoint::FlushAfterFreeze);
+    // The flush skips the dropped project's partitions, so nothing is written.
+    wait_for_flush_commit(&storage, 0).await;
+    wait_until_wal_lacks_marker(dir.path()).await;
+    storage.shutdown().await.unwrap();
+}
+
+/// A deletion the traces file has already applied must not hide a trace ingested after it,
+/// even while another deletion of the project is pending (spec 03 §7).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reingested_trace_survives_another_pending_deletion() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = crate::Storage::open(config_in(dir.path())).await.unwrap();
+    storage
+        .append_spans(project(), span_rows(&[span_row(1, 0, INGEST, INGEST)]))
+        .await
+        .unwrap();
+    storage
+        .register_deletion(traces_deletion(&[1], INGEST))
+        .await
+        .unwrap();
+    storage
+        .append_spans(project(), span_rows(&[span_row(1, 1, INGEST, INGEST + 10)]))
+        .await
+        .unwrap();
+    storage.shutdown().await.unwrap();
+    let storage = crate::Storage::open(config_in(dir.path())).await.unwrap();
+    assert_eq!(span_count(&storage, 1).await, 1);
+    assert_eq!(trace_count(&storage, 1).await, 1);
+    storage
+        .register_deletion(traces_deletion(&[2], INGEST + 100))
+        .await
+        .unwrap();
+    assert_eq!(span_count(&storage, 1).await, 1);
+    assert_eq!(trace_count(&storage, 1).await, 1, "so does the trace");
     storage.shutdown().await.unwrap();
 }

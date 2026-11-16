@@ -2,12 +2,12 @@
   "spans": [
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "b594ed7c920c0739bf6ab3a45fa5d6a1",
-      "span_id": "8a1d321b3948e3cf",
+      "trace_id": "9f85b78ab43a6cc362c7483b63b11ec7",
+      "span_id": "e51ecaed7c58a33e",
       "name": "openai.chat",
       "span_kind": "llm",
       "start_time": "2025-12-31T23:59:50.000000000Z",
-      "end_time": "2025-12-31T23:59:50.170000000Z",
+      "end_time": "2025-12-31T23:59:50.169000000Z",
       "status": "ok",
       "service_name": "main.py",
       "release": "capture",
@@ -44,7 +44,7 @@
         "llm.headers": "None",
         "llm.is_streaming": "true",
         "llm.usage.total_tokens": "36",
-        "lmnr.span.ids_path": "[\"00000000-0000-0000-8a1d-321b3948e3cf\"]",
+        "lmnr.span.ids_path": "[\"00000000-0000-0000-e51e-caed7c58a33e\"]",
         "lmnr.span.instrumentation_scope.name": "openai",
         "lmnr.span.instrumentation_scope.version": "3.45.0",
         "lmnr.span.instrumentation_source": "python",
@@ -76,15 +76,15 @@
           "name": "llm.content.completion.chunk"
         },
         {
-          "time": "2025-12-31T23:59:50.151000000Z",
+          "time": "2025-12-31T23:59:50.150000000Z",
           "name": "llm.content.completion.chunk"
         },
         {
-          "time": "2025-12-31T23:59:50.157000000Z",
+          "time": "2025-12-31T23:59:50.156000000Z",
           "name": "llm.content.completion.chunk"
         },
         {
-          "time": "2025-12-31T23:59:50.164000000Z",
+          "time": "2025-12-31T23:59:50.163000000Z",
           "name": "llm.content.completion.chunk"
         }
       ],

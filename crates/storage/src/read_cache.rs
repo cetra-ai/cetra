@@ -2,17 +2,17 @@
 //!
 //! With an S3 object store, reads of data files (`tables/…`) go through
 //! [`CacheStore`], which serves byte ranges from 1 MiB blocks kept under
-//! `<data_dir>/cache/<file name>/`. Each block file ends with the CRC-32C of
-//! its bytes; a block that fails its check, or has the wrong length, is deleted
-//! and fetched again. Nothing is fsynced: a block lost or torn by a crash fails
-//! that check and is fetched again. Files are immutable, so entries never go
-//! stale.
+//! `<data_dir>/cache/<file name>/`. Each block file and the `size` file end with
+//! the CRC-32C of their bytes. A block that fails its check, or has the wrong
+//! length, is deleted and fetched again. A `size` file that fails its check
+//! drops its whole directory. Nothing is fsynced: a block or `size` file lost or
+//! torn by a crash fails its check and is handled the same way. Files are
+//! immutable, so entries never go stale.
 //!
 //! Blocks are written only while free disk is at least `2 × min_free`, and the
 //! disk monitor gives blocks back while it is below `min_free` (see `disk`).
 
 use std::collections::{BTreeMap, HashMap};
-use std::fs;
 use std::io::{self, Read};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -34,6 +34,7 @@ use uuid::Uuid;
 
 use crate::disk::Disk;
 use crate::error::OpenError;
+use crate::fs;
 use crate::open_io;
 
 /// Block size of the S3 read cache.
@@ -45,8 +46,12 @@ const BLOCK_LEN: usize = 1 << 20;
 /// Bytes after a block's data: its CRC-32C, little-endian.
 const CRC_LEN: usize = 4;
 
-/// The file in an object's directory that holds the object's size.
+/// The file in an object's directory that holds the object's size: the size as a
+/// little-endian `u64`, then the CRC-32C of those 8 bytes, little-endian.
 const SIZE_FILE: &str = "size";
+
+/// Length of a `size` file: 8 bytes of size and its CRC.
+const SIZE_FILE_LEN: usize = 8 + CRC_LEN;
 
 /// Largest default capacity, in bytes (spec 03 §6).
 const MAX_DEFAULT_CAPACITY: u64 = 100 << 30;
@@ -79,8 +84,18 @@ pub(crate) struct ReadCache {
     disk: Arc<Disk>,
     min_free: u64,
     state: Mutex<CacheState>,
+    /// Held by `write_blocks` for each block, from its free-disk check to its write, so the
+    /// check and the write are atomic per block: two concurrent calls cannot both pass the
+    /// check for the space one block leaves (D7). Taken per block, not per call, so a
+    /// call of up to 128 blocks does not hold it throughout. The concurrency of this lock
+    /// is not tested: the disk hook measures one constant value, so no test can make one
+    /// thread's write use up the space the other thread checked.
+    write_lock: Mutex<()>,
     hits: AtomicU64,
     misses: AtomicU64,
+    /// Test seam: runs in `write_blocks` after a block file is written and before it is indexed.
+    #[cfg(test)]
+    after_block_write: Mutex<Option<fn(&ReadCache)>>,
 }
 
 #[derive(Debug, Default)]
@@ -164,9 +179,9 @@ impl ReadCache {
             if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
                 continue;
             }
-            let size = fs::read_to_string(path.join(SIZE_FILE))
+            let size = fs::read(path.join(SIZE_FILE))
                 .ok()
-                .and_then(|text| text.parse::<u64>().ok());
+                .and_then(|bytes| parse_size(&bytes));
             let Some(size) = size else {
                 // Without its size the blocks cannot be checked: drop them all.
                 remove_dir(&path);
@@ -216,8 +231,11 @@ impl ReadCache {
             disk,
             min_free,
             state: Mutex::new(state),
+            write_lock: Mutex::new(()),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
+            #[cfg(test)]
+            after_block_write: Mutex::new(None),
         };
         let victims = {
             let mut state = cache.lock();
@@ -250,7 +268,7 @@ impl ReadCache {
         }
         let dir = self.dir.join(name);
         fs::create_dir_all(&dir)?;
-        write_renamed(&dir, SIZE_FILE, size.to_string().as_bytes())?;
+        write_renamed(&dir, SIZE_FILE, &encode_size(size))?;
         self.lock().sizes.insert(name.to_owned(), size);
         Ok(())
     }
@@ -298,19 +316,29 @@ impl ReadCache {
 
     /// Writes `blocks` of `name`, the bytes of each block without its CRC. Blocks
     /// already cached are skipped. Nothing is written while free disk is under
-    /// `2 × min_free`, nor for an object whose size is not recorded. Evicts the
-    /// least recently used blocks while the cache is over capacity. Failures are
-    /// logged at debug and skipped. Blocking.
+    /// `2 × min_free` (measured before each block, not the monitor's last value), nor for an
+    /// object whose size is not recorded. Evicts the least recently used blocks while the
+    /// cache is over capacity. Failures are logged at debug and skipped. Blocking.
     pub(crate) fn write_blocks(&self, name: &str, blocks: &[(u64, Bytes)]) {
-        if !self.writable() {
-            return;
-        }
         let Some(size) = self.size(name) else {
             return;
         };
         let dir = self.dir.join(name);
         for (index, data) in blocks {
             let index = *index;
+            // The guard covers one block: the free-disk check and the write, so the
+            // check of one block is not spent by another call's write. Lock order:
+            // `write_lock`, then `state`.
+            let _writing = self
+                .write_lock
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            // The monitor measures once a second, so the stored value can be stale, and one call
+            // may write many blocks: measure before every block (one `statvfs` per 1 MiB block).
+            // A failed measurement writes nothing.
+            if self.disk.refresh().is_err() || !self.writable() {
+                return;
+            }
             if block_len(size, index) != Some(len_u64(data.len())) {
                 tracing::debug!(index, "read cache block has the wrong length; not cached");
                 continue;
@@ -327,6 +355,14 @@ impl ReadCache {
             {
                 tracing::debug!(%error, index, "writing a read cache block failed");
                 continue;
+            }
+            #[cfg(test)]
+            if let Some(hook) = &*self
+                .after_block_write
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+            {
+                hook(self);
             }
             let victims = {
                 let mut state = self.lock();
@@ -717,6 +753,30 @@ fn block_data(file: &[u8]) -> Option<&[u8]> {
     (crc32c::crc32c(data) == stored).then_some(data)
 }
 
+/// The contents of a `size` file for an object of `size` bytes.
+fn encode_size(size: u64) -> [u8; SIZE_FILE_LEN] {
+    let mut bytes = [0; SIZE_FILE_LEN];
+    let (value, crc) = bytes.split_at_mut(8);
+    value.copy_from_slice(&size.to_le_bytes());
+    crc.copy_from_slice(&crc32c::crc32c(value).to_le_bytes());
+    bytes
+}
+
+/// The size in a `size` file. `None` unless the file is exactly
+/// `SIZE_FILE_LEN` bytes with a matching CRC, so a torn file, or one in the
+/// old text format, is rejected.
+fn parse_size(bytes: &[u8]) -> Option<u64> {
+    if bytes.len() != SIZE_FILE_LEN {
+        return None;
+    }
+    let (value, crc) = bytes.split_at(8);
+    let stored = u32::from_le_bytes(crc.try_into().ok()?);
+    if crc32c::crc32c(value) != stored {
+        return None;
+    }
+    <[u8; 8]>::try_from(value).ok().map(u64::from_le_bytes)
+}
+
 /// Reads and checks block `index` of `name`. `None` when the file is missing,
 /// has the wrong length, or fails its CRC.
 fn read_block(dir: &Path, name: &str, index: u64, size: u64) -> Option<Bytes> {
@@ -838,6 +898,7 @@ fn remove_dir(path: &Path) {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::ops::Range;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -848,7 +909,8 @@ mod tests {
     use object_store::{GetOptions, GetRange, ObjectStore, ObjectStoreExt};
 
     use super::*;
-    use crate::test_support::FaultStore;
+    use crate::fs::lossy::{CrashMode, Lossy};
+    use crate::test_support::{Call, ChaosStore};
 
     const MIB: u64 = 1 << 20;
     const DATA: &str =
@@ -871,7 +933,7 @@ mod tests {
     /// A cache over `inner` in `dir`, with its disk reporting `free` bytes.
     struct Fixture {
         inner: Arc<InMemory>,
-        fault: FaultStore,
+        fault: ChaosStore,
         cache: Arc<ReadCache>,
         store: CacheStore,
         cache_dir: PathBuf,
@@ -879,8 +941,16 @@ mod tests {
 
     fn fixture(dir: &Path, capacity: u64, min_free: u64) -> Fixture {
         let inner = Arc::new(InMemory::new());
-        let fault = FaultStore::new(Arc::clone(&inner) as Arc<dyn ObjectStore>);
-        let disk = Arc::new(Disk::open(vec![dir.to_path_buf()], 0).unwrap());
+        let fault = ChaosStore::new(Arc::clone(&inner) as Arc<dyn ObjectStore>);
+        let spill_dir = tempfile::tempdir().unwrap();
+        let disk = Arc::new(
+            Disk::open(
+                vec![dir.to_path_buf()],
+                0,
+                crate::disk::test_spill(spill_dir.path()),
+            )
+            .unwrap(),
+        );
         let cache_dir = dir.join("cache");
         let cache = Arc::new(ReadCache::open(cache_dir.clone(), capacity, disk, min_free).unwrap());
         let store = CacheStore {
@@ -923,6 +993,65 @@ mod tests {
         cache_dir.join(NAME).join(index.to_string())
     }
 
+    #[test]
+    fn writes_check_free_disk_now_not_the_last_measurement() {
+        // D7: the monitor measures once a second, so the stored value can say writable after the
+        // disk has filled. `write_blocks` must measure again before it writes.
+        let dir = tempfile::tempdir().unwrap();
+        let spill_dir = tempfile::tempdir().unwrap();
+        let disk = Arc::new(
+            Disk::open(
+                vec![dir.path().to_path_buf()],
+                MIB,
+                crate::disk::test_spill(spill_dir.path()),
+            )
+            .unwrap(),
+        );
+        disk.set_free_for_test(Some(10 * MIB));
+        let cache =
+            ReadCache::open(dir.path().join("cache"), 64 * MIB, Arc::clone(&disk), MIB).unwrap();
+        cache.set_size(NAME, 4 * MIB).unwrap();
+
+        // The stored measurement says 10 MiB; the disk now has 1 MiB, under 2 × min_free.
+        disk.set_next_measurement_for_test(Some(MIB));
+        cache.write_blocks(NAME, &[(0, content(MIB))]);
+
+        assert!(
+            cache.read_blocks(NAME, &[0]).is_empty(),
+            "a block was written on a stale free-disk measurement"
+        );
+    }
+
+    #[test]
+    fn a_block_written_after_its_object_was_evicted_is_not_indexed() {
+        let dir = tempfile::tempdir().unwrap();
+        let spill_dir = tempfile::tempdir().unwrap();
+        let disk = Arc::new(
+            Disk::open(
+                vec![dir.path().to_path_buf()],
+                MIB,
+                crate::disk::test_spill(spill_dir.path()),
+            )
+            .unwrap(),
+        );
+        disk.set_free_for_test(Some(10 * MIB));
+        let cache =
+            ReadCache::open(dir.path().join("cache"), 64 * MIB, Arc::clone(&disk), MIB).unwrap();
+        cache.set_size(NAME, 4_096).unwrap();
+
+        // The object is evicted between the block's write and its index insert.
+        let evict: fn(&ReadCache) = |cache| cache.evict_file(NAME);
+        *cache.after_block_write.lock().unwrap() = Some(evict);
+        cache.write_blocks(NAME, &[(0, Bytes::from(vec![7_u8; 4_096]))]);
+
+        assert_eq!(
+            cache.stats().bytes,
+            0,
+            "a block of an evicted object is indexed"
+        );
+        assert!(cache.read_blocks(NAME, &[0]).is_empty());
+    }
+
     #[tokio::test]
     async fn a_range_is_served_from_blocks_after_the_first_read() {
         let dir = tempfile::tempdir().unwrap();
@@ -934,10 +1063,14 @@ mod tests {
         assert_eq!(first, expected(7 * MIB / 2, range.clone()));
         assert_eq!(fixture.cache.stats().misses, 3);
 
-        let gets = fixture.fault.gets();
+        let gets = fixture.fault.count(Call::Get) + fixture.fault.count(Call::Head);
         let second = read(&fixture.store, DATA, range.clone()).await.unwrap();
         assert_eq!(second, expected(7 * MIB / 2, range));
-        assert_eq!(fixture.fault.gets(), gets, "the second read went to S3");
+        assert_eq!(
+            fixture.fault.count(Call::Get) + fixture.fault.count(Call::Head),
+            gets,
+            "the second read went to S3"
+        );
         assert_eq!(fixture.cache.stats().hits, 3);
         assert_eq!(fixture.cache.stats().misses, 3);
     }
@@ -1057,11 +1190,19 @@ mod tests {
         let inner = Arc::clone(&fixture.inner);
         drop(fixture);
 
-        let disk = Arc::new(Disk::open(vec![dir.path().to_path_buf()], 0).unwrap());
+        let spill_dir = tempfile::tempdir().unwrap();
+        let disk = Arc::new(
+            Disk::open(
+                vec![dir.path().to_path_buf()],
+                0,
+                crate::disk::test_spill(spill_dir.path()),
+            )
+            .unwrap(),
+        );
         let cache = Arc::new(ReadCache::open(cache_dir, 64 * MIB, disk, 0).unwrap());
         assert_eq!(cache.stats().blocks, 3);
         let store = CacheStore {
-            inner: Arc::new(FaultStore::new(inner as Arc<dyn ObjectStore>)),
+            inner: Arc::new(ChaosStore::new(inner as Arc<dyn ObjectStore>)),
             cache: Arc::clone(&cache),
         };
         assert_eq!(
@@ -1072,6 +1213,62 @@ mod tests {
         assert_eq!((stats.hits, stats.misses), (3, 0));
     }
 
+    /// The golden directories' cache entries (R8.7): each one, copied and opened, records its size,
+    /// and an empty inner store serves every range of it from the cache alone, with the pattern.
+    #[test]
+    fn the_golden_cache_entry_is_served() {
+        let mut dirs = crate::golden_tests::committed_dirs();
+        dirs.insert(0, crate::golden_tests::fresh_golden_dir().to_path_buf());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut served = 0;
+        for dir in dirs.iter().filter(|dir| dir.join("cache").is_dir()) {
+            let recorded: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(dir.join("expected.json")).unwrap())
+                    .unwrap();
+            let size = recorded["cache"]["size"].as_u64().unwrap();
+            assert_eq!(recorded["cache"]["name"], crate::golden_tests::CACHE_NAME);
+
+            let temp = tempfile::tempdir().unwrap();
+            let copy = temp.path().join("golden");
+            crate::test_support::copy_dir(dir, &copy);
+            let spill_dir = tempfile::tempdir().unwrap();
+            let disk = Arc::new(
+                Disk::open(
+                    vec![copy.clone()],
+                    0,
+                    crate::disk::test_spill(spill_dir.path()),
+                )
+                .unwrap(),
+            );
+            let cache = Arc::new(ReadCache::open(copy.join("cache"), 64 * MIB, disk, 0).unwrap());
+            assert_eq!(
+                cache.size(crate::golden_tests::CACHE_NAME),
+                Some(size),
+                "the golden cache entry's size"
+            );
+            let store = CacheStore {
+                inner: Arc::new(InMemory::new()),
+                cache: Arc::clone(&cache),
+            };
+            runtime.block_on(async {
+                for range in [0..size, 0..1, 1..2, 4_000..size] {
+                    let bytes = read(&store, crate::golden_tests::CACHE_LOCATION, range.clone())
+                        .await
+                        .expect("a golden range is served from the cache");
+                    assert_eq!(bytes, expected(size, range));
+                }
+            });
+            let stats = cache.stats();
+            assert_eq!(stats.misses, 0, "the golden cache entry missed");
+            assert!(stats.hits > 0, "the golden cache entry served no block");
+            served += 1;
+        }
+        eprintln!("the_golden_cache_entry_is_served: {served} cache entries");
+    }
+
     #[tokio::test]
     async fn a_size_file_that_does_not_parse_drops_its_directory() {
         let dir = tempfile::tempdir().unwrap();
@@ -1079,10 +1276,114 @@ mod tests {
         fs::create_dir_all(cache_dir.join(NAME)).unwrap();
         fs::write(cache_dir.join(NAME).join(SIZE_FILE), "12x").unwrap();
         fs::write(cache_dir.join(NAME).join("0"), b"stray").unwrap();
-        let disk = Arc::new(Disk::open(vec![dir.path().to_path_buf()], 0).unwrap());
+        let spill_dir = tempfile::tempdir().unwrap();
+        let disk = Arc::new(
+            Disk::open(
+                vec![dir.path().to_path_buf()],
+                0,
+                crate::disk::test_spill(spill_dir.path()),
+            )
+            .unwrap(),
+        );
         let cache = ReadCache::open(cache_dir.clone(), 64 * MIB, disk, 0).unwrap();
         assert_eq!(cache.stats().blocks, 0);
         assert!(!cache_dir.join(NAME).exists());
+    }
+
+    #[tokio::test]
+    async fn a_torn_size_file_never_serves_short_ranges() {
+        // 1,048,579 bytes: a torn decimal prefix of this size is below the range.
+        const LEN: u64 = MIB + 3;
+        let range = 0..200_000_u64;
+        for seed in 0..16_u64 {
+            let dir = tempfile::tempdir().unwrap();
+            let data = dir.path().join("data");
+            let cache_dir = data.join("cache");
+            let lossy = Lossy::enable(&data, &dir.path().join("shadow"));
+            let inner = Arc::new(InMemory::new());
+            put(&inner, DATA, content(LEN)).await;
+            let location = ObjectPath::parse(DATA).unwrap();
+            let open_store = || {
+                let spill_dir = tempfile::tempdir().unwrap();
+                let disk = Arc::new(
+                    Disk::open(
+                        vec![data.clone()],
+                        0,
+                        crate::disk::test_spill(spill_dir.path()),
+                    )
+                    .unwrap(),
+                );
+                let cache =
+                    Arc::new(ReadCache::open(cache_dir.clone(), 64 * MIB, disk, 0).unwrap());
+                CacheStore {
+                    inner: Arc::clone(&inner) as Arc<dyn ObjectStore>,
+                    cache,
+                }
+            };
+
+            {
+                let store = open_store();
+                let first = store
+                    .get_ranges(&location, std::slice::from_ref(&range))
+                    .await
+                    .unwrap();
+                assert_eq!(first, vec![expected(LEN, range.clone())], "seed {seed}");
+            }
+            lossy.crash_with(CrashMode::TearLast, seed);
+
+            let store = open_store();
+            let again = store
+                .get_ranges(&location, std::slice::from_ref(&range))
+                .await
+                .unwrap();
+            let got: usize = again.iter().map(Bytes::len).sum();
+            assert_eq!(
+                got, 200_000,
+                "seed {seed}: a torn size file served a short range"
+            );
+            assert_eq!(again, vec![expected(LEN, range.clone())], "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn parse_size_accepts_only_a_checksummed_size() {
+        let encoded = encode_size(1_048_579);
+        assert_eq!(encoded.len(), 12);
+        assert_eq!(parse_size(&encoded), Some(1_048_579));
+        assert_eq!(parse_size(&encode_size(0)), Some(0));
+
+        assert_eq!(parse_size(&encoded[..11]), None, "11 bytes");
+        assert_eq!(
+            parse_size(&[encoded.as_slice(), &[0]].concat()),
+            None,
+            "13 bytes"
+        );
+        assert_eq!(parse_size(b"12"), None, "the old text format");
+        assert_eq!(parse_size(b""), None, "empty");
+
+        let mut flipped = encoded;
+        flipped[3] ^= 0x10;
+        assert_eq!(parse_size(&flipped), None, "a flipped bit in the size");
+        flipped[3] ^= 0x10;
+        flipped[11] ^= 0x01;
+        assert_eq!(parse_size(&flipped), None, "a flipped bit in the CRC");
+    }
+
+    #[test]
+    fn the_cache_layout_is_pinned() {
+        assert_eq!(
+            BLOCK,
+            1 << 20,
+            "BLOCK is part of the cache layout: blocks are addressed as offset / BLOCK. Changing it makes every stored block serve wrong bytes with a valid CRC. If it must change, the cache must be wiped at open first (spec 03 § 12)."
+        );
+        assert_eq!(
+            SIZE_FILE, "size",
+            "the size file's name is part of the cache layout (spec 03 § 12)"
+        );
+        assert_eq!(
+            SIZE_FILE_LEN, 12,
+            "the size file's length is part of the cache layout (spec 03 § 12)"
+        );
     }
 
     #[tokio::test]
@@ -1108,7 +1409,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let inner = Arc::new(InMemory::new());
         put(&inner, DATA, content(2 * MIB)).await;
-        let disk = Arc::new(Disk::open(vec![dir.path().to_path_buf()], MIB).unwrap());
+        let spill_dir = tempfile::tempdir().unwrap();
+        let disk = Arc::new(
+            Disk::open(
+                vec![dir.path().to_path_buf()],
+                MIB,
+                crate::disk::test_spill(spill_dir.path()),
+            )
+            .unwrap(),
+        );
         disk.set_free_for_test(Some(MIB));
         let cache_dir = dir.path().join("cache");
         let cache = Arc::new(ReadCache::open(cache_dir.clone(), 64 * MIB, disk, MIB).unwrap());
@@ -1170,5 +1479,85 @@ mod tests {
         assert_eq!(block_len(7 * MIB / 2, 3), Some(MIB / 2));
         assert_eq!(block_len(7 * MIB / 2, 4), None);
         assert_eq!(block_len(MIB, 0), Some(MIB));
+    }
+
+    /// R6.8. Eight threads insert, read, evict and shed 32 objects at once. No
+    /// read returns other bytes, the capacity holds, and every block file on
+    /// disk is indexed. Evicted-and-rewritten blocks may be indexed without a
+    /// file for a moment, which is benign (see `hardening.md` § M6), so only the
+    /// file-to-index direction is asserted.
+    #[test]
+    fn concurrent_use_never_returns_wrong_bytes() {
+        /// Object `n`: byte `i` is `(n * 31 + i) mod 256`, so objects differ.
+        fn object(n: u64) -> Bytes {
+            (0..4_096_u64)
+                .map(|i| u8::try_from((n * 31 + i) % 256).unwrap_or(0))
+                .collect::<Vec<u8>>()
+                .into()
+        }
+
+        /// The block files under `dir`: every file but `size` files and temp files.
+        fn block_bytes_on_disk(dir: &Path) -> u64 {
+            let mut total = 0;
+            let mut pending = vec![dir.to_path_buf()];
+            while let Some(current) = pending.pop() {
+                for entry in fs::read_dir(&current).unwrap() {
+                    let entry = entry.unwrap();
+                    let path = entry.path();
+                    if entry.file_type().unwrap().is_dir() {
+                        pending.push(path);
+                        continue;
+                    }
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if name != SIZE_FILE && !is_temp_name(&name) {
+                        total += entry.metadata().unwrap().len();
+                    }
+                }
+            }
+            total
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let capacity = 8 * 4_100;
+        let fixture = fixture(dir.path(), capacity, 0);
+        let objects: Vec<(String, Bytes)> = (0..32_u64)
+            .map(|n| (format!("obj-{n}"), object(n)))
+            .collect();
+        std::thread::scope(|scope| {
+            for thread in 0..8_u64 {
+                let cache = Arc::clone(&fixture.cache);
+                let objects = &objects;
+                scope.spawn(move || {
+                    // A xorshift64 generator, seeded per thread.
+                    let mut state = 0x9E37_79B9_7F4A_7C15_u64 ^ (thread + 1);
+                    for _ in 0..2_000 {
+                        state ^= state << 13;
+                        state ^= state >> 7;
+                        state ^= state << 17;
+                        let (name, bytes) = &objects[usize::try_from(state % 32).unwrap()];
+                        match (state >> 8) % 4 {
+                            0 => cache.insert_bytes(name, bytes),
+                            1 => {
+                                for (index, data) in cache.read_blocks(name, &[0]) {
+                                    assert_eq!(index, 0);
+                                    assert_eq!(&data, bytes, "{name} returned other bytes");
+                                }
+                            }
+                            2 => cache.evict_file(name),
+                            _ => cache.shed(4_100),
+                        }
+                    }
+                });
+            }
+        });
+
+        let stats = fixture.cache.stats();
+        assert!(stats.bytes <= capacity, "{stats:?}");
+        let on_disk = block_bytes_on_disk(&fixture.cache_dir);
+        assert!(
+            on_disk <= stats.bytes,
+            "{on_disk} bytes of block files, {} indexed",
+            stats.bytes
+        );
     }
 }

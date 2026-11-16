@@ -126,26 +126,26 @@ expression: protobuf
       "input_preview": "{}",
       "output_preview": "null",
       "attributes": {
-        "llmobs.environment": "staging",
-        "llmobs.metadata.plan": "pro",
-        "llmobs.metadata.seats": "3",
-        "llmobs.release": "1.2.3",
-        "llmobs.session.id": "chat-42",
-        "llmobs.span.kind": "chain",
-        "llmobs.tags": "[\"beta\"]",
-        "llmobs.user.id": "u-17"
+        "cetra.environment": "staging",
+        "cetra.metadata.plan": "pro",
+        "cetra.metadata.seats": "3",
+        "cetra.release": "1.2.3",
+        "cetra.session.id": "chat-42",
+        "cetra.span.kind": "chain",
+        "cetra.tags": "[\"beta\"]",
+        "cetra.user.id": "u-17"
       },
       "resource_attributes": {
-        "telemetry.distro.name": "llmobs"
+        "telemetry.distro.name": "cetra"
       },
-      "scope_name": "llmobs",
+      "scope_name": "cetra",
       "scope_version": "0.0.0",
       "events": [],
       "links": [],
       "media_refs": [],
       "truncated": [],
       "conventions": [
-        "llmobs"
+        "cetra"
       ],
       "ingest_time": "[redacted]",
       "schema_version": 1
@@ -183,26 +183,26 @@ expression: protobuf
       "input_preview": "{}",
       "output_preview": "null",
       "attributes": {
-        "llmobs.environment": "staging",
-        "llmobs.metadata.plan": "pro",
-        "llmobs.metadata.seats": "3",
-        "llmobs.release": "1.2.3",
-        "llmobs.session.id": "chat-42",
-        "llmobs.span.kind": "chain",
-        "llmobs.tags": "[\"beta\"]",
-        "llmobs.user.id": "u-17"
+        "cetra.environment": "staging",
+        "cetra.metadata.plan": "pro",
+        "cetra.metadata.seats": "3",
+        "cetra.release": "1.2.3",
+        "cetra.session.id": "chat-42",
+        "cetra.span.kind": "chain",
+        "cetra.tags": "[\"beta\"]",
+        "cetra.user.id": "u-17"
       },
       "resource_attributes": {
-        "telemetry.distro.name": "llmobs"
+        "telemetry.distro.name": "cetra"
       },
-      "scope_name": "llmobs",
+      "scope_name": "cetra",
       "scope_version": "0.0.0",
       "events": [],
       "links": [],
       "media_refs": [],
       "truncated": [],
       "conventions": [
-        "llmobs"
+        "cetra"
       ],
       "ingest_time": "[redacted]",
       "schema_version": 1

@@ -1,9 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
 import { PanelLeft, Play } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { $api } from "@/api/client";
+import { $api, retryQuery } from "@/api/client";
 import { problemOf } from "@/api/problem";
-import { savedQueriesQuery, schemaQuery } from "@/api/queries";
+import { savedQueriesQuery, savedViewQuery, schemaQuery } from "@/api/queries";
 import type { Schema } from "@/api/types";
 import { useProject } from "@/components/shell/project-context";
 import { ExamplesMenu } from "@/components/sql/examples-menu";
@@ -76,7 +76,15 @@ export function SqlConsole({
   const [paramErrors, setParamErrors] = useState<Record<string, string>>({});
   const savedQueries = useQuery(savedQueriesQuery(org, project));
   const listed = savedQueries.data?.data;
-  const complete = savedQueries.isSuccess && savedQueries.data.next_cursor === null;
+  const listedView = search.view ? listed?.find((item) => item.id === search.view) : undefined;
+  /** A `?view=` id the loaded list does not hold (shared after it loaded): read by id. */
+  const byId = useQuery({
+    ...savedViewQuery(org, project, search.view ?? ""),
+    enabled: savedQueries.isSuccess && Boolean(search.view) && listedView === undefined,
+    // A 4xx (missing, private, malformed) will not change on retry: drop the link at once.
+    retry: retryQuery,
+  });
+  const fetchedView = byId.data?.id === search.view ? byId.data : undefined;
   /** The draft's saved-query id, read by the `?view=` effect without re-running it. */
   const draftView = useRef(draft.view);
   draftView.current = draft.view;
@@ -111,10 +119,11 @@ export function SqlConsole({
     if (!savedQueries.isSuccess) {
       return;
     }
-    const view = listed?.find((item) => item.id === id);
+    const view = listedView ?? fetchedView;
     if (!view) {
       handledView.current = undefined;
-      if (complete) {
+      // Neither listed nor readable by id (missing, private, or the read failed): drop the link.
+      if (byId.isError) {
         forgetView();
       }
       return;
@@ -127,7 +136,7 @@ export function SqlConsole({
     if (draftView.current !== id) {
       load(view);
     }
-  }, [search.view, savedQueries.isSuccess, listed, complete]);
+  }, [search.view, savedQueries.isSuccess, listedView, fetchedView, byId.isError]);
 
   /** The request for `text`, or undefined when a parameter is invalid (errors are shown). */
   function buildBody(text: string): Schema<"SqlQueryRequest"> | undefined {

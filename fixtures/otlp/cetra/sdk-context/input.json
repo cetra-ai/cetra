@@ -1,0 +1,209 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "conformance"
+            }
+          },
+          {
+            "key": "telemetry.distro.name",
+            "value": {
+              "stringValue": "cetra"
+            }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "cetra",
+            "version": "0.0.0"
+          },
+          "spans": [
+            {
+              "traceId": "00000000000000000000000000000001",
+              "spanId": "0000000000000001",
+              "name": "turn",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590001000000",
+              "endTimeUnixNano": "1767225590999000000",
+              "attributes": [
+                {
+                  "key": "cetra.environment",
+                  "value": {
+                    "stringValue": "staging"
+                  }
+                },
+                {
+                  "key": "cetra.input",
+                  "value": {
+                    "stringValue": "{}"
+                  }
+                },
+                {
+                  "key": "cetra.input.format",
+                  "value": {
+                    "stringValue": "json"
+                  }
+                },
+                {
+                  "key": "cetra.metadata.plan",
+                  "value": {
+                    "stringValue": "pro"
+                  }
+                },
+                {
+                  "key": "cetra.metadata.seats",
+                  "value": {
+                    "intValue": "3"
+                  }
+                },
+                {
+                  "key": "cetra.output",
+                  "value": {
+                    "stringValue": "null"
+                  }
+                },
+                {
+                  "key": "cetra.output.format",
+                  "value": {
+                    "stringValue": "json"
+                  }
+                },
+                {
+                  "key": "cetra.release",
+                  "value": {
+                    "stringValue": "1.2.3"
+                  }
+                },
+                {
+                  "key": "cetra.session.id",
+                  "value": {
+                    "stringValue": "chat-42"
+                  }
+                },
+                {
+                  "key": "cetra.span.kind",
+                  "value": {
+                    "stringValue": "chain"
+                  }
+                },
+                {
+                  "key": "cetra.tags",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "beta"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "key": "cetra.user.id",
+                  "value": {
+                    "stringValue": "u-17"
+                  }
+                }
+              ]
+            },
+            {
+              "traceId": "00000000000000000000000000000001",
+              "spanId": "0000000000000002",
+              "parentSpanId": "0000000000000001",
+              "name": "lookup",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590002000000",
+              "endTimeUnixNano": "1767225590998000000",
+              "attributes": [
+                {
+                  "key": "cetra.environment",
+                  "value": {
+                    "stringValue": "staging"
+                  }
+                },
+                {
+                  "key": "cetra.input",
+                  "value": {
+                    "stringValue": "{}"
+                  }
+                },
+                {
+                  "key": "cetra.input.format",
+                  "value": {
+                    "stringValue": "json"
+                  }
+                },
+                {
+                  "key": "cetra.metadata.plan",
+                  "value": {
+                    "stringValue": "pro"
+                  }
+                },
+                {
+                  "key": "cetra.metadata.seats",
+                  "value": {
+                    "intValue": "3"
+                  }
+                },
+                {
+                  "key": "cetra.output",
+                  "value": {
+                    "stringValue": "null"
+                  }
+                },
+                {
+                  "key": "cetra.output.format",
+                  "value": {
+                    "stringValue": "json"
+                  }
+                },
+                {
+                  "key": "cetra.release",
+                  "value": {
+                    "stringValue": "1.2.3"
+                  }
+                },
+                {
+                  "key": "cetra.session.id",
+                  "value": {
+                    "stringValue": "chat-42"
+                  }
+                },
+                {
+                  "key": "cetra.span.kind",
+                  "value": {
+                    "stringValue": "chain"
+                  }
+                },
+                {
+                  "key": "cetra.tags",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "beta"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "key": "cetra.user.id",
+                  "value": {
+                    "stringValue": "u-17"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

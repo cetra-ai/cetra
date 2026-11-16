@@ -14,11 +14,11 @@
         "beta"
       ],
       "attributes": {
-        "llmobs.tags": "[\"alpha\",\"beta\",\"alpha\"]",
+        "cetra.tags": "[\"alpha\",\"beta\",\"alpha\"]",
         "tag.tags": "alpha,beta"
       },
       "conventions": [
-        "llmobs"
+        "cetra"
       ],
       "ingest_time": "2026-01-01T00:00:00.000000000Z",
       "schema_version": 1

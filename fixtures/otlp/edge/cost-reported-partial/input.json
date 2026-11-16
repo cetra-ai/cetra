@@ -12,7 +12,7 @@
               "endTimeUnixNano": "1767225591000000000",
               "attributes": [
                 {
-                  "key": "llmobs.span.kind",
+                  "key": "cetra.span.kind",
                   "value": {
                     "stringValue": "llm"
                   }

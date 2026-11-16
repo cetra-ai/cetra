@@ -16,6 +16,7 @@ use crate::auth::principal::{self, Principal};
 use crate::auth::roles::{self, OrgPerm, OrgRole};
 use crate::auth::secret::{hash_token, is_opaque_token, new_opaque_token};
 use crate::email::Email;
+use crate::entitlements::{over_limit, plan_limit};
 use crate::http::AppState;
 use crate::http::access::{Access, OrgAccess, RouteDef};
 use crate::http::client_ip::ClientIp;
@@ -23,6 +24,7 @@ use crate::http::error::{self, ApiError};
 use crate::meta::MetaError;
 use crate::meta::invites::{self, INVITE_TTL_NS, InviteRow, Inviter};
 use crate::meta::members;
+use crate::meta::users::EmailVerifiedVia;
 use crate::meta::users::{self, normalize_email};
 
 use super::orgs::page_named;
@@ -91,6 +93,8 @@ struct TokenPath {
 enum Created {
     Invite(InviteRow),
     Forbidden,
+    /// The org's seat limit, which is what the caller hit.
+    OverLimit(u64),
 }
 
 enum Accepted {
@@ -100,6 +104,7 @@ enum Accepted {
     },
     Missing,
     WrongEmail,
+    OverLimit(u64),
 }
 
 async fn list_invites(
@@ -146,6 +151,7 @@ async fn create_invite(
     let inviter = users::user_by_id(state.meta.reader(), actor).await?;
     let invited_by = inviter.as_ref().map(member_user);
     let inviter_name = inviter.and_then(|user| user.name);
+    let max_seats = state.entitlements.resolve(org_id, now).limits.max_seats;
     let created = state
         .meta
         .write(move |conn| {
@@ -168,6 +174,13 @@ async fn create_invite(
                 if existing.is_some() {
                     return Err(MetaError::Conflict("already a member"));
                 }
+                if let Some(limit) = max_seats.filter(|_| role != OrgRole::Viewer) {
+                    let seats = members::seat_members_tx(conn, org_id).await?
+                        + invites::seat_invites_tx(conn, org_id, now, Some(&email_for_db)).await?;
+                    if over_limit(Some(limit), seats, 1) {
+                        return Ok(Created::OverLimit(limit));
+                    }
+                }
                 let row = invites::replace_invite(
                     conn,
                     org_id,
@@ -183,10 +196,14 @@ async fn create_invite(
             })
         })
         .await?;
-    let Created::Invite(row) = created else {
-        return Err(ApiError::Forbidden {
-            code: ProblemCode::Forbidden,
-        });
+    let row = match created {
+        Created::Invite(row) => row,
+        Created::Forbidden => {
+            return Err(ApiError::Forbidden {
+                code: ProblemCode::Forbidden,
+            });
+        }
+        Created::OverLimit(limit) => return Err(plan_limit(limit, ("seat", "seats"))),
     };
     let url = state
         .config
@@ -274,6 +291,9 @@ async fn accept_invite(
     let now = state.clock.now_ns();
     let caller_id = user.id;
     let caller_email = user.email.clone();
+    // The org is known only inside the transaction, so the closure resolves its limits itself.
+    // The seat limit can be lowered after the invitation was sent; it applies at accept.
+    let limits_state = state.clone();
     let outcome = state
         .meta
         .write(move |conn| {
@@ -282,6 +302,10 @@ async fn accept_invite(
                 else {
                     return Ok(Accepted::Missing);
                 };
+                // A suspended or deleting org takes no new members.
+                if org.state != "active" {
+                    return Ok(Accepted::Missing);
+                }
                 if invite.email != caller_email {
                     return Ok(Accepted::WrongEmail);
                 }
@@ -291,6 +315,17 @@ async fn accept_invite(
                 } else if invite.accepted_at.is_some() {
                     return Ok(Accepted::Missing);
                 } else {
+                    let max_seats = limits_state
+                        .entitlements
+                        .resolve(org.id, now)
+                        .limits
+                        .max_seats;
+                    if let Some(limit) = max_seats.filter(|_| invite.role != OrgRole::Viewer) {
+                        let seats = members::seat_members_tx(conn, org.id).await?;
+                        if over_limit(Some(limit), seats, 1) {
+                            return Ok(Accepted::OverLimit(limit));
+                        }
+                    }
                     match members::add_org_member(conn, org.id, caller_id, invite.role, now).await {
                         Ok(()) => invite.role,
                         Err(MetaError::Conflict("already a member")) => {
@@ -309,7 +344,8 @@ async fn accept_invite(
                         .fetch_one(&mut *conn)
                         .await?;
                 if verified.is_none() {
-                    users::set_email_verified(conn, caller_id, now).await?;
+                    users::set_email_verified(conn, caller_id, now, EmailVerifiedVia::Invite)
+                        .await?;
                 }
                 Ok(Accepted::Done {
                     membership: OrgMembership {
@@ -342,6 +378,7 @@ async fn accept_invite(
             ProblemCode::Forbidden,
             Some("this invitation is for another email address".to_owned()),
         ))),
+        Accepted::OverLimit(limit) => Err(plan_limit(limit, ("seat", "seats"))),
     }
 }
 
@@ -418,7 +455,7 @@ mod tests {
     use std::time::Duration;
 
     use axum::http::{Method, header};
-    use llmobs_core::ids::OrgId;
+    use cetra_core::ids::OrgId;
     use uuid::Uuid;
 
     use super::*;
@@ -428,7 +465,7 @@ mod tests {
     use crate::auth::session::start_session;
     use crate::meta::members::add_org_member;
     use crate::meta::users::{NewUser, insert_user};
-    use crate::test_support::{TestApp, TestResponse, capture_logs};
+    use crate::test_support::{TestApp, TestResponse, capture_logs, set_limits};
 
     const SEVEN_DAYS_AND_A_SECOND: Duration = Duration::from_secs(7 * 24 * 60 * 60 + 1);
 
@@ -463,6 +500,7 @@ mod tests {
                             name: None,
                             password_hash: None,
                             email_verified_at: Some(now),
+                            email_verified_via: Some(EmailVerifiedVia::MailToken),
                             is_instance_admin: false,
                         },
                         now,
@@ -472,9 +510,15 @@ mod tests {
             })
             .await
             .unwrap();
-        let cookie = start_session(&app.state, user.id, None, None)
-            .await
-            .unwrap();
+        let cookie = start_session(
+            &app.state,
+            user.id,
+            None,
+            None,
+            crate::auth::session::SessionOrigin::Password,
+        )
+        .await
+        .unwrap();
         (user.id, cookie_pair(&cookie))
     }
 
@@ -493,6 +537,7 @@ mod tests {
                             name: None,
                             password_hash: None,
                             email_verified_at: None,
+                            email_verified_via: None,
                             is_instance_admin: false,
                         },
                         now,
@@ -673,6 +718,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn seats_are_limited() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let org = create_org(&app, &ada).await;
+        set_limits(
+            &app,
+            org.id,
+            "2026-01-01T00:00:00Z",
+            &serde_json::json!({"max_seats": 1}),
+        );
+
+        let denied = send_invite(&app, &ada, &org.slug, "guest@example.com", "member").await;
+        assert_eq!(denied.status, 403, "{}", body(&denied));
+        assert_eq!(denied.problem().code, ProblemCode::PlanLimit);
+        assert_eq!(
+            denied.problem().detail.as_deref(),
+            Some("Your plan allows 1 seat.")
+        );
+        let viewer = send_invite(&app, &ada, &org.slug, "guest@example.com", "viewer").await;
+        assert_eq!(viewer.status, 201, "{}", body(&viewer));
+
+        set_limits(
+            &app,
+            org.id,
+            "2026-01-01T00:01:00Z",
+            &serde_json::json!({"max_seats": 2}),
+        );
+        let a = send_invite(&app, &ada, &org.slug, "a@example.com", "member").await;
+        assert_eq!(a.status, 201, "{}", body(&a));
+        let replaced = send_invite(&app, &ada, &org.slug, "a@example.com", "member").await;
+        assert_eq!(replaced.status, 201, "{}", body(&replaced));
+        let b = send_invite(&app, &ada, &org.slug, "b@example.com", "member").await;
+        assert_eq!(b.status, 403, "{}", body(&b));
+        assert_eq!(
+            b.problem().detail.as_deref(),
+            Some("Your plan allows 2 seats.")
+        );
+        let demoted = send_invite(&app, &ada, &org.slug, "a@example.com", "viewer").await;
+        assert_eq!(demoted.status, 201, "{}", body(&demoted));
+        let b = send_invite(&app, &ada, &org.slug, "b@example.com", "member").await;
+        assert_eq!(b.status, 201, "{}", body(&b));
+    }
+
+    #[tokio::test]
+    async fn accept_after_the_limit_was_lowered() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let org = create_org(&app, &ada).await;
+        set_limits(
+            &app,
+            org.id,
+            "2026-01-01T00:00:00Z",
+            &serde_json::json!({"max_seats": 2}),
+        );
+        let guest_invite = post_invite(&app, &ada, &org.slug, "guest@example.com", "member").await;
+        let viewer_invite =
+            post_invite(&app, &ada, &org.slug, "viewer@example.com", "viewer").await;
+        set_limits(
+            &app,
+            org.id,
+            "2026-01-01T00:01:00Z",
+            &serde_json::json!({"max_seats": 1}),
+        );
+
+        let (_, guest) = signed_in(&app, "guest@example.com").await;
+        let refused = app
+            .request(
+                Method::POST,
+                &format!("/api/auth/invites/{}/accept", guest_invite.token),
+            )
+            .header(header::COOKIE.as_str(), &guest)
+            .send()
+            .await;
+        assert_eq!(refused.status, 403, "{}", body(&refused));
+        assert_eq!(refused.problem().code, ProblemCode::PlanLimit);
+        assert_eq!(
+            refused.problem().detail.as_deref(),
+            Some("Your plan allows 1 seat.")
+        );
+
+        let (_, viewer) = signed_in(&app, "viewer@example.com").await;
+        let accepted = app
+            .request(
+                Method::POST,
+                &format!("/api/auth/invites/{}/accept", viewer_invite.token),
+            )
+            .header(header::COOKIE.as_str(), &viewer)
+            .send()
+            .await;
+        assert_eq!(accepted.status, 200, "{}", body(&accepted));
+    }
+
+    #[tokio::test]
     async fn preview_hides_expired_and_deleted_invites() {
         let app = TestApp::new().await;
         let (_, ada) = signed_in(&app, "ada@example.com").await;
@@ -743,6 +881,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_inactive_org_takes_no_member() {
+        // Review 2026-11-15 #8: accept ignored the org's state.
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let org = create_org(&app, &ada).await;
+        let guest_id = insert_unverified(&app, "guest@example.com").await;
+        let guest_cookie = cookie_pair(
+            &start_session(
+                &app.state,
+                guest_id,
+                None,
+                None,
+                crate::auth::session::SessionOrigin::Password,
+            )
+            .await
+            .unwrap(),
+        );
+        let invite = post_invite(&app, &ada, &org.slug, "guest@example.com", "member").await;
+        let org_id = org.id.to_string();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    sqlx::query("UPDATE orgs SET state = 'deleting' WHERE id = ?")
+                        .bind(org_id)
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(MetaError::from)
+                })
+            })
+            .await
+            .unwrap();
+        let accepted = app
+            .request(
+                Method::POST,
+                &format!("/api/auth/invites/{}/accept", invite.token),
+            )
+            .header(header::COOKIE.as_str(), &guest_cookie)
+            .send()
+            .await;
+        assert_eq!(accepted.status, 404, "{}", body(&accepted));
+    }
+
+    #[tokio::test]
     async fn accept_checks_the_email_and_is_idempotent() {
         let app = TestApp::new().await;
         let (_, ada) = signed_in(&app, "ada@example.com").await;
@@ -750,9 +932,15 @@ mod tests {
         let org = create_org(&app, &ada).await;
         let guest_id = insert_unverified(&app, "guest@example.com").await;
         let guest_cookie = cookie_pair(
-            &start_session(&app.state, guest_id, None, None)
-                .await
-                .unwrap(),
+            &start_session(
+                &app.state,
+                guest_id,
+                None,
+                None,
+                crate::auth::session::SessionOrigin::Password,
+            )
+            .await
+            .unwrap(),
         );
         let invite = post_invite(&app, &ada, &org.slug, "guest@example.com", "member").await;
 
@@ -856,9 +1044,15 @@ mod tests {
         let viewer_id = insert_unverified(&app, "viewer@example.com").await;
         add_member(&app, org.id, viewer_id, OrgRole::Viewer).await;
         let viewer_cookie = cookie_pair(
-            &start_session(&app.state, viewer_id, None, None)
-                .await
-                .unwrap(),
+            &start_session(
+                &app.state,
+                viewer_id,
+                None,
+                None,
+                crate::auth::session::SessionOrigin::Password,
+            )
+            .await
+            .unwrap(),
         );
         let kept = app
             .request(

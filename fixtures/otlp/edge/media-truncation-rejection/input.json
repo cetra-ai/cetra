@@ -14,7 +14,7 @@
       "scopeSpans": [
         {
           "scope": {
-            "name": "llmobs.manual",
+            "name": "cetra.manual",
             "version": "0.0.0"
           },
           "spans": [

@@ -28,7 +28,7 @@ Hot-tail sections 4, 5 and 6 are written **empty** (length 0) in M1.
 
 ## Versions
 
-Take each version from this table. These are the versions `bench/Cargo.toml` or the llmobs workspace already use, so no lookup is needed, except for `proptest`.
+Take each version from this table. These are the versions `bench/Cargo.toml` or the cetra workspace already use, so no lookup is needed, except for `proptest`.
 
 | Crate | Spec | Where | Why |
 |---|---|---|---|
@@ -43,7 +43,7 @@ Take each version from this table. These are the versions `bench/Cargo.toml` or 
 | `tokio` | `{ version = "1.54", features = ["rt-multi-thread", "macros"] }` | dev-dep | async tests |
 | `proptest` | `"1.12.0"` (the workspace pin; check with `cargo info proptest` and report the version actually resolved) | dev-dep | property tests |
 | `fmt-testdata` | `{ path = "../testdata" }` | dev-dep, added in M1.4 | realistic data |
-| `llmobs-core` | `{ path = "/home/sebastien/travaux/llm-observer/crates/core" }` | dev-dep (M1.1) | `schema::spans_schema`, `batch::spans_to_record_batch` |
+| `cetra-core` | `{ path = "/home/sebastien/travaux/llm-observer/crates/core" }` | dev-dep (M1.1) | `schema::spans_schema`, `batch::spans_to_record_batch` |
 | `parquet` | `{ version = "59.2", default-features = false, features = ["arrow", "zstd"] }` | dev-dep, added in M1.4 | size comparison in `roundtrip_light` |
 
 ## Conventions for every sub-phase
@@ -301,7 +301,7 @@ pub const HOT_SECTIONS: usize = 7;
 
    The crate docs, which say:
    - what Strata is;
-   - that it is a research prototype outside the llmobs workspace;
+   - that it is a research prototype outside the cetra workspace;
    - a pointer to `../prototype-plan.md`;
    - the M1 limits from § What M1 is.
 
@@ -327,7 +327,7 @@ pub const HOT_SECTIONS: usize = 7;
 - The encoded sizes are exactly 64, 64 and 16 bytes.
 
 **`file.rs` unit tests** (`#[cfg(test)] mod tests` in `src/file.rs`, with `InMemory`, the counting store via `#[path]`, and `write_empty_file`):
-- An empty file opens: `row_count() == 0`, and the schema equals `llmobs_core::schema::spans_schema()` (dev-dependency, see § Versions).
+- An empty file opens: `row_count() == 0`, and the schema equals `cetra_core::schema::spans_schema()` (dev-dependency, see § Versions).
 - With `hot_len_hint = Some(actual hot_len)`, open makes exactly 1 `get`.
 - With `hot_len_hint = Some(1)`, open makes exactly 2.
 - With no hint, it makes 1 (the 256 KiB default covers the small tail).
@@ -668,7 +668,7 @@ The § Conventions checks pass.
      ```
    - Clear the payload fields exactly like the `FMT_LIGHT` block in `bench/src/main.rs` (copy that block).
    - Sort with `spans.sort_by_key(|s| (s.trace_id, s.start_time))`.
-   - Build batches with `llmobs_core::batch::spans_to_record_batch`, one call per 8,192-span chunk (`spans.chunks(8192)`).
+   - Build batches with `cetra_core::batch::spans_to_record_batch`, one call per 8,192-span chunk (`spans.chunks(8192)`).
    - Write the file with sort key `["trace_id", "start_time"]`, open it from `InMemory`, and `read_column` every column. Compare each with the input column using `==`.
    - Print the `FileSummary`: per column, the bytes and the encoding counts. Also print the file size next to the size of the same batches written with the bench's `pq_default` writer properties (zstd 3, defaults otherwise, via `parquet::arrow::ArrowWriter`; add `parquet = { version = "59.2", default-features = false, features = ["arrow", "zstd"] }` as a dev-dependency).
 

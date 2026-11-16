@@ -1,11 +1,11 @@
 //! `org_members` and `project_members` (spec 04).
 #![cfg_attr(not(test), allow(dead_code))]
 
-use llmobs_core::ids::{OrgId, ProjectId};
+use cetra_core::ids::{OrgId, ProjectId};
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
-use super::users::UserRow;
+use super::users::{EmailVerifiedVia, UserRow};
 use super::{MetaError, unique_or};
 use crate::auth::{
     OrgRole, ProjectOverride, org_role_str, parse_org_role, parse_project_override,
@@ -160,6 +160,69 @@ pub(crate) async fn count_owners(
         .map_err(MetaError::from)
 }
 
+/// Owners whose account is not disabled. A disabled owner cannot act for the org, so it does
+/// not count toward the last-owner rule (as in [`crate::meta::users::is_last_active_owner`]).
+///
+/// # Errors
+///
+/// Returns [`MetaError::Db`] when the query fails.
+pub(crate) async fn count_active_owners(
+    conn: &mut SqliteConnection,
+    org_id: OrgId,
+) -> Result<i64, MetaError> {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM org_members JOIN users ON users.id = org_members.user_id \
+         WHERE org_members.org_id = ? AND org_members.role = 'owner' \
+         AND users.disabled_at IS NULL",
+    )
+    .bind(org_id.to_string())
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(MetaError::from)
+}
+
+/// Whether `user_id` owns an org that `other_id` is not a member of (D-P-68).
+///
+/// # Errors
+///
+/// Returns [`MetaError::Db`] when the query fails.
+pub(crate) async fn owns_org_without(
+    pool: &SqlitePool,
+    user_id: Uuid,
+    other_id: Uuid,
+) -> Result<bool, MetaError> {
+    let found: i64 = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM org_members owned \
+         WHERE owned.user_id = ? AND owned.role = ? \
+           AND NOT EXISTS(SELECT 1 FROM org_members other \
+                          WHERE other.org_id = owned.org_id AND other.user_id = ?))",
+    )
+    .bind(user_id.to_string())
+    .bind(org_role_str(OrgRole::Owner))
+    .bind(other_id.to_string())
+    .fetch_one(pool)
+    .await?;
+    Ok(found != 0)
+}
+
+/// Members whose role is owner, admin or member (viewers take no seat, D176).
+///
+/// # Errors
+///
+/// Returns [`MetaError::Db`] when the query fails.
+pub(crate) async fn seat_members_tx(
+    conn: &mut SqliteConnection,
+    org_id: OrgId,
+) -> Result<u64, MetaError> {
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM org_members WHERE org_id = ? AND role != ?")
+            .bind(org_id.to_string())
+            .bind(org_role_str(OrgRole::Viewer))
+            .fetch_one(&mut *conn)
+            .await?;
+    Ok(u64::try_from(count).unwrap_or(0))
+}
+
 /// Members of the org, ordered by email.
 ///
 /// # Errors
@@ -170,7 +233,7 @@ pub(crate) async fn org_members(
     org_id: OrgId,
 ) -> Result<Vec<MemberRow>, MetaError> {
     let records: Vec<MemberRecord> = sqlx::query_as(
-        "SELECT users.id, users.email, users.name, users.password_hash, users.email_verified_at, \
+        "SELECT users.id, users.email, users.name, users.password_hash, users.email_verified_at, users.email_verified_via, \
          users.is_instance_admin, users.disabled_at, users.created_at, users.updated_at, \
          org_members.role, org_members.created_at AS joined_at \
          FROM org_members JOIN users ON users.id = org_members.user_id \
@@ -180,6 +243,27 @@ pub(crate) async fn org_members(
     .fetch_all(pool)
     .await?;
     records.into_iter().map(member_row).collect()
+}
+
+/// Emails of the org's members whose address is verified, ordered by email (D-K-19).
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails.
+pub(crate) async fn verified_member_emails(
+    pool: &SqlitePool,
+    org_id: OrgId,
+) -> Result<Vec<String>, MetaError> {
+    let emails: Vec<String> = sqlx::query_scalar(
+        "SELECT users.email FROM org_members JOIN users ON users.id = org_members.user_id \
+         WHERE org_members.org_id = ? AND users.email_verified_at IS NOT NULL \
+         AND users.disabled_at IS NULL \
+         ORDER BY users.email",
+    )
+    .bind(org_id.to_string())
+    .fetch_all(pool)
+    .await?;
+    Ok(emails)
 }
 
 /// The user's project override, if one is stored.
@@ -275,6 +359,7 @@ struct MemberRecord {
     name: Option<String>,
     password_hash: Option<String>,
     email_verified_at: Option<i64>,
+    email_verified_via: Option<String>,
     is_instance_admin: i64,
     disabled_at: Option<i64>,
     created_at: i64,
@@ -305,6 +390,7 @@ fn member_row(record: MemberRecord) -> Result<MemberRow, MetaError> {
             name: record.name,
             password_hash: record.password_hash,
             email_verified_at: record.email_verified_at,
+            email_verified_via: EmailVerifiedVia::from_column(record.email_verified_via)?,
             is_instance_admin,
             disabled_at: record.disabled_at,
             created_at: record.created_at,
@@ -336,7 +422,7 @@ mod tests {
     use crate::meta::orgs::insert_org;
     use crate::meta::projects::insert_project;
     use crate::meta::test_db;
-    use crate::meta::users::{NewUser, insert_user, normalize_email};
+    use crate::meta::users::{NewUser, insert_user, normalize_email, set_disabled};
 
     #[tokio::test]
     async fn memberships_roles_and_override_removal() {
@@ -502,7 +588,40 @@ mod tests {
             name: None,
             password_hash: None,
             email_verified_at: None,
+            email_verified_via: None,
             is_instance_admin: false,
         }
+    }
+
+    #[tokio::test]
+    async fn verified_member_emails_skip_unverified_and_disabled_users() {
+        let (_dir, db) = test_db().await;
+        let org_id = OrgId::new_v7();
+        db.write(|conn| {
+            Box::pin(async move {
+                let org = insert_org(conn, org_id, "Alpha", "alpha", 1).await?;
+                let verified = |email: &str| NewUser {
+                    email_verified_at: Some(1),
+                    email_verified_via: Some(EmailVerifiedVia::MailToken),
+                    ..user(email)
+                };
+                let ada = insert_user(conn, verified("ada@example.com"), 1).await?;
+                let bob = insert_user(conn, verified("bob@example.com"), 1).await?;
+                let cy = insert_user(conn, verified("cy@example.com"), 1).await?;
+                let unverified = insert_user(conn, user("dee@example.com"), 1).await?;
+                for member in [ada.id, bob.id, cy.id, unverified.id] {
+                    add_org_member(conn, org.id, member, OrgRole::Member, 1).await?;
+                }
+                set_disabled(conn, cy.id, Some(2), 2).await?;
+                Ok::<(), MetaError>(())
+            })
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            verified_member_emails(db.reader(), org_id).await.unwrap(),
+            vec!["ada@example.com".to_owned(), "bob@example.com".to_owned()]
+        );
     }
 }

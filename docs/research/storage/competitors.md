@@ -1,4 +1,4 @@
-# Competitor trace storage — research notes for the llmobs storage design
+# Competitor trace storage — research notes for the cetra storage design
 
 Scope: how Phoenix, MLflow and LangWatch (in depth), and Langfuse, Opik, Helicone and Laminar (briefly) store and query traces and spans. Each finding is mapped to our spec (`docs/spec/01`, `03`, `05`).
 

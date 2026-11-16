@@ -14,14 +14,14 @@ use arrow::array::{
 };
 use arrow::compute::cast;
 use arrow::datatypes::{DataType, TimeUnit};
-use llmobs_core::enums::{
+use cetra_core::enums::{
     Convention, CostSource, PayloadFormat, ScoreDataType, ScoreSource, ScoreTargetKind, SpanKind,
     SpanStatus,
 };
-use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-use llmobs_core::schema::{event_field, link_field, scores, spans, traces};
-use llmobs_core::score::{Score, ScoreTarget, ScoreValue};
-use llmobs_core::span::{Span, SpanEvent, SpanLink};
+use cetra_core::ids::{ProjectId, SpanId, TraceId};
+use cetra_core::schema::{event_field, link_field, scores, spans, traces};
+use cetra_core::score::{Score, ScoreTarget, ScoreValue};
+use cetra_core::span::{Span, SpanEvent, SpanLink};
 use uuid::Uuid;
 
 use super::metrics::{
@@ -902,6 +902,48 @@ pub(crate) fn score_value(
     }
 }
 
+/// One matched row of a trigger read: the trace, the span for a span rule, and the row's `start_time`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MatchRow {
+    pub(crate) trace_id: TraceId,
+    pub(crate) span_id: Option<SpanId>,
+    pub(crate) start_time: i64,
+}
+
+/// The rows of `trace_refresh` (`with_span: false`: columns `trace_id`, `start_time`) or
+/// `span_refresh` (`with_span: true`: `trace_id`, `span_id`, `start_time`), in row order.
+pub(crate) fn match_rows(
+    batches: &[RecordBatch],
+    with_span: bool,
+) -> Result<Vec<MatchRow>, ConvertError> {
+    let mut out = Vec::new();
+    for batch in batches {
+        let (trace_name, time_name) = if with_span {
+            (spans::TRACE_ID, spans::START_TIME)
+        } else {
+            (traces::TRACE_ID, traces::START_TIME)
+        };
+        let trace_id = strings(batch, trace_name)?;
+        let start_time = times(batch, time_name)?;
+        let span_id = if with_span {
+            Some(strings(batch, spans::SPAN_ID)?)
+        } else {
+            None
+        };
+        for row in 0..batch.num_rows() {
+            out.push(MatchRow {
+                trace_id: req_parsed(&trace_id, row, trace_name, TraceId::from_str)?,
+                span_id: match &span_id {
+                    Some(ids) => Some(req_parsed(ids, row, spans::SPAN_ID, SpanId::from_str)?),
+                    None => None,
+                },
+                start_time: req_time(&start_time, row, time_name)?,
+            });
+        }
+    }
+    Ok(out)
+}
+
 /// Score rows of the scores view, in row order across batches. `project_id` is the caller's project.
 pub(crate) fn scores(
     batches: &[RecordBatch],
@@ -1004,7 +1046,7 @@ fn score_batch(batch: &RecordBatch, project_id: ProjectId) -> Result<Vec<Score>,
 
 /// The API dashboard response. Storage names map variant by variant.
 pub(crate) fn metrics_response(
-    data: llmobs_storage::MetricsData,
+    data: cetra_storage::MetricsData,
     from: i64,
     to: i64,
     group_by: Option<MetricsGroupBy>,
@@ -1052,8 +1094,8 @@ pub(crate) fn metrics_response(
     }
 }
 
-fn kpi_metric(name: llmobs_storage::KpiName) -> KpiMetric {
-    use llmobs_storage::KpiName;
+fn kpi_metric(name: cetra_storage::KpiName) -> KpiMetric {
+    use cetra_storage::KpiName;
     match name {
         KpiName::Traces => KpiMetric::Traces,
         KpiName::ErrorRate => KpiMetric::ErrorRate,
@@ -1063,8 +1105,8 @@ fn kpi_metric(name: llmobs_storage::KpiName) -> KpiMetric {
     }
 }
 
-fn metric_name(name: llmobs_storage::SeriesName) -> MetricName {
-    use llmobs_storage::SeriesName;
+fn metric_name(name: cetra_storage::SeriesName) -> MetricName {
+    use cetra_storage::SeriesName;
     match name {
         SeriesName::Traces => MetricName::Traces,
         SeriesName::Errors => MetricName::Errors,
@@ -1090,8 +1132,9 @@ fn metric_name(name: llmobs_storage::SeriesName) -> MetricName {
 /// The API catalog of views and functions. Storage names map variant by variant.
 pub(crate) fn schema_response() -> SchemaResponse {
     SchemaResponse {
-        views: llmobs_storage::view_catalog()
+        views: cetra_storage::view_catalog()
             .into_iter()
+            .chain(crate::datasets::sql_views::catalog())
             .map(|view| ViewSchema {
                 name: view_name(view.view),
                 description: view.description.to_owned(),
@@ -1107,7 +1150,7 @@ pub(crate) fn schema_response() -> SchemaResponse {
                     .collect(),
             })
             .collect(),
-        functions: llmobs_storage::function_catalog()
+        functions: cetra_storage::function_catalog()
             .into_iter()
             .map(|function| FunctionSchema {
                 name: function.name.to_owned(),
@@ -1120,9 +1163,9 @@ pub(crate) fn schema_response() -> SchemaResponse {
     }
 }
 
-fn view_name(name: llmobs_storage::ViewName) -> super::schema::ViewName {
+fn view_name(name: cetra_storage::ViewName) -> super::schema::ViewName {
     use super::schema::ViewName as Api;
-    use llmobs_storage::ViewName;
+    use cetra_storage::ViewName;
     match name {
         ViewName::Traces => Api::Traces,
         ViewName::Spans => Api::Spans,
@@ -1133,8 +1176,8 @@ fn view_name(name: llmobs_storage::ViewName) -> super::schema::ViewName {
     }
 }
 
-fn column_type(kind: llmobs_storage::ColumnKind) -> ColumnType {
-    use llmobs_storage::ColumnKind;
+fn column_type(kind: cetra_storage::ColumnKind) -> ColumnType {
+    use cetra_storage::ColumnKind;
     match kind {
         ColumnKind::String => ColumnType::String,
         ColumnKind::Integer => ColumnType::Integer,
@@ -1150,7 +1193,7 @@ fn column_type(kind: llmobs_storage::ColumnKind) -> ColumnType {
 #[cfg(test)]
 mod tests {
     use arrow::datatypes::{FieldRef, Fields, Schema};
-    use llmobs_storage::{
+    use cetra_storage::{
         QueryContext, ScoreTargets, SortOrder as StorageSortOrder, SpanListRequest, SpanSort,
         TraceListRequest, TraceSort,
     };
@@ -1164,18 +1207,19 @@ mod tests {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
         app.load_example_dataset(seeded.project.id).await;
-        let ctx = open_query(&app.state, seeded.project.id, None)
+        let ctx = open_query(&app.state, seeded.org_id, seeded.project.id, None)
             .await
             .unwrap();
         (app, ctx)
     }
 
     async fn trace_rows(ctx: &QueryContext, include_eval: bool) -> Vec<TraceSummary> {
-        let page = llmobs_storage::trace_list(
+        let page = cetra_storage::trace_list(
             ctx,
             TraceListRequest {
                 filter: None,
                 search: None,
+                strict_exclusions: false,
                 scope: list_scope(None, None, include_eval, false).unwrap(),
                 sort: TraceSort::StartTime,
                 order: StorageSortOrder::Desc,
@@ -1189,12 +1233,13 @@ mod tests {
         trace_summaries(&page.batches).unwrap()
     }
 
-    async fn span_page(ctx: &QueryContext) -> llmobs_storage::Page {
-        llmobs_storage::span_list(
+    async fn span_page(ctx: &QueryContext) -> cetra_storage::Page {
+        cetra_storage::span_list(
             ctx,
             SpanListRequest {
                 filter: None,
                 search: None,
+                strict_exclusions: false,
                 scope: list_scope(None, None, false, false).unwrap(),
                 sort: SpanSort::StartTime,
                 order: StorageSortOrder::Desc,
@@ -1284,7 +1329,7 @@ mod tests {
             "a1000000000000000000000000000003",
         ];
         let batches =
-            llmobs_storage::latest_scores(&ctx, ScoreTargets::Traces(&targets), READ_TIMEOUT)
+            cetra_storage::latest_scores(&ctx, ScoreTargets::Traces(&targets), READ_TIMEOUT)
                 .await
                 .unwrap();
         let briefs = score_briefs(&batches).unwrap();
@@ -1396,5 +1441,47 @@ mod tests {
             })
             .collect();
         RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
+    }
+
+    #[test]
+    fn match_rows_reads_trace_and_span_batches() {
+        let trace_hex = "a1000000000000000000000000000001";
+        let span_hex = "0000000000000001";
+        let time =
+            || Arc::new(TimestampNanosecondArray::from(vec![7]).with_timezone("UTC")) as ArrayRef;
+        let trace_column = || Arc::new(StringArray::from(vec![trace_hex])) as ArrayRef;
+
+        let trace_batch = RecordBatch::try_from_iter([
+            (traces::TRACE_ID, trace_column()),
+            (traces::START_TIME, time()),
+        ])
+        .unwrap();
+        let rows = match_rows(&[trace_batch], false).unwrap();
+        let expected = MatchRow {
+            trace_id: trace_hex.parse().unwrap(),
+            span_id: None,
+            start_time: 7,
+        };
+        assert_eq!(rows, vec![expected]);
+
+        let span_batch = RecordBatch::try_from_iter([
+            (spans::TRACE_ID, trace_column()),
+            (
+                spans::SPAN_ID,
+                Arc::new(StringArray::from(vec![span_hex])) as ArrayRef,
+            ),
+            (spans::START_TIME, time()),
+        ])
+        .unwrap();
+        let rows = match_rows(std::slice::from_ref(&span_batch), true).unwrap();
+        assert_eq!(rows[0].span_id, Some(span_hex.parse().unwrap()));
+
+        // A span batch without its span id column does not convert.
+        let without_span = RecordBatch::try_from_iter([
+            (spans::TRACE_ID, trace_column()),
+            (spans::START_TIME, time()),
+        ])
+        .unwrap();
+        assert!(match_rows(&[without_span], true).is_err());
     }
 }

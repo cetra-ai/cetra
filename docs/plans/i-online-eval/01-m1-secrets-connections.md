@@ -17,8 +17,8 @@ Implementation plan for milestone M1 of track I. It has 7 sub-phases, I1.1 to I1
 ## What M1 is, and what it is not
 
 When M1 is done:
-- the server has an encryption key: from `LLMOBS_ENCRYPTION_KEY`, or from `<data_dir>/secret.key`, which it generates on the first start of a new data directory. It refuses to start with a key that does not match the data directory, and it refuses to start without a key once one was used;
-- `llmobs admin rotate-encryption-key` re-encrypts every sealed column under a new key, with the server stopped;
+- the server has an encryption key: from `CETRA_ENCRYPTION_KEY`, or from `<data_dir>/secret.key`, which it generates on the first start of a new data directory. It refuses to start with a key that does not match the data directory, and it refuses to start without a key once one was used;
+- `cetra admin rotate-encryption-key` re-encrypts every sealed column under a new key, with the server stopped;
 - org admins create, edit, delete and test LLM connections through `/api/v1/orgs/{org}/llm-connections`. Every org member can list them; the API key and header values never leave the server;
 - the org settings area has an "LLM connections" page.
 
@@ -28,9 +28,9 @@ When M1 is done:
 
 | # | Summary |
 |---|---|
-| D-I-1 | Key from `LLMOBS_ENCRYPTION_KEY` (`encryption_key`), else `<data_dir>/secret.key`, else generated into that file (0600), but only while `meta.db` has no check value. A check value in `instance_settings` refuses a different key. |
+| D-I-1 | Key from `CETRA_ENCRYPTION_KEY` (`encryption_key`), else `<data_dir>/secret.key`, else generated into that file (0600), but only while `meta.db` has no check value. A check value in `instance_settings` refuses a different key. |
 | D-I-2 | Sealed value = `0x01` ‖ key id (4 bytes) ‖ nonce (12) ‖ ciphertext and tag. AAD `table:column:row_id`. Key id and check value are HMAC-SHA256 of fixed labels. |
-| D-I-3 | `llmobs admin rotate-encryption-key [--new-from-stdin]`: server stopped (takes `LOCK`), one transaction, `secret.key.new` then rename (finished at startup after a crash). With an env key the new key must be given with `--new-from-stdin`; with a file key it may be generated. |
+| D-I-3 | `cetra admin rotate-encryption-key [--new-from-stdin]`: server stopped (takes `LOCK`), one transaction, `secret.key.new` then rename (finished at startup after a crash). With an env key the new key must be given with `--new-from-stdin`; with a file key it may be generated. |
 | D-I-4 | Connections are org-wide. `max_concurrency` 1–64 (default 4), `requests_per_minute` 1–10 000 (default 300). The API key and header values are write-only; `api_key_hint` is the key's last 4 characters when it has at least 16. |
 | D-I-5 | `POST …/llm-connections/{id}/test` with `{model?}` runs one boolean judge call through `EvalRunner` (30 s), answering `200 {ok, model, latency_ms, error?}`. A success sets `status = 'ok'`; a pause-class error sets `'failing'` only when the test used the connection's default model, because a pause-class 404 for a typed model name says nothing about the key. |
 | D-I-24 | `OrgPerm::ManageConnections` (org role `admin`) for writes and tests; `OrgPerm::View` for reads. Not session-only. |
@@ -44,7 +44,7 @@ Add to the root `[workspace.dependencies]` in I1.2, with a one-line comment sayi
 |---|---|---|---|
 | `aes-gcm` | `0.11.1` | `default-features = false, features = ["aes", "alloc"]` | AES-256-GCM for sealed columns (D-I-2). Nonces come from the server's own random source, so the `getrandom` feature is not needed |
 
-In I1.6, `llmobs-eval` becomes a dependency of `llmobs-server`: add `llmobs-eval.workspace = true`. The root already has a `llmobs-eval = { path = "crates/eval" }` workspace entry; if it does not, add one next to the other `llmobs-*` path entries. This keeps the crate graph in `AGENTS.md` (`server` depends on `eval`).
+In I1.6, `cetra-eval` becomes a dependency of `cetra-server`: add `cetra-eval.workspace = true`. The root already has a `cetra-eval = { path = "crates/eval" }` workspace entry; if it does not, add one next to the other `cetra-*` path entries. This keeps the crate graph in `AGENTS.md` (`server` depends on `eval`).
 
 `Cargo.lock` changes in I1.2 and I1.6; commit it. After I1.2 and I1.6, `cargo deny check` must still pass. An *error* is a STOP (§ Conventions); a duplicate-version *warning* is fine.
 
@@ -109,8 +109,8 @@ web/src/components/settings/connection-dialog.tsx, connection-test.tsx   (I1.7)
 
 ```
 sealed = [0x01] ++ key_id[0..4] ++ nonce[0..12] ++ AES-256-GCM(key, nonce, aad, plaintext)   // ciphertext ++ 16-byte tag
-key_id = HMAC-SHA256(key, b"llmobs.key-id.v1")[0..4]
-check  = lowercase hex of HMAC-SHA256(key, b"llmobs.encryption-check.v1")   // 64 hex characters
+key_id = HMAC-SHA256(key, b"cetra.key-id.v1")[0..4]
+check  = lowercase hex of HMAC-SHA256(key, b"cetra.encryption-check.v1")   // 64 hex characters
 aad    = format!("{table}:{column}:{row_id}")                               // row_id: hyphenated lowercase UUID
 ```
 
@@ -150,14 +150,14 @@ let plaintext = cipher
 - **Write** (`write_key_file(path, key)`): remove a leftover `path` + `.tmp` if one exists (a crash can leave one with a wider mode), then write `path` with `.tmp` appended to its file name, opened with `create(true).truncate(true).write(true).mode(0o600)` (`std::os::unix::fs::OpenOptionsExt`). `sync_all()`, rename it over `path`, then fsync the directory (`File::open(dir)?.sync_all()`). A crash leaves either no file or a whole one.
 - **Read**: the file text with one trailing `\n` (and a `\r` before it) removed, then decoded. A file whose mode allows group or other access (`metadata.permissions().mode() & 0o077 != 0`) logs `tracing::warn!(path = %…, "encryption key file is readable by other users")` and is still used.
 - **Source order:**
-  1. the `encryption_key` config value (`LLMOBS_ENCRYPTION_KEY`) wins, and the file is neither read nor written;
+  1. the `encryption_key` config value (`CETRA_ENCRYPTION_KEY`) wins, and the file is neither read nor written;
   2. otherwise the file;
   3. otherwise, generate the key, but only when `instance_settings` has no `encryption.check`. When a check value exists, startup fails with `CryptoError::Missing`.
 - **Finishing a rotation**: at startup, when the env value is unset and before reading the key: if `secret.key.new` exists, decodes, and its check value equals the stored `encryption.check`, rename it over `secret.key` and log `warn` "finished an interrupted key rotation". Otherwise delete it and log `warn` "removed an unused secret.key.new". Also delete a leftover `secret.key.tmp` or `secret.key.new.tmp`.
 
 ### Connection contract
 
-JSON field names are exact. Times are RFC 3339 through `llmobs_core::time_serde`, and optional times through `crate::api::keys::optional_time` (made `pub(crate)` in I1.4).
+JSON field names are exact. Times are RFC 3339 through `cetra_core::time_serde`, and optional times through `crate::api::keys::optional_time` (made `pub(crate)` in I1.4).
 
 **`LlmConnection`** (response). Fields in this order, which is also the fixture key order:
 
@@ -216,7 +216,7 @@ Names are stored trimmed. Header names are stored lowercased.
 
 `adapter` and `structured_output` are checked by serde: an unknown value is the existing JSON 400.
 
-OpenRouter-style model ids such as `openai/gpt-5` are refused by the eval crate's adapters today, so they are refused here too. Lifting that limit is a change to `llmobs-eval`, outside M1.
+OpenRouter-style model ids such as `openai/gpt-5` are refused by the eval crate's adapters today, so they are refused here too. Lifting that limit is a change to `cetra-eval`, outside M1.
 
 **Cap.** An org holds at most 100 connections. The 101st create is `409` with `an organization has at most 100 connections` (count inside the insert's transaction).
 
@@ -245,7 +245,7 @@ A connection of another org, or an unknown id, is `404` (spec 08: never 403 for 
 
 ### Config (`crates/server/src/config.rs`)
 
-1. `ALIASES`: add `("LLMOBS_ENCRYPTION_KEY", "encryption_key"),` after the `LLMOBS_EMAIL_FROM` row.
+1. `ALIASES`: add `("CETRA_ENCRYPTION_KEY", "encryption_key"),` after the `CETRA_EMAIL_FROM` row.
 2. `is_secret_path` (near line 1429): add `"encryption_key"` to the `matches!` list, so an env value made only of digits stays a string and is never echoed.
 3. `secret_key` (the figment error mapper): add an arm before the `[..]` arm: `[key] if key == "encryption_key" => Some("encryption_key"),`.
 4. `Secret<T>`: add a constructor after `expose`:
@@ -323,7 +323,7 @@ The existing `mod tests` in `judge/mod.rs` already round-trips both parsers. Add
 
 ### Spec (`docs/spec/12-operations.md` § Configuration)
 
-- Replace the `encryption_key` row: `` | `encryption_key` | `LLMOBS_ENCRYPTION_KEY` | unset: read `<data_dir>/secret.key`, generated on the first start of a new data directory (D-I-1) | ``.
+- Replace the `encryption_key` row: `` | `encryption_key` | `CETRA_ENCRYPTION_KEY` | unset: read `<data_dir>/secret.key`, generated on the first start of a new data directory (D-I-1) | ``.
 - Replace the `eval.workers` row: `` | `eval.workers` | | `16` (1–256, D-I-6) | ``.
 - Add after it: `` | `security.allow_private_network_egress` | | `false` (D166) | ``.
 - § Security checklist: in the sentence "…(needed for local Ollama/vLLM — the setting is shown in the LLM connection form)…", replace "the setting is shown in the LLM connection form" with "the LLM connection form explains the setting; the UI cannot read its value (D-I-4)".
@@ -332,8 +332,8 @@ The existing `mod tests` in `judge/mod.rs` already round-trips both parsers. Add
 
 - `eval_and_security_default`: no TOML, no env → `eval.workers == 16`, `!security.allow_private_network_egress`, `encryption_key.is_none()`.
 - `eval_workers_out_of_range_is_rejected`: TOML `[eval]\nworkers = 0` → `ConfigError::Invalid { key: "eval.workers", .. }`; `257` → the same.
-- `encryption_key_comes_from_the_environment`: env `LLMOBS_ENCRYPTION_KEY=abc` → `encryption_key.map(|k| k.expose().clone()) == Some("abc".into())`.
-- `numeric_encryption_key_stays_a_string`: env `LLMOBS_ENCRYPTION_KEY=12345678` → `Some("12345678")`.
+- `encryption_key_comes_from_the_environment`: env `CETRA_ENCRYPTION_KEY=abc` → `encryption_key.map(|k| k.expose().clone()) == Some("abc".into())`.
+- `numeric_encryption_key_stays_a_string`: env `CETRA_ENCRYPTION_KEY=12345678` → `Some("12345678")`.
 - `encryption_key_type_error_does_not_quote_the_value`: TOML `encryption_key = 424242` → `ConfigError::Invalid { key: "encryption_key", .. }`, and its `to_string()` does not contain `424242`.
 - `security_section_parses`: TOML `[security]\nallow_private_network_egress = true` → `true`.
 - `server_config_debug_hides_the_key`: `format!("{config:?}")` with `encryption_key = Some(Secret::new("topsecretvalue".into()))` does not contain `topsecretvalue`.
@@ -395,7 +395,7 @@ CREATE TABLE llm_connections (
 **Existing tests the new migration changes:**
 - `meta/mod.rs` tests: the migration count assertion (`assert_eq!(count, 2)`, near line 387) becomes 4 (`0003_saved_views` from track H, then `0004_connections`). In `open_existing_checks_the_file_and_the_version`, the inserted future version becomes `5`, and the expected values become `found == 5`, `expected == 4`.
 - `admin.rs` `schema_mismatch_names_the_versions`: insert version `5`, and expect `"this binary expects schema 4, found 5"`.
-- `crates/server/tests/snapshots/meta_schema.snap` (checked by `schema_matches_the_snapshot` in `meta/mod.rs`): regenerate it with `INSTA_UPDATE=always cargo test -p llmobs-server schema_matches_the_snapshot`. Read the diff: it must add exactly the two tables above and their three automatic indexes (`sqlite_autoindex_instance_settings_1`, `sqlite_autoindex_llm_connections_1`, `sqlite_autoindex_llm_connections_2`), and nothing else.
+- `crates/server/tests/snapshots/meta_schema.snap` (checked by `schema_matches_the_snapshot` in `meta/mod.rs`): regenerate it with `INSTA_UPDATE=always cargo test -p cetra-server schema_matches_the_snapshot`. Read the diff: it must add exactly the two tables above and their three automatic indexes (`sqlite_autoindex_instance_settings_1`, `sqlite_autoindex_llm_connections_1`, `sqlite_autoindex_llm_connections_2`), and nothing else.
 
 ### `crates/server/src/meta/instance_settings.rs`
 
@@ -436,7 +436,7 @@ use uuid::Uuid;
 /// Where the key came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KeySource {
-    /// `LLMOBS_ENCRYPTION_KEY` or `encryption_key`.
+    /// `CETRA_ENCRYPTION_KEY` or `encryption_key`.
     Env,
     /// `<data_dir>/secret.key`, read.
     File,
@@ -478,10 +478,10 @@ pub enum CryptoError {
     #[error("could not {action} {}", .path.display())]
     Io { action: &'static str, path: PathBuf, #[source] error: std::io::Error },
     /// The key does not match the check value.
-    #[error("the encryption key does not match this data directory (check LLMOBS_ENCRYPTION_KEY or {})", .path.display())]
+    #[error("the encryption key does not match this data directory (check CETRA_ENCRYPTION_KEY or {})", .path.display())]
     Mismatch { path: PathBuf },
     /// `meta.db` has a check value and no key is available.
-    #[error("no encryption key: set LLMOBS_ENCRYPTION_KEY or restore {} from the backup", .path.display())]
+    #[error("no encryption key: set CETRA_ENCRYPTION_KEY or restore {} from the backup", .path.display())]
     Missing { path: PathBuf },
     /// A sealed value was written with another key.
     #[error("a sealed value was written with another key")]
@@ -500,7 +500,7 @@ pub enum CryptoError {
 
 `CryptoError` is `pub` because `ServeError` (public) wraps it; `MetaError` is the precedent, `pub` inside a `pub(crate)` module. `KeySource` stays `pub(crate)`: no public type exposes it, and `unreachable_pub` would warn.
 
-The `origin` of `BadKey` is `"LLMOBS_ENCRYPTION_KEY"` for the env value, the file path (`path.display().to_string()`) for the file, and `"--new-from-stdin"` for the rotation input.
+The `origin` of `BadKey` is `"CETRA_ENCRYPTION_KEY"` for the env value, the file path (`path.display().to_string()`) for the file, and `"--new-from-stdin"` for the rotation input.
 
 ```rust
 /// Every sealed column, for key rotation (D-I-3). Later milestones append rows.
@@ -514,7 +514,7 @@ pub(crate) fn key_path(data_dir: &Path) -> PathBuf;
 
 impl SecretBox {
     pub(crate) fn new(key: &[u8; 32]) -> Self;
-    /// Lowercase hex HMAC-SHA256(key, "llmobs.encryption-check.v1").
+    /// Lowercase hex HMAC-SHA256(key, "cetra.encryption-check.v1").
     pub(crate) fn check_value(&self) -> &str;
     pub(crate) fn seal(&self, plaintext: &[u8], aad: Aad<'_>) -> Result<Vec<u8>, CryptoError>;
     pub(crate) fn open(&self, sealed: &[u8], aad: Aad<'_>) -> Result<Vec<u8>, CryptoError>;
@@ -656,13 +656,13 @@ Add `a_lost_key_file_fails_startup`: bind with no env key (the file is generated
 
 ---
 
-## I1.3 — `llmobs admin rotate-encryption-key`
+## I1.3 — `cetra admin rotate-encryption-key`
 
 **Goal:** an operator replaces the key with the server stopped, and every sealed column follows.
 
 **Edit only:** `crates/server/src/admin.rs` (including its module doc), `crates/server/src/crypto.rs` (only if a helper is missing), `crates/cli/src/main.rs`, `docs/spec/09-api.md` (§ CLI), `docs/spec/12-operations.md` (§ Backups).
 
-**Commit:** `Add llmobs admin rotate-encryption-key`
+**Commit:** `Add cetra admin rotate-encryption-key`
 
 ### `crates/server/src/admin.rs`
 
@@ -692,11 +692,11 @@ pub struct Rotated {
 
 /// Re-encrypts every sealed column under a new key (D-I-3). The server must be stopped.
 /// `new_key` is base64 text (from stdin); `None` generates a key, unless the current key
-/// comes from `LLMOBS_ENCRYPTION_KEY` (step 6).
+/// comes from `CETRA_ENCRYPTION_KEY` (step 6).
 pub async fn rotate_encryption_key(config: &ServerConfig, new_key: Option<&str>) -> Result<Rotated, AdminError>;
 ```
 
-Update the module doc of `admin.rs` ("These open the database without migrating and without the data-dir lock, so they work while `llmobs serve` is running (D136).") by adding: "`rotate_encryption_key` is the exception: it takes the lock and needs the server stopped (D-I-3)."
+Update the module doc of `admin.rs` ("These open the database without migrating and without the data-dir lock, so they work while `cetra serve` is running (D136).") by adding: "`rotate_encryption_key` is the exception: it takes the lock and needs the server stopped (D-I-3)."
 
 Steps, in this order:
 0. If `<data_dir>/meta.db` does not exist → `NotInitialized` (as `list_users` answers). This also covers a missing data directory, before any lock file is created.
@@ -705,7 +705,7 @@ Steps, in this order:
 3. Read the stored check (`get_setting(reader, ENCRYPTION_CHECK)`). When the env key is unset, call `crypto::finish_rotation(data_dir, check)` (any error → `Crypto(e.to_string())`).
 4. `crypto::read_key(env, data_dir)`. `Ok(None)` → `Crypto("no encryption key: start the server once first".into())`. An error → `Crypto(e.to_string())`.
 5. The old box is `SecretBox::new(&old.key)`. A missing check, or one that differs (`constant_time_eq`), → `Crypto("the current key does not match this data directory".into())`.
-6. New key: `new_key` decoded with `decode_key(text.trim(), "--new-from-stdin")` (error → `Crypto`), else `random_key()` — except that when `old.source == KeySource::Env` and `new_key` is `None`, return `Crypto("the key comes from LLMOBS_ENCRYPTION_KEY: pass the new key with --new-from-stdin")` before any write: a generated key would exist only in memory after the commit. Equal to the old key → `SameKey`.
+6. New key: `new_key` decoded with `decode_key(text.trim(), "--new-from-stdin")` (error → `Crypto`), else `random_key()` — except that when `old.source == KeySource::Env` and `new_key` is `None`, return `Crypto("the key comes from CETRA_ENCRYPTION_KEY: pass the new key with --new-from-stdin")` before any write: a generated key would exist only in memory after the commit. Equal to the old key → `SameKey`.
 7. If `old.source == KeySource::File`: remove a stale `secret.key.new`, then `write_key_file(&data_dir.join("secret.key.new"), &new)`. On a `write_key_file` failure, also remove `secret.key.new.tmp`, which the failed write can leave behind (a missing file is ignored).
 8. One `meta.write`. For each `(table, column)` in `ENCRYPTED_COLUMNS`:
    - Select `format!("SELECT id, {column} FROM {table} WHERE {column} IS NOT NULL")`. Add the comment `// table and column come from ENCRYPTED_COLUMNS, never from input`.
@@ -724,7 +724,7 @@ Steps, in this order:
         /// Read the new key (32 bytes, standard base64) from one line of stdin. Default: generate one.
         #[arg(long)]
         new_from_stdin: bool,
-        /// Config file. Overrides `LLMOBS_CONFIG`.
+        /// Config file. Overrides `CETRA_CONFIG`.
         #[arg(long)]
         config: Option<PathBuf>,
     },
@@ -746,7 +746,7 @@ In `admin_command`:
             let mut stdout = io::stdout().lock();
             writeln!(stdout, "Re-encrypted {} values.", rotated.values)?;
             if loaded.encryption_key.is_some() {
-                writeln!(stdout, "Set LLMOBS_ENCRYPTION_KEY to the new key before the next start.")?;
+                writeln!(stdout, "Set CETRA_ENCRYPTION_KEY to the new key before the next start.")?;
             }
         }
 ```
@@ -755,8 +755,8 @@ Add `fn read_key_line(input: impl BufRead) -> anyhow::Result<String>` next to `r
 
 ### Spec
 
-- `docs/spec/09-api.md` § CLI, the `llmobs admin …` row: change its Purpose from "local admin on the data dir (works offline, server may be running)" to "local admin on the data dir (works offline, server may be running, except `rotate-encryption-key [--new-from-stdin]`, which needs the server stopped; D-I-3)".
-- `docs/spec/12-operations.md` § Backups: the section's file list names `<data_dir>/secret.key` (or `LLMOBS_ENCRYPTION_KEY`) once, followed by "Without it, LLM connection keys and webhook secrets cannot be read, and the server refuses to start (D-I-1). `llmobs admin rotate-encryption-key` replaces the key while the server is stopped (D-I-3). A backup taken before a rotation can only be read with the key that was current then; keep that key with it."
+- `docs/spec/09-api.md` § CLI, the `cetra admin …` row: change its Purpose from "local admin on the data dir (works offline, server may be running)" to "local admin on the data dir (works offline, server may be running, except `rotate-encryption-key [--new-from-stdin]`, which needs the server stopped; D-I-3)".
+- `docs/spec/12-operations.md` § Backups: the section's file list names `<data_dir>/secret.key` (or `CETRA_ENCRYPTION_KEY`) once, followed by "Without it, LLM connection keys and webhook secrets cannot be read, and the server refuses to start (D-I-1). `cetra admin rotate-encryption-key` replaces the key while the server is stopped (D-I-3). A backup taken before a rotation can only be read with the key that was current then; keep that key with it."
 
 ### Tests (`admin.rs` `mod tests`; reuse its `ready_config()` helper)
 
@@ -769,7 +769,7 @@ Seed with raw SQL. First an org row (`INSERT INTO orgs (id, name, slug, created_
 Seeding the check value: open the database with `MetaDb::open` and call `crypto::verify_or_record(&db, &SecretBox::new(&old), &key_path)`; close it before calling `rotate_encryption_key`.
 - `rotation_with_an_env_key_reencrypts_under_a_given_key`: seed the check for `old` and one connection; config `encryption_key = Some(Secret::new(encode_key(&old)))`, `new_key = Some(&format!("  {}\r\n", encode_key(&new)))` (surrounding whitespace is trimmed where the key is decoded) → `values == 1`, no `secret.key` exists, the stored check is the new box's.
 - `rotation_with_an_env_key_leaves_secret_key_alone`: also write a `secret.key`; after the rotation its bytes are unchanged, and no `secret.key.new` exists.
-- `rotation_with_an_env_key_requires_a_new_key`: `new_key = None` → `Crypto("the key comes from LLMOBS_ENCRYPTION_KEY: pass the new key with --new-from-stdin")`, and nothing was written: no key file exists, and the stored check and row are unchanged.
+- `rotation_with_an_env_key_requires_a_new_key`: `new_key = None` → `Crypto("the key comes from CETRA_ENCRYPTION_KEY: pass the new key with --new-from-stdin")`, and nothing was written: no key file exists, and the stored check and row are unchanged.
 - `rotation_refuses_while_locked`: open and `try_lock` `<data_dir>/LOCK` in the test → `Locked`, and the stored check is unchanged.
 - `rotation_refuses_a_wrong_current_key`: check of key A stored, config key B → `Crypto(_)`; the database is unchanged.
 - `rotation_refuses_the_same_key` → `SameKey`.
@@ -781,7 +781,7 @@ Seeding the check value: open the database with `MetaDb::open` and call `crypto:
 - `rotation_on_a_missing_database_names_serve`: an empty temp dir → `NotInitialized`, and no `LOCK` file was created.
 - `rotated_debug_prints_only_the_values`.
 
-In `crates/cli/src/main.rs` tests (if it has a clap parsing test module, add to it; otherwise add one): `Cli::try_parse_from(["llmobs", "admin", "rotate-encryption-key", "--new-from-stdin"])` parses to that variant, and `["llmobs", "admin", "rotate-encryption-key", "--new", "x"]` is an error. `read_key_line` drops one trailing `\r\n`, accepts a line without a trailing newline, and answers "expected a key on stdin" on empty stdin.
+In `crates/cli/src/main.rs` tests (if it has a clap parsing test module, add to it; otherwise add one): `Cli::try_parse_from(["cetra", "admin", "rotate-encryption-key", "--new-from-stdin"])` parses to that variant, and `["cetra", "admin", "rotate-encryption-key", "--new", "x"]` is an error. `read_key_line` drops one trailing `\r\n`, accepts a line without a trailing newline, and answers "expected a key on stdin" on empty stdin.
 
 ### Done when
 
@@ -884,7 +884,7 @@ The types in § Connection contract, with:
 - `#[serde(deny_unknown_fields)]` on requests;
 - a doc comment on every type and field (the OpenAPI document shows them);
 - `#[serde(default, skip_serializing_if = "Option::is_none")]` on every `Option` field of every type;
-- `#[serde(with = "llmobs_core::time_serde")] #[schema(value_type = String, format = DateTime)]` on `created_at` and `updated_at`;
+- `#[serde(with = "cetra_core::time_serde")] #[schema(value_type = String, format = DateTime)]` on `created_at` and `updated_at`;
 - `#[serde(default, skip_serializing_if = "Option::is_none", with = "crate::api::keys::optional_time")] #[schema(value_type = Option<String>, format = DateTime)]` on `last_error_at`.
 
 In `api/keys.rs`, change `mod optional_time {` to `pub(crate) mod optional_time {` and its functions from `pub(super)` to `pub(crate)`.
@@ -1002,7 +1002,7 @@ The round-trip in `tests/api_examples.rs` compares the canonical JSON of the par
 Run `just api-examples`.
 
 `crates/server/tests/api_examples.rs`:
-- imports: `use llmobs_server::api::connections::{CreateLlmConnectionRequest, LlmConnection, LlmConnectionTestResult};`;
+- imports: `use cetra_server::api::connections::{CreateLlmConnectionRequest, LlmConnection, LlmConnectionTestResult};`;
 - `static_files_match_their_types`: `roundtrip::<Page<LlmConnection>>("static/llm-connections.json")`, `roundtrip::<LlmConnection>("static/llm-connection.json")` and `roundtrip::<LlmConnectionTestResult>("static/llm-connection-test.json")`;
 - `request_examples_match_their_types_and_the_openapi_document`: `roundtrip::<CreateLlmConnectionRequest>("requests/llm-connection-create.json")`, plus the schema check that `score-batch.json` gets in that test, against `CreateLlmConnectionRequest`;
 - `generated_files_roundtrip`: before the `other => panic!` arm, add
@@ -1157,7 +1157,7 @@ To get a PAT, `POST /api/v1/me/tokens` with the owner's cookie and `{"name": "t"
 **Goal:** `POST …/{id}/test` runs one judge call through the eval crate with the connection's decrypted key. The server holds the one `EvalRunner` that later milestones reuse.
 
 **Edit only:**
-- `Cargo.toml` (root, only if the `llmobs-eval` path entry is missing), `Cargo.lock`, `crates/server/Cargo.toml`;
+- `Cargo.toml` (root, only if the `cetra-eval` path entry is missing), `Cargo.lock`, `crates/server/Cargo.toml`;
 - `crates/server/src/lib.rs`;
 - `crates/server/src/eval/mod.rs` (new), `crates/server/src/eval/connection.rs` (new);
 - `crates/server/src/ingest/mod.rs` (one accessor);
@@ -1170,7 +1170,7 @@ To get a PAT, `POST /api/v1/me/tokens` with the owner's cookie and `{"name": "t"
 
 ### Dependency
 
-`crates/server/Cargo.toml` `[dependencies]`: `llmobs-eval.workspace = true` after `llmobs-core`.
+`crates/server/Cargo.toml` `[dependencies]`: `cetra-eval.workspace = true` after `cetra-core`.
 
 ### State
 
@@ -1178,7 +1178,7 @@ To get a PAT, `POST /api/v1/me/tokens` with the owner's cookie and `{"name": "t"
 
 ```rust
     /// One egress client for judges, webhooks and connection tests (D-I-29).
-    pub(crate) eval_runner: Arc<llmobs_eval::EvalRunner>,
+    pub(crate) eval_runner: Arc<cetra_eval::EvalRunner>,
     /// Decrypted connections, keyed by id and `updated_at`.
     pub(crate) connections: crate::eval::connection::ConnectionCache,
 ```
@@ -1186,7 +1186,7 @@ To get a PAT, `POST /api/v1/me/tokens` with the owner's cookie and `{"name": "t"
 - `serve.rs` `bind`, after `open_secrets` succeeds:
 
 ```rust
-    let eval_runner = match llmobs_eval::EvalRunner::new(llmobs_eval::EgressPolicy {
+    let eval_runner = match cetra_eval::EvalRunner::new(cetra_eval::EgressPolicy {
         allow_private_network: config.security.allow_private_network_egress,
     }) {
         Ok(runner) => Arc::new(runner),
@@ -1253,11 +1253,11 @@ pub(crate) enum ConnectionError {
 ```
 
 - `get`: when the map holds `row.id` with the same `updated_at`, return a clone of the `Arc`. Otherwise:
-  - open `secret_enc` and build `llmobs_eval::Secret::new(String::from_utf8(bytes)…)` (write the path in full: `crate::config::Secret` is another type; invalid UTF-8 → `Corrupt("secret_enc")`);
+  - open `secret_enc` and build `cetra_eval::Secret::new(String::from_utf8(bytes)…)` (write the path in full: `crate::config::Secret` is another type; invalid UTF-8 → `Corrupt("secret_enc")`);
   - open `extra_headers_enc` when present, parse a `BTreeMap<String, String>` (failure → `Corrupt("extra_headers_enc")`), and map it to `Vec<(String, Secret)>`;
-  - parse `adapter` and `structured_output` with `llmobs_eval::Adapter::from_name` and `llmobs_eval::StructuredOutput::from_name` (`Corrupt("adapter")` / `Corrupt("structured_output")`);
+  - parse `adapter` and `structured_output` with `cetra_eval::Adapter::from_name` and `cetra_eval::StructuredOutput::from_name` (`Corrupt("adapter")` / `Corrupt("structured_output")`);
   - parse `base_url` with `url::Url::parse` (`Corrupt("base_url")`).
-  Build `llmobs_eval::JudgeConnection { adapter, base_url, api_key, extra_headers, structured_output }` and insert it. When the map already holds `CACHE_ENTRIES` entries, clear it first. Recover a poisoned lock with `PoisonError::into_inner`.
+  Build `cetra_eval::JudgeConnection { adapter, base_url, api_key, extra_headers, structured_output }` and insert it. When the map already holds `CACHE_ENTRIES` entries, clear it first. Recover a poisoned lock with `PoisonError::into_inner`.
 - In `routes/connections.rs`, call `state.connections.forget(id)` after a successful update and after a successful delete. `forget` is what keeps the cache correct inside this process. The `updated_at` check only matters for rows changed elsewhere; the frozen test clock makes it useless in tests, which is why the route tests below check `forget`.
 
 ### Test route (`routes/connections.rs`)
@@ -1273,23 +1273,23 @@ Add the row `POST /api/v1/orgs/{org}/llm-connections/{id}/test`, `Access::Org { 
 
 ```rust
 const TEST_PROMPT: &str = "Reply true.";
-let evaluator = llmobs_eval::Evaluator {
+let evaluator = cetra_eval::Evaluator {
     id: row.id,
     name: "connection test".to_owned(),
-    config: llmobs_eval::EvaluatorConfig::LlmJudge(llmobs_eval::JudgeConfig {
+    config: cetra_eval::EvaluatorConfig::LlmJudge(cetra_eval::JudgeConfig {
         connection_id: row.id,
         model: model.clone(),
         prompt: TEST_PROMPT.to_owned(),
-        output: llmobs_eval::JudgeOutput::Boolean,
+        output: cetra_eval::JudgeOutput::Boolean,
         include_reason: false,
         temperature: None,
         // Reasoning models spend tokens before answering; 1024 can truncate a working call.
         max_output_tokens: 4096,
         timeout_ms: 30_000,
     }),
-    output: llmobs_eval::OutputScore {
+    output: cetra_eval::OutputScore {
         name: "connection_test".to_owned(),
-        data_type: llmobs_core::enums::ScoreDataType::Boolean,
+        data_type: cetra_core::enums::ScoreDataType::Boolean,
         categories: None,
     },
 };
@@ -1298,9 +1298,9 @@ let evaluator = llmobs_eval::Evaluator {
 7. Run it:
 
 ```rust
-let ingest = llmobs_otel::IngestContext {
+let ingest = cetra_otel::IngestContext {
     // A connection belongs to no project, and the judge trace is discarded.
-    project_id: llmobs_core::ids::ProjectId::from_uuid(Uuid::nil()),
+    project_id: cetra_core::ids::ProjectId::from_uuid(Uuid::nil()),
     ingest_time: state.clock.now_ns(),
     retention_days: None,
     limits: state.config.ingest.limits(&state.config.media),
@@ -1308,16 +1308,16 @@ let ingest = llmobs_otel::IngestContext {
 let prices = state.ingest.prices();
 let bytes = crate::auth::secret::random_bytes(16).map_err(|error| ApiError::Internal(Box::new(error)))?;
 let bytes = <[u8; 16]>::try_from(bytes.as_slice()).map_err(|error| ApiError::Internal(Box::new(error)))?;
-let judge_trace_id = llmobs_core::ids::TraceId::from_bytes(bytes)   // refuses all-zero bytes only
+let judge_trace_id = cetra_core::ids::TraceId::from_bytes(bytes)   // refuses all-zero bytes only
     .map_err(|error| ApiError::Internal(Box::new(error)))?;
 let started = std::time::Instant::now();
-let run = state.eval_runner.run(llmobs_eval::RunInput {
+let run = state.eval_runner.run(cetra_eval::RunInput {
     evaluator: &evaluator,
-    variables: &llmobs_eval::Variables::from_map(BTreeMap::new()),
+    variables: &cetra_eval::Variables::from_map(BTreeMap::new()),
     connection: Some(connection.as_ref()),
     webhook_secret: None,
-    target: llmobs_eval::EvalTarget { trace_id: None, span_id: None },
-    origin: llmobs_eval::EvalOrigin::Test,
+    target: cetra_eval::EvalTarget { trace_id: None, span_id: None },
+    origin: cetra_eval::EvalOrigin::Test,
     judge_trace_id,
     ingest: &ingest,
     prices: &prices,

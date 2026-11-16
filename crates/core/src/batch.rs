@@ -735,7 +735,7 @@ mod tests {
         assert_eq!(list_at(&batch, schema::spans::TAGS, 1), vec!["beta"]);
         assert_eq!(
             list_at(&batch, schema::spans::CONVENTIONS, 1),
-            vec!["llmobs", "genai"]
+            vec!["cetra", "genai"]
         );
         assert_eq!(
             map_at(&batch, schema::spans::METADATA, 1),

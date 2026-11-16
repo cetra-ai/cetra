@@ -107,7 +107,7 @@ mod tests {
     use crate::bag::AttrBag;
     use crate::convert::openai_messages;
     use crate::warn::Warnings;
-    use llmobs_core::message::messages_to_json;
+    use cetra_core::message::messages_to_json;
     use opentelemetry_proto::tonic::common::v1::any_value::Value;
     use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
 

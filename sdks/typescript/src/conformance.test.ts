@@ -1,6 +1,6 @@
 /**
  * The cross-language conformance scenarios (README § Scenarios): each case
- * `fixtures/otlp/llmobs/sdk-<case>/input.json` is the canonical OTLP this SDK
+ * `fixtures/otlp/cetra/sdk-<case>/input.json` is the canonical OTLP this SDK
  * must emit for the TypeScript call of the scenario row, run through the real
  * pipeline with the OTLP exporter replaced by an in-memory one.
  */
@@ -12,7 +12,7 @@ import { canonical, SCENARIOS } from "./conformance.test-helpers.js";
 import { resetForTests } from "./runtime.js";
 import { finished, startMemory } from "./testing.test-helpers.js";
 
-const FIXTURES = new URL("../../../fixtures/otlp/llmobs/", import.meta.url);
+const FIXTURES = new URL("../../../fixtures/otlp/cetra/", import.meta.url);
 
 describe("conformance", () => {
   beforeEach(async () => {

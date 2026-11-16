@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import { problemOf } from "@/api/problem";
 import { scoresQuery } from "@/api/queries";
 import type { Schema } from "@/api/types";
@@ -71,7 +72,9 @@ function ScoreTable({ scores }: { scores: Schema<"Score">[] }) {
           <tr key={score.score_id} className="border-t">
             <td className="py-1 pr-2">{score.name}</td>
             <td className="py-1 pr-2">{scoreValue(score.value)}</td>
-            <td className="py-1 pr-2">{score.source}</td>
+            <td className="py-1 pr-2">
+              <Source score={score} />
+            </td>
             <td className="py-1 pr-2">
               <Reason reason={score.reason} />
             </td>
@@ -85,6 +88,29 @@ function ScoreTable({ scores }: { scores: Schema<"Score">[] }) {
         ))}
       </tbody>
     </table>
+  );
+}
+
+/** Sources whose score comes from an evaluator run, and so has a judge trace. */
+const EVALUATOR_SOURCES: ReadonlySet<string> = new Set(["llm_judge", "check", "webhook"]);
+
+function Source({ score }: { score: Schema<"Score"> }) {
+  const { org, project } = useProject();
+  const judgeTraceId = score.metadata?.["judge.trace_id"];
+  if (!EVALUATOR_SOURCES.has(score.source) || !judgeTraceId) {
+    return score.source;
+  }
+  return (
+    <span className="flex flex-col gap-0.5">
+      {score.source}
+      <Link
+        to="/$org/$project/traces/$traceId"
+        params={{ org, project, traceId: judgeTraceId }}
+        className="w-fit underline underline-offset-4"
+      >
+        View judge trace
+      </Link>
+    </span>
   );
 }
 

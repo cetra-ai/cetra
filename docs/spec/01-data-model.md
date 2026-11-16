@@ -37,7 +37,7 @@ A single closed enum, `span_kind`, stored as a dictionary-encoded string.
 
 One row per OTel span, after normalization. Columns marked **P** are the "light" projection read by list views; heavy columns are only read when a span/trace is opened or searched.
 
-Type notation in this document: "Utf8 (dict)" means a `Utf8` column in memory that is **dictionary-encoded in Parquet** (low cardinality); it is not an Arrow `Dictionary` type (D62). The Rust structs and Arrow schemas implementing these tables live in `llmobs-core` (D60).
+Type notation in this document: "Utf8 (dict)" means a `Utf8` column in memory that is **dictionary-encoded in Parquet** (low cardinality); it is not an Arrow `Dictionary` type (D62). The Rust structs and Arrow schemas implementing these tables live in `cetra-core` (D60).
 
 | Column | Arrow type | P | Notes |
 |---|---|---|---|
@@ -55,7 +55,7 @@ Type notation in this document: "Utf8 (dict)" means a `Utf8` column in memory th
 | `service_name` | Utf8 (dict), nullable | P | Resource `service.name`. |
 | `session_id` | Utf8, nullable | P | Bloom filter. |
 | `user_id` | Utf8, nullable | P | Bloom filter. GDPR key. |
-| `environment` | Utf8 (dict), nullable | P | e.g. `production`. Reserved: `llmobs-eval` (evaluator executions, 06), `experiment` default for experiment runs. |
+| `environment` | Utf8 (dict), nullable | P | e.g. `production`. Reserved: `cetra-eval` (evaluator executions, 06), `experiment` default for experiment runs. |
 | `release` | Utf8 (dict), nullable | P | Git SHA / version string. |
 | `tags` | List(Utf8) | P | |
 | `metadata` | Map(Utf8, Utf8) | P | User metadata; values are JSON-encoded scalars or strings. |
@@ -84,7 +84,7 @@ Type notation in this document: "Utf8 (dict)" means a `Utf8` column in memory th
 | `output_preview` | Utf8, nullable | P | Same. |
 | `system_instructions` | Utf8 (JSON), nullable | | |
 | `tool_definitions` | Utf8 (JSON), nullable | | |
-| `attributes` | Map(Utf8, Utf8) | | All span attributes not consumed by normalization; values JSON-encoded. Includes `llmobs.normalize_warning` (02 rule 18) and `llmobs.normalize_error`. |
+| `attributes` | Map(Utf8, Utf8) | | All span attributes not consumed by normalization; values JSON-encoded. Includes `cetra.normalize_warning` (02 rule 18) and `cetra.normalize_error`. |
 | `resource_attributes` | Map(Utf8, Utf8) | | Minus `service.name`. |
 | `scope_name` | Utf8 (dict), nullable | | Instrumentation scope. |
 | `scope_version` | Utf8 (dict), nullable | | |
@@ -92,11 +92,11 @@ Type notation in this document: "Utf8 (dict)" means a `Utf8` column in memory th
 | `links` | List(Struct{trace_id, span_id, attributes JSON}) | | |
 | `media_refs` | List(Utf8) | | SHA-256 hex of extracted blobs; used by media GC. |
 | `truncated` | List(Utf8) | | Names of attributes truncated at ingest. |
-| `conventions` | List(Utf8 dict) | | Detected conventions (`genai`, `openinference`, `openllmetry`, `vercel`, `llmobs`, …). Debug aid. |
+| `conventions` | List(Utf8 dict) | | Detected conventions (`genai`, `openinference`, `openllmetry`, `vercel`, `cetra`, …). Debug aid. |
 | `ingest_time` | Timestamp(ns, UTC) | | Server receive time. Used by deletion cut-offs. |
 | `schema_version` | UInt16 | | Row-level normalization version. |
 
-Uniqueness: `(project_id, trace_id, span_id)`. Duplicate re-sends are tolerated at write time and removed at compaction (keep the row with greatest `ingest_time`); queries over not-yet-compacted data may briefly see duplicates — list views de-duplicate by `span_id`.
+Uniqueness: `(project_id, trace_id, span_id)`. Duplicate re-sends are tolerated at write time and removed at compaction (keep the row with greatest `ingest_time`); queries over not-yet-compacted data may briefly see duplicates — list views de-duplicate by `span_id`. Known limit: `span_list` de-duplicates adjacent copies of a span (same `start_time`, `span_id`, `trace_id`), keeping the newest `ingest_time`. Under the other sorts (`duration`, `cost_total`, `total_tokens`) copies are de-duplicated only when their sort value is also equal. The filter, search and exclusions run before de-duplication, so an older copy that matches is listed when the newest one does not. A re-send that changed `start_time` stays a duplicate until compaction, which keeps copies whose `start_time`s fall in different slices (spec 03 §5, "During a merge").
 
 ### Payloads (`input` / `output`)
 

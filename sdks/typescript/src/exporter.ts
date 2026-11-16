@@ -12,18 +12,15 @@
 import { type ExportResult, ExportResultCode } from "@opentelemetry/core";
 import { ProtobufTraceSerializer } from "@opentelemetry/otlp-transformer";
 import type { ReadableSpan, SpanExporter } from "@opentelemetry/sdk-trace";
-
 import { warnOnce } from "./log.js";
-import { type FetchLike, getFetch, gzip, runtimeGlobals, timeoutSignal } from "./web.js";
+import { QuotaState } from "./quota.js";
+import { defaultSleep, MAX_ATTEMPTS, waitMillis } from "./retry.js";
+import { type FetchLike, getFetch, gzip, timeoutSignal } from "./web.js";
 
 const DEFAULT_TIMEOUT_MILLIS = 10_000;
 /** Total budget per `export` call, retries included (D-F-8). */
 const DEADLINE_MILLIS = 30_000;
-/** 1 attempt plus 3 retries. */
-const MAX_ATTEMPTS = 4;
 const RETRYABLE_STATUSES: ReadonlySet<number> = new Set([429, 502, 503, 504]);
-const RETRY_AFTER_MAX_MILLIS = 30_000;
-const NON_NEGATIVE_INTEGER = /^[0-9]+$/;
 
 export interface FetchTraceExporterOptions {
   /** `<baseUrl>/v1/traces`. */
@@ -37,6 +34,8 @@ export interface FetchTraceExporterOptions {
   sleep?: (ms: number) => Promise<void>;
   /** Tests inject a clock; the default is `Date.now`. */
   now?: () => number;
+  /** Shared with the score queue; the default is a new one on `now`. */
+  quota?: QuotaState;
 }
 
 export class FetchTraceExporter implements SpanExporter {
@@ -46,6 +45,7 @@ export class FetchTraceExporter implements SpanExporter {
   private readonly timeoutMillis: number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly now: () => number;
+  private readonly quota: QuotaState;
   private readonly inFlight = new Set<Promise<void>>();
   private stopped = false;
 
@@ -56,6 +56,7 @@ export class FetchTraceExporter implements SpanExporter {
     this.timeoutMillis = options.timeoutMillis ?? DEFAULT_TIMEOUT_MILLIS;
     this.sleep = options.sleep ?? defaultSleep;
     this.now = options.now ?? Date.now;
+    this.quota = options.quota ?? new QuotaState(this.now);
   }
 
   export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void {
@@ -85,9 +86,13 @@ export class FetchTraceExporter implements SpanExporter {
     if (this.stopped) {
       return failure("shutdown");
     }
+    if (this.quota.paused()) {
+      // D-P-34: spans are dropped while the org is over its units cap.
+      return { code: ExportResultCode.SUCCESS };
+    }
     const fetch = this.fetcher;
     if (fetch === undefined) {
-      warnOnce("no-fetch", "llmobs: fetch is not available; spans are not exported");
+      warnOnce("no-fetch", "cetra: fetch is not available; spans are not exported");
       return failure("no fetch");
     }
     try {
@@ -145,6 +150,11 @@ export class FetchTraceExporter implements SpanExporter {
       } catch {
         status = undefined; // network error or timeout; retryable
       }
+      if (status === 402) {
+        // D-P-34: pause every exporter, drop this batch, and report success.
+        this.quota.on402(retryAfter);
+        return { code: ExportResultCode.SUCCESS };
+      }
       const reason = status === undefined ? "network" : `http ${String(status)}`;
       if (status !== undefined && !RETRYABLE_STATUSES.has(status)) {
         return failure(reason);
@@ -164,36 +174,4 @@ export class FetchTraceExporter implements SpanExporter {
 
 function failure(reason: string): ExportResult {
   return { code: ExportResultCode.FAILED, error: new Error(reason) };
-}
-
-/** Backoff after the attempt with index `attempt` (0-based): 1 s, 2 s, 4 s. */
-function backoffMillis(attempt: number): number {
-  switch (attempt) {
-    case 0:
-      return 1_000;
-    case 1:
-      return 2_000;
-    default:
-      return 4_000;
-  }
-}
-
-/** `Retry-After` seconds when a non-negative integer (capped at 30 s), else the backoff. */
-function waitMillis(retryAfter: string | null, attempt: number): number {
-  const header = retryAfter === null ? undefined : retryAfter.trim();
-  if (header !== undefined && NON_NEGATIVE_INTEGER.test(header)) {
-    return Math.min(Number(header) * 1000, RETRY_AFTER_MAX_MILLIS);
-  }
-  return backoffMillis(attempt);
-}
-
-function defaultSleep(ms: number): Promise<void> {
-  const { setTimeout } = runtimeGlobals();
-  if (setTimeout === undefined) {
-    // No timer in this runtime: continue without the wait.
-    return Promise.resolve();
-  }
-  return new Promise<void>((resolve) => {
-    setTimeout(resolve, ms);
-  });
 }

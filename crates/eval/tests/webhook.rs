@@ -10,9 +10,9 @@ use crate::mapping::resolve::Variables;
 use crate::mock::{Mock, MockReply};
 use crate::secret::Secret;
 use crate::webhook::{WebhookCall, WebhookReply, exchange};
-use llmobs_core::enums::ScoreDataType;
-use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-use llmobs_core::score::ScoreValue;
+use cetra_core::enums::ScoreDataType;
+use cetra_core::ids::{ProjectId, SpanId, TraceId};
+use cetra_core::score::ScoreValue;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -36,6 +36,7 @@ fn webhook_url(mock: &Mock) -> String {
 fn client(allow_private_network: bool) -> EgressClient {
     EgressClient::new(EgressPolicy {
         allow_private_network,
+        restore_mode: false,
     })
     .expect("client")
 }
@@ -114,7 +115,11 @@ async fn signs_the_exact_body_and_sends_the_headers() {
     let http = client(true);
     let config = config(
         webhook_url(&mock),
-        vec![("X-Extra", "keep"), ("x-llmobs-signature", "forged")],
+        vec![
+            ("X-Extra", "keep"),
+            ("x-cetra-signature", "forged"),
+            ("Content-Type", "text/plain"),
+        ],
     );
     let secret = Secret::new(VECTOR_SECRET.to_owned());
     let variables = variables();
@@ -157,7 +162,7 @@ async fn signs_the_exact_body_and_sends_the_headers() {
     );
     assert_eq!(seen[0].header("content-type"), Some("application/json"));
     assert_eq!(seen[0].header("x-extra"), Some("keep"));
-    assert_eq!(seen[0].header("x-llmobs-signature"), Some(SIGNATURE));
+    assert_eq!(seen[0].header("x-cetra-signature"), Some(SIGNATURE));
     assert_clean(&format!("{:?}", seen[0].headers));
 }
 
@@ -285,10 +290,10 @@ async fn classifies_each_status_and_does_not_follow_a_redirect() {
         (401, ErrorClass::Pause),
         (403, ErrorClass::Pause),
         (404, ErrorClass::Pause),
+        (402, ErrorClass::Pause),
         (410, ErrorClass::Pause),
         (301, ErrorClass::Permanent),
         (400, ErrorClass::Permanent),
-        (402, ErrorClass::Permanent),
         (422, ErrorClass::Permanent),
     ];
     for (status, class) in cases {

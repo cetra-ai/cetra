@@ -3,7 +3,7 @@
 use axum::extract::{Extension, State};
 use axum::http::Method;
 use axum::routing::get;
-use llmobs_storage as storage;
+use cetra_storage as storage;
 use serde::Deserialize;
 
 use crate::api::common::{ExclusionParams, Page};
@@ -15,7 +15,7 @@ use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
 use crate::routes::read::{
-    READ_TIMEOUT, attach_session_scores, list_scope, open_query, page_limit, sort_order,
+    Deadline, READ_TIMEOUT, attach_session_scores, list_scope, open_query, page_limit, sort_order,
 };
 
 /// End-user read routes. All are documented and need project view.
@@ -60,7 +60,7 @@ async fn list_users(
         params.include_eval,
         params.include_experiments,
     )?;
-    let ctx = open_query(&state, access.project.id, None).await?;
+    let ctx = open_query(&state, access.project.org_id, access.project.id, None).await?;
     let page = storage::user_list(
         &ctx,
         storage::UserListRequest {
@@ -86,13 +86,14 @@ async fn get_user(
     error::Path(path): error::Path<UserPath>,
     error::Query(params): error::Query<ExclusionParams>,
 ) -> Result<error::Json<EndUserDetail>, ApiError> {
-    let ctx = open_query(&state, access.project.id, None).await?;
+    let deadline = Deadline::start();
+    let ctx = open_query(&state, access.project.org_id, access.project.id, None).await?;
     let data = storage::user_detail(
         &ctx,
         &path.user_id,
         params.include_eval,
         params.include_experiments,
-        READ_TIMEOUT,
+        deadline.remaining()?,
     )
     .await?
     .ok_or(ApiError::NotFound)?;
@@ -100,7 +101,7 @@ async fn get_user(
         .pop()
         .ok_or(ApiError::NotFound)?;
     let mut sessions: Vec<SessionSummary> = convert::session_summaries(&data.sessions)?;
-    attach_session_scores(&ctx, &mut sessions).await?;
+    attach_session_scores(&ctx, &mut sessions, deadline).await?;
     Ok(error::Json(EndUserDetail { user, sessions }))
 }
 

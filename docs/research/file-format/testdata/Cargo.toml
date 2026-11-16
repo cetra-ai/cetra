@@ -7,7 +7,7 @@ publish = false
 [workspace]
 
 [dependencies]
-llmobs-core = { path = "/home/sebastien/travaux/llm-observer/crates/core" }
+cetra-core = { path = "/home/sebastien/travaux/llm-observer/crates/core" }
 arrow = { version = "59.2", default-features = false, features = ["ipc", "prettyprint"] }
 parquet = { version = "59.2", default-features = false, features = ["arrow", "async", "object_store", "zstd", "snap"] }
 serde_json = "1"

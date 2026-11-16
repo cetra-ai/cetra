@@ -19,12 +19,12 @@ See [README.md](README.md) for the decisions, boundaries and conventions. E1 is 
 4. **Spec 06 § `check`:** a "Defaults" paragraph from D164 (text extraction, each check's defaults, the reason of `json_schema`, the Levenshtein formula and `normalize`).
 5. **Spec 06 § `webhook`:** D165's details (timeout default and cap, no redirects, 64 KiB cap, a `200` with a bad body is permanent).
 6. **Spec 06 § Variable mapping:** add the `span[kind="…"]` selector, the trailing `?`, the root rule, payload decoding and JSONPath match counts (D162). After the table, a "Rendering" paragraph from D163 (how values render in prompts, the transcript layout).
-7. **Spec 06 § Execution:** the retries bullet gains "Failures arrive classified by `llmobs-eval` as retryable, pause or permanent (D160)". Add "pause" to the error breaker: a pause-class error pauses the rule at once with `paused_reason='errors'`.
-8. **Spec 06:** a new last section, "## Library", saying in three sentences that `llmobs-eval` implements evaluator execution, mapping, templating and judge traces without a database, and the server track owns the queue, tables, encryption and handlers (D155, D156).
+7. **Spec 06 § Execution:** the retries bullet gains "Failures arrive classified by `cetra-eval` as retryable, pause or permanent (D160)". Add "pause" to the error breaker: a pause-class error pauses the rule at once with `paused_reason='errors'`.
+8. **Spec 06:** a new last section, "## Library", saying in three sentences that `cetra-eval` implements evaluator execution, mapping, templating and judge traces without a database, and the server track owns the queue, tables, encryption and handlers (D155, D156).
 9. **Spec 04 `llm_connections`:** add `structured_output TEXT NOT NULL DEFAULT 'native', -- 'native' | 'tool' | 'prompt' (06)` after `default_model` (D157).
-10. **Spec 02 § Validation** (or the section that lists reserved values; find it): one sentence that `environment = "llmobs-eval"` from OTLP is rewritten by the OTLP handler after normalization (D161).
+10. **Spec 02 § Validation** (or the section that lists reserved values; find it): one sentence that `environment = "cetra-eval"` from OTLP is rewritten by the OTLP handler after normalization (D161).
 11. **Spec 12:** in the SSRF bullet, list D166's denied ranges, "redirects are never followed", and "the check applies to every resolved address and to literal IPs".
-12. **`docs/spec/README.md`** and **`AGENTS.md` § Layout:** add `crates/eval  llmobs-eval  evaluator execution: checks, mapping, templates, judges, webhooks, judge traces (spec 06)`. In the crate dependency graph: "`eval` depends on `core` and `otel`"; "`server` depends on `core`, `otel`, `storage` and `eval`". Do not add the dependency to `crates/server/Cargo.toml`: the server track does that with its first call.
+12. **`docs/spec/README.md`** and **`AGENTS.md` § Layout:** add `crates/eval  cetra-eval  evaluator execution: checks, mapping, templates, judges, webhooks, judge traces (spec 06)`. In the crate dependency graph: "`eval` depends on `core` and `otel`"; "`server` depends on `core`, `otel`, `storage` and `eval`". Do not add the dependency to `crates/server/Cargo.toml`: the server track does that with its first call.
 13. **`docs/plans/d-meta-auth/README.md`:** under R-E1, add "Moved to the Wave 2 eval server track by D156." Change nothing else in that plan.
 
 **Checks:** `just check`.
@@ -37,7 +37,7 @@ See [README.md](README.md) for the decisions, boundaries and conventions. E1 is 
 
 **Edit only:** the root `Cargo.toml`, `Cargo.lock`, `crates/eval/`.
 
-**Crate.** Package `llmobs-eval`, description "Evaluator execution: checks, variable mapping, templates, LLM judges, webhooks", `[lints] workspace = true`, the workspace `version`/`edition`/`rust-version`/`publish`. Add `llmobs-eval = { path = "crates/eval" }` to `[workspace.dependencies]` next to the other workspace crates. The workspace already globs `crates/*`; check that it does. Dependencies in this sub-phase: `llmobs-core`, `serde`, `serde_json`, `thiserror`, `uuid` (all workspace). Dev: `insta`.
+**Crate.** Package `cetra-eval`, description "Evaluator execution: checks, variable mapping, templates, LLM judges, webhooks", `[lints] workspace = true`, the workspace `version`/`edition`/`rust-version`/`publish`. Add `cetra-eval = { path = "crates/eval" }` to `[workspace.dependencies]` next to the other workspace crates. The workspace already globs `crates/*`; check that it does. Dependencies in this sub-phase: `cetra-core`, `serde`, `serde_json`, `thiserror`, `uuid` (all workspace). Dev: `insta`.
 
 **`secret.rs`.** `pub struct Secret(String)`:
 - `Secret::new(String)`, `expose(&self) -> &str`;
@@ -69,8 +69,8 @@ Test: `format!("{:?}", Secret::new("sk-live-123".into()))` does not contain `sk-
   - `JsonValid {}`;
   - `JsonSchema { schema: serde_json::Value }`;
   - `Levenshtein { normalize: bool = true }`.
-- `pub struct WebhookConfig`: `url: String` (absolute `http`/`https`, no userinfo; parsed with `reqwest::Url` from E10 — in E2 check the scheme prefix and non-empty host with a small hand-written check, and E10 replaces it with `Url::parse`), `timeout_ms: u32` (default 10 000, 1 000–60 000), `headers: BTreeMap<String, String>` (default empty; at most 20; names are valid HTTP token characters and not one of `content-type`, `content-length`, `host`, `x-llmobs-signature`, case-insensitively), `secret_enc: Option<String>` (opaque; stored by the server, never read here; document that on the field). This struct does **not** deny unknown fields, so the server can add bookkeeping keys without breaking parsing; document why.
-- `pub struct OutputScore { name: String, data_type: ScoreDataType, categories: Option<Vec<String>> }` (the `evaluators.output_score` column). `ScoreDataType` comes from `llmobs_core::enums`.
+- `pub struct WebhookConfig`: `url: String` (absolute `http`/`https`, no userinfo; parsed with `reqwest::Url` from E10 — in E2 check the scheme prefix and non-empty host with a small hand-written check, and E10 replaces it with `Url::parse`), `timeout_ms: u32` (default 10 000, 1 000–60 000), `headers: BTreeMap<String, String>` (default empty; at most 20; names are valid HTTP token characters and not one of `content-type`, `content-length`, `host`, `x-cetra-signature`, case-insensitively), `secret_enc: Option<String>` (opaque; stored by the server, never read here; document that on the field). This struct does **not** deny unknown fields, so the server can add bookkeeping keys without breaking parsing; document why.
+- `pub struct OutputScore { name: String, data_type: ScoreDataType, categories: Option<Vec<String>> }` (the `evaluators.output_score` column). `ScoreDataType` comes from `cetra_core::enums`.
 - `pub struct Evaluator { pub id: Uuid, pub name: String, pub config: EvaluatorConfig, pub output: OutputScore }`.
 - `impl Evaluator { pub fn validate(&self) -> Result<(), ConfigError> }` checks every rule above and that the output agrees with the config:
   - judge: numeric → `numeric`, boolean → `boolean`, categorical → `categorical` with `categories` equal to `labels`;
@@ -99,8 +99,8 @@ Test: `format!("{:?}", Secret::new("sk-live-123".into()))` does not contain `sk-
 **Edit only:** `crates/eval/`, the root `Cargo.toml` and `Cargo.lock` (add `regex` to the crate).
 
 **`text.rs`.**
-- `pub(crate) fn extract_text(value: &serde_json::Value) -> String` per D164: a string as is; a messages array (an array whose elements all parse as `llmobs_core::message::Message`) gives the concatenated text parts of the last `assistant` message, joined with `\n`, or `""` if there is none; any other value gives compact JSON (`serde_json::to_string`).
-- `pub(crate) fn is_messages(value) -> Option<Vec<Message>>` used by `extract_text` and later by E8's rendering. Use `llmobs_core::message::parse_messages` on the value's JSON text only if there is no `Deserialize`-from-`Value` path; prefer `serde_json::from_value`.
+- `pub(crate) fn extract_text(value: &serde_json::Value) -> String` per D164: a string as is; a messages array (an array whose elements all parse as `cetra_core::message::Message`) gives the concatenated text parts of the last `assistant` message, joined with `\n`, or `""` if there is none; any other value gives compact JSON (`serde_json::to_string`).
+- `pub(crate) fn is_messages(value) -> Option<Vec<Message>>` used by `extract_text` and later by E8's rendering. Use `cetra_core::message::parse_messages` on the value's JSON text only if there is no `Deserialize`-from-`Value` path; prefer `serde_json::from_value`.
 
 **`check.rs`.**
 - `pub struct CheckInput<'a> { pub output: Option<&'a Value>, pub expected: Option<&'a Value> }`.

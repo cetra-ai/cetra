@@ -1,8 +1,8 @@
 {
-  "name": "llmobs",
+  "name": "@cetra-ai/sdk",
   "version": "0.0.0",
   "private": true,
-  "description": "TypeScript SDK for llmobs.",
+  "description": "TypeScript SDK for cetra.",
   "license": "MIT",
   "type": "module",
   "sideEffects": false,
@@ -42,17 +42,17 @@
     "check": "biome check . && pnpm typecheck && pnpm test && pnpm build && pnpm check:package"
   },
   "devDependencies": {
-    "@anthropic-ai/sdk": "1.5.0",
+    "@anthropic-ai/sdk": "1.6.0",
     "@arethetypeswrong/cli": "0.18.5",
-    "@arizeai/openinference-instrumentation-anthropic": "1.0.0",
+    "@arizeai/openinference-instrumentation-anthropic": "1.0.1",
     "@arizeai/openinference-instrumentation-langchain": "4.1.5",
     "@arizeai/openinference-instrumentation-openai": "4.4.3",
-    "@langchain/core": "1.3.4",
+    "@langchain/core": "1.3.5",
     "@opentelemetry/api": "1.9.1",
     "@types/node": "26.6.6",
-    "openai": "7.50.0",
+    "openai": "7.53.0",
     "publint": "0.3.25",
-    "tsdown": "0.23.4",
+    "tsdown": "0.23.7",
     "typescript": "5.9.3",
     "vitest": "5.1.0"
   },

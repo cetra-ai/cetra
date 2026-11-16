@@ -11,5 +11,7 @@ export function featureOffer(feature: Feature): string {
       return "Available with the Teams add-on or an enterprise licence";
     case "sso_enforcement":
       return "Available with an enterprise licence";
+    case "org_sso":
+      return "Available with the Teams add-on or an enterprise licence";
   }
 }

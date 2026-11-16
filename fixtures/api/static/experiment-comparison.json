@@ -1,0 +1,227 @@
+{
+  "experiments": [
+    {
+      "experiment": {
+        "id": "01900000-0000-7000-8000-000000000e01",
+        "name": "baseline",
+        "dataset_id": "01900000-0000-7000-8000-000000000c01",
+        "dataset_name": "faq",
+        "dataset_version": 2,
+        "metadata": {
+          "model": "gpt-5-mini",
+          "prompt": "v1"
+        },
+        "repetitions": 1,
+        "item_count": 3,
+        "result_count": 3,
+        "status": "completed",
+        "created_at": "2026-01-01T10:00:00.000000000Z",
+        "finished_at": "2026-01-01T10:05:00.000000000Z"
+      },
+      "scores": [
+        {
+          "name": "exact",
+          "data_type": "boolean",
+          "count": 3,
+          "mean": 0.6666666666666666,
+          "median": 1.0,
+          "min": 0.0,
+          "max": 1.0,
+          "pass_rate": 0.6666666666666666,
+          "labels": {}
+        },
+        {
+          "name": "quality",
+          "data_type": "numeric",
+          "count": 3,
+          "mean": 0.6666666666666666,
+          "median": 0.5,
+          "min": 0.5,
+          "max": 1.0,
+          "labels": {}
+        }
+      ],
+      "result_count": 3,
+      "error_count": 0,
+      "latency_mean_ns": 2000000000,
+      "latency_p50_ns": 2000000000,
+      "latency_p95_ns": 3000000000,
+      "cost_total": 1.0
+    },
+    {
+      "experiment": {
+        "id": "01900000-0000-7000-8000-000000000e02",
+        "name": "candidate",
+        "dataset_id": "01900000-0000-7000-8000-000000000c01",
+        "dataset_name": "faq",
+        "dataset_version": 2,
+        "metadata": {
+          "model": "gpt-5-mini",
+          "prompt": "v2"
+        },
+        "repetitions": 1,
+        "item_count": 3,
+        "result_count": 3,
+        "status": "completed",
+        "created_at": "2026-01-01T11:00:00.000000000Z",
+        "finished_at": "2026-01-01T11:05:00.000000000Z"
+      },
+      "scores": [
+        {
+          "name": "exact",
+          "data_type": "boolean",
+          "count": 3,
+          "mean": 0.3333333333333333,
+          "median": 0.0,
+          "min": 0.0,
+          "max": 1.0,
+          "pass_rate": 0.3333333333333333,
+          "labels": {}
+        },
+        {
+          "name": "quality",
+          "data_type": "numeric",
+          "count": 3,
+          "mean": 0.5,
+          "median": 0.5,
+          "min": 0.0,
+          "max": 1.0,
+          "labels": {}
+        }
+      ],
+      "result_count": 3,
+      "error_count": 0,
+      "latency_mean_ns": 4000000000,
+      "latency_p50_ns": 4000000000,
+      "latency_p95_ns": 6000000000,
+      "cost_total": 0.75
+    }
+  ],
+  "deltas": [
+    {
+      "experiment_id": "01900000-0000-7000-8000-000000000e02",
+      "scores": {
+        "exact": {
+          "delta": -0.3333333333333333,
+          "n_compared": 3
+        },
+        "quality": {
+          "delta": -0.16666666666666663,
+          "n_compared": 3
+        }
+      }
+    }
+  ],
+  "warnings": [],
+  "rows": [
+    {
+      "dataset_item_id": "01900000-0000-7000-8000-000000000d01",
+      "input": {
+        "question": "How do I reset my password?"
+      },
+      "expected_output": {
+        "answer": "Use the Forgot password link on the login page."
+      },
+      "cells": [
+        {
+          "experiment_id": "01900000-0000-7000-8000-000000000e01",
+          "output": {
+            "answer": "Use the Forgot password link on the login page."
+          },
+          "trace_id": "e1000000000000000000000000000001",
+          "latency_ns": 1000000000,
+          "scores": {
+            "exact": 1.0,
+            "quality": 1.0
+          },
+          "regressed": false
+        },
+        {
+          "experiment_id": "01900000-0000-7000-8000-000000000e02",
+          "output": {
+            "answer": "Reset it from the login page with Forgot password."
+          },
+          "trace_id": "e2000000000000000000000000000001",
+          "latency_ns": 2000000000,
+          "scores": {
+            "exact": 1.0,
+            "quality": 1.0
+          },
+          "regressed": false
+        }
+      ]
+    },
+    {
+      "dataset_item_id": "01900000-0000-7000-8000-000000000d02",
+      "input": {
+        "question": "Can I export my traces?"
+      },
+      "expected_output": {
+        "answer": "Yes, as JSONL or CSV."
+      },
+      "cells": [
+        {
+          "experiment_id": "01900000-0000-7000-8000-000000000e01",
+          "output": {
+            "answer": "Yes, as JSONL or CSV."
+          },
+          "trace_id": "e1000000000000000000000000000002",
+          "latency_ns": 2000000000,
+          "scores": {
+            "exact": 1.0,
+            "quality": 0.5
+          },
+          "regressed": false
+        },
+        {
+          "experiment_id": "01900000-0000-7000-8000-000000000e02",
+          "output": {
+            "answer": "No."
+          },
+          "trace_id": "e2000000000000000000000000000002",
+          "latency_ns": 4000000000,
+          "scores": {
+            "exact": 0.0,
+            "quality": 0.0
+          },
+          "regressed": true
+        }
+      ]
+    },
+    {
+      "dataset_item_id": "01900000-0000-7000-8000-000000000d03",
+      "input": {
+        "question": "Which plans include SSO?"
+      },
+      "cells": [
+        {
+          "experiment_id": "01900000-0000-7000-8000-000000000e01",
+          "output": {
+            "answer": "Enterprise and above."
+          },
+          "trace_id": "e1000000000000000000000000000003",
+          "latency_ns": 3000000000,
+          "scores": {
+            "exact": 0.0,
+            "quality": 0.5
+          },
+          "regressed": false
+        },
+        {
+          "experiment_id": "01900000-0000-7000-8000-000000000e02",
+          "output": {
+            "answer": "Enterprise only."
+          },
+          "trace_id": "e2000000000000000000000000000003",
+          "latency_ns": 6000000000,
+          "scores": {
+            "exact": 0.0,
+            "quality": 0.5
+          },
+          "regressed": false
+        }
+      ]
+    }
+  ],
+  "next_cursor": null
+}

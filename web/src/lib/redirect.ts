@@ -34,6 +34,16 @@ export function isPublicPath(pathname: string): boolean {
   return PUBLIC_PATHS.has(path) || path.startsWith("/invite/");
 }
 
+/** `/api/auth/sso/authorize?domain=…&redirect=…` (D-P-60). `redirect` omitted when undefined. */
+export function ssoAuthorizeHref(domain: string, redirect?: string): string {
+  const query = new URLSearchParams();
+  query.set("domain", domain);
+  if (redirect !== undefined) {
+    query.set("redirect", redirect);
+  }
+  return `/api/auth/sso/authorize?${query.toString()}`;
+}
+
 /** Full-page link that starts an OAuth/OIDC login (spec 08). */
 export function authorizeHref(
   providerId: string,

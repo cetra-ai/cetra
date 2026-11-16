@@ -41,15 +41,15 @@
           },
           "spans": [
             {
-              "traceId": "9655257f7c68d7fe324e9f47397de1ae",
-              "spanId": "1612fb66634068a2",
+              "traceId": "d90013b352faee6913fa0b9fc9e6f5a6",
+              "spanId": "89ecdc6a2581aa4d",
               "traceState": "",
               "parentSpanId": "",
               "flags": 257,
               "name": "ai.streamText",
               "kind": 1,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590201000000",
+              "endTimeUnixNano": "1767225590203000000",
               "attributes": [
                 {
                   "key": "operation.name",
@@ -180,15 +180,15 @@
               "status": null
             },
             {
-              "traceId": "9655257f7c68d7fe324e9f47397de1ae",
-              "spanId": "734a75bf3bf67508",
+              "traceId": "d90013b352faee6913fa0b9fc9e6f5a6",
+              "spanId": "a0b709b1fd77630c",
               "traceState": "",
-              "parentSpanId": "1612fb66634068a2",
+              "parentSpanId": "89ecdc6a2581aa4d",
               "flags": 257,
               "name": "ai.streamText.doStream",
               "kind": 1,
-              "startTimeUnixNano": "1767225590005000000",
-              "endTimeUnixNano": "1767225590196000000",
+              "startTimeUnixNano": "1767225590006000000",
+              "endTimeUnixNano": "1767225590197000000",
               "attributes": [
                 {
                   "key": "operation.name",
@@ -253,19 +253,19 @@
                 {
                   "key": "ai.response.msToFirstChunk",
                   "value": {
-                    "doubleValue": 155.908406
+                    "doubleValue": 155.237763
                   }
                 },
                 {
                   "key": "ai.response.msToFinish",
                   "value": {
-                    "doubleValue": 189.855662
+                    "doubleValue": 189.84217399999997
                   }
                 },
                 {
                   "key": "ai.response.avgOutputTokensPerSecond",
                   "value": {
-                    "doubleValue": 42.137273735876256
+                    "doubleValue": 42.14026752559208
                   }
                 },
                 {
@@ -404,14 +404,14 @@
                     {
                       "key": "ai.response.msToFirstChunk",
                       "value": {
-                        "doubleValue": 155.908406
+                        "doubleValue": 155.237763
                       }
                     }
                   ],
                   "droppedAttributesCount": 0
                 },
                 {
-                  "timeUnixNano": "1767225590195000000",
+                  "timeUnixNano": "1767225590196000000",
                   "name": "ai.stream.finish",
                   "attributes": [],
                   "droppedAttributesCount": 0

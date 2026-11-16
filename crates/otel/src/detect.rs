@@ -3,13 +3,13 @@
 //! Spec 02 § Convention detection and rule 13. The result is precedence order,
 //! not the order the keys were seen.
 
-use llmobs_core::enums::Convention;
+use cetra_core::enums::Convention;
 use opentelemetry_proto::tonic::trace::v1::span::Event;
 
 use crate::bag::{AttrBag, is_decimal_index};
 
 const PRECEDENCE: [Convention; 8] = [
-    Convention::Llmobs,
+    Convention::Cetra,
     Convention::Genai,
     Convention::Openinference,
     Convention::Vercel,
@@ -23,8 +23,8 @@ const PRECEDENCE: [Convention; 8] = [
 pub(crate) fn detect(bag: &AttrBag<'_>, events: &[Event]) -> Vec<Convention> {
     let mut present = [false; PRECEDENCE.len()];
     for key in bag.keys() {
-        if key.starts_with("llmobs.") {
-            mark(&mut present, Convention::Llmobs);
+        if key.starts_with("cetra.") {
+            mark(&mut present, Convention::Cetra);
         }
         if key.starts_with("gen_ai.") && !legacy_numbered(key) {
             mark(&mut present, Convention::Genai);
@@ -63,7 +63,7 @@ fn mark(present: &mut [bool; PRECEDENCE.len()], convention: Convention) {
 
 fn slot(convention: Convention) -> usize {
     match convention {
-        Convention::Llmobs => 0,
+        Convention::Cetra => 0,
         Convention::Genai => 1,
         Convention::Openinference => 2,
         Convention::Vercel => 3,
@@ -139,8 +139,8 @@ mod tests {
 
     #[test]
     fn each_convention_has_a_matching_key() {
-        assert_eq!(detect_keys(&["llmobs.span.kind"]), vec![Convention::Llmobs]);
-        assert_eq!(detect_keys(&["llmobs"]), Vec::new());
+        assert_eq!(detect_keys(&["cetra.span.kind"]), vec![Convention::Cetra]);
+        assert_eq!(detect_keys(&["cetra"]), Vec::new());
         assert_eq!(
             detect_keys(&["gen_ai.request.model"]),
             vec![Convention::Genai]

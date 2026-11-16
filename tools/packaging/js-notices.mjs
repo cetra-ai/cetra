@@ -37,7 +37,7 @@ packages.sort((a, b) => a.name.localeCompare(b.name));
 
 const out = [];
 out.push("# Third-party notices: web UI packages", "");
-out.push("The web UI embedded in the `llmobs` binary includes the following packages.", "");
+out.push("The web UI embedded in the `cetra` binary includes the following packages.", "");
 let missing = 0;
 for (const pkg of packages) {
   out.push(`## ${pkg.name} ${pkg.versions.join(", ")} (${pkg.license})`, "");

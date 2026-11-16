@@ -1,0 +1,72 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "conformance"
+            }
+          },
+          {
+            "key": "telemetry.distro.name",
+            "value": {
+              "stringValue": "cetra"
+            }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "cetra",
+            "version": "0.0.0"
+          },
+          "spans": [
+            {
+              "traceId": "00000000000000000000000000000001",
+              "spanId": "0000000000000001",
+              "name": "stream",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590001000000",
+              "endTimeUnixNano": "1767225590999000000",
+              "attributes": [
+                {
+                  "key": "cetra.input",
+                  "value": {
+                    "stringValue": "{\"prompt\":\"hi\"}"
+                  }
+                },
+                {
+                  "key": "cetra.input.format",
+                  "value": {
+                    "stringValue": "json"
+                  }
+                },
+                {
+                  "key": "cetra.output",
+                  "value": {
+                    "stringValue": "Hello"
+                  }
+                },
+                {
+                  "key": "cetra.output.format",
+                  "value": {
+                    "stringValue": "text"
+                  }
+                },
+                {
+                  "key": "cetra.span.kind",
+                  "value": {
+                    "stringValue": "chain"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

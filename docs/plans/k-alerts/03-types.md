@@ -302,7 +302,7 @@ Later sub-phases add `pub(crate) mod evaluate;`, `message;`, `deliver;` here.
 ```rust
 //! Rule condition defaults and checks (D-K-2).
 
-use llmobs_storage::AlertMeasure;
+use cetra_storage::AlertMeasure;
 
 use crate::api::alerts::{AlertCondition, AlertMetric, LatencyTarget, ScoreAggregation};
 use crate::api::common::FieldError;
@@ -330,7 +330,7 @@ Take the argument as `mut condition`, change its fields in place and return `Ok(
 2. **threshold**: not finite (`!threshold.is_finite()`) → error `threshold`, `"must be a finite number"`, and skip the per-metric check. Otherwise, per metric:
    - `error_rate`: outside `[0, 1]` → `"must be between 0 and 1"`;
    - `cost`: below 0 → `"must be at least 0"`;
-   - `latency_p95`: `<= 0` → `"must be greater than 0"`;
+   - `latency_p95`: `<= 0` → `"must be greater than 0"`; target `trace` (or `None`) and `threshold >= window length in ms` → `"must be less than the window"` (D-K-18);
    - `score` with aggregation `pass_rate` (after the default below): outside `[0, 1]` → `"must be between 0 and 1"`; with `avg`: no range.
 3. **min_count**:
    - `cost`: `Some(_)` → error `min_count`, `"does not apply to cost"`; stays `None`.
@@ -399,8 +399,8 @@ pub(crate) const RESERVED_HEADERS: &[&str] = &[
     "content-length",
     "host",
     "user-agent",
-    "x-llmobs-signature",
-    "x-llmobs-delivery",
+    "x-cetra-signature",
+    "x-cetra-delivery",
 ];
 
 /// The decrypted configuration of one channel. Never logged: [`fmt::Debug`] prints the kind only.
@@ -452,7 +452,7 @@ Field errors use `position: None`. For each kind:
   - `url`: as Slack, in the same order (length, parse, scheme/host), but the scheme may be `http` or `https` (`"must use http or https"`).
   - `secret`: 16 to 256 characters (`chars().count()`), else `"must be 16 to 256 characters"`.
   - `headers`: more than `MAX_HEADERS` entries → `"at most 10 headers"`. For each `(name, value)`: `HeaderName::from_bytes(name.as_bytes())` fails → `"invalid header name"`; the lower-cased name is in `RESERVED_HEADERS` → `"header is set by the server"`; `value.len() > MAX_HEADER_VALUE_BYTES` or `HeaderValue::from_str(value)` fails → `"invalid header value"`. Report one `headers` error at most (the first found, iterating the `BTreeMap` in order); the message must not contain the header value.
-- **Email**: one `recipients` error at most, the first that applies in this order: empty → `"at least one recipient"`; more than `MAX_RECIPIENTS` → `"at most 20 recipients"`; the first entry that is not `is_email_address(entry)` → `"invalid email address"`; two entries equal ignoring ASCII case → `"duplicate recipient"`. The message never contains the address.
+- **Email**: one `recipients` error at most, the first that applies in this order: empty → `"at least one recipient"`; more than `MAX_RECIPIENTS` → `"at most 20 recipients"`; the first entry that is not `is_email_address(entry)` → `"invalid email address"`; two entries equal ignoring ASCII case → `"duplicate recipient"`. The message never contains the address. Under open signup the members rule (D-K-19: each recipient a verified member of the org, `"must be verified members of this organization"`) is not in `validate`, which has no org; the routes check it after `validate` on create and update, and `deliver` checks it at send time.
 
 ### `target_hint`
 
@@ -463,7 +463,7 @@ Field errors use `position: None`. For each kind:
 ### Tests (`#[cfg(test)] mod tests`)
 
 1. `slack_url_must_be_https`: `http://hooks.slack.com/x` → one `url` error `"must use https"`; `not a url` → `"must be a valid URL"`; `format!("https://hooks.slack.com/{}", "a".repeat(2049 - 24))` (2 049 bytes) → `"at most 2048 bytes"`; `https://hooks.slack.com/services/T/B/abcd` → ok.
-2. `webhook_checks_secret_and_headers`: secret of 15 characters → `secret` error; 16 → ok; 257 → error. Headers: 11 entries → `"at most 10 headers"`; `{"X-Llmobs-Signature": "v"}` → `"header is set by the server"`; `{"bad name": "v"}` → `"invalid header name"`; `{"X-Ok": "line\nbreak"}` → `"invalid header value"`, and the message does not contain `"line"`; `{"X-Team": "core"}` → ok.
+2. `webhook_checks_secret_and_headers`: secret of 15 characters → `secret` error; 16 → ok; 257 → error. Headers: 11 entries → `"at most 10 headers"`; `{"X-Cetra-Signature": "v"}` → `"header is set by the server"`; `{"bad name": "v"}` → `"invalid header name"`; `{"X-Ok": "line\nbreak"}` → `"invalid header value"`, and the message does not contain `"line"`; `{"X-Team": "core"}` → ok.
 3. `webhook_allows_http`: `http://10.0.0.1:9000/hook` validates (the egress guard decides at send time, not here).
 4. `email_recipients`: `[]` → `"at least one recipient"`; 21 valid addresses (`(0..21).map(|i| format!("u{i}@x.io"))`) → `"at most 20 recipients"`; `["not-an-address"]` → `"invalid email address"`; `["A@x.io","a@x.io"]` → `"duplicate recipient"`; `["a@x.io"]` → ok.
 5. `errors_are_collected_together`: a webhook with a bad URL and a short secret → two errors, `url` then `secret`.
@@ -475,7 +475,7 @@ Field errors use `position: None`. For each kind:
 ## Commands
 
 ```bash
-cargo test -p llmobs-server alerts::
+cargo test -p cetra-server alerts::
 ```
 
 ```bash

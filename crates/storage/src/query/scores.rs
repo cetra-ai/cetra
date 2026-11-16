@@ -6,6 +6,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use cetra_core::ids::ProjectId;
+use cetra_core::schema::{scores, scores_schema};
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::common::DataFusionError;
 use datafusion::datasource::provider_as_source;
@@ -15,8 +17,6 @@ use datafusion::logical_expr::{
     col, lit,
 };
 use datafusion::physical_plan::ExecutionPlan;
-use llmobs_core::ids::ProjectId;
-use llmobs_core::schema::{scores, scores_schema};
 
 #[cfg(test)]
 use super::overlapping_files;
@@ -235,17 +235,18 @@ impl TableProvider for RawScores {
 
 #[cfg(test)]
 mod tests {
+    use crate::QueryOptions;
     use bytesize::ByteSize;
     use std::path::Path;
 
     use arrow::array::{Array, Int64Array, RecordBatch, StringArray, TimestampNanosecondArray};
+    use cetra_core::batch::scores_to_record_batch;
+    use cetra_core::enums::ScoreSource;
+    use cetra_core::ids::{ProjectId, TraceId};
+    use cetra_core::schema::scores;
+    use cetra_core::score::{Score, ScoreTarget, ScoreValue};
     use datafusion::execution::context::SessionContext;
     use datafusion::logical_expr::Expr;
-    use llmobs_core::batch::scores_to_record_batch;
-    use llmobs_core::enums::ScoreSource;
-    use llmobs_core::ids::{ProjectId, TraceId};
-    use llmobs_core::schema::scores;
-    use llmobs_core::score::{Score, ScoreTarget, ScoreValue};
 
     use crate::config::{
         FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
@@ -257,6 +258,7 @@ mod tests {
 
     fn config_in(dir: &Path) -> StorageConfig {
         StorageConfig {
+            delete_objects: true,
             data_dir: dir.to_path_buf(),
             min_free_bytes: ByteSize::b(0),
             object_store: None,
@@ -318,7 +320,10 @@ mod tests {
     }
 
     async fn names(storage: &crate::Storage) -> Vec<String> {
-        let query = storage.query(project(), Default::default()).await.unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let ctx = SessionContext::new();
         ctx.register_table("scores_t", query.scores).unwrap();
         let batches = ctx
@@ -379,7 +384,10 @@ mod tests {
             .append_scores(project(), batch_of(&rows))
             .await
             .unwrap();
-        let query = storage.query(project(), Default::default()).await.unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let ctx = SessionContext::new();
         ctx.register_table("scores_t", query.scores).unwrap();
         let count = ctx
@@ -421,7 +429,10 @@ mod tests {
     }
 
     async fn query_off(storage: &crate::Storage, sql: &str) -> Vec<RecordBatch> {
-        let query = storage.query(project(), Default::default()).await.unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let runtime = std::sync::Arc::clone(&query.runtime);
         let provider = std::sync::Arc::clone(&query.scores);
         let sql = sql.to_owned();
@@ -453,7 +464,10 @@ mod tests {
     async fn wait_flushed(storage: &crate::Storage, files: usize) {
         let started = std::time::Instant::now();
         loop {
-            let query = storage.query(project(), Default::default()).await.unwrap();
+            let query = storage
+                .query(project(), QueryOptions::new(None, None))
+                .await
+                .unwrap();
             let provider = scores_of(&query);
             if provider.candidate_files(&[]).len() == files && provider.candidate_batches(&[]) == 0
             {
@@ -518,7 +532,10 @@ mod tests {
             .await
             .unwrap();
 
-        let query = storage.query(project(), Default::default()).await.unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let provider = scores_of(&query);
         assert_eq!(provider.candidate_files(&[]).len(), 2);
         assert!(provider.candidate_batches(&[]) >= 1);
@@ -617,12 +634,7 @@ mod tests {
         ));
         let around = 3 * 86_400_000_000_000;
         let query = storage
-            .query(
-                project(),
-                crate::QueryOptions {
-                    around: Some(around),
-                },
-            )
+            .query(project(), QueryOptions::new(Some(around), None))
             .await
             .unwrap();
         assert_eq!(scores_of(&query).candidate_files(&[filter]).len(), 1);

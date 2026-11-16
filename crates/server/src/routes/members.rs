@@ -16,10 +16,12 @@ use crate::api::members::{
 };
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::{self, OrgPerm, ProjectOverride, ProjectPerm, Role};
+use crate::entitlements::{over_limit, plan_limit};
 use crate::http::AppState;
 use crate::http::access::{Access, OrgAccess, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
 use crate::meta::MetaError;
+use crate::meta::invites;
 use crate::meta::members::{self, MemberRow};
 
 use super::orgs::page_named;
@@ -61,7 +63,7 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             method: axum::http::Method::GET,
             path: "/api/v1/projects/{project}/members",
             access: Access::Project {
-                perm: ProjectPerm::View,
+                perm: ProjectPerm::ViewMembers,
                 session_only: false,
             },
             documented: true,
@@ -79,6 +81,14 @@ pub(crate) enum MemberChange {
     Done,
     Missing,
     Forbidden,
+}
+
+enum RoleChange {
+    Done,
+    Missing,
+    Forbidden,
+    /// The org's seat limit, which the new role would exceed.
+    OverLimit(u64),
 }
 
 async fn list_org_members(
@@ -115,37 +125,56 @@ async fn update_org_member(
     let actor = user.id;
     let org_id = access.org.id;
     let role = body.role;
+    let now = state.clock.now_ns();
+    let limits_state = state.clone();
     let outcome = state
         .meta
         .write(move |conn| {
             Box::pin(async move {
                 let Some(actor_role) = members::org_role_tx(conn, org_id, actor).await? else {
-                    return Ok(MemberChange::Forbidden);
+                    return Ok(RoleChange::Forbidden);
                 };
                 if roles::org_rank(actor_role) < roles::org_rank(OrgRole::Admin) {
-                    return Ok(MemberChange::Forbidden);
+                    return Ok(RoleChange::Forbidden);
                 }
                 let Some(target_role) = members::org_role_tx(conn, org_id, target).await? else {
-                    return Ok(MemberChange::Missing);
+                    return Ok(RoleChange::Missing);
                 };
                 if !may_set_role(actor_role, target_role, role) {
-                    return Ok(MemberChange::Forbidden);
+                    return Ok(RoleChange::Forbidden);
+                }
+                if target_role == OrgRole::Viewer && role != OrgRole::Viewer {
+                    let max_seats = limits_state
+                        .entitlements
+                        .resolve(org_id, now)
+                        .limits
+                        .max_seats;
+                    if let Some(limit) = max_seats {
+                        let seats = members::seat_members_tx(conn, org_id).await?
+                            + invites::seat_invites_tx(conn, org_id, now, None).await?;
+                        if over_limit(Some(limit), seats, 1) {
+                            return Ok(RoleChange::OverLimit(limit));
+                        }
+                    }
                 }
                 members::set_org_role(conn, org_id, target, role).await?;
                 if matches!(role, OrgRole::Owner | OrgRole::Admin) {
                     members::clear_project_overrides(conn, org_id, target).await?;
                 }
-                if members::count_owners(conn, org_id).await? == 0 {
+                if target_role == OrgRole::Owner
+                    && members::count_active_owners(conn, org_id).await? == 0
+                {
                     return Err(MetaError::Conflict("an org needs an owner"));
                 }
-                Ok(MemberChange::Done)
+                Ok(RoleChange::Done)
             })
         })
         .await?;
     match outcome {
-        MemberChange::Done => {}
-        MemberChange::Missing => return Err(ApiError::NotFound),
-        MemberChange::Forbidden => return Err(forbidden()),
+        RoleChange::Done => {}
+        RoleChange::Missing => return Err(ApiError::NotFound),
+        RoleChange::Forbidden => return Err(forbidden()),
+        RoleChange::OverLimit(limit) => return Err(plan_limit(limit, ("seat", "seats"))),
     }
     tracing::info!(
         target: "audit",
@@ -180,11 +209,13 @@ async fn remove_org_member(
                 if actor != target && !may_remove_other(actor_role, target_role) {
                     return Ok(MemberChange::Forbidden);
                 }
-                if target_role == OrgRole::Owner && members::count_owners(conn, org_id).await? == 1
+                members::remove_org_member(conn, org_id, target).await?;
+                // A disabled owner does not count: the org must keep one who can act.
+                if target_role == OrgRole::Owner
+                    && members::count_active_owners(conn, org_id).await? == 0
                 {
                     return Err(MetaError::Conflict("an org needs an owner"));
                 }
-                members::remove_org_member(conn, org_id, target).await?;
                 Ok(MemberChange::Done)
             })
         })
@@ -252,7 +283,7 @@ fn may_remove_other(actor: OrgRole, target: OrgRole) -> bool {
 
 async fn find_member(
     state: &AppState,
-    org_id: llmobs_core::ids::OrgId,
+    org_id: cetra_core::ids::OrgId,
     user: Uuid,
 ) -> Result<MemberRow, ApiError> {
     let members = members::org_members(state.meta.reader(), org_id).await?;
@@ -314,14 +345,15 @@ fn forbidden() -> ApiError {
 #[cfg(test)]
 mod tests {
     use axum::http::{Method, header};
-    use llmobs_core::ids::OrgId;
+    use cetra_core::ids::OrgId;
     use serde_json::Value;
 
     use super::*;
     use crate::api::account::{OrgMembership, Project};
+    use crate::api::common::ProblemCode;
     use crate::auth::session::start_session;
     use crate::meta::users::{NewUser, insert_user};
-    use crate::test_support::{TestApp, capture_logs};
+    use crate::test_support::{TestApp, capture_logs, set_limits};
 
     fn cookie_pair(set_cookie: &axum::http::HeaderValue) -> String {
         set_cookie
@@ -348,6 +380,9 @@ mod tests {
                             name: None,
                             password_hash: None,
                             email_verified_at: Some(now),
+                            email_verified_via: Some(
+                                crate::meta::users::EmailVerifiedVia::MailToken,
+                            ),
                             is_instance_admin: true,
                         },
                         now,
@@ -357,9 +392,15 @@ mod tests {
             })
             .await
             .unwrap();
-        let cookie = start_session(&app.state, user.id, None, None)
-            .await
-            .unwrap();
+        let cookie = start_session(
+            &app.state,
+            user.id,
+            None,
+            None,
+            crate::auth::session::SessionOrigin::Password,
+        )
+        .await
+        .unwrap();
         (user.id, cookie_pair(&cookie))
     }
 
@@ -430,6 +471,65 @@ mod tests {
                     }
                 )
         }));
+    }
+
+    #[tokio::test]
+    async fn promoting_a_viewer_needs_a_seat() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let (viewer_id, _) = signed_in(&app, "viewer@example.com").await;
+        let org = create_org(&app, &ada, "Acme").await;
+        add_member(&app, org.id, viewer_id, OrgRole::Viewer).await;
+        set_limits(
+            &app,
+            org.id,
+            "2026-01-01T00:00:00Z",
+            &serde_json::json!({"max_seats": 1}),
+        );
+        let path = format!("/api/v1/orgs/acme/members/{viewer_id}");
+
+        let refused = app
+            .request(Method::PATCH, &path)
+            .header(header::COOKIE.as_str(), &ada)
+            .json(&serde_json::json!({ "role": "member" }))
+            .send()
+            .await;
+        assert_eq!(refused.status, 403);
+        assert_eq!(refused.problem().code, ProblemCode::PlanLimit);
+        assert_eq!(
+            refused.problem().detail.as_deref(),
+            Some("Your plan allows 1 seat.")
+        );
+        let still: OrgMember = app
+            .request(Method::GET, "/api/v1/orgs/acme/members")
+            .header(header::COOKIE.as_str(), &ada)
+            .send()
+            .await
+            .json::<Page<OrgMember>>()
+            .data
+            .into_iter()
+            .find(|member| member.user.id == viewer_id)
+            .unwrap();
+        assert_eq!(still.role, OrgRole::Viewer);
+
+        set_limits(
+            &app,
+            org.id,
+            "2026-01-01T00:01:00Z",
+            &serde_json::json!({"max_seats": 2}),
+        );
+        let promoted = app
+            .request(Method::PATCH, &path)
+            .header(header::COOKIE.as_str(), &ada)
+            .json(&serde_json::json!({ "role": "member" }))
+            .send()
+            .await;
+        assert_eq!(
+            promoted.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&promoted.body)
+        );
     }
 
     #[tokio::test]
@@ -587,6 +687,57 @@ mod tests {
         );
     }
 
+    /// Review 2026-11-15 #5: a disabled owner counted toward the last-owner rule, so the only
+    /// active owner could leave or step down and no one could act for the org.
+    #[tokio::test]
+    async fn a_disabled_owner_does_not_keep_the_org_owned() {
+        let app = TestApp::new().await;
+        let (ada_id, ada) = signed_in(&app, "ada@example.com").await;
+        let (other_id, _) = signed_in(&app, "other@example.com").await;
+        let org = create_org(&app, &ada, "Acme").await;
+        add_member(&app, org.id, other_id, OrgRole::Owner).await;
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    crate::meta::users::set_disabled(conn, other_id, Some(now), now).await
+                })
+            })
+            .await
+            .unwrap();
+
+        let demoted = app
+            .request(
+                Method::PATCH,
+                &format!("/api/v1/orgs/acme/members/{ada_id}"),
+            )
+            .header(header::COOKIE.as_str(), &ada)
+            .json(&serde_json::json!({ "role": "admin" }))
+            .send()
+            .await;
+        assert_eq!(demoted.status, 409);
+        let left = app
+            .request(
+                Method::DELETE,
+                &format!("/api/v1/orgs/acme/members/{ada_id}"),
+            )
+            .header(header::COOKIE.as_str(), &ada)
+            .send()
+            .await;
+        assert_eq!(left.status, 409);
+        // The disabled owner can still be removed while an active one stays.
+        let removed = app
+            .request(
+                Method::DELETE,
+                &format!("/api/v1/orgs/acme/members/{other_id}"),
+            )
+            .header(header::COOKIE.as_str(), &ada)
+            .send()
+            .await;
+        assert_eq!(removed.status, 204);
+    }
+
     #[tokio::test]
     async fn promotion_to_admin_clears_overrides() {
         let app = TestApp::new().await;
@@ -622,5 +773,36 @@ mod tests {
             .await
             .unwrap();
         assert!(stored.is_none());
+    }
+
+    /// Auth review #10: a read key, often a CI secret, never lists the org's people.
+    #[tokio::test]
+    async fn an_api_key_cannot_list_project_members() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let path = format!("/api/v1/projects/{}/members", seeded.project.id);
+        for key in [&seeded.read_key, &seeded.ingest_key] {
+            let response = app
+                .request(Method::GET, &path)
+                .header(header::AUTHORIZATION.as_str(), &format!("Bearer {key}"))
+                .send()
+                .await;
+            assert_eq!(response.status, 403);
+        }
+        let current = app
+            .request(Method::GET, "/api/v1/projects/current/members")
+            .header(
+                header::AUTHORIZATION.as_str(),
+                &format!("Bearer {}", seeded.read_key),
+            )
+            .send()
+            .await;
+        assert_eq!(current.status, 403);
+        let session = app
+            .request(Method::GET, &path)
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(session.status, 200);
     }
 }

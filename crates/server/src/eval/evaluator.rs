@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use axum::http::HeaderValue;
-use llmobs_core::enums::ScoreDataType;
-use llmobs_eval::{ConfigError, Evaluator, EvaluatorConfig, OutputScore};
+use cetra_core::enums::ScoreDataType;
+use cetra_eval::{ConfigError, Evaluator, EvaluatorConfig, OutputScore};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -23,7 +23,7 @@ use crate::meta::evaluators::EvaluatorRow;
 /// The longest webhook header value, in bytes (spec 06 § Evaluator contract).
 const HEADER_VALUE_MAX: usize = 4096;
 
-/// The longest evaluator name, in Unicode scalar values (`llmobs_eval::Evaluator::validate`).
+/// The longest evaluator name, in Unicode scalar values (`cetra_eval::Evaluator::validate`).
 const NAME_MAX_CHARS: usize = 128;
 
 /// The `webhook_secret` message of a webhook `config` sent without one: a new URL must never
@@ -372,7 +372,7 @@ fn to_text<T: Serialize>(value: &T, prefix: &str) -> Result<String, Vec<FieldErr
 
 #[cfg(test)]
 mod tests {
-    use llmobs_core::enums::ScoreDataType;
+    use cetra_core::enums::ScoreDataType;
     use serde_json::json;
 
     use super::*;
@@ -428,5 +428,27 @@ mod tests {
             fields,
             ["evaluator.config", "evaluator.output_score.data_type"]
         );
+    }
+
+    #[test]
+    fn a_categorical_webhook_without_categories_is_refused() {
+        let categorical = OutputScore {
+            name: "quality".to_owned(),
+            data_type: ScoreDataType::Categorical,
+            categories: None,
+        };
+        let Err(errors) = prepare(
+            Uuid::nil(),
+            "Hook",
+            EvaluatorKind::Webhook,
+            &json!({"url": "https://example.com/hook"}),
+            &categorical,
+            Some("signing-secret-0123456789"),
+            "",
+        ) else {
+            panic!("a categorical webhook without categories is accepted");
+        };
+        let fields: Vec<&str> = errors.iter().map(|error| error.field.as_str()).collect();
+        assert_eq!(fields, ["output_score.categories"]);
     }
 }

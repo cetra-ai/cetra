@@ -36,7 +36,7 @@ Step 7 of the original Phase 0 list was "record the new decisions (D52 onward), 
 
 **Out:**
 - Release builds, cross-compilation, Docker images, publishing to npm/PyPI, and macOS runners. These come with the server track, once the binary serves the embedded UI and `/healthz` (user decision; D81).
-- SDK integration tests against a running `llmobs serve` (spec 10 § Testing). There is no server yet.
+- SDK integration tests against a running `cetra serve` (spec 10 § Testing). There is no server yet.
 - Coverage reports, benchmarks in CI, and caching across forks.
 - Repository settings: branch protection, Dependabot alerts, Actions permissions. These are the user's to change. The report lists what to set (S5).
 
@@ -69,6 +69,7 @@ User answers behind D81: Linux runners only, no release artifacts yet, Dependabo
   - Use the latest release that is at least 7 days old.
   - The cargo-deny version must accept the existing `deny.toml` (`version = 2` sections).
   - If you have the tools installed locally, the local `just` and `cargo-deny` versions are the ones to match, unless they are older than the latest by a major version.
+  - A tool that `taiki-e/install-action` does not install is downloaded from its release and checked against a pinned sha256 (`sha256sum -c`, as kubeconform is in `actions/packaging`). Current cases: actionlint 1.7.12 (no manifest in v2.90.0). mold 3.0.0 (`actions/rust`, Linux x86_64 only) is also downloaded this way, although v2.90.0 has a manifest for it, so it follows the kubeconform pattern. zizmor 1.32.0 is installed by install-action, which has its manifest.
 - **Runtimes come from the repo,** never duplicated in workflow files:
   - Rust from `rust-toolchain.toml`;
   - Node from `.node-version` (`node-version-file`);
@@ -169,7 +170,7 @@ Timeouts: `rust-lint` 30 min, `rust-test` 45 min, `rust-deny` 10 min.
 
 Notes:
 - `rust-deny` builds nothing. It needs the toolchain (cargo-deny calls `cargo metadata`), but no cache.
-- GitHub sets `CI=true`. `insta` then refuses to write snapshots, and tests fail instead. `assert-clean` also catches any test that writes into the repo. Don't set the `LLMOBS_*_WRITE` variables.
+- GitHub sets `CI=true`. `insta` then refuses to write snapshots, and tests fail instead. `assert-clean` also catches any test that writes into the repo. Don't set the `CETRA_*_WRITE` variables.
 - Disk: if `rust-test` runs out of space on `ubuntu-latest`, report it with the `df -h` output. Don't add disk-cleanup steps preemptively.
 
 ### `ci-ok` (added now, extended in S2 and S3)
@@ -223,19 +224,20 @@ ts-smoke tarball:
     trap 'rm -rf "$dir"' EXIT
     cd "$dir"
     npm init -y >/dev/null
-    npm install --no-audit --no-fund --ignore-scripts "$tarball" >/dev/null
-    EXPECTED="$expected" node --input-type=module -e 'import { VERSION } from "llmobs"; if (VERSION !== process.env.EXPECTED) { console.error(`ESM: VERSION ${VERSION}`); process.exit(1); }'
-    EXPECTED="$expected" node -e 'const { VERSION } = require("llmobs"); if (VERSION !== process.env.EXPECTED) { console.error(`CJS: VERSION ${VERSION}`); process.exit(1); }'
-    echo "llmobs ${expected} loads from ESM and CommonJS on Node $(node --version)"
+    before="$(node -p 'new Date(Date.now() - 7*24*3600*1000).toISOString()')"
+    npm install --no-audit --no-fund --ignore-scripts --before "$before" "$tarball" >/dev/null
+    EXPECTED="$expected" node --input-type=module -e 'import { VERSION } from "@cetra-ai/sdk"; if (VERSION !== process.env.EXPECTED) { console.error(`ESM: VERSION ${VERSION}`); process.exit(1); }'
+    EXPECTED="$expected" node -e 'const { VERSION } = require("@cetra-ai/sdk"); if (VERSION !== process.env.EXPECTED) { console.error(`CJS: VERSION ${VERSION}`); process.exit(1); }'
+    echo "cetra ${expected} loads from ESM and CommonJS on Node $(node --version)"
 ```
 
-The CommonJS line is the point of this recipe. It proves the D77 claim that an ESM-only package works for `require()` callers on Node 22.12. The package has no dependencies, so `npm install` fetches nothing from the registry. `--ignore-scripts` keeps it that way.
+The CommonJS line is the point of this recipe. It proves the D77 claim that an ESM-only package works for `require()` callers on Node 22.12. The smoke test does fetch the SDK's dependencies (five `@opentelemetry` packages and their ranged transitive dependencies, plus the `@opentelemetry/api` peer), since the tarball has them. The `npm install` is therefore age-gated with `--before` (seven days, D74) and has no lockfile. `--ignore-scripts` stops install scripts from running.
 
 Job `ts-sdk-min-node` steps:
 1. Checkout (`persist-credentials: false`) and `./.github/actions/js`.
 2. `just js-install`, then `pnpm --dir sdks/typescript run build`, then `pnpm --dir sdks/typescript pack --pack-destination "$RUNNER_TEMP"`. The build and pack run on the repo Node, because pnpm and tsdown may not run on 22.12.
 3. `actions/setup-node` with `node-version: 22.12.0`, and no cache.
-4. `just ts-smoke "$RUNNER_TEMP"/llmobs-*.tgz`. Resolve the glob in the step with `shell: bash`. Fail if it matches anything other than exactly one file.
+4. `just ts-smoke "$RUNNER_TEMP"/cetra-*.tgz`. Resolve the glob in the step with `shell: bash`. Fail if it matches anything other than exactly one file.
 5. Unit tests on 22.12. Check the `engines` field of the pinned `vitest` (`npm view vitest@<version> engines`).
    - If it allows 22.12, run `pnpm --dir sdks/typescript exec vitest run` right after step 4, still on Node 22.12. pnpm itself must run under the active Node; if pnpm 11 refuses Node 22.12, call the binary directly with `node sdks/typescript/node_modules/vitest/vitest.mjs run` (check the path in the installed package).
    - If vitest does not allow 22.12, skip the unit tests here and say so in your report. The packed-package smoke test is the required part.
@@ -262,7 +264,7 @@ Add every new job to `ci-ok.needs`.
 ### Verify locally
 
 - `just check-web check-ts check-py`.
-- `pnpm --dir sdks/typescript run build && pnpm --dir sdks/typescript pack --pack-destination /tmp/llmobs-pack && just ts-smoke /tmp/llmobs-pack/llmobs-*.tgz`. Run this with your current Node, and with Node 22.12 if you can install it (`fnm`, `nvm`, or `npx node@22.12.0`).
+- `pnpm --dir sdks/typescript run build && pnpm --dir sdks/typescript pack --pack-destination /tmp/cetra-pack && just ts-smoke /tmp/cetra-pack/cetra-*.tgz`. Run this with your current Node, and with Node 22.12 if you can install it (`fnm`, `nvm`, or `npx node@22.12.0`).
 - `UV_PYTHON=3.15 just check-py` if uv can fetch 3.15.
 
 **Commit:** `ci: add web, TypeScript SDK and Python SDK jobs`
@@ -403,17 +405,17 @@ Phase 0's last step was to record the decisions and commit. That happened step b
 
 ### 2. Stale crate layout in `docs/spec/README.md`
 
-§ Crate layout still shows the pre-D52 layout with 11 crates (`llmobs-query`, `llmobs-meta`, `llmobs-auth`, `llmobs-eval`, `llmobs-alerts`, `llmobs-mail`, `llmobs-api`, and a `crates/llmobs/` binary) and the matching dependency direction.
+§ Crate layout still shows the pre-D52 layout with 11 crates (`cetra-query`, `cetra-meta`, `cetra-auth`, `cetra-eval`, `cetra-alerts`, `cetra-mail`, `cetra-api`, and a `crates/cetra/` binary) and the matching dependency direction.
 - Replace the block and the "Dependency direction" line with the D52 layout, using the wording of `AGENTS.md` § Layout and its enforced dependency graph.
 - Map the old crates to their new homes:
-  - query → `llmobs-storage`;
-  - meta, auth, eval, alerts, mail, api → modules of `llmobs-server`;
-  - the binary → `llmobs-cli`.
-- `web/` is embedded into the binary by `llmobs-server` (`memory-serve`), not by `crates/llmobs-api`.
+  - query → `cetra-storage`;
+  - meta, auth, eval, alerts, mail, api → modules of `cetra-server`;
+  - the binary → `cetra-cli`.
+- `web/` is embedded into the binary by `cetra-server` (`memory-serve`), not by `crates/cetra-api`.
 
-Then search every spec for the old crate names, `rg -n 'llmobs-(query|meta|auth|eval|alerts|mail|api)\b|crates/llmobs/' docs`:
-- Replace each with the new crate or module, e.g. "`llmobs-server` (`auth` module)".
-- Don't invent module names that don't exist yet; "`llmobs-server`" alone is fine.
+Then search every spec for the old crate names, `rg -n 'cetra-(query|meta|auth|eval|alerts|mail|api)\b|crates/cetra/' docs`:
+- Replace each with the new crate or module, e.g. "`cetra-server` (`auth` module)".
+- Don't invent module names that don't exist yet; "`cetra-server`" alone is fine.
 - Leave `docs/research/` unchanged; it is a historical record.
 
 ### 3. The Open list

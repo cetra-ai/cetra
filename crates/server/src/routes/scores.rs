@@ -3,8 +3,8 @@
 use axum::extract::{DefaultBodyLimit, Extension, State};
 use axum::http::{Method, StatusCode};
 use axum::routing::{delete, get, post};
-use llmobs_core::score::Score;
-use llmobs_storage as storage;
+use cetra_core::score::Score;
+use cetra_storage as storage;
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -12,7 +12,7 @@ use crate::api::common::{Page, ProblemCode};
 use crate::api::convert;
 use crate::api::scores::{ScoreBatch, ScoreListParams, ScoreWriteResult};
 use crate::auth::principal::Principal;
-use crate::auth::roles::{KeyScope, ProjectPerm};
+use crate::auth::roles::{KeyScope, ProjectPerm, Role};
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
@@ -80,8 +80,10 @@ async fn list_scores(
 ) -> Result<error::Json<Page<Score>>, ApiError> {
     let trace_id = params.trace_id.map(|id| id.to_string());
     let span_id = params.span_id.map(|id| id.to_string());
+    let evaluator_id = params.evaluator_id.map(|id| id.to_string());
+    let rule_id = params.rule_id.map(|id| id.to_string());
     let created = window(params.from, params.to)?;
-    let ctx = open_query(&state, access.project.id, None).await?;
+    let ctx = open_query(&state, access.project.org_id, access.project.id, None).await?;
     let page = storage::score_list(
         &ctx,
         storage::ScoreListRequest {
@@ -91,6 +93,8 @@ async fn list_scores(
             session_id: params.session_id.as_deref(),
             name: params.name.as_deref(),
             source: params.source,
+            evaluator_id: evaluator_id.as_deref(),
+            rule_id: rule_id.as_deref(),
             window: created,
             limit: page_limit(params.limit),
             cursor: params.cursor.as_deref(),
@@ -104,34 +108,58 @@ async fn list_scores(
     }))
 }
 
+/// The writer of a project score route and its log label (D-G-27). Sessions and PATs carry
+/// their user and whether that user is a project admin, for the ownership check (D-I-36).
+fn project_writer(
+    principal: &Principal,
+    access: &ProjectAccess,
+) -> Result<(Writer, &'static str), ApiError> {
+    let admin = access.role == Some(Role::Admin);
+    match principal {
+        Principal::Session { user, .. } => Ok((
+            Writer::Human {
+                user_id: user.id,
+                admin,
+            },
+            "human",
+        )),
+        Principal::Pat { user, token_id, .. } => Ok((
+            Writer::Pat {
+                token_id: *token_id,
+                user_id: user.id,
+                admin,
+            },
+            "api",
+        )),
+        Principal::ApiKey { key_id, .. } => Ok((Writer::Api { author: *key_id }, "api")),
+        Principal::ControlPlane { .. } => Err(ApiError::Forbidden {
+            code: ProblemCode::Forbidden,
+        }),
+    }
+}
+
 /// `POST …/scores` with a session or a PAT or project key. The source and author follow the
-/// caller (D-G-27).
+/// caller (D-G-27). Replacing another user's `human` score needs a project admin (403, D-I-36).
 async fn create_scores(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
     error::Json(batch): error::Json<ScoreBatch>,
 ) -> Result<error::Json<ScoreWriteResult>, ApiError> {
-    let (writer, kind) = match principal {
-        Principal::Session { user, .. } => (Writer::Human { user_id: user.id }, "human"),
-        Principal::Pat { token_id, .. } => (Writer::Api { author: token_id }, "api"),
-        Principal::ApiKey { key_id, .. } => (Writer::Api { author: key_id }, "api"),
-        Principal::ControlPlane { .. } => {
-            return Err(ApiError::Forbidden {
-                code: ProblemCode::Forbidden,
-            });
-        }
-    };
+    let (writer, kind) = project_writer(&principal, &access)?;
     write_batch(&state, &access, writer, kind, batch).await
 }
 
-/// `DELETE …/scores/{score_id}`: appends a tombstone of the live score (spec 03 §5).
+/// `DELETE …/scores/{score_id}`: appends a tombstone of the live score (spec 03 §5). Another
+/// user's `human` score can be deleted only by a project admin (403, D-I-36).
 async fn delete_score(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
     error::Path(path): error::Path<ScorePath>,
 ) -> Result<StatusCode, ApiError> {
-    score_writes::delete(&state, &access.project, path.score_id).await?;
+    let (writer, _) = project_writer(&principal, &access)?;
+    score_writes::delete(&state, &access.project, writer, path.score_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -170,13 +198,14 @@ mod tests {
     use std::str::FromStr;
 
     use axum::http::{Method, StatusCode};
-    use llmobs_core::enums::ScoreSource;
-    use llmobs_core::ids::{SpanId, TraceId};
-    use llmobs_core::score::{ScoreTarget, ScoreValue};
+    use cetra_core::enums::ScoreSource;
+    use cetra_core::ids::{SpanId, TraceId};
+    use cetra_core::score::{ScoreTarget, ScoreValue};
     use serde_json::Value as Json;
 
     use super::*;
     use crate::api::scores::ScoreCreate;
+    use crate::auth::roles::OrgRole;
     use crate::meta::users;
     use crate::test_support::{Seeded, TestApp};
 
@@ -278,6 +307,28 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn scores_filter_by_evaluator_id_and_rule_id() {
+        let (app, seeded) = loaded().await;
+        let evaluator = "01900000-0000-7000-8000-000000000201";
+        let rule = "01900000-0000-7000-8000-000000000202";
+
+        let (status, body) =
+            get_json(&app, &seeded, &format!("/scores?evaluator_id={evaluator}")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let page: Page<Score> = serde_json::from_value(body).unwrap();
+        assert_eq!(ids(&page), [score_id(302)]);
+
+        let (status, body) = get_json(&app, &seeded, &format!("/scores?rule_id={rule}")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let page: Page<Score> = serde_json::from_value(body).unwrap();
+        assert_eq!(ids(&page), [score_id(302)]);
+
+        let (status, body) = get_json(&app, &seeded, "/scores?evaluator_id=not-a-uuid").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["code"], "bad_request");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn pages_follow_the_cursor() {
         let (app, seeded) = loaded().await;
         let (status, body) = get_json(&app, &seeded, "/scores?limit=4").await;
@@ -318,6 +369,8 @@ mod tests {
             reason: None,
             source: None,
             metadata: BTreeMap::new(),
+            experiment_id: None,
+            dataset_item_id: None,
         }
     }
 
@@ -561,5 +614,302 @@ mod tests {
             .send()
             .await;
         assert_eq!(refused.status, StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    /// A write key on the project, created by Ada (project admin) through her session.
+    async fn write_key(app: &TestApp, seeded: &Seeded) -> String {
+        let response = app
+            .request(
+                Method::POST,
+                &format!("/api/v1/projects/{}/api-keys", seeded.project.id),
+            )
+            .header("cookie", &seeded.cookie)
+            .json(&serde_json::json!({"kind": "secret", "scopes": ["write"]}))
+            .send()
+            .await;
+        assert_eq!(response.status, StatusCode::CREATED);
+        let created: Json = response.json();
+        created["secret"].as_str().unwrap().to_owned()
+    }
+
+    /// A `tone` score of `value` on the example span, with the id `…04NN` of `number`.
+    fn owned_score(number: u32, value: f64) -> ScoreBatch {
+        ScoreBatch {
+            scores: vec![ScoreCreate {
+                score_id: Some(score_id(number).parse().unwrap()),
+                ..span_score("tone", value)
+            }],
+        }
+    }
+
+    /// Writes `batch` as the caller `cookie` (a session) and returns the status.
+    async fn post_scores(
+        app: &TestApp,
+        seeded: &Seeded,
+        cookie: &str,
+        batch: &ScoreBatch,
+    ) -> StatusCode {
+        app.request(Method::POST, &scores_path(seeded))
+            .header("cookie", cookie)
+            .json(batch)
+            .send()
+            .await
+            .status
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_member_cannot_replace_or_delete_another_users_human_score() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let bob = app
+            .add_member(&seeded, "bob@example.com", OrgRole::Member)
+            .await;
+        let delete_path = format!("{}/{}", scores_path(&seeded), score_id(410));
+
+        assert_eq!(
+            post_scores(&app, &seeded, &seeded.cookie, &owned_score(410, 1.0)).await,
+            StatusCode::OK
+        );
+        let refused = post_scores(&app, &seeded, &bob.cookie, &owned_score(410, 0.0)).await;
+        assert_eq!(refused, StatusCode::FORBIDDEN);
+
+        let deleted = app
+            .request(Method::DELETE, &delete_path)
+            .header("cookie", &bob.cookie)
+            .send()
+            .await;
+        assert_eq!(deleted.status, StatusCode::FORBIDDEN);
+        assert_eq!(deleted.json::<Json>()["code"], "forbidden");
+
+        let rows = listed(&app, &seeded).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].value, ScoreValue::Numeric(1.0));
+        assert_eq!(rows[0].author_user_id, Some(seeded.user_id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refused_batch_writes_nothing() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let bob = app
+            .add_member(&seeded, "bob@example.com", OrgRole::Member)
+            .await;
+        assert_eq!(
+            post_scores(&app, &seeded, &seeded.cookie, &owned_score(410, 1.0)).await,
+            StatusCode::OK
+        );
+
+        let batch = ScoreBatch {
+            scores: vec![
+                ScoreCreate {
+                    score_id: Some(score_id(413).parse().unwrap()),
+                    ..span_score("tone", 0.3)
+                },
+                ScoreCreate {
+                    score_id: Some(score_id(410).parse().unwrap()),
+                    ..span_score("tone", 0.0)
+                },
+            ],
+        };
+        assert_eq!(
+            post_scores(&app, &seeded, &bob.cookie, &batch).await,
+            StatusCode::FORBIDDEN
+        );
+        let rows = listed(&app, &seeded).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].score_id.to_string(), score_id(410));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_project_admin_can_replace_and_delete_another_users_human_score() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let bob = app
+            .add_member(&seeded, "bob@example.com", OrgRole::Member)
+            .await;
+        let delete_path = format!("{}/{}", scores_path(&seeded), score_id(411));
+
+        assert_eq!(
+            post_scores(&app, &seeded, &bob.cookie, &owned_score(411, 1.0)).await,
+            StatusCode::OK
+        );
+        app.state.clock.advance(std::time::Duration::from_secs(60));
+        assert_eq!(
+            post_scores(&app, &seeded, &seeded.cookie, &owned_score(411, 0.0)).await,
+            StatusCode::OK
+        );
+        let rows = listed(&app, &seeded).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].author_user_id, Some(seeded.user_id));
+        assert_eq!(rows[0].value, ScoreValue::Numeric(0.0));
+
+        // The score is Ada's now, so Bob may not replace it.
+        app.state.clock.advance(std::time::Duration::from_secs(60));
+        assert_eq!(
+            post_scores(&app, &seeded, &bob.cookie, &owned_score(411, 0.5)).await,
+            StatusCode::FORBIDDEN
+        );
+
+        app.state.clock.advance(std::time::Duration::from_secs(60));
+        let deleted = app
+            .request(Method::DELETE, &delete_path)
+            .header("cookie", &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+        assert!(listed(&app, &seeded).await.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_member_replaces_and_deletes_their_own_human_score() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let bob = app
+            .add_member(&seeded, "bob@example.com", OrgRole::Member)
+            .await;
+        let delete_path = format!("{}/{}", scores_path(&seeded), score_id(412));
+
+        assert_eq!(
+            post_scores(&app, &seeded, &bob.cookie, &owned_score(412, 1.0)).await,
+            StatusCode::OK
+        );
+        app.state.clock.advance(std::time::Duration::from_secs(60));
+        assert_eq!(
+            post_scores(&app, &seeded, &bob.cookie, &owned_score(412, 0.5)).await,
+            StatusCode::OK
+        );
+        let rows = listed(&app, &seeded).await;
+        assert_eq!(rows[0].value, ScoreValue::Numeric(0.5));
+
+        app.state.clock.advance(std::time::Duration::from_secs(60));
+        let deleted = app
+            .request(Method::DELETE, &delete_path)
+            .header("cookie", &bob.cookie)
+            .send()
+            .await;
+        assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_personal_token_is_checked_as_its_user() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let bob = app
+            .add_member(&seeded, "bob@example.com", OrgRole::Member)
+            .await;
+        let bob_pat = app.personal_token(bob.id, true).await;
+        let ada_pat = app.personal_token(seeded.user_id, true).await;
+        let delete_path = format!("{}/{}", scores_path(&seeded), score_id(410));
+
+        assert_eq!(
+            post_scores(&app, &seeded, &seeded.cookie, &owned_score(410, 1.0)).await,
+            StatusCode::OK
+        );
+        let by_bob_pat = |batch: &ScoreBatch| {
+            app.request(Method::POST, &scores_path(&seeded))
+                .header("authorization", &format!("Bearer {bob_pat}"))
+                .json(batch)
+                .send()
+        };
+        assert_eq!(
+            by_bob_pat(&owned_score(410, 0.0)).await.status,
+            StatusCode::FORBIDDEN
+        );
+        let bob_deletes = app
+            .request(Method::DELETE, &delete_path)
+            .header("authorization", &format!("Bearer {bob_pat}"))
+            .send()
+            .await;
+        assert_eq!(bob_deletes.status, StatusCode::FORBIDDEN);
+
+        app.state.clock.advance(std::time::Duration::from_secs(60));
+        let ada_writes = app
+            .request(Method::POST, &scores_path(&seeded))
+            .header("authorization", &format!("Bearer {ada_pat}"))
+            .json(&owned_score(410, 0.0))
+            .send()
+            .await;
+        assert_eq!(ada_writes.status, StatusCode::OK);
+        let rows = listed(&app, &seeded).await;
+        assert_eq!(rows.len(), 1);
+        // A PAT's score is stored as `api`, not `human` (D-G-27).
+        assert_eq!(rows[0].source, ScoreSource::Api);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_write_key_keeps_g_rules_over_human_scores() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let bob = app
+            .add_member(&seeded, "bob@example.com", OrgRole::Member)
+            .await;
+        let key = write_key(&app, &seeded).await;
+        let delete_path = format!("{}/{}", scores_path(&seeded), score_id(411));
+
+        assert_eq!(
+            post_scores(&app, &seeded, &bob.cookie, &owned_score(411, 1.0)).await,
+            StatusCode::OK
+        );
+        app.state.clock.advance(std::time::Duration::from_secs(60));
+        let written = app
+            .request(Method::POST, &scores_path(&seeded))
+            .header("authorization", &format!("Bearer {key}"))
+            .json(&owned_score(411, 0.0))
+            .send()
+            .await;
+        assert_eq!(written.status, StatusCode::OK);
+        assert_eq!(listed(&app, &seeded).await[0].source, ScoreSource::Api);
+
+        app.state.clock.advance(std::time::Duration::from_secs(60));
+        let deleted = app
+            .request(Method::DELETE, &delete_path)
+            .header("authorization", &format!("Bearer {key}"))
+            .send()
+            .await;
+        assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_member_may_delete_a_non_human_score() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let bob = app
+            .add_member(&seeded, "bob@example.com", OrgRole::Member)
+            .await;
+        let key = write_key(&app, &seeded).await;
+        let delete_path = format!("{}/{}", scores_path(&seeded), score_id(412));
+
+        let written = app
+            .request(Method::POST, &scores_path(&seeded))
+            .header("authorization", &format!("Bearer {key}"))
+            .json(&owned_score(412, 0.5))
+            .send()
+            .await;
+        assert_eq!(written.status, StatusCode::OK);
+
+        app.state.clock.advance(std::time::Duration::from_secs(60));
+        let deleted = app
+            .request(Method::DELETE, &delete_path)
+            .header("cookie", &bob.cookie)
+            .send()
+            .await;
+        assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+        assert!(listed(&app, &seeded).await.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ownership_needs_an_existing_score() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let bob = app
+            .add_member(&seeded, "bob@example.com", OrgRole::Member)
+            .await;
+        assert_eq!(
+            post_scores(&app, &seeded, &bob.cookie, &owned_score(413, 1.0)).await,
+            StatusCode::OK
+        );
+        let rows = listed(&app, &seeded).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].author_user_id, Some(bob.id));
     }
 }

@@ -14,6 +14,8 @@ import { server } from "./node";
 import { WRITE_OPERATIONS, writeHandlers } from "./writes";
 
 const PROJECT = "/api/v1/projects/acme%2Fsupport-bot";
+const BASELINE_ID = "01900000-0000-7000-8000-000000000e01";
+const ITEM_ID = "01900000-0000-7000-8000-000000000d01";
 
 /** Writes that later sub-phases add under the covered prefixes. */
 const LATER_TRACKS: string[] = [];
@@ -71,8 +73,13 @@ it("lists every account and admin write of the contract", () => {
         path.startsWith("/api/v1/projects/{project}/members") ||
         path.startsWith("/api/v1/projects/{project}/evaluators") ||
         path.startsWith("/api/v1/projects/{project}/score-definitions") ||
+        path.startsWith("/api/v1/projects/{project}/models") ||
         path.startsWith("/api/v1/projects/{project}/channels") ||
-        path.startsWith("/api/v1/projects/{project}/alert-rules");
+        path.startsWith("/api/v1/projects/{project}/alert-rules") ||
+        path.startsWith("/api/v1/projects/{project}/online-rules") ||
+        path.startsWith("/api/v1/projects/{project}/datasets") ||
+        path.startsWith("/api/v1/projects/{project}/scores") ||
+        path.startsWith("/api/v1/projects/{project}/experiments");
       if (covered && !LATER_TRACKS.includes(operationId)) {
         expected.push({ operationId, method, path });
       }
@@ -125,7 +132,7 @@ it("creates a public key", async () => {
   expect(key.kind).toBe("public");
   expect(key.scopes).toEqual(["feedback"]);
   expect(key.name).toBe("Web");
-  expect(response.json?.secret).toMatch(/^pk-llmobs-/);
+  expect(response.json?.secret).toMatch(/^pk-cetra-/);
 });
 
 it("omits the name of an unnamed key", async () => {
@@ -211,6 +218,64 @@ it("answers the channel and alert rule writes", async () => {
 
   expect((await send("DELETE", `${PROJECT}/channels/${SLACK_CHANNEL_ID}`)).status).toBe(204);
   expect((await send("DELETE", `${PROJECT}/alert-rules/${FIRING_RULE_ID}`)).status).toBe(204);
+});
+
+it("answers the score writes", async () => {
+  const created = await send(
+    "POST",
+    `${PROJECT}/scores`,
+    JSON.stringify({
+      scores: [
+        {
+          target: { type: "trace", trace_id: "a1000000000000000000000000000001" },
+          name: "tone",
+          value: { data_type: "boolean", value: true },
+        },
+        {
+          target: { type: "session", session_id: "sess-001" },
+          name: "note",
+          value: { data_type: "text", value: "ok" },
+        },
+      ],
+    }),
+  );
+  expect(created.status).toBe(200);
+  expect(created.json?.score_ids).toHaveLength(2);
+
+  const deleted = await send("DELETE", `${PROJECT}/scores/01900000-0000-7000-8000-000000000310`);
+  expect(deleted.status).toBe(204);
+});
+
+it("creates a dataset with the given name", async () => {
+  const response = await send("POST", `${PROJECT}/datasets`, JSON.stringify({ name: "golden" }));
+  expect(response.status).toBe(201);
+  expect(response.json?.name).toBe("golden");
+});
+
+it("answers the experiment writes", async () => {
+  const created = await send(
+    "POST",
+    `${PROJECT}/experiments`,
+    JSON.stringify({ name: "candidate", dataset: "faq" }),
+  );
+  expect(created.status).toBe(201);
+  expect(part(created.json ?? {}, "experiment").name).toBe("candidate");
+
+  const stored = await send(
+    "POST",
+    `${PROJECT}/experiments/${BASELINE_ID}/items`,
+    JSON.stringify({ results: [{ dataset_item_id: ITEM_ID, repetition: 0 }] }),
+  );
+  expect(stored.status).toBe(200);
+  expect(stored.json).toEqual({ stored: 1, skipped: 0 });
+
+  const finished = await send("POST", `${PROJECT}/experiments/${BASELINE_ID}/finish`, "{}");
+  expect(finished.status).toBe(200);
+  expect(finished.json?.status).toBe("completed");
+  expect(finished.json?.id).toBe(BASELINE_ID);
+
+  const deleted = await send("DELETE", `${PROJECT}/experiments/${BASELINE_ID}`);
+  expect(deleted.status).toBe(204);
 });
 
 it("answers 204 for deletes", async () => {
@@ -424,3 +489,47 @@ it.each(rows)(
     check?.(response.json ?? {});
   },
 );
+
+it("answers the project model price writes", async () => {
+  const created = await send(
+    "POST",
+    `${PROJECT}/models`,
+    JSON.stringify({ model_name: "  Local  ", price_input: 0, price_output: 0 }),
+  );
+  expect(created.status).toBe(201);
+  expect(created.json?.model_name).toBe("Local");
+
+  const id = "01900000-0000-7000-8000-000000000c01";
+  const patched = await send(
+    "PATCH",
+    `${PROJECT}/models/${id}`,
+    JSON.stringify({ model_name: "Local", price_input: 0, price_output: 0 }),
+  );
+  expect(patched.status).toBe(200);
+  expect(patched.json?.id).toBe(id);
+
+  const deleted = await send("DELETE", `${PROJECT}/models/${id}`);
+  expect(deleted.status).toBe(204);
+});
+
+it("answers the org model price writes", async () => {
+  const created = await send(
+    "POST",
+    "/api/v1/orgs/acme/models",
+    JSON.stringify({ model_name: "  Local  ", price_input: 0, price_output: 0 }),
+  );
+  expect(created.status).toBe(201);
+  expect(created.json?.model_name).toBe("Local");
+
+  const id = "01900000-0000-7000-8000-000000000c00";
+  const patched = await send(
+    "PATCH",
+    `/api/v1/orgs/acme/models/${id}`,
+    JSON.stringify({ model_name: "Local", price_input: 0, price_output: 0 }),
+  );
+  expect(patched.status).toBe(200);
+  expect(patched.json?.id).toBe(id);
+
+  const deleted = await send("DELETE", `/api/v1/orgs/acme/models/${id}`);
+  expect(deleted.status).toBe(204);
+});

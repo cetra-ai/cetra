@@ -13,10 +13,10 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.trace import StatusCode
 from opentelemetry.util.types import AnyValue
 
-import llmobs
-from llmobs import _generators
-from llmobs._generators import TracedAsyncGenerator, TracedGenerator
-from llmobs._runtime import Runtime
+import cetra
+from cetra import _generators
+from cetra._generators import TracedAsyncGenerator, TracedGenerator
+from cetra._runtime import Runtime
 
 Memory = tuple[InMemorySpanExporter, Callable[..., Runtime]]
 Spans = Callable[[InMemorySpanExporter], list[ReadableSpan]]
@@ -44,7 +44,7 @@ def test_exhaustion_joined_text(memory: Memory, spans: Spans) -> None:
     exporter, start = memory
     start()
 
-    @llmobs.observe(name="stream")
+    @cetra.observe(name="stream")
     def stream(prompt: str) -> Iterator[str]:
         yield "Hel"
         yield "lo"
@@ -52,10 +52,10 @@ def test_exhaustion_joined_text(memory: Memory, spans: Spans) -> None:
     assert list(stream("hi")) == ["Hel", "lo"]
     [span] = spans(exporter)
     attributes = attrs(span)
-    assert attributes["llmobs.input"] == '{"prompt":"hi"}'
-    assert attributes["llmobs.input.format"] == "json"
-    assert attributes["llmobs.output"] == "Hello"
-    assert attributes["llmobs.output.format"] == "text"
+    assert attributes["cetra.input"] == '{"prompt":"hi"}'
+    assert attributes["cetra.input.format"] == "json"
+    assert attributes["cetra.output"] == "Hello"
+    assert attributes["cetra.output.format"] == "text"
     assert span.status.status_code is StatusCode.UNSET
 
 
@@ -63,12 +63,12 @@ def test_exhaustion_json_list(memory: Memory, spans: Spans) -> None:
     exporter, start = memory
     start()
 
-    @llmobs.observe(name="numbers")
+    @cetra.observe(name="numbers")
     def numbers() -> Iterator[dict[str, int]]:
         yield {"n": 1}
         yield {"n": 2}
 
-    @llmobs.observe(name="mixed")
+    @cetra.observe(name="mixed")
     def mixed() -> Iterator[object]:
         yield "a"
         yield 1
@@ -78,26 +78,26 @@ def test_exhaustion_json_list(memory: Memory, spans: Spans) -> None:
     finished = spans(exporter)
     names = by_name(finished)
     numbers_attributes = attrs(names["numbers"])
-    assert numbers_attributes["llmobs.input"] == "{}"
-    assert numbers_attributes["llmobs.output"] == '[{"n":1},{"n":2}]'
-    assert numbers_attributes["llmobs.output.format"] == "json"
+    assert numbers_attributes["cetra.input"] == "{}"
+    assert numbers_attributes["cetra.output"] == '[{"n":1},{"n":2}]'
+    assert numbers_attributes["cetra.output.format"] == "json"
     mixed_attributes = attrs(names["mixed"])
-    assert mixed_attributes["llmobs.output"] == '["a",1]'
-    assert mixed_attributes["llmobs.output.format"] == "json"
+    assert mixed_attributes["cetra.output"] == '["a",1]'
+    assert mixed_attributes["cetra.output.format"] == "json"
 
 
 def test_span_starts_at_first_next(memory: Memory, spans: Spans) -> None:
     exporter, start = memory
     start()
 
-    @llmobs.observe(name="gen")
+    @cetra.observe(name="gen")
     def gen() -> Iterator[int]:
         yield 1
         yield 2
 
-    with llmobs.span("outer"):
+    with cetra.span("outer"):
         generator = gen()
-        with llmobs.span("middle"):
+        with cetra.span("middle"):
             pass
         assert next(generator) == 1
         assert next(generator) == 2
@@ -124,16 +124,16 @@ def test_span_current_only_while_body_runs(memory: Memory, spans: Spans) -> None
     body_ids: list[str | None] = []
     consumer_ids: list[str | None] = []
 
-    @llmobs.observe(name="gen")
+    @cetra.observe(name="gen")
     def gen() -> Iterator[str]:
         for text in ("a", "b"):
-            body_ids.append(llmobs.current_span_id())
+            body_ids.append(cetra.current_span_id())
             yield text
 
-    with llmobs.span("consumer"):
-        consumer_id = llmobs.current_span_id()
+    with cetra.span("consumer"):
+        consumer_id = cetra.current_span_id()
         for _ in gen():
-            consumer_ids.append(llmobs.current_span_id())
+            consumer_ids.append(cetra.current_span_id())
     names = by_name(spans(exporter))
     gen_span = names["gen"]
     assert body_ids == [format(gen_span.context.span_id, "016x")] * 2
@@ -146,7 +146,7 @@ def test_break_ends_ok_with_partial_items(memory: Memory, spans: Spans) -> None:
     exporter, start = memory
     start()
 
-    @llmobs.observe(name="partial")
+    @cetra.observe(name="partial")
     def partial() -> Iterator[str]:
         yield "a"
         yield "b"
@@ -158,15 +158,15 @@ def test_break_ends_ok_with_partial_items(memory: Memory, spans: Spans) -> None:
     [span] = spans(exporter)
     attributes = attrs(span)
     assert span.status.status_code is StatusCode.OK
-    assert attributes["llmobs.output"] == "a"
-    assert attributes["llmobs.output.format"] == "text"
+    assert attributes["cetra.output"] == "a"
+    assert attributes["cetra.output.format"] == "text"
 
 
 def test_send_and_close(memory: Memory, spans: Spans) -> None:
     exporter, start = memory
     start()
 
-    @llmobs.observe(name="echo")
+    @cetra.observe(name="echo")
     def echo() -> Generator[str, int, None]:
         got = yield "start"
         yield f"got:{got}"
@@ -178,9 +178,9 @@ def test_send_and_close(memory: Memory, spans: Spans) -> None:
     generator.close()
     [span] = spans(exporter)
     attributes = attrs(span)
-    assert attributes["llmobs.input"] == "{}"
-    assert attributes["llmobs.output"] == "startgot:7"
-    assert attributes["llmobs.output.format"] == "text"
+    assert attributes["cetra.input"] == "{}"
+    assert attributes["cetra.output"] == "startgot:7"
+    assert attributes["cetra.output.format"] == "text"
     assert span.status.status_code is StatusCode.OK
 
 
@@ -191,7 +191,7 @@ def test_body_exception_error_and_reraised(memory: Memory, spans: Spans) -> None
     class ScenarioError(Exception):
         pass
 
-    @llmobs.observe(name="fails")
+    @cetra.observe(name="fails")
     def fails() -> Iterator[str]:
         yield "a"
         raise ScenarioError("boom")
@@ -204,7 +204,7 @@ def test_body_exception_error_and_reraised(memory: Memory, spans: Spans) -> None
     attributes = attrs(span)
     assert span.status.status_code is StatusCode.ERROR
     assert span.status.description == "ScenarioError: boom"
-    assert "llmobs.output" not in attributes
+    assert "cetra.output" not in attributes
     [event] = span.events
     assert event.name == "exception"
     event_attributes = event.attributes
@@ -217,7 +217,7 @@ def test_throw_from_consumer_error(memory: Memory, spans: Spans) -> None:
     exporter, start = memory
     start()
 
-    @llmobs.observe(name="thrown")
+    @cetra.observe(name="thrown")
     def thrown() -> Generator[str, None, None]:
         yield "a"
         yield "b"
@@ -243,7 +243,7 @@ def test_reduce_output(memory: Memory, spans: Spans) -> None:
     def count_and_first(items: list[object]) -> object:
         return {"count": len(items), "first": items[0] if items else None}
 
-    @llmobs.observe(name="reduced", reduce_output=count_and_first)
+    @cetra.observe(name="reduced", reduce_output=count_and_first)
     def reduced() -> Iterator[str]:
         yield "a"
         yield "b"
@@ -251,8 +251,8 @@ def test_reduce_output(memory: Memory, spans: Spans) -> None:
     assert list(reduced()) == ["a", "b"]
     [span] = spans(exporter)
     attributes = attrs(span)
-    assert attributes["llmobs.output"] == '{"count":2,"first":"a"}'
-    assert attributes["llmobs.output.format"] == "json"
+    assert attributes["cetra.output"] == '{"count":2,"first":"a"}'
+    assert attributes["cetra.output.format"] == "json"
 
 
 def test_reduce_output_raising_falls_back(
@@ -264,17 +264,17 @@ def test_reduce_output_raising_falls_back(
     def boom(items: list[object]) -> object:
         raise RuntimeError("no")
 
-    @llmobs.observe(name="fallback", reduce_output=boom)
+    @cetra.observe(name="fallback", reduce_output=boom)
     def fallback() -> Iterator[str]:
         yield "x"
         yield "y"
 
-    with caplog.at_level(logging.DEBUG, logger="llmobs"):
+    with caplog.at_level(logging.DEBUG, logger="cetra"):
         assert list(fallback()) == ["x", "y"]
     [span] = spans(exporter)
     attributes = attrs(span)
-    assert attributes["llmobs.output"] == "xy"
-    assert attributes["llmobs.output.format"] == "text"
+    assert attributes["cetra.output"] == "xy"
+    assert attributes["cetra.output.format"] == "text"
     assert any("reduce_output" in record.getMessage() for record in caplog.records)
 
 
@@ -289,14 +289,14 @@ def test_empty_generator_records_no_output_and_skips_reduce(memory: Memory, span
         calls.append(len(items))
         return {"count": len(items)}
 
-    @llmobs.observe(name="empty", reduce_output=counter)
+    @cetra.observe(name="empty", reduce_output=counter)
     def empty() -> Iterator[int]:
         return
         yield 1  # makes this a generator function that yields nothing
 
     assert list(empty()) == []
     [span] = spans(exporter)
-    assert "llmobs.output" not in attrs(span)
+    assert "cetra.output" not in attrs(span)
     assert calls == []
 
 
@@ -307,14 +307,14 @@ def test_unbindable_call_records_one_span_with_the_error(memory: Memory, spans: 
     exporter, start = memory
     start()
 
-    @llmobs.observe(name="bad")
+    @cetra.observe(name="bad")
     def bad(a: int, b: int = 1) -> Iterator[int]:
         yield a
 
     with pytest.raises(TypeError):
         bad(*[1, 2, 3])  # one argument too many: the call cannot bind
 
-    @llmobs.observe(name="abad")
+    @cetra.observe(name="abad")
     async def abad(a: int) -> AsyncIterator[int]:
         yield a
 
@@ -326,8 +326,8 @@ def test_unbindable_call_records_one_span_with_the_error(memory: Memory, spans: 
     for name, expected_input in inputs.items():
         span = by_name_spans[name]
         attributes = attrs(span)
-        assert attributes["llmobs.input"] == expected_input
-        assert attributes["llmobs.span.kind"] == "chain"
+        assert attributes["cetra.input"] == expected_input
+        assert attributes["cetra.span.kind"] == "chain"
         assert span.status.status_code is StatusCode.ERROR
         assert span.status.description is not None
         [event] = span.events
@@ -338,7 +338,7 @@ def test_capture_content_false_keeps_no_items(memory: Memory, spans: Spans) -> N
     exporter, start = memory
     start(capture_content=False)
 
-    @llmobs.observe(name="many")
+    @cetra.observe(name="many")
     def many() -> Generator[int, None, None]:
         yield from range(10_000)
 
@@ -348,7 +348,7 @@ def test_capture_content_false_keeps_no_items(memory: Memory, spans: Spans) -> N
     assert cast(TracedGenerator[int, None, None], generator)._items == []
     generator.close()
     [span] = spans(exporter)
-    assert dict(attrs(span)) == {"llmobs.span.kind": "chain"}
+    assert dict(attrs(span)) == {"cetra.span.kind": "chain"}
 
 
 def test_dropped_without_iteration_no_span_no_warning(
@@ -357,7 +357,7 @@ def test_dropped_without_iteration_no_span_no_warning(
     exporter, start = memory
     start()
 
-    @llmobs.observe(name="dropped")
+    @cetra.observe(name="dropped")
     def dropped() -> Iterator[int]:
         yield 1
 
@@ -372,7 +372,7 @@ def test_gc_ends_half_consumed_generator_with_ok(memory: Memory, spans: Spans) -
     exporter, start = memory
     start()
 
-    @llmobs.observe(name="gc")
+    @cetra.observe(name="gc")
     def half() -> Iterator[str]:
         yield "a"
         yield "b"
@@ -383,13 +383,13 @@ def test_gc_ends_half_consumed_generator_with_ok(memory: Memory, spans: Spans) -
     gc.collect()
     [span] = spans(exporter)
     assert span.status.status_code is StatusCode.OK
-    assert attrs(span)["llmobs.output"] == "a"
+    assert attrs(span)["cetra.output"] == "a"
 
 
 def test_without_runtime_inner_generator_unchanged(memory: Memory, spans: Spans) -> None:
     exporter, _start = memory
 
-    @llmobs.observe(name="off")
+    @cetra.observe(name="off")
     def off(x: int) -> Iterator[int]:
         yield x
 
@@ -404,14 +404,14 @@ def test_wrapper_is_a_plain_function(memory: Memory, spans: Spans) -> None:
     exporter, start = memory
     start()
 
-    @llmobs.observe(name="gen")
+    @cetra.observe(name="gen")
     def gen() -> Iterator[int]:
         yield 1
 
     async def agen() -> AsyncIterator[int]:
         yield 1
 
-    traced_async_gen = llmobs.observe(name="agen")(agen)
+    traced_async_gen = cetra.observe(name="agen")(agen)
     assert inspect.isgeneratorfunction(gen) is False
     assert inspect.isasyncgenfunction(traced_async_gen) is False
     assert "isasyncgenfunction" in (_generators.__doc__ or "")
@@ -428,7 +428,7 @@ def test_async_exhaustion_joined_text(memory: Memory, spans: Spans) -> None:
     exporter, start = memory
     start()
 
-    @llmobs.observe(name="stream")
+    @cetra.observe(name="stream")
     async def stream(prompt: str) -> AsyncIterator[str]:
         yield "Hel"
         yield "lo"
@@ -439,9 +439,9 @@ def test_async_exhaustion_joined_text(memory: Memory, spans: Spans) -> None:
     assert asyncio.run(main()) == ["Hel", "lo"]
     [span] = spans(exporter)
     attributes = attrs(span)
-    assert attributes["llmobs.input"] == '{"prompt":"hi"}'
-    assert attributes["llmobs.output"] == "Hello"
-    assert attributes["llmobs.output.format"] == "text"
+    assert attributes["cetra.input"] == '{"prompt":"hi"}'
+    assert attributes["cetra.output"] == "Hello"
+    assert attributes["cetra.output.format"] == "text"
     assert span.status.status_code is StatusCode.UNSET
 
 
@@ -449,7 +449,7 @@ def test_async_exhaustion_json_list(memory: Memory, spans: Spans) -> None:
     exporter, start = memory
     start()
 
-    @llmobs.observe(name="numbers")
+    @cetra.observe(name="numbers")
     async def numbers() -> AsyncIterator[dict[str, int]]:
         yield {"n": 1}
         yield {"n": 2}
@@ -460,24 +460,24 @@ def test_async_exhaustion_json_list(memory: Memory, spans: Spans) -> None:
     assert asyncio.run(main()) == [{"n": 1}, {"n": 2}]
     [span] = spans(exporter)
     attributes = attrs(span)
-    assert attributes["llmobs.input"] == "{}"
-    assert attributes["llmobs.output"] == '[{"n":1},{"n":2}]'
-    assert attributes["llmobs.output.format"] == "json"
+    assert attributes["cetra.input"] == "{}"
+    assert attributes["cetra.output"] == '[{"n":1},{"n":2}]'
+    assert attributes["cetra.output.format"] == "json"
 
 
 def test_async_span_starts_at_first_anext(memory: Memory, spans: Spans) -> None:
     exporter, start = memory
     start()
 
-    @llmobs.observe(name="agen")
+    @cetra.observe(name="agen")
     async def agen() -> AsyncGenerator[int, None]:
         yield 1
         yield 2
 
     async def main() -> None:
-        with llmobs.span("outer"):
+        with cetra.span("outer"):
             generator = agen()
-            with llmobs.span("middle"):
+            with cetra.span("middle"):
                 pass
             assert await generator.__anext__() == 1
             await generator.aclose()
@@ -502,17 +502,17 @@ def test_async_span_current_only_while_body_runs(memory: Memory, spans: Spans) -
     body_ids: list[str | None] = []
     consumer_ids: list[str | None] = []
 
-    @llmobs.observe(name="agen")
+    @cetra.observe(name="agen")
     async def agen() -> AsyncIterator[str]:
         for text in ("a", "b"):
-            body_ids.append(llmobs.current_span_id())
+            body_ids.append(cetra.current_span_id())
             yield text
 
     async def main() -> str | None:
-        with llmobs.span("consumer"):
-            consumer_id = llmobs.current_span_id()
+        with cetra.span("consumer"):
+            consumer_id = cetra.current_span_id()
             async for _ in agen():
-                consumer_ids.append(llmobs.current_span_id())
+                consumer_ids.append(cetra.current_span_id())
         return consumer_id
 
     consumer_id = asyncio.run(main())
@@ -528,7 +528,7 @@ def test_async_aclose_ok_with_partial_items(memory: Memory, spans: Spans) -> Non
     exporter, start = memory
     start()
 
-    @llmobs.observe(name="partial")
+    @cetra.observe(name="partial")
     async def partial() -> AsyncGenerator[str, None]:
         yield "a"
         yield "b"
@@ -544,8 +544,8 @@ def test_async_aclose_ok_with_partial_items(memory: Memory, spans: Spans) -> Non
     [span] = spans(exporter)
     attributes = attrs(span)
     assert span.status.status_code is StatusCode.OK
-    assert attributes["llmobs.output"] == "a"
-    assert attributes["llmobs.output.format"] == "text"
+    assert attributes["cetra.output"] == "a"
+    assert attributes["cetra.output.format"] == "text"
 
 
 def test_async_exception_error_and_reraised(memory: Memory, spans: Spans) -> None:
@@ -555,7 +555,7 @@ def test_async_exception_error_and_reraised(memory: Memory, spans: Spans) -> Non
     class ScenarioError(Exception):
         pass
 
-    @llmobs.observe(name="fails")
+    @cetra.observe(name="fails")
     async def fails() -> AsyncIterator[str]:
         yield "a"
         raise ScenarioError("boom")
@@ -571,7 +571,7 @@ def test_async_exception_error_and_reraised(memory: Memory, spans: Spans) -> Non
     attributes = attrs(span)
     assert span.status.status_code is StatusCode.ERROR
     assert span.status.description == "ScenarioError: boom"
-    assert "llmobs.output" not in attributes
+    assert "cetra.output" not in attributes
     [event] = span.events
     assert event.name == "exception"
     event_attributes = event.attributes
@@ -583,7 +583,7 @@ def test_async_athrow_from_consumer_error(memory: Memory, spans: Spans) -> None:
     exporter, start = memory
     start()
 
-    @llmobs.observe(name="thrown")
+    @cetra.observe(name="thrown")
     async def thrown() -> AsyncGenerator[str, None]:
         yield "a"
         yield "b"
@@ -606,7 +606,7 @@ def test_async_reduce_output(memory: Memory, spans: Spans) -> None:
     exporter, start = memory
     start()
 
-    @llmobs.observe(name="count", reduce_output=len)
+    @cetra.observe(name="count", reduce_output=len)
     async def count() -> AsyncIterator[int]:
         yield 1
         yield 2
@@ -617,15 +617,15 @@ def test_async_reduce_output(memory: Memory, spans: Spans) -> None:
     assert asyncio.run(main()) == [1, 2]
     [span] = spans(exporter)
     attributes = attrs(span)
-    assert attributes["llmobs.output"] == "2"
-    assert attributes["llmobs.output.format"] == "json"
+    assert attributes["cetra.output"] == "2"
+    assert attributes["cetra.output.format"] == "json"
 
 
 def test_async_capture_content_false_keeps_no_items(memory: Memory, spans: Spans) -> None:
     exporter, start = memory
     start(capture_content=False)
 
-    @llmobs.observe(name="many")
+    @cetra.observe(name="many")
     async def many() -> AsyncGenerator[int, None]:
         for number in range(10_000):
             yield number
@@ -639,14 +639,14 @@ def test_async_capture_content_false_keeps_no_items(memory: Memory, spans: Spans
 
     asyncio.run(main())
     [span] = spans(exporter)
-    assert dict(attrs(span)) == {"llmobs.span.kind": "chain"}
+    assert dict(attrs(span)) == {"cetra.span.kind": "chain"}
 
 
 def test_abandoned_async_generator_exports_nothing(memory: Memory, spans: Spans) -> None:
     exporter, start = memory
     start()
 
-    @llmobs.observe(name="abandoned")
+    @cetra.observe(name="abandoned")
     async def abandoned() -> AsyncIterator[int]:
         yield 1
         yield 2
@@ -664,7 +664,7 @@ def test_abandoned_async_generator_exports_nothing(memory: Memory, spans: Spans)
 def test_async_without_runtime_inner_unchanged(memory: Memory, spans: Spans) -> None:
     exporter, _start = memory
 
-    @llmobs.observe(name="off")
+    @cetra.observe(name="off")
     async def off() -> AsyncIterator[int]:
         yield 1
 

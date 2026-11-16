@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-use llmobs_server::api::openapi::openapi;
+use cetra_server::api::openapi::openapi;
 
 const OPERATIONS: &[(&str, &str, &str)] = &[
     (
@@ -16,6 +16,8 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "get_oauth_authorize",
     ),
     ("get", "/api/auth/callback/{provider}", "get_oauth_callback"),
+    ("get", "/api/auth/sso/authorize", "get_sso_authorize"),
+    ("post", "/api/auth/sso/discover", "post_sso_discover"),
     ("get", "/api/auth/config", "get_auth_config"),
     ("post", "/api/auth/setup", "post_setup"),
     ("post", "/api/auth/login", "post_login"),
@@ -69,12 +71,76 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/orgs/{org}/entitlements",
         "get_org_entitlements",
     ),
+    ("get", "/api/v1/orgs/{org}/usage", "get_org_usage"),
+    ("get", "/api/v1/orgs/{org}/sso", "get_org_sso"),
+    ("patch", "/api/v1/orgs/{org}/sso", "patch_org_sso"),
+    (
+        "put",
+        "/api/v1/orgs/{org}/sso/provider",
+        "put_org_sso_provider",
+    ),
+    (
+        "delete",
+        "/api/v1/orgs/{org}/sso/provider",
+        "delete_org_sso_provider",
+    ),
+    (
+        "post",
+        "/api/v1/orgs/{org}/sso/domains",
+        "post_org_sso_domain",
+    ),
+    (
+        "post",
+        "/api/v1/orgs/{org}/sso/domains/{id}/verify",
+        "post_org_sso_domain_verify",
+    ),
+    (
+        "delete",
+        "/api/v1/orgs/{org}/sso/domains/{id}",
+        "delete_org_sso_domain",
+    ),
     (
         "put",
         "/api/internal/v1/orgs/{org_id}/entitlements",
         "put_org_entitlements_token",
     ),
     ("post", "/api/internal/v1/orgs", "post_internal_org"),
+    (
+        "delete",
+        "/api/internal/v1/orgs/{org_id}",
+        "delete_internal_org",
+    ),
+    ("get", "/api/internal/v1/usage", "list_internal_usage"),
+    (
+        "get",
+        "/api/internal/v1/deletions",
+        "list_internal_deletions",
+    ),
+    (
+        "post",
+        "/api/internal/v1/users/revoke",
+        "post_internal_user_revoke",
+    ),
+    (
+        "post",
+        "/api/internal/v1/users/disable",
+        "post_internal_user_disable",
+    ),
+    (
+        "post",
+        "/api/internal/v1/users/delete",
+        "post_internal_user_delete",
+    ),
+    (
+        "post",
+        "/api/internal/v1/memberships/lookup",
+        "post_internal_membership_lookup",
+    ),
+    (
+        "get",
+        "/api/internal/v1/orgs/{org_id}/members",
+        "list_internal_org_members",
+    ),
     ("patch", "/api/v1/orgs/{org}", "patch_org"),
     ("get", "/api/v1/orgs/{org}/members", "list_org_members"),
     (
@@ -123,6 +189,18 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "post",
         "/api/v1/orgs/{org}/llm-connections/{id}/test",
         "post_llm_connection_test",
+    ),
+    ("get", "/api/v1/orgs/{org}/models", "list_org_model_prices"),
+    ("post", "/api/v1/orgs/{org}/models", "post_org_model_price"),
+    (
+        "patch",
+        "/api/v1/orgs/{org}/models/{id}",
+        "patch_org_model_price",
+    ),
+    (
+        "delete",
+        "/api/v1/orgs/{org}/models/{id}",
+        "delete_org_model_price",
     ),
     ("get", "/api/v1/orgs/{org}/projects", "list_projects"),
     ("post", "/api/v1/orgs/{org}/projects", "post_project"),
@@ -215,6 +293,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "post",
         "/api/v1/projects/{project}/saved-views",
         "create_saved_view",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/saved-views/{id}",
+        "get_saved_view",
     ),
     (
         "patch",
@@ -348,6 +431,71 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ),
     (
         "get",
+        "/api/v1/projects/{project}/online-rules",
+        "list_online_rules",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/online-rules",
+        "post_online_rule",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/online-rules/{id}",
+        "get_online_rule",
+    ),
+    (
+        "patch",
+        "/api/v1/projects/{project}/online-rules/{id}",
+        "patch_online_rule",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/online-rules/{id}",
+        "delete_online_rule",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/online-rules/preview",
+        "post_online_rule_preview",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/online-rules/{id}/resume",
+        "post_online_rule_resume",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/eval-jobs",
+        "list_eval_jobs",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/eval-jobs/{id}",
+        "get_eval_job",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/evaluators/{id}/run",
+        "post_evaluator_run",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/online-rules/{id}/backfills",
+        "list_backfills",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/online-rules/{id}/backfills",
+        "post_backfill",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/online-rules/{id}/backfills/estimate",
+        "post_backfill_estimate",
+    ),
+    (
+        "get",
         "/api/v1/projects/{project}/score-definitions",
         "list_score_definitions",
     ),
@@ -366,9 +514,152 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/projects/{project}/score-definitions/{id}",
         "delete_score_definition",
     ),
+    (
+        "get",
+        "/api/v1/projects/{project}/datasets",
+        "list_datasets",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/datasets",
+        "post_dataset",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/datasets/{dataset}",
+        "get_dataset",
+    ),
+    (
+        "patch",
+        "/api/v1/projects/{project}/datasets/{dataset}",
+        "patch_dataset",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/datasets/{dataset}",
+        "delete_dataset",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/datasets/{dataset}/versions",
+        "list_dataset_versions",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/datasets/{dataset}/items",
+        "list_dataset_items",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/datasets/{dataset}/items",
+        "post_dataset_items",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/datasets/{dataset}/items/{item_id}",
+        "get_dataset_item",
+    ),
+    (
+        "patch",
+        "/api/v1/projects/{project}/datasets/{dataset}/items/{item_id}",
+        "patch_dataset_item",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/datasets/{dataset}/items/{item_id}",
+        "delete_dataset_item",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/datasets/{dataset}/items/from-trace",
+        "post_dataset_item_from_trace",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/datasets/{dataset}/import/preview",
+        "post_dataset_import_preview",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/datasets/{dataset}/import",
+        "post_dataset_import",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/datasets/{dataset}/export",
+        "get_dataset_export",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/experiments",
+        "list_experiments",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/experiments",
+        "post_experiment",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/experiments/{id}",
+        "get_experiment",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/experiments/{id}/results",
+        "get_experiment_results",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/experiments/compare",
+        "compare_experiments",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/experiments/{id}",
+        "delete_experiment",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/experiments/{id}/items",
+        "post_experiment_results",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/experiments/{id}/finish",
+        "post_experiment_finish",
+    ),
+    ("get", "/api/v1/projects/{project}/models", "list_models"),
+    (
+        "get",
+        "/api/v1/projects/{project}/models/resolve",
+        "resolve_model_price",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/models",
+        "post_model_price",
+    ),
+    (
+        "patch",
+        "/api/v1/projects/{project}/models/{id}",
+        "patch_model_price",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/models/{id}",
+        "delete_model_price",
+    ),
 ];
 
 const QUERY_OR_BODY: &[&str] = &[
+    "get_org_usage",
+    "list_internal_usage",
+    "list_internal_deletions",
+    "post_internal_user_revoke",
+    "post_internal_user_disable",
+    "post_internal_membership_lookup",
+    "list_internal_org_members",
     "list_alert_events",
     "list_org_members",
     "list_org_invites",
@@ -387,12 +678,26 @@ const QUERY_OR_BODY: &[&str] = &[
     "get_user",
     "list_scores",
     "list_saved_views",
+    "get_saved_view",
     "get_metrics",
     "list_deletions",
     "get_deletion",
     "list_org_deletions",
     "list_evaluators",
     "list_score_definitions",
+    "list_datasets",
+    "list_dataset_versions",
+    "list_dataset_items",
+    "get_dataset_item",
+    "list_experiments",
+    "get_experiment",
+    "list_models",
+    "resolve_model_price",
+    "list_org_model_prices",
+    "list_online_rules",
+    "post_online_rule_preview",
+    "post_backfill_estimate",
+    "list_eval_jobs",
 ];
 
 /// Read operations with a handler (D-G-23): their errors include 422.
@@ -408,6 +713,8 @@ const READ_OPERATIONS: &[&str] = &[
     "get_user",
     "list_scores",
     "get_metrics",
+    "get_experiment_results",
+    "compare_experiments",
 ];
 
 const TAGS: &[&str] = &[
@@ -423,6 +730,9 @@ const TAGS: &[&str] = &[
     "scores",
     "evaluation",
     "score_definitions",
+    "datasets",
+    "experiments",
+    "model_prices",
     "schema",
     "saved_views",
     "sql",
@@ -492,7 +802,17 @@ fn document_lint() {
         let operation_security = operation.get("security").and_then(Value::as_array);
         if matches!(
             *id,
-            "create_key_scores" | "post_feedback" | "post_internal_org"
+            "create_key_scores"
+                | "post_feedback"
+                | "post_internal_org"
+                | "delete_internal_org"
+                | "list_internal_usage"
+                | "list_internal_deletions"
+                | "post_internal_user_revoke"
+                | "post_internal_user_disable"
+                | "post_internal_user_delete"
+                | "post_internal_membership_lookup"
+                | "list_internal_org_members"
         ) {
             let security = operation_security.unwrap_or_else(|| panic!("{id}"));
             assert_eq!(security.len(), 1, "{id}");
@@ -502,6 +822,8 @@ fn document_lint() {
             *id,
             "get_auth_config"
                 | "get_oauth_authorize"
+                | "get_sso_authorize"
+                | "post_sso_discover"
                 | "get_oauth_callback"
                 | "post_setup"
                 | "post_login"
@@ -539,6 +861,15 @@ fn document_lint() {
                 | "get_admin_settings"
                 | "get_admin_license"
                 | "post_admin_settings_test_email"
+                | "get_org_sso"
+                | "put_org_sso_provider"
+                | "delete_org_sso_provider"
+                | "patch_org_sso"
+                | "post_org_sso_domain"
+                | "post_org_sso_domain_verify"
+                | "delete_org_sso_domain"
+                | "delete_org"
+                | "delete_project"
         ) {
             let security = operation_security.unwrap_or_else(|| panic!("{id}"));
             assert_eq!(security.len(), 1, "{id}");
@@ -560,6 +891,10 @@ fn document_lint() {
             expected_errors.extend(["401", "429"]);
         } else if *id == "get_oauth_authorize" {
             expected_errors.extend(["404"]);
+        } else if *id == "get_sso_authorize" {
+            expected_errors.extend(["429"]);
+        } else if *id == "post_sso_discover" {
+            expected_errors.extend(["400", "429"]);
         } else if *id == "get_oauth_callback" {
             // Failure is a redirect, not a problem response.
         } else if *id == "post_setup" || *id == "post_signup" {
@@ -569,7 +904,15 @@ fn document_lint() {
         } else if *id == "put_org_entitlements_token" {
             expected_errors.extend(["400", "404", "409", "429"]);
         } else if *id == "post_internal_org" {
-            expected_errors.extend(["400", "401", "403", "422", "429"]);
+            expected_errors.extend(["400", "401", "403", "409", "422", "429"]);
+        } else if *id == "list_internal_usage"
+            || *id == "list_internal_deletions"
+            || *id == "post_internal_user_delete"
+            || *id == "post_internal_membership_lookup"
+        {
+            expected_errors.extend(["400", "401", "403", "429"]);
+        } else if *id == "list_internal_org_members" {
+            expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "post_password_reset" || *id == "post_password_forgot" {
             expected_errors.extend(["400", "403", "429"]);
         } else if *id == "post_email_verify" {
@@ -615,14 +958,14 @@ fn document_lint() {
         } else if *id == "post_logout" {
             // The handler always answers 204. CSRF is the shared origin check.
         } else if *id == "create_scores" || *id == "create_key_scores" {
-            expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
+            expected_errors.extend(["400", "401", "402", "403", "404", "413", "429"]);
         } else if *id == "delete_score" || *id == "delete_saved_view" {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "create_saved_view" || *id == "update_saved_view" {
             // 409: unsharing a view whose owner was deleted.
             expected_errors.extend(["400", "401", "403", "404", "409", "413", "415", "429"]);
         } else if *id == "post_feedback" {
-            expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
+            expected_errors.extend(["400", "401", "402", "403", "404", "413", "429"]);
         } else if *id == "get_media" {
             expected_errors.extend(["401", "403", "404", "416", "429"]);
         } else if *id == "post_llm_connection"
@@ -636,8 +979,13 @@ fn document_lint() {
             || *id == "update_channel"
             || *id == "create_alert_rule"
             || *id == "update_alert_rule"
+            || *id == "put_org_sso_provider"
+            || *id == "post_org_sso_domain"
+            || *id == "patch_org_sso"
         {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
+        } else if *id == "post_org_sso_domain_verify" || *id == "delete_org_sso_provider" {
+            expected_errors.extend(["401", "403", "404", "409", "429"]);
         } else if *id == "run_sql" {
             expected_errors.extend(["400", "401", "403", "404", "413", "415", "422", "429"]);
         } else if *id == "create_deletion" {
@@ -646,19 +994,58 @@ fn document_lint() {
             || *id == "delete_org"
             || *id == "post_evaluator"
             || *id == "patch_evaluator"
+            || *id == "delete_evaluator"
             || *id == "post_score_definition"
             || *id == "patch_score_definition"
+            || *id == "post_model_price"
+            || *id == "patch_model_price"
+            || *id == "delete_model_price"
+            || *id == "post_org_model_price"
+            || *id == "patch_org_model_price"
+            || *id == "delete_org_model_price"
         {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
-        } else if *id == "get_evaluator"
-            || *id == "delete_evaluator"
-            || *id == "delete_score_definition"
-        {
+        } else if *id == "get_evaluator" || *id == "delete_score_definition" {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "post_evaluator_test" {
             // The test only collects 4xx codes; the operation also declares 503.
             expected_errors.extend(["400", "401", "403", "404", "429"]);
-        } else if READ_OPERATIONS.contains(id) || *id == "preview_deletion" {
+        } else if *id == "post_online_rule" || *id == "patch_online_rule" || *id == "post_backfill"
+        {
+            expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
+        } else if *id == "get_online_rule"
+            || *id == "list_backfills"
+            || *id == "delete_online_rule"
+            || *id == "post_online_rule_resume"
+            || *id == "get_eval_job"
+            || *id == "post_evaluator_run"
+        {
+            expected_errors.extend(["400", "401", "403", "404", "429"]);
+        } else if *id == "post_dataset" || *id == "patch_dataset" || *id == "post_dataset_items" {
+            expected_errors.extend(["400", "401", "403", "404", "409", "413", "429"]);
+        } else if *id == "patch_dataset_item" {
+            expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
+        } else if *id == "delete_dataset_item" {
+            expected_errors.extend(["400", "401", "403", "404", "429"]);
+        } else if *id == "post_dataset_item_from_trace" {
+            expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
+        } else if *id == "post_dataset_import_preview" {
+            expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
+        } else if *id == "post_dataset_import" {
+            expected_errors.extend(["400", "401", "403", "404", "409", "413", "415", "429"]);
+        } else if *id == "get_dataset_export" {
+            expected_errors.extend(["400", "401", "403", "404", "429"]);
+        } else if *id == "post_experiment_finish" {
+            expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
+        } else if *id == "post_experiment" {
+            expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
+        } else if *id == "post_experiment_results" {
+            expected_errors.extend(["400", "401", "403", "404", "409", "413", "429"]);
+        } else if READ_OPERATIONS.contains(id)
+            || *id == "preview_deletion"
+            || *id == "post_online_rule_preview"
+            || *id == "post_backfill_estimate"
+        {
             expected_errors.extend(["400", "401", "403", "404", "422", "429"]);
         } else if *id != "get_auth_config" && QUERY_OR_BODY.contains(id) {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
@@ -743,9 +1130,17 @@ fn document_lint() {
         ("DeletionPage", "Deletion"),
         ("EvaluatorPage", "Evaluator"),
         ("ScoreDefinitionPage", "ScoreDefinition"),
+        ("DatasetPage", "Dataset"),
+        ("DatasetVersionPage", "DatasetVersion"),
+        ("DatasetItemPage", "DatasetItem"),
+        ("ExperimentPage", "Experiment"),
+        ("ModelPricePage", "ModelPrice"),
         ("ChannelPage", "NotificationChannel"),
         ("AlertRulePage", "AlertRule"),
         ("AlertEventPage", "AlertEvent"),
+        ("OnlineRulePage", "OnlineRule"),
+        ("EvalJobPage", "EvalJob"),
+        ("BackfillPage", "Backfill"),
     ];
     for (page, item) in pages {
         let schema = &schemas[page];
@@ -783,7 +1178,7 @@ fn document_lint() {
 }
 
 fn openapi_write_requested() -> bool {
-    write_requested("LLMOBS_OPENAPI_WRITE")
+    write_requested("CETRA_OPENAPI_WRITE")
 }
 
 fn write_requested(name: &str) -> bool {
@@ -908,7 +1303,7 @@ fn assert_exclusions(document: &Value) {
         "list_users",
         "stream_traces",
     ];
-    const TEXT: &str = "Evaluation traces (`environment = llmobs-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.";
+    const TEXT: &str = "Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.";
     let mut found = BTreeSet::new();
     let Some(paths) = document["paths"].as_object() else {
         panic!("paths");
@@ -963,10 +1358,28 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         ("ReasoningPart", &[]),
         ("UnknownPart", &[]),
     ];
-    let d65_names: HashSet<&str> = D65.iter().map(|(name, _)| *name).collect();
+    // `null` is a value here, not an absent field: a PATCH clears retention with it
+    // (`api/openapi.rs` NULL_IS_A_VALUE).
+    const NULL_IS_A_VALUE: &[(&str, &[&str])] = &[
+        ("CreateProjectRequest", &["retention_days"]),
+        ("UpdateProjectRequest", &["retention_days"]),
+        (
+            "UpdateDatasetRequest",
+            &["description", "input_schema", "expected_schema"],
+        ),
+    ];
+    let allowed_names: HashSet<&str> = D65
+        .iter()
+        .chain(NULL_IS_A_VALUE)
+        .map(|(name, _)| *name)
+        .collect();
     let mut required_nullable = BTreeSet::new();
     for (name, schema) in schemas {
-        if let Some((_, fields)) = D65.iter().find(|(component, _)| *component == name) {
+        if let Some((_, fields)) = D65
+            .iter()
+            .chain(NULL_IS_A_VALUE)
+            .find(|(component, _)| *component == name)
+        {
             assert_eq!(
                 nullable_property_names(schema),
                 fields.iter().copied().collect(),
@@ -976,7 +1389,7 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         collect_required_nullable(
             name,
             schema,
-            d65_names.contains(name.as_str()),
+            allowed_names.contains(name.as_str()),
             &mut required_nullable,
         );
     }
@@ -999,14 +1412,28 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "DeletionPage",
         "EvaluatorPage",
         "ScoreDefinitionPage",
+        "DatasetPage",
+        "DatasetVersionPage",
+        "DatasetItemPage",
+        "ExperimentPage",
+        "ModelPricePage",
         "ChannelPage",
         "AlertRulePage",
         "AlertEventPage",
+        "OnlineRulePage",
+        "EvalJobPage",
+        "BackfillPage",
+        "InternalUsagePage",
+        "InternalDropPage",
     ];
-    let expected: BTreeSet<String> = pages
+    let mut expected: BTreeSet<String> = pages
         .iter()
         .map(|page| format!("{page}.next_cursor"))
         .collect();
+    // Answers that are not pages, with an always-present cursor (D-J-10, D-J-13).
+    expected.insert("CreateExperimentResponse.next_cursor".to_owned());
+    expected.insert("ExperimentResults.next_cursor".to_owned());
+    expected.insert("ExperimentComparison.next_cursor".to_owned());
     assert_eq!(required_nullable, expected);
 }
 

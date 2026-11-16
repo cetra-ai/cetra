@@ -1,21 +1,24 @@
 //! `catalog.db`: one connection, the M2 schema, and the load into [`Catalog`].
 //!
 //! `Storage::open` opens it and loads the in-memory [`Catalog`].
+//!
+//! A migration that has been in a release is never edited; a change is a new migration (spec 03 § 12).
 #![allow(dead_code)]
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
+use cetra_core::ids::ProjectId;
 use chrono::NaiveDate;
-use llmobs_core::ids::ProjectId;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous};
-use sqlx::{ConnectOptions, Row, SqliteConnection};
+use sqlx::{AssertSqlSafe, ConnectOptions, Connection, Row, SqliteConnection};
 use uuid::Uuid;
 
 use super::{Catalog, FileId, FileMeta, FileTable, insert_sorted};
 use crate::deletion::{PendingDeletion, Tombstones};
 use crate::error::CatalogError;
+use crate::format::FORMAT_VERSION;
 use crate::projects::ProjectStates;
 
 /// `flushed_seq` for the two tables. A missing `table_state` row is `0`.
@@ -32,7 +35,11 @@ pub(crate) struct TableState {
 /// The directory must already exist. Pragmas are applied on connect, before
 /// the migrations run. This is the only connection: readers use the in-memory
 /// catalog.
+///
+/// The format marker (`PRAGMA user_version`, spec 03 § 12) is checked before
+/// anything is copied or migrated, and stamped once the catalog is current.
 pub(crate) async fn open_catalog_db(data_dir: &Path) -> Result<SqliteConnection, CatalogError> {
+    check_catalog(data_dir).await?;
     let path = data_dir.join("catalog.db");
     let options = SqliteConnectOptions::new()
         .filename(&path)
@@ -45,11 +52,254 @@ pub(crate) async fn open_catalog_db(data_dir: &Path) -> Result<SqliteConnection,
         .connect()
         .await
         .map_err(|source| CatalogError::Open { path, source })?;
+    let marker = read_user_version(&mut connection).await?;
+    let applied = applied_version(&mut connection).await?;
+    let expected = sqlx::migrate!("./migrations/catalog")
+        .migrations
+        .iter()
+        .map(|migration| migration.version)
+        .max()
+        .unwrap_or(0);
+    pre_migration_copy(&mut connection, data_dir, "catalog.db", applied, expected).await?;
     sqlx::migrate!("./migrations/catalog")
         .run(&mut connection)
         .await
-        .map_err(|source| CatalogError::Migrate { source })?;
+        .map_err(|source| match source {
+            sqlx::migrate::MigrateError::VersionMissing(version) => {
+                CatalogError::SchemaTooNew { version }
+            }
+            source => CatalogError::Migrate { source },
+        })?;
+    if marker == 0 {
+        // The catalog is new or empty. A crash between the migrations and this
+        // statement leaves a marker of 0 that the next open accepts.
+        // `FORMAT_VERSION` is a constant integer, not input.
+        sqlx::query(AssertSqlSafe(format!(
+            "PRAGMA user_version = {FORMAT_VERSION}"
+        )))
+        .execute(&mut connection)
+        .await
+        .map_err(CatalogError::db)?;
+    }
     Ok(connection)
+}
+
+/// Refuses a `catalog.db` this build does not read (spec 03 § 12) on a
+/// read-only connection, so a refused directory comes back unchanged:
+/// connecting for writing with `journal_mode=WAL` rewrites the header of a
+/// rollback-journal file, and closing a writing connection checkpoints.
+/// `Storage::open` calls it before anything in the directory is written; a
+/// missing `catalog.db` is a new directory.
+pub(crate) async fn check_catalog(data_dir: &Path) -> Result<(), CatalogError> {
+    let path = data_dir.join("catalog.db");
+    if !path.is_file() {
+        return Ok(());
+    }
+    let mut reader = SqliteConnectOptions::new()
+        .filename(&path)
+        .read_only(true)
+        .connect()
+        .await
+        .map_err(|source| CatalogError::Open {
+            path: path.clone(),
+            source,
+        })?;
+    let checked = check_format(&mut reader).await;
+    reader.close().await.map_err(CatalogError::db)?;
+    checked
+}
+
+/// Refuses a directory this build does not read (spec 03 § 12). Nothing is
+/// copied, migrated or stamped before this check passes.
+async fn check_format(connection: &mut SqliteConnection) -> Result<(), CatalogError> {
+    let marker = read_user_version(connection).await?;
+    // No older format exists, so any other value (a newer one, or a corrupt
+    // negative one) is refused.
+    if marker != 0 && marker != i64::from(FORMAT_VERSION) {
+        return Err(CatalogError::FormatTooNew {
+            found: marker,
+            supported: FORMAT_VERSION,
+        });
+    }
+    let applied = applied_version(connection).await?;
+    if marker == 0 && applied > 0 && catalog_has_data(connection).await? {
+        return Err(CatalogError::PreFormat);
+    }
+    if let Some(version) = unknown_migration(connection).await? {
+        return Err(CatalogError::SchemaTooNew { version });
+    }
+    Ok(())
+}
+
+/// `PRAGMA user_version`: the data directory's format marker, `0` when unset.
+async fn read_user_version(connection: &mut SqliteConnection) -> Result<i64, CatalogError> {
+    sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(CatalogError::db)
+}
+
+/// Whether a table that holds data has a row, among the tables an older
+/// catalog may have. Tables that do not exist yet (migrations are pending) are
+/// skipped, and `table_state` counts only a flushed sequence above `0`.
+async fn catalog_has_data(connection: &mut SqliteConnection) -> Result<bool, CatalogError> {
+    let tables: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table'")
+            .fetch_all(&mut *connection)
+            .await
+            .map_err(CatalogError::db)?;
+    let present = |name: &str| tables.iter().any(|table| table == name);
+    // Only these constant names are interpolated into the SQL below.
+    for table in [
+        "data_files",
+        "deletions",
+        "media",
+        "projects",
+        "retention_watermarks",
+    ] {
+        if present(table) {
+            let found: bool = sqlx::query_scalar(AssertSqlSafe(format!(
+                "SELECT EXISTS(SELECT 1 FROM {table})"
+            )))
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(CatalogError::db)?;
+            if found {
+                return Ok(true);
+            }
+        }
+    }
+    if present("table_state") {
+        let found: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM table_state WHERE flushed_seq > 0)")
+                .fetch_one(&mut *connection)
+                .await
+                .map_err(CatalogError::db)?;
+        return Ok(found);
+    }
+    Ok(false)
+}
+
+/// The first applied migration this build does not have, read without
+/// running the migrator (which would write).
+async fn unknown_migration(connection: &mut SqliteConnection) -> Result<Option<i64>, CatalogError> {
+    let present: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(CatalogError::db)?;
+    if present.is_none() {
+        return Ok(None);
+    }
+    let applied: Vec<i64> =
+        sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
+            .fetch_all(&mut *connection)
+            .await
+            .map_err(CatalogError::db)?;
+    let known = sqlx::migrate!("./migrations/catalog").migrations;
+    Ok(applied
+        .into_iter()
+        .find(|version| !known.iter().any(|migration| migration.version == *version)))
+}
+
+/// The highest applied migration version, or `0` when the database has none.
+async fn applied_version(connection: &mut SqliteConnection) -> Result<i64, CatalogError> {
+    let present: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(|source| CatalogError::Db { source })?;
+    if present.is_none() {
+        return Ok(0);
+    }
+    let version: Option<i64> =
+        sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version DESC LIMIT 1")
+            .fetch_optional(&mut *connection)
+            .await
+            .map_err(|source| CatalogError::Db { source })?;
+    Ok(version.unwrap_or(0))
+}
+
+/// Before migrations that change an existing database, copies `<name>` to
+/// `<name>.pre-m<applied, 4 digits>` with `VACUUM INTO` (an existing copy is
+/// kept), and removes the other `<name>.pre-*` copies (D-N-22). A new database (`applied == 0`) and a
+/// current one (`applied >= expected`) get no copy. File errors arrive as
+/// `sqlx::Error::Io`.
+async fn pre_migration_copy(
+    connection: &mut SqliteConnection,
+    dir: &Path,
+    name: &str,
+    applied: i64,
+    expected: i64,
+) -> Result<(), CatalogError> {
+    if applied == 0 || applied >= expected {
+        return Ok(());
+    }
+    let io = |source: std::io::Error| CatalogError::PreMigrationCopy {
+        source: sqlx::Error::Io(source),
+    };
+    // Keyed by the schema being left, not the package version, which stays
+    // the same between releases while commit-pinned builds migrate (D-N-22).
+    let target = dir.join(format!("{name}.pre-m{applied:04}"));
+    let staging = dir.join(format!("{name}.pre-m{applied:04}.tmp"));
+    // An existing copy is kept: a failed upgrade must not replace the good
+    // pre-upgrade copy with a half-migrated database.
+    let copied = !target.exists();
+    if copied {
+        let staging_text = staging
+            .to_str()
+            .ok_or_else(|| CatalogError::PreMigrationCopy {
+                source: sqlx::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "data directory path is not UTF-8",
+                )),
+            })?;
+        if staging.exists() {
+            crate::fs::remove_file(&staging).map_err(io)?;
+        }
+        sqlx::query("VACUUM INTO ?")
+            .bind(staging_text)
+            .execute(&mut *connection)
+            .await
+            .map_err(|source| CatalogError::PreMigrationCopy { source })?;
+        crate::fs::OpenOptions::new()
+            .read(true)
+            .open(&staging)
+            .and_then(|file| file.sync_all())
+            .map_err(io)?;
+        crate::fs::rename(&staging, &target).map_err(io)?;
+        crate::fs::sync_dir(dir).map_err(io)?;
+    }
+    let prefix = format!("{name}.pre-");
+    for entry in crate::fs::read_dir(dir).map_err(io)? {
+        let path = entry.map_err(io)?.path();
+        let stale = path != target
+            && path
+                .file_name()
+                .and_then(|file| file.to_str())
+                .is_some_and(|file| file.starts_with(&prefix));
+        if stale {
+            crate::fs::remove_file(&path).map_err(io)?;
+        }
+    }
+    if copied {
+        tracing::info!(
+            database = name,
+            applied,
+            expected,
+            "copied the database before migrating"
+        );
+    } else {
+        tracing::info!(
+            database = name,
+            applied,
+            expected,
+            "kept the existing pre-migration copy"
+        );
+    }
+    Ok(())
 }
 
 /// Read every active file and both sequence rows.
@@ -170,7 +420,7 @@ pub(crate) async fn load_tombstones(
 
 /// Read every retention watermark (spec 03 §8) and dropped project (spec 03
 /// §7). `keep_from` is `YYYY-MM-DD`, like `data_files.day`.
-pub(super) async fn load_project_states(
+pub(crate) async fn load_project_states(
     connection: &mut SqliteConnection,
 ) -> Result<ProjectStates, CatalogError> {
     let rows: Vec<(String, String)> =
@@ -398,6 +648,8 @@ fn parse_flag(value: i64) -> Result<bool, CatalogError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::format::tests_support::dir_digest;
+    use sqlx::Connection;
 
     const PROJECT: &str = "018f6b4e-7c1a-7c1a-8c1a-000000000001";
     const DAY: &str = "2024-06-01";
@@ -472,6 +724,85 @@ mod tests {
         assert!(has_file_sources(&mut connection).await);
     }
 
+    /// Lists the `catalog.db.pre-*` files in `dir`.
+    fn pre_copies(dir: &Path) -> Vec<String> {
+        crate::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name.starts_with("catalog.db.pre-"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn opening_an_older_catalog_keeps_a_pre_migration_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.db");
+        // An older binary left only migration 0001 applied.
+        let mut first_only = sqlx::migrate!("./migrations/catalog");
+        let first = first_only.migrations[..1].to_vec();
+        first_only.migrations = std::borrow::Cow::Owned(first);
+        let mut older = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true)
+            .connect()
+            .await
+            .unwrap();
+        first_only.run(&mut older).await.unwrap();
+        drop(older);
+        std::fs::write(dir.path().join("catalog.db.pre-0.0.0-old"), b"old").unwrap();
+
+        let connection = open_catalog_db(dir.path()).await.unwrap();
+        drop(connection);
+
+        let copy = dir.path().join("catalog.db.pre-m0001");
+        assert!(copy.is_file());
+        assert_eq!(
+            pre_copies(dir.path()),
+            vec![copy.file_name().unwrap().to_str().unwrap().to_owned()]
+        );
+        let mut copy = SqliteConnectOptions::new()
+            .filename(&copy)
+            .connect()
+            .await
+            .unwrap();
+        let version: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+            .fetch_one(&mut copy)
+            .await
+            .unwrap();
+        assert_eq!(version, 1);
+    }
+
+    #[tokio::test]
+    async fn an_existing_pre_migration_copy_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.db");
+        let mut first_only = sqlx::migrate!("./migrations/catalog");
+        let first = first_only.migrations[..1].to_vec();
+        first_only.migrations = std::borrow::Cow::Owned(first);
+        let mut older = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true)
+            .connect()
+            .await
+            .unwrap();
+        first_only.run(&mut older).await.unwrap();
+        drop(older);
+        let copy = dir.path().join("catalog.db.pre-m0001");
+        std::fs::write(&copy, b"known content").unwrap();
+
+        drop(open_catalog_db(dir.path()).await.unwrap());
+
+        assert_eq!(std::fs::read(&copy).unwrap(), b"known content");
+    }
+
+    #[tokio::test]
+    async fn a_new_or_current_catalog_gets_no_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(open_catalog_db(dir.path()).await.unwrap());
+        drop(open_catalog_db(dir.path()).await.unwrap());
+        assert!(pre_copies(dir.path()).is_empty());
+    }
+
     #[tokio::test]
     async fn migration_applies_to_an_m2_catalog() {
         let dir = tempfile::tempdir().unwrap();
@@ -494,7 +825,7 @@ mod tests {
             .fetch_one(&mut connection)
             .await
             .unwrap();
-        assert_eq!(versions, 6);
+        assert_eq!(versions, 7);
     }
 
     #[tokio::test]
@@ -664,5 +995,414 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(error, CatalogError::SourcesInvariant { file } if file == traces));
+    }
+
+    /// Sets `PRAGMA user_version` of `<dir>/catalog.db` through its own
+    /// connection, which is closed before the function returns.
+    async fn set_user_version(dir: &Path, version: u16) {
+        let mut connection = SqliteConnectOptions::new()
+            .filename(dir.join("catalog.db"))
+            .connect()
+            .await
+            .unwrap();
+        sqlx::query(AssertSqlSafe(format!("PRAGMA user_version = {version}")))
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        connection.close().await.unwrap();
+    }
+
+    /// Reads `PRAGMA user_version` through a second connection.
+    async fn user_version(dir: &Path) -> i64 {
+        let mut connection = SqliteConnectOptions::new()
+            .filename(dir.join("catalog.db"))
+            .read_only(true)
+            .connect()
+            .await
+            .unwrap();
+        let version = read_user_version(&mut connection).await.unwrap();
+        connection.close().await.unwrap();
+        version
+    }
+
+    /// Creates `<dir>/catalog.db` with the migrations up to and including
+    /// `last` applied, as an older binary left it, and closes it.
+    async fn migrated_through(dir: &Path, last: i64) {
+        let mut older_migrations = sqlx::migrate!("./migrations/catalog");
+        let kept: Vec<_> = older_migrations
+            .migrations
+            .iter()
+            .filter(|migration| migration.version <= last)
+            .cloned()
+            .collect();
+        older_migrations.migrations = std::borrow::Cow::Owned(kept);
+        let mut older = SqliteConnectOptions::new()
+            .filename(dir.join("catalog.db"))
+            .create_if_missing(true)
+            .connect()
+            .await
+            .unwrap();
+        older_migrations.run(&mut older).await.unwrap();
+        older.close().await.unwrap();
+    }
+
+    /// Opens `dir`, which must be refused, and returns the error.
+    async fn refused(dir: &Path) -> CatalogError {
+        match open_catalog_db(dir).await {
+            Ok(_) => panic!("the open of the data directory should be refused"),
+            Err(error) => error,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_new_catalog_is_stamped() {
+        let dir = tempfile::tempdir().unwrap();
+        let connection = open_catalog_db(dir.path()).await.unwrap();
+        connection.close().await.unwrap();
+        assert_eq!(user_version(dir.path()).await, i64::from(FORMAT_VERSION));
+
+        let connection = open_catalog_db(dir.path()).await.unwrap();
+        connection.close().await.unwrap();
+        assert_eq!(user_version(dir.path()).await, i64::from(FORMAT_VERSION));
+    }
+
+    #[tokio::test]
+    async fn a_newer_marker_is_refused_before_anything_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let connection = open_catalog_db(dir.path()).await.unwrap();
+        connection.close().await.unwrap();
+        set_user_version(dir.path(), 2).await;
+        let before = dir_digest(dir.path());
+
+        let error = refused(dir.path()).await;
+        assert!(matches!(
+            error,
+            CatalogError::FormatTooNew {
+                found: 2,
+                supported: 1
+            }
+        ));
+        assert_eq!(dir_digest(dir.path()), before);
+    }
+
+    #[tokio::test]
+    async fn a_newer_marker_is_refused_before_pending_migrations() {
+        let dir = tempfile::tempdir().unwrap();
+        migrated_through(dir.path(), 1).await;
+        set_user_version(dir.path(), 2).await;
+        let before = dir_digest(dir.path());
+
+        let error = refused(dir.path()).await;
+        assert!(matches!(
+            error,
+            CatalogError::FormatTooNew {
+                found: 2,
+                supported: 1
+            }
+        ));
+        assert_eq!(dir_digest(dir.path()), before);
+        assert!(pre_copies(dir.path()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_pre_release_catalog_with_data_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut connection = open_catalog_db(dir.path()).await.unwrap();
+        insert_file(&mut connection, file_id(1), "spans", DAY).await;
+        connection.close().await.unwrap();
+        set_user_version(dir.path(), 0).await;
+
+        assert!(matches!(refused(dir.path()).await, CatalogError::PreFormat));
+        let mut connection = SqliteConnectOptions::new()
+            .filename(dir.path().join("catalog.db"))
+            .read_only(true)
+            .connect()
+            .await
+            .unwrap();
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM data_files")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(rows, 1);
+    }
+
+    #[tokio::test]
+    async fn a_pre_release_catalog_with_data_and_pending_migrations_is_refused_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        migrated_through(dir.path(), 1).await;
+        let mut connection = SqliteConnectOptions::new()
+            .filename(dir.path().join("catalog.db"))
+            .connect()
+            .await
+            .unwrap();
+        insert_file(&mut connection, file_id(1), "spans", DAY).await;
+        connection.close().await.unwrap();
+        let before = dir_digest(dir.path());
+
+        assert!(matches!(refused(dir.path()).await, CatalogError::PreFormat));
+        assert!(pre_copies(dir.path()).is_empty());
+        assert_eq!(dir_digest(dir.path()), before);
+        let mut connection = SqliteConnectOptions::new()
+            .filename(dir.path().join("catalog.db"))
+            .read_only(true)
+            .connect()
+            .await
+            .unwrap();
+        let applied: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(applied, 1);
+    }
+
+    #[tokio::test]
+    async fn an_empty_catalog_without_a_marker_is_stamped() {
+        let dir = tempfile::tempdir().unwrap();
+        let connection = open_catalog_db(dir.path()).await.unwrap();
+        connection.close().await.unwrap();
+        set_user_version(dir.path(), 0).await;
+
+        let connection = open_catalog_db(dir.path()).await.unwrap();
+        connection.close().await.unwrap();
+        assert_eq!(user_version(dir.path()).await, i64::from(FORMAT_VERSION));
+    }
+
+    #[tokio::test]
+    async fn an_empty_catalog_with_pending_migrations_migrates_then_is_stamped() {
+        let dir = tempfile::tempdir().unwrap();
+        migrated_through(dir.path(), 1).await;
+        assert_eq!(user_version(dir.path()).await, 0);
+
+        let mut connection = open_catalog_db(dir.path()).await.unwrap();
+        assert!(has_file_sources(&mut connection).await);
+        connection.close().await.unwrap();
+        assert_eq!(user_version(dir.path()).await, i64::from(FORMAT_VERSION));
+    }
+
+    #[tokio::test]
+    async fn an_unknown_applied_migration_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut connection = open_catalog_db(dir.path()).await.unwrap();
+        sqlx::query(
+            "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time)
+             VALUES (9999, 'x', 1, X'00', 0)",
+        )
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        connection.close().await.unwrap();
+
+        assert!(matches!(
+            refused(dir.path()).await,
+            CatalogError::SchemaTooNew { version: 9999 }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_vacuum_copy_keeps_the_marker() {
+        // The pre-migration copy and the snapshot are both `VACUUM INTO`.
+        let dir = tempfile::tempdir().unwrap();
+        let mut connection = open_catalog_db(dir.path()).await.unwrap();
+        let copy = dir.path().join("copy.db");
+        sqlx::query("VACUUM INTO ?")
+            .bind(copy.to_str().unwrap())
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        connection.close().await.unwrap();
+
+        let mut copied = SqliteConnectOptions::new()
+            .filename(&copy)
+            .read_only(true)
+            .connect()
+            .await
+            .unwrap();
+        let version = read_user_version(&mut copied).await.unwrap();
+        assert_eq!(version, i64::from(FORMAT_VERSION));
+    }
+
+    /// Migrations that change the format (spec 03 § 12). `migrations_only_add`
+    /// skips these. Add a migration's version here together with the
+    /// `FORMAT_VERSION` bump it needs.
+    const FORMAT_CHANGING_MIGRATIONS: &[i64] = &[];
+
+    /// A migration that alters an existing table, with a row it must keep.
+    struct AlteringCase {
+        /// The migration under test.
+        version: i64,
+        /// Inserts the row as the migration before `version` left the table.
+        seed: &'static str,
+        /// Reads the row back after the open, one text value per row.
+        read: &'static str,
+        /// The value `read` returns: the row is intact, and the new column has
+        /// its default.
+        expected: &'static str,
+    }
+
+    const ALTERING_CASES: &[AlteringCase] = &[
+        AlteringCase {
+            version: 3,
+            seed: "INSERT INTO data_files (id, table_name, project_id, day, level, path,
+                size_bytes, footer_size, row_count, min_time, max_time, min_ingest_time,
+                max_ingest_time, fully_merged, created_at)
+                VALUES ('018f6b4e-7c1a-7c1a-8c1a-0000000000f1', 'spans',
+                '018f6b4e-7c1a-7c1a-8c1a-000000000001', '2024-06-01', 0, 'objects/kept',
+                42, 1, 1, 0, 0, 0, 0, 0, 1)",
+            read: "SELECT id || '|' || path || '|' || size_bytes || '|' || deletions_applied_seq
+                FROM data_files",
+            expected: "018f6b4e-7c1a-7c1a-8c1a-0000000000f1|objects/kept|42|0",
+        },
+        AlteringCase {
+            version: 7,
+            seed: "INSERT INTO media (project_id, sha256, mime_type, size_bytes,
+                first_seen_at, last_seen_at)
+                VALUES ('018f6b4e-7c1a-7c1a-8c1a-000000000001',
+                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                'image/png', 42, 1, 2)",
+            read: "SELECT sha256 || '|' || size_bytes || '|' || newest_span_start FROM media",
+            expected: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef|42|0",
+        },
+    ];
+
+    /// The statements of a migration: `--` comments dropped, split on `;`,
+    /// whitespace collapsed, empty ones dropped. No migration has a `--` or a
+    /// `;` inside a string literal.
+    fn statements(sql: &str) -> Vec<String> {
+        let code: Vec<&str> = sql
+            .lines()
+            .map(|line| line.split("--").next().unwrap_or_default())
+            .collect();
+        code.join("\n")
+            .split(';')
+            .map(|statement| statement.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|statement| !statement.is_empty())
+            .collect()
+    }
+
+    /// Whether a statement only adds to the schema: it creates a table or an
+    /// index, or adds a column that has a default or is nullable.
+    fn is_additive(statement: &str) -> bool {
+        let upper = statement.to_ascii_uppercase();
+        if upper.starts_with("CREATE TABLE ")
+            || upper.starts_with("CREATE INDEX ")
+            || upper.starts_with("CREATE UNIQUE INDEX ")
+        {
+            return true;
+        }
+        let words: Vec<&str> = upper.split_whitespace().collect();
+        match words.as_slice() {
+            // ALTER TABLE <name> ADD COLUMN <column> <type> ...
+            ["ALTER", "TABLE", _, "ADD", "COLUMN", _, ..] => {
+                let definition = &words[6..];
+                let has_default = definition.contains(&"DEFAULT");
+                let not_null = definition
+                    .windows(2)
+                    .any(|pair| pair[0] == "NOT" && pair[1] == "NULL");
+                has_default || !not_null
+            }
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn migrations_only_add() {
+        for migration in sqlx::migrate!("./migrations/catalog").migrations.iter() {
+            if FORMAT_CHANGING_MIGRATIONS.contains(&migration.version) {
+                continue;
+            }
+            for statement in statements(migration.sql.as_str()) {
+                assert!(
+                    is_additive(&statement),
+                    "migration {:04} is not additive: a format change. Bump FORMAT_VERSION (spec 03 § 12), then list the migration in FORMAT_CHANGING_MIGRATIONS.",
+                    migration.version,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_altering_migration_has_a_case() {
+        for migration in sqlx::migrate!("./migrations/catalog").migrations.iter() {
+            let alters = statements(migration.sql.as_str())
+                .iter()
+                .any(|statement| statement.to_ascii_uppercase().starts_with("ALTER TABLE "));
+            if alters {
+                assert!(
+                    ALTERING_CASES
+                        .iter()
+                        .any(|case| case.version == migration.version),
+                    "migration {:04} alters a table: add a case to ALTERING_CASES",
+                    migration.version,
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn migrations_that_alter_a_table_keep_its_rows() {
+        for case in ALTERING_CASES {
+            let dir = tempfile::tempdir().unwrap();
+            // The release before the migration: the migrations below it are
+            // applied and the marker is set, as a released build leaves it.
+            migrated_through(dir.path(), case.version - 1).await;
+            set_user_version(dir.path(), FORMAT_VERSION).await;
+            let mut older = SqliteConnectOptions::new()
+                .filename(dir.path().join("catalog.db"))
+                .connect()
+                .await
+                .unwrap();
+            sqlx::query(case.seed).execute(&mut older).await.unwrap();
+            older.close().await.unwrap();
+
+            let mut connection = open_catalog_db(dir.path()).await.unwrap();
+            let rows: Vec<String> = sqlx::query_scalar(case.read)
+                .fetch_all(&mut connection)
+                .await
+                .unwrap();
+            assert_eq!(
+                rows,
+                vec![case.expected.to_owned()],
+                "migration {:04} must keep the row",
+                case.version,
+            );
+        }
+    }
+
+    /// The committed dump of a fresh catalog's objects, one line each.
+    const SCHEMA_DUMP: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/catalog/schema.txt");
+
+    #[tokio::test]
+    async fn the_schema_matches_the_committed_dump() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut connection = open_catalog_db(dir.path()).await.unwrap();
+        let objects: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master
+             WHERE name NOT LIKE 'sqlite_%' AND name != '_sqlx_migrations' ORDER BY name",
+        )
+        .fetch_all(&mut connection)
+        .await
+        .unwrap();
+        let actual: String = objects
+            .iter()
+            .map(|(kind, name, table, sql)| {
+                let sql = sql
+                    .as_deref()
+                    .unwrap_or_default()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                format!("{kind} | {name} | {table} | {sql}\n")
+            })
+            .collect();
+
+        if std::env::var("CETRA_BLESS_SCHEMA").as_deref() == Ok("1") {
+            std::fs::write(SCHEMA_DUMP, &actual).unwrap();
+            return;
+        }
+        let committed = std::fs::read_to_string(SCHEMA_DUMP).expect("read src/catalog/schema.txt");
+        assert!(
+            actual == committed,
+            "the schema of a fresh catalog differs from src/catalog/schema.txt. A migration changed the schema: update the SQL in docs/spec/03-storage.md § 4 by hand, then rewrite the file with CETRA_BLESS_SCHEMA=1 cargo test -p cetra-storage the_schema_matches_the_committed_dump",
+        );
     }
 }

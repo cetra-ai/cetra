@@ -1,5 +1,5 @@
 [project]
-name = "llmobs-capture-scenarios"
+name = "cetra-capture-scenarios"
 version = "0.0.0"
 requires-python = "==3.13.*"
 dependencies = [

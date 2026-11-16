@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use axum::http::{HeaderMap, HeaderValue, header};
 use axum_extra::extract::cookie::Cookie;
+use cetra_core::ids::OrgId;
 
 use super::secret::{hash_token, is_opaque_token, new_opaque_token};
 use crate::http::AppState;
@@ -16,8 +17,8 @@ use crate::meta::web_sessions::{
     NewSession, SessionRow, insert_session, session_user, touch_session,
 };
 
-/// `llmobs_session`. Built from [`llmobs_core::llmobs_name`], the same constant as the key prefixes.
-pub(crate) const SESSION_COOKIE: &str = llmobs_core::llmobs_name!("_session");
+/// `cetra_session`. Built from [`cetra_core::cetra_name`], the same constant as the key prefixes.
+pub(crate) const SESSION_COOKIE: &str = cetra_core::cetra_name!("_session");
 
 /// How long a session stays valid after it was last seen.
 pub(crate) const LIFETIME: Duration = Duration::from_secs(30 * 24 * 60 * 60);
@@ -25,9 +26,21 @@ pub(crate) const LIFETIME: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// A session slides at most once per this interval.
 pub(crate) const REFRESH_AFTER: Duration = Duration::from_secs(60 * 60);
 
+/// What signed the user in, for [`start_session`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionOrigin {
+    /// A password: login, signup, setup or the first session after a reset.
+    Password,
+    /// A provider of the instance configuration (Google, GitHub, `[[auth.oidc]]`).
+    Provider,
+    /// The identity provider of this org (D-P-59).
+    OrgProvider(OrgId),
+}
+
 /// Inserts a session and returns the `Set-Cookie` value.
 ///
 /// `user_agent` is cut to 256 characters. `Secure` is set when `public_url` is https.
+/// `sso_org` is the org whose identity provider signed the user in (D-P-59); `None` otherwise.
 ///
 /// # Errors
 ///
@@ -37,6 +50,7 @@ pub(crate) async fn start_session(
     user_id: uuid::Uuid,
     user_agent: Option<&str>,
     ip: Option<IpAddr>,
+    origin: SessionOrigin,
 ) -> Result<HeaderValue, ApiError> {
     let token = new_opaque_token().map_err(|error| ApiError::Internal(Box::new(error)))?;
     let now = state.clock.now_ns();
@@ -55,6 +69,11 @@ pub(crate) async fn start_session(
                         user_id,
                         user_agent,
                         ip,
+                        sso_org_id: match origin {
+                            SessionOrigin::OrgProvider(org) => Some(org),
+                            SessionOrigin::Password | SessionOrigin::Provider => None,
+                        },
+                        via_provider: origin != SessionOrigin::Password,
                     },
                     now,
                     expires_at,
@@ -92,6 +111,9 @@ pub(crate) async fn resolve_session(
     let Some(mut row) = session_user(state.meta.reader(), &hash, now).await? else {
         return Ok(None);
     };
+    if refused_under_enforcement(state, &row) {
+        return Ok(None);
+    }
     if now.saturating_sub(row.last_seen_at) < duration_ns(REFRESH_AFTER) {
         return Ok(Some((row, None)));
     }
@@ -111,7 +133,26 @@ pub(crate) async fn resolve_session(
     )))
 }
 
-/// The first `llmobs_session` cookie in `headers` that resolves.
+/// Whether an enforcing org refuses this session (D-P-58): the user's domain is enforced, the
+/// user is not an instance admin, and the session was not started through that org's provider.
+/// The row stays for the revocation or its expiry to delete.
+fn refused_under_enforcement(state: &AppState, row: &SessionRow) -> bool {
+    // `auth.enforce_sso_domains` (D-P-69) has no admin exemption, as for login: a session from
+    // before the domain was listed, which no provider started, stops resolving.
+    if !row.via_provider && crate::ee::sso_enforcement::requires_sso(state, &row.user.email) {
+        return true;
+    }
+    if row.user.is_instance_admin || !crate::ee::org_sso::enforces(state, &row.user.email) {
+        return false;
+    }
+    let route_org = state
+        .org_sso
+        .route(&row.user.email)
+        .map(|route| route.org_id);
+    row.sso_org_id != route_org
+}
+
+/// The first `cetra_session` cookie in `headers` that resolves.
 ///
 /// A request can repeat the name. Values that are not opaque tokens are skipped
 /// without a query. The first one that finds a session wins.
@@ -167,6 +208,8 @@ fn duration_ns(duration: Duration) -> i64 {
 #[cfg(test)]
 mod tests {
     use std::net::IpAddr;
+
+    use super::SessionOrigin;
     use std::time::Duration;
 
     use axum::http::{HeaderMap, HeaderValue};
@@ -192,6 +235,7 @@ mod tests {
                             name: None,
                             password_hash: None,
                             email_verified_at: None,
+                            email_verified_via: None,
                             is_instance_admin: false,
                         },
                         now,
@@ -202,6 +246,48 @@ mod tests {
             })
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_session_records_its_org_provider() {
+        let app = TestApp::new().await;
+        let user_id = user(&app).await;
+        let org = cetra_core::ids::OrgId::new_v7();
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    crate::meta::orgs::insert_org(conn, org, "Acme", "acme", now).await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+
+        let via_org = start_session(
+            &app.state,
+            user_id,
+            None,
+            None,
+            SessionOrigin::OrgProvider(org),
+        )
+        .await
+        .unwrap();
+        let (row, _) = resolve_session(&app.state, &token_of(&via_org), now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.sso_org_id, Some(org));
+
+        let by_password = start_session(&app.state, user_id, None, None, SessionOrigin::Password)
+            .await
+            .unwrap();
+        let (row, _) = resolve_session(&app.state, &token_of(&by_password), now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.sso_org_id, None);
     }
 
     fn token_of(header: &HeaderValue) -> String {
@@ -221,9 +307,15 @@ mod tests {
         let app = TestApp::new().await;
         let user_id = user(&app).await;
         let ip: IpAddr = "203.0.113.8".parse().unwrap();
-        let header = start_session(&app.state, user_id, Some(&"a".repeat(300)), Some(ip))
-            .await
-            .unwrap();
+        let header = start_session(
+            &app.state,
+            user_id,
+            Some(&"a".repeat(300)),
+            Some(ip),
+            SessionOrigin::Password,
+        )
+        .await
+        .unwrap();
         let text = header.to_str().unwrap();
         assert!(!text.contains("Secure"), "{text}");
         let token = token_of(&header);
@@ -251,12 +343,18 @@ mod tests {
         assert_eq!(stored_agent.chars().count(), 256);
 
         let https = TestApp::with_config(|config| {
-            config.public_url = serde_json::from_str("\"https://llmobs.example\"").unwrap();
+            config.public_url = serde_json::from_str("\"https://cetra.example\"").unwrap();
         })
         .await;
-        let secure = start_session(&https.state, user(&https).await, None, None)
-            .await
-            .unwrap();
+        let secure = start_session(
+            &https.state,
+            user(&https).await,
+            None,
+            None,
+            SessionOrigin::Password,
+        )
+        .await
+        .unwrap();
         assert!(secure.to_str().unwrap().ends_with("; Secure"));
         let clearing = clear_cookie(&https.state);
         let clearing = clearing.to_str().unwrap();
@@ -274,7 +372,7 @@ mod tests {
     async fn refresh_waits_an_hour_and_thirty_idle_days_expire() {
         let app = TestApp::new().await;
         let user_id = user(&app).await;
-        let header = start_session(&app.state, user_id, None, None)
+        let header = start_session(&app.state, user_id, None, None, SessionOrigin::Password)
             .await
             .unwrap();
         let token = token_of(&header);
@@ -322,7 +420,7 @@ mod tests {
     async fn a_disabled_user_and_a_garbage_cookie_do_not_resolve() {
         let app = TestApp::new().await;
         let user_id = user(&app).await;
-        let header = start_session(&app.state, user_id, None, None)
+        let header = start_session(&app.state, user_id, None, None, SessionOrigin::Password)
             .await
             .unwrap();
         let token = token_of(&header);
@@ -354,7 +452,7 @@ mod tests {
     async fn the_first_cookie_that_resolves_wins() {
         let app = TestApp::new().await;
         let user_id = user(&app).await;
-        let header = start_session(&app.state, user_id, None, None)
+        let header = start_session(&app.state, user_id, None, None, SessionOrigin::Password)
             .await
             .unwrap();
         let token = token_of(&header);

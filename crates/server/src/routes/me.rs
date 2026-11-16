@@ -71,7 +71,9 @@ async fn change_password(
     error::Json(body): error::Json<ChangePasswordRequest>,
 ) -> Result<Response, ApiError> {
     let (user, session_hash) = match &principal {
-        Principal::Session { user, session_hash } => (user, session_hash),
+        Principal::Session {
+            user, session_hash, ..
+        } => (user, session_hash),
         Principal::ApiKey { .. } | Principal::Pat { .. } | Principal::ControlPlane { .. } => {
             return Err(ApiError::Forbidden {
                 code: ProblemCode::Forbidden,
@@ -89,7 +91,8 @@ async fn change_password(
         .map_err(|retry| ApiError::RateLimited {
             retry_after_s: retry.0.as_secs().max(1),
         })?;
-    if state.config.auth.disable_password {
+    // Instance admins keep their password while password login is off (D-S-3).
+    if state.config.auth.disable_password && !row.is_instance_admin {
         return Err(ApiError::Forbidden {
             code: ProblemCode::Forbidden,
         });
@@ -154,6 +157,8 @@ fn user_view(user: &UserRow) -> User {
         email: user.email.clone(),
         name: user.name.clone(),
         is_instance_admin: user.is_instance_admin,
+        email_verified: user.email_verified_at.is_some(),
+        has_password: user.password_hash.is_some(),
     }
 }
 
@@ -193,8 +198,8 @@ mod tests {
     use crate::test_support::{TestApp, assert_logs_clean};
     use uuid::Uuid;
 
-    const PASSWORD: &str = "llmobs-ok1";
-    const NEW_PASSWORD: &str = "llmobs-ok2";
+    const PASSWORD: &str = "cetra-ok-1";
+    const NEW_PASSWORD: &str = "cetra-ok-2";
 
     fn cookie_pair(set_cookie: &axum::http::HeaderValue) -> String {
         set_cookie
@@ -236,6 +241,7 @@ mod tests {
                             name: Some("Ada".to_owned()),
                             password_hash: hash,
                             email_verified_at: Some(now),
+                            email_verified_via: Some(users::EmailVerifiedVia::MailToken),
                             is_instance_admin: false,
                         },
                         now,
@@ -257,6 +263,27 @@ mod tests {
             .json(&serde_json::json!({ "email": email, "password": password }))
             .send()
             .await
+    }
+
+    #[test]
+    fn user_view_reports_verification_and_password() {
+        let row = |password_hash: Option<&str>, verified: Option<i64>| UserRow {
+            id: Uuid::nil(),
+            email: "ada@example.com".to_owned(),
+            name: None,
+            password_hash: password_hash.map(str::to_owned),
+            email_verified_at: verified,
+            email_verified_via: verified.map(|_| users::EmailVerifiedVia::MailToken),
+            is_instance_admin: false,
+            disabled_at: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        let flags = |user: User| (user.email_verified, user.has_password);
+        assert_eq!(flags(user_view(&row(Some("hash"), Some(1)))), (true, true));
+        assert_eq!(flags(user_view(&row(Some("hash"), None))), (false, true));
+        assert_eq!(flags(user_view(&row(None, Some(1)))), (true, false));
+        assert_eq!(flags(user_view(&row(None, None))), (false, false));
     }
 
     #[test]
@@ -315,9 +342,15 @@ mod tests {
         let user_id = insert_account(&app, "ada@example.com", Some(PASSWORD)).await;
         let logged_in = login(&app, "ada@example.com", PASSWORD).await;
         let cookie = session_cookie(&logged_in);
-        let other = start_session(&app.state, user_id, None, None)
-            .await
-            .unwrap();
+        let other = start_session(
+            &app.state,
+            user_id,
+            None,
+            None,
+            crate::auth::session::SessionOrigin::Password,
+        )
+        .await
+        .unwrap();
         let other_cookie = cookie_pair(&other);
         let now = app.state.clock.now_ns();
         for _ in 0..19 {
@@ -380,9 +413,15 @@ mod tests {
         let app = TestApp::new().await;
         let user_id = insert_account(&app, "ada@example.com", None).await;
         let cookie = cookie_pair(
-            &start_session(&app.state, user_id, None, None)
-                .await
-                .unwrap(),
+            &start_session(
+                &app.state,
+                user_id,
+                None,
+                None,
+                crate::auth::session::SessionOrigin::Password,
+            )
+            .await
+            .unwrap(),
         );
         let rejected = app
             .request(Method::POST, "/api/v1/me/password")
@@ -421,7 +460,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn password_change_rejects_a_weak_password_and_a_disabled_login() {
+    async fn password_change_rejects_a_weak_password_and_a_disabled_login_except_for_admins() {
         let app = TestApp::new().await;
         insert_account(&app, "ada@example.com", Some(PASSWORD)).await;
         let cookie = session_cookie(&login(&app, "ada@example.com", PASSWORD).await);
@@ -454,9 +493,15 @@ mod tests {
         let disabled = TestApp::with_config(|config| config.auth.disable_password = true).await;
         let user_id = insert_account(&disabled, "ada@example.com", Some(PASSWORD)).await;
         let cookie = cookie_pair(
-            &start_session(&disabled.state, user_id, None, None)
-                .await
-                .unwrap(),
+            &start_session(
+                &disabled.state,
+                user_id,
+                None,
+                None,
+                crate::auth::session::SessionOrigin::Password,
+            )
+            .await
+            .unwrap(),
         );
         let before = disabled
             .state
@@ -482,5 +527,29 @@ mod tests {
             .map(Hasher::verify_count)
             .unwrap_or(0);
         assert_eq!(after, before);
+
+        let admin = insert_account(&disabled, "root@example.com", Some(PASSWORD)).await;
+        crate::test_support::make_instance_admin(&disabled, admin).await;
+        let admin_cookie = cookie_pair(
+            &start_session(
+                &disabled.state,
+                admin,
+                None,
+                None,
+                crate::auth::session::SessionOrigin::Password,
+            )
+            .await
+            .unwrap(),
+        );
+        let changed = disabled
+            .request(Method::POST, "/api/v1/me/password")
+            .header(header::COOKIE.as_str(), &admin_cookie)
+            .json(&serde_json::json!({
+                "current_password": PASSWORD,
+                "new_password": NEW_PASSWORD,
+            }))
+            .send()
+            .await;
+        assert_eq!(changed.status, 204);
     }
 }

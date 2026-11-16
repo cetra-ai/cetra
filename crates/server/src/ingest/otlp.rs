@@ -1,7 +1,7 @@
 //! Success body of `POST /v1/traces` (spec 02 § Endpoints, D-G-6).
 
 use axum::http::HeaderValue;
-use llmobs_otel::Rejections;
+use cetra_otel::Rejections;
 use opentelemetry_proto::tonic::collector::trace::v1::{
     ExportTracePartialSuccess, ExportTraceServiceResponse,
 };
@@ -61,8 +61,8 @@ pub(crate) fn partial_success(rejections: &Rejections) -> Option<(i64, String)> 
 
 #[cfg(test)]
 mod tests {
-    use llmobs_core::ids::ProjectId;
-    use llmobs_otel::{IngestContext, IngestLimits, PriceTable, decode_json, normalize};
+    use cetra_core::ids::ProjectId;
+    use cetra_otel::{IngestContext, IngestLimits, PriceTable, decode_json, normalize};
 
     use super::*;
 

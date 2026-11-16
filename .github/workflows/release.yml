@@ -32,7 +32,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: just@1.59.0
       - name: Fetch main
@@ -91,27 +91,27 @@ jobs:
           version: v0.33.0
           install_only: true
       - run: just dist "$TARGET"
-      - run: just binary-smoke "target/$TARGET/release/llmobs"
+      - run: just binary-smoke "target/$TARGET/release/cetra"
       - run: just install-smoke
-      - run: just image llmobs:dev
-      - run: just image-smoke llmobs:dev
-      - run: just compose-smoke llmobs:dev
-      - run: just compose-smoke llmobs:dev s3
+      - run: just image cetra:dev
+      - run: just image-smoke cetra:dev
+      - run: just compose-smoke cetra:dev
+      - run: just compose-smoke cetra:dev s3
       - run: just helm-check
-      - run: just helm-smoke llmobs:dev
+      - run: just helm-smoke cetra:dev
       - uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
-          file: target/${{ matrix.target }}/release/llmobs
+          file: target/${{ matrix.target }}/release/cetra
           format: spdx-json
-          output-file: target/dist/llmobs-${{ needs.verify.outputs.version }}-${{ matrix.target }}.spdx.json
+          output-file: target/dist/cetra-${{ needs.verify.outputs.version }}-${{ matrix.target }}.spdx.json
           upload-artifact: false
           upload-release-assets: false
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist-${{ matrix.target }}
           path: |
-            target/dist/llmobs-*.tar.gz
-            target/dist/llmobs-*.spdx.json
+            target/dist/cetra-*.tar.gz
+            target/dist/cetra-*.spdx.json
           if-no-files-found: error
           retention-days: 7
       - run: just assert-clean
@@ -138,21 +138,21 @@ jobs:
           package-manager-cache: false
       - uses: ./.github/actions/packaging # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
       - run: just dist "$TARGET"
-      - run: just binary-smoke "target/$TARGET/release/llmobs"
+      - run: just binary-smoke "target/$TARGET/release/cetra"
       - run: just install-smoke
       - uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
-          file: target/aarch64-apple-darwin/release/llmobs
+          file: target/aarch64-apple-darwin/release/cetra
           format: spdx-json
-          output-file: target/dist/llmobs-${{ needs.verify.outputs.version }}-aarch64-apple-darwin.spdx.json
+          output-file: target/dist/cetra-${{ needs.verify.outputs.version }}-aarch64-apple-darwin.spdx.json
           upload-artifact: false
           upload-release-assets: false
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist-aarch64-apple-darwin
           path: |
-            target/dist/llmobs-*.tar.gz
-            target/dist/llmobs-*.spdx.json
+            target/dist/cetra-*.tar.gz
+            target/dist/cetra-*.spdx.json
           if-no-files-found: error
           retention-days: 7
       - run: just assert-clean
@@ -175,7 +175,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: just@1.59.0
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
@@ -192,15 +192,15 @@ jobs:
           set -euo pipefail
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           {
-            echo "image=ghcr.io/$owner/llmobs"
+            echo "image=ghcr.io/$owner/cetra"
             echo "charts=ghcr.io/$owner/charts"
-            echo "tags=$(tools/packaging/image-tags.sh "ghcr.io/$owner/llmobs" "$VERSION")"
+            echo "tags=$(tools/packaging/image-tags.sh "ghcr.io/$owner/cetra" "$VERSION")"
           } >> "$GITHUB_OUTPUT"
       - name: Stage the image contexts from the Linux archives
         run: |
           set -euo pipefail
-          just image-context "target/dist/llmobs-$VERSION-x86_64-unknown-linux-musl.tar.gz" amd64
-          just image-context "target/dist/llmobs-$VERSION-aarch64-unknown-linux-musl.tar.gz" arm64
+          just image-context "target/dist/cetra-$VERSION-x86_64-unknown-linux-musl.tar.gz" amd64
+          just image-context "target/dist/cetra-$VERSION-aarch64-unknown-linux-musl.tar.gz" arm64
       - run: just checksums target/dist
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
@@ -235,9 +235,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          helm package deploy/helm/llmobs --destination target/dist
+          helm package deploy/helm/cetra --destination target/dist
           printf '%s' "$GH_TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-          helm push "target/dist/llmobs-$VERSION.tgz" "oci://$CHARTS" 2>&1 | tee "$RUNNER_TEMP/helm-push.log"
+          helm push "target/dist/cetra-$VERSION.tgz" "oci://$CHARTS" 2>&1 | tee "$RUNNER_TEMP/helm-push.log"
           digest="$(grep -o 'sha256:[0-9a-f]\{64\}' "$RUNNER_TEMP/helm-push.log" | head -n1)"
           if [[ -z "$digest" ]]; then
             echo "no digest in the helm push output" >&2
@@ -246,7 +246,7 @@ jobs:
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-name: ${{ steps.names.outputs.charts }}/llmobs
+          subject-name: ${{ steps.names.outputs.charts }}/cetra
           subject-digest: ${{ steps.chart.outputs.digest }}
           push-to-registry: true
 
@@ -261,10 +261,10 @@ jobs:
             flags=(--draft --prerelease)
           fi
           gh release create "$GITHUB_REF_NAME" "${flags[@]}" --verify-tag \
-            --title "llmobs $VERSION" \
+            --title "cetra $VERSION" \
             --notes-file "$RUNNER_TEMP/notes.md" \
-            target/dist/llmobs-*.tar.gz \
-            target/dist/llmobs-*.spdx.json \
+            target/dist/cetra-*.tar.gz \
+            target/dist/cetra-*.spdx.json \
             target/dist/SHA256SUMS \
-            "target/dist/llmobs-$VERSION.tgz" \
+            "target/dist/cetra-$VERSION.tgz" \
             deploy/install.sh

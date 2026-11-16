@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use arrow::array::RecordBatch;
-use llmobs_core::schema::{scores_schema, spans_schema};
+use cetra_core::schema::{scores_schema, spans_schema};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use uuid::Uuid;
@@ -16,6 +16,7 @@ use crate::catalog::{CatalogEdit, Committer, FileId, FileMeta, FileState, FileTa
 use crate::compaction::merge::{MergeContext, merge_slice};
 use crate::compaction::plan::{Job, JobKind, Policy, plan};
 use crate::compaction::slice::{slice_count, slices, time_values};
+use crate::counters::CompactionOutcome;
 use crate::deletion::covered_predicate;
 use crate::disk::Disk;
 use crate::error::{CommitError, CompactionError, ObjectError};
@@ -177,6 +178,11 @@ impl Compactor {
         self: &Arc<Self>,
         now: i64,
     ) -> Result<CompactionReport, CompactionError> {
+        // A stopped store (D-R-6) would only stage rows that cannot commit.
+        if self.objects.sync_failed() || self.committer.stopped() {
+            tracing::debug!("compaction pass skipped: the store stopped after an I/O error");
+            return Ok(CompactionReport::default());
+        }
         let catalog = self.committer.catalog().await;
         let mut spawned: Vec<(Job, ClaimGuard)> = Vec::new();
         {
@@ -264,6 +270,10 @@ impl Compactor {
                 }
                 Err(_) => {
                     report.failed += 1;
+                    // A panicked job never returned from `run`, so it is counted here.
+                    self.committer
+                        .counters()
+                        .compaction(CompactionOutcome::Failed, 1);
                     tracing::warn!("compaction task failed");
                 }
             }
@@ -304,6 +314,18 @@ impl Compactor {
             && may_be_corrupt(source)
         {
             self.verify.suspect(inputs, now_ns());
+        }
+        let counters = self.committer.counters();
+        match &outcome {
+            Ok(report) => {
+                counters.compaction(CompactionOutcome::Ok, report.jobs);
+                counters.compaction_bytes(report.output_bytes);
+            }
+            Err(CompactionError::Commit(CommitError::Conflict { .. })) => {
+                counters.compaction(CompactionOutcome::Conflict, 1);
+            }
+            Err(CompactionError::DiskFull) => counters.compaction(CompactionOutcome::Deferred, 1),
+            Err(_) => counters.compaction(CompactionOutcome::Failed, 1),
         }
         outcome
     }
@@ -438,12 +460,18 @@ impl Compactor {
             }
 
             let (target, file) = self.objects.create_output(&path).await?;
-            let writer = FileWriter::new(
+            let writer = match FileWriter::new(
                 job.table,
                 level,
                 file,
                 u64::try_from(*expected_rows).unwrap_or(u64::MAX),
-            )?;
+            ) {
+                Ok(writer) => writer,
+                Err(error) => {
+                    let _ = self.objects.discard_output(target).await;
+                    return Err(error.into());
+                }
+            };
             let merged = merge_slice(
                 &self.merge,
                 job.table,
@@ -491,8 +519,16 @@ impl Compactor {
                 Ok::<_, CompactionError>((file, summary, footer_size))
             })
             .await
-            .map_err(|_| CompactionError::Task)??;
-            let (file, summary, footer_size) = finished;
+            .map_err(|_| CompactionError::Task)
+            .and_then(|finished| finished);
+            let (file, summary, footer_size) = match finished {
+                Ok(finished) => finished,
+                Err(error) => {
+                    // The output is not published: remove its temp file now (R5.5).
+                    let _ = self.objects.discard_output(target).await;
+                    return Err(error);
+                }
+            };
 
             let size = self.objects.publish_output(target, file).await?;
             output_bytes = output_bytes.saturating_add(size);
@@ -643,16 +679,17 @@ fn kind_label(kind: JobKind) -> &'static str {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use crate::QueryOptions;
     use bytesize::ByteSize;
     use std::path::Path;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     use arrow::array::{AsArray, RecordBatch};
+    use cetra_core::batch::scores_to_record_batch;
+    use cetra_core::ids::ProjectId;
     use chrono::{Datelike, NaiveDate};
     use datafusion::execution::context::{SessionConfig, SessionContext};
-    use llmobs_core::batch::scores_to_record_batch;
-    use llmobs_core::ids::ProjectId;
     use uuid::Uuid;
 
     use crate::Storage;
@@ -693,6 +730,7 @@ pub(crate) mod tests {
         flush_age: Duration,
     ) -> StorageConfig {
         StorageConfig {
+            delete_objects: true,
             data_dir: dir.to_path_buf(),
             min_free_bytes: ByteSize::b(0),
             object_store: None,
@@ -760,7 +798,10 @@ pub(crate) mod tests {
     }
 
     async fn view_rows(storage: &Storage, sql: &str) -> Vec<Vec<String>> {
-        let query = storage.query(project(), Default::default()).await.unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let ctx = QueryContext::new(query, None).unwrap();
         text_rows(&rows(&ctx, sql).await)
     }
@@ -791,7 +832,10 @@ pub(crate) mod tests {
 
     /// Rows of the raw provider behind the `traces` view, read with SQL.
     async fn raw_traces(storage: &Storage, columns: &str) -> Vec<RecordBatch> {
-        let query = storage.query(project(), Default::default()).await.unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let ctx =
             SessionContext::new_with_config_rt(SessionConfig::new(), Arc::clone(&query.runtime));
         ctx.register_table("traces", Arc::clone(&query.traces))
@@ -859,11 +903,11 @@ pub(crate) mod tests {
                 .collect();
             let combined = arrow::compute::concat_batches(&schema, &batches).unwrap();
             let ids = combined
-                .column_by_name(llmobs_core::schema::scores::SCORE_ID)
+                .column_by_name(cetra_core::schema::scores::SCORE_ID)
                 .unwrap()
                 .as_string::<i32>();
             let deleted = combined
-                .column_by_name(llmobs_core::schema::scores::DELETED)
+                .column_by_name(cetra_core::schema::scores::DELETED)
                 .unwrap()
                 .as_boolean();
             for row in 0..combined.num_rows() {
@@ -924,6 +968,10 @@ pub(crate) mod tests {
             (1, 0, 6, 2),
             "{report:?}"
         );
+        let stats = storage.stats().await;
+        assert!(stats.compactions_ok >= 1, "{stats:?}");
+        assert!(stats.compaction_bytes_written > 0, "{stats:?}");
+        assert_eq!(stats.compactions_failed, 0, "{stats:?}");
 
         let spans_files = storage.catalog_files(crate::wal::Table::Spans);
         assert_eq!(spans_files.len(), 1);
@@ -949,6 +997,38 @@ pub(crate) mod tests {
         drop(storage);
         let storage = Storage::open(config).await.unwrap();
         assert_eq!(storage.catalog_files(crate::wal::Table::Spans).len(), 1);
+        storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn compacted_files_carry_the_format_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_in(dir.path(), quiet_compaction(2), Duration::from_secs(3_600));
+        let mut storage = Storage::open(config.clone()).await.unwrap();
+        for index in 0..2_u8 {
+            let base = at(10, 0, 0) + i64::from(index) * 60 * 1_000_000_000;
+            storage = flush_cycle(
+                &config,
+                storage,
+                span_rows(&[span_row(1, index, base, base + 1_000_000_000)]),
+            )
+            .await;
+        }
+        let report = storage.compact(at(11, 0, 0)).await.unwrap();
+        assert_eq!((report.jobs, report.failed), (1, 0), "{report:?}");
+        let files = storage.catalog_files(crate::wal::Table::Spans);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].level, 1);
+
+        let bytes = std::fs::read(dir.path().join("objects").join(&files[0].path)).unwrap();
+        let metadata = parquet::file::metadata::ParquetMetaDataReader::new()
+            .parse_and_finish(&bytes::Bytes::from(bytes))
+            .unwrap();
+        assert_eq!(
+            crate::parquet::file_format_version(&metadata),
+            Some(crate::format::FORMAT_VERSION),
+            "the L1 output carries the format version"
+        );
         storage.shutdown().await.unwrap();
     }
 
@@ -1366,10 +1446,16 @@ pub(crate) mod tests {
             )
             .await;
         }
-        let pinned = storage.query(project(), Default::default()).await.unwrap();
+        let pinned = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let before = {
             let ctx = QueryContext::new(
-                storage.query(project(), Default::default()).await.unwrap(),
+                storage
+                    .query(project(), QueryOptions::new(None, None))
+                    .await
+                    .unwrap(),
                 None,
             )
             .unwrap();

@@ -274,7 +274,7 @@ This phase changes the **contract only**. The stream handler does not exist yet:
    - The doc comment becomes the OpenAPI parameter description (utoipa `IntoParams`), as for the other fields.
    - `TraceListParams.search` has the doc `/// Full-text search (spec 05 § Full-text search).`. Keep the same first sentence.
 
-2. **Regenerate** with `just openapi`. It rewrites `crates/server/openapi.json` (through `LLMOBS_OPENAPI_WRITE=1 cargo test -p llmobs-server --test openapi -- contract_file_is_up_to_date`) and `web/src/api/schema.gen.ts`.
+2. **Regenerate** with `just openapi`. It rewrites `crates/server/openapi.json` (through `CETRA_OPENAPI_WRITE=1 cargo test -p cetra-server --test openapi -- contract_file_is_up_to_date`) and `web/src/api/schema.gen.ts`.
    - Check the diff. Only the new `search` query parameter of `stream_traces` may change in both files.
    - If anything else changes, stop and report.
 
@@ -298,7 +298,7 @@ This phase changes the **contract only**. The stream handler does not exist yet:
 
 ### Done when
 
-- `just check` is green: Rust, web, the Python SDK and the TypeScript SDK. The contract test `contract_file_is_up_to_date` passes without `LLMOBS_OPENAPI_WRITE`, and `pnpm --dir web check:api` passes.
+- `just check` is green: Rust, web, the Python SDK and the TypeScript SDK. The contract test `contract_file_is_up_to_date` passes without `CETRA_OPENAPI_WRITE`, and `pnpm --dir web check:api` passes.
 - Only the listed files changed.
 
 ---

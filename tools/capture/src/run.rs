@@ -135,16 +135,16 @@ pub fn program_env(
     env.insert("TZ".to_owned(), "UTC".to_owned());
     env.insert("PYTHONHASHSEED".to_owned(), "0".to_owned());
     env.insert(
-        "LLMOBS_CAPTURE_MOCK_URL".to_owned(),
+        "CETRA_CAPTURE_MOCK_URL".to_owned(),
         format!("http://127.0.0.1:{mock_port}"),
     );
-    env.insert("LLMOBS_CAPTURE_OTLP_ENDPOINT".to_owned(), receiver.clone());
-    env.insert("LLMOBS_CAPTURE_META".to_owned(), meta_path.to_owned());
+    env.insert("CETRA_CAPTURE_OTLP_ENDPOINT".to_owned(), receiver.clone());
+    env.insert("CETRA_CAPTURE_META".to_owned(), meta_path.to_owned());
     env.insert(
-        "LLMOBS_CAPTURE_LIBRARIES".to_owned(),
+        "CETRA_CAPTURE_LIBRARIES".to_owned(),
         scenario.libraries.join(","),
     );
-    env.insert("LLMOBS_CAPTURE_CASE".to_owned(), scenario.case.to_string());
+    env.insert("CETRA_CAPTURE_CASE".to_owned(), scenario.case.to_string());
     for key in [
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
@@ -312,7 +312,7 @@ struct MetaFile {
 
 impl MetaFile {
     fn create(case: &CasePath) -> Result<Self, CaptureError> {
-        let path = unique_temp("llmobs-capture-meta", case);
+        let path = unique_temp("cetra-capture-meta", case);
         if path.exists() {
             fs::remove_file(&path).map_err(|source| CaptureError::Process {
                 step: "prepare the meta file",
@@ -677,7 +677,7 @@ struct TempCapture {
 impl TempCapture {
     fn new(case: &CasePath) -> Self {
         Self {
-            path: unique_temp("llmobs-capture-check", case),
+            path: unique_temp("cetra-capture-check", case),
         }
     }
 
@@ -926,7 +926,7 @@ mod tests {
     impl Tmp {
         fn new(name: &str) -> Self {
             let path =
-                std::env::temp_dir().join(format!("llmobs-capture-{name}-{}", std::process::id()));
+                std::env::temp_dir().join(format!("cetra-capture-{name}-{}", std::process::id()));
             let _ = fs::remove_dir_all(&path);
             Self(path)
         }
@@ -1125,11 +1125,11 @@ mod tests {
         assert_eq!(env.get("TZ").map(String::as_str), Some("UTC"));
         assert_eq!(env.get("PYTHONHASHSEED").map(String::as_str), Some("0"));
         assert_eq!(
-            env.get("LLMOBS_CAPTURE_MOCK_URL").map(String::as_str),
+            env.get("CETRA_CAPTURE_MOCK_URL").map(String::as_str),
             Some("http://127.0.0.1:40123")
         );
         assert_eq!(
-            env.get("LLMOBS_CAPTURE_OTLP_ENDPOINT").map(String::as_str),
+            env.get("CETRA_CAPTURE_OTLP_ENDPOINT").map(String::as_str),
             Some("http://127.0.0.1:40124/v1/traces")
         );
         assert_eq!(
@@ -1138,15 +1138,15 @@ mod tests {
             Some("http://127.0.0.1:40124/v1/traces")
         );
         assert_eq!(
-            env.get("LLMOBS_CAPTURE_META").map(String::as_str),
+            env.get("CETRA_CAPTURE_META").map(String::as_str),
             Some("/tmp/meta.json")
         );
         assert_eq!(
-            env.get("LLMOBS_CAPTURE_LIBRARIES").map(String::as_str),
+            env.get("CETRA_CAPTURE_LIBRARIES").map(String::as_str),
             Some("zeta,alpha")
         );
         assert_eq!(
-            env.get("LLMOBS_CAPTURE_CASE").map(String::as_str),
+            env.get("CETRA_CAPTURE_CASE").map(String::as_str),
             Some("genai/alpha")
         );
         for key in [

@@ -10,7 +10,7 @@
       "openinference-instrumentation-google-genai": "1.5.0",
       "opentelemetry-sdk": "1.45.2"
     },
-    "captured_at": "2026-11-11T11:22:39Z"
+    "captured_at": "2026-11-16T08:54:26Z"
   },
   "spec_refs": [
     "02 § Convention detection",
@@ -22,5 +22,5 @@
   "settings": {
     "media_min_bytes": 64
   },
-  "notes": "OpenInference records message content by default, and this scenario sets no content-capture environment variable. The image is a 64x64 PNG generated in the program, stored as a data URL on message_content.image.image.url. Prompt 90 and cache_read 40 are copied; completion 15 is candidatesTokenCount. llm.provider is google and llm.finish_reason is STOP. output.value includes sdk_http_response headers; the mock pins Date so that string stays stable. prices.json has no Gemini model row."
+  "notes": "OpenInference records message content by default, and this scenario sets no content-capture environment variable. The image is a 64x64 PNG generated in the program, stored as a data URL on message_content.image.image.url. Prompt 90 and cache_read 40 are copied; completion 15 is candidatesTokenCount. llm.provider is google and llm.finish_reason is STOP. output.value includes sdk_http_response headers; the mock pins Date so that string stays stable. prices.json has a gemini-2.5-flash row (provider gcp.gemini)."
 }

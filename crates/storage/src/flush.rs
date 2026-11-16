@@ -15,7 +15,7 @@ use arrow::array::{RecordBatch, TimestampNanosecondArray};
 use arrow::compute::{concat_batches, min};
 use arrow::datatypes::SchemaRef;
 use bytes::Bytes;
-use llmobs_core::ids::ProjectId;
+use cetra_core::ids::ProjectId;
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 
@@ -33,7 +33,7 @@ use crate::parquet::{WrittenFile, write_file};
 use crate::partials::partials_from_spans;
 use crate::projects::ProjectStates;
 use crate::read_state::{Published, ReadState};
-use crate::wal::writer::WriterShared;
+use crate::wal::writer::{RotateError, WriterShared};
 use crate::wal::{Table, truncate_segments};
 
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
@@ -176,12 +176,13 @@ async fn run(mut params: FlushParams) {
                 Ok(()) => pending = None,
                 Err(error) => {
                     log_truncate(params.table, &error);
-                    sleep_backoff(&mut params.stop, backoff).await;
+                    sleep_backoff(&mut params.stop, &params.notify, backoff).await;
                     backoff = next_backoff(backoff);
                     continue;
                 }
             }
         }
+        let started = std::time::Instant::now();
         match flush_once(&params).await {
             Ok(None) => {
                 backoff = INITIAL_BACKOFF;
@@ -192,6 +193,8 @@ async fn run(mut params: FlushParams) {
             }
             Ok(Some(seq)) => {
                 backoff = INITIAL_BACKOFF;
+                let nanos = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                params.committer.counters().flush_ok(params.table, nanos);
                 match truncate_flushed(&params, seq).await {
                     Ok(()) => {}
                     Err(error) => {
@@ -201,7 +204,16 @@ async fn run(mut params: FlushParams) {
                 }
             }
             Err(_) => {
-                sleep_backoff(&mut params.stop, backoff).await;
+                params.committer.counters().flush_failed(params.table);
+                // After a failed local fsync or a fatal catalog I/O error, no retry can
+                // succeed until a restart (D-R-6). At shutdown, stop instead of retrying
+                // for the grace period.
+                if stopping(&params.stop)
+                    && (params.objects.sync_failed() || params.committer.stopped())
+                {
+                    break;
+                }
+                sleep_backoff(&mut params.stop, &params.notify, backoff).await;
                 backoff = next_backoff(backoff);
             }
         }
@@ -216,13 +228,22 @@ fn next_backoff(current: Duration) -> Duration {
     current.saturating_mul(2).min(MAX_BACKOFF)
 }
 
-async fn sleep_backoff(stop: &mut watch::Receiver<bool>, backoff: Duration) {
+/// Waits out an error backoff. A forced flush (`notify`) ends the wait at once.
+async fn sleep_backoff(stop: &mut watch::Receiver<bool>, notify: &Notify, backoff: Duration) {
     tokio::select! {
         () = tokio::time::sleep(backoff) => {}
         result = stop.changed() => {
             let _ = result;
         }
+        () = notify.notified() => {}
     }
+}
+
+/// A forced flush is due only when there is something to flush (N M2, D-N-18).
+/// Without this check an empty memtable would spin the task.
+fn forced(memtable: &Memtable, shared: &WriterShared) -> bool {
+    // The same emptiness test `Memtable::freeze` makes before it freezes.
+    shared.force_flush() && (memtable.has_frozen() || !memtable.partitions().is_empty())
 }
 
 async fn wait_until_due(params: &FlushParams) {
@@ -251,7 +272,7 @@ async fn wait_until_due(params: &FlushParams) {
 }
 
 fn flush_due(memtable: &Memtable, params: &FlushParams) -> bool {
-    if memtable.has_frozen() || stopping(&params.stop) {
+    if memtable.has_frozen() || stopping(&params.stop) || forced(memtable, &params.shared) {
         return true;
     }
     let over_size = u64::try_from(memtable.active_bytes()).unwrap_or(u64::MAX) >= params.max_bytes;
@@ -274,7 +295,7 @@ fn flush_wait(
     let aged = memtable
         .active_oldest()
         .is_some_and(|oldest| oldest.elapsed() >= max_age);
-    let ready = memtable.has_frozen() || over_size || aged;
+    let ready = memtable.has_frozen() || over_size || aged || forced(&memtable, shared);
     let due = memtable
         .active_oldest()
         .map(|oldest| max_age.saturating_sub(oldest.elapsed()));
@@ -463,7 +484,7 @@ fn prepare(
                 let min_ingest = min_ingest_time(&partition.batch, table)?;
                 let batch = uncovered_rows(
                     file_table,
-                    &llmobs_core::schema::spans_schema(),
+                    &cetra_core::schema::spans_schema(),
                     &partition.batch,
                     tombstones,
                     partition.key.project,
@@ -487,14 +508,13 @@ fn prepare(
                 }
                 let refs: Vec<&RecordBatch> =
                     batches.iter().map(|batch| batch.batch.as_ref()).collect();
-                let combined = concat_batches(&llmobs_core::schema::scores_schema(), refs)
-                    .map_err(|source| {
-                        FlushError::prepare(crate::error::ParquetWriteError::arrow(source))
-                    })?;
+                let combined = concat_batches(&cetra_core::schema::scores_schema(), refs).map_err(
+                    |source| FlushError::prepare(crate::error::ParquetWriteError::arrow(source)),
+                )?;
                 let min_ingest = min_ingest_time(&combined, table)?;
                 let combined = uncovered_rows(
                     file_table,
-                    &llmobs_core::schema::scores_schema(),
+                    &cetra_core::schema::scores_schema(),
                     &combined,
                     tombstones,
                     key.project,
@@ -671,7 +691,35 @@ async fn put_chunk(objects: &Arc<Objects>, files: &[PreparedFile]) -> Result<(),
     Ok(())
 }
 
+/// Asks the writer to start a new segment after a committed flush, so that the
+/// truncation after it can delete every segment whose records are all flushed
+/// (spec 03 §7). A segment that also holds newer records waits for the next flush.
+///
+/// Best effort. A failed rotation is logged and truncation still runs: it deletes
+/// only segments whose records are all flushed, and the open segment is never one
+/// of them.
+async fn rotate_flushed(params: &FlushParams) {
+    match params.shared.rotate().await {
+        Ok(_) => {}
+        Err(RotateError::Stopped) => {
+            tracing::debug!(
+                table = params.table.name(),
+                "WAL writer stopped; not rotating"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                table = params.table.name(),
+                %error,
+                "WAL rotation failed; the drained segment waits for the next flush"
+            );
+        }
+    }
+}
+
 async fn truncate_flushed(params: &FlushParams, seq: u64) -> Result<(), std::io::Error> {
+    rotate_flushed(params).await;
+    params.hooks.pause(HookPoint::FlushAfterRotate);
     let dir = params.dir.clone();
     let outcome = tokio::task::spawn_blocking(move || truncate_segments(&dir, seq))
         .await
@@ -698,14 +746,15 @@ fn log_truncate(table: Table, error: &std::io::Error) {
 
 #[cfg(test)]
 mod tests {
+    use crate::QueryOptions;
     use bytesize::ByteSize;
     use std::path::Path;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     use arrow::array::Array;
+    use cetra_core::ids::ProjectId;
     use chrono::{Datelike, NaiveDate};
-    use llmobs_core::ids::ProjectId;
 
     use super::dedup_spans;
     use crate::Storage;
@@ -725,7 +774,7 @@ mod tests {
 
     fn names(batch: &arrow::array::RecordBatch) -> Vec<String> {
         let column = batch
-            .column_by_name(llmobs_core::schema::spans::NAME)
+            .column_by_name(cetra_core::schema::spans::NAME)
             .unwrap()
             .as_any()
             .downcast_ref::<arrow::array::StringArray>()
@@ -767,6 +816,7 @@ mod tests {
 
     fn anchor_config(dir: &Path) -> StorageConfig {
         StorageConfig {
+            delete_objects: true,
             data_dir: dir.to_path_buf(),
             min_free_bytes: ByteSize::b(0),
             object_store: None,
@@ -789,6 +839,7 @@ mod tests {
     /// register a deletion before the flush starts.
     fn config_in(dir: &Path) -> StorageConfig {
         StorageConfig {
+            delete_objects: true,
             data_dir: dir.to_path_buf(),
             min_free_bytes: ByteSize::b(0),
             object_store: None,
@@ -1029,7 +1080,7 @@ mod tests {
             false,
             "session-score",
         );
-        session.target = llmobs_core::score::ScoreTarget::Session {
+        session.target = cetra_core::score::ScoreTarget::Session {
             session_id: "s".to_owned(),
         };
         storage
@@ -1052,7 +1103,7 @@ mod tests {
         assert_eq!(
             values_of(
                 &object_rows(dir.path(), &files[0]),
-                llmobs_core::schema::scores::NAME
+                cetra_core::schema::scores::NAME
             ),
             vec!["session-score".to_owned()],
             "the score on trace 1 is not flushed; the session score is"
@@ -1117,7 +1168,10 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         // The tombstones still hide the row: the file is gated at query time.
-        let query = storage.query(project(), Default::default()).await.unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let ctx = datafusion::execution::context::SessionContext::new_with_config_rt(
             datafusion::execution::context::SessionConfig::new(),
             Arc::clone(&query.runtime),
@@ -1137,6 +1191,166 @@ mod tests {
             .unwrap()
             .value(0);
         assert_eq!(total, 0);
+        storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_flush_that_drains_the_wal_leaves_only_a_new_segment() {
+        const MARKER: &[u8] = b"wal-flush-marker-8e21";
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(anchor_config(dir.path())).await.unwrap();
+        storage
+            .append_spans(
+                project(),
+                spans_named(&[at(day(), 12, 0, 0)], "wal-flush-marker-8e21"),
+            )
+            .await
+            .unwrap();
+        wait_rows(&storage, 1).await;
+        let wal = dir.path().join("wal").join("spans");
+        // The append was record 1, so the drained segment goes and segment 2 stays.
+        let started = Instant::now();
+        loop {
+            let names: Vec<String> = std::fs::read_dir(&wal)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            if names == vec![crate::wal::segment_name(2)] {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(15),
+                "WAL segments after the flush: {names:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            std::fs::read(wal.join(crate::wal::segment_name(2))).unwrap(),
+            crate::wal::segment::segment_header(),
+            "the new segment holds only its header"
+        );
+        for entry in std::fs::read_dir(dir.path().join("wal")).unwrap() {
+            let bytes = std::fs::read(entry.unwrap().path()).unwrap_or_default();
+            assert!(
+                !bytes.windows(MARKER.len()).any(|window| window == MARKER),
+                "a WAL file still holds the appended record"
+            );
+        }
+        storage.shutdown().await.unwrap();
+    }
+
+    fn wal_names(wal: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(wal)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Whether any spans WAL file of `dir` holds `marker`.
+    fn wal_holds(dir: &Path, marker: &[u8]) -> bool {
+        std::fs::read_dir(dir.join("wal").join("spans"))
+            .unwrap()
+            .any(|entry| {
+                let bytes = std::fs::read(entry.unwrap().path()).unwrap_or_default();
+                bytes.windows(marker.len()).any(|window| window == marker)
+            })
+    }
+
+    async fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
+        let started = Instant::now();
+        while !ready() {
+            assert!(
+                started.elapsed() < Duration::from_secs(15),
+                "timed out: {what}"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    async fn wait_for_pause(hooks: &crate::hooks::Hooks, point: HookPoint) {
+        wait_until("flush reached a held point", || hooks.waiting_at(point) > 0).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_idle_instance_creates_no_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(anchor_config(dir.path())).await.unwrap();
+        storage
+            .append_spans(project(), spans_named(&[at(day(), 12, 0, 0)], "idle"))
+            .await
+            .unwrap();
+        let wal = dir.path().join("wal").join("spans");
+        wait_until("the first flush drains the WAL", || {
+            wal_names(&wal) == vec![crate::wal::segment_name(2)]
+        })
+        .await;
+        // Long enough for several idle polls. With no rows there is no flush, so
+        // no rotation: the directory must not grow.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(wal_names(&wal), vec![crate::wal::segment_name(2)]);
+        storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_record_appended_during_a_flush_leaves_the_wal_by_the_next_flush() {
+        const FIRST: &[u8] = b"first-during-flush-5a7c";
+        const SECOND: &[u8] = b"second-during-flush-9d03";
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(anchor_config(dir.path())).await.unwrap();
+        let hooks = storage.hooks().clone();
+        let wal = dir.path().join("wal").join("spans");
+
+        // Flush 1 freezes record 1 and parks at its freeze.
+        hooks.hold(HookPoint::FlushAfterFreeze);
+        storage
+            .append_spans(
+                project(),
+                spans_named(&[at(day(), 12, 0, 0)], "first-during-flush-5a7c"),
+            )
+            .await
+            .unwrap();
+        wait_for_pause(&hooks, HookPoint::FlushAfterFreeze).await;
+        // Record 2 lands after the freeze, so flush 1 cannot cover it.
+        storage
+            .append_spans(
+                project(),
+                spans_named(&[at(day(), 12, 0, 1)], "second-during-flush-9d03"),
+            )
+            .await
+            .unwrap();
+        // Park flush 1 after its write, and park flush 2 at its freeze, so the
+        // state between the two flushes can be checked.
+        hooks.hold(HookPoint::FlushAfterWrite);
+        hooks.release(HookPoint::FlushAfterFreeze);
+        wait_for_pause(&hooks, HookPoint::FlushAfterWrite).await;
+        hooks.hold(HookPoint::FlushAfterFreeze);
+        hooks.release(HookPoint::FlushAfterWrite);
+
+        // Flush 1 committed record 1 and rotated: segment 1 still holds record 2,
+        // and segment 3 is the new open one.
+        wait_until("flush 1 rotates", || {
+            wal_names(&wal) == vec![crate::wal::segment_name(1), crate::wal::segment_name(3)]
+        })
+        .await;
+        assert!(wal_holds(dir.path(), FIRST), "segment 1 holds record 1");
+        assert!(wal_holds(dir.path(), SECOND), "segment 1 holds record 2");
+
+        // Flush 2 drains through record 2 and deletes segment 1. Record 3 goes to
+        // the open segment, so its bytes wait for flush 3.
+        storage
+            .append_spans(
+                project(),
+                spans_named(&[at(day(), 12, 0, 2)], "third-during-flush-2e41"),
+            )
+            .await
+            .unwrap();
+        hooks.release(HookPoint::FlushAfterFreeze);
+        wait_until("flush 2 deletes the drained segment", || {
+            !wal_holds(dir.path(), FIRST) && !wal_holds(dir.path(), SECOND)
+        })
+        .await;
         storage.shutdown().await.unwrap();
     }
 }

@@ -181,7 +181,7 @@ struct PoolState {
 `QueryPool::new(shared, initial, cap)` sets `held = initial`, `used = 0`.
 
 `impl datafusion::execution::memory_pool::MemoryPool for QueryPool`:
-- `fn name(&self) -> &str { "llmobs_query" }`
+- `fn name(&self) -> &str { "cetra_query" }`
 - `fn grow(&self, _: &MemoryReservation, additional: usize)`: lock; `used += additional`; if `used > held` { `shared.force_take(used - held)`; `held = used` }.
 - `fn try_grow(&self, _: &MemoryReservation, additional: usize) -> datafusion::error::Result<()>`: lock; `let next = used.saturating_add(additional)`;
   - `next > cap` → `Err(DataFusionError::ResourcesExhausted(format!("the query needs more than its {cap} bytes")))`;
@@ -194,7 +194,7 @@ struct PoolState {
 
 `impl Drop for QueryPool`: `shared.give_back(held)` (read through `get_mut`, poison recovered with `PoisonError::into_inner`).
 
-`MemoryPool` requires `Any + Send + Sync + Debug + Display` (`datafusion-execution-55.2.0/src/memory_pool/mod.rs:188`): add `impl std::fmt::Display for QueryPool` writing `llmobs_query(cap={cap})`.
+`MemoryPool` requires `Any + Send + Sync + Debug + Display` (`datafusion-execution-55.2.0/src/memory_pool/mod.rs:188`): add `impl std::fmt::Display for QueryPool` writing `cetra_query(cap={cap})`.
 
 Lock poisoning everywhere: `.lock().unwrap_or_else(PoisonError::into_inner)`.
 
