@@ -46,6 +46,15 @@ model cases="500":
 stress secs="300":
     LLMOBS_STRESS_SECS={{secs}} cargo test --release --workspace --all-features -- --ignored --exact --nocapture model_tests::stress::concurrent_lanes_match_the_model
 
+# Write a golden data directory from the current build (track R M8, D-R-29):
+# `just golden-dir 0.1.0` at a release; `just golden-dir scratch` to look at one.
+golden-dir name:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out="{{justfile_directory()}}/fixtures/storage/golden/{{name}}"
+    if [ -e "$out" ]; then echo "golden-dir: $out exists" >&2; exit 1; fi
+    LLMOBS_GOLDEN_OUT="$out" cargo test --workspace --all-features -- --ignored --exact golden_tests::write_golden_dir
+
 # Resource exhaustion (track R M5, D-R-9): a full disk, a memory limit and few file descriptors.
 # Needs unprivileged user namespaces, or LLMOBS_TEST_SMALL_FS (a small mounted filesystem).
 # Ubuntu 24.04 and later restrict them with AppArmor: run
