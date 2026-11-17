@@ -70,6 +70,7 @@ If the code has to deviate from the spec, update the spec **in the same change**
 - Normalization uses golden fixtures in `fixtures/otlp/`.
 - Storage needs crash-recovery and concurrency tests.
 - `CETRA_BLESS_SCHEMA=1` makes `catalog::db::tests::the_schema_matches_the_committed_dump` rewrite `crates/storage/src/catalog/schema.txt` instead of comparing it; then update spec 03 § 4 by hand (R M8).
+- `CETRA_DOCS_WRITE=1` makes `cli_reference_is_up_to_date` rewrite the site's CLI reference (`just docs-gen`); a CLI change commits the regenerated page.
 - `golden_tests` checks the golden data directories against the current build (R M8): the fresh directory is built once per test process by `golden_tests::fresh_golden_dir()`, and every golden test and `read_cache::tests::the_golden_cache_entry_is_served` uses it; `golden_tests::write_golden_dir` (ignored; `just golden-dir <name>`) writes one into `CETRA_GOLDEN_OUT`.
 - A format change (spec 03 § 12) bumps `FORMAT_VERSION`; from the first public release the golden directories under `fixtures/storage/golden/` must keep opening; `just golden-dir <name>` writes one.
 - `CETRA_CRASH_ITERATIONS=N just test` runs the storage crash harness longer (default 25).
@@ -173,6 +174,7 @@ Run everything through `just`:
 | `just ts-smoke <tarball>` | load a packed TS SDK from ESM and CommonJS |
 | `just check-workflows` | lint and audit GitHub Actions workflows (actionlint, zizmor) |
 | `just openapi` | regenerate `crates/server/openapi.json` and `web/src/api/schema.gen.ts` |
+| `just docs-gen` | regenerate the site's generated pages (the CLI reference, D-W-7) |
 | `just web-dev` | web dev server with the API mocked from `fixtures/api` |
 | `just web-dev-server` | web dev server proxied at the real API |
 | `just docs-dev` | docs site dev server on http://localhost:4321 |

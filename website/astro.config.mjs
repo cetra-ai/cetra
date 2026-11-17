@@ -28,6 +28,12 @@ export default defineConfig({
             icon: "open-book",
             items: [{ label: "Overview", link: "/docs/" }],
           },
+          {
+            label: "Reference",
+            link: "/docs/reference/cli/",
+            icon: "document",
+            items: [{ label: "CLI", link: "/docs/reference/cli/" }],
+          },
         ]),
       ],
     }),
