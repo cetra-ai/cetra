@@ -25,7 +25,7 @@ pnpm add @arizeai/openinference-instrumentation-openai openai
 import { flush, init, observe } from "@cetra-ai/sdk";
 ```
 
-<!-- readme:quick-start -->
+<!-- example:quick-start -->
 ```ts
 init({ apiKey: process.env.CETRA_API_KEY });
 const searchDocs = observe(({ query }: { query: string }) => `results for ${query}`, {
@@ -88,7 +88,7 @@ the config's env source) sets `service.name`.
 value is never recorded — only `span.setInput` / `span.setOutput` /
 `span.setMetadata` write attributes.
 
-<!-- readme:with-llm-span -->
+<!-- example:with-llm-span -->
 ```ts
 withLlmSpan(
   "chat",
@@ -113,7 +113,7 @@ Messages may be the canonical `{ role, parts }` format or the short
 
 ## Context and baggage
 
-<!-- readme:with-context -->
+<!-- example:with-context -->
 ```ts
 const turn = observe(({ question }: { question: string }) => `answered: ${question}`, {
   name: "turn",
@@ -133,7 +133,7 @@ and user ids as W3C baggage entries for downstream services.
 
 ## Scores
 
-<!-- readme:score -->
+<!-- example:score -->
 ```ts
 // The returned id is yours to keep: pass it back as `scoreId` to update.
 const id = score({ name: "helpful", value: 0.8, sessionId: "chat-42", reason: "human review" });
@@ -297,7 +297,7 @@ The AI SDK sends spans to the tracer it is given; `aiTelemetry()` hands out
 one from the llm provider (scope `ai`) plus your context values as telemetry
 metadata.
 
-<!-- readme:ai-telemetry -->
+<!-- example:ai-telemetry -->
 ```ts
 // Pass `telemetry` as `experimental_telemetry` to the Vercel AI SDK; the
 // tracer it hands out is the cetra one, so AI spans land in cetra.

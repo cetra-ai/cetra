@@ -6,7 +6,7 @@
     "dev": "astro dev",
     "build": "astro build",
     "test:scripts": "node --test scripts/",
-    "check:content": "node scripts/check-terms.mjs",
+    "check:content": "node scripts/check-terms.mjs && node scripts/check-samples.mjs",
     "check": "biome check . && pnpm test:scripts && astro check && pnpm check:content && astro build"
   },
   "dependencies": {

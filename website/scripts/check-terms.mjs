@@ -51,6 +51,8 @@ export function checkFile(path, text) {
       continue;
     }
     if (inFence) continue;
+    // Sample markers such as `{/* test:otel */}` are not prose.
+    if (/^\{\/\*.*\*\/\}$/.test(line.trim())) continue;
     const prose = stripInlineCode(line);
     for (const [pattern, message] of BANNED) {
       if (pattern.test(prose)) findings.push(`${path}:${i + 1}: ${message}`);

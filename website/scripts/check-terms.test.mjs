@@ -46,3 +46,7 @@ test("finds an over-long description", () => {
 test("a clean file has no finding", () => {
   assert.deepEqual(check("cetra records traces.\n"), []);
 });
+
+test("ignores an MDX sample marker comment", () => {
+  assert.deepEqual(check("{/* test:otel */}\n"), []);
+});

@@ -1,10 +1,11 @@
 /**
- * The README's tested examples (T13). Each function marked with a
- * `// readme:<name>` comment has a twin block in README.md preceded by
- * `<!-- readme:<name> -->`; `readme.test.ts` runs every function against
- * `startMemory` and checks the two texts are byte-identical (the body,
- * dedented). Bodies therefore contain no `import` statements — the README
- * shows imports once, above the first block.
+ * The tested examples of the README and the docs site (T13, D-W-6). Each
+ * function marked with a `// example:<name>` comment has twin blocks in
+ * README.md (preceded by an `example:<name>` HTML comment) and in the site
+ * pages (preceded by an `example:<name>` MDX comment). examples.test.ts runs
+ * every function against `startMemory` and checks the texts are
+ * byte-identical (the body, dedented). Bodies therefore contain no `import`
+ * statements: the pages show imports once, above the first block.
  *
  * Not part of the build (no entry imports this file); type-checked by
  * tsconfig.test.json only.
@@ -17,7 +18,7 @@ import { flush, init } from "./runtime.js";
 import { score } from "./scores.js";
 import { observe } from "./span.js";
 
-// readme:quick-start
+// example:quick-start
 export async function quickStart(): Promise<void> {
   init({ apiKey: process.env.CETRA_API_KEY });
   const searchDocs = observe(({ query }: { query: string }) => `results for ${query}`, {
@@ -28,7 +29,7 @@ export async function quickStart(): Promise<void> {
   await flush();
 }
 
-// readme:with-llm-span
+// example:with-llm-span
 export function withLlmSpanExample(): void {
   withLlmSpan(
     "chat",
@@ -45,7 +46,7 @@ export function withLlmSpanExample(): void {
   );
 }
 
-// readme:with-context
+// example:with-context
 export function withContextExample(): void {
   const turn = observe(({ question }: { question: string }) => `answered: ${question}`, {
     name: "turn",
@@ -55,14 +56,14 @@ export function withContextExample(): void {
   );
 }
 
-// readme:score
+// example:score
 export function scoreExample(): string | undefined {
   // The returned id is yours to keep: pass it back as `scoreId` to update.
   const id = score({ name: "helpful", value: 0.8, sessionId: "chat-42", reason: "human review" });
   return id;
 }
 
-// readme:ai-telemetry
+// example:ai-telemetry
 export function aiTelemetryExample(): void {
   // Pass `telemetry` as `experimental_telemetry` to the Vercel AI SDK; the
   // tracer it hands out is the cetra one, so AI spans land in cetra.
