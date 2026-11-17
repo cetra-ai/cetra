@@ -5,6 +5,23 @@ export function evaluatorsInit(org: string, project: string) {
   return { params: { path: { project: projectRef(org, project) }, query: { limit: 100 } } };
 }
 
+/**
+ * The project's evaluators, page by page. Every reader of the list uses this one shape: a plain
+ * query on the same URL and parameters would share the cache entry and break the paged readers.
+ */
+export function useEvaluatorPages(org: string, project: string) {
+  return $api.useInfiniteQuery(
+    "get",
+    "/api/v1/projects/{project}/evaluators",
+    evaluatorsInit(org, project),
+    {
+      pageParamName: "cursor",
+      initialPageParam: null,
+      getNextPageParam: (page) => page.next_cursor ?? undefined,
+    },
+  );
+}
+
 /** Prefix of every evaluator list query of the project, for invalidation. */
 export function evaluatorsKey(org: string, project: string) {
   return $api.queryOptions("get", "/api/v1/projects/{project}/evaluators", {

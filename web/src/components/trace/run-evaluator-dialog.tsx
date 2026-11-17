@@ -5,7 +5,7 @@ import { type FormEvent, useEffect, useState } from "react";
 import { $api } from "@/api/client";
 import { fieldErrors, problemMessage, problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
-import { evaluatorsInit } from "@/api/queries-evaluation";
+import { useEvaluatorPages } from "@/api/queries-evaluation";
 import { evalJobQuery } from "@/api/queries-online-rules";
 import type { Schema } from "@/api/types";
 import { DisabledReason } from "@/components/disabled-reason";
@@ -149,11 +149,7 @@ function RunEvaluatorForm({
 }: RunFormProps) {
   const { org, project } = useProject();
   const ref = projectRef(org, project);
-  const evaluators = $api.useQuery(
-    "get",
-    "/api/v1/projects/{project}/evaluators",
-    evaluatorsInit(org, project),
-  );
+  const evaluators = useEvaluatorPages(org, project);
   const [evaluatorId, setEvaluatorId] = useState("");
   const [target, setTarget] = useState<Target>("trace");
   const [mapping, setMapping] = useState<MappingRow[]>([]);
@@ -163,7 +159,7 @@ function RunEvaluatorForm({
     gcTime: 0,
   });
   const busy = job?.status === "queued" || job?.status === "running";
-  const list = evaluators.data?.data ?? [];
+  const list = evaluators.data?.pages.flatMap((page) => page.data) ?? [];
   const picked = list.find((item) => item.id === evaluatorId);
   // A span run needs a selected span that is not a root; otherwise the whole trace is the target.
   const spanTargetable = spanId !== undefined && !selectedIsRoot;

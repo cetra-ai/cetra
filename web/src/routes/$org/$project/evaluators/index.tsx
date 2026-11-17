@@ -3,7 +3,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { Gauge, Loader2 } from "lucide-react";
 import { useEffect, useMemo } from "react";
 import { $api } from "@/api/client";
-import { evaluatorStatsQuery, evaluatorsInit } from "@/api/queries-evaluation";
+import { evaluatorStatsQuery, useEvaluatorPages } from "@/api/queries-evaluation";
 import { onlineRulesInit } from "@/api/queries-online-rules";
 import type { Schema } from "@/api/types";
 import { DisabledReason } from "@/components/disabled-reason";
@@ -115,16 +115,7 @@ function EvaluatorsPage() {
   const search = Route.useSearch();
   const navigate = Route.useNavigate();
   const backState = useBackState("Evaluators");
-  const query = $api.useInfiniteQuery(
-    "get",
-    "/api/v1/projects/{project}/evaluators",
-    evaluatorsInit(org, project),
-    {
-      pageParamName: "cursor",
-      initialPageParam: null,
-      getNextPageParam: (page) => page.next_cursor ?? undefined,
-    },
-  );
+  const query = useEvaluatorPages(org, project);
   const rulesQuery = $api.useInfiniteQuery(
     "get",
     "/api/v1/projects/{project}/online-rules",

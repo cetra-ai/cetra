@@ -4,7 +4,7 @@ import { type FormEvent, useState } from "react";
 import { $api } from "@/api/client";
 import { problemMessage, problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
-import { evaluatorQuery, evaluatorsInit } from "@/api/queries-evaluation";
+import { evaluatorQuery, useEvaluatorPages } from "@/api/queries-evaluation";
 import { onlineRuleKey, onlineRuleStatsKey, onlineRulesKey } from "@/api/queries-online-rules";
 import type { Schema } from "@/api/types";
 import { DisabledReason } from "@/components/disabled-reason";
@@ -296,17 +296,14 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
   const [errors, setErrors] = useState<Errors>({});
   const [formError, setFormError] = useState<FormProblem | undefined>();
   const upgradeUrl = useOrgEntitlements(org).upgradeUrl;
-  const evaluators = $api.useQuery(
-    "get",
-    "/api/v1/projects/{project}/evaluators",
-    evaluatorsInit(org, project),
-  );
+  const evaluators = useEvaluatorPages(org, project);
+  const evaluatorItems = evaluators.data?.pages.flatMap((page) => page.data);
   // A saved rule's evaluator may be past the first page of the list: fetch it by id then.
   const savedEvaluatorId = rule?.evaluator_id ?? "";
   const fetchMissing =
     saved &&
-    evaluators.data !== undefined &&
-    !evaluators.data.data.some((item) => item.id === savedEvaluatorId);
+    evaluatorItems !== undefined &&
+    !evaluatorItems.some((item) => item.id === savedEvaluatorId);
   const missing = useQuery({
     ...evaluatorQuery(org, project, savedEvaluatorId),
     enabled: fetchMissing,
@@ -331,7 +328,9 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
   }
 
   const evaluatorList =
-    fetchMissing && missing.data ? [...evaluators.data.data, missing.data] : evaluators.data.data;
+    fetchMissing && missing.data
+      ? [...(evaluatorItems ?? []), missing.data]
+      : (evaluatorItems ?? []);
   const evaluator = evaluatorList.find((item) => item.id === values.evaluatorId);
   const judge = evaluator?.kind === "llm_judge";
 

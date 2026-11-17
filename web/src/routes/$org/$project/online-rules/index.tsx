@@ -4,7 +4,7 @@ import { cn } from "cn";
 import { ArrowDown, ArrowUp, ListChecks, Loader2, Plus } from "lucide-react";
 import { type KeyboardEvent, useLayoutEffect, useRef, useState } from "react";
 import { $api } from "@/api/client";
-import { evaluatorsInit } from "@/api/queries-evaluation";
+import { useEvaluatorPages } from "@/api/queries-evaluation";
 import {
   onlineRuleStatsKey,
   onlineRuleStatsQuery,
@@ -109,11 +109,8 @@ function OnlineRulesPage() {
       getNextPageParam: (page) => page.next_cursor ?? undefined,
     },
   );
-  const evaluators = $api.useQuery(
-    "get",
-    "/api/v1/projects/{project}/evaluators",
-    evaluatorsInit(org, project),
-  );
+  const evaluators = useEvaluatorPages(org, project);
+  const evaluatorItems = evaluators.data?.pages.flatMap((page) => page.data);
   const stats = useQuery(onlineRuleStatsQuery(org, project));
   const [text, setText] = useState(search.q ?? "");
 
@@ -158,7 +155,7 @@ function OnlineRulesPage() {
   const pages = query.data?.pages ?? [];
   const rows = pages.flatMap((page) => page.data);
   const activeRules = pages[0]?.org_enabled_rules;
-  const evaluatorById = new Map((evaluators.data?.data ?? []).map((item) => [item.id, item]));
+  const evaluatorById = new Map((evaluatorItems ?? []).map((item) => [item.id, item]));
   const evaluatorName = (id: string) => evaluatorById.get(id)?.name;
   const statsByRule = new Map((stats.data?.data ?? []).map((entry) => [entry.rule_id, entry]));
   /** A rule's stats; none while they load or when the stats query failed (the cells then show nothing). */
@@ -174,7 +171,7 @@ function OnlineRulesPage() {
   const dailySpend = spendToday(rows);
   const jobs24 = rows.reduce((sum, rule) => sum + jobTotal(rule), 0);
   const failed24 = rows.reduce((sum, rule) => sum + rule.jobs_last_24h.failed, 0);
-  const noEvaluators = evaluators.data !== undefined && evaluators.data.data.length === 0;
+  const noEvaluators = evaluatorItems !== undefined && evaluatorItems.length === 0;
 
   const newRule = (
     <DisabledReason reason={canManage ? undefined : "Only members can create online rules"}>

@@ -263,3 +263,16 @@ it("shows a dash, not a skeleton, for an evaluator the stats leave out", async (
   await waitFor(() => expect(table.querySelector('[data-slot="skeleton"]')).toBeNull());
   expect(within(rowOf(table, "Relevance")).getAllByText("—").length).toBeGreaterThanOrEqual(4);
 });
+
+it("opens after the online rules page, which reads the same evaluator list", async () => {
+  const { router } = await renderApp("/acme/support-bot/online-rules");
+  // The online rules list reads the evaluators to name each rule's evaluator.
+  expect(await screen.findByText("Relevance on answers")).toBeInTheDocument();
+  await router.navigate({
+    to: "/$org/$project/evaluators",
+    params: { org: "acme", project: "support-bot" },
+  });
+  expect(await screen.findByRole("heading", { name: "Evaluators" })).toBeInTheDocument();
+  expect(screen.queryByText("Something went wrong")).not.toBeInTheDocument();
+  await waitFor(() => expect(router.state.status).toBe("idle"));
+});
