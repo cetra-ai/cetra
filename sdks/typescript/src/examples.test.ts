@@ -1,11 +1,12 @@
 /**
- * The README's tested examples (T13): every function marked `// readme:<name>`
- * in readme-examples.test-helpers.ts runs against `startMemory`, and its body
- * (dedented) must be byte-identical to the README.md block preceded by
- * `<!-- readme:<name> -->`.
+ * The tested examples of the README and the docs site (T13, D-W-6): every
+ * function marked `// example:<name>` in examples.test-helpers.ts runs against
+ * `startMemory`, and its body (dedented) must be byte-identical to every block
+ * preceded by an `example:<name>` marker in README.md or in the site pages.
  */
 
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
@@ -14,13 +15,14 @@ import {
   scoreExample,
   withContextExample,
   withLlmSpanExample,
-} from "./readme-examples.test-helpers.js";
+} from "./examples.test-helpers.js";
 import { init, resetForTests } from "./runtime.js";
 import { finished, type MemoryRuntime, startMemory } from "./testing.test-helpers.js";
 import type { FetchLike } from "./web.js";
 
 const README = new URL("../README.md", import.meta.url);
-const EXAMPLES = new URL("./readme-examples.test-helpers.ts", import.meta.url);
+const SITE = new URL("../../../website/src/content/docs/", import.meta.url);
+const EXAMPLES = new URL("./examples.test-helpers.ts", import.meta.url);
 /** A UUIDv7, which is what `score()` mints (D-F-2). */
 const UUID7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
@@ -84,7 +86,7 @@ const EXAMPLES_BY_NAME: Record<string, Example> = {
   },
 };
 
-describe("README examples", () => {
+describe("documented examples", () => {
   let memory: MemoryRuntime;
 
   beforeEach(async () => {
@@ -110,47 +112,72 @@ describe("README examples", () => {
   }
 
   it("matches every marked block byte for byte", () => {
-    const blocks = markedBlocks(readFileSync(README, "utf8"));
+    const blocks = [...pages()].flatMap(([path, text]) => markedBlocks(path, text));
     const bodies = markedBodies(readFileSync(EXAMPLES, "utf8"));
     expect(Object.keys(EXAMPLES_BY_NAME).sort()).toEqual([...bodies.keys()].sort());
-    expect([...bodies.keys()].sort()).toEqual([...blocks.keys()].sort());
-    for (const [name, body] of bodies) {
-      expect(blocks.get(name), `README block "${name}"`).toBe(body);
+    expect([...new Set(blocks.map((block) => block.name))].sort()).toEqual(
+      [...bodies.keys()].sort(),
+    );
+    for (const block of blocks) {
+      expect(block.code, `${block.path} block "${block.name}"`).toBe(bodies.get(block.name));
     }
   });
 });
+
+/** The README and every Markdown or MDX page of the docs site, by path. */
+function pages(): Map<string, string> {
+  const found = new Map<string, string>([[fileURLToPath(README), readFileSync(README, "utf8")]]);
+  const site = fileURLToPath(SITE);
+  if (existsSync(site)) {
+    for (const entry of readdirSync(site, { recursive: true, encoding: "utf8" }).sort()) {
+      if (/\.mdx?$/.test(entry)) {
+        found.set(`${site}${entry}`, readFileSync(`${site}${entry}`, "utf8"));
+      }
+    }
+  }
+  return found;
+}
 
 /** A `fetch` that answers 200 to everything; no request leaves the process. */
 const okFetch: FetchLike = () =>
   Promise.resolve({ status: 200, ok: true, headers: { get: () => null } });
 
-/** The `ts` fenced blocks preceded by a `<!-- readme:<name> -->` line. */
-function markedBlocks(markdown: string): Map<string, string> {
-  const blocks = new Map<string, string>();
+interface Block {
+  readonly path: string;
+  readonly name: string;
+  readonly code: string;
+}
+
+/** The `ts` fenced blocks preceded by an `example:<name>` HTML or MDX comment. */
+function markedBlocks(path: string, markdown: string): Block[] {
+  const blocks: Block[] = [];
   const lines = markdown.split("\n");
   for (let i = 0; i < lines.length; i++) {
-    const marker = /^<!-- readme:([a-z0-9-]+) -->$/.exec(lines[i] ?? "");
+    const marker = /^(?:<!-- example:([a-z0-9-]+) -->|\{\/\* example:([a-z0-9-]+) \*\/\})$/.exec(
+      lines[i] ?? "",
+    );
     if (marker === null) {
       continue;
     }
+    const name = marker[1] ?? marker[2] ?? "";
     if (lines[i + 1] !== "```ts") {
-      throw new Error(`no ts fence after the "${marker[1]}" marker`);
+      throw new Error(`${path}: no ts fence after the "${name}" marker`);
     }
     const close = lines.indexOf("```", i + 2);
     if (close === -1) {
-      throw new Error(`unterminated fence after the "${marker[1]}" marker`);
+      throw new Error(`${path}: unterminated fence after the "${name}" marker`);
     }
-    blocks.set(marker[1] ?? "", lines.slice(i + 2, close).join("\n"));
+    blocks.push({ path, name, code: lines.slice(i + 2, close).join("\n") });
   }
   return blocks;
 }
 
-/** The bodies of the functions marked `// readme:<name>`, dedented. */
+/** The bodies of the functions marked `// example:<name>`, dedented. */
 function markedBodies(source: string): Map<string, string> {
   const bodies = new Map<string, string>();
   const lines = source.split("\n");
   for (let i = 0; i < lines.length; i++) {
-    const marker = /^\/\/ readme:([a-z0-9-]+)$/.exec(lines[i] ?? "");
+    const marker = /^\/\/ example:([a-z0-9-]+)$/.exec(lines[i] ?? "");
     if (marker === null) {
       continue;
     }

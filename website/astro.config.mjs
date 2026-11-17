@@ -26,7 +26,17 @@ export default defineConfig({
             label: "Docs",
             link: "/docs/",
             icon: "open-book",
-            items: [{ label: "Overview", link: "/docs/" }],
+            items: [
+              { label: "Overview", link: "/docs/" },
+              {
+                label: "Get started",
+                items: [
+                  { label: "Quick start", link: "/docs/get-started/quickstart/" },
+                  { label: "Run cetra", link: "/docs/get-started/run-cetra/" },
+                  { label: "Send OpenTelemetry", link: "/docs/get-started/opentelemetry/" },
+                ],
+              },
+            ],
           },
         ]),
       ],

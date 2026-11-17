@@ -1,0 +1,158 @@
+---
+title: Quick start
+description: Run cetra on your machine and send your first trace in a few minutes.
+---
+
+import { Tabs, TabItem, Aside } from "@astrojs/starlight/components";
+
+By the end of this page you have cetra running locally and a first trace in the UI.
+
+## Run cetra
+
+Choose the first start settings. The `CETRA_INIT_*` variables create the admin account, an organization, a project and an API key, so there is no setup page and you know the key. Pick your own 32 letters or digits for the key.
+
+<Tabs syncKey="run">
+  <TabItem label="Docker">
+
+```bash
+docker run -d --name cetra \
+  -p 127.0.0.1:8080:8080 -p 127.0.0.1:4317:4317 -p 127.0.0.1:4318:4318 \
+  -v cetra-data:/data \
+  -e CETRA_PUBLIC_URL=http://localhost:8080 \
+  -e CETRA_INIT_ADMIN_EMAIL=you@example.com \
+  -e CETRA_INIT_ADMIN_PASSWORD=<YOUR_PASSWORD> \
+  -e CETRA_INIT_ORG=acme \
+  -e CETRA_INIT_PROJECT=demo \
+  -e CETRA_INIT_SECRET_KEY=sk-cetra-<32_LETTERS_OR_DIGITS> \
+  ghcr.io/cetra-ai/cetra:0.1.0
+```
+
+  </TabItem>
+  <TabItem label="Binary">
+
+```bash
+curl -fsSL https://github.com/cetra-ai/cetra/releases/latest/download/install.sh | sh
+```
+
+```bash
+CETRA_INIT_ADMIN_EMAIL=you@example.com \
+CETRA_INIT_ADMIN_PASSWORD=<YOUR_PASSWORD> \
+CETRA_INIT_ORG=acme \
+CETRA_INIT_PROJECT=demo \
+CETRA_INIT_SECRET_KEY=sk-cetra-<32_LETTERS_OR_DIGITS> \
+cetra serve
+```
+
+  </TabItem>
+  <TabItem label="From source">
+
+```bash
+git clone https://github.com/cetra-ai/cetra
+cd cetra
+just build-release
+```
+
+```bash
+CETRA_INIT_ADMIN_EMAIL=you@example.com \
+CETRA_INIT_ADMIN_PASSWORD=<YOUR_PASSWORD> \
+CETRA_INIT_ORG=acme \
+CETRA_INIT_PROJECT=demo \
+CETRA_INIT_SECRET_KEY=sk-cetra-<32_LETTERS_OR_DIGITS> \
+./target/release/cetra serve
+```
+
+<Aside>
+  cetra has no release yet, so building from source is the only way to run it for now.
+</Aside>
+
+  </TabItem>
+</Tabs>
+
+## Open the UI
+
+Open `http://localhost:8080` and sign in with the admin email and password you chose.
+
+## Send a trace
+
+Pick your language. Set `CETRA_API_KEY` to the secret key you chose in the first step.
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install cetra-sdk
+export CETRA_API_KEY=sk-cetra-<32_LETTERS_OR_DIGITS>
+```
+
+{/* test */}
+```python
+import cetra
+
+cetra.init()
+
+
+@cetra.observe(kind="tool", name="search_docs")
+def search_docs(query: str, limit: int = 2) -> list[str]:
+    return ["doc-1", "doc-2"]
+
+
+@cetra.observe(name="answer")
+def answer(question: str) -> str:
+    docs = search_docs(question)
+    return f"It is in {docs[0]}."
+
+
+answer("why?")
+
+cetra.flush()  # blocks until spans (and scores) are exported
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+```bash
+npm install @cetra-ai/sdk
+# or: pnpm add @cetra-ai/sdk
+export CETRA_API_KEY=sk-cetra-<32_LETTERS_OR_DIGITS>
+```
+
+{/* untested: the imports line is part of the example below */}
+```ts
+import { flush, init, observe } from "@cetra-ai/sdk";
+```
+
+{/* example:quick-start */}
+```ts
+init({ apiKey: process.env.CETRA_API_KEY });
+const searchDocs = observe(({ query }: { query: string }) => `results for ${query}`, {
+  kind: "tool",
+  name: "search_docs",
+});
+searchDocs({ query: "pricing" });
+await flush();
+```
+
+  </TabItem>
+  <TabItem label="OpenTelemetry">
+
+Any OpenTelemetry exporter can send traces to cetra. See [Send OpenTelemetry](/docs/get-started/opentelemetry/).
+
+  </TabItem>
+</Tabs>
+
+## See the trace
+
+In the UI, open the `demo` project and select **Traces**. The trace `answer` is in the list. Select it to see the `search_docs` span nested inside it, with its input and output.
+
+## Nothing showing up?
+
+- The API key starts with `sk-cetra-` and belongs to the project you are looking at.
+- The base URL and port are right. The SDKs send to `http://localhost:8080` unless you set `CETRA_BASE_URL`.
+- Your process exited before the spans were sent. Call `flush()` (Python) or `await flush()` (TypeScript) before it ends.
+- `CETRA_ENABLED` is not set to `false`.
+- The cetra log names the reason when it refuses a request. Check the output of `cetra serve` or `docker logs cetra`.
+
+## Next steps
+
+- [Run cetra](/docs/get-started/run-cetra/): the other ways to run it, ports and where data lives.
+- [Send OpenTelemetry](/docs/get-started/opentelemetry/): use plain OpenTelemetry instead of an SDK.

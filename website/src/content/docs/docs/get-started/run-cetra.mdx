@@ -1,0 +1,45 @@
+---
+title: Run cetra
+description: The ways to run cetra, the ports it listens on, and where it keeps its data.
+---
+
+cetra is one binary, `cetra`, that serves the web UI, the API, OTLP ingestion and MCP.
+
+## Methods
+
+| Method | Best for | Guide |
+|---|---|---|
+| Binary (`install.sh`) | a laptop, a VM, systemd | [Install](https://github.com/cetra-ai/cetra/blob/main/docs/self-hosting/install.md) |
+| Docker image | anything that runs containers | [Install](https://github.com/cetra-ai/cetra/blob/main/docs/self-hosting/install.md#docker) |
+| docker-compose | one server, optionally with a local S3 (Garage) | [docker-compose](https://github.com/cetra-ai/cetra/blob/main/docs/self-hosting/docker-compose.md) |
+| Helm chart | Kubernetes | [Kubernetes](https://github.com/cetra-ai/cetra/blob/main/docs/self-hosting/kubernetes.md) |
+
+## Ports
+
+| Port | Serves |
+|---|---|
+| 8080 | the UI, the API, OTLP/HTTP at `/v1/traces`, MCP at `/mcp`, `/healthz` and `/readyz` |
+| 4317 | OTLP/gRPC |
+| 4318 | OTLP/HTTP only (the standard OTLP port) |
+
+cetra accepts `/v1/logs` and `/v1/metrics` and drops them: it stores traces only.
+
+## First start
+
+On the first start, cetra logs a setup link: `setup required: open http://localhost:8080/setup?token=…`. Open it to create the first admin, organization and project.
+
+To skip the setup page, set these variables for the first start:
+
+| Variable | Sets |
+|---|---|
+| `CETRA_INIT_ADMIN_EMAIL` | the admin's email |
+| `CETRA_INIT_ADMIN_PASSWORD` | the admin's password |
+| `CETRA_INIT_ORG` | the organization name |
+| `CETRA_INIT_PROJECT` | the project name |
+| `CETRA_INIT_SECRET_KEY` | optional: the project's first API key (`sk-cetra-` and 32 letters or digits) |
+
+## Where data lives
+
+cetra keeps its data in one directory: `./cetra-data` by default, or the one you set in `CETRA_DATA_DIR`. In the Docker image it is the volume at `/data`.
+
+One process owns a data directory. Run exactly one cetra instance per data directory.

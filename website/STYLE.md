@@ -37,7 +37,7 @@ Second person, present tense, active voice. Plain words, short sentences, one id
 
 ## Sample markers
 
-Added in W3 (the markers do nothing until then):
+Every `python`, `py`, `ts`, `tsx` and `js` block has one of these markers on the line before its fence (`scripts/check-samples.mjs` checks it); in the SDK READMEs the same markers are HTML comments:
 
 - `{/* test */}`: a Python block run by the Python SDK's tests.
 - `{/* test:otel */}`: a Python block run against a recording OTLP endpoint.
