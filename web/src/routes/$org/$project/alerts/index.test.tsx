@@ -60,13 +60,13 @@ it("lists the rules with their state", async () => {
   expect(helpfulness).toHaveTextContent("No data");
 });
 
-it("links to the rule page", async () => {
+it("links the rule name to the rule in the panel", async () => {
   await renderApp(PAGE);
 
   const table = await screen.findByRole("table", { name: "Alert rules" });
   expect(within(table).getByRole("link", { name: "High error rate" })).toHaveAttribute(
     "href",
-    `/acme/support-bot/alerts/${FIRING_RULE_ID}`,
+    `/acme/support-bot/alerts?rule=${FIRING_RULE_ID}`,
   );
 });
 
@@ -410,11 +410,11 @@ it("lists the recent events with the names of their rules", async () => {
   expect(within(events).getAllByRole("row").slice(1)).toHaveLength(2);
   expect(within(events).getByRole("link", { name: "High error rate" })).toHaveAttribute(
     "href",
-    `/acme/support-bot/alerts/${HIGH_ID}`,
+    `/acme/support-bot/alerts?rule=${HIGH_ID}`,
   );
   expect(within(events).getByRole("link", { name: "Low helpfulness" })).toHaveAttribute(
     "href",
-    `/acme/support-bot/alerts/${LOW_ID}`,
+    `/acme/support-bot/alerts?rule=${LOW_ID}`,
   );
   expect(within(events).getByText("Fired")).toBeInTheDocument();
   expect(within(events).getByText("Resolved")).toBeInTheDocument();
@@ -490,4 +490,86 @@ it("shows the recent events whatever the bucket filter", async () => {
 
   const events = await screen.findByRole("table", { name: "Recent alert events" });
   expect(within(events).getAllByRole("row").slice(1)).toHaveLength(3);
+});
+
+const DAILY_ID = "01900000-0000-7000-8000-000000000512";
+const PANEL = { name: "Alert rule" };
+
+it("opens the rule in the panel when its row is clicked", async () => {
+  const { router, user } = await renderApp(PAGE);
+
+  const table = await screen.findByRole("table", { name: "Alert rules" });
+  await user.click(within(table).getByText("Never"));
+
+  expect(router.state.location.search).toMatchObject({ rule: DAILY_ID });
+  expect(await screen.findByRole("region", PANEL)).toBeInTheDocument();
+});
+
+it("opens the rule named in the URL", async () => {
+  server.use(http.get(RULE, () => HttpResponse.json(rulesFixture.data[2])));
+
+  await renderApp(`${PAGE}?rule=${LOW_ID}`);
+
+  const panel = await screen.findByRole("region", PANEL);
+  expect(await within(panel).findByText("Low helpfulness")).toBeInTheDocument();
+});
+
+it("closes the panel and removes the rule param", async () => {
+  const { router, user } = await renderApp(`${PAGE}?rule=${HIGH_ID}`);
+
+  const panel = await screen.findByRole("region", PANEL);
+  await user.click(within(panel).getByRole("button", { name: "Close" }));
+
+  expect(router.state.location.search.rule).toBeUndefined();
+  await waitFor(() => expect(screen.queryByRole("region", PANEL)).toBeNull());
+});
+
+it("moves the open rule with the arrow keys", async () => {
+  const { router, user } = await renderApp(`${PAGE}?rule=${HIGH_ID}`);
+
+  const table = await screen.findByRole("table", { name: "Alert rules" });
+  const high = within(table).getByRole("row", { name: /^High error rate\b/ });
+  act(() => {
+    high.focus();
+  });
+
+  await user.keyboard("{ArrowDown}");
+  expect(router.state.location.search).toMatchObject({ rule: LOW_ID });
+  expect(within(table).getByRole("row", { name: /^Low helpfulness\b/ })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+
+  await user.keyboard("{ArrowDown}");
+  expect(router.state.location.search).toMatchObject({ rule: DAILY_ID });
+
+  await user.keyboard("{ArrowUp}");
+  expect(router.state.location.search).toMatchObject({ rule: LOW_ID });
+});
+
+it("does not open the rule when its switch is clicked", async () => {
+  server.use(
+    http.patch(RULE, () => HttpResponse.json({ ...rulesFixture.data[1], enabled: false })),
+  );
+
+  const { router, user } = await renderApp(PAGE);
+  const table = await screen.findByRole("table", { name: "Alert rules" });
+  await user.click(within(table).getByRole("switch", { name: "Enable High error rate" }));
+
+  expect(router.state.location.search.rule).toBeUndefined();
+  expect(screen.queryByRole("region", PANEL)).toBeNull();
+});
+
+it("opens the rule in the panel from a recent event", async () => {
+  const { router, user } = await renderApp(PAGE);
+
+  const events = await screen.findByRole("table", { name: "Recent alert events" });
+  const [link] = within(events).getAllByRole("link", { name: "High error rate" });
+  if (link === undefined) {
+    throw new Error("no event links to the high error rate rule");
+  }
+  await user.click(link);
+
+  expect(router.state.location.search).toMatchObject({ rule: HIGH_ID });
+  expect(await screen.findByRole("region", PANEL)).toBeInTheDocument();
 });
