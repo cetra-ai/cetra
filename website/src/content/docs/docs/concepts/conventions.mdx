@@ -1,0 +1,46 @@
+---
+title: Semantic conventions
+description: Which instrumentation conventions cetra reads, how it recognizes each one, and which wins when a span carries several.
+---
+
+Read this page to learn which instrumentation libraries cetra understands, and how it picks a value when a span carries more than one convention.
+
+Instrumentation libraries describe an LLM call with attributes, and they do not all use the same names. A convention is a naming scheme for those attributes. cetra reads the common ones, so the same field, such as the model or the input tokens, appears in the same place in the UI whatever sent the span.
+
+## The conventions cetra reads
+
+| Convention | cetra recognizes it by | What cetra reads |
+|---|---|---|
+| cetra | any attribute starting with `cetra.` | Kind, input, output, session, user, tags, metadata, environment, release, time to first token, cost |
+| OpenTelemetry GenAI | `gen_ai.*` attributes, or events named `gen_ai.*` | Operation, models, provider, messages, system instructions, tool definitions, token counts, finish reasons, conversation ID |
+| OpenInference | `openinference.span.kind`, or `llm.*`, `input.value`, `output.value`, `embedding.*`, `retrieval.*`, `tool.*` | Kind, models, input and output messages, tool definitions, token counts, cost, session, user |
+| Vercel AI SDK | `ai.*` attributes | Operation, models, prompt, response, tool calls, token counts, telemetry metadata |
+| OpenLLMetry | `traceloop.*`, or `gen_ai.prompt.N.*` and `gen_ai.completion.N.*` | Kind, prompt and completion messages, entity input and output, association properties |
+| Langfuse | `langfuse.*` attributes | Observation type, input, output, model, usage, cost, session, user, tags, metadata |
+| Laminar | `lmnr.*` attributes | Span type, input, output, association properties |
+| Google ADK | `gcp.vertex.agent.*` attributes | Request, response, tool calls, session |
+
+[Span attributes](/docs/reference/attributes/) lists every attribute and the field it feeds.
+
+## Precedence
+
+A span can carry several conventions. The Vercel AI SDK, for example, writes both `ai.*` and `gen_ai.*` attributes. For each field, cetra reads the conventions in this order and uses the first that has a value:
+
+1. cetra
+2. OpenTelemetry GenAI
+3. OpenInference
+4. Vercel AI SDK
+5. OpenLLMetry
+6. Langfuse
+7. Laminar
+8. Google ADK
+
+The winner takes the whole field. cetra never merges the message lists of two conventions into one.
+
+## Attributes cetra does not use
+
+cetra keeps every attribute it does not read for a field. They are stored on the span and shown in the UI under **Attributes**, and you can filter on them with `attributes['key']`. An attribute that cetra reads for a field is removed from the attributes once it is stored, unless its value is short, so large payloads are not stored twice.
+
+## If a payload cannot be read
+
+If cetra recognizes a convention but cannot convert its input or output into messages, it keeps the raw value and adds a `cetra.normalize_error` attribute to the span. The span is still stored.

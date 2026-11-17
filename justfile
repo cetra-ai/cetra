@@ -375,9 +375,10 @@ openapi: js-install
     CETRA_OPENAPI_WRITE=1 cargo test -p cetra-server --test openapi -- contract_file_is_up_to_date
     pnpm --dir web run gen:api
 
-# Regenerate the generated docs pages (D-W-7): the CLI reference
+# Regenerate the generated docs pages (D-W-7): the CLI and SQL schema references
 docs-gen:
     CETRA_DOCS_WRITE=1 cargo test -p cetra-cli cli_reference_is_up_to_date
+    CETRA_DOCS_WRITE=1 cargo test -p cetra-server sql_schema_reference_is_up_to_date
 
 # Regenerate fixtures/api responses and manifest
 api-examples:

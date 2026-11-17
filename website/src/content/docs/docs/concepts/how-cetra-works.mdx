@@ -1,0 +1,35 @@
+---
+title: How cetra works
+description: How a span travels from your application to a query result, inside one process and one data directory.
+---
+
+Read this page to understand what cetra does with a span, and what is safe when something goes wrong.
+
+cetra is one process. It receives spans, stores them in its own data directory, and serves the UI, the API, the SQL console and the MCP server from the same data. There is no separate database, queue or search service to run.
+
+## The path of a span
+
+1. **OTLP in.** Your application sends spans to cetra over OTLP. cetra checks the API key, the request size and the limits of your plan. See [OTLP endpoint](/docs/reference/otlp/).
+2. **Normalization.** cetra reads each span with the conventions it knows and fills the same fields whatever the source: kind, model, provider, input, output, token counts, session, user. It moves images and audio out of payloads, cuts oversized values, and works out the cost. See [Semantic conventions](/docs/concepts/conventions/).
+3. **Write-ahead log.** cetra appends the batch to a write-ahead log on disk and syncs it. cetra answers your request only after this step, so an acknowledged span survives a crash or a restart.
+4. **In memory.** The batch also goes into memory, so the span is queryable at once.
+5. **Parquet files.** In the background, cetra writes memory to Parquet files, a standard columnar format, and later merges small files into larger ones. The files live on local disk or in an S3-compatible bucket.
+6. **Queries.** The UI, the REST API, the SQL console, the CLI and the MCP server all read the same files and the same memory. A filter on the traces list and a SQL query run on the same engine.
+
+Evaluators and alerts run on top of this data. An online rule looks at new traces as they arrive and runs an evaluator on those that match. An alert rule queries the data on a schedule.
+
+The metadata database is separate from your traces. It is a SQLite file in the same data directory and holds users, organizations, projects, API keys, settings and saved views.
+
+## What "acknowledged" means
+
+When cetra answers an OTLP request with success, the spans in that request are in the write-ahead log on disk. The SDKs send spans in batches, in the background. If your process exits before a batch is sent, those spans are lost, so call `flush()` before a short-lived process ends. See the [quick start](/docs/get-started/quickstart/).
+
+If cetra cannot accept a request, it says so with a status code, and the SDK or your exporter retries. cetra never drops an accepted span silently. A span that cannot be read at all, for example because it has no valid trace ID, is rejected and counted in the answer to the request.
+
+## Where the data lives
+
+Everything is under one data directory: the write-ahead log, the Parquet files, the media files and the metadata database. With S3, the Parquet files and media move to the bucket and the rest stays local. Back up the directory, or the bucket together with the directory, and you have backed up cetra. The Parquet files are open files: other tools can read them.
+
+## Sizing
+
+How much memory, disk and CPU cetra needs depends on how many spans you send, how large their payloads are and how you query them. See [Resources](/docs/self-hosting/resources/) for what to plan for.

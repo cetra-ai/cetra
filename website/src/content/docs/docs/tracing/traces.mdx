@@ -1,0 +1,115 @@
+---
+title: Traces
+description: Browse traces in the UI, read a trace as a tree and a timeline, and inspect the input, output and attributes of each span.
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+Use the trace list to find a request, and the trace view to see what happened inside it.
+
+A trace is one request through your application. Each step of it is a span. See the [data model](/docs/concepts/data-model/).
+
+## Send a trace
+
+Every span you create becomes part of a trace. Spans started inside another span become its children.
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* test */}
+```python
+import cetra
+
+cetra.init()
+
+
+@cetra.observe(kind="tool", name="search_docs")
+def search_docs(query: str) -> list[str]:
+    return ["doc-1", "doc-2"]
+
+
+@cetra.observe(name="answer")
+def answer(question: str) -> str:
+    docs = search_docs(question)
+    return f"It is in {docs[0]}."
+
+
+answer("why?")
+
+cetra.flush()
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+{/* untested: the imports line is part of the example below */}
+```ts
+import { flush, init, observe } from "@cetra-ai/sdk";
+```
+
+{/* example:quick-start */}
+```ts
+init({ apiKey: process.env.CETRA_API_KEY });
+const searchDocs = observe(({ query }: { query: string }) => `results for ${query}`, {
+  kind: "tool",
+  name: "search_docs",
+});
+searchDocs({ query: "pricing" });
+await flush();
+```
+
+  </TabItem>
+  <TabItem label="OpenTelemetry">
+
+Any OpenTelemetry instrumentation works. Nested spans form the tree. See [Send OpenTelemetry](/docs/get-started/opentelemetry/).
+
+  </TabItem>
+</Tabs>
+
+## The trace list
+
+Select **Traces** in the sidebar. The list shows the traces of the last 24 hours, newest first. Each row shows:
+
+- the status, start time and name of the trace;
+- a preview of the input and the output;
+- the duration, token count and cost;
+- the models used, the session, the user, the tags and the environment;
+- one column per score name found in the traces.
+
+The columns menu hides or shows columns. Select a column header to sort by it. The time range picker offers presets from 15 minutes to 30 days and a custom range. The list does not show evaluation traces or experiment traces until you turn on **Show evaluation traces** or **Show experiment traces**.
+
+Select a row to open the trace in a panel beside the list, with the list still in place. Use `j` and `k`, or the arrow keys, to move between rows, and `Esc` to close the panel. The same view opens as a full page from the trace's own link.
+
+Turn on **Live** to see new traces arrive as they finish. Live mode works with a preset time range and the default sort.
+
+A project with no traces shows setup snippets until the first trace arrives.
+
+## The trace view
+
+The left side shows the spans as a tree and a timeline in one grid. Each row has the span's name, kind and status, its duration, tokens and cost, and a bar on a shared time axis. Spans with an error are red. You can collapse a branch and search within the tree.
+
+**Transcript** shows the model and tool spans in order as one conversation. Each model turn shows only the messages that are new since the previous call.
+
+When a trace has just ended, or the list is live, the view updates as spans arrive and shows a **Live** badge.
+
+The right side shows the selected span. The header gives its kind, name, model, provider, duration, time to first token, token counts with cache and reasoning, cost and status. The tabs are:
+
+- **Chat**: for spans with messages. System instructions are collapsed, messages appear as bubbles, tool calls and results as cards, and reasoning is collapsed. Images, audio and PDFs show in place. Tool definitions open in a drawer.
+- **Input / Output**: the raw payload as a JSON tree, as text or as raw text, with copy buttons. A badge tells you when a value was truncated.
+- **Attributes**: metadata, attributes, resource attributes, events and links. An exception event shows its stack trace.
+- **Scores**: the scores on the span and on the trace.
+- **Annotate**: add your own scores to the trace or the span.
+
+The trace header shows the trace's name, total duration, cost and tokens, and links to its session and user. Use **Copy link** to share the trace with someone who has access to the project.
+
+If a span's parent is missing, for example because it was never sent, cetra shows the span as a root of its own, so no span is hidden.
+
+## Filter traces
+
+Use the filter bar and the search box. See [Filters and search](/docs/tracing/filters-and-search/). The trace list reads the `traces` view, and the spans list reads the `spans` view. Both are in the [SQL schema](/docs/reference/sql-schema/).
+
+## Limits
+
+- A span that arrives more than a day in the future, or from before the year 2000, is rejected.
+- An input or output larger than the server's limit is cut. See [Masking, sampling and truncation](/docs/tracing/privacy-controls/).
+- A time range reaches back no further than your plan allows, and a link to an older trace shows "not found".

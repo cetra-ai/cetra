@@ -1,6 +1,6 @@
 ---
 title: Reference
-description: The REST API, the OTLP endpoint and the CLI, the interfaces your code and your tools use to talk to cetra.
+description: The REST API, the OTLP endpoint, the CLI, span attributes, the filter language and the SQL schema.
 ---
 
 import { CardGrid, LinkCard } from "@astrojs/starlight/components";
@@ -22,5 +22,20 @@ Use these pages to look up the exact shape of an interface.
     title="CLI"
     description="Every cetra command and option."
     href="/docs/reference/cli/"
+  />
+  <LinkCard
+    title="Span attributes"
+    description="The attributes cetra reads from a span and the field each one fills."
+    href="/docs/reference/attributes/"
+  />
+  <LinkCard
+    title="Filter language"
+    description="The grammar, operators and functions of the filter bar."
+    href="/docs/reference/filter-language/"
+  />
+  <LinkCard
+    title="SQL schema"
+    description="The tables, columns and functions of the SQL console."
+    href="/docs/reference/sql-schema/"
   />
 </CardGrid>
