@@ -33,10 +33,11 @@ const PRICE_COLUMNS: DataTableColumn<PriceRow>[] = [
     header: "Model",
     meta: { grow: true },
     cell: ({ row }) => (
-      <div className="flex min-w-0 flex-col">
-        <span className="truncate">{row.original.model_name}</span>
+      // One line: rows have the fixed table row height, so the pattern follows the name.
+      <div className="flex min-w-0 items-baseline gap-2">
+        <span className="shrink-0 truncate">{row.original.model_name}</span>
         {row.original.match_pattern !== escapeRegex(row.original.model_name) ? (
-          <span className="truncate font-mono text-caption text-muted-foreground">
+          <span className="min-w-0 truncate font-mono text-caption text-muted-foreground">
             {row.original.match_pattern}
           </span>
         ) : null}

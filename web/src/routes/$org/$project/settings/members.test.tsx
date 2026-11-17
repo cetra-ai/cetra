@@ -38,14 +38,25 @@ it("shows effective roles and overrides", async () => {
   const ada = within(table).getByRole("row", { name: /ada@example.com/ });
   const adaCells = within(ada).getAllByRole("gridcell");
   expect(adaCells[0]).toHaveTextContent("Ada Example");
-  expect(adaCells[1]).toHaveTextContent("Owner");
-  expect(adaCells[2]).toHaveTextContent("Always admin");
-  expect(adaCells[3]).toHaveTextContent("Admin");
+  expect(adaCells[1]).toHaveTextContent("ada@example.com");
+  expect(adaCells[2]).toHaveTextContent("Owner");
+  expect(adaCells[3]).toHaveTextContent("Always admin");
+  expect(adaCells[4]).toHaveTextContent("Admin");
 
   const bob = within(table).getByRole("row", { name: /bob@example.com/ });
   const bobCells = within(bob).getAllByRole("gridcell");
-  expect(bobCells[2]).toHaveTextContent("Viewer");
   expect(bobCells[3]).toHaveTextContent("Viewer");
+  expect(bobCells[4]).toHaveTextContent("Viewer");
+});
+
+it("links to the organization's members", async () => {
+  await renderApp("/acme/support-bot/settings/members");
+
+  await screen.findByRole("grid", { name: "Project members" });
+  expect(screen.getByRole("link", { name: "Organization members" })).toHaveAttribute(
+    "href",
+    "/acme/settings/members",
+  );
 });
 
 it("opens the panel from a row", async () => {

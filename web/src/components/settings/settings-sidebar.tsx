@@ -1,4 +1,4 @@
-import { Link, useMatchRoute } from "@tanstack/react-router";
+import { Link, useMatchRoute, useNavigate, useRouterState } from "@tanstack/react-router";
 import { ArrowLeft } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { $api } from "@/api/client";
@@ -21,6 +21,8 @@ import {
   SidebarProvider,
   SidebarTrigger,
 } from "@/components/ui/sidebar";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { readLastProject } from "@/lib/last-project";
 import type { OrgRole } from "@/lib/roles";
 
 /** True when the filter is empty, or the label, description or a keyword contains it. */
@@ -36,27 +38,106 @@ function matchesFilter(
   );
 }
 
+type ProjectNavItems = ReturnType<typeof visibleProjectNav>;
+type OrgNavItems = ReturnType<typeof visibleOrgNav>;
+
+function ProjectNavList({
+  org,
+  slug,
+  items,
+}: {
+  org: string;
+  slug: string;
+  items: ProjectNavItems;
+}) {
+  const matchRoute = useMatchRoute();
+  return (
+    <SidebarMenu aria-label="Project settings">
+      {items.map((item) => (
+        <SidebarMenuItem key={item.to}>
+          <SidebarMenuButton
+            asChild
+            isActive={Boolean(matchRoute({ to: item.to, params: { org, project: slug } }))}
+          >
+            <Link to={item.to} params={{ org, project: slug }}>
+              {item.label}
+            </Link>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
+      ))}
+    </SidebarMenu>
+  );
+}
+
+function OrgNavList({ org, items }: { org: string; items: OrgNavItems }) {
+  const matchRoute = useMatchRoute();
+  return (
+    <SidebarMenu aria-label="Organization settings">
+      {items.map((item) => (
+        <SidebarMenuItem key={item.to}>
+          <SidebarMenuButton
+            asChild
+            isActive={Boolean(matchRoute({ to: item.to, params: { org } }))}
+          >
+            <Link to={item.to} params={{ org }}>
+              {item.label}
+            </Link>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
+      ))}
+    </SidebarMenu>
+  );
+}
+
+/** A group of nav links; the label is shown only while the filter groups both scopes. */
+function NavGroup({ label, children }: { label?: string; children: ReactNode }) {
+  return (
+    <SidebarGroup>
+      {label ? <SidebarGroupLabel>{label}</SidebarGroupLabel> : null}
+      <SidebarGroupContent>{children}</SidebarGroupContent>
+    </SidebarGroup>
+  );
+}
+
 export function SettingsSidebar({
   org,
   project,
   children,
 }: {
   org: string;
-  project?: { slug: string; role: OrgRole | undefined };
+  project?: { slug: string; name: string; role: OrgRole | undefined };
   children: ReactNode;
 }) {
-  const matchRoute = useMatchRoute();
+  const navigate = useNavigate();
+  // Subscribing to the location re-reads the remembered project after every navigation.
+  useRouterState({ select: (state) => state.location.pathname });
+  const remembered = readLastProject(org);
   const me = $api.useQuery("get", "/api/auth/me");
-  const role = me.data?.orgs.find((candidate) => candidate.slug === org)?.role;
+  const orgRole = me.data?.orgs.find((candidate) => candidate.slug === org)?.role;
   const [filter, setFilter] = useState("");
   const needle = filter.trim().toLowerCase();
-  const projectItems = project
-    ? visibleProjectNav(project.role).filter((item) => matchesFilter(item, needle))
-    : [];
-  const orgItems = visibleOrgNav(role).filter((item) => matchesFilter(item, needle));
+
+  // The project the project scope links to: the open one, else the remembered one. Only the
+  // open project's role is known; for a remembered project the organization role stands in.
+  const projectSlug = project?.slug ?? remembered?.slug;
+  const projectName = project?.name ?? remembered?.name;
+  const projectRole = project ? project.role : orgRole;
+  const projectMatches =
+    projectSlug === undefined
+      ? []
+      : visibleProjectNav(projectRole).filter((item) => matchesFilter(item, needle));
+  const orgMatches = visibleOrgNav(orgRole).filter((item) => matchesFilter(item, needle));
+  // Without a filter only the current scope is listed; with one, both scopes are searched.
+  const showProject = project !== undefined || needle !== "";
+  const showOrg = project === undefined || needle !== "";
+  const shownCount = (showProject ? projectMatches.length : 0) + (showOrg ? orgMatches.length : 0);
+  const groupLabel = (name: string) => (needle !== "" ? name : undefined);
+
   const entitlements = useOrgEntitlements(org);
   const usage = entitlements.query.data?.usage;
   const limits = entitlements.query.data?.limits;
+
+  const backTo = project ?? remembered;
 
   return (
     <SidebarProvider className="h-[calc(100dvh-40px)] overflow-hidden">
@@ -65,10 +146,10 @@ export function SettingsSidebar({
           <SidebarMenu>
             <SidebarMenuItem>
               <SidebarMenuButton asChild>
-                {project ? (
-                  <Link to="/$org/$project/traces" params={{ org, project: project.slug }}>
+                {backTo ? (
+                  <Link to="/$org/$project/traces" params={{ org, project: backTo.slug }}>
                     <ArrowLeft />
-                    <span>Back to project</span>
+                    <span>Back to {backTo.name}</span>
                   </Link>
                 ) : (
                   <Link to="/$org" params={{ org }}>
@@ -79,6 +160,34 @@ export function SettingsSidebar({
               </SidebarMenuButton>
             </SidebarMenuItem>
           </SidebarMenu>
+          {projectSlug === undefined || projectName === undefined ? (
+            <p className="px-2 py-1 text-ui font-medium">Organization</p>
+          ) : (
+            <Tabs
+              // Manual: arrowing across the switch moves focus; Enter or a click changes scope.
+              activationMode="manual"
+              value={project ? "project" : "org"}
+              onValueChange={(next) => {
+                if (next === "org") {
+                  void navigate({ to: "/$org/settings", params: { org } });
+                } else {
+                  void navigate({
+                    to: "/$org/$project/settings",
+                    params: { org, project: projectSlug },
+                  });
+                }
+              }}
+            >
+              <TabsList aria-label="Settings scope" className="grid w-full grid-cols-2">
+                <TabsTrigger value="project" className="min-w-0 truncate">
+                  {projectName.length > 0 ? projectName : "Project"}
+                </TabsTrigger>
+                <TabsTrigger value="org" className="min-w-0 truncate">
+                  Organization
+                </TabsTrigger>
+              </TabsList>
+            </Tabs>
+          )}
           <Input
             aria-label="Filter settings"
             placeholder="Filter settings"
@@ -88,54 +197,17 @@ export function SettingsSidebar({
           />
         </SidebarHeader>
         <SidebarContent>
-          {project && projectItems.length > 0 ? (
-            <SidebarGroup>
-              <SidebarGroupLabel>Project</SidebarGroupLabel>
-              <SidebarGroupContent>
-                <SidebarMenu aria-label="Project settings">
-                  {projectItems.map((item) => (
-                    <SidebarMenuItem key={item.to}>
-                      <SidebarMenuButton
-                        asChild
-                        isActive={Boolean(
-                          matchRoute({
-                            to: item.to,
-                            params: { org, project: project.slug },
-                          }),
-                        )}
-                      >
-                        <Link to={item.to} params={{ org, project: project.slug }}>
-                          {item.label}
-                        </Link>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                  ))}
-                </SidebarMenu>
-              </SidebarGroupContent>
-            </SidebarGroup>
+          {showProject && projectSlug !== undefined && projectMatches.length > 0 ? (
+            <NavGroup label={groupLabel("Project")}>
+              <ProjectNavList org={org} slug={projectSlug} items={projectMatches} />
+            </NavGroup>
           ) : null}
-          {orgItems.length > 0 ? (
-            <SidebarGroup>
-              <SidebarGroupLabel>Organization</SidebarGroupLabel>
-              <SidebarGroupContent>
-                <SidebarMenu aria-label="Organization settings">
-                  {orgItems.map((item) => (
-                    <SidebarMenuItem key={item.to}>
-                      <SidebarMenuButton
-                        asChild
-                        isActive={Boolean(matchRoute({ to: item.to, params: { org } }))}
-                      >
-                        <Link to={item.to} params={{ org }}>
-                          {item.label}
-                        </Link>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                  ))}
-                </SidebarMenu>
-              </SidebarGroupContent>
-            </SidebarGroup>
+          {showOrg && orgMatches.length > 0 ? (
+            <NavGroup label={groupLabel("Organization")}>
+              <OrgNavList org={org} items={orgMatches} />
+            </NavGroup>
           ) : null}
-          {projectItems.length === 0 && orgItems.length === 0 ? (
+          {shownCount === 0 ? (
             <p className="px-2 py-1 text-body text-muted-foreground">No settings match</p>
           ) : null}
         </SidebarContent>

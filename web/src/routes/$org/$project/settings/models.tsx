@@ -154,7 +154,16 @@ function ProjectPricesPage() {
       <SettingsPage
         width="wide"
         title="Model prices"
-        description="What costs are computed with in this project. A project price beats an organization price, which beats the built-in LiteLLM prices. New prices apply to spans received from now on; stored costs are not recomputed."
+        description={
+          <>
+            Prices used for this project. They override the{" "}
+            <Link to="/$org/settings/models" params={{ org }} className="text-body underline">
+              organization's model prices
+            </Link>
+            , which override the built-in LiteLLM prices. New prices apply to spans received from
+            now on; stored costs are not recomputed.
+          </>
+        }
         actions={
           <DisabledReason reason={canManage ? undefined : NO_PERMISSION}>
             <Button

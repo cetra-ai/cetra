@@ -74,6 +74,10 @@ it("shows project and organization prices", async () => {
     "href",
     "/acme/settings/models",
   );
+  expect(screen.getByRole("link", { name: "organization's model prices" })).toHaveAttribute(
+    "href",
+    "/acme/settings/models",
+  );
   expect(projectNav().getByRole("link", { name: "Model prices" })).toHaveAttribute(
     "aria-current",
     "page",

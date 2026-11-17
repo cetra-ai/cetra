@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { Users } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { $api } from "@/api/client";
@@ -40,18 +40,18 @@ function accessText(member: Member): string {
 const COLUMNS: DataTableColumn<Member>[] = [
   {
     id: "name",
-    size: 280,
-    header: "Member",
+    size: 200,
+    header: "Name",
     enableSorting: true,
+    cell: ({ row }) => <span className="truncate">{row.original.user.name ?? "—"}</span>,
+  },
+  {
+    id: "email",
+    size: 240,
+    header: "Email",
+    enableSorting: false,
     cell: ({ row }) => (
-      <div className="flex min-w-0 flex-col">
-        <span className="truncate">{row.original.user.name ?? row.original.user.email}</span>
-        {row.original.user.name ? (
-          <span className="truncate text-caption text-muted-foreground">
-            {row.original.user.email}
-          </span>
-        ) : null}
-      </div>
+      <span className="truncate text-muted-foreground">{row.original.user.email}</span>
     ),
   },
   {
@@ -178,7 +178,16 @@ function ProjectMembersPage() {
       <SettingsPage
         width="wide"
         title="Members"
-        description="Org members and their access to this project. Org owners and admins always have admin access."
+        description={
+          <>
+            Roles of the organization's members in this project. People join through the
+            organization:{" "}
+            <Link to="/$org/settings/members" params={{ org }} className="text-body underline">
+              Organization members
+            </Link>
+            .
+          </>
+        }
       >
         {query.isPending ? (
           <>

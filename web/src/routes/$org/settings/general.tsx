@@ -94,7 +94,10 @@ function OrgGeneralPage() {
   }
 
   return (
-    <SettingsPage title="General" description="Name and URL of this organization.">
+    <SettingsPage
+      title="General"
+      description="Name and URL of the organization. Project names and retention are in each project's General."
+    >
       <SettingsFormCard
         title="Organization"
         dirty={dirty}

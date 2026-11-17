@@ -120,7 +120,7 @@ function OrgPricesPage() {
       <SettingsPage
         width="wide"
         title="Model prices"
-        description="Prices for every project of this organization. A project's own price beats an organization price, which beats the built-in LiteLLM prices. New prices apply to spans received from now on; stored costs are not recomputed."
+        description="Default prices for every project in the organization. A project can override them in its own Model prices. New prices apply to spans received from now on; stored costs are not recomputed."
         actions={
           <DisabledReason reason={canManage ? undefined : NO_PERMISSION}>
             <Button

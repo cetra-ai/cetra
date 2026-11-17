@@ -22,6 +22,7 @@ import { SettingsSidebar } from "@/components/settings/settings-sidebar";
 import { ProjectProvider, useProject } from "@/components/shell/project-context";
 import { ProjectSidebar } from "@/components/shell/project-sidebar";
 import { type RecentKind, rememberItem } from "@/components/shell/recent-items";
+import { rememberLastProject } from "@/lib/last-project";
 import type { DashboardSearch } from "@/lib/search/dashboard";
 
 export const Route = createFileRoute("/$org/$project")({
@@ -137,12 +138,16 @@ function ProjectLayout() {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const inSettings = isProjectSettingsPath(pathname, org, project);
 
+  useEffect(() => {
+    rememberLastProject(org, { slug: project, name: data.name });
+  }, [org, project, data.name]);
+
   return (
     <ProjectProvider value={{ org, project, ref: projectRef(org, project), data }}>
       <ScoreDefinitionsProvider>
         <RememberOpenItem />
         {inSettings ? (
-          <SettingsSidebar org={org} project={{ slug: project, role: data.role }}>
+          <SettingsSidebar org={org} project={{ slug: project, name: data.name, role: data.role }}>
             <Outlet />
           </SettingsSidebar>
         ) : (

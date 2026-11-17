@@ -41,12 +41,13 @@ it("replaces the project sidebar with the settings sidebar", async () => {
   await renderApp("/acme/support-bot/settings/general");
 
   await screen.findByRole("heading", { name: "General", level: 1 });
-  expect(screen.getByRole("link", { name: "Back to project" })).toHaveAttribute(
+  expect(screen.getByRole("link", { name: "Back to Support bot" })).toHaveAttribute(
     "href",
     "/acme/support-bot/traces",
   );
   expect(screen.getByRole("list", { name: "Project settings" })).toBeInTheDocument();
-  expect(screen.getByRole("list", { name: "Organization settings" })).toBeInTheDocument();
+  expect(screen.queryByRole("list", { name: "Organization settings" })).toBeNull();
+  expect(screen.getByRole("tab", { name: "Support bot", selected: true })).toBeInTheDocument();
   expect(projectNav().getByRole("link", { name: "General" })).toHaveAttribute(
     "aria-current",
     "page",
@@ -215,14 +216,14 @@ it("asks before leaving with unsaved edits, and stays when asked", async () => {
   const name = await screen.findByLabelText("Name");
   await user.type(name, " bot");
 
-  await user.click(screen.getByRole("link", { name: "Back to project" }));
+  await user.click(screen.getByRole("link", { name: "Back to Support bot" }));
   const dialog = await screen.findByRole("alertdialog", { name: "Discard unsaved changes?" });
   await user.click(within(dialog).getByRole("button", { name: "Keep editing" }));
 
   expect(router.state.location.pathname).toBe("/acme/support-bot/settings/general");
   expect(screen.getByLabelText("Name")).toHaveValue("Support bot bot");
 
-  await user.click(screen.getByRole("link", { name: "Back to project" }));
+  await user.click(screen.getByRole("link", { name: "Back to Support bot" }));
   await user.click(
     within(await screen.findByRole("alertdialog", { name: "Discard unsaved changes?" })).getByRole(
       "button",

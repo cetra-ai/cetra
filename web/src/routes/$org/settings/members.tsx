@@ -73,7 +73,7 @@ function OrgMembersPage() {
       <SettingsPage
         width="wide"
         title="Members"
-        description="People in this organization and their roles."
+        description="Members and invites of the organization. Per-project roles are under each project's Members."
         actions={
           admin ? (
             <Button
