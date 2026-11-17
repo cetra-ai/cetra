@@ -47,6 +47,8 @@ const features = tableFeatures({
     icon?: LucideIcon;
     /** Takes the row's remaining width. `size` is its minimum. */
     grow?: boolean;
+    /** Accessible name of the column, for a header given as a render function. */
+    label?: string;
   },
 });
 
@@ -536,9 +538,10 @@ export function DataTable<Row extends RowData>({
               const sorted = header.column.getIsSorted();
               const canSort = header.column.getCanSort();
               const label =
-                typeof header.column.columnDef.header === "string"
+                header.column.columnDef.meta?.label ??
+                (typeof header.column.columnDef.header === "string"
                   ? header.column.columnDef.header
-                  : "column";
+                  : "column");
               const HeaderIcon = header.column.columnDef.meta?.icon;
               return (
                 <div

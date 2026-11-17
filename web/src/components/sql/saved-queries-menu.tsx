@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bookmark, Check, Users } from "lucide-react";
+import { Bookmark } from "lucide-react";
 import { useState } from "react";
 import { api } from "@/api/client";
 import { problemOf } from "@/api/problem";
@@ -22,7 +22,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Label } from "@/components/ui/label";
@@ -44,11 +43,11 @@ export function SavedQueriesMenu({
   onSaved,
   onCleared,
 }: {
-  /** `search.view`. */
+  /** The tab's saved query (`draft.view`). */
   viewId: string | undefined;
   /** What "Save" would store now: `savedStateOf(draft, search)`. */
   current: SqlSavedState;
-  /** Load a saved query into the console. */
+  /** Reloads the saved query's state into this tab ("Discard changes"). */
   onLoad: (view: Schema<"SavedView">) => void;
   /** A query was created from the current draft; the console records its id. */
   onSaved: (view: Schema<"SavedView">) => void;
@@ -139,19 +138,6 @@ export function SavedQueriesMenu({
               {problem}
             </p>
           ) : null}
-          {views.data?.data.length === 0 ? (
-            <DropdownMenuItem disabled>No saved queries</DropdownMenuItem>
-          ) : null}
-          {views.data?.data.map((view) => (
-            <DropdownMenuItem key={view.id} onSelect={() => onLoad(view)}>
-              <span className="min-w-0 flex-1 truncate">{view.name}</span>
-              {view.shared ? (
-                <Users role="img" aria-hidden={false} aria-label="Shared" className="size-3" />
-              ) : null}
-              {view.id === viewId ? <Check className="size-3" /> : null}
-            </DropdownMenuItem>
-          ))}
-          <DropdownMenuSeparator />
           {owned && loaded ? (
             <DropdownMenuItem
               disabled={editBlocked}

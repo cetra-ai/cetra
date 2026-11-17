@@ -598,3 +598,31 @@ it("fetches at most five more pages for the restore row, then stops at the top",
   expect(fetchNextPage).toHaveBeenCalledTimes(5);
   expect(scrollerOf(screen.getByRole("grid", { name: "Pages" })).scrollTop).toBe(0);
 });
+
+it("names the resize handle by meta.label when the header is a render function", () => {
+  const rendered: DataTableColumn<Item>[] = [
+    {
+      id: "name",
+      size: 200,
+      header: () => <span title="Utf8">Name</span>,
+      accessorFn: (row) => row.name,
+      meta: { label: "Name" },
+      cell: ({ row }) => row.original.name,
+    },
+  ];
+  render(
+    <DataTable
+      tableId="label-test"
+      ariaLabel="Labelled"
+      columns={rendered}
+      rows={ITEMS}
+      getRowId={(row) => row.id}
+      onActivate={() => undefined}
+      hasNextPage={false}
+      isFetchingNextPage={false}
+      fetchNextPage={() => undefined}
+      emptyState={null}
+    />,
+  );
+  expect(screen.getByRole("separator", { name: "Resize Name" })).toBeInTheDocument();
+});
