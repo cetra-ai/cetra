@@ -45,6 +45,21 @@ export default defineConfig({
                     { label: "Send OpenTelemetry", link: "/docs/get-started/opentelemetry/" },
                   ],
                 },
+                {
+                  label: "Platform",
+                  items: [
+                    { label: "Alerts", link: "/docs/platform/alerts/" },
+                    { label: "MCP server", link: "/docs/platform/mcp/" },
+                    { label: "API keys and tokens", link: "/docs/platform/api-keys/" },
+                    { label: "Organizations and roles", link: "/docs/platform/organizations/" },
+                    { label: "Single sign-on", link: "/docs/platform/sso/" },
+                    {
+                      label: "Deletion and retention",
+                      link: "/docs/platform/deletion-and-retention/",
+                    },
+                    { label: "Plans and licence", link: "/docs/platform/plans-and-licence/" },
+                  ],
+                },
               ],
             },
             {
@@ -69,6 +84,8 @@ export default defineConfig({
                       label: "Configuration reference",
                       link: "/docs/self-hosting/configuration-reference/",
                     },
+                    { label: "Authentication", link: "/docs/self-hosting/authentication/" },
+                    { label: "Email (SMTP)", link: "/docs/self-hosting/email/" },
                     { label: "Object storage (S3)", link: "/docs/self-hosting/s3/" },
                     { label: "Security", link: "/docs/self-hosting/security/" },
                     { label: "Resources", link: "/docs/self-hosting/resources/" },
