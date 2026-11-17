@@ -54,6 +54,26 @@
   {
     "operation_id": "get_alert_rule",
     "path_params": {
+      "id": "01900000-0000-7000-8000-000000000511"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/alert-rule-0511.json"
+  },
+  {
+    "operation_id": "get_alert_rule",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000512"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/alert-rule-0512.json"
+  },
+  {
+    "operation_id": "get_alert_rule",
+    "path_params": {
       "id": "01900000-0000-7000-8000-000000000510"
     },
     "query": {},
@@ -548,6 +568,26 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/admin-users.json"
+  },
+  {
+    "operation_id": "list_alert_events",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000511"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/alert-events-empty.json"
+  },
+  {
+    "operation_id": "list_alert_events",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000512"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/alert-events-empty.json"
   },
   {
     "operation_id": "list_alert_events",

@@ -1,0 +1,22 @@
+{
+  "id": "01900000-0000-7000-8000-000000000511",
+  "name": "Low helpfulness",
+  "enabled": true,
+  "condition": {
+    "metric": "score",
+    "window": "1h",
+    "comparator": "lt",
+    "threshold": 0.7,
+    "min_count": 10,
+    "score_name": "helpfulness",
+    "aggregation": "avg"
+  },
+  "channel_ids": [],
+  "cooldown_s": 3600,
+  "notify_while_firing": false,
+  "state": "no_data",
+  "last_count": 3,
+  "last_evaluated_at": "2026-01-01T10:05:00.000000000Z",
+  "created_at": "2026-01-01T09:00:00.000000000Z",
+  "updated_at": "2026-01-01T09:00:00.000000000Z"
+}

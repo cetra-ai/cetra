@@ -622,11 +622,41 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
             "static/alert-rule.json",
             "application/json",
         ),
+        // The other two rules, so the mocked list can open each in its panel.
+        example(
+            "get_alert_rule",
+            params(&[("id", "01900000-0000-7000-8000-000000000511")]),
+            BTreeMap::new(),
+            "static/alert-rule-0511.json",
+            "application/json",
+        ),
+        example(
+            "get_alert_rule",
+            params(&[("id", "01900000-0000-7000-8000-000000000512")]),
+            BTreeMap::new(),
+            "static/alert-rule-0512.json",
+            "application/json",
+        ),
         example(
             "list_alert_events",
             params(&[("id", "01900000-0000-7000-8000-000000000510")]),
             BTreeMap::new(),
             "static/alert-events.json",
+            "application/json",
+        ),
+        // The other two rules have no events yet.
+        example(
+            "list_alert_events",
+            params(&[("id", "01900000-0000-7000-8000-000000000511")]),
+            BTreeMap::new(),
+            "static/alert-events-empty.json",
+            "application/json",
+        ),
+        example(
+            "list_alert_events",
+            params(&[("id", "01900000-0000-7000-8000-000000000512")]),
+            BTreeMap::new(),
+            "static/alert-events-empty.json",
             "application/json",
         ),
         example(
