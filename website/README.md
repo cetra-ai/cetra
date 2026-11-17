@@ -50,3 +50,19 @@ The site is a Cloudflare Pages project, `cetra-site` (D-W-3).
 - To deploy by hand, set those two variables and run `just docs-deploy <branch>`, where `<branch>` is `main` or `pr-<number>`.
 
 `public/_headers` sets the security headers and long caching for `/_astro/*`; `public/robots.txt` allows all and points to the sitemap.
+
+## Releases
+
+At the first release, delete the `NOT_RELEASED` banner default in `src/content.config.ts`, and use `<Since v="x.y.z" />` for features added after it. `just release-prep` dates the changelog section that the badge compares against.
+
+## Versioning
+
+- The site documents one version, built from `main` (D-W-9).
+- A feature merged since the latest release shows an "Unreleased" badge; the latest release is the first `## [x.y.z]` heading of `CHANGELOG.md`.
+- Versioned snapshots start only at the first breaking major after 1.0.
+
+## Generated files and checks
+
+- `help/changelog.md` is generated from `CHANGELOG.md` at each dev start, build and check (`pnpm gen:changelog`); it is git-ignored.
+- `llms.txt`, `llms-full.txt` and `llms-small.txt` are written by `starlight-llms-txt` at the site root.
+- `just docs-links` checks external links with lychee 0.24.2. The `links` job of `nightly.yml` runs it every night and opens or updates the `nightly` issue on failure.

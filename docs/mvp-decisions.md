@@ -760,6 +760,10 @@ Decisions of track W (`docs/plans/docs-site/README.md`), numbered `D-W-<n>` (`do
 | D-W-13 | Link checking | **Internal links fail the build** (`starlight-links-validator`, which also checks anchors). **External links are checked weekly** by `lychee` in `nightly.yml`, outside `ci-ok`, opening or updating the `nightly` issue like the fuzz job. |
 | D-W-14 | Claims | **No performance numbers.** The 5M-trace benchmark missed some query targets; the docs describe how cetra works and its limits and resource needs, never "N spans/s" or "X× faster". A number can come in only with a published benchmark page that gives its method and hardware, through a new decision. |
 | D-W-15 | Style | **`website/STYLE.md`** (the plan README § Style guide) is the voice and terminology guide; `website/scripts/check-terms.mjs` enforces its banned terms in CI. |
+| D-W-16 | Biome and Markdown | **Biome does not format Markdown** (excluded in `biome.json`): it rewrote the tables of `STYLE.md`. `check-terms.mjs` covers prose. |
+| D-W-17 | API overview URL | **The REST API overview is at `reference/api/overview/`**, because `starlight-openapi` owns `reference/api/`. |
+| D-W-18 | Configuration reference follows the code | **Where spec 12 and the loader differ, the page follows the loader and spec 12 is corrected.** `AWS_REGION` and `CETRA_RESTORE_MODE` are not aliases, `telemetry.*` and `tls.*` are refused, and the storage keys the spec omitted are listed. |
+| D-W-19 | `llms.txt` | **`starlight-llms-txt` 0.12.0 at its default paths**: `/llms.txt`, `/llms-full.txt` and `/llms-small.txt` at the site root. The `links` job (lychee) runs with the nightly workflow, not weekly. The generated changelog page is git-ignored and is skipped by `check-env-vars.mjs`, since it names removed variables. |
 
 ## Open
 

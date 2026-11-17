@@ -70,3 +70,7 @@ The glossary page lists these; `check-terms.mjs` flags the wrong forms.
 | the UI | the dashboard (except the Dashboard page), the app |
 | OpenTelemetry (prose), OTel (only after the first use on a page), OTLP (the protocol) | otel, Open Telemetry |
 | `llmobs` never appears (the old working name, D46) | |
+
+## Versions
+
+Before the first release every page carries a banner that says cetra is not released yet (D-W-9). After it, mark a feature merged since the latest release with `<Since v="x.y.z" />` (import it from `src/components/Since.astro`): it shows "Unreleased" until `CHANGELOG.md` has a released section at or above that version, then "Since x.y.z".

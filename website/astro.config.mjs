@@ -1,6 +1,7 @@
 import starlight from "@astrojs/starlight";
 import { defineConfig } from "astro/config";
 import starlightLinksValidator from "starlight-links-validator";
+import starlightLlmsTxt from "starlight-llms-txt";
 import starlightOpenAPI, { openAPISidebarGroups } from "starlight-openapi";
 import starlightSidebarTopics from "starlight-sidebar-topics";
 
@@ -22,6 +23,11 @@ export default defineConfig({
       lastUpdated: false,
       plugins: [
         starlightLinksValidator(),
+        starlightLlmsTxt({
+          projectName: "cetra",
+          description:
+            "Open-source LLM observability and evaluation that runs as one binary on one machine. Traces over OpenTelemetry, scores, evaluators, datasets, experiments and alerts.",
+        }),
         starlightOpenAPI([
           {
             base: "docs/reference/api",
@@ -98,6 +104,15 @@ export default defineConfig({
                       link: "/docs/platform/deletion-and-retention/",
                     },
                     { label: "Plans and licence", link: "/docs/platform/plans-and-licence/" },
+                  ],
+                },
+                {
+                  label: "Help",
+                  items: [
+                    { label: "FAQ", link: "/docs/help/faq/" },
+                    { label: "Troubleshooting", link: "/docs/help/troubleshooting/" },
+                    { label: "Changelog", link: "/docs/help/changelog/" },
+                    { label: "Support and security", link: "/docs/help/support/" },
                   ],
                 },
               ],

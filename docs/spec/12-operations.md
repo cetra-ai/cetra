@@ -15,9 +15,9 @@ GitHub and Google also accept the split form (`CETRA_AUTH__GITHUB__CLIENT_ID`, `
 | `grpc_addr` | `CETRA_GRPC_ADDR` | `0.0.0.0:4317` (empty = disabled; a config key from track G M3) |
 | `otlp_http_addr` | `CETRA_OTLP_HTTP_ADDR` | `0.0.0.0:4318` (empty = disabled) |
 | `metrics_addr` | `CETRA_METRICS_ADDR` | unset (off). Prometheus `/metrics`; no authentication, bind it to a private address (D-N-28) |
-| `restore_mode` | `CETRA_RESTORE_MODE` | `false`. No outbound work: alert deliveries, webhooks, judges, email and identity providers are off; for restore drills (D-N-25) |
+| `restore_mode` | | `false`. No outbound work: alert deliveries, webhooks, judges, email and identity providers are off; for restore drills (D-N-25) |
 | `storage.object_store` | `CETRA_OBJECT_STORE` | `file://<data_dir>/objects`. A set value is `file://<absolute path>` or `s3://<bucket>[/<prefix>]` |
-| `storage.s3.region` | `AWS_REGION` | unset |
+| `storage.s3.region` | | unset: the `AWS_REGION` environment variable (not an alias; the loader has none) |
 | `storage.s3.endpoint` | | unset (MinIO, R2, …) |
 | `storage.s3.force_path_style` | | `false` |
 | `storage.s3.allow_http` | | `false` |
@@ -44,8 +44,10 @@ GitHub and Google also accept the split form (`CETRA_AUTH__GITHUB__CLIENT_ID`, `
 | `ingest.max_grpc_message_bytes` | | `"32MiB"` (with the gRPC listener, track G M3) |
 | `ingest.max_attribute_bytes` | | `"8MiB"` |
 | `media.min_bytes` / `media.max_bytes` | | `"4KiB"` / `"32MiB"` |
+| `storage.min_free_bytes` | | `"2GiB"`: ingestion is refused below this much free disk |
 | `storage.wal.sync` | | `"always"` (or a duration such as `"5ms"`: fsync at most that often) |
 | `storage.flush.max_bytes` / `storage.flush.max_age` / `storage.flush.upload_concurrency` | | `"256MiB"` / `"120s"` / `8` |
+| `storage.wal.segment_bytes` / `storage.wal.group_max_bytes` / `storage.wal.group_max_wait` / `storage.wal.skip_corrupt` | | `"64MiB"` / `"8MiB"` / `"2ms"` / `false` |
 | `storage.memtable.hard_limit` | | `"1GiB"` |
 | `storage.compaction.target_file_size` / `storage.compaction.threads` | | `"512MiB"` / `max(1, cores/4)` |
 | `storage.compaction.interval` / `storage.compaction.close_delay` | | `"30s"` / `"2h"` |
@@ -54,15 +56,17 @@ GitHub and Google also accept the split form (`CETRA_AUTH__GITHUB__CLIENT_ID`, `
 | `storage.gc.grace` | | `"5m"` (at most `"30d"`; the window a meta-only S3 backup stays restorable, D-N-20) |
 | `storage.query.max_memory` | | `"2GiB"` |
 | `storage.query.metadata_cache_bytes` | | `"512MiB"` |
+| `storage.query.target_partitions` / `storage.query.trace_lookback` / `storage.query.admission_wait` | | the CPU count / `"1h"` / `"5s"` |
+| `storage.query.max_memory_total` / `storage.query.initial_memory` / `storage.query.read_cache_bytes` | | unset (half the machine's memory, at most `"8GiB"`) / `"64MiB"` / unset (10% of the file system, at most `"100GiB"`; `"0B"` turns it off) |
+| `storage.anchor.window` | | unset (`storage.query.trace_lookback`) |
 | `storage.deletion.max_delay` | | `"24h"` |
-
-The storage engine's settings form the `[storage]` section, with one sub-table per area (`wal`, `s3`, `flush`, `memtable`, `compaction`, `query`, `gc`, `deletion`, `anchor`); spec 03 names them without the `storage.` prefix. Sizes are strings with a binary unit (`"256MiB"`, `"1GiB"`) and durations are strings with a unit (`"2ms"`, `"120s"`, `"24h"`) (D90). The `[ingest]` and `[media]` sections use the same formats. S3 credentials are the standard `AWS_*` environment variables and are not config keys. The full list, with defaults, is the `StorageConfig` doc in `cetra-storage`. Memory, disk and file-descriptor needs of the storage engine, and a profile for small machines, are in spec 03 § 10 Resource needs.
 | `eval.workers` | | `16` (1–256, D-I-6) |
 | `security.allow_private_network_egress` | | `false` (D166) |
 | `log.format` / `log.level` | `CETRA_LOG` | `pretty` on TTY else `json` / `info` |
-| `telemetry.enabled` | `CETRA_TELEMETRY` | decided with the license (anonymous usage ping, opt-out) |
 
-TLS: terminated by a reverse proxy in the reference setups; native TLS optional via `tls.cert` / `tls.key` (rustls) for simple installs.
+The storage engine's settings form the `[storage]` section, with one sub-table per area (`wal`, `s3`, `flush`, `memtable`, `compaction`, `query`, `gc`, `deletion`, `anchor`); spec 03 names them without the `storage.` prefix. Sizes are strings with a binary unit (`"256MiB"`, `"1GiB"`) and durations are strings with a unit (`"2ms"`, `"120s"`, `"24h"`) (D90). The `[ingest]` and `[media]` sections use the same formats. S3 credentials are the standard `AWS_*` environment variables and are not config keys. The full list, with defaults, is the `StorageConfig` doc in `cetra-storage`, and the site's configuration reference, which `config::tests::the_configuration_reference_matches_the_loader` checks against the loader. Memory, disk and file-descriptor needs of the storage engine, and a profile for small machines, are in spec 03 § 10 Resource needs.
+
+TLS: terminated by a reverse proxy in the reference setups. cetra has no `tls.*` keys and no telemetry key: the loader refuses them as unknown keys.
 
 ## Packaging
 

@@ -1,6 +1,6 @@
 # W · Documentation site
 
-Status: design and plan written on 2026-11-17; nothing implemented.
+Status: implemented (W1–W13) on 2026-11-17; the first release and the first run of the `links` job are still to come.
 
 Track W builds cetra's user documentation: a full, production-ready site comparable to Laminar's and Langfuse's, served at **`https://cetra.sh/docs/`**. It is built with Starlight (Astro) from a new top-level directory, **`website/`**, in this repository, so a change to the code and its documentation land in the same PR. The same Astro project serves the landing page at `https://cetra.sh/` (today's one-page holding site, ported as-is) and will later hold the marketing site.
 

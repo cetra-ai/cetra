@@ -1,0 +1,62 @@
+---
+title: FAQ
+description: Short answers to the questions people ask before and after they install cetra, with a link to the page that explains each.
+---
+
+This page answers common questions in a few sentences each. Follow the link for the detail.
+
+## Is cetra compatible with OpenTelemetry?
+
+Yes. cetra ingests spans over OTLP, on HTTP and gRPC, from the cetra SDKs or from any OpenTelemetry exporter. It reads the OpenTelemetry GenAI conventions and several others. See [Send OpenTelemetry](/docs/get-started/opentelemetry/) and [Semantic conventions](/docs/concepts/conventions/).
+
+## Where is my data, and in what format?
+
+Everything is in one data directory on the machine that runs cetra: a write-ahead log, Parquet files, media files and a metadata database. With an S3-compatible bucket, the Parquet files and media go to the bucket instead. See [How cetra works](/docs/concepts/how-cetra-works/) and [Object storage](/docs/self-hosting/s3/).
+
+## Can I read the Parquet files without cetra?
+
+Parquet is a standard columnar format, so any tool that reads Parquet can open the files. Their layout is cetra's own and can change between releases, so query through the [SQL console](/docs/tracing/sql-console/) or the API when you can. See [How cetra works](/docs/concepts/how-cetra-works/).
+
+## Does cetra run in the cloud?
+
+cetra is self-hosted: you run one binary or one container on your own machine or cluster. A hosted cetra Cloud is not available yet. See [Self-hosting](/docs/self-hosting/).
+
+## What is the licence?
+
+The core is under the MIT licence. A small set of features lives in the `ee` directories under the Elastic License 2.0. See [Plans and licence](/docs/platform/plans-and-licence/).
+
+## What needs a licence key?
+
+Only the features listed on the plans page, such as per-organization single sign-on and project-level roles. Everything else works without a key. See [Plans and licence](/docs/platform/plans-and-licence/#what-needs-a-licence-key).
+
+## Which languages can I use?
+
+cetra has SDKs for Python and TypeScript. Any other language can send spans with its OpenTelemetry SDK, because cetra accepts plain OTLP. See the [Python SDK](/docs/reference/python/), the [TypeScript SDK](/docs/reference/typescript/) and [Send OpenTelemetry](/docs/get-started/opentelemetry/).
+
+## Can I keep using the Langfuse or Laminar SDK?
+
+Yes. cetra reads the spans that those SDKs produce, so you can point their OpenTelemetry export at cetra and move over at your own pace. See [Migrating from Langfuse](/docs/integrations/from-langfuse/) and [Migrating from Laminar](/docs/integrations/from-laminar/).
+
+## How do I delete a person's data?
+
+Enter their user ID in the project's deletion page, or delete by trace ID or filter through the API. The page also covers retention and what to do for a GDPR request. See [Deletion and retention](/docs/platform/deletion-and-retention/).
+
+## Does the SDK slow my application down?
+
+The SDKs batch spans and export them in the background, so your code does not wait for the network on each call. Call `flush()` when a process is about to end, so the last batch is sent. See [Python SDK](/docs/reference/python/) and [Runtimes](/docs/reference/typescript/runtimes/).
+
+## What happens if cetra is down?
+
+The SDK exports in the background and never raises an exception into your application. Spans wait in a queue while cetra is unreachable, and the queue has a limit: when it is full, new data is dropped and the SDK logs a warning. Scores are buffered the same way, up to 10,000. See [Scores, datasets and experiments](/docs/reference/python/scores-datasets-experiments/#scores).
+
+## What if I do not want prompts and completions stored?
+
+Set `capture_content` to `false`, mask values before they leave your process, or sample traces. See [Masking, sampling and truncation](/docs/tracing/privacy-controls/).
+
+## Can I run more than one cetra instance on the same data?
+
+No. One process owns a data directory, and cetra locks it. For more capacity, give the one instance more resources. See [Resources](/docs/self-hosting/resources/).
+
+## Where do I report a bug or ask a question?
+
+See [Support and security](/docs/help/support/).
