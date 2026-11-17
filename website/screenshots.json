@@ -3,8 +3,8 @@
   {
     "name": "trace-view",
     "path": "/acme/support-bot/traces",
-    "waitFor": "chat claude-sonnet-4-5",
-    "actions": [{ "click": "text=chat claude-sonnet-4-5" }],
+    "waitFor": "support-agent",
+    "actions": [{ "click": "text=My order 1234" }],
     "waitAfter": "Input / Output"
   },
   { "name": "sessions", "path": "/acme/support-bot/sessions", "waitFor": "Sessions" },
