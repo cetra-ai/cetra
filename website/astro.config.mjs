@@ -17,6 +17,10 @@ export default defineConfig({
         "Open-source LLM observability and evaluation that runs as one binary on one machine.",
       favicon: "/favicon.svg",
       customCss: ["./src/styles/custom.css"],
+      components: {
+        // "On this page" as wide as the left sidebar (Starlight's grows with the window).
+        TwoColumnContent: "./src/components/TwoColumnContent.astro",
+      },
       social: [{ icon: "github", label: "GitHub", href: "https://github.com/cetra-ai/cetra" }],
       editLink: { baseUrl: "https://github.com/cetra-ai/cetra/edit/main/website/" },
       // CI checks out one commit; git dates would all be the same.

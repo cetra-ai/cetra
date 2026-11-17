@@ -4,8 +4,8 @@
   --sl-color-accent: #0f766e;
   --sl-color-accent-high: #ccfbf1;
 }
-/* Starlight's 45rem text column leaves half of a wide screen's spare width to "On this page"
-   and clips the reference tables; 60rem fits a four-column table. */
+/* Starlight's 45rem text column clips the reference tables; 60rem fits a four-column table.
+   "On this page" keeps the sidebar width (src/components/TwoColumnContent.astro). */
 @media (min-width: 72rem) {
   :root {
     --sl-content-width: 60rem;
