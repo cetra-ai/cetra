@@ -1,0 +1,44 @@
+---
+// The evidence an integration page rests on (integrations pages, W8).
+interface Props {
+  /** Captured fixture cases, as `group/case`. */
+  fixtures?: string[];
+  /** SDK tests, as `path::name`. */
+  tests?: string[];
+}
+const { fixtures = [], tests = [] } = Astro.props;
+const repo = "https://github.com/cetra-ai/cetra/tree/main";
+---
+
+<aside class="backing">
+  <strong>Tested against</strong>
+  <ul>
+    {
+      fixtures.map((f) => (
+        <li>
+          <a href={`${repo}/fixtures/otlp/${f}`}>
+            spans in the repository: <code>{f}</code>
+          </a>
+        </li>
+      ))
+    }
+    {
+      tests.map((t) => (
+        <li>
+          SDK test <code>{t}</code>
+        </li>
+      ))
+    }
+  </ul>
+</aside>
+
+<style>
+  .backing {
+    border-left: 3px solid var(--sl-color-accent);
+    padding: 0.5rem 1rem;
+    margin: 1rem 0;
+  }
+  .backing ul {
+    margin: 0.25rem 0 0;
+  }
+</style>

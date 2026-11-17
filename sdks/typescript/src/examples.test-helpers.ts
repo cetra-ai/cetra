@@ -11,9 +11,16 @@
  * tsconfig.test.json only.
  */
 
+import Anthropic from "@anthropic-ai/sdk";
+import * as callbacksManager from "@langchain/core/callbacks/manager";
+import OpenAI from "openai";
+
 import { aiTelemetry } from "./ai.js";
+import { anthropic } from "./anthropic.js";
 import { withContext } from "./context.js";
+import { langchain } from "./langchain.js";
 import { withLlmSpan } from "./llm.js";
+import { openai } from "./openai.js";
 import { flush, init } from "./runtime.js";
 import { score } from "./scores.js";
 import { observe } from "./span.js";
@@ -69,4 +76,19 @@ export function aiTelemetryExample(): void {
   // tracer it hands out is the cetra one, so AI spans land in cetra.
   const telemetry = aiTelemetry({ sessionId: "chat-42", functionId: "chat" });
   telemetry.tracer?.startSpan("ai.chat").end();
+}
+
+// example:integration-openai
+export function integrationOpenai(): void {
+  init({ apiKey: process.env.CETRA_API_KEY, instrument: [openai(OpenAI)] });
+}
+
+// example:integration-anthropic
+export function integrationAnthropic(): void {
+  init({ apiKey: process.env.CETRA_API_KEY, instrument: [anthropic(Anthropic)] });
+}
+
+// example:integration-langchain
+export function integrationLangchain(): void {
+  init({ apiKey: process.env.CETRA_API_KEY, instrument: [langchain(callbacksManager)] });
 }

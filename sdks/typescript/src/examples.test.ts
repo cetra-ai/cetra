@@ -7,10 +7,15 @@
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { isPatched as anthropicIsPatched } from "@arizeai/openinference-instrumentation-anthropic";
+import { isPatched as openaiIsPatched } from "@arizeai/openinference-instrumentation-openai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   aiTelemetryExample,
+  integrationAnthropic,
+  integrationLangchain,
+  integrationOpenai,
   quickStart,
   scoreExample,
   withContextExample,
@@ -70,6 +75,27 @@ const EXAMPLES_BY_NAME: Record<string, Example> = {
     assert: (memory, result) => {
       expect(result).toMatch(UUID7);
       expect(memory.exporter.getFinishedSpans()).toEqual([]);
+    },
+  },
+  // The harness has claimed init (it is once per process), so these calls build
+  // the helper and patch the module without enabling it: what instrument.test.ts
+  // asserts for each helper, with no provider call.
+  "integration-openai": {
+    run: integrationOpenai,
+    assert: () => {
+      expect(openaiIsPatched()).toBe(true);
+    },
+  },
+  "integration-anthropic": {
+    run: integrationAnthropic,
+    assert: () => {
+      expect(anthropicIsPatched()).toBe(true);
+    },
+  },
+  "integration-langchain": {
+    run: integrationLangchain,
+    assert: async (memory) => {
+      expect(await finished(memory.exporter)).toEqual([]);
     },
   },
   "ai-telemetry": {
