@@ -28,8 +28,9 @@ pub use deletions::{
     filter_trace_ids, user_deletion_scope,
 };
 pub use experiments::{
-    ExperimentScore, ExperimentTrace, MAX_EXPERIMENT_SCORES, MAX_EXPERIMENT_TRACES,
-    experiment_scores, experiment_traces,
+    ExperimentScore, ExperimentScoreMean, ExperimentTrace, MAX_EXPERIMENT_SCORES,
+    MAX_EXPERIMENT_TRACES, MAX_MEAN_EXPERIMENTS, experiment_score_means, experiment_scores,
+    experiment_traces,
 };
 pub use metrics::{
     Bucket, BucketWidth, Kpi, KpiName, MetricsData, MetricsGroupBy, MetricsRequest, ModelUsageRow,

@@ -13,6 +13,10 @@ import channelsDocument from "../../../fixtures/api/static/channels.json";
 import datasetImportPreviewDocument from "../../../fixtures/api/static/dataset-import-preview.json";
 import datasetImportResultDocument from "../../../fixtures/api/static/dataset-import-result.json";
 import datasetItemFromTraceDocument from "../../../fixtures/api/static/dataset-item-from-trace.json";
+import datasetItemsDeletedDocument from "../../../fixtures/api/static/dataset-items-deleted.json";
+import datasetItemsEditedDocument from "../../../fixtures/api/static/dataset-items-edited.json";
+import datasetItemsFromTracesDocument from "../../../fixtures/api/static/dataset-items-from-traces.json";
+import datasetRestoredDocument from "../../../fixtures/api/static/dataset-restored.json";
 import deletionOrgDocument from "../../../fixtures/api/static/deletion-org.json";
 import deletionPreviewDocument from "../../../fixtures/api/static/deletion-preview.json";
 import deletionProjectDocument from "../../../fixtures/api/static/deletion-project.json";
@@ -333,6 +337,26 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     operationId: "post_dataset_item_from_trace",
     method: "post",
     path: "/api/v1/projects/{project}/datasets/{dataset}/items/from-trace",
+  },
+  {
+    operationId: "patch_dataset_items",
+    method: "patch",
+    path: "/api/v1/projects/{project}/datasets/{dataset}/items",
+  },
+  {
+    operationId: "post_dataset_items_delete",
+    method: "post",
+    path: "/api/v1/projects/{project}/datasets/{dataset}/items/delete",
+  },
+  {
+    operationId: "post_dataset_items_from_traces",
+    method: "post",
+    path: "/api/v1/projects/{project}/datasets/{dataset}/items/from-traces",
+  },
+  {
+    operationId: "restore_dataset",
+    method: "post",
+    path: "/api/v1/projects/{project}/datasets/{dataset}/restore",
   },
   {
     operationId: "post_experiment",
@@ -703,6 +727,11 @@ const RESPONSES: Record<string, Respond> = {
   post_dataset_import: () => HttpResponse.json(datasetImportResultDocument, { status: 201 }),
   post_dataset_item_from_trace: () =>
     HttpResponse.json(datasetItemFromTraceDocument, { status: 201 }),
+  patch_dataset_items: () => HttpResponse.json(datasetItemsEditedDocument),
+  post_dataset_items_delete: () => HttpResponse.json(datasetItemsDeletedDocument),
+  post_dataset_items_from_traces: () =>
+    HttpResponse.json(datasetItemsFromTracesDocument, { status: 201 }),
+  restore_dataset: () => HttpResponse.json(datasetRestoredDocument),
   post_experiment: ({ body }) =>
     HttpResponse.json(
       {

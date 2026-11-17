@@ -7694,6 +7694,98 @@
         }
       }
     },
+    "/api/v1/projects/{project}/dataset-trends": {
+      "get": {
+        "tags": [
+          "datasets"
+        ],
+        "summary": "The latest experiments of several datasets, with score means",
+        "description": "Any project member, or an API key with `read`. For each dataset of `ids` in the project, its 10 newest visible experiments with result and error counts, and their numeric and boolean score means (D-J-26). Storage busy or slow answers without `scores` and with `scores_unavailable: true`.",
+        "operationId": "list_experiment_trends",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ids",
+            "in": "query",
+            "description": "Comma-separated dataset ids, 1 to 100 distinct UUIDs. Unknown ids are left out.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The trends of each dataset, in request order.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExperimentTrends"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{project}/datasets": {
       "get": {
         "tags": [
@@ -8641,6 +8733,15 @@
             }
           },
           {
+            "name": "q",
+            "in": "query",
+            "description": "Search text, 1 to 200 characters after trimming: keeps the items whose input, expected\noutput or metadata contains it, case-insensitively. Keys count too. Absent: no search.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "description": "Maximum number of items to return (1–1000, default 50).",
@@ -8842,6 +8943,228 @@
             }
           }
         }
+      },
+      "patch": {
+        "tags": [
+          "datasets"
+        ],
+        "summary": "Edit items in one batch",
+        "description": "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5, D-J-23). Creates one new version holding every item that changes; items that change nothing are left out. A batch with any failing item writes nothing; the error lists the failing items.",
+        "operationId": "patch_dataset_items",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "dataset",
+            "in": "path",
+            "description": "Dataset id, or its name.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EditItemsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The new version, or null when nothing changed, and the items.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EditItemsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is larger than the limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/datasets/{dataset}/items/delete": {
+      "post": {
+        "tags": [
+          "datasets"
+        ],
+        "summary": "Delete items in one batch",
+        "description": "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5, D-J-23). Creates one new version in which the listed items are gone; older versions still hold them.",
+        "operationId": "post_dataset_items_delete",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "dataset",
+            "in": "path",
+            "description": "Dataset id, or its name.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteItemsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The new version.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetVersion"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is larger than the limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/projects/{project}/datasets/{dataset}/items/from-trace": {
@@ -8935,6 +9258,138 @@
           },
           "409": {
             "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is busy or a dependency is unavailable. Retry later.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/datasets/{dataset}/items/from-traces": {
+      "post": {
+        "tags": [
+          "datasets"
+        ],
+        "summary": "Add items from several traces",
+        "description": "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5, D-J-25). Copies 1 to 100 traces as `from-trace` does, in one new version. A trace that cannot be copied is listed in `skipped`; no copyable trace is a 400.",
+        "operationId": "post_dataset_items_from_traces",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "dataset",
+            "in": "path",
+            "description": "Dataset id, or its name.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FromTracesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The new version, the items added and the traces skipped.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FromTracesResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is larger than the limit.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -9298,6 +9753,128 @@
         }
       }
     },
+    "/api/v1/projects/{project}/datasets/{dataset}/restore": {
+      "post": {
+        "tags": [
+          "datasets"
+        ],
+        "summary": "Restore the items of an earlier version",
+        "description": "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5, D-J-24). Creates one new version whose live items are those of the given earlier version. A version that changes nothing is a 400 on `version` and writes nothing.",
+        "operationId": "restore_dataset",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "dataset",
+            "in": "path",
+            "description": "Dataset id, or its name.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestoreRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The new version.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetVersion"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is larger than the limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{project}/datasets/{dataset}/versions": {
       "get": {
         "tags": [
@@ -9352,6 +9929,126 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/DatasetVersionPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/datasets/{dataset}/versions/{version}/changes": {
+      "get": {
+        "tags": [
+          "datasets"
+        ],
+        "summary": "List the items a version changed",
+        "description": "Any project member, or an API key with `read`. The items the version added, edited or deleted, each with its revision before and after, paged by item id (D-J-24). A version outside 1 to the current one is 404.",
+        "operationId": "list_dataset_version_changes",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "dataset",
+            "in": "path",
+            "description": "Dataset id, or its name.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version",
+            "in": "path",
+            "description": "Version number, starting at 1.",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of changes to return (1–100, default 50).",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/ChangeLimit",
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque cursor from a previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of changes, by item id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ItemChangePage"
                 }
               }
             }
@@ -18618,6 +19315,14 @@
           }
         }
       },
+      "ChangeLimit": {
+        "type": "integer",
+        "format": "int32",
+        "description": "Page size of a change listing. Default 50, accepted range 1–100.",
+        "default": 50,
+        "maximum": 100,
+        "minimum": 1
+      },
       "ChangePasswordRequest": {
         "type": "object",
         "description": "`POST /api/v1/me/password`.",
@@ -19061,11 +19766,11 @@
           },
           "expected_schema": {
             "type": "object",
-            "description": "JSON Schema every present expected output must fit, at most 64 KiB."
+            "additionalProperties": true
           },
           "input_schema": {
             "type": "object",
-            "description": "JSON Schema (Draft 2020-12) every item input must fit, at most 64 KiB."
+            "additionalProperties": true
           },
           "name": {
             "type": "string",
@@ -19212,7 +19917,7 @@
           },
           "metadata": {
             "type": "object",
-            "description": "A JSON object of at most 64 KiB."
+            "additionalProperties": true
           },
           "name": {
             "type": "string",
@@ -19664,7 +20369,7 @@
           },
           "expected_schema": {
             "type": "object",
-            "description": "JSON Schema every present expected output must fit. Omitted when unset."
+            "additionalProperties": true
           },
           "experiment_count": {
             "type": "integer",
@@ -19678,7 +20383,7 @@
           },
           "input_schema": {
             "type": "object",
-            "description": "JSON Schema (Draft 2020-12) every item input must fit. Omitted when unset."
+            "additionalProperties": true
           },
           "item_count": {
             "type": "integer",
@@ -19726,7 +20431,7 @@
           },
           "metadata": {
             "type": "object",
-            "description": "A JSON object. Empty when the item has no metadata."
+            "additionalProperties": true
           },
           "revision_id": {
             "type": "string",
@@ -19796,15 +20501,45 @@
           }
         }
       },
+      "DatasetTrend": {
+        "type": "object",
+        "description": "The latest experiments of one dataset, newest first (D-J-26).",
+        "required": [
+          "dataset_id",
+          "experiments"
+        ],
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The dataset id."
+          },
+          "experiments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExperimentTrend"
+            },
+            "description": "Up to 10 visible experiments, newest first."
+          }
+        }
+      },
       "DatasetVersion": {
         "type": "object",
         "description": "One version of a dataset.",
         "required": [
           "version",
           "description",
-          "created_at"
+          "created_at",
+          "added",
+          "edited",
+          "deleted"
         ],
         "properties": {
+          "added": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Items this version adds (D-J-24)."
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
@@ -19814,9 +20549,19 @@
             "type": "string",
             "description": "The user id, or `key:<key id>` for an API key. Omitted when unknown."
           },
+          "deleted": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Items this version deletes (D-J-24)."
+          },
           "description": {
             "type": "string",
             "description": "What changed, e.g. `add 12 items`."
+          },
+          "edited": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Items this version edits (D-J-24)."
           },
           "version": {
             "type": "integer",
@@ -19848,6 +20593,24 @@
             "description": "Opaque cursor for the next page, or null when this is the last page."
           }
         }
+      },
+      "DeleteItemsRequest": {
+        "type": "object",
+        "description": "`POST …/datasets/{dataset}/items/delete` body (D-J-23): 1 to 1 000 distinct live item ids.",
+        "required": [
+          "ids"
+        ],
+        "properties": {
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The live items to delete, 1 to 1 000 distinct ids."
+          }
+        },
+        "additionalProperties": false
       },
       "Deletion": {
         "type": "object",
@@ -20122,6 +20885,68 @@
           "pending",
           "verified"
         ]
+      },
+      "EditItem": {
+        "type": "object",
+        "description": "One item of a batch edit (D-J-23): the item id and the fields to replace, as in\n[`UpdateItemRequest`]. An absent field is unchanged; `expected_output: null` clears it.",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "expected_output": {
+            "description": "Any JSON value."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The live item to edit."
+          },
+          "input": {
+            "description": "Any JSON value but null."
+          },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "EditItemsRequest": {
+        "type": "object",
+        "description": "`PATCH …/datasets/{dataset}/items` body (D-J-23): 1 to 1 000 distinct live items.",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EditItem"
+            },
+            "description": "The edits, 1 to 1 000 of them, one per item id."
+          }
+        },
+        "additionalProperties": false
+      },
+      "EditItemsResponse": {
+        "type": "object",
+        "description": "The answer to a batch edit (D-J-23): the new version, or `null` when no item changed, and the\nlive revision of every id in request order.",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DatasetItem"
+            },
+            "description": "The live revisions of every id, in request order."
+          },
+          "version": {
+            "$ref": "#/components/schemas/DatasetVersion",
+            "description": "The version the changed items were edited in. `null` when nothing changed."
+          }
+        }
       },
       "EndUserDetail": {
         "type": "object",
@@ -20987,7 +21812,7 @@
           },
           "metadata": {
             "type": "object",
-            "description": "A JSON object."
+            "additionalProperties": true
           },
           "name": {
             "type": "string",
@@ -21184,6 +22009,35 @@
           }
         }
       },
+      "ExperimentScoreMean": {
+        "type": "object",
+        "description": "The score of an experiment: the mean and row count of one name and data type (D-J-26).",
+        "required": [
+          "name",
+          "data_type",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Score rows counted."
+          },
+          "data_type": {
+            "type": "string",
+            "description": "`numeric` or `boolean`. A boolean's mean is its pass rate."
+          },
+          "mean": {
+            "type": "number",
+            "format": "double",
+            "description": "Mean of the values over the score rows. Omitted when no row has a value."
+          },
+          "name": {
+            "type": "string",
+            "description": "Score name."
+          }
+        }
+      },
       "ExperimentStatus": {
         "type": "string",
         "description": "`running`, `completed` or `failed`.",
@@ -21268,6 +22122,76 @@
               "$ref": "#/components/schemas/ScoreSummary"
             },
             "description": "One entry per score name, sorted by name."
+          }
+        }
+      },
+      "ExperimentTrend": {
+        "type": "object",
+        "description": "One of a dataset's latest experiments in the trends answer (D-J-26).",
+        "required": [
+          "id",
+          "name",
+          "status",
+          "created_at",
+          "result_count",
+          "error_count"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Creation time. JSON is RFC 3339."
+          },
+          "error_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Results with an error."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The experiment id."
+          },
+          "name": {
+            "type": "string",
+            "description": "The experiment name."
+          },
+          "result_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Results of the experiment."
+          },
+          "scores": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExperimentScoreMean"
+            },
+            "description": "The numeric and boolean scores of the experiment. Omitted when storage could not read\nthem (`scores_unavailable` on the answer)."
+          },
+          "status": {
+            "type": "string",
+            "description": "`running`, `completed` or `failed`."
+          }
+        }
+      },
+      "ExperimentTrends": {
+        "type": "object",
+        "description": "The answer of the experiment trends (D-J-26).",
+        "required": [
+          "data",
+          "scores_unavailable"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DatasetTrend"
+            },
+            "description": "One entry per dataset of the request that exists in the project, in request order."
+          },
+          "scores_unavailable": {
+            "type": "boolean",
+            "description": "True when storage was busy or timed out, so no experiment has `scores`."
           }
         }
       },
@@ -21462,7 +22386,7 @@
           },
           "metadata": {
             "type": "object",
-            "description": "The item's metadata, a JSON object. Absent: `{}`."
+            "additionalProperties": true
           },
           "span_id": {
             "type": "string",
@@ -21474,6 +22398,52 @@
           }
         },
         "additionalProperties": false
+      },
+      "FromTracesRequest": {
+        "type": "object",
+        "description": "`POST …/items/from-traces` body (D-J-25): 1 to 100 traces, each copied as `from-trace` copies it.",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TraceRef"
+            },
+            "description": "The traces to copy, 1 to 100 of them."
+          }
+        },
+        "additionalProperties": false
+      },
+      "FromTracesResult": {
+        "type": "object",
+        "description": "The answer of a bulk add from traces (D-J-25): the new version, the items it added, and the\ntraces that were not copied.",
+        "required": [
+          "version",
+          "items",
+          "skipped"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DatasetItem"
+            },
+            "description": "The items added, in request order."
+          },
+          "skipped": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SkippedTrace"
+            },
+            "description": "Every trace that was not copied, in request order."
+          },
+          "version": {
+            "$ref": "#/components/schemas/DatasetVersion",
+            "description": "The version the copies were added in."
+          }
+        }
       },
       "FunctionSchema": {
         "type": "object",
@@ -22025,6 +22995,66 @@
           "role": {
             "$ref": "#/components/schemas/OrgRole",
             "description": "Role granted on accept."
+          }
+        }
+      },
+      "ItemChange": {
+        "type": "object",
+        "description": "One item that changed in a version (D-J-24). `before` is the revision the version closed,\n`after` the one it started; each is absent when the version did not make it.",
+        "required": [
+          "item_id",
+          "change"
+        ],
+        "properties": {
+          "after": {
+            "$ref": "#/components/schemas/DatasetItem",
+            "description": "The revision after the version. Omitted for a deleted item."
+          },
+          "before": {
+            "$ref": "#/components/schemas/DatasetItem",
+            "description": "The revision before the version. Omitted for an added item."
+          },
+          "change": {
+            "$ref": "#/components/schemas/ItemChangeKind",
+            "description": "What the version did to the item."
+          },
+          "item_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The item id."
+          }
+        }
+      },
+      "ItemChangeKind": {
+        "type": "string",
+        "description": "How an item changed in a version (D-J-24).",
+        "enum": [
+          "added",
+          "edited",
+          "deleted"
+        ]
+      },
+      "ItemChangePage": {
+        "type": "object",
+        "description": "One page of results. `next_cursor` is null when there is no next page.",
+        "required": [
+          "data",
+          "next_cursor"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ItemChange"
+            },
+            "description": "Items in this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor for the next page, or null when this is the last page."
           }
         }
       },
@@ -22899,7 +23929,7 @@
           },
           "metadata": {
             "type": "object",
-            "description": "A JSON object. Empty when omitted."
+            "additionalProperties": true
           }
         },
         "additionalProperties": false
@@ -24211,6 +25241,21 @@
           "token": {
             "type": "string",
             "description": "The token from the reset link."
+          }
+        },
+        "additionalProperties": false
+      },
+      "RestoreRequest": {
+        "type": "object",
+        "description": "`POST …/datasets/{dataset}/restore` body (D-J-24): the earlier version whose items the dataset\ntakes again.",
+        "required": [
+          "version"
+        ],
+        "properties": {
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "An earlier version, 0 to the current version minus one."
           }
         },
         "additionalProperties": false
@@ -25591,6 +26636,30 @@
           }
         }
       },
+      "SkippedTrace": {
+        "type": "object",
+        "description": "A trace of a bulk add that was not copied (D-J-25).",
+        "required": [
+          "index",
+          "trace_id",
+          "message"
+        ],
+        "properties": {
+          "index": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Position of the trace in the request."
+          },
+          "message": {
+            "type": "string",
+            "description": "Why it was not copied."
+          },
+          "trace_id": {
+            "type": "string",
+            "description": "The trace id as the request gave it."
+          }
+        }
+      },
       "SortOrder": {
         "type": "string",
         "description": "Sort direction. Default is descending.\n\nSpec 09 § Conventions.",
@@ -26519,6 +27588,24 @@
           }
         }
       },
+      "TraceRef": {
+        "type": "object",
+        "description": "One trace of a bulk add from traces (D-J-25): the trace, and the span when it is not the root.",
+        "required": [
+          "trace_id"
+        ],
+        "properties": {
+          "span_id": {
+            "type": "string",
+            "description": "16 hex digits. Absent: the trace root."
+          },
+          "trace_id": {
+            "type": "string",
+            "description": "32 hex digits, either case."
+          }
+        },
+        "additionalProperties": false
+      },
       "TraceSort": {
         "type": "string",
         "description": "Sort key for trace lists.\n\nSpec 09 § Observability data.",
@@ -26831,14 +27918,14 @@
               "object",
               "null"
             ],
-            "description": "New expected-output schema, when present. `null` clears it."
+            "additionalProperties": true
           },
           "input_schema": {
             "type": [
               "object",
               "null"
             ],
-            "description": "New input schema, when present. `null` clears it."
+            "additionalProperties": true
           },
           "name": {
             "type": "string",
@@ -26882,7 +27969,7 @@
           },
           "metadata": {
             "type": "object",
-            "description": "New metadata, when present. A JSON object; must not be null."
+            "additionalProperties": true
           }
         },
         "additionalProperties": false

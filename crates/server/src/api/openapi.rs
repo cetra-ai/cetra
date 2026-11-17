@@ -47,11 +47,14 @@ use super::connections::{
     TestLlmConnectionRequest, UpdateLlmConnectionRequest,
 };
 use super::datasets::{
-    AddItemsRequest, AddItemsResponse, CreateDatasetRequest, Dataset, DatasetItem,
-    DatasetItemListParams, DatasetItemParams, DatasetListParams, DatasetVersion,
-    DatasetVersionListParams, ExportFormat, ExportParams, FromTraceRequest, ImportColumn,
+    AddItemsRequest, AddItemsResponse, ChangeLimit, CreateDatasetRequest, Dataset, DatasetItem,
+    DatasetItemListParams, DatasetItemParams, DatasetListParams, DatasetTrend, DatasetVersion,
+    DatasetVersionListParams, DeleteItemsRequest, EditItem, EditItemsRequest, EditItemsResponse,
+    ExperimentScoreMean, ExperimentTrend, ExperimentTrendParams, ExperimentTrends, ExportFormat,
+    ExportParams, FromTraceRequest, FromTracesRequest, FromTracesResult, ImportColumn,
     ImportFormat, ImportMapping, ImportParams, ImportPreview, ImportResult, ImportRowError,
-    NewDatasetItem, PreviewParams, UpdateDatasetRequest, UpdateItemRequest,
+    ItemChange, ItemChangeKind, ItemChangeListParams, NewDatasetItem, PreviewParams,
+    RestoreRequest, SkippedTrace, TraceRef, UpdateDatasetRequest, UpdateItemRequest,
 };
 use super::deletions::{
     CreateDeletion, Deletion, DeletionPreview, DeletionPreviewRequest, DropParams,
@@ -324,7 +327,24 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<AddItemsRequest>();
     set.insert::<AddItemsResponse>();
     set.insert::<UpdateItemRequest>();
+    set.insert::<EditItem>();
+    set.insert::<EditItemsRequest>();
+    set.insert::<EditItemsResponse>();
+    set.insert::<DeleteItemsRequest>();
+    set.insert::<RestoreRequest>();
+    set.insert::<TraceRef>();
+    set.insert::<FromTracesRequest>();
+    set.insert::<SkippedTrace>();
+    set.insert::<FromTracesResult>();
+    set.insert::<ExperimentScoreMean>();
+    set.insert::<ExperimentTrend>();
+    set.insert::<DatasetTrend>();
+    set.insert::<ExperimentTrends>();
     set.insert::<FromTraceRequest>();
+    set.insert::<ItemChangeKind>();
+    set.insert::<ItemChange>();
+    set.insert::<ChangeLimit>();
+    set.insert_page::<ItemChange>("ItemChangePage");
     set.insert_page::<DatasetVersion>("DatasetVersionPage");
     set.insert_page::<DatasetItem>("DatasetItemPage");
     set.insert::<ImportFormat>();
@@ -3121,6 +3141,32 @@ fn dataset_paths(paths: PathsBuilder) -> PathsBuilder {
         QUERY_ERRORS,
     ))
     .build();
+    let version_number = ParameterBuilder::new()
+        .name("version")
+        .parameter_in(ParameterIn::Path)
+        .required(Required::True)
+        .description(Some("Version number, starting at 1."))
+        .schema(Some(ObjectBuilder::new().schema_type(Type::Integer)))
+        .build();
+    let changes_list = operation(
+        "list_dataset_version_changes",
+        "datasets",
+        "List the items a version changed",
+    )
+    .description(Some(
+        "Any project member, or an API key with `read`. The items the version added, edited or deleted, each with its revision before and after, paged by item id (D-J-24). A version outside 1 to the current one is 404.",
+    ))
+    .parameters(Some(with_query::<ItemChangeListParams>(vec![
+        project_param(),
+        dataset.clone(),
+        version_number,
+    ])))
+    .responses(responses(
+        "200",
+        json_named("ItemChangePage", "One page of changes, by item id."),
+        QUERY_ERRORS,
+    ))
+    .build();
     let item_list = operation(
         "list_dataset_items",
         "datasets",
@@ -3185,6 +3231,69 @@ fn dataset_paths(paths: PathsBuilder) -> PathsBuilder {
             &[400, 401, 403, 404, 429],
         ))
         .build();
+    let items_edit = operation("patch_dataset_items", "datasets", "Edit items in one batch")
+        .description(Some(
+            "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5, D-J-23). Creates one new version holding every item that changes; items that change nothing are left out. A batch with any failing item writes nothing; the error lists the failing items.",
+        ))
+        .parameters(Some(vec![project_param(), dataset.clone()]))
+        .request_body(Some(json_body("EditItemsRequest")))
+        .responses(responses(
+            "200",
+            json_of::<EditItemsResponse>("The new version, or null when nothing changed, and the items."),
+            &[400, 401, 403, 404, 413, 429],
+        ))
+        .build();
+    let items_delete = operation("post_dataset_items_delete", "datasets", "Delete items in one batch")
+        .description(Some(
+            "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5, D-J-23). Creates one new version in which the listed items are gone; older versions still hold them.",
+        ))
+        .parameters(Some(vec![project_param(), dataset.clone()]))
+        .request_body(Some(json_body("DeleteItemsRequest")))
+        .responses(responses(
+            "200",
+            json_of::<DatasetVersion>("The new version."),
+            &[400, 401, 403, 404, 413, 429],
+        ))
+        .build();
+    let restore = operation("restore_dataset", "datasets", "Restore the items of an earlier version")
+        .description(Some(
+            "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5, D-J-24). Creates one new version whose live items are those of the given earlier version. A version that changes nothing is a 400 on `version` and writes nothing.",
+        ))
+        .parameters(Some(vec![project_param(), dataset.clone()]))
+        .request_body(Some(json_body("RestoreRequest")))
+        .responses(responses(
+            "200",
+            json_of::<DatasetVersion>("The new version."),
+            &[400, 401, 403, 404, 409, 413, 429],
+        ))
+        .build();
+    let from_traces = operation("post_dataset_items_from_traces", "datasets", "Add items from several traces")
+        .description(Some(
+            "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5, D-J-25). Copies 1 to 100 traces as `from-trace` does, in one new version. A trace that cannot be copied is listed in `skipped`; no copyable trace is a 400.",
+        ))
+        .parameters(Some(vec![project_param(), dataset.clone()]))
+        .request_body(Some(json_body("FromTracesRequest")))
+        .responses(responses(
+            "201",
+            json_of::<FromTracesResult>("The new version, the items added and the traces skipped."),
+            &[400, 401, 403, 404, 409, 413, 429, 503],
+        ))
+        .build();
+    let trends = operation(
+        "list_experiment_trends",
+        "datasets",
+        "The latest experiments of several datasets, with score means",
+    )
+    .description(Some(
+        "Any project member, or an API key with `read`. For each dataset of `ids` in the project, its 10 newest visible experiments with result and error counts, and their numeric and boolean score means (D-J-26). Storage busy or slow answers without `scores` and with `scores_unavailable: true`.",
+    ))
+    .parameters(Some(with_query::<ExperimentTrendParams>(vec![project_param()])))
+    .responses(responses(
+        "200",
+        json_of::<ExperimentTrends>("The trends of each dataset, in request order."),
+        QUERY_ERRORS,
+    ))
+    .build();
     let item_from_trace = operation(
         "post_dataset_item_from_trace",
         "datasets",
@@ -3253,6 +3362,10 @@ fn dataset_paths(paths: PathsBuilder) -> PathsBuilder {
             PathItem::new(HttpMethod::Get, version_list),
         )
         .path(
+            format!("{PROJECT}/datasets/{{dataset}}/versions/{{version}}/changes"),
+            PathItem::new(HttpMethod::Get, changes_list),
+        )
+        .path(
             format!("{PROJECT}/datasets/{{dataset}}/items"),
             PathItem::new(HttpMethod::Get, item_list),
         )
@@ -3291,6 +3404,26 @@ fn dataset_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/datasets/{{dataset}}"),
             PathItem::new(HttpMethod::Delete, delete),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}/items"),
+            PathItem::new(HttpMethod::Patch, items_edit),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}/items/delete"),
+            PathItem::new(HttpMethod::Post, items_delete),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}/restore"),
+            PathItem::new(HttpMethod::Post, restore),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}/items/from-traces"),
+            PathItem::new(HttpMethod::Post, from_traces),
+        )
+        .path(
+            format!("{PROJECT}/dataset-trends"),
+            PathItem::new(HttpMethod::Get, trends),
         )
         .path(
             format!("{PROJECT}/datasets/{{dataset}}/items/from-trace"),

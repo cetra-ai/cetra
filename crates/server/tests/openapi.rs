@@ -610,6 +610,36 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "get_dataset_export",
     ),
     (
+        "patch",
+        "/api/v1/projects/{project}/datasets/{dataset}/items",
+        "patch_dataset_items",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/datasets/{dataset}/items/delete",
+        "post_dataset_items_delete",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/datasets/{dataset}/items/from-traces",
+        "post_dataset_items_from_traces",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/datasets/{dataset}/restore",
+        "restore_dataset",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/datasets/{dataset}/versions/{version}/changes",
+        "list_dataset_version_changes",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/dataset-trends",
+        "list_experiment_trends",
+    ),
+    (
         "get",
         "/api/v1/projects/{project}/experiments",
         "list_experiments",
@@ -715,6 +745,8 @@ const QUERY_OR_BODY: &[&str] = &[
     "list_datasets",
     "list_dataset_versions",
     "list_dataset_items",
+    "list_dataset_version_changes",
+    "list_experiment_trends",
     "get_dataset_item",
     "list_experiments",
     "get_experiment",
@@ -1059,6 +1091,10 @@ fn document_lint() {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "post_dataset_item_from_trace" {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
+        } else if *id == "patch_dataset_items" || *id == "post_dataset_items_delete" {
+            expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
+        } else if *id == "post_dataset_items_from_traces" || *id == "restore_dataset" {
+            expected_errors.extend(["400", "401", "403", "404", "409", "413", "429"]);
         } else if *id == "post_dataset_import_preview" {
             expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
         } else if *id == "post_dataset_import" {
@@ -1447,6 +1483,7 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "DatasetPage",
         "DatasetVersionPage",
         "DatasetItemPage",
+        "ItemChangePage",
         "ExperimentPage",
         "ModelPricePage",
         "ChannelPage",

@@ -6,6 +6,12 @@ import {
   userSummaries,
   visibleTraces,
 } from "@/mocks/generated/dataset";
+import {
+  createDatasets,
+  type GeneratedDataset,
+  type GeneratedExperiment,
+  itemsAt,
+} from "@/mocks/generated/datasets";
 import { experimentHandlers } from "@/mocks/generated/experiments";
 import {
   type SpanStreamSource,
@@ -106,8 +112,376 @@ export function largeHandlers(dataset: Dataset): HttpHandler[] {
     http.get(`${PROJECT}/score-definitions`, () =>
       HttpResponse.json({ data: SCORE_DEFINITIONS, next_cursor: null }),
     ),
+    http.get(`${PROJECT}/dataset-trends`, ({ request }) => datasetTrends(dataset, request)),
+    http.get(`${PROJECT}/datasets`, ({ request }) => listDatasets(dataset, request)),
+    http.get(`${PROJECT}/datasets/:dataset/items/:item_id`, ({ params }) =>
+      oneDatasetItem(dataset, params.dataset, params.item_id),
+    ),
+    http.get(`${PROJECT}/datasets/:dataset/items`, ({ request, params }) =>
+      listDatasetItems(dataset, request, params.dataset),
+    ),
+    http.get(`${PROJECT}/datasets/:dataset/versions/:version/changes`, ({ request, params }) =>
+      listVersionChanges(dataset, request, params.dataset, params.version),
+    ),
+    http.get(`${PROJECT}/datasets/:dataset/versions`, ({ request, params }) =>
+      listDatasetVersions(dataset, request, params.dataset),
+    ),
+    http.get(`${PROJECT}/datasets/:dataset`, ({ params }) => oneDataset(dataset, params.dataset)),
+    http.get(`${PROJECT}/experiments`, ({ request }) => listExperiments(dataset, request)),
+    http.get(`${PROJECT}/experiments/:id/results`, ({ request, params }) =>
+      experimentResults(dataset, request, params.id),
+    ),
+    http.get(`${PROJECT}/experiments/:id`, ({ params }) => oneExperiment(dataset, params.id)),
+    // The experiments of the generated datasets answer above; every other experiment request falls
+    // through to the experiments mock (its runs are on the fixture dataset).
     ...experimentHandlers(),
+    http.get(`${PROJECT}/experiments/summaries`, ({ request }) =>
+      experimentSummaries(dataset, request),
+    ),
   ];
+}
+
+/** The seed of the generated datasets. The trace dataset's seed is not kept, so this one is fixed. */
+const DATASET_SEED = 1;
+
+type DatasetIndex = {
+  /** By name, the server's order (`lower(name), id`). */
+  datasets: GeneratedDataset[];
+  byId: Map<string, GeneratedDataset>;
+  byName: Map<string, GeneratedDataset>;
+  /** Every experiment, newest first (the server's `id DESC`). */
+  experiments: GeneratedExperiment[];
+  experimentById: Map<string, GeneratedExperiment>;
+};
+
+const datasetIndexes = new WeakMap<Dataset, DatasetIndex>();
+
+/** The generated datasets of a trace dataset, built once. They share its `now`. */
+function indexOf(dataset: Dataset): DatasetIndex {
+  const cached = datasetIndexes.get(dataset);
+  if (cached) {
+    return cached;
+  }
+  const generated = createDatasets({
+    seed: DATASET_SEED,
+    now: dataset.now,
+    traces: dataset.traces,
+  });
+  const datasets = [...generated].sort((left, right) => {
+    const byName = left.dataset.name.toLowerCase().localeCompare(right.dataset.name.toLowerCase());
+    return byName !== 0 ? byName : left.dataset.id.localeCompare(right.dataset.id);
+  });
+  const experiments = generated
+    .flatMap((item) => item.experiments)
+    .sort((left, right) => right.experiment.id.localeCompare(left.experiment.id));
+  const index: DatasetIndex = {
+    datasets,
+    byId: new Map(datasets.map((item) => [item.dataset.id, item])),
+    byName: new Map(datasets.map((item) => [item.dataset.name, item])),
+    experiments,
+    experimentById: new Map(experiments.map((item) => [item.experiment.id, item])),
+  };
+  datasetIndexes.set(dataset, index);
+  return index;
+}
+
+/** A dataset by id or name, as the server's routes take it. */
+function findDataset(index: DatasetIndex, raw: string): GeneratedDataset | undefined {
+  return index.byId.get(raw) ?? index.byName.get(raw);
+}
+
+function listDatasets(dataset: Dataset, request: Request): Response {
+  const url = new URL(request.url);
+  const parsed = readQuery(url);
+  if (parsed instanceof Response) {
+    return parsed;
+  }
+  const needle = (url.searchParams.get("q") ?? "").trim().toLowerCase();
+  const rows = indexOf(dataset)
+    .datasets.filter((item) => needle === "" || item.dataset.name.toLowerCase().includes(needle))
+    .map((item) => item.dataset);
+  return page(rows, parsed, {});
+}
+
+function oneDataset(
+  dataset: Dataset,
+  datasetParam: string | readonly string[] | undefined,
+): Response {
+  const found = findDataset(indexOf(dataset), text(datasetParam));
+  if (!found) {
+    return problem(404, "not_found", "Not Found");
+  }
+  return HttpResponse.json(found.dataset);
+}
+
+function listDatasetItems(
+  dataset: Dataset,
+  request: Request,
+  datasetParam: string | readonly string[] | undefined,
+): Response {
+  const url = new URL(request.url);
+  const parsed = readQuery(url);
+  if (parsed instanceof Response) {
+    return parsed;
+  }
+  const found = findDataset(indexOf(dataset), text(datasetParam));
+  if (!found) {
+    return problem(404, "not_found", "Not Found");
+  }
+  // Items of the requested version: those introduced at or before it (default: the latest).
+  const raw = url.searchParams.get("version");
+  if (raw !== null && !/^\d+$/.test(raw)) {
+    return problem(400, "bad_request", "Bad Request");
+  }
+  const search = readSearch(url.searchParams.get("q"));
+  if (search instanceof Response) {
+    return search;
+  }
+  const version = raw === null ? found.dataset.current_version : Number(raw);
+  return page(
+    itemsAt(found, version).filter(
+      (item) => search === undefined || searchText(item).includes(search),
+    ),
+    parsed,
+    {},
+  );
+}
+
+/** The item search (D-J-22): trimmed, 1 to 200 characters, else a 400 on `q`. Lower-cased. */
+function readSearch(raw: string | null): string | undefined | Response {
+  if (raw === null) {
+    return undefined;
+  }
+  const trimmed = raw.trim();
+  if ([...trimmed].length < 1 || [...trimmed].length > 200) {
+    return problem(400, "bad_request", "Bad Request", [
+      { field: "q", message: "must be 1 to 200 characters" },
+    ]);
+  }
+  return trimmed.toLowerCase();
+}
+
+/** The JSON text of an item's input, expected output and metadata, lower-cased, as the search reads it. */
+function searchText(item: Schema<"DatasetItem">): string {
+  return [
+    JSON.stringify(item.input),
+    item.expected_output === undefined ? "" : JSON.stringify(item.expected_output),
+    JSON.stringify(item.metadata),
+  ]
+    .join(" ")
+    .toLowerCase();
+}
+
+function oneDatasetItem(
+  dataset: Dataset,
+  datasetParam: string | readonly string[] | undefined,
+  itemParam: string | readonly string[] | undefined,
+): Response {
+  const found = findDataset(indexOf(dataset), text(datasetParam));
+  const item = found?.items.find((row) => row.id === text(itemParam));
+  if (!item) {
+    return problem(404, "not_found", "Not Found");
+  }
+  return HttpResponse.json(item);
+}
+
+function listDatasetVersions(
+  dataset: Dataset,
+  request: Request,
+  datasetParam: string | readonly string[] | undefined,
+): Response {
+  const parsed = readQuery(new URL(request.url));
+  if (parsed instanceof Response) {
+    return parsed;
+  }
+  const found = findDataset(indexOf(dataset), text(datasetParam));
+  if (!found) {
+    return problem(404, "not_found", "Not Found");
+  }
+  return page([...found.versions].reverse(), parsed, {});
+}
+
+/**
+ * `GET …/datasets/{dataset}/versions/{version}/changes` (D-J-24): the version's history.
+ */
+function listVersionChanges(
+  dataset: Dataset,
+  request: Request,
+  datasetParam: string | readonly string[] | undefined,
+  versionParam: string | readonly string[] | undefined,
+): Response {
+  const parsed = readQuery(new URL(request.url));
+  if (parsed instanceof Response) {
+    return parsed;
+  }
+  const found = findDataset(indexOf(dataset), text(datasetParam));
+  if (!found) {
+    return problem(404, "not_found", "Not Found");
+  }
+  const raw = text(versionParam);
+  if (!/^\d+$/.test(raw)) {
+    return problem(400, "bad_request", "Bad Request");
+  }
+  const version = Number(raw);
+  if (version < 1 || version > found.dataset.current_version) {
+    return problem(404, "not_found", "Not Found");
+  }
+  const changes: Schema<"ItemChange">[] = found.history
+    .filter((change) => change.version === version)
+    .sort((left, right) =>
+      left.item_id < right.item_id ? -1 : left.item_id > right.item_id ? 1 : 0,
+    )
+    .map((change) => ({
+      item_id: change.item_id,
+      change: change.change,
+      ...(change.before === undefined ? {} : { before: change.before }),
+      ...(change.after === undefined ? {} : { after: change.after }),
+    }));
+  return page(changes, parsed, {});
+}
+
+/**
+ * The experiments of one generated dataset. Without `dataset`, or for a dataset the generator did
+ * not make, it answers nothing, so the experiments mock (`experimentHandlers`) answers instead.
+ */
+function listExperiments(dataset: Dataset, request: Request): Response | undefined {
+  const url = new URL(request.url);
+  const parsed = readQuery(url);
+  if (parsed instanceof Response) {
+    return parsed;
+  }
+  const index = indexOf(dataset);
+  const datasetParam = url.searchParams.get("dataset");
+  const found = datasetParam === null ? undefined : findDataset(index, datasetParam);
+  if (!found) {
+    return undefined;
+  }
+  const rows = index.experiments.filter((item) => item.experiment.dataset_id === found.dataset.id);
+  return page(
+    rows.map((item) => item.experiment),
+    parsed,
+    {},
+  );
+}
+
+function oneExperiment(
+  dataset: Dataset,
+  idParam: string | readonly string[] | undefined,
+): Response | undefined {
+  // Not a generated experiment: the experiments mock answers.
+  const found = indexOf(dataset).experimentById.get(text(idParam));
+  return found ? HttpResponse.json(found.experiment) : undefined;
+}
+
+/** Most datasets one trends request names, and experiments per dataset in its answer (D-J-26). */
+const MAX_TREND_DATASETS = 100;
+const TRENDS_PER_DATASET = 10;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** `GET …/dataset-trends?ids=` (D-J-26): the latest experiments of each dataset that exists. */
+function datasetTrends(dataset: Dataset, request: Request): Response {
+  const ids = readTrendIds(new URL(request.url).searchParams.get("ids"));
+  if (ids instanceof Response) {
+    return ids;
+  }
+  const index = indexOf(dataset);
+  const data = ids.flatMap((id) => {
+    const found = index.byId.get(id);
+    if (!found) {
+      return [];
+    }
+    return [
+      {
+        dataset_id: found.dataset.id,
+        experiments: found.experiments
+          .slice(-TRENDS_PER_DATASET)
+          .reverse()
+          .map((item) => trendOf(item)),
+      },
+    ];
+  });
+  return HttpResponse.json({ data, scores_unavailable: false });
+}
+
+/** The ids of a trends request: 1 to 100 distinct UUIDs, comma-separated, lower-cased. */
+function readTrendIds(raw: string | null): string[] | Response {
+  const ids = (raw ?? "").split(",").map((part) => part.trim().toLowerCase());
+  if (!ids.every((id) => UUID_PATTERN.test(id))) {
+    return problem(400, "bad_request", "Bad Request", [
+      { field: "ids", message: "must be comma-separated UUIDs" },
+    ]);
+  }
+  if (ids.length < 1 || ids.length > MAX_TREND_DATASETS) {
+    return problem(400, "bad_request", "Bad Request", [
+      { field: "ids", message: `must hold 1 to ${MAX_TREND_DATASETS} ids` },
+    ]);
+  }
+  if (new Set(ids).size !== ids.length) {
+    return problem(400, "bad_request", "Bad Request", [
+      { field: "ids", message: "must be distinct" },
+    ]);
+  }
+  return ids;
+}
+
+/** One experiment of a trends answer: its summary's error count and its numeric and boolean scores. */
+function trendOf(generated: GeneratedExperiment): Schema<"ExperimentTrend"> {
+  const { experiment, summary } = generated;
+  return {
+    id: experiment.id,
+    name: experiment.name,
+    status: experiment.status,
+    created_at: experiment.created_at,
+    result_count: experiment.result_count,
+    error_count: summary.error_count,
+    scores: summary.scores.map((score) => ({
+      name: score.name,
+      data_type: score.data_type,
+      count: score.count,
+      // A boolean's mean is its pass rate (D-J-26).
+      ...(score.data_type === "boolean"
+        ? score.pass_rate === undefined
+          ? {}
+          : { mean: score.pass_rate }
+        : score.mean === undefined
+          ? {}
+          : { mean: score.mean }),
+    })),
+  };
+}
+
+/** `GET …/experiments/{id}/results`: the summary, and one page of rows in item then repetition order. */
+/** `GET /experiments/summaries?ids=` for the generated experiments (after the experiments mock). */
+function experimentSummaries(dataset: Dataset, request: Request): Response {
+  const byId = indexOf(dataset).experimentById;
+  const ids = (new URL(request.url).searchParams.get("ids") ?? "").split(",").filter(Boolean);
+  const data = ids.flatMap((id) => {
+    const found = byId.get(id);
+    return found ? [found.summary] : [];
+  });
+  return HttpResponse.json({ data, skipped: [] });
+}
+
+function experimentResults(
+  dataset: Dataset,
+  request: Request,
+  idParam: string | readonly string[] | undefined,
+): Response | undefined {
+  const found = indexOf(dataset).experimentById.get(text(idParam));
+  if (!found) {
+    // Not a generated experiment: the experiments mock answers.
+    return undefined;
+  }
+  const parsed = readQuery(new URL(request.url));
+  if (parsed instanceof Response) {
+    return parsed;
+  }
+  const end = parsed.offset + parsed.limit;
+  return HttpResponse.json({
+    summary: found.summary,
+    rows: found.rows.slice(parsed.offset, end),
+    next_cursor: end < found.rows.length ? encodeCursor(end) : null,
+  });
 }
 
 function listTraces(dataset: Dataset, request: Request): Response {

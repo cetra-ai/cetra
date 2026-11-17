@@ -283,7 +283,7 @@ function medianOf(sorted: number[]): number {
   return sorted.length % 2 === 1 ? upper : ((sorted[middle - 1] ?? 0) + upper) / 2;
 }
 
-function histogramOf(dataType: ScoreDataType, sorted: number[]): number[] {
+export function histogramOf(dataType: ScoreDataType, sorted: number[]): number[] {
   const min = sorted[0];
   const max = sorted[sorted.length - 1];
   if (dataType !== "numeric" || min === undefined || max === undefined) {

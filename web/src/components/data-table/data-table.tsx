@@ -36,6 +36,7 @@ import {
   writeColumnSizes,
 } from "@/components/data-table/column-size";
 import { ROW_HEIGHTS, useRowHeight } from "@/components/theme-provider";
+import { Checkbox } from "@/components/ui/checkbox";
 import type { RowAnchor } from "@/lib/list-return";
 import { matchesBinding } from "@/lib/shortcuts";
 
@@ -66,6 +67,9 @@ const EDGE_STEP_PX = 12;
 /** How long the pointer must rest on a body row before `onRowHover` fires. */
 const ROW_HOVER_MS = 100;
 const NO_LOCKED: ReadonlySet<string> = new Set();
+const NO_CHECKED: ReadonlySet<string> = new Set();
+/** Width, in px, of the checkbox column when selection is on. It is not a column: it cannot be moved or sized. */
+const CHECK_COLUMN_PX = 32;
 /** Quiet time, in ms, after the last scroll before the first visible row is reported. */
 const ANCHOR_SETTLE_MS = 150;
 /** Pages fetched, at most, while looking for the row a restore scrolls to and the rows below it. */
@@ -108,6 +112,13 @@ export interface DataTableProps<Row extends RowData> {
   onScrollAnchor?: (anchor: RowAnchor) => void;
   /** Scrolls to this row once after mount, fetching pages until it is loaded. */
   restoreAnchor?: RowAnchor;
+  /**
+   * Checkbox selection, off unless `onCheckedChange` is given. Then a fixed first column holds a
+   * header checkbox (all loaded rows) and a checkbox per row. A checkbox click does not activate
+   * its row. `checkedIds` are the checked row ids; the table calls `onCheckedChange` with the new set.
+   */
+  checkedIds?: ReadonlySet<string>;
+  onCheckedChange?: (ids: ReadonlySet<string>) => void;
 }
 
 export function DataTable<Row extends RowData>({
@@ -133,7 +144,10 @@ export function DataTable<Row extends RowData>({
   onRowHover,
   onScrollAnchor,
   restoreAnchor,
+  checkedIds = NO_CHECKED,
+  onCheckedChange,
 }: DataTableProps<Row>) {
+  const selectable = onCheckedChange !== undefined;
   const scrollRef = useRef<HTMLDivElement>(null);
   const headerRef = useRef<HTMLDivElement>(null);
   const rowHeight = useRowHeight();
@@ -251,6 +265,46 @@ export function DataTable<Row extends RowData>({
     [flushAnchor],
   );
 
+  // Read by the row checkboxes, which keep their identity while the checked set changes.
+  const checkRef = useRef({ checkedIds, onCheckedChange });
+  useLayoutEffect(() => {
+    checkRef.current = { checkedIds, onCheckedChange };
+  });
+  const toggleRow = useCallback((id: string) => {
+    const { checkedIds: current, onCheckedChange: notify } = checkRef.current;
+    if (!notify) {
+      return;
+    }
+    const next = new Set(current);
+    if (next.has(id)) {
+      next.delete(id);
+    } else {
+      next.add(id);
+    }
+    notify(next);
+  }, []);
+  const checkedLoaded = rows.reduce(
+    (count, row) => count + (checkedIds.has(getRowId(row)) ? 1 : 0),
+    0,
+  );
+  const allLoadedChecked = rows.length > 0 && checkedLoaded === rows.length;
+  const headerChecked = allLoadedChecked ? true : checkedLoaded > 0 ? "indeterminate" : false;
+  // Checks every loaded row, or clears them when they are all checked; checked rows past the page stay.
+  function toggleAllLoaded() {
+    if (!onCheckedChange) {
+      return;
+    }
+    const next = new Set(checkedIds);
+    for (const row of rows) {
+      if (allLoadedChecked) {
+        next.delete(getRowId(row));
+      } else {
+        next.add(getRowId(row));
+      }
+    }
+    onCheckedChange(next);
+  }
+
   // One timer is enough: the pointer rests on one row at a time.
   const onRowHoverRef = useRef(onRowHover);
   useLayoutEffect(() => {
@@ -327,6 +381,10 @@ export function DataTable<Row extends RowData>({
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    // A checkbox (and its keys) belongs to its own cell: Enter on it checks it, not opens the row.
+    if (event.target instanceof Element && event.target.closest("[data-select-cell]")) {
+      return;
+    }
     if (rows.length === 0) {
       return;
     }
@@ -506,7 +564,7 @@ export function DataTable<Row extends RowData>({
   }
 
   const headerGroup = table.getHeaderGroups()[0];
-  const template = headerGroup
+  const columnsTemplate = headerGroup
     ? headerGroup.headers
         .map((header) =>
           header.column.columnDef.meta?.grow
@@ -515,9 +573,14 @@ export function DataTable<Row extends RowData>({
         )
         .join(" ")
     : undefined;
-  const totalWidth = headerGroup
+  const columnsWidth = headerGroup
     ? headerGroup.headers.reduce((sum, header) => sum + header.getSize(), 0)
     : undefined;
+  // With selection, the checkbox column comes first and takes its fixed width.
+  const template = selectable
+    ? [`${CHECK_COLUMN_PX}px`, columnsTemplate].filter(Boolean).join(" ")
+    : columnsTemplate;
+  const totalWidth = selectable ? CHECK_COLUMN_PX + (columnsWidth ?? 0) : columnsWidth;
   const model = table.getRowModel().rows;
 
   return (
@@ -525,7 +588,7 @@ export function DataTable<Row extends RowData>({
       role="grid"
       aria-label={ariaLabel}
       aria-rowcount={rows.length + 1 + (isFetchingNextPage ? 1 : 0)}
-      aria-colcount={columns.length}
+      aria-colcount={columns.length + (selectable ? 1 : 0)}
       tabIndex={0}
       className="flex min-h-0 flex-1 flex-col outline-none focus-visible:outline-2 focus-visible:outline-ring focus-visible:-outline-offset-2 focus-visible:outline-solid"
       onKeyDown={onKeyDown}
@@ -549,6 +612,21 @@ export function DataTable<Row extends RowData>({
             className="grid h-row w-full shrink-0 items-center border-b bg-surface select-none text-caption font-medium tracking-wide text-muted-foreground uppercase"
             style={{ gridTemplateColumns: template, minWidth: totalWidth }}
           >
+            {selectable ? (
+              <div
+                role="columnheader"
+                aria-label="Selection"
+                data-select-cell
+                className="flex h-full min-w-0 items-center justify-center"
+              >
+                <Checkbox
+                  aria-label="Select all loaded rows"
+                  checked={headerChecked}
+                  disabled={rows.length === 0}
+                  onCheckedChange={toggleAllLoaded}
+                />
+              </div>
+            ) : null}
             {headerGroup.headers.map((header) => {
               const sorted = header.column.getIsSorted();
               const canSort = header.column.getCanSort();
@@ -693,6 +771,9 @@ export function DataTable<Row extends RowData>({
                   tone={!selected && rowTone?.(row.original) === "error" ? "error" : undefined}
                   template={template}
                   totalWidth={totalWidth}
+                  checkable={selectable}
+                  checked={checkedIds.has(row.id)}
+                  onToggle={toggleRow}
                   onRowClick={onRowClick}
                   onRowEnter={onRowEnter}
                   onRowLeave={cancelRowHover}
@@ -728,6 +809,9 @@ interface BodyRowProps<TData extends RowData> {
   tone: "error" | undefined;
   template: string | undefined;
   totalWidth: number | undefined;
+  checkable: boolean;
+  checked: boolean;
+  onToggle: (id: string) => void;
   onRowClick: (index: number, row: TableRow<typeof features, TData>) => void;
   onRowEnter: (row: TableRow<typeof features, TData>) => void;
   onRowLeave: () => void;
@@ -746,6 +830,9 @@ function BodyRowView<TData extends RowData>({
   tone,
   template,
   totalWidth,
+  checkable,
+  checked,
+  onToggle,
   onRowClick,
   onRowEnter,
   onRowLeave,
@@ -773,6 +860,25 @@ function BodyRowView<TData extends RowData>({
       onPointerEnter={() => onRowEnter(row)}
       onPointerLeave={onRowLeave}
     >
+      {checkable ? (
+        // The wrapper stops the click here, so a checkbox does not reach the row's activation.
+        <div
+          role="gridcell"
+          data-select-cell
+          className="flex min-w-0 items-center justify-center"
+          onClick={(event) => {
+            event.stopPropagation();
+          }}
+        >
+          <Checkbox
+            aria-label="Select row"
+            checked={checked}
+            onCheckedChange={() => {
+              onToggle(row.id);
+            }}
+          />
+        </div>
+      ) : null}
       {row.getAllCells().map((cell) => (
         <div
           key={cell.id}

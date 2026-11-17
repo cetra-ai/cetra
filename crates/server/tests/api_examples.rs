@@ -22,8 +22,9 @@ use cetra_server::api::connections::{
     CreateLlmConnectionRequest, LlmConnection, LlmConnectionTestResult,
 };
 use cetra_server::api::datasets::{
-    AddItemsRequest, CreateDatasetRequest, Dataset, DatasetItem, DatasetVersion, FromTraceRequest,
-    ImportMapping, ImportPreview, ImportResult,
+    AddItemsRequest, CreateDatasetRequest, Dataset, DatasetItem, DatasetVersion, EditItemsResponse,
+    ExperimentTrends, FromTraceRequest, FromTracesResult, ImportMapping, ImportPreview,
+    ImportResult, ItemChange,
 };
 use cetra_server::api::deletions::{Deletion, DeletionPreview};
 use cetra_server::api::entitlements::OrgEntitlements;
@@ -451,6 +452,10 @@ fn static_files_match_their_types() {
     roundtrip::<ImportPreview>("static/dataset-import-preview.json");
     roundtrip::<ImportResult>("static/dataset-import-result.json");
     roundtrip::<DatasetItem>("static/dataset-item-from-trace.json");
+    roundtrip::<EditItemsResponse>("static/dataset-items-edited.json");
+    roundtrip::<DatasetVersion>("static/dataset-items-deleted.json");
+    roundtrip::<FromTracesResult>("static/dataset-items-from-traces.json");
+    roundtrip::<DatasetVersion>("static/dataset-restored.json");
 }
 
 #[test]
@@ -527,6 +532,16 @@ fn request_examples_match_their_types_and_the_openapi_document() {
         ),
         ("post_dataset", "requests/dataset-create.json"),
         ("post_dataset_items", "requests/dataset-items-add.json"),
+        ("patch_dataset_items", "requests/dataset-items-edit.json"),
+        (
+            "post_dataset_items_delete",
+            "requests/dataset-items-delete.json",
+        ),
+        (
+            "post_dataset_items_from_traces",
+            "requests/dataset-items-from-traces.json",
+        ),
+        ("restore_dataset", "requests/dataset-restore.json"),
         (
             "post_dataset_item_from_trace",
             "requests/dataset-from-trace.json",
@@ -681,6 +696,13 @@ fn generated_files_roundtrip() {
             "post_dataset_import_preview" => roundtrip::<ImportPreview>(&example.file),
             "post_dataset_import" => roundtrip::<ImportResult>(&example.file),
             "post_dataset_item_from_trace" => roundtrip::<DatasetItem>(&example.file),
+            "patch_dataset_items" => roundtrip::<EditItemsResponse>(&example.file),
+            "post_dataset_items_delete" | "restore_dataset" => {
+                roundtrip::<DatasetVersion>(&example.file);
+            }
+            "post_dataset_items_from_traces" => roundtrip::<FromTracesResult>(&example.file),
+            "list_dataset_version_changes" => roundtrip::<Page<ItemChange>>(&example.file),
+            "list_experiment_trends" => roundtrip::<ExperimentTrends>(&example.file),
             other => panic!("{other} has no round-trip"),
         }
     }

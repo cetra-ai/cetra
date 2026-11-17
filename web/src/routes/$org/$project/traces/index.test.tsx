@@ -37,8 +37,10 @@ function slotRect(left: number, width: number): DOMRect {
 
 // Each header is 100 px wide, so the drop index follows the column order.
 function stubHeaderSlots(grid: HTMLElement) {
+  // The selection column has no column id and is not a sortable column: the slots count the columns only.
   within(grid)
     .getAllByRole("columnheader")
+    .filter((header) => header.hasAttribute("data-column-id"))
     .forEach((header, index) => {
       header.getBoundingClientRect = () => slotRect(index * 100, 100);
     });
@@ -302,10 +304,10 @@ it("persists a column width and restores the default on double-click", async () 
   fireEvent.pointerUp(window, { clientX: 180 });
   expect(JSON.parse(localStorage.getItem("cetra.table.traces") ?? "")).toEqual({ name: 280 });
   const header = handle.parentElement?.parentElement;
-  expect(header?.style.gridTemplateColumns.startsWith("28px 132px 280px")).toBe(true);
+  expect(header?.style.gridTemplateColumns.startsWith("32px 28px 132px 280px")).toBe(true);
   fireEvent.doubleClick(handle);
   expect(localStorage.getItem("cetra.table.traces")).toBeNull();
-  expect(header?.style.gridTemplateColumns.startsWith("28px 132px 200px")).toBe(true);
+  expect(header?.style.gridTemplateColumns.startsWith("32px 28px 132px 200px")).toBe(true);
 });
 
 const TRACE_1 = "a1000000000000000000000000000001";
@@ -535,6 +537,7 @@ it("restores column order from cols and ignores an unknown id", async () => {
   expect(
     within(grid)
       .getAllByRole("columnheader")
+      .filter((header) => header.hasAttribute("data-column-id"))
       .map((header) => header.textContent),
   ).toEqual(["User", "Name", "Status"]);
 });
@@ -609,6 +612,7 @@ it("uses the stored columns when the URL has no cols", async () => {
   expect(
     within(grid)
       .getAllByRole("columnheader")
+      .filter((header) => header.hasAttribute("data-column-id"))
       .map((header) => header.textContent),
   ).toEqual(["User", "Name", "Status"]);
 });
@@ -1554,4 +1558,54 @@ it("does not apply the default view on a return from a detail page", async () =>
   const traces = await screen.findByRole("grid", { name: "Traces" });
   expect(within(traces).getAllByRole("row").length).toBeGreaterThan(1);
   expect(router.state.location.search).toEqual({});
+});
+
+/** The row checkbox of the `index`th loaded row. */
+async function rowBox(index: number): Promise<HTMLElement> {
+  const grid = await screen.findByRole("grid", { name: "Traces" });
+  const boxes = within(grid).getAllByRole("checkbox", { name: "Select row" });
+  const box = boxes[index];
+  if (!box) {
+    throw new Error(`no row checkbox ${index}`);
+  }
+  return box;
+}
+
+it("checks trace rows without opening them and offers to add them to a dataset", async () => {
+  const { router, user } = await renderApp("/acme/support-bot/traces");
+  await screen.findByRole("grid", { name: "Traces" });
+  expect(screen.queryByRole("button", { name: /to dataset$/ })).not.toBeInTheDocument();
+
+  await user.click(await rowBox(0));
+  await user.click(await rowBox(1));
+  expect(screen.getByRole("button", { name: "Add 2 to dataset" })).toBeEnabled();
+
+  await user.click(await rowBox(0));
+  expect(screen.getByRole("button", { name: "Add 1 to dataset" })).toBeEnabled();
+  expect(router.state.location.search.trace).toBeUndefined();
+});
+
+it("disables the add action for viewers and says why", async () => {
+  server.use(
+    http.get("/api/v1/projects/:project", () =>
+      HttpResponse.json({ ...projectFixture, role: "viewer" }),
+    ),
+  );
+  const { user } = await renderApp("/acme/support-bot/traces");
+  await user.click(await rowBox(0));
+
+  expect(screen.getByRole("button", { name: "Add 1 to dataset" })).toBeDisabled();
+  expect(screen.getByText("Only members can add to datasets")).toBeInTheDocument();
+});
+
+it("clears the checked traces when the search changes", async () => {
+  const { user } = await renderApp("/acme/support-bot/traces");
+  await user.click(await rowBox(0));
+  expect(screen.getByRole("button", { name: "Add 1 to dataset" })).toBeInTheDocument();
+
+  await user.type(screen.getByRole("searchbox", { name: "Search" }), "refund");
+
+  await waitFor(() =>
+    expect(screen.queryByRole("button", { name: "Add 1 to dataset" })).not.toBeInTheDocument(),
+  );
 });

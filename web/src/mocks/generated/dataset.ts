@@ -62,6 +62,8 @@ type BuiltSpan = {
 };
 
 export type Dataset = {
+  /** The `now` the traces were generated against; generated datasets (`datasets.ts`) share it. */
+  now: number;
   traces: Schema<"TraceSummary">[];
   traceDetail(traceId: string): Schema<"TraceDetail"> | undefined;
   spanDetail(traceId: string, spanId: string): Schema<"SpanDetail"> | undefined;
@@ -131,6 +133,7 @@ export function createDataset(options: { seed: number; now: number; traces: numb
   }
 
   return {
+    now: options.now,
     traces,
     traceDetail,
     spanDetail(traceId, spanId) {

@@ -18,6 +18,10 @@ import {
 import { DataTable } from "@/components/data-table/data-table";
 import { traceListOptions, traceProbeOptions } from "@/components/data-table/use-infinite-list";
 import { useLiveTraces } from "@/components/data-table/use-live-traces";
+import {
+  AddTracesToDatasetDialog,
+  addTracesReason,
+} from "@/components/datasets/add-traces-to-dataset-dialog";
 import { DeleteMatchingDialog } from "@/components/deletions/delete-matching-dialog";
 import { DisabledReason } from "@/components/disabled-reason";
 import { FilterBar } from "@/components/filter-bar/filter-bar";
@@ -66,6 +70,7 @@ import { traceStreamUrl } from "@/lib/sse";
 import { type RangeState, rangeFromSearch, resolveRange } from "@/lib/time-range";
 
 const TABLE_ID = "traces";
+const NO_TRACES: ReadonlySet<string> = new Set();
 
 const SORT_COLUMN: Record<Schema<"TraceSort">, string> = {
   start_time: "start",
@@ -93,6 +98,8 @@ function TracesPage() {
   const navigate = Route.useNavigate();
   const router = useRouter();
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
+  const [addIds, setAddIds] = useState<string[]>([]);
   const applyView = useCallback(
     (next: Record<string, unknown>) => {
       void navigate({
@@ -127,6 +134,21 @@ function TracesPage() {
     setAnchor(Date.now());
   }, [rangeKey]);
   const resolved = resolveRange(range, anchor);
+  // Checked traces belong to the list they were checked in: a new filter, search, range or
+  // eval/experiment flag clears them.
+  const selectionKey = JSON.stringify([
+    search.filter,
+    search.search,
+    rangeKey,
+    search.eval,
+    search.exp,
+  ]);
+  const [selection, setSelection] = useState<{ key: string; ids: ReadonlySet<string> }>({
+    key: selectionKey,
+    ids: NO_TRACES,
+  });
+  const checkedIds = selection.key === selectionKey ? selection.ids : NO_TRACES;
+  const addReason = addTracesReason(data.role, checkedIds.size);
   const listOptions = traceListOptions(org, project, {
     from: resolved.from,
     to: resolved.to,
@@ -456,6 +478,22 @@ function TracesPage() {
                   views={
                     <>
                       <SavedViewsMenu kind="traces" search={search} onApply={applyView} />
+                      {checkedIds.size > 0 ? (
+                        <DisabledReason reason={addReason}>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={addReason !== undefined}
+                            onClick={() => {
+                              setAddIds([...checkedIds]);
+                              setAddOpen(true);
+                            }}
+                          >
+                            {`Add ${checkedIds.size} to dataset`}
+                          </Button>
+                        </DisabledReason>
+                      ) : null}
                       <DisabledReason
                         reason={canDelete ? undefined : "Only project admins can delete traces"}
                       >
@@ -486,6 +524,14 @@ function TracesPage() {
                     to: resolved.to,
                     includeEval: search.eval === 1,
                     includeExperiments: search.exp === 1,
+                  }}
+                />
+                <AddTracesToDatasetDialog
+                  open={addOpen}
+                  onOpenChange={setAddOpen}
+                  traceIds={addIds}
+                  onAdded={() => {
+                    setSelection({ key: selectionKey, ids: NO_TRACES });
                   }}
                 />
                 {filterError ? (
@@ -535,6 +581,10 @@ function TracesPage() {
                         });
                       }}
                       onRowHover={prefetchTrace}
+                      checkedIds={checkedIds}
+                      onCheckedChange={(ids) => {
+                        setSelection({ key: selectionKey, ids });
+                      }}
                       onScrollAnchor={onScrollAnchor}
                       restoreAnchor={restoreAnchor}
                       onSelectionMove={(row) => {

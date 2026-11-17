@@ -108,14 +108,20 @@ Track J ([`plans/j-datasets/00-design.md`](../plans/j-datasets/00-design.md) § 
 | Method & path | Notes |
 |---|---|
 | `GET/POST /datasets` · `GET/PATCH/DELETE /datasets/{dataset}` | `{dataset}` = id or name (names are never UUID-shaped, D-J-4); list `?q=` filters by name; a schema change validates the live items (D-J-2) |
-| `GET /datasets/{dataset}/versions` | newest first (D-J-3) |
-| `GET /datasets/{dataset}/items?version=` · `GET /datasets/{dataset}/items/{item_id}?version=` | ordered by item id; default the latest version |
+| `GET /datasets/{dataset}/versions` | newest first, each with its `added`, `edited` and `deleted` item counts (D-J-3, D-J-24) |
+| `GET /datasets/{dataset}/versions/{version}/changes?limit=&cursor=` | the items a version added, edited or deleted, each with `before` and `after` revisions; a version outside 1 to the current one is 404 (D-J-24) |
+| `POST /datasets/{dataset}/restore` | `{version}`, 0 ≤ version < current; a new version making the live items those of `version`; a version that already is the live state is 400 (D-J-24) |
+| `GET /datasets/{dataset}/items?version=&q=` · `GET /datasets/{dataset}/items/{item_id}?version=` | ordered by item id; default the latest version; `q` (1–200 characters) searches input, expected output and metadata text, case-insensitively (D-J-22) |
 | `POST /datasets/{dataset}/items` | batch add, 1–1,000 items (one new version); `201 {version, item_ids}` |
 | `PATCH/DELETE /datasets/{dataset}/items/{item_id}` | new version; an unchanged PATCH makes none |
+| `PATCH /datasets/{dataset}/items` | `{items: [{id, input?, expected_output?, metadata?}]}`, 1–1,000 distinct live ids; one new version (`edit N items`, or `edit item <id>` for one); `{version \| null, items}`, `version` null when nothing changed (D-J-23) |
+| `POST /datasets/{dataset}/items/delete` | `{ids}`, 1–1,000 distinct live ids; one new version (`delete N items`); `200 DatasetVersion` (D-J-23) |
 | `POST /datasets/{dataset}/import/preview` | `application/octet-stream` head of the file (≤ 1 MiB), `?format=csv\|jsonl&partial=` → columns, ≤ 20 rows and their errors; writes nothing; a `read` key or read-only PAT is refused, since only `Query` routes read by `POST` (D-H-4, D-J-5) (D-J-6) |
 | `POST /datasets/{dataset}/import` | `?format=csv\|jsonl`; multipart `file` (≤ 100 MiB, ≤ 50,000 rows) + `mapping` JSON; `201 {version, imported, error_count, errors}`; at most 2 imports at once (503) (D-J-6) |
 | `GET /datasets/{dataset}/export?version=&format=jsonl\|csv` | streamed attachment (D-J-7) |
 | `POST /datasets/{dataset}/items/from-trace` | `{trace_id, span_id?, input?, expected_output?, metadata?}`; window and deletion guard apply (D-J-8) |
+| `POST /datasets/{dataset}/items/from-traces` | `{items: [{trace_id, span_id?}]}`, 1–100; each copied as `from-trace` does, one new version (`add from trace <id>` for one written trace, else `add from N traces`); `201 {version, items, skipped}`; no copyable trace is 400 (D-J-25) |
+| `GET /dataset-trends?ids=` | 1–100 dataset ids; per dataset its latest 10 visible experiments with result and error counts and numeric and boolean score means; `scores_unavailable: true` instead of a 5xx when storage is busy (D-J-26) |
 | `GET/POST /experiments` · `GET/DELETE /experiments/{id}` | list `?dataset=`; create pins the version and answers the first 1,000 items (D-J-10); experiments older than the data window are 404, except to `DELETE` (D-J-14) |
 | `POST /experiments/{id}/items` | 1–500 results, outputs ≤ 32 MiB in total; a repost of `(item, repetition)` replaces it; `{stored, skipped}` (D-J-10) |
 | `POST /experiments/{id}/finish` | `{error?}` → `completed` or `failed`; later results are 409, a repeated finish with the same outcome answers the experiment (no server evaluators, D-J-11) |

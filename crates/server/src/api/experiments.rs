@@ -10,7 +10,7 @@ use uuid::Uuid;
 use cetra_core::enums::ScoreDataType;
 use cetra_core::ids::TraceId;
 
-use super::common::{Limit, any_json};
+use super::common::{Limit, any_json, open_object};
 use super::datasets::DatasetItem;
 
 /// Repetitions of an experiment (D-J-10).
@@ -69,7 +69,7 @@ pub struct Experiment {
     /// The dataset version the experiment is pinned to.
     pub dataset_version: i64,
     /// A JSON object.
-    #[schema(value_type = Object)]
+    #[schema(schema_with = open_object)]
     pub metadata: Map<String, Value>,
     /// Repetitions of every item, 1 to 20.
     pub repetitions: i64,
@@ -112,7 +112,7 @@ pub struct CreateExperimentRequest {
     pub description: Option<String>,
     /// A JSON object of at most 64 KiB.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Option<Object>)]
+    #[schema(schema_with = open_object)]
     pub metadata: Option<Map<String, Value>>,
     /// Repetitions of every item, 1 to 20. Defaults to 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]

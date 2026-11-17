@@ -1309,6 +1309,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{project}/dataset-trends": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The latest experiments of several datasets, with score means
+         * @description Any project member, or an API key with `read`. For each dataset of `ids` in the project, its 10 newest visible experiments with result and error counts, and their numeric and boolean score means (D-J-26). Storage busy or slow answers without `scores` and with `scores_unavailable: true`.
+         */
+        get: operations["list_experiment_trends"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{project}/datasets": {
         parameters: {
             query?: never;
@@ -1442,6 +1462,30 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
+        /**
+         * Edit items in one batch
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-J-5, D-J-23). Creates one new version holding every item that changes; items that change nothing are left out. A batch with any failing item writes nothing; the error lists the failing items.
+         */
+        patch: operations["patch_dataset_items"];
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/datasets/{dataset}/items/delete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Delete items in one batch
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-J-5, D-J-23). Creates one new version in which the listed items are gone; older versions still hold them.
+         */
+        post: operations["post_dataset_items_delete"];
+        delete?: never;
+        options?: never;
+        head?: never;
         patch?: never;
         trace?: never;
     };
@@ -1459,6 +1503,26 @@ export interface paths {
          * @description Project members and above, a read-write personal access token, or an API key with `write` (D-J-5, D-J-8). Creates one new version holding one item copied from the trace root or from `span_id`; the request's fields replace the copied values. A trace that a pending deletion covers answers 404 and writes nothing (D-J-9).
          */
         post: operations["post_dataset_item_from_trace"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/datasets/{dataset}/items/from-traces": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Add items from several traces
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-J-5, D-J-25). Copies 1 to 100 traces as `from-trace` does, in one new version. A trace that cannot be copied is listed in `skipped`; no copyable trace is a 400.
+         */
+        post: operations["post_dataset_items_from_traces"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1493,6 +1557,26 @@ export interface paths {
         patch: operations["patch_dataset_item"];
         trace?: never;
     };
+    "/api/v1/projects/{project}/datasets/{dataset}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Restore the items of an earlier version
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-J-5, D-J-24). Creates one new version whose live items are those of the given earlier version. A version that changes nothing is a 400 on `version` and writes nothing.
+         */
+        post: operations["restore_dataset"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{project}/datasets/{dataset}/versions": {
         parameters: {
             query?: never;
@@ -1505,6 +1589,26 @@ export interface paths {
          * @description Any project member, or an API key with `read`.
          */
         get: operations["list_dataset_versions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/datasets/{dataset}/versions/{version}/changes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the items a version changed
+         * @description Any project member, or an API key with `read`. The items the version added, edited or deleted, each with its revision before and after, paged by item id (D-J-24). A version outside 1 to the current one is 404.
+         */
+        get: operations["list_dataset_version_changes"];
         put?: never;
         post?: never;
         delete?: never;
@@ -3175,6 +3279,12 @@ export interface components {
             /** @description The label. */
             label: string;
         };
+        /**
+         * Format: int32
+         * @description Page size of a change listing. Default 50, accepted range 1–100.
+         * @default 50
+         */
+        ChangeLimit: number;
         /** @description `POST /api/v1/me/password`. */
         ChangePasswordRequest: {
             /** @description The current password. Required when the account has one, and absent when it does not. */
@@ -3396,10 +3506,12 @@ export interface components {
         CreateDatasetRequest: {
             /** @description Free text, at most 2 000 characters. */
             description?: string;
-            /** @description JSON Schema every present expected output must fit, at most 64 KiB. */
-            expected_schema?: Record<string, never>;
-            /** @description JSON Schema (Draft 2020-12) every item input must fit, at most 64 KiB. */
-            input_schema?: Record<string, never>;
+            expected_schema?: {
+                [key: string]: unknown;
+            };
+            input_schema?: {
+                [key: string]: unknown;
+            };
             /** @description Unique in the project, 1 to 200 characters, never a UUID. */
             name: string;
         };
@@ -3451,8 +3563,9 @@ export interface components {
             dataset_version?: number;
             /** @description Free text, at most 2 000 characters. */
             description?: string;
-            /** @description A JSON object of at most 64 KiB. */
-            metadata?: Record<string, never>;
+            metadata?: {
+                [key: string]: unknown;
+            };
             /** @description Experiment name, 1 to 200 characters after trimming. */
             name: string;
             /**
@@ -3685,8 +3798,9 @@ export interface components {
             current_version: number;
             /** @description What the dataset holds. Omitted when unset. */
             description?: string;
-            /** @description JSON Schema every present expected output must fit. Omitted when unset. */
-            expected_schema?: Record<string, never>;
+            expected_schema?: {
+                [key: string]: unknown;
+            };
             /**
              * Format: int64
              * @description Experiments run on this dataset.
@@ -3697,8 +3811,9 @@ export interface components {
              * @description Dataset id.
              */
             id: string;
-            /** @description JSON Schema (Draft 2020-12) every item input must fit. Omitted when unset. */
-            input_schema?: Record<string, never>;
+            input_schema?: {
+                [key: string]: unknown;
+            };
             /**
              * Format: int64
              * @description Live items at the latest version.
@@ -3728,8 +3843,9 @@ export interface components {
             id: string;
             /** @description Any JSON value. */
             input: unknown;
-            /** @description A JSON object. Empty when the item has no metadata. */
-            metadata: Record<string, never>;
+            metadata: {
+                [key: string]: unknown;
+            };
             /**
              * Format: uuid
              * @description This revision.
@@ -3759,8 +3875,23 @@ export interface components {
             /** @description Opaque cursor for the next page, or null when this is the last page. */
             next_cursor: string | null;
         };
+        /** @description The latest experiments of one dataset, newest first (D-J-26). */
+        DatasetTrend: {
+            /**
+             * Format: uuid
+             * @description The dataset id.
+             */
+            dataset_id: string;
+            /** @description Up to 10 visible experiments, newest first. */
+            experiments: components["schemas"]["ExperimentTrend"][];
+        };
         /** @description One version of a dataset. */
         DatasetVersion: {
+            /**
+             * Format: int64
+             * @description Items this version adds (D-J-24).
+             */
+            added: number;
             /**
              * Format: date-time
              * @description Creation time. JSON is RFC 3339.
@@ -3768,8 +3899,18 @@ export interface components {
             created_at: string;
             /** @description The user id, or `key:<key id>` for an API key. Omitted when unknown. */
             created_by?: string;
+            /**
+             * Format: int64
+             * @description Items this version deletes (D-J-24).
+             */
+            deleted: number;
             /** @description What changed, e.g. `add 12 items`. */
             description: string;
+            /**
+             * Format: int64
+             * @description Items this version edits (D-J-24).
+             */
+            edited: number;
             /**
              * Format: int64
              * @description Version number. Versions start at 1.
@@ -3782,6 +3923,11 @@ export interface components {
             data: components["schemas"]["DatasetVersion"][];
             /** @description Opaque cursor for the next page, or null when this is the last page. */
             next_cursor: string | null;
+        };
+        /** @description `POST …/datasets/{dataset}/items/delete` body (D-J-23): 1 to 1 000 distinct live item ids. */
+        DeleteItemsRequest: {
+            /** @description The live items to delete, 1 to 1 000 distinct ids. */
+            ids: string[];
         };
         /** @description A deletion request and its progress. */
         Deletion: {
@@ -3925,6 +4071,39 @@ export interface components {
          * @enum {string}
          */
         DomainStatus: "pending" | "verified";
+        /**
+         * @description One item of a batch edit (D-J-23): the item id and the fields to replace, as in
+         *     [`UpdateItemRequest`]. An absent field is unchanged; `expected_output: null` clears it.
+         */
+        EditItem: {
+            /** @description Any JSON value. */
+            expected_output?: unknown;
+            /**
+             * Format: uuid
+             * @description The live item to edit.
+             */
+            id: string;
+            /** @description Any JSON value but null. */
+            input?: unknown;
+            metadata?: {
+                [key: string]: unknown;
+            };
+        };
+        /** @description `PATCH …/datasets/{dataset}/items` body (D-J-23): 1 to 1 000 distinct live items. */
+        EditItemsRequest: {
+            /** @description The edits, 1 to 1 000 of them, one per item id. */
+            items: components["schemas"]["EditItem"][];
+        };
+        /**
+         * @description The answer to a batch edit (D-J-23): the new version, or `null` when no item changed, and the
+         *     live revision of every id in request order.
+         */
+        EditItemsResponse: {
+            /** @description The live revisions of every id, in request order. */
+            items: components["schemas"]["DatasetItem"][];
+            /** @description The version the changed items were edited in. `null` when nothing changed. */
+            version?: components["schemas"]["DatasetVersion"];
+        };
         /**
          * @description User summary plus the most recent sessions.
          *
@@ -4415,8 +4594,9 @@ export interface components {
              * @description Live items of the pinned version.
              */
             item_count: number;
-            /** @description A JSON object. */
-            metadata: Record<string, never>;
+            metadata: {
+                [key: string]: unknown;
+            };
             /** @description Not unique. 1 to 200 characters. */
             name: string;
             /**
@@ -4506,6 +4686,23 @@ export interface components {
              */
             stored: number;
         };
+        /** @description The score of an experiment: the mean and row count of one name and data type (D-J-26). */
+        ExperimentScoreMean: {
+            /**
+             * Format: int64
+             * @description Score rows counted.
+             */
+            count: number;
+            /** @description `numeric` or `boolean`. A boolean's mean is its pass rate. */
+            data_type: string;
+            /**
+             * Format: double
+             * @description Mean of the values over the score rows. Omitted when no row has a value.
+             */
+            mean?: number;
+            /** @description Score name. */
+            name: string;
+        };
         /**
          * @description `running`, `completed` or `failed`.
          * @enum {string}
@@ -4557,6 +4754,45 @@ export interface components {
             result_count: number;
             /** @description One entry per score name, sorted by name. */
             scores: components["schemas"]["ScoreSummary"][];
+        };
+        /** @description One of a dataset's latest experiments in the trends answer (D-J-26). */
+        ExperimentTrend: {
+            /**
+             * Format: date-time
+             * @description Creation time. JSON is RFC 3339.
+             */
+            created_at: string;
+            /**
+             * Format: int64
+             * @description Results with an error.
+             */
+            error_count: number;
+            /**
+             * Format: uuid
+             * @description The experiment id.
+             */
+            id: string;
+            /** @description The experiment name. */
+            name: string;
+            /**
+             * Format: int64
+             * @description Results of the experiment.
+             */
+            result_count: number;
+            /**
+             * @description The numeric and boolean scores of the experiment. Omitted when storage could not read
+             *     them (`scores_unavailable` on the answer).
+             */
+            scores?: components["schemas"]["ExperimentScoreMean"][];
+            /** @description `running`, `completed` or `failed`. */
+            status: string;
+        };
+        /** @description The answer of the experiment trends (D-J-26). */
+        ExperimentTrends: {
+            /** @description One entry per dataset of the request that exists in the project, in request order. */
+            data: components["schemas"]["DatasetTrend"][];
+            /** @description True when storage was busy or timed out, so no experiment has `scores`. */
+            scores_unavailable: boolean;
         };
         /** @description An experiment listed in `experiments_with_score`. */
         ExperimentWithScore: {
@@ -4645,12 +4881,30 @@ export interface components {
             expected_output?: unknown;
             /** @description Any JSON value. */
             input?: unknown;
-            /** @description The item's metadata, a JSON object. Absent: `{}`. */
-            metadata?: Record<string, never>;
+            metadata?: {
+                [key: string]: unknown;
+            };
             /** @description 16 hex digits. Absent: the trace root. */
             span_id?: string;
             /** @description 32 hex digits, either case. */
             trace_id: string;
+        };
+        /** @description `POST …/items/from-traces` body (D-J-25): 1 to 100 traces, each copied as `from-trace` copies it. */
+        FromTracesRequest: {
+            /** @description The traces to copy, 1 to 100 of them. */
+            items: components["schemas"]["TraceRef"][];
+        };
+        /**
+         * @description The answer of a bulk add from traces (D-J-25): the new version, the items it added, and the
+         *     traces that were not copied.
+         */
+        FromTracesResult: {
+            /** @description The items added, in request order. */
+            items: components["schemas"]["DatasetItem"][];
+            /** @description Every trace that was not copied, in request order. */
+            skipped: components["schemas"]["SkippedTrace"][];
+            /** @description The version the copies were added in. */
+            version: components["schemas"]["DatasetVersion"];
         };
         /**
          * @description One function the filter DSL or SQL console can call.
@@ -4910,6 +5164,35 @@ export interface components {
             org: components["schemas"]["InviteOrg"];
             /** @description Role granted on accept. */
             role: components["schemas"]["OrgRole"];
+        };
+        /**
+         * @description One item that changed in a version (D-J-24). `before` is the revision the version closed,
+         *     `after` the one it started; each is absent when the version did not make it.
+         */
+        ItemChange: {
+            /** @description The revision after the version. Omitted for a deleted item. */
+            after?: components["schemas"]["DatasetItem"];
+            /** @description The revision before the version. Omitted for an added item. */
+            before?: components["schemas"]["DatasetItem"];
+            /** @description What the version did to the item. */
+            change: components["schemas"]["ItemChangeKind"];
+            /**
+             * Format: uuid
+             * @description The item id.
+             */
+            item_id: string;
+        };
+        /**
+         * @description How an item changed in a version (D-J-24).
+         * @enum {string}
+         */
+        ItemChangeKind: "added" | "edited" | "deleted";
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        ItemChangePage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["ItemChange"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
         };
         /**
          * @description Role given to people who join through the org's provider (D-P-56).
@@ -5430,8 +5713,9 @@ export interface components {
             expected_output?: unknown;
             /** @description Any JSON value. */
             input: unknown;
-            /** @description A JSON object. Empty when omitted. */
-            metadata?: Record<string, never>;
+            metadata?: {
+                [key: string]: unknown;
+            };
         };
         /** @description A notification channel. The URL, the secret and header values are never returned (D-K-6). */
         NotificationChannel: {
@@ -6092,6 +6376,17 @@ export interface components {
             password: string;
             /** @description The token from the reset link. */
             token: string;
+        };
+        /**
+         * @description `POST …/datasets/{dataset}/restore` body (D-J-24): the earlier version whose items the dataset
+         *     takes again.
+         */
+        RestoreRequest: {
+            /**
+             * Format: int64
+             * @description An earlier version, 0 to the current version minus one.
+             */
+            version: number;
         };
         /** @description One result of an experiment, with its input and output. */
         ResultRow: {
@@ -6852,6 +7147,18 @@ export interface components {
             /** @description The account cannot sign in until the email is verified. */
             verification_required: boolean;
         };
+        /** @description A trace of a bulk add that was not copied (D-J-25). */
+        SkippedTrace: {
+            /**
+             * Format: int64
+             * @description Position of the trace in the request.
+             */
+            index: number;
+            /** @description Why it was not copied. */
+            message: string;
+            /** @description The trace id as the request gave it. */
+            trace_id: string;
+        };
         /**
          * @description Sort direction. Default is descending.
          *
@@ -7382,6 +7689,13 @@ export interface components {
             /** @description Opaque cursor for the next page, or null when this is the last page. */
             next_cursor: string | null;
         };
+        /** @description One trace of a bulk add from traces (D-J-25): the trace, and the span when it is not the root. */
+        TraceRef: {
+            /** @description 16 hex digits. Absent: the trace root. */
+            span_id?: string;
+            /** @description 32 hex digits, either case. */
+            trace_id: string;
+        };
         /**
          * @description Sort key for trace lists.
          *
@@ -7570,10 +7884,12 @@ export interface components {
         UpdateDatasetRequest: {
             /** @description New description, when present. `null` clears it. */
             description?: string | null;
-            /** @description New expected-output schema, when present. `null` clears it. */
-            expected_schema?: Record<string, never> | null;
-            /** @description New input schema, when present. `null` clears it. */
-            input_schema?: Record<string, never> | null;
+            expected_schema?: {
+                [key: string]: unknown;
+            } | null;
+            input_schema?: {
+                [key: string]: unknown;
+            } | null;
             /** @description New name, when present. Same rules as on create. */
             name?: string;
         };
@@ -7607,8 +7923,9 @@ export interface components {
             expected_output?: unknown;
             /** @description Any JSON value but null. */
             input?: unknown;
-            /** @description New metadata, when present. A JSON object; must not be null. */
-            metadata?: Record<string, never>;
+            metadata?: {
+                [key: string]: unknown;
+            };
         };
         /**
          * @description `PATCH /api/v1/orgs/{org}/llm-connections/{id}` body. Absent means
@@ -13825,6 +14142,77 @@ export interface operations {
             };
         };
     };
+    list_experiment_trends: {
+        parameters: {
+            query: {
+                /** @description Comma-separated dataset ids, 1 to 100 distinct UUIDs. Unknown ids are left out. */
+                ids: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The trends of each dataset, in request order. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExperimentTrends"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     list_datasets: {
         parameters: {
             query?: {
@@ -14490,6 +14878,11 @@ export interface operations {
             query?: {
                 /** @description Version to read, 0 to the current version. Default: the current version. */
                 version?: number;
+                /**
+                 * @description Search text, 1 to 200 characters after trimming: keeps the items whose input, expected
+                 *     output or metadata contains it, case-insensitively. Keys count too. Absent: no search.
+                 */
+                q?: string;
                 /** @description Maximum number of items to return (1–1000, default 50). */
                 limit?: components["schemas"]["Limit"];
                 /** @description Opaque cursor from a previous page. */
@@ -14654,6 +15047,172 @@ export interface operations {
             };
         };
     };
+    patch_dataset_items: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dataset id, or its name. */
+                dataset: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EditItemsRequest"];
+            };
+        };
+        responses: {
+            /** @description The new version, or null when nothing changed, and the items. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EditItemsResponse"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_dataset_items_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dataset id, or its name. */
+                dataset: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DeleteItemsRequest"];
+            };
+        };
+        responses: {
+            /** @description The new version. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DatasetVersion"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     post_dataset_item_from_trace: {
         parameters: {
             query?: never;
@@ -14719,6 +15278,107 @@ export interface operations {
             };
             /** @description The request conflicts with the current state. */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_dataset_items_from_traces: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dataset id, or its name. */
+                dataset: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FromTracesRequest"];
+            };
+        };
+        responses: {
+            /** @description The new version, the items added and the traces skipped. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FromTracesResult"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -14978,6 +15638,98 @@ export interface operations {
             };
         };
     };
+    restore_dataset: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dataset id, or its name. */
+                dataset: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RestoreRequest"];
+            };
+        };
+        responses: {
+            /** @description The new version. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DatasetVersion"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     list_dataset_versions: {
         parameters: {
             query?: {
@@ -15004,6 +15756,83 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DatasetVersionPage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_dataset_version_changes: {
+        parameters: {
+            query?: {
+                /** @description Maximum number of changes to return (1–100, default 50). */
+                limit?: components["schemas"]["ChangeLimit"];
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dataset id, or its name. */
+                dataset: string;
+                /** @description Version number, starting at 1. */
+                version: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of changes, by item id. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ItemChangePage"];
                 };
             };
             /** @description The request is malformed or a filter is invalid. */

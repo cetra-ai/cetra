@@ -27,12 +27,25 @@ export function datasetKey(org: string, project: string, dataset: string) {
   return datasetQuery(org, project, dataset).queryKey;
 }
 
-/** One page request of a version's items; `version` undefined reads the latest. */
-export function datasetItemsInit(org: string, project: string, dataset: string, version?: number) {
+/**
+ * One page request of a version's items; `version` undefined reads the latest, and `q` (when
+ * given) keeps the items that match the search text.
+ */
+export function datasetItemsInit(
+  org: string,
+  project: string,
+  dataset: string,
+  version?: number,
+  q?: string,
+) {
   return {
     params: {
       path: { project: projectRef(org, project), dataset },
-      query: { limit: 100, ...(version !== undefined ? { version } : {}) },
+      query: {
+        limit: 100,
+        ...(version !== undefined ? { version } : {}),
+        ...(q !== undefined ? { q } : {}),
+      },
     },
   };
 }

@@ -279,7 +279,7 @@ function ExperimentsPage() {
                 <Link
                   to="/$org/$project/datasets"
                   params={{ org, project }}
-                  search={{ q: undefined }}
+                  search={{ q: undefined, dataset: undefined }}
                 >
                   Open datasets
                 </Link>

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::api::common::Page;
-use crate::api::datasets::{Dataset, DatasetItem, DatasetVersion};
+use crate::api::datasets::{Dataset, DatasetItem, DatasetVersion, ExperimentTrends, ItemChange};
 use crate::api::metrics::MetricsResponse;
 use crate::api::schema::SchemaResponse;
 use crate::api::sessions::{SessionDetail, SessionSummary};
@@ -382,6 +382,33 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
         &format!("responses/datasets/{EXAMPLE_DATASET}/items/{EXAMPLE_ITEM}.json"),
         &item,
     );
+    // Version 2 edited `EXAMPLE_ITEM`: one changed item, its revision before and after.
+    let changes: Page<ItemChange> = fetch(
+        &app,
+        cookie,
+        &format!("/datasets/{EXAMPLE_DATASET}/versions/2/changes"),
+    )
+    .await;
+    out.add(
+        "list_dataset_version_changes",
+        &[("dataset", EXAMPLE_DATASET), ("version", "2")],
+        &[],
+        &format!("responses/datasets/{EXAMPLE_DATASET}/versions/2/changes.json"),
+        &changes,
+    );
+    let trends: ExperimentTrends = fetch(
+        &app,
+        cookie,
+        &format!("/dataset-trends?ids={EXAMPLE_DATASET}"),
+    )
+    .await;
+    out.add(
+        "list_experiment_trends",
+        &[],
+        &[("ids", EXAMPLE_DATASET)],
+        "responses/dataset-trends.json",
+        &trends,
+    );
 
     let metrics: MetricsResponse = fetch(
         &app,
@@ -462,6 +489,32 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
             "post_dataset_item_from_trace",
             params(&[("dataset", EXAMPLE_DATASET)]),
             "static/dataset-item-from-trace.json",
+        ),
+        example(
+            "patch_dataset_items",
+            params(&[("dataset", EXAMPLE_DATASET)]),
+            BTreeMap::new(),
+            "static/dataset-items-edited.json",
+            "application/json",
+        ),
+        example(
+            "post_dataset_items_delete",
+            params(&[("dataset", EXAMPLE_DATASET)]),
+            BTreeMap::new(),
+            "static/dataset-items-deleted.json",
+            "application/json",
+        ),
+        example_created(
+            "post_dataset_items_from_traces",
+            params(&[("dataset", EXAMPLE_DATASET)]),
+            "static/dataset-items-from-traces.json",
+        ),
+        example(
+            "restore_dataset",
+            params(&[("dataset", EXAMPLE_DATASET)]),
+            BTreeMap::new(),
+            "static/dataset-restored.json",
+            "application/json",
         ),
         example(
             "list_admin_users",
