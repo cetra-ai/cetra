@@ -90,6 +90,7 @@ async fn main() -> R<()> {
             .await
         }
         Some("merge") => merge_cmd(&args[2]).await,
+        Some("dedup") => dedup_cmd(Path::new(args.get(2).ok_or(USAGE)?)),
         Some("swe") => {
             let budget: usize = args[2].parse()?;
             swe_cmd(budget, &args[3..])
@@ -102,7 +103,7 @@ async fn main() -> R<()> {
     }
 }
 
-const USAGE: &str = "usage: fmtbench gen <dir> <traces> <files> [--swe <max_trajectories> <shard>...] | query <dir|s3://bucket/key> [runs] [only] | profile <dir|s3://bucket/key> [runs] | merge <dir> (local only)\n  s3 needs AWS_ENDPOINT, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION and AWS_ALLOW_HTTP=true";
+const USAGE: &str = "usage: fmtbench gen <dir> <traces> <files> [--swe <max_trajectories> <shard>...] | query <dir|s3://bucket/key> [runs] [only] | profile <dir|s3://bucket/key> [runs] | merge <dir> (local only) | dedup <dir> (local only)\n  s3 needs AWS_ENDPOINT, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION and AWS_ALLOW_HTTP=true";
 
 // ------------------------------------------------------------------ generate
 
@@ -1056,6 +1057,113 @@ async fn trace_lookup_cold(loc: &Location, ids: &[[u8; 16]], runs: usize) -> R<(
         let w = waves.map_or("-".to_owned(), |w| format!("{:.1}", w as f64 / n));
         println!("{label:16} {:>10.2} {:>10.1} {:>10.1} {w:>8} {:>8}", ms / n, kib / n, reqs / n, rows / runs);
     }
+    Ok(())
+}
+
+// ------------------------------------------------------------------ dedup
+
+/// Survey experiment E2: per `pq_default` file, the payload bytes with one chunk store per
+/// column (as Strata writes them) against one store shared by all payload columns.
+fn dedup_cmd(dir: &Path) -> R<()> {
+    use arrow::array::AsArray;
+    use parquet::arrow::ProjectionMask;
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    const NAMES: [&str; 4] = ["input", "output", "system_instructions", "tool_definitions"];
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir.join("pq_default"))?
+        .map(|e| e.map(|e| e.path()))
+        .collect::<Result<_, _>>()?;
+    paths.sort();
+    let mut totals: Vec<(u64, u64, u64, u64, u64)> = vec![(0, 0, 0, 0, 0); NAMES.len()];
+    let (mut own_total, mut shared_total, mut pq_total) = (0u64, 0u64, 0u64);
+    for p in &paths {
+        let b = ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(p)?)?;
+        let pq_sizes: Vec<u64> = NAMES
+            .iter()
+            .map(|n| {
+                b.metadata()
+                    .row_groups()
+                    .iter()
+                    .flat_map(|rg| rg.columns())
+                    .filter(|c| c.column_path().parts().first().map(String::as_str) == Some(*n))
+                    .map(|c| c.compressed_size() as u64)
+                    .sum()
+            })
+            .collect();
+        let mask = ProjectionMask::columns(b.parquet_schema(), NAMES);
+        let reader = b.with_projection(mask).with_batch_size(4096).build()?;
+        let mut scope = strata::DedupScope::new(&NAMES)?;
+        for batch in reader {
+            let batch = batch?;
+            let cols: Vec<ArrayRef> = NAMES
+                .iter()
+                .map(|n| -> R<ArrayRef> { Ok(cast(batch.column_by_name(n).ok_or("missing payload column")?, &DataType::LargeBinary)?) })
+                .collect::<R<_>>()?;
+            let bins: Vec<_> = cols.iter().map(|c| c.as_binary::<i64>()).collect();
+            let mut row: Vec<Option<&[u8]>> = vec![None; NAMES.len()];
+            for r in 0..batch.num_rows() {
+                for (c, b) in bins.iter().enumerate() {
+                    row[c] = if b.is_null(r) { None } else { Some(b.value(r)) };
+                }
+                scope.add_row(&row)?;
+            }
+        }
+        let rep = scope.finish()?;
+        println!("== {}", p.display());
+        println!("  {:22} {:>10} {:>9} {:>10} {:>10} {:>10} {:>12} {:>10}", "column (KiB)", "raw", "chunks", "own uniq", "own frames", "pq_default", "in others", "new shared");
+        let mut own = 0u64;
+        for (c, col) in rep.columns.iter().enumerate() {
+            println!(
+                "  {:22} {:>10} {:>9} {:>10} {:>10} {:>10} {:>12} {:>10}",
+                col.name,
+                col.raw_bytes >> 10,
+                col.own_chunks,
+                col.own_unique_bytes >> 10,
+                col.own_frame_bytes >> 10,
+                pq_sizes[c] >> 10,
+                col.shared_with_others_bytes >> 10,
+                col.new_in_shared_bytes >> 10
+            );
+            own += col.own_frame_bytes;
+            let t = &mut totals[c];
+            t.0 += col.own_unique_bytes;
+            t.1 += col.own_frame_bytes;
+            t.2 += pq_sizes[c];
+            t.3 += col.shared_with_others_bytes;
+            t.4 += col.new_in_shared_bytes;
+        }
+        let pq: u64 = pq_sizes.iter().sum();
+        println!(
+            "  frames: own stores {} KiB, shared store {} KiB ({} chunks, {} KiB unique); pq_default {} KiB",
+            own >> 10,
+            rep.shared_frame_bytes >> 10,
+            rep.shared_chunks,
+            rep.shared_unique_bytes >> 10,
+            pq >> 10
+        );
+        own_total += own;
+        shared_total += rep.shared_frame_bytes;
+        pq_total += pq;
+    }
+    println!("== total over {} files", paths.len());
+    for (n, t) in NAMES.iter().zip(&totals) {
+        println!(
+            "  {n:22} own uniq {:>9} KiB  own frames {:>9} KiB  pq_default {:>9} KiB  in others {:>9} KiB  new shared {:>9} KiB",
+            t.0 >> 10,
+            t.1 >> 10,
+            t.2 >> 10,
+            t.3 >> 10,
+            t.4 >> 10
+        );
+    }
+    let ratio = |x: u64| x as f64 / pq_total.max(1) as f64;
+    println!(
+        "  frames: own {} KiB ({:.2}x pq_default), shared {} KiB ({:.2}x); pq_default {} KiB",
+        own_total >> 10,
+        ratio(own_total),
+        shared_total >> 10,
+        ratio(shared_total),
+        pq_total >> 10
+    );
     Ok(())
 }
 

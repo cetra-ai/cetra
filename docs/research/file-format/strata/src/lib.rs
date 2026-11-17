@@ -61,7 +61,7 @@ pub use fast::{trace_detail, trace_list};
 pub use file::StrataFile;
 pub use io::{IoStats, ScanKind};
 pub use merge::merge;
-pub use payload::PayloadStats;
+pub use payload::{DedupScope, PayloadStats, ScopeColumn, ScopeReport};
 pub use predicate::{CmpOp, Lit, Predicate};
 pub use reader::read_column;
 pub use scan::ScanRequest;

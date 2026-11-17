@@ -159,7 +159,30 @@ Also add a per-file rollup of count, sum, min and max by (time bucket, model, st
 | E6 | Frame size, from 16 KiB to 1 MiB, against zstd dictionaries on `output` | The compression unit |
 | E7 | A prototype of the trace-major layout with a fanout footer: waves, bytes and cold ms on the S3 rig | G1a |
 
-E1 and E2 are small and can run against existing data. E2 is the gate: if cross-column dedup doesn't reach about 0.6×, no layout or index work will save G6.
+E1 and E2 are small and can run against existing data. E2 has run: see below.
+
+## E2 result: a shared store helps, but not through dedup
+
+`fmtbench dedup <dir>` reads each `pq_default` file and runs the v0 chunker and frame builder twice: once with one store per payload column, as the writer does, and once with one store shared by all of them (`strata::DedupScope`). The data is the same as M7.4: `swe` written as 2 files, and `payload` as 4.
+
+| Dataset | Frames, one store per column | Frames, one shared store | pq_default, payload columns |
+|---|---|---|---|
+| `swe` | 21,119 KiB (0.67×) | **17,114 KiB (0.54×)** | 31,501 KiB |
+| `payload` | 318,175 KiB (1.20×) | **228,315 KiB (0.86×)** | 264,823 KiB |
+
+**The hypothesis was wrong, but the result is real.**
+- Almost no chunk is shared across columns. Only 17 KiB of `output`'s 47,957 KiB of unique chunks on `swe` also appear in `input`, and 1,735 KiB of 480,115 KiB on `payload`.
+- The reason is the chunker. An answer under 8 KiB stays one whole JSON element, and that element differs between the two columns. In `output` it ends with `"finish_reason":"stop"`, and in `input` it does not. So the hashes never match.
+- The frames still shrink, by 19% on `swe` and 28% on `payload`. In a shared store, an answer and its near-identical copy in the next input are written close together, often in the same 64 KiB frame, where zstd's matching finds the repeat.
+
+**Against G6.**
+- The best Parquet is 31,017 KiB on `swe`. The shared frames are 0.55× of that, or 0.58× with v0's refs.
+- With v0's filters and edges on top, the total is 0.66×, which fails.
+- The 0.6× target therefore depends on a search index costing less than about 600 KiB, against the 3,240 KiB of v0's filters and edges (E3).
+
+**Next lever, not measured.** Cut chunks at message-content boundaries, so an answer's text becomes a chunk of its own and the next input refers to it. Exact dedup would then remove most of `output`'s frames. If none of it were stored twice, the bound would be about `input`'s 11,762 KiB alone, 0.37× **[est]**.
+
+The `payload` dataset is synthetic. With one store per column, its frames are 1.20× of Parquet, larger than Parquet's, so the 64 KiB frames lose to Parquet's 1 MiB pages there. That is not explained.
 
 ## Open questions
 

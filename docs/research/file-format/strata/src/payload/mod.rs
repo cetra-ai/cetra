@@ -7,6 +7,7 @@ mod frames;
 mod header;
 mod read;
 mod refs;
+mod scope;
 mod search;
 mod trigram;
 mod varint;
@@ -21,6 +22,7 @@ pub(crate) use read::{
     read_header, read_payload_column, read_rows, refs_segments,
 };
 pub(crate) use search::payload_contains;
+pub use scope::{DedupScope, ScopeColumn, ScopeReport};
 pub use write::PayloadStats;
 pub(crate) use write::{
     CopiedFrame, PayloadCopy, SourceColumn, is_payload, write_payload_column, write_payload_merged,
