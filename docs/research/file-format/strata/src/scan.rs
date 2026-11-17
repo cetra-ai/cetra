@@ -34,6 +34,9 @@ use crate::predicate::{
 use crate::segment::{Kind, SegmentRef, Segments};
 use crate::shred::unshred;
 
+/// Chunk postings prune a column only when its predicate matches at most this many codes.
+const MAX_POSTING_CODES: usize = 256;
+
 /// Rows per output batch.
 const BATCH_ROWS: usize = 8_192;
 
@@ -629,8 +632,25 @@ impl StrataFile {
             for column in pruned_columns(b) {
                 let info = info_of(&infos, column)?;
                 let codes = matching_codes(b, column, info.dict.as_deref())?;
+                // The chunk postings, when the column has them, name the only chunks that hold
+                // one of the matching codes.
+                let mut allowed: Option<Vec<u32>> = None;
+                if let Some(codes) = &codes
+                    && codes.len() <= MAX_POSTING_CODES
+                    && let Some(key) = self.key_index(column).await?
+                    && let Some(postings) = &key.postings
+                {
+                    allowed = Some(postings.chunks_for(codes, info.entries.len())?);
+                }
                 let mut pruned: Vec<Range<u32>> = Vec::new();
-                for entry in info.entries.iter() {
+                for (index, entry) in info.entries.iter().enumerate() {
+                    if let Some(allowed) = &allowed
+                        && u32::try_from(index).is_ok_and(|i| allowed.binary_search(&i).is_err())
+                    {
+                        let end = entry.first_row.saturating_add(entry.n_rows);
+                        pruned.push(entry.first_row..end);
+                        continue;
+                    }
                     let may = chunk_may_match(
                         b,
                         column,
@@ -724,6 +744,53 @@ impl StrataFile {
             &payloads,
             &output,
         )
+    }
+
+    /// Whether some row of the file may satisfy `predicate`, from the zones, dictionaries and
+    /// chunk postings of its pruning columns. `false` is a proof that none does. Loads the
+    /// metadata of those columns (one wave when it is not cached).
+    pub async fn may_match(&self, predicate: &Predicate) -> Result<bool> {
+        let (bound, _) = bind(predicate, self)?;
+        if never_true(&bound) {
+            return Ok(false);
+        }
+        let columns: Vec<usize> = pruned_columns(&bound)
+            .into_iter()
+            .filter(|&column| is_chunked(self, column))
+            .collect();
+        self.load_metadata(&columns, ScanKind::Point).await?;
+        for column in columns {
+            let field = self.field_of(column)?;
+            let dict = self.dictionary(column).await?;
+            let entries = self.block_entries(column).await?;
+            let codes = matching_codes(&bound, column, dict.as_deref())?;
+            if let Some(codes) = &codes
+                && codes.len() <= MAX_POSTING_CODES
+                && let Some(key) = self.key_index(column).await?
+                && let Some(postings) = &key.postings
+                && postings.chunks_for(codes, entries.len())?.is_empty()
+            {
+                return Ok(false);
+            }
+            let mut any = false;
+            for entry in entries.iter() {
+                if chunk_may_match(
+                    &bound,
+                    column,
+                    entry,
+                    &field,
+                    dict.as_deref(),
+                    codes.as_ref(),
+                )? {
+                    any = true;
+                    break;
+                }
+            }
+            if !any {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Rows whose first sort-key column equals `key`, with the projected columns. It runs in
@@ -1403,6 +1470,53 @@ mod tests {
                             assert_eq!(v.column(c).as_ref(), want.as_ref());
                         }
                     }
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn may_match_rules_out_a_file_only_when_no_row_can_match() {
+        runtime().block_on(async {
+            let file = open_wide(20_000, &Config::default()).await;
+            let t0: i64 = 1_700_000_000_000_000_000;
+            let time = |op, ns: i64| Predicate::Cmp(col("start_time"), op, Lit::Int(ns));
+            let cases = [
+                (time(CmpOp::Lt, t0), false),
+                (time(CmpOp::GtEq, t0 + 20_000 * 1_000_003), false),
+                (time(CmpOp::GtEq, t0 + 10_000 * 1_000_003), true),
+                (
+                    Predicate::Cmp(col("status"), CmpOp::Eq, Lit::Utf8("no such status".into())),
+                    false,
+                ),
+                (
+                    Predicate::Cmp(col("status"), CmpOp::Eq, Lit::Utf8("error".into())),
+                    true,
+                ),
+            ];
+            for (predicate, want) in cases {
+                assert_eq!(
+                    file.may_match(&predicate).await.unwrap(),
+                    want,
+                    "{predicate:?}"
+                );
+                if !want {
+                    let req = ScanRequest {
+                        projection: vec![0],
+                        predicate: Some(predicate.clone()),
+                        row_ranges: None,
+                        limit: None,
+                        kind: ScanKind::Scan,
+                        views: false,
+                    };
+                    let rows: usize = file
+                        .scan(&req)
+                        .await
+                        .unwrap()
+                        .iter()
+                        .map(RecordBatch::num_rows)
+                        .sum();
+                    assert_eq!(rows, 0, "{predicate:?}");
                 }
             }
         });

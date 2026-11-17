@@ -638,6 +638,24 @@ impl TableProvider for StrataTable {
             }
         }
 
+        // Prune the files where no row can match: their partitions would read nothing, and
+        // the remaining files get the partitions instead.
+        if !kept.is_empty() {
+            let predicate = match kept.len() {
+                1 => kept.first().cloned(),
+                _ => Some(Predicate::And(kept.clone())),
+            };
+            if let Some(predicate) = predicate {
+                let mut kept_files = Vec::with_capacity(files.len());
+                for file in files {
+                    if file.may_match(&predicate).await.map_err(df)? {
+                        kept_files.push(file);
+                    }
+                }
+                files = kept_files;
+            }
+        }
+
         // Lookup mode: the key filter is the only kept filter and there is no limit.
         let lookup = match key {
             Some((_, bytes)) if kept.len() == 1 && limit.is_none() => Some(bytes),

@@ -47,9 +47,8 @@ pub fn pack(values: &[u64], width: u8, out: &mut Vec<u8>) {
     }
 }
 
-/// Reads `n` values of `width` bits from `bytes`. `bytes` must be exactly the packed
-/// length; a wrong length, or a width above 64, is `Corrupt`.
-pub fn unpack(bytes: &[u8], n: usize, width: u8) -> Result<Vec<u64>> {
+/// Checks that `bytes` is exactly the packed length of `n` values of `width` bits.
+fn check_packed(bytes: &[u8], n: usize, width: u8) -> Result<()> {
     let corrupt = || StrataError::Corrupt {
         what: "bit-packed values",
         offset: 0,
@@ -57,9 +56,8 @@ pub fn unpack(bytes: &[u8], n: usize, width: u8) -> Result<Vec<u64>> {
     if width > 64 {
         return Err(corrupt());
     }
-    let w = usize::from(width);
     let expected = n
-        .checked_mul(w)
+        .checked_mul(usize::from(width))
         .ok_or_else(corrupt)?
         .div_ceil(64)
         .checked_mul(8)
@@ -67,25 +65,77 @@ pub fn unpack(bytes: &[u8], n: usize, width: u8) -> Result<Vec<u64>> {
     if bytes.len() != expected {
         return Err(corrupt());
     }
-    if width == 0 {
-        return Ok(vec![0; n]);
+    Ok(())
+}
+
+/// The 8 bytes of `bytes` from `at`, little-endian, zero-padded past the end.
+fn word_at(bytes: &[u8], at: usize) -> u64 {
+    if let Some(word) = bytes.get(at..).and_then(<[u8]>::first_chunk::<8>) {
+        return u64::from_le_bytes(*word);
     }
-    // The length check above makes the words exact; `le_u64` cannot fail on 8 bytes.
-    let (words, _) = bytes.as_chunks::<8>();
-    let words: Vec<u64> = words.iter().map(|w| u64::from_le_bytes(*w)).collect();
+    let mut padded = [0u8; 8];
+    let rest = bytes.get(at..).unwrap_or_default();
+    if let Some(head) = padded.get_mut(..rest.len()) {
+        head.copy_from_slice(rest);
+    }
+    u64::from_le_bytes(padded)
+}
+
+/// Calls `f` with each of the `n` values of `width` bits in `bytes`, in order. `bytes` must
+/// already be checked. Values of at most 56 bits are read with one unaligned load each.
+fn for_each_value(bytes: &[u8], n: usize, width: u8, mut f: impl FnMut(u64)) {
+    let w = usize::from(width);
     let m = mask(width);
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let bit = i * w;
-        let word = bit / 64;
-        let shift = (bit % 64) as u32;
-        let mut v = words.get(word).ok_or_else(corrupt)? >> shift;
-        if shift + u32::from(width) > 64 {
-            let next = words.get(word + 1).ok_or_else(corrupt)?;
-            v |= next << (64 - shift);
+    if width == 0 {
+        (0..n).for_each(|_| f(0));
+    } else if width <= 56 {
+        for i in 0..n {
+            let bit = i * w;
+            f((word_at(bytes, bit >> 3) >> (bit & 7)) & m);
         }
-        out.push(v & m);
+    } else {
+        for i in 0..n {
+            let bit = i * w;
+            let word = (bit / 64) * 8;
+            let shift = (bit % 64) as u32;
+            let mut v = word_at(bytes, word) >> shift;
+            if shift + u32::from(width) > 64 {
+                v |= word_at(bytes, word + 8) << (64 - shift);
+            }
+            f(v & m);
+        }
     }
+}
+
+/// Calls `f` with each of the `n` values of `width` bits in `bytes`. `bytes` must be exactly
+/// the packed length; a wrong length, or a width above 64, is `Corrupt` and calls `f` never.
+pub fn for_each_packed(bytes: &[u8], n: usize, width: u8, f: impl FnMut(u64)) -> Result<()> {
+    check_packed(bytes, n, width)?;
+    for_each_value(bytes, n, width, f);
+    Ok(())
+}
+
+/// Reads `n` values of `width` bits from `bytes`. `bytes` must be exactly the packed
+/// length; a wrong length, or a width above 64, is `Corrupt`.
+pub fn unpack(bytes: &[u8], n: usize, width: u8) -> Result<Vec<u64>> {
+    check_packed(bytes, n, width)?;
+    let mut out = Vec::with_capacity(n);
+    for_each_value(bytes, n, width, |v| out.push(v));
+    Ok(out)
+}
+
+/// Like [`unpack`], for values of at most 32 bits, as `u32`. A width above 32 is `Corrupt`.
+pub fn unpack_u32(bytes: &[u8], n: usize, width: u8) -> Result<Vec<u32>> {
+    check_packed(bytes, n, width)?;
+    if width > 32 {
+        return Err(StrataError::Corrupt {
+            what: "bit-packed values",
+            offset: 0,
+        });
+    }
+    let mut out = Vec::with_capacity(n);
+    // The width check makes every value fit in 32 bits.
+    for_each_value(bytes, n, width, |v| out.push(v as u32));
     Ok(out)
 }
 
@@ -110,7 +160,13 @@ mod tests {
             let masked: Vec<u64> = values.iter().map(|v| v & m).collect();
             let mut bytes = Vec::new();
             pack(&masked, width, &mut bytes);
-            prop_assert_eq!(unpack(&bytes, masked.len(), width).unwrap(), masked);
+            prop_assert_eq!(unpack(&bytes, masked.len(), width).unwrap(), masked.clone());
+            if width <= 32 {
+                let small: Vec<u32> = masked.iter().map(|&v| v as u32).collect();
+                prop_assert_eq!(unpack_u32(&bytes, masked.len(), width).unwrap(), small);
+            } else {
+                prop_assert!(unpack_u32(&bytes, masked.len(), width).is_err());
+            }
         }
     }
 

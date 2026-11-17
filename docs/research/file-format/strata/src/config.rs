@@ -17,7 +17,7 @@ pub struct Config {
     /// Maximum distinct values in a dictionary. Default 65,535. The writer rejects values
     /// above 1,048,576 (`MAX_DICT_VALUES`).
     pub dict_max_values: usize,
-    /// Maximum dictionary size in bytes. Default 64 KiB.
+    /// Maximum dictionary size in bytes. Default 1 MiB.
     pub dict_max_bytes: usize,
     /// A Utf8 or Binary column whose average non-null value is at least this many bytes is
     /// stored with the payload layer. Default 256.
@@ -37,7 +37,7 @@ impl Default for Config {
             chunk_max_bytes: 32 * 1024,
             page_max_entries: 64,
             dict_max_values: 65_535,
-            dict_max_bytes: 64 * 1024,
+            dict_max_bytes: 1024 * 1024,
             payload_min_avg: 256,
             key_filter_columns: vec!["user_id".into(), "session_id".into()],
             open_default_suffix: 256 * 1024,

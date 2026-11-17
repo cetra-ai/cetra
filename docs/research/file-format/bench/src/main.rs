@@ -99,6 +99,7 @@ async fn main() -> R<()> {
         }
         Some("merge") => merge_cmd(&args[2]).await,
         Some("dedup") => dedup_cmd(Path::new(args.get(2).ok_or(USAGE)?)),
+        Some("restrata") => restrata_cmd(Path::new(args.get(2).ok_or(USAGE)?), args.get(3).map_or("st", String::as_str)),
         Some("swe") => {
             let budget: usize = args[2].parse()?;
             swe_cmd(budget, &args[3..])
@@ -111,7 +112,7 @@ async fn main() -> R<()> {
     }
 }
 
-const USAGE: &str = "usage: fmtbench gen <dir> <traces> <files> [--swe <max_trajectories> <shard>...] | query <dir|s3://bucket/key> [runs] [only] | profile <dir|s3://bucket/key> [runs] | merge <dir> (local only) | dedup <dir> (local only)\n  s3 needs AWS_ENDPOINT, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION and AWS_ALLOW_HTTP=true";
+const USAGE: &str = "usage: fmtbench gen <dir> <traces> <files> [--swe <max_trajectories> <shard>...] | query <dir|s3://bucket/key> [runs] [only] | profile <dir|s3://bucket/key> [runs] | merge <dir> (local only) | dedup <dir> (local only) | restrata <dir> [out] (local only)\n  s3 needs AWS_ENDPOINT, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION and AWS_ALLOW_HTTP=true";
 
 // ------------------------------------------------------------------ generate
 
@@ -1104,6 +1105,43 @@ fn print_profile(report: &pprof::Report) {
     };
     show("self", own, 40, false);
     show("inclusive, strata/arrow/datafusion/zstd", incl, 60, true);
+}
+
+// ------------------------------------------------------------------ restrata
+
+/// Rewrites the Strata files of a dataset from its `pq_default` files, which hold the same
+/// slices, into `<dir>/<out>`. Used to measure a format change without regenerating the
+/// other variants.
+fn restrata_cmd(dir: &Path, out: &str) -> R<()> {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir.join("pq_default"))?
+        .map(|e| e.map(|e| e.path()))
+        .collect::<Result<_, _>>()?;
+    paths.sort();
+    let out_dir = dir.join(out);
+    std::fs::create_dir_all(&out_dir)?;
+    let (mut raw, mut bytes, mut write_time) = (0u64, 0u64, std::time::Duration::ZERO);
+    let mut summaries = Vec::new();
+    for (i, p) in paths.iter().enumerate() {
+        let reader = ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(p)?)?.with_batch_size(65536).build()?;
+        let batches: Vec<RecordBatch> = reader.collect::<Result<_, _>>()?;
+        let schema = batches.first().ok_or("empty parquet file")?.schema();
+        let b = concat_batches(&schema, &batches)?;
+        raw += b.get_array_memory_size() as u64;
+        let t = Instant::now();
+        let mut w = StrataWriter::new(b.schema(), &["trace_id", "start_time"], Config::default())?;
+        for off in (0..b.num_rows()).step_by(8192) {
+            w.write(&b.slice(off, 8192.min(b.num_rows() - off)))?;
+        }
+        let (file, summary) = w.finish()?;
+        write_time += t.elapsed();
+        std::fs::write(out_dir.join(format!("{i:03}.strata")), &file)?;
+        bytes += file.len() as u64;
+        summaries.push(summary);
+    }
+    println!("{out:12} {:>6} MiB  write {:>8.2?}  ({:.0} MiB/s of arrow)", bytes >> 20, write_time, raw as f64 / 1048576.0 / write_time.as_secs_f64());
+    payload_table(dir, &summaries)?;
+    Ok(())
 }
 
 // ------------------------------------------------------------------ dedup

@@ -38,6 +38,7 @@ mod index;
 mod io;
 mod narrow;
 mod payload;
+mod postings;
 mod predicate;
 mod scan;
 mod segment;

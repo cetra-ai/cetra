@@ -23,6 +23,7 @@ use crate::narrow::{
     numeric_of,
 };
 use crate::payload::{self, FRAME_ZSTD_LEVEL, PayloadStats, SourceColumn};
+use crate::postings::ChunkPostings;
 use crate::segment::{Codec, Kind, SegmentCodec, SegmentRef, encode_segment};
 use crate::shred::{Shredded, shred};
 
@@ -198,6 +199,52 @@ fn filter_body(values: &[Vec<u8>]) -> Vec<u8> {
     body
 }
 
+/// The body of a key-filter segment: `u32` filter length, the filter, then the column's chunk
+/// postings when it has a dictionary (nothing otherwise).
+fn key_index_body(filter: &[u8], postings: Option<&ChunkPostings>) -> Result<Vec<u8>> {
+    let len = u32::try_from(filter.len()).map_err(|_| StrataError::Unsupported {
+        what: "a key filter of more than 4 GiB".to_string(),
+    })?;
+    let mut out = Out(Vec::with_capacity(4 + filter.len()));
+    out.u32(len);
+    out.bytes(filter);
+    if let Some(postings) = postings {
+        postings.encode(&mut out);
+    }
+    Ok(out.0)
+}
+
+/// The chunk postings of a Utf8 column written with a dictionary: for each chunk of
+/// `entries`, the codes of its rows. `None` when the column has no dictionary.
+fn chunk_postings(
+    config: &Config,
+    array: &dyn Array,
+    entries: &[BlockEntry],
+) -> Result<Option<ChunkPostings>> {
+    let (Some(dict), Some(strings)) = (
+        for_column(array, config),
+        array.as_any().downcast_ref::<arrow::array::StringArray>(),
+    ) else {
+        return Ok(None);
+    };
+    let mut chunks = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let mut codes: Vec<u32> = Vec::new();
+        let start = entry.first_row as usize;
+        for row in start..start + entry.n_rows as usize {
+            if strings.is_valid(row)
+                && let Some(code) = dict.code_of(strings.value(row).as_bytes())
+            {
+                codes.push(code);
+            }
+        }
+        codes.sort_unstable();
+        codes.dedup();
+        chunks.push(codes);
+    }
+    Ok(Some(ChunkPostings::build(dict.len(), &chunks)?))
+}
+
 /// Writes a file of `rows` rows whose column `i` is `column(i).await`. The rows must already
 /// be sorted by `sort_key` (schema indexes); this is not checked here. A payload column that
 /// comes with its inputs' frames has them copied where possible (S10 step 4).
@@ -337,7 +384,9 @@ where
         if is_sort_key {
             sort_key_filter = filter.unwrap_or_default();
             filter_bytes = sort_key_filter.len() as u64;
-        } else if let Some(body) = filter {
+        } else if let Some(filter) = filter {
+            let postings = chunk_postings(config, array.as_ref(), &entries)?;
+            let body = key_index_body(&filter, postings.as_ref())?;
             let seg = encode_segment(Kind::KeyFilter, &body, Codec::Zstd, &mut codec, &mut out)?;
             filter_bytes = u64::from(seg.len);
             key_filters.push((column_id, seg));
@@ -784,9 +833,9 @@ mod tests {
     }
 
     /// xxh3_64 of the file written from `wide_batch(20_000)` with `Config::default()`.
-    /// Recorded on the M3.2b code, where the `attrs` map is shredded. A change to this value
-    /// means the output changed.
-    const GOLDEN: u64 = 0xfd4f_9db0_9179_db82;
+    /// Recorded after the 1 MiB dictionary limit, chunk postings and the narrow-chunk zstd
+    /// threshold. A change to this value means the output changed.
+    const GOLDEN: u64 = 0xf23a_1642_7885_0e7e;
 
     #[test]
     fn golden_output_hash() {

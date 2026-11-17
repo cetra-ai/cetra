@@ -6,14 +6,15 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, BinaryArray, BooleanArray, FixedSizeBinaryArray, Float64Array, Int64Array,
-    MapArray, Scalar, StringArray, UInt64Array, new_null_array,
+    Array, ArrayRef, BinaryArray, BooleanArray, DictionaryArray, FixedSizeBinaryArray,
+    Float64Array, Int64Array, MapArray, Scalar, StringArray, UInt32Array, UInt64Array,
+    new_null_array,
 };
 use arrow::compute::kernels::cmp::{eq, gt, gt_eq, lt, lt_eq, neq};
 use arrow::compute::{
     CastOptions, and_kleene, cast, cast_with_options, is_not_null, is_null, not, or_kleene,
 };
-use arrow::datatypes::{DataType, Field};
+use arrow::datatypes::{DataType, Field, UInt32Type};
 
 use crate::error::{Result, StrataError};
 use crate::file::StrataFile;
@@ -453,6 +454,9 @@ pub(crate) fn evaluate(
         Bound::Cmp(column, op, lit) => {
             let values = column_of(columns, *column)?;
             let array: &dyn Array = values.as_ref();
+            if let Some(mask) = compare_codes(array, *op, lit.as_ref())? {
+                return Ok(mask);
+            }
             // A scan decodes a Utf8 column with a dictionary as a dictionary array; the
             // comparison kernels compare its values to a literal of the value type.
             let value_type = match array.data_type() {
@@ -485,6 +489,54 @@ pub(crate) fn evaluate(
         }
         Bound::Const(value) => Ok(BooleanArray::from(vec![*value; rows])),
     }
+}
+
+/// `array op lit` on the codes of a dictionary array, or `None` when the fast path does not
+/// apply. A scan's dictionary arrays hold the file dictionary's values, which are sorted
+/// bytewise (the order of Utf8 comparisons), so the literal's place in them turns every
+/// comparison into one on the codes.
+fn compare_codes(array: &dyn Array, op: CmpOp, lit: &dyn Array) -> Result<Option<BooleanArray>> {
+    let Some(dict) = array.as_any().downcast_ref::<DictionaryArray<UInt32Type>>() else {
+        return Ok(None);
+    };
+    let (Some(values), Some(lit)) = (
+        dict.values().as_any().downcast_ref::<StringArray>(),
+        lit.as_any().downcast_ref::<StringArray>(),
+    ) else {
+        return Ok(None);
+    };
+    if lit.len() != 1 || lit.is_null(0) || values.null_count() > 0 {
+        return Ok(None);
+    }
+    let needle = lit.value(0).as_bytes();
+    let point = |inclusive: bool| -> u32 {
+        let (mut lo, mut hi) = (0usize, values.len());
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let v = values.value(mid).as_bytes();
+            if v < needle || (inclusive && v == needle) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        u32::try_from(lo).unwrap_or(u32::MAX)
+    };
+    let (lower, upper) = (point(false), point(true));
+    let keys = dict.keys();
+    let at = |code: u32| Scalar::new(UInt32Array::from(vec![code]));
+    // Codes are below the dictionary's length, so `u32::MAX` matches no row.
+    let mask = match op {
+        CmpOp::Eq if lower < upper => eq(keys, &at(lower))?,
+        CmpOp::Eq => eq(keys, &at(u32::MAX))?,
+        CmpOp::NotEq if lower < upper => neq(keys, &at(lower))?,
+        CmpOp::NotEq => neq(keys, &at(u32::MAX))?,
+        CmpOp::Lt => lt(keys, &at(lower))?,
+        CmpOp::LtEq => lt(keys, &at(upper))?,
+        CmpOp::Gt => gt_eq(keys, &at(upper))?,
+        CmpOp::GtEq => gt_eq(keys, &at(lower))?,
+    };
+    Ok(Some(mask))
 }
 
 /// The mask of `MapKeyEq(.., key, lit)` over the rows of a map array `map`, which is a map
@@ -652,13 +704,8 @@ pub(crate) fn matching_codes(
         what: "dictionary code",
         offset: 0,
     };
-    let mut values: Vec<&str> = Vec::with_capacity(dict.len());
-    for code in 0..dict.len() {
-        let code = u32::try_from(code).map_err(|_| corrupt())?;
-        values.push(dict.str_value(code).ok_or_else(corrupt)?);
-    }
-    let n = values.len();
-    let strings: ArrayRef = Arc::new(StringArray::from(values));
+    let strings: ArrayRef = dict.values_array();
+    let n = strings.len();
     let mut columns: Vec<Option<ArrayRef>> = vec![None; column + 1];
     if let Some(slot) = columns.get_mut(column) {
         *slot = Some(strings);

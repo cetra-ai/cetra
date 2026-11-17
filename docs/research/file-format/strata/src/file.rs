@@ -21,6 +21,7 @@ use crate::index::{KeyFilter, merge_rows, zone_may_hold};
 use crate::io::{IoStats, MAX_CONCURRENT_GETS, ScanKind, coalesce};
 use crate::narrow::{BlockEntry, Dictionary, decode_chunk, is_utf8_map};
 use crate::payload::{PayloadHeader, decode_header};
+use crate::postings::ChunkPostings;
 use crate::segment::{Kind, SegmentRef, decode_segment};
 
 #[cfg(test)]
@@ -163,6 +164,14 @@ impl MetadataPlan {
 }
 
 /// An open Strata file: its postscript and decoded hot tail, plus the store to read
+/// A column's key filter and, for a dictionary column, its chunk postings.
+pub(crate) struct KeyIndex {
+    /// Answers "may this value occur in the column?".
+    pub(crate) filter: KeyFilter,
+    /// The chunks that hold each bucket of codes.
+    pub(crate) postings: Option<ChunkPostings>,
+}
+
 /// segments from.
 pub struct StrataFile {
     store: Arc<dyn ObjectStore>,
@@ -178,7 +187,7 @@ pub struct StrataFile {
     /// The sort-key block table (hot-tail section 3), decoded at open, in row order.
     sort_key_entries: Vec<BlockEntry>,
     /// Key filters read on first use, by column id.
-    key_filters: Mutex<HashMap<u32, Arc<KeyFilter>>>,
+    key_filters: Mutex<HashMap<u32, Arc<KeyIndex>>>,
     /// Block-table entries of each column, read on first use.
     blocks: Mutex<HashMap<usize, Arc<Vec<BlockEntry>>>>,
     /// Dictionaries of each narrow column, read on first use. `None` for a column without one.
@@ -832,6 +841,15 @@ impl StrataFile {
                 .as_ref()
                 .and_then(|filter| filter.may_contain(value)));
         }
+        Ok(self
+            .key_index(index)
+            .await?
+            .and_then(|key| key.filter.may_contain(value)))
+    }
+
+    /// The key filter and chunk postings of column `index` (a directory id), read on first use
+    /// and cached, or `None` when the column has none.
+    pub(crate) async fn key_index(&self, index: usize) -> Result<Option<Arc<KeyIndex>>> {
         let Some(&(column_id, segment)) = self
             .hot
             .key_filters
@@ -846,19 +864,37 @@ impl StrataFile {
             .unwrap_or_else(PoisonError::into_inner)
             .get(&column_id)
             .cloned();
-        let filter = match cached {
-            Some(filter) => filter,
-            None => {
-                let bytes = self.read_segment(&segment, Kind::KeyFilter).await?;
-                let filter = Arc::new(KeyFilter::decode(&bytes, segment.offset)?);
-                self.key_filters
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(column_id, Arc::clone(&filter));
-                filter
-            }
+        if let Some(key) = cached {
+            return Ok(Some(key));
+        }
+        let corrupt = || StrataError::Corrupt {
+            what: "key filter",
+            offset: segment.offset,
         };
-        Ok(filter.may_contain(value))
+        let bytes = self.read_segment(&segment, Kind::KeyFilter).await?;
+        let len = bytes
+            .first_chunk::<4>()
+            .map(|b| u32::from_le_bytes(*b) as usize)
+            .ok_or_else(corrupt)?;
+        let filter_bytes = bytes.get(4..4 + len).ok_or_else(corrupt)?;
+        let rest = bytes.get(4 + len..).ok_or_else(corrupt)?;
+        let filter = KeyFilter::decode(filter_bytes, segment.offset)?;
+        let postings = if rest.is_empty() {
+            None
+        } else {
+            let n_chunks = self
+                .directory()
+                .get(index)
+                .map(|record| record.n_chunks as usize)
+                .ok_or_else(corrupt)?;
+            Some(ChunkPostings::decode(rest, n_chunks, segment.offset)?)
+        };
+        let key = Arc::new(KeyIndex { filter, postings });
+        self.key_filters
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(column_id, Arc::clone(&key));
+        Ok(Some(key))
     }
 
     /// The sort-key chunks that may hold `key`, in row order, or `None` when the sort-key filter
@@ -1583,6 +1619,88 @@ mod tests {
                 absent >= 980,
                 "{absent} of 1000 absent values were filtered"
             );
+        });
+    }
+
+    #[test]
+    fn chunk_postings_prune_an_equality_scan() {
+        runtime().block_on(async {
+            use crate::{CmpOp, Lit, Predicate, ScanKind, ScanRequest};
+            // 40,000 rows of 4,000 traces; each trace has one user of 2,000, so a user's rows
+            // sit in a few chunks of 256 rows.
+            let n = 40_000usize;
+            let ids: Vec<u8> = (0..n)
+                .flat_map(|i| ((i / 10) as u128).to_be_bytes())
+                .collect();
+            let ids = FixedSizeBinaryArray::try_new(16, Buffer::from_vec(ids), None).unwrap();
+            let user_of = |i: usize| ((i / 10) * 7919) % 2_000;
+            let users = StringArray::from_iter(
+                (0..n).map(|i| (i % 10 != 3).then(|| format!("user-{}", user_of(i)))),
+            );
+            let rows =
+                RecordBatch::try_new(user_schema(), vec![Arc::new(ids), Arc::new(users)]).unwrap();
+            let config = Config {
+                chunk_max_rows: 256,
+                ..Config::default()
+            };
+            let mut w = StrataWriter::new(user_schema(), &["trace_id"], config).unwrap();
+            w.write(&rows).unwrap();
+            let file = open_patched(w.finish().unwrap().0).await.unwrap();
+            let key = file.key_index(1).await.unwrap().unwrap();
+            assert!(key.postings.is_some());
+
+            let all_bytes = {
+                file.reset_io_stats();
+                let req = ScanRequest {
+                    projection: vec![0, 1],
+                    predicate: None,
+                    row_ranges: None,
+                    limit: None,
+                    kind: ScanKind::Scan,
+                    views: false,
+                };
+                file.scan(&req).await.unwrap();
+                file.io_stats().bytes
+            };
+            for wanted in [vec!["user-17"], vec!["user-5", "user-1999"], vec!["nobody"]] {
+                let terms: Vec<Predicate> = wanted
+                    .iter()
+                    .map(|u| Predicate::Cmp(1, CmpOp::Eq, Lit::Utf8((*u).to_string())))
+                    .collect();
+                let predicate = if terms.len() == 1 {
+                    terms.into_iter().next().unwrap()
+                } else {
+                    Predicate::Or(terms)
+                };
+                file.reset_io_stats();
+                let req = ScanRequest {
+                    projection: vec![0, 1],
+                    predicate: Some(predicate),
+                    row_ranges: None,
+                    limit: None,
+                    kind: ScanKind::Scan,
+                    views: false,
+                };
+                let batches = file.scan(&req).await.unwrap();
+                let got: usize = batches.iter().map(RecordBatch::num_rows).sum();
+                let want = (0..n)
+                    .filter(|&i| {
+                        i % 10 != 3 && wanted.contains(&format!("user-{}", user_of(i)).as_str())
+                    })
+                    .count();
+                assert_eq!(got, want, "{wanted:?}");
+                for b in &batches {
+                    let col = b.column(1).as_string::<i32>();
+                    for r in 0..b.num_rows() {
+                        assert!(wanted.contains(&col.value(r)));
+                    }
+                }
+                assert!(
+                    file.io_stats().bytes * 4 < all_bytes,
+                    "{wanted:?}: {} bytes against {all_bytes} for a full scan",
+                    file.io_stats().bytes
+                );
+            }
         });
     }
 

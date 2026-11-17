@@ -3,15 +3,15 @@
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayData, ArrayRef, BinaryArray, DictionaryArray, ListArray, MapArray, StringArray,
+    Array, ArrayData, ArrayRef, BinaryArray, DictionaryArray, ListArray, MapArray, StringArray,
     StringBuilder, StructArray, UInt32Array, make_array, new_null_array,
 };
 use arrow::buffer::{BooleanBuffer, Buffer, NullBuffer, OffsetBuffer, ScalarBuffer};
-use arrow::compute::cast;
+
 use arrow::datatypes::{DataType, Field, UInt32Type};
 use arrow::ipc::reader::StreamReader;
 
-use super::bitpack::unpack;
+use super::bitpack::{for_each_packed, unpack, unpack_u32};
 use super::lengths::{decode_lengths, offsets_of, total_of};
 use super::{
     BlockEntry, Class, Dictionary, Encoding, Numeric, fits, flags, is_utf8_map, numeric_of,
@@ -245,7 +245,7 @@ fn decode_numeric(
     at: u64,
 ) -> Result<ArrayRef> {
     let corrupt = |what: &'static str| StrataError::Corrupt { what, offset: at };
-    let bits: Vec<u64> = match (entry.encoding, num.class) {
+    match (entry.encoding, num.class) {
         (Encoding::ForBitpack, Class::Int) => {
             if entry.flags & flags::HAS_ZONE == 0 {
                 return Err(corrupt("chunk zone"));
@@ -258,23 +258,33 @@ fn decode_numeric(
             let width = c.u8("bitpack width")?;
             let rest = c.remaining();
             let packed = c.bytes(rest, "bitpack values")?;
-            let deltas = unpack(packed, n, width).map_err(|_| corrupt("bitpack values"))?;
-            deltas.iter().map(|d| base.wrapping_add(*d)).collect()
+            expect_end(c, at)?;
+            // One pass: unpack, add the base, check the range, and write the value's bytes.
+            let mut values = Vec::with_capacity(n * num.width);
+            let mut fits_all = true;
+            for_each_packed(packed, n, width, |delta| {
+                let v = base.wrapping_add(delta);
+                fits_all &= fits(v, num.width, num.signed);
+                values.extend_from_slice(v.to_le_bytes().get(..num.width).unwrap_or_default());
+            })
+            .map_err(|_| corrupt("bitpack values"))?;
+            if !fits_all {
+                return Err(corrupt("value out of range"));
+            }
+            build_array(dt, n, nulls, values, at)
         }
         (Encoding::Plain, Class::Wide | Class::Float) => {
+            // Plain values are stored at the type's width, little-endian: the bytes are the
+            // Arrow buffer.
             let len = n
                 .checked_mul(num.width)
                 .ok_or_else(|| corrupt("plain values"))?;
             let raw = c.bytes(len, "plain values")?;
-            raw.chunks_exact(num.width)
-                .map(le_u64)
-                .collect::<Option<Vec<u64>>>()
-                .ok_or_else(|| corrupt("plain values"))?
+            expect_end(c, at)?;
+            build_array(dt, n, nulls, raw.to_vec(), at)
         }
-        _ => return Err(corrupt("encoding for type")),
-    };
-    expect_end(c, at)?;
-    build_numeric(dt, num, &bits, nulls, at)
+        _ => Err(corrupt("encoding for type")),
+    }
 }
 
 fn decode_fsb(
@@ -348,10 +358,34 @@ pub fn decode_chunk_view(
         return decode_chunk(entry, body, field, dict);
     };
     let at = entry.segment_offset;
-    let dict_type = || DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8));
     if entry.encoding != Encoding::Dict {
+        // Every chunk shares the file dictionary's values, so a scan's dictionary arrays all
+        // hold the same sorted values (predicate evaluation relies on it).
         let array = decode_chunk(entry, body, field, Some(dict))?;
-        return Ok(cast(&array, &dict_type())?);
+        let strings = array
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| StrataError::Corrupt {
+                what: "encoding for type",
+                offset: at,
+            })?;
+        let keys: Vec<u32> = (0..strings.len())
+            .map(|i| {
+                if strings.is_null(i) {
+                    return Ok(0);
+                }
+                dict.code_of(strings.value(i).as_bytes())
+                    .ok_or_else(|| StrataError::Corrupt {
+                        what: "value outside the dictionary",
+                        offset: at,
+                    })
+            })
+            .collect::<Result<_>>()?;
+        let keys = UInt32Array::new(keys.into(), strings.nulls().cloned());
+        return Ok(Arc::new(DictionaryArray::<UInt32Type>::try_new(
+            keys,
+            dict.values_array(),
+        )?));
     }
     if entry.n_rows > MAX_CHUNK_ROWS {
         return Err(StrataError::Corrupt {
@@ -370,20 +404,27 @@ pub fn decode_chunk_view(
     } else {
         None
     };
-    let codes = read_codes(&mut c, n, at)?;
+    let width = c.u8("dictionary width")?;
+    let rest = c.remaining();
+    let packed = c.bytes(rest, "dictionary codes")?;
     expect_end(&c, at)?;
-    let keys: Vec<u32> = codes
-        .into_iter()
-        .map(|code| {
-            u32::try_from(code)
-                .ok()
-                .filter(|&code| (code as usize) < dict.len())
-                .ok_or_else(|| StrataError::Corrupt {
-                    what: "dictionary code",
-                    offset: at,
-                })
-        })
-        .collect::<Result<_>>()?;
+    let corrupt_codes = || StrataError::Corrupt {
+        what: "dictionary codes",
+        offset: at,
+    };
+    let keys = unpack_u32(packed, n, width).map_err(|_| corrupt_codes())?;
+    // Null rows carry a code too, which must be in the dictionary.
+    if keys
+        .iter()
+        .copied()
+        .max()
+        .is_some_and(|k| k as usize >= dict.len())
+    {
+        return Err(StrataError::Corrupt {
+            what: "dictionary code",
+            offset: at,
+        });
+    }
     let keys = UInt32Array::new(keys.into(), nulls);
     Ok(Arc::new(DictionaryArray::<UInt32Type>::try_new(
         keys,

@@ -291,8 +291,9 @@ Field sizes: 4 + 4 + 8 + 4 + 1 + 1 + 2 + 16 + 16 = 56. `const_len` is the byte l
 
 **Dictionaries** (kind 8 segment):
 - Layout: `u32 n` · `u32 offsets[n+1]` · bytes, values sorted bytewise (b#4, a#11). A code is the value's rank.
-- Built when a Utf8 column (or a List(Utf8)'s values) has ≤ 65,535 distinct values **and** the dictionary is ≤ 64 KiB. Otherwise `VARBIN`.
+- Built when a Utf8 column (or a List(Utf8)'s values) has ≤ 65,535 distinct values **and** the dictionary is ≤ 1 MiB. Otherwise `VARBIN`. (v0 used 64 KiB; the M8 speed work raised it so that `user_id` gets a dictionary.)
 - A predicate on a dictionary column is evaluated once against the dictionary, which turns it into a set or range of codes.
+- A scan decodes a dictionary column's chunks as `Dictionary(UInt32, Utf8)` arrays that share the file dictionary's values, so no row's string is copied. Comparisons run on the codes: the dictionary is sorted bytewise, so the literal's position in it turns `=`, `<>`, `<`, `<=`, `>` and `>=` into comparisons of codes. Through DataFusion the columns come out as `Utf8View` built over the same values.
 
 **Row order.** The writer is given the sort key (`["trace_id", "start_time"]`). It checks that rows arrive in that order and returns `StrataError::Unsorted` otherwise.
 
@@ -416,6 +417,8 @@ The result is a list of row ranges (usually 1–2 chunks).
   - `3` unknown: the filter could not be built; always "may contain".
 - Validity for tag 2: `segment_length` is a power of two; `segment_length_mask = segment_length − 1`; `segment_count_length ≥ segment_length` and is a multiple of it; `n_fingerprints = segment_count_length + 2 × segment_length`. These keep `contains` in bounds, so a forged geometry is `Corrupt`, never a panic. Any other byte after the body is `Corrupt`.
 - Kept for the first sort-key column (hot-tail section 4, the body raw), and for `user_id` and `session_id` (kind 9 segments, indexed by hot-tail section 6). Only narrow columns with key bytes get one; maps and payload columns do not.
+- A kind 9 segment's body is `u32 filter_len` · the filter body · the column's **chunk postings**, when the column has a dictionary (nothing otherwise).
+- **Chunk postings** list, for each bucket of `2^shift` consecutive codes, the chunks holding one of them: `u32 n_codes` · `u8 shift` · `u32 n_buckets` · `u32 offsets[n_buckets + 1]` · the lists, each ascending chunk indexes as LEB128 deltas. `shift` is the smallest giving at most 4,096 buckets. A scan whose predicate matches at most 256 codes of the column reads only the listed chunks; `StrataFile::may_match` uses them, with the zones, to drop whole files before DataFusion partitions are planned.
 - The only accessor is `StrataFile::may_contain(column, value) -> Result<Option<bool>>`. `Some(false)` is a proof of absence; `None` means the column has no filter.
 
 ### S6. Shredded maps
