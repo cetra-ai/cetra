@@ -28,7 +28,7 @@ export function MediaView({
   }
   const source = classifyMedia(projectRef, part.uri);
   if (source.kind === "dropped") {
-    return <p className="text-[10.5px] text-muted-foreground">{droppedLabel(part.size)}</p>;
+    return <p className="text-caption text-muted-foreground">{droppedLabel(part.size)}</p>;
   }
   if (source.kind === "external") {
     return <ExternalMedia uri={source.url} mime={mime} modality={modality} />;
@@ -44,7 +44,7 @@ function ExternalMedia({ uri, mime, modality }: { uri: string; mime?: string; mo
   const [loaded, setLoaded] = useState(false);
   if (!loaded) {
     return (
-      <span className="inline-flex items-center gap-2 rounded bg-muted px-1 text-[10.5px] text-muted-foreground">
+      <span className="inline-flex items-center gap-2 rounded bg-muted px-1 text-caption text-muted-foreground">
         <span className="break-all">{uri}</span>
         <button type="button" className="text-foreground" onClick={() => setLoaded(true)}>
           Load

@@ -97,16 +97,16 @@ function ExperimentPage() {
         to="/$org/$project/experiments"
         params={{ org, project }}
         search={{}}
-        className="w-fit rounded-sm text-xs text-muted-foreground underline-offset-4 outline-none hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 focus-visible:outline-solid"
+        className="w-fit rounded-sm text-caption text-muted-foreground underline-offset-4 outline-none hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 focus-visible:outline-solid"
       >
         Experiments
       </Link>
       <header className="flex flex-col gap-2">
-        <h1 className="text-lg font-medium">{experiment.name}</h1>
+        <h1 className="text-title font-medium">{experiment.name}</h1>
         {experiment.description ? (
-          <p className="text-xs text-muted-foreground">{experiment.description}</p>
+          <p className="text-caption text-muted-foreground">{experiment.description}</p>
         ) : null}
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-body">
           {experiment.dataset_id !== undefined ? (
             <Link
               to="/$org/$project/datasets/$datasetId"
@@ -135,12 +135,12 @@ function ExperimentPage() {
           ) : null}
         </div>
         {experiment.status === "failed" ? (
-          <div role="alert" className="rounded-md border border-status-error px-3 py-2 text-sm">
+          <div role="alert" className="rounded-md border border-status-error px-3 py-2 text-body">
             {`The run failed: ${experiment.error ?? "no error was recorded"}`}
           </div>
         ) : null}
         {hasMetadata ? (
-          <details className="text-sm">
+          <details className="text-body">
             <summary className="w-fit cursor-pointer text-muted-foreground">Metadata</summary>
             <div className="mt-2">
               <JsonView value={experiment.metadata} />
@@ -191,7 +191,7 @@ function ExperimentPage() {
           />
         )}
         {inlineFailure === undefined ? null : (
-          <p role="alert" className="text-sm text-status-error">
+          <p role="alert" className="text-body text-status-error">
             {problemMessage(inlineFailure, "The results could not be loaded")}
           </p>
         )}

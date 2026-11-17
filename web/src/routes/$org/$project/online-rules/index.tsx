@@ -93,9 +93,9 @@ function OnlineRulesPage() {
     <div className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 overflow-auto px-4 py-6">
       <div className="flex items-start justify-between gap-4">
         <div className="flex flex-col gap-1">
-          <h1 className="text-lg font-medium">Online rules</h1>
+          <h1 className="text-title font-medium">Online rules</h1>
           {activeRules !== undefined ? (
-            <p className="text-xs text-muted-foreground">
+            <p className="text-caption text-muted-foreground">
               {activeRules === 1
                 ? "1 active rule in this organization"
                 : `${activeRules} active rules in this organization`}

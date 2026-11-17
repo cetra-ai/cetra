@@ -150,17 +150,17 @@ function DatasetPage() {
         to="/$org/$project/datasets"
         params={{ org, project }}
         search={{ q: undefined }}
-        className="w-fit rounded-sm text-xs text-muted-foreground underline-offset-4 outline-none hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 focus-visible:outline-solid"
+        className="w-fit rounded-sm text-caption text-muted-foreground underline-offset-4 outline-none hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 focus-visible:outline-solid"
       >
         Datasets
       </Link>
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div className="flex flex-col gap-1">
-          <h1 className="text-lg font-medium">{dataset.name}</h1>
+          <h1 className="text-title font-medium">{dataset.name}</h1>
           {dataset.description ? (
-            <p className="text-xs text-muted-foreground">{dataset.description}</p>
+            <p className="text-caption text-muted-foreground">{dataset.description}</p>
           ) : null}
-          <p className="text-xs text-muted-foreground">
+          <p className="text-caption text-muted-foreground">
             {`${dataset.item_count} items · version ${latest}`}
           </p>
         </div>
@@ -219,7 +219,7 @@ function DatasetPage() {
       {atLatest ? null : (
         <div
           role="status"
-          className="flex flex-wrap items-center justify-between gap-2 rounded-md border px-3 py-2 text-sm"
+          className="flex flex-wrap items-center justify-between gap-2 rounded-md border px-3 py-2 text-body"
         >
           <p>{`You are viewing version ${shown}. Items are read-only.`}</p>
           <Button
@@ -308,7 +308,7 @@ function ExperimentsTab({
           to="/$org/$project/experiments"
           params={{ org, project }}
           search={{ dataset: datasetId }}
-          className="w-fit rounded-sm text-xs text-muted-foreground underline-offset-4 outline-none hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 focus-visible:outline-solid"
+          className="w-fit rounded-sm text-caption text-muted-foreground underline-offset-4 outline-none hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 focus-visible:outline-solid"
         >
           Open in Experiments
         </Link>

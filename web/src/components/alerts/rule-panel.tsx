@@ -37,10 +37,10 @@ export function RulePanel({
 
   return (
     <section aria-label="Alert rule" className="flex h-full min-h-0 flex-col">
-      <header className="flex shrink-0 items-center gap-2 border-b px-3 py-1.5 text-xs">
+      <header className="flex shrink-0 items-center gap-2 border-b px-3 py-1.5 text-caption">
         {rule ? (
           <span className="flex min-w-0 items-center gap-2">
-            <span className="truncate text-[13px] font-semibold">{rule.name}</span>
+            <span className="truncate text-ui font-semibold">{rule.name}</span>
             <StateBadge state={rule.state} enabled={rule.enabled} />
           </span>
         ) : null}
@@ -56,7 +56,7 @@ export function RulePanel({
           </Button>
         </div>
       </header>
-      <div className="min-h-0 flex-1 overflow-auto p-3 text-xs">
+      <div className="min-h-0 flex-1 overflow-auto p-3 text-caption">
         {rule ? (
           <RuleDetail rule={rule} onDeleted={onDeleted} />
         ) : missing ? (

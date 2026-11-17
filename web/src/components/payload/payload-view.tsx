@@ -29,8 +29,8 @@ export function PayloadView({
   if (!payload) {
     return (
       <section className="flex min-w-0 flex-col gap-1">
-        <h3 className="text-[12px] font-medium">{label}</h3>
-        <p className="text-[12px] text-muted-foreground">—</p>
+        <h3 className="text-body font-medium">{label}</h3>
+        <p className="text-body text-muted-foreground">—</p>
       </section>
     );
   }
@@ -40,16 +40,16 @@ export function PayloadView({
   return (
     <section className="flex min-w-0 flex-col gap-1">
       <div className="flex flex-wrap items-center gap-2">
-        <h3 className="text-[12px] font-medium">{label}</h3>
-        <Badge variant="outline" className="h-4 px-1.5 text-[11px] text-muted-foreground">
+        <h3 className="text-body font-medium">{label}</h3>
+        <Badge variant="outline" className="h-4 px-1.5 text-caption text-muted-foreground">
           {payload.format}
         </Badge>
-        <span className="text-[11px] text-muted-foreground">{serialized.chars} chars</span>
+        <span className="text-caption text-muted-foreground">{serialized.chars} chars</span>
         <CopyButton value={serialized.raw} label={label} />
         <FormatSwitch value={mode} onChange={setMode} />
       </div>
       {capped ? (
-        <div className="flex flex-wrap items-center gap-2 text-[12px]">
+        <div className="flex flex-wrap items-center gap-2 text-body">
           <p>Large payload ({megabytes(serialized.chars)} MB)</p>
           <button type="button" className="underline" onClick={() => setForce(true)}>
             Render anyway
@@ -88,9 +88,7 @@ function PayloadBody({
     }
     return (
       <ShowMore>
-        <pre className="overflow-auto font-mono text-[12px] whitespace-pre-wrap">
-          {payload.value}
-        </pre>
+        <pre className="overflow-auto font-mono text-body whitespace-pre-wrap">{payload.value}</pre>
       </ShowMore>
     );
   }
@@ -100,7 +98,7 @@ function PayloadBody({
   if (mode === "raw") {
     return (
       <ShowMore>
-        <pre className="overflow-auto font-mono text-[12px] whitespace-pre-wrap">
+        <pre className="overflow-auto font-mono text-body whitespace-pre-wrap">
           {serialized.raw}
         </pre>
       </ShowMore>
@@ -109,7 +107,7 @@ function PayloadBody({
   if (payload.format === "json" && mode === "json") {
     return (
       <ShowMore>
-        <pre className="overflow-auto font-mono text-[12px] whitespace-pre-wrap">
+        <pre className="overflow-auto font-mono text-body whitespace-pre-wrap">
           {serialized.pretty}
         </pre>
       </ShowMore>

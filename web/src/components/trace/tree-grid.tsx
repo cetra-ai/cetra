@@ -23,6 +23,7 @@ import type { Schema } from "@/api/types";
 import { KindIcon } from "@/components/kind-icon";
 import { useProject } from "@/components/shell/project-context";
 import { StatusDot } from "@/components/status-dot";
+import { useRowHeight } from "@/components/theme-provider";
 import { SpanBar } from "@/components/trace/span-bar";
 import { TreeToolbar } from "@/components/trace/tree-toolbar";
 import { Badge } from "@/components/ui/badge";
@@ -51,7 +52,6 @@ import {
 } from "@/lib/tree";
 import { STORAGE_PREFIX } from "@/product";
 
-const ROW_HEIGHT = 28;
 /** A row must rest under the pointer this long before its span detail is prefetched. */
 const HOVER_PREFETCH_MS = 100;
 const OVERSCAN = 12;
@@ -273,12 +273,19 @@ export function TreeGrid({
     writeNameWidth(next);
   }
 
+  const rowHeight = useRowHeight();
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => ROW_HEIGHT,
+    estimateSize: () => rowHeight,
     overscan: OVERSCAN,
   });
+
+  // A density change alters every row's height, so the measurements must be redone.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: rowHeight is the trigger; estimateSize reads it
+  useEffect(() => {
+    virtualizer.measure();
+  }, [rowHeight, virtualizer]);
 
   useEffect(() => {
     const visibleIndex = rows.indexOf(selectedIndex);
@@ -504,7 +511,7 @@ export function TreeGrid({
               className="pointer-events-none absolute top-0 bottom-0 z-10 w-px bg-foreground/70"
               style={{ left: shownNeedle.x }}
             >
-              <span className="absolute top-0.5 left-1 text-[10px] whitespace-nowrap text-foreground normal-case">
+              <span className="absolute top-0.5 left-1 text-caption whitespace-nowrap text-foreground normal-case">
                 {shownNeedle.label}
               </span>
             </div>
@@ -512,7 +519,7 @@ export function TreeGrid({
           <div
             role="row"
             aria-rowindex={1}
-            className="grid h-row shrink-0 items-center border-b bg-background text-[11px] font-medium text-muted-foreground uppercase"
+            className="grid h-row shrink-0 items-center border-b bg-background text-caption font-medium text-muted-foreground uppercase"
             style={{ gridTemplateColumns: template }}
           >
             <div role="columnheader" className="relative min-w-0 truncate px-2">
@@ -573,7 +580,7 @@ export function TreeGrid({
                   <span
                     key={mark.ns}
                     aria-hidden="true"
-                    className="absolute top-1/2 -translate-y-1/2 text-[10px] normal-case"
+                    className="absolute top-1/2 -translate-y-1/2 text-caption normal-case"
                     style={{
                       left: `${((mark.ns - zoom.startNs) / (zoom.endNs - zoom.startNs)) * 100}%`,
                     }}
@@ -621,7 +628,7 @@ export function TreeGrid({
                       highlightedSpanIds?.has(span.span_id) && "live-row",
                     )}
                     style={{
-                      height: ROW_HEIGHT,
+                      height: rowHeight,
                       transform: `translateY(${item.start}px)`,
                       gridTemplateColumns: template,
                     }}
@@ -670,19 +677,19 @@ export function TreeGrid({
                         <span className="min-w-0 truncate">{highlightName(span.name, query)}</span>
                         {span.status === "error" ? <StatusDot status="error" /> : null}
                         {row.detached ? (
-                          <Badge variant="secondary" className="h-4 px-1.5 text-[10px]">
+                          <Badge variant="secondary" className="h-4 px-1.5 text-caption">
                             detached
                           </Badge>
                         ) : null}
                       </div>
                     </div>
-                    <div role="gridcell" className="num truncate px-2 text-xs">
+                    <div role="gridcell" className="num truncate px-2 text-caption">
                       {formatDuration(span.duration_ns)}
                     </div>
-                    <div role="gridcell" className="num truncate px-2 text-xs">
+                    <div role="gridcell" className="num truncate px-2 text-caption">
                       {showTokens ? formatTokens(span.total_tokens) : ""}
                     </div>
-                    <div role="gridcell" className="num truncate px-2 text-xs">
+                    <div role="gridcell" className="num truncate px-2 text-caption">
                       {span.cost_total === undefined ? "" : formatCost(span.cost_total)}
                     </div>
                     {timeline ? (

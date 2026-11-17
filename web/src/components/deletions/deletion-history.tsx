@@ -68,7 +68,7 @@ export function DeletionHistory() {
 
   return (
     <section aria-labelledby={headingId} className="flex flex-col gap-3">
-      <h2 id={headingId} className="text-base font-medium">
+      <h2 id={headingId} className="text-ui font-medium">
         Deletion history
       </h2>
       {list.data === undefined && list.error ? (
@@ -101,7 +101,7 @@ export function DeletionHistory() {
                     <TableCell>
                       <div className="flex flex-col">
                         <span>{deletionKindLabel(deletion.kind)}</span>
-                        <span className="text-xs text-muted-foreground">
+                        <span className="text-caption text-muted-foreground">
                           {deletionSubject(deletion)}
                         </span>
                       </div>
@@ -120,7 +120,7 @@ export function DeletionHistory() {
                           {deletionStatusLabel(deletion.status)}
                         </Badge>
                         {deletion.error ? (
-                          <span className="text-xs text-muted-foreground">
+                          <span className="text-caption text-muted-foreground">
                             {deletionErrorLabel(deletion.error)}
                           </span>
                         ) : null}

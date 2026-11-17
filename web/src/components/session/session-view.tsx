@@ -88,7 +88,7 @@ export function SessionView({
   }
   if (detail.isError) {
     return (
-      <p className="p-3 text-sm">
+      <p className="p-3 text-body">
         {problemOf(detail.error)?.title ?? "Could not load this session"}
       </p>
     );
@@ -123,7 +123,7 @@ export function SessionView({
         onShowErrors={failedIndex >= 0 ? showFirstError : undefined}
       />
       {truncated ? (
-        <div className="shrink-0 border-b bg-muted px-3 py-1 text-xs">
+        <div className="shrink-0 border-b bg-muted px-3 py-1 text-caption">
           Showing the first 1 000 turns
         </div>
       ) : null}
@@ -163,7 +163,7 @@ export function SessionView({
                   }}
                 />
               ) : (
-                <p className="p-3 text-xs text-muted-foreground">Select a turn</p>
+                <p className="p-3 text-caption text-muted-foreground">Select a turn</p>
               )
             }
           />
@@ -208,7 +208,7 @@ function SessionHeader({
               event.preventDefault();
               router.history.push(backTo.href);
             }}
-            className="focus-ring -ml-1 inline-flex items-center gap-0.5 rounded-sm px-1 text-[12px] text-muted-foreground hover:bg-row-hover hover:text-foreground"
+            className="focus-ring -ml-1 inline-flex items-center gap-0.5 rounded-sm px-1 text-body text-muted-foreground hover:bg-row-hover hover:text-foreground"
           >
             <ChevronLeft aria-hidden="true" className="size-3.5" />
             {backTo.label}
@@ -225,7 +225,7 @@ function SessionHeader({
                 : undefined,
             })}
             aria-label="Back to sessions"
-            className="focus-ring -ml-1 inline-flex items-center gap-0.5 rounded-sm px-1 text-[12px] text-muted-foreground hover:bg-row-hover hover:text-foreground"
+            className="focus-ring -ml-1 inline-flex items-center gap-0.5 rounded-sm px-1 text-body text-muted-foreground hover:bg-row-hover hover:text-foreground"
           >
             <ChevronLeft aria-hidden="true" className="size-3.5" />
             Sessions
@@ -234,7 +234,7 @@ function SessionHeader({
         <span aria-hidden="true" className="text-muted-foreground/60">
           /
         </span>
-        <span className="min-w-0 truncate text-[15px] font-semibold select-text">
+        <span className="min-w-0 truncate text-title font-semibold select-text">
           {session.session_id}
         </span>
         <CopyButton value={session.session_id} label="session ID" />
@@ -242,7 +242,7 @@ function SessionHeader({
           <Link
             to="/$org/$project/users/$userId"
             params={{ org, project, userId: session.user_id }}
-            className="focus-ring rounded-sm font-mono text-[12px] underline-offset-2 hover:underline"
+            className="focus-ring rounded-sm font-mono text-body underline-offset-2 hover:underline"
           >
             {session.user_id}
           </Link>
@@ -263,7 +263,7 @@ function SessionHeader({
           </DisabledReason>
         </div>
       </div>
-      <div className="flex flex-wrap items-center gap-2 text-[12px] text-muted-foreground">
+      <div className="flex flex-wrap items-center gap-2 text-body text-muted-foreground">
         <MetricChip icon={Clock} label="Time span">
           <TimeText value={session.start_time} style="datetime" />
           <span aria-hidden="true"> → </span>
@@ -285,7 +285,7 @@ function SessionHeader({
         {session.error_count > 0 ? (
           <button
             type="button"
-            className="focus-ring inline-flex items-center gap-1 rounded-md border border-status-error/40 px-1.5 py-0.5 text-[12px] text-status-error disabled:opacity-50"
+            className="focus-ring inline-flex items-center gap-1 rounded-md border border-status-error/40 px-1.5 py-0.5 text-body text-status-error disabled:opacity-50"
             disabled={!onShowErrors}
             onClick={onShowErrors}
           >
@@ -297,7 +297,7 @@ function SessionHeader({
           <span
             key={tag}
             className={cn(
-              "inline-flex rounded-sm border px-1.5 text-[11px]",
+              "inline-flex rounded-sm border px-1.5 text-caption",
               categoryClasses(tag).pill,
             )}
           >
@@ -307,7 +307,7 @@ function SessionHeader({
         {[...session.scores]
           .sort((left, right) => left.name.localeCompare(right.name))
           .map((score) => (
-            <Badge key={score.score_id} variant="secondary" className="h-4 px-1.5 text-[11px]">
+            <Badge key={score.score_id} variant="secondary" className="h-4 px-1.5 text-caption">
               {score.name}{" "}
               <ScoreBadge name={score.name} value={score.value} text={badgeValue(score.value)} />
             </Badge>
@@ -444,7 +444,7 @@ function Turn({
         onSelect();
       }}
     >
-      <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
+      <div className="flex items-center gap-2 text-body text-muted-foreground">
         <button
           type="button"
           className="focus-ring flex min-w-0 flex-1 items-center gap-2 rounded-sm text-left"
@@ -461,20 +461,20 @@ function Turn({
           {[...trace.scores]
             .sort((left, right) => left.name.localeCompare(right.name))
             .map((score) => (
-              <Badge key={score.score_id} variant="secondary" className="h-4 px-1.5 text-[11px]">
+              <Badge key={score.score_id} variant="secondary" className="h-4 px-1.5 text-caption">
                 {score.name}{" "}
                 <ScoreBadge name={score.name} value={score.value} text={badgeValue(score.value)} />
               </Badge>
             ))}
           <StatusDot status={trace.status} />
           {failed ? (
-            <span className="shrink-0 rounded-sm bg-status-error/12 px-1.5 text-[11px] font-medium text-status-error">
+            <span className="shrink-0 rounded-sm bg-status-error/12 px-1.5 text-caption font-medium text-status-error">
               Failed
             </span>
           ) : null}
         </button>
         {tools > 0 ? (
-          <span className="inline-flex shrink-0 items-center gap-1 text-[11px]">
+          <span className="inline-flex shrink-0 items-center gap-1 text-caption">
             <Wrench aria-hidden="true" className="size-3" />
             <span className="num">{tools} tool calls</span>
           </span>
@@ -509,7 +509,7 @@ function Turn({
 
 function TurnBubbles({ turn }: { turn: Schema<"SessionTurn"> }) {
   if (turn.input === undefined && turn.output === undefined) {
-    return <p className="text-[12px] text-muted-foreground">No root input/output</p>;
+    return <p className="text-body text-muted-foreground">No root input/output</p>;
   }
   const input = bubbleOf(turn.input, "user");
   const output = bubbleOf(turn.output, "assistant");
@@ -529,7 +529,7 @@ function BubbleBox({ speaker, bubble }: { speaker: "user" | "assistant"; bubble:
   return (
     <div
       className={cn(
-        "max-w-[85%] rounded-lg px-3 py-2 text-[13px]",
+        "max-w-[85%] rounded-lg px-3 py-2 text-ui",
         speaker === "user" ? "ml-auto bg-muted" : "mr-auto border bg-card",
       )}
     >
@@ -537,11 +537,11 @@ function BubbleBox({ speaker, bubble }: { speaker: "user" | "assistant"; bubble:
         {bubble.kind === "markdown" ? (
           <Markdown text={shown} />
         ) : (
-          <pre className="font-mono text-[12px] break-words whitespace-pre-wrap">{shown}</pre>
+          <pre className="font-mono text-body break-words whitespace-pre-wrap">{shown}</pre>
         )}
       </ShowMore>
       {truncated ? (
-        <p className="mt-1 text-[11px] text-muted-foreground">Truncated, see details</p>
+        <p className="mt-1 text-caption text-muted-foreground">Truncated, see details</p>
       ) : null}
     </div>
   );
@@ -611,7 +611,7 @@ function toolCallCount(turn: Schema<"SessionTurn">): number {
 
 function TurnPayloads({ turn, projectRef }: { turn: Schema<"SessionTurn">; projectRef: string }) {
   if (turn.input === undefined && turn.output === undefined) {
-    return <p className="text-xs text-muted-foreground">No root input/output</p>;
+    return <p className="text-caption text-muted-foreground">No root input/output</p>;
   }
   const input = messagesOf(turn.input);
   const output = messagesOf(turn.output);

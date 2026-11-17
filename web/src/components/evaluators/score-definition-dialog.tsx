@@ -395,7 +395,7 @@ function DefinitionForm({
       ) : null}
       {dataType === "categorical" ? (
         <div className="flex flex-col gap-2">
-          <span className="text-sm font-medium">Categories</span>
+          <span className="text-body font-medium">Categories</span>
           {rows.map((row, index) => (
             <div key={row.id} className="flex items-center gap-2">
               <Input
@@ -447,7 +447,7 @@ function DefinitionForm({
             Add category
           </Button>
           {errors.categories ? (
-            <p className="text-xs text-destructive">{errors.categories}</p>
+            <p className="text-caption text-destructive">{errors.categories}</p>
           ) : null}
         </div>
       ) : null}
@@ -478,8 +478,12 @@ function DefinitionForm({
               ))}
             </SelectContent>
           </Select>
-          {directionHint ? <p className="text-xs text-muted-foreground">{directionHint}</p> : null}
-          {errors.direction ? <p className="text-xs text-destructive">{errors.direction}</p> : null}
+          {directionHint ? (
+            <p className="text-caption text-muted-foreground">{directionHint}</p>
+          ) : null}
+          {errors.direction ? (
+            <p className="text-caption text-destructive">{errors.direction}</p>
+          ) : null}
         </div>
       ) : null}
       <div className="flex flex-col gap-1.5">
@@ -494,7 +498,7 @@ function DefinitionForm({
           rows={3}
         />
         {errors.description ? (
-          <p className="text-xs text-destructive">{errors.description}</p>
+          <p className="text-caption text-destructive">{errors.description}</p>
         ) : null}
       </div>
       <FormError message={error} />

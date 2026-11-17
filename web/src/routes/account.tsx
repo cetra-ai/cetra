@@ -20,23 +20,23 @@ function AccountPage() {
   return (
     <TopBarLayout>
       <main className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-10 overflow-auto px-4 py-6">
-        <h1 className="text-2xl font-medium">Account</h1>
+        <h1 className="text-heading font-medium">Account</h1>
         <section className="flex flex-col gap-3" aria-labelledby="profile-heading">
-          <h2 id="profile-heading" className="text-lg font-medium">
+          <h2 id="profile-heading" className="text-title font-medium">
             Profile
           </h2>
           <ProfileForm />
         </section>
         {showPassword ? (
           <section className="flex flex-col gap-3" aria-labelledby="password-heading">
-            <h2 id="password-heading" className="text-lg font-medium">
+            <h2 id="password-heading" className="text-title font-medium">
               Password
             </h2>
             <PasswordForm />
           </section>
         ) : null}
         <section className="flex flex-col gap-3" aria-labelledby="tokens-heading">
-          <h2 id="tokens-heading" className="text-lg font-medium">
+          <h2 id="tokens-heading" className="text-title font-medium">
             Personal access tokens
           </h2>
           <PersonalTokens />

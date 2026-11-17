@@ -250,7 +250,7 @@ function UserHeader({
           params={{ org, project }}
           search={{ ...rangeParams(range), ...pageFlags(search) }}
           aria-label="Back to users"
-          className="focus-ring -ml-1 inline-flex items-center gap-0.5 rounded-sm px-1 text-[12px] text-muted-foreground hover:bg-row-hover hover:text-foreground"
+          className="focus-ring -ml-1 inline-flex items-center gap-0.5 rounded-sm px-1 text-body text-muted-foreground hover:bg-row-hover hover:text-foreground"
         >
           <ChevronLeft aria-hidden="true" className="size-3.5" />
           Users
@@ -260,20 +260,18 @@ function UserHeader({
         </span>
         {identity.name ? (
           <>
-            <span className="min-w-0 truncate text-[15px] font-semibold select-text">
+            <span className="min-w-0 truncate text-title font-semibold select-text">
               {identity.name}
             </span>
-            <span className="font-mono text-[12px] text-muted-foreground select-text">
-              {userId}
-            </span>
+            <span className="font-mono text-body text-muted-foreground select-text">{userId}</span>
           </>
         ) : (
-          <span className="min-w-0 truncate text-[15px] font-semibold select-text">{userId}</span>
+          <span className="min-w-0 truncate text-title font-semibold select-text">{userId}</span>
         )}
         <CopyButton value={userId} label="user ID" />
         {identity.plan ? <PlanPill plan={identity.plan} /> : null}
         {identity.email ? (
-          <span className="text-[12px] text-muted-foreground select-text">{identity.email}</span>
+          <span className="text-body text-muted-foreground select-text">{identity.email}</span>
         ) : null}
         <div className="ml-auto flex shrink-0 items-center gap-2">
           <TimeRangePicker state={range} onChange={onRangeChange} />
@@ -318,7 +316,7 @@ function UserHeader({
       {loading ? (
         <Skeleton className="h-6 w-64" />
       ) : user ? (
-        <div className="flex flex-wrap items-center gap-2 text-[12px] text-muted-foreground">
+        <div className="flex flex-wrap items-center gap-2 text-body text-muted-foreground">
           <MetricChip icon={Clock} label="Time span">
             <TimeText value={user.first_seen} style="datetime" />
             <span aria-hidden="true"> → </span>

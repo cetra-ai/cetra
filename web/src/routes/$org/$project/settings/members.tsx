@@ -127,7 +127,9 @@ function ProjectMembersPage() {
                   <div className="flex flex-col">
                     <span>{member.user.name ?? member.user.email}</span>
                     {member.user.name ? (
-                      <span className="text-xs text-muted-foreground">{member.user.email}</span>
+                      <span className="text-caption text-muted-foreground">
+                        {member.user.email}
+                      </span>
                     ) : null}
                   </div>
                 </TableCell>

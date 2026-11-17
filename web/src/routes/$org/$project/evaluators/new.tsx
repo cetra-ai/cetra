@@ -11,7 +11,7 @@ function NewEvaluatorPage() {
   const navigate = useNavigate();
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-6 overflow-auto px-4 py-6">
-      <h1 className="text-lg font-medium">New evaluator</h1>
+      <h1 className="text-title font-medium">New evaluator</h1>
       <EvaluatorForm
         org={org}
         project={project}

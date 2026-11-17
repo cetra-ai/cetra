@@ -332,7 +332,7 @@ function envPill(env: string | undefined, onFilter?: (conjunct: string) => void)
     >
       <span
         className={cn(
-          "inline-flex rounded-sm border px-1.5 text-[11px]",
+          "inline-flex rounded-sm border px-1.5 text-caption",
           environmentClasses(env).pill,
         )}
       >
@@ -417,7 +417,7 @@ function Tags({ tags, onFilter }: { tags: string[]; onFilter?: (conjunct: string
         <span key={tag} className="group/tag inline-flex min-w-0 items-center">
           <Badge
             variant="secondary"
-            className={cn("h-4 px-1.5 text-[10px]", categoryClasses(tag).pill)}
+            className={cn("h-4 px-1.5 text-caption", categoryClasses(tag).pill)}
           >
             {tag}
           </Badge>

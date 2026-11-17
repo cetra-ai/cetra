@@ -356,32 +356,32 @@ export function SqlTabBody({
           >
             <div className="absolute inset-0 flex min-h-0 flex-col gap-2 pt-2">
               {failure ? (
-                <p id={errorId} role="alert" className="text-[12px] text-destructive">
+                <p id={errorId} role="alert" className="text-body text-destructive">
                   {failure}
                 </p>
               ) : null}
               {exportError ? (
-                <p role="alert" className="text-[12px] text-destructive">
+                <p role="alert" className="text-body text-destructive">
                   {exportError}
                 </p>
               ) : null}
               {exporting ? (
-                <p role="status" className="text-[12px] text-muted-foreground">
+                <p role="status" className="text-body text-muted-foreground">
                   Exporting…
                 </p>
               ) : null}
               <div className="flex min-h-0 flex-1 flex-col gap-1">
                 {run.isPending ? (
-                  <p role="status" className="text-[12px] text-muted-foreground">
+                  <p role="status" className="text-body text-muted-foreground">
                     Running…
                   </p>
                 ) : cancelled ? (
-                  <p role="status" className="text-[12px] text-muted-foreground">
+                  <p role="status" className="text-body text-muted-foreground">
                     Query cancelled.
                   </p>
                 ) : lastRun && !run.isError ? (
                   <>
-                    <p role="status" className="text-[12px] text-muted-foreground">
+                    <p role="status" className="text-body text-muted-foreground">
                       {resultStatus(
                         lastRun.result.rows.length,
                         lastRun.result.truncated,

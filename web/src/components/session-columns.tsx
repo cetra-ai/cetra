@@ -278,11 +278,11 @@ function Tags({ tags }: { tags: string[] }) {
   return (
     <span className="flex min-w-0 items-center gap-1">
       {shown.map((tag) => (
-        <Badge key={tag} variant="secondary" className="h-4 max-w-24 truncate px-1.5 text-[10px]">
+        <Badge key={tag} variant="secondary" className="h-4 max-w-24 truncate px-1.5 text-caption">
           {tag}
         </Badge>
       ))}
-      {rest > 0 ? <span className="text-[10px] text-muted-foreground">+{rest}</span> : null}
+      {rest > 0 ? <span className="text-caption text-muted-foreground">+{rest}</span> : null}
     </span>
   );
 }

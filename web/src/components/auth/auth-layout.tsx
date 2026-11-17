@@ -27,11 +27,13 @@ export function AuthLayout({
         }`}
       >
         <div className="flex flex-col gap-1">
-          <h1 className="text-xl font-medium">{title}</h1>
-          {description ? <div className="text-sm text-muted-foreground">{description}</div> : null}
+          <h1 className="text-heading font-medium">{title}</h1>
+          {description ? (
+            <div className="text-body text-muted-foreground">{description}</div>
+          ) : null}
         </div>
         {children}
-        {footer ? <div className="flex flex-col gap-1 text-sm">{footer}</div> : null}
+        {footer ? <div className="flex flex-col gap-1 text-body">{footer}</div> : null}
       </main>
     </div>
   );

@@ -100,10 +100,10 @@ export function DomainsSection({
   return (
     <section aria-labelledby="sso-domains-heading" className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 id="sso-domains-heading" className="text-base font-medium">
+        <h2 id="sso-domains-heading" className="text-ui font-medium">
           Domains
         </h2>
-        <p className="text-sm text-muted-foreground">
+        <p className="text-body text-muted-foreground">
           People with these email domains sign in through the provider. Prove each domain with its
           DNS TXT record, then verify it.
         </p>
@@ -161,7 +161,7 @@ export function DomainsSection({
               </TableCell>
               <TableCell>
                 {row.status === "pending" ? (
-                  <div className="flex flex-col gap-1 text-xs">
+                  <div className="flex flex-col gap-1 text-caption">
                     <span className="flex items-center gap-1">
                       <code className="break-all">{row.txt_name}</code>
                       <CopyButton value={row.txt_name} label="TXT name" />

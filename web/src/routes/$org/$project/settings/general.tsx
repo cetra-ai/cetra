@@ -278,7 +278,7 @@ function ProjectGeneralPage() {
         </DisabledReason>
       </form>
       <section className="flex max-w-md flex-col gap-4">
-        <h2 className="text-sm leading-none font-medium">Online evaluation</h2>
+        <h2 className="text-body leading-none font-medium">Online evaluation</h2>
         <form
           noValidate
           aria-label="Online evaluation"
@@ -304,13 +304,20 @@ function ProjectGeneralPage() {
                 setTimeoutSaved(false);
               }}
             />
-            <p id="project-trace-timeout-description" className="text-xs text-muted-foreground">
+            <p
+              id="project-trace-timeout-description"
+              className="text-caption text-muted-foreground"
+            >
               Online rules evaluate a trace when its root span has ended and 5 seconds pass without
               a new span, or after this many seconds without a new span. {COMPLETION_TIMEOUT_MIN_S}{" "}
               to {COMPLETION_TIMEOUT_MAX_S}; default 60.
             </p>
             {timeoutError ? (
-              <p id="project-trace-timeout-error" role="alert" className="text-xs text-destructive">
+              <p
+                id="project-trace-timeout-error"
+                role="alert"
+                className="text-caption text-destructive"
+              >
                 {timeoutError}
               </p>
             ) : null}

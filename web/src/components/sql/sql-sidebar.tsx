@@ -56,10 +56,10 @@ export function SqlSidebar({
         className="flex min-h-0 flex-1 flex-col gap-0"
       >
         <TabsList className="m-2 mb-0 flex w-auto shrink-0">
-          <TabsTrigger value="schema" className="text-[12px]">
+          <TabsTrigger value="schema" className="text-body">
             Schema
           </TabsTrigger>
-          <TabsTrigger value="saved" className="text-[12px]">
+          <TabsTrigger value="saved" className="text-body">
             Saved
           </TabsTrigger>
         </TabsList>

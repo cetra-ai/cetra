@@ -117,16 +117,16 @@ function PlanDetails({
   return (
     <>
       <section aria-labelledby="plan-name" className="flex flex-col gap-2">
-        <h2 id="plan-name" className="text-base font-medium">
+        <h2 id="plan-name" className="text-ui font-medium">
           {name}
         </h2>
         {plan.source === "defaults" ? (
-          <p className="text-sm text-muted-foreground">Instance defaults apply.</p>
+          <p className="text-body text-muted-foreground">Instance defaults apply.</p>
         ) : null}
         {status === "grace" && expires_at !== undefined && grace_ends_at !== undefined ? (
           <p
             role="alert"
-            className="flex items-center gap-2 text-sm text-amber-700 dark:text-amber-400"
+            className="flex items-center gap-2 text-body text-amber-700 dark:text-amber-400"
           >
             <TriangleAlert className="size-4 shrink-0" aria-hidden="true" />
             This plan expired on {day(expires_at)}. It stays in effect until {day(grace_ends_at)}.
@@ -137,12 +137,15 @@ function PlanDetails({
       <UsageSection org={org} entitlements={entitlements} />
 
       <section aria-labelledby="plan-features" className="flex flex-col gap-2">
-        <h2 id="plan-features" className="text-base font-medium">
+        <h2 id="plan-features" className="text-ui font-medium">
           Features
         </h2>
         <ul className="flex flex-col divide-y rounded-md border">
           {FEATURES.map((feature) => (
-            <li key={feature} className="flex items-center justify-between gap-4 px-3 py-2 text-sm">
+            <li
+              key={feature}
+              className="flex items-center justify-between gap-4 px-3 py-2 text-body"
+            >
               <span>{FEATURE_NAMES[feature]}</span>
               {allows(feature) ? (
                 <span className="flex items-center gap-1 text-muted-foreground">
@@ -161,7 +164,7 @@ function PlanDetails({
       </section>
 
       <section aria-labelledby="plan-limits" className="flex flex-col gap-2">
-        <h2 id="plan-limits" className="text-base font-medium">
+        <h2 id="plan-limits" className="text-ui font-medium">
           Limits
         </h2>
         <Table>
@@ -199,7 +202,7 @@ function UsageSection({ org, entitlements }: { org: string; entitlements: Entitl
 
   return (
     <section aria-labelledby="plan-usage" className="flex flex-col gap-2">
-      <h2 id="plan-usage" className="text-base font-medium">
+      <h2 id="plan-usage" className="text-ui font-medium">
         Usage this month
       </h2>
       <UsageMeter
@@ -211,7 +214,7 @@ function UsageSection({ org, entitlements }: { org: string; entitlements: Entitl
       {query.data === undefined ? (
         <Skeleton className="h-48 w-full" />
       ) : query.data.days.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No usage this month.</p>
+        <p className="text-body text-muted-foreground">No usage this month.</p>
       ) : (
         <>
           <ChartContainer
@@ -282,10 +285,10 @@ function UsageMeter({
           ))}
         </div>
       )}
-      <p className="text-sm tabular-nums">{text}</p>
-      <p className="text-sm text-muted-foreground">Resets on {day(resetsAt)} (UTC).</p>
+      <p className="text-body tabular-nums">{text}</p>
+      <p className="text-body text-muted-foreground">Resets on {day(resetsAt)} (UTC).</p>
       {cap === undefined ? null : (
-        <p className="text-sm text-muted-foreground">
+        <p className="text-body text-muted-foreground">
           Ingest pauses at {numbers.format(cap)} units.
         </p>
       )}

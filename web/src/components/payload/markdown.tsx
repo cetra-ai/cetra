@@ -24,16 +24,16 @@ export function Markdown({ text }: { text: string }) {
 }
 
 const components: Components = {
-  h1: ({ children }) => <h1 className="mt-3 mb-1.5 text-[17px] font-semibold">{children}</h1>,
-  h2: ({ children }) => <h2 className="mt-3 mb-1.5 text-[15px] font-semibold">{children}</h2>,
-  h3: ({ children }) => <h3 className="mt-2 mb-1 text-[13px] font-semibold">{children}</h3>,
-  h4: ({ children }) => <h4 className="mt-2 mb-1 text-[13px] font-semibold">{children}</h4>,
-  h5: ({ children }) => <h5 className="mt-2 mb-1 text-[13px] font-semibold">{children}</h5>,
-  h6: ({ children }) => <h6 className="mt-2 mb-1 text-[13px] font-semibold">{children}</h6>,
-  p: ({ children }) => <p className="my-1.5 text-[13px] leading-relaxed">{children}</p>,
+  h1: ({ children }) => <h1 className="mt-3 mb-1.5 text-heading font-semibold">{children}</h1>,
+  h2: ({ children }) => <h2 className="mt-3 mb-1.5 text-title font-semibold">{children}</h2>,
+  h3: ({ children }) => <h3 className="mt-2 mb-1 text-ui font-semibold">{children}</h3>,
+  h4: ({ children }) => <h4 className="mt-2 mb-1 text-ui font-semibold">{children}</h4>,
+  h5: ({ children }) => <h5 className="mt-2 mb-1 text-ui font-semibold">{children}</h5>,
+  h6: ({ children }) => <h6 className="mt-2 mb-1 text-ui font-semibold">{children}</h6>,
+  p: ({ children }) => <p className="my-1.5 text-ui leading-relaxed">{children}</p>,
   ul: ({ children }) => <ul className="my-1.5 list-disc pl-5">{children}</ul>,
   ol: ({ children }) => <ol className="my-1.5 list-decimal pl-5">{children}</ol>,
-  li: ({ children }) => <li className="my-0.5 text-[13px] leading-relaxed">{children}</li>,
+  li: ({ children }) => <li className="my-0.5 text-ui leading-relaxed">{children}</li>,
   a: ({ href, children }) => (
     <a
       href={href}
@@ -48,7 +48,7 @@ const components: Components = {
   code: ({ className, children }) => (
     <code
       className={cn(
-        "rounded bg-muted px-1 py-0.5 font-mono text-[12px] in-[pre]:bg-transparent in-[pre]:p-0",
+        "rounded bg-muted px-1 py-0.5 font-mono text-body in-[pre]:bg-transparent in-[pre]:p-0",
         className,
       )}
     >
@@ -58,7 +58,7 @@ const components: Components = {
   pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
   table: ({ children }) => (
     <div className="my-2 overflow-auto">
-      <table className="w-full border-collapse text-[12px]">{children}</table>
+      <table className="w-full border-collapse text-body">{children}</table>
     </div>
   ),
   th: ({ children }) => <th className="border px-2 py-1 text-left">{children}</th>,
@@ -77,11 +77,11 @@ function CodeBlock({ children }: { children: ReactNode }) {
   const text = reactText(code ? code.props.children : children).replace(/\n$/, "");
   return (
     <div className="my-2 overflow-hidden rounded-md border bg-surface">
-      <div className="flex items-center justify-between border-b px-3 py-1 text-[11px] text-muted-foreground">
+      <div className="flex items-center justify-between border-b px-3 py-1 text-caption text-muted-foreground">
         <span>{language}</span>
         <CopyButton value={text} label="code" />
       </div>
-      <pre className="overflow-auto p-3 font-mono text-[12px] leading-relaxed">{children}</pre>
+      <pre className="overflow-auto p-3 font-mono text-body leading-relaxed">{children}</pre>
     </div>
   );
 }

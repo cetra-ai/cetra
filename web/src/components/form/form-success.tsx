@@ -3,7 +3,7 @@ export function FormSuccess({ message }: { message?: string }) {
     return null;
   }
   return (
-    <p role="status" className="text-sm text-muted-foreground">
+    <p role="status" className="text-body text-muted-foreground">
       {message}
     </p>
   );

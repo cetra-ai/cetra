@@ -203,7 +203,9 @@ export function TraceView({
   }
   if (trace.isError) {
     return (
-      <p className="p-3 text-sm">{problemOf(trace.error)?.title ?? "Could not load this trace"}</p>
+      <p className="p-3 text-body">
+        {problemOf(trace.error)?.title ?? "Could not load this trace"}
+      </p>
     );
   }
 
@@ -271,7 +273,7 @@ export function TraceView({
         }
       />
       {loaded.truncated ? (
-        <div className="shrink-0 border-b bg-muted px-3 py-1 text-xs">
+        <div className="shrink-0 border-b bg-muted px-3 py-1 text-caption">
           Showing the first 20 000 spans
         </div>
       ) : null}
@@ -320,7 +322,7 @@ export function TraceView({
                       type="button"
                       variant="ghost"
                       size="xs"
-                      className="text-[12px]"
+                      className="text-body"
                       onClick={onShowSummary}
                     >
                       <ArrowLeft />

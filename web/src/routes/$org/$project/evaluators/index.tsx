@@ -61,7 +61,7 @@ function EvaluatorsPage() {
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 overflow-auto px-4 py-6">
       <div className="flex items-start justify-between gap-4">
-        <h1 className="text-lg font-medium">Evaluators</h1>
+        <h1 className="text-title font-medium">Evaluators</h1>
         <DisabledReason reason={canManage ? undefined : "Only members can create evaluators"}>
           {canManage ? (
             <Button asChild>
@@ -114,13 +114,13 @@ function EvaluatorsPage() {
                 <TableCell>
                   <div className="flex flex-col">
                     <span>{evaluator.output_score.name}</span>
-                    <span className="text-xs text-muted-foreground">
+                    <span className="text-caption text-muted-foreground">
                       {evaluator.output_score.data_type}
                     </span>
                   </div>
                 </TableCell>
                 <TableCell>
-                  <span className="font-mono text-xs">{detailOf(evaluator)}</span>
+                  <span className="font-mono text-caption">{detailOf(evaluator)}</span>
                 </TableCell>
                 <TableCell>{evaluator.version}</TableCell>
                 <TableCell>

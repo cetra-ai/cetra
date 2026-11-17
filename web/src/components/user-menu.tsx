@@ -48,7 +48,7 @@ export function UserMenu() {
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-56">
         {name ? <DropdownMenuLabel>{name}</DropdownMenuLabel> : null}
-        <p className="px-2 py-1.5 text-sm text-muted-foreground">{me.user.email}</p>
+        <p className="px-2 py-1.5 text-body text-muted-foreground">{me.user.email}</p>
         {me.user.is_instance_admin ? (
           <div className="px-2 py-1.5">
             <Badge variant="secondary">Instance admin</Badge>

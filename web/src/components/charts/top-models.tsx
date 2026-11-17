@@ -19,7 +19,7 @@ export function TopModels({ models }: { models: readonly Schema<"ModelUsage">[] 
         <NoData />
       ) : (
         <div className="mt-2 min-h-0 flex-1 overflow-auto">
-          <table className="w-full text-left text-xs">
+          <table className="w-full text-left text-caption">
             <thead className="text-muted-foreground">
               <tr>
                 <th className="py-1 font-medium">Model</th>
@@ -54,14 +54,16 @@ export function TopModels({ models }: { models: readonly Schema<"ModelUsage">[] 
 export function CardHeading({ title, unit }: { title: string; unit: string }) {
   return (
     <header className="flex items-baseline justify-between gap-2">
-      <h2 className="text-sm font-medium">{title}</h2>
-      <span className="font-mono text-[11px] text-muted-foreground">{unit}</span>
+      <h2 className="text-body font-medium">{title}</h2>
+      <span className="font-mono text-caption text-muted-foreground">{unit}</span>
     </header>
   );
 }
 
 export function NoData() {
   return (
-    <p className="flex flex-1 items-center justify-center text-muted-foreground text-sm">No data</p>
+    <p className="flex flex-1 items-center justify-center text-muted-foreground text-body">
+      No data
+    </p>
   );
 }

@@ -73,11 +73,11 @@ export function UserPanel({
 
   return (
     <section aria-label="User" className="flex h-full min-h-0 flex-col">
-      <header className="flex shrink-0 items-center gap-2 border-b px-3 py-1.5 text-[12px]">
+      <header className="flex shrink-0 items-center gap-2 border-b px-3 py-1.5 text-body">
         {user && identity.name ? (
           <span className="flex min-w-0 items-baseline gap-1.5">
-            <span className="truncate text-[13px] font-semibold">{identity.name}</span>
-            <span className="truncate font-mono text-[11px] text-muted-foreground">{userId}</span>
+            <span className="truncate text-ui font-semibold">{identity.name}</span>
+            <span className="truncate font-mono text-caption text-muted-foreground">{userId}</span>
           </span>
         ) : (
           <IdText value={userId} kind="user" />
@@ -99,12 +99,12 @@ export function UserPanel({
           </Button>
         </div>
       </header>
-      <div className="@container min-h-0 flex-1 overflow-auto p-3 text-[12px]">
+      <div className="@container min-h-0 flex-1 overflow-auto p-3 text-body">
         {user ? (
           <div className="flex flex-col gap-3">
             <div className="flex flex-col gap-2">
               {identity.email ? (
-                <p className="text-[12px] text-muted-foreground">{identity.email}</p>
+                <p className="text-body text-muted-foreground">{identity.email}</p>
               ) : null}
               <UserChips user={user} totalSessions={allTimeFetched?.user.session_count} />
               <p className="text-muted-foreground">
@@ -151,7 +151,7 @@ export function UserPanel({
                               : "border-transparent",
                           )}
                         >
-                          <span className="flex min-w-0 items-center gap-1.5 text-[12px]">
+                          <span className="flex min-w-0 items-center gap-1.5 text-body">
                             <span
                               aria-hidden="true"
                               title={session.error_trace_count > 0 ? "Has errors" : undefined}
@@ -178,7 +178,7 @@ export function UserPanel({
                               <span className="sr-only"> (has errors)</span>
                             ) : null}
                           </span>
-                          <span className="num flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                          <span className="num flex items-center gap-1.5 text-caption text-muted-foreground">
                             <RelativeTime value={session.start_time} />
                             <span aria-hidden="true">·</span>
                             <span>
@@ -198,7 +198,7 @@ export function UserPanel({
                       to="/$org/$project/users/$userId"
                       params={{ org, project, userId }}
                       search={{ ...pageSearch, tab: "sessions" as const }}
-                      className="self-start text-[12px] text-muted-foreground hover:text-foreground"
+                      className="self-start text-body text-muted-foreground hover:text-foreground"
                     >
                       All sessions →
                     </Link>
@@ -236,7 +236,7 @@ function Section({
     <section className="flex flex-col gap-2 rounded-md border bg-surface p-3">
       <div className="flex items-center gap-1.5">
         <Icon aria-hidden="true" className="size-3.5 text-muted-foreground" />
-        <h3 className="text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
+        <h3 className="text-caption font-medium tracking-wide text-muted-foreground uppercase">
           {title}
         </h3>
       </div>

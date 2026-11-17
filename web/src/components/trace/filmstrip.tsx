@@ -110,7 +110,7 @@ export function Filmstrip({
                 onSelect(item.id);
               }}
               className={cn(
-                "inline-flex h-6 shrink-0 items-center gap-1.5 rounded-md border px-2 text-[10.5px] hover:bg-muted",
+                "inline-flex h-6 shrink-0 items-center gap-1.5 rounded-md border px-2 text-caption hover:bg-muted",
                 selected && "border-ring bg-muted",
               )}
             >

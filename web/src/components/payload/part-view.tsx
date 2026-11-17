@@ -56,7 +56,7 @@ export function PartView({
   }
   return (
     <div className="flex flex-col gap-1">
-      <p className="text-[12px] text-muted-foreground">Unknown part</p>
+      <p className="text-body text-muted-foreground">Unknown part</p>
       <JsonView value={part} />
     </div>
   );
@@ -76,14 +76,14 @@ function Reasoning({ content }: { content: string }) {
     <div className="flex flex-col gap-1">
       <button
         type="button"
-        className="self-start text-[12px] text-muted-foreground"
+        className="self-start text-body text-muted-foreground"
         aria-expanded={open}
         onClick={() => setOpen((current) => !current)}
       >
         Reasoning · {content.length}
       </button>
       {open ? (
-        <p className="text-[12px] break-words whitespace-pre-wrap text-muted-foreground italic">
+        <p className="text-body break-words whitespace-pre-wrap text-muted-foreground italic">
           {content}
         </p>
       ) : null}

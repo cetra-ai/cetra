@@ -51,7 +51,7 @@ export function ShowMore({
       {overflowing ? (
         <button
           type="button"
-          className="self-start text-[12px] text-primary"
+          className="self-start text-body text-primary"
           aria-expanded={expanded}
           onClick={() => {
             setExpanded((current) => !current);

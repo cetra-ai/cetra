@@ -19,7 +19,7 @@ export function TopUsers({
   return (
     <section
       aria-label="Top users by cost"
-      className="flex h-8 shrink-0 items-center gap-2 overflow-x-auto border-b px-3 text-[12px]"
+      className="flex h-8 shrink-0 items-center gap-2 overflow-x-auto border-b px-3 text-body"
     >
       <span className="shrink-0 text-muted-foreground">Top by cost</span>
       {costly.map((user) => {

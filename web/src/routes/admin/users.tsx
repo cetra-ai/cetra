@@ -113,7 +113,7 @@ function AdminUsersPage() {
   return (
     <>
       <div className="flex items-center gap-4">
-        <h2 className="text-lg font-medium">Users</h2>
+        <h2 className="text-title font-medium">Users</h2>
         <div className="flex-1" />
         <Button type="button" onClick={() => setAddOpen(true)}>
           <UserPlus aria-hidden="true" />
@@ -162,7 +162,7 @@ function AdminUsersPage() {
                 </TableCell>
                 <TableCell>
                   {user.providers.length > 0 ? (
-                    <span className="font-mono text-xs">{user.providers.join(", ")}</span>
+                    <span className="font-mono text-caption">{user.providers.join(", ")}</span>
                   ) : (
                     "—"
                   )}

@@ -278,7 +278,7 @@ function ItemBody({
           <JsonSection title="Metadata" value={item.metadata} />
         </>
       )}
-      <dl className="grid grid-cols-[8rem_1fr] gap-x-4 gap-y-2 text-sm">
+      <dl className="grid grid-cols-[8rem_1fr] gap-x-4 gap-y-2 text-body">
         <dt className="text-muted-foreground">Added in</dt>
         <dd>{`v${item.version}`}</dd>
         <dt className="text-muted-foreground">Revision</dt>
@@ -324,9 +324,9 @@ function ItemBody({
 function JsonSection({ title, value }: { title: string; value: unknown }) {
   return (
     <section className="flex flex-col gap-2">
-      <h3 className="text-sm font-medium">{title}</h3>
+      <h3 className="text-body font-medium">{title}</h3>
       {value === undefined ? (
-        <p className="text-sm text-muted-foreground">None</p>
+        <p className="text-body text-muted-foreground">None</p>
       ) : (
         <JsonView value={value} />
       )}

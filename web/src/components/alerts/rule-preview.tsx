@@ -70,7 +70,7 @@ export function RulePreview(props: { org: string; project: string; values: RuleF
 
   if (series === undefined) {
     return (
-      <div className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
+      <div className="rounded-md border border-dashed p-4 text-body text-muted-foreground">
         No preview for LLM span latency. The dashboard shows it per model.
       </div>
     );
@@ -106,10 +106,10 @@ export function RulePreview(props: { org: string; project: string; values: RuleF
       problem?.code === "invalid_filter" ? (
         <FormError message={`The filter is invalid: ${filterMessage(problem)}`} />
       ) : (
-        <p className="text-sm text-muted-foreground">The preview could not be loaded.</p>
+        <p className="text-body text-muted-foreground">The preview could not be loaded.</p>
       );
   } else if (!hasValue) {
-    body = <p className="text-sm text-muted-foreground">No data in this range.</p>;
+    body = <p className="text-body text-muted-foreground">No data in this range.</p>;
   } else {
     body = (
       <figure aria-label={`Preview of the metric over the last ${RANGE_LABEL[values.window]}`}>
@@ -162,9 +162,9 @@ export function RulePreview(props: { org: string; project: string; values: RuleF
 
   return (
     <div className="flex flex-col gap-2">
-      <h2 className="text-sm font-medium">Preview</h2>
+      <h2 className="text-body font-medium">Preview</h2>
       {body}
-      <p className="text-xs text-muted-foreground">
+      <p className="text-caption text-muted-foreground">
         Each point is the metric over one window, as the rule sees it. Minimum samples are not
         shown.
       </p>

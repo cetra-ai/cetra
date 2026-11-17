@@ -65,14 +65,14 @@ export function UserOverview({
             <UserMetadata metadata={user.metadata} />
           </OverviewCard>
         </div>
-        <h2 className="text-[11px] text-muted-foreground uppercase">Usage</h2>
+        <h2 className="text-caption text-muted-foreground uppercase">Usage</h2>
         {data ? (
           <>
             <KpiRow kpis={data.kpis} />
             <DashboardBody response={data} onBucket={openBucket} />
           </>
         ) : metrics.isError ? (
-          <p className="text-[12px] text-muted-foreground">Could not load the usage charts.</p>
+          <p className="text-body text-muted-foreground">Could not load the usage charts.</p>
         ) : (
           <>
             <KpiRowSkeleton />
@@ -95,8 +95,8 @@ function OverviewCard({
   children: ReactNode;
 }) {
   return (
-    <section aria-label={label} className="rounded-md border p-3 text-[12px]">
-      <h2 className="mb-2 text-[11px] text-muted-foreground uppercase">{title}</h2>
+    <section aria-label={label} className="rounded-md border p-3 text-body">
+      <h2 className="mb-2 text-caption text-muted-foreground uppercase">{title}</h2>
       {children}
     </section>
   );

@@ -82,8 +82,8 @@ function DatasetsPage() {
     <div className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 overflow-auto px-4 py-6">
       <div className="flex items-start justify-between gap-4">
         <div className="flex flex-col gap-1">
-          <h1 className="text-lg font-medium">Datasets</h1>
-          <p className="text-xs text-muted-foreground">
+          <h1 className="text-title font-medium">Datasets</h1>
+          <p className="text-caption text-muted-foreground">
             Versioned sets of inputs and expected outputs for experiments.
           </p>
         </div>

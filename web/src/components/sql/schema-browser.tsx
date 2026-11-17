@@ -28,7 +28,7 @@ export function SchemaBrowser({
     return (
       <nav
         aria-label="Schema"
-        className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto p-2 text-[12px]"
+        className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto p-2 text-body"
       >
         <p className="text-destructive">Schema unavailable</p>
       </nav>
@@ -38,7 +38,7 @@ export function SchemaBrowser({
     return (
       <nav
         aria-label="Schema"
-        className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto p-2 text-[12px]"
+        className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto p-2 text-body"
       >
         <p className="text-muted-foreground">Loading…</p>
       </nav>
@@ -47,7 +47,7 @@ export function SchemaBrowser({
   return (
     <nav
       aria-label="Schema"
-      className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto p-2 text-[12px]"
+      className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto p-2 text-body"
     >
       {schema.views.map((view) => {
         const open = expanded.has(view.name);
@@ -87,7 +87,7 @@ export function SchemaBrowser({
                       onClick={() => onInsert(column.name)}
                     >
                       <span className="font-mono">{column.name}</span>
-                      <span className="text-[11px] text-muted-foreground">
+                      <span className="text-caption text-muted-foreground">
                         {column.column_type}
                       </span>
                     </button>

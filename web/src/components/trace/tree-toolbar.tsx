@@ -88,11 +88,11 @@ function TreeControls({ controls }: { controls: TreeControls }) {
         type="search"
         aria-label="Search spans"
         placeholder="Search"
-        className="h-6 min-w-0 flex-1 text-xs"
+        className="h-6 min-w-0 flex-1 text-caption"
         onChange={(event) => controls.onQuery(event.target.value)}
         onKeyDown={onSearchKey}
       />
-      <span className="num shrink-0 text-[11px] text-muted-foreground">{controls.matchLabel}</span>
+      <span className="num shrink-0 text-caption text-muted-foreground">{controls.matchLabel}</span>
       <Button
         type="button"
         variant="ghost"
@@ -134,7 +134,7 @@ function TreeControls({ controls }: { controls: TreeControls }) {
       </Button>
       {controls.zoomLabel !== undefined && controls.onFit ? (
         <>
-          <span className="num shrink-0 text-[11px] text-muted-foreground">
+          <span className="num shrink-0 text-caption text-muted-foreground">
             {controls.zoomLabel}
           </span>
           <Button type="button" variant="outline" size="xs" onClick={controls.onFit}>

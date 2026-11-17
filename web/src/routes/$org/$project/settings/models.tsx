@@ -124,14 +124,14 @@ function ProjectPricesPage() {
       }
     >
       <section aria-labelledby="price-resolver-heading" className="flex flex-col gap-3">
-        <h2 id="price-resolver-heading" className="text-base font-medium">
+        <h2 id="price-resolver-heading" className="text-ui font-medium">
           Which price applies?
         </h2>
         <PriceResolver org={org} project={project} />
       </section>
 
       <section aria-labelledby="project-prices-heading" className="flex flex-col gap-3">
-        <h2 id="project-prices-heading" className="text-base font-medium">
+        <h2 id="project-prices-heading" className="text-ui font-medium">
           Project prices
         </h2>
         {own.isPending ? (
@@ -199,24 +199,24 @@ function ProjectPricesPage() {
 
       <section aria-labelledby="org-prices-heading" className="flex flex-col gap-3">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <h2 id="org-prices-heading" className="text-base font-medium">
+          <h2 id="org-prices-heading" className="text-ui font-medium">
             Organization prices
           </h2>
-          <Link to="/$org/settings/models" params={{ org }} className="text-sm underline">
+          <Link to="/$org/settings/models" params={{ org }} className="text-body underline">
             Manage organization prices
           </Link>
         </div>
         {inherited.isPending ? (
           <Skeleton className="h-8 w-full" />
         ) : orgRows.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No organization prices.</p>
+          <p className="text-body text-muted-foreground">No organization prices.</p>
         ) : (
           <PriceTable label="Organization prices" rows={orgRows} />
         )}
       </section>
 
       <section aria-labelledby="builtin-prices-heading" className="flex flex-col gap-3">
-        <h2 id="builtin-prices-heading" className="text-base font-medium">
+        <h2 id="builtin-prices-heading" className="text-ui font-medium">
           Built-in prices
         </h2>
         <Input
@@ -228,11 +228,13 @@ function ProjectPricesPage() {
           }}
         />
         {term.length < 2 ? (
-          <p className="text-sm text-muted-foreground">Search the built-in prices from LiteLLM.</p>
+          <p className="text-body text-muted-foreground">
+            Search the built-in prices from LiteLLM.
+          </p>
         ) : builtin.isPending ? (
           <Skeleton className="h-8 w-full" />
         ) : builtinRows.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No built-in prices match.</p>
+          <p className="text-body text-muted-foreground">No built-in prices match.</p>
         ) : (
           <PriceTable label="Built-in prices" rows={builtinRows} />
         )}

@@ -70,8 +70,8 @@ function ExperimentsPage() {
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 overflow-auto px-4 py-6">
       <div className="flex flex-col gap-1">
-        <h1 className="text-lg font-medium">Experiments</h1>
-        <p className="text-xs text-muted-foreground">
+        <h1 className="text-title font-medium">Experiments</h1>
+        <p className="text-caption text-muted-foreground">
           Runs of your app on a dataset, scored by the SDK. Pick two to four to compare.
         </p>
       </div>
@@ -121,7 +121,7 @@ function ExperimentsPage() {
         <ExperimentsTable rows={rows} selected={selected} onSelectedChange={setSelected} />
       )}
       {nextPageFailure === undefined ? null : (
-        <p role="alert" className="text-sm text-status-error">
+        <p role="alert" className="text-body text-status-error">
           {problemMessage(nextPageFailure, "The next page could not be loaded")}
         </p>
       )}

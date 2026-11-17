@@ -192,8 +192,8 @@ export function DashboardView({ search }: { search: DashboardSearch }) {
         <div className="min-h-0 flex-1 overflow-auto p-3">
           {filterError ? (
             <div className="mx-auto flex max-w-md flex-col gap-2 px-4 py-16">
-              <h2 className="text-sm font-medium">{filterError.title}</h2>
-              <p className="text-destructive text-sm">{filterMessage(filterError)}</p>
+              <h2 className="text-body font-medium">{filterError.title}</h2>
+              <p className="text-destructive text-body">{filterMessage(filterError)}</p>
             </div>
           ) : data ? (
             <>
@@ -220,11 +220,11 @@ function GroupBy({
   onChange: (group: DashboardSearch["group"]) => void;
 }) {
   return (
-    <label className="flex shrink-0 items-center gap-1.5 text-muted-foreground text-xs">
+    <label className="flex shrink-0 items-center gap-1.5 text-muted-foreground text-caption">
       <span id="dashboard-group-label">Group by</span>
       <select
         aria-labelledby="dashboard-group-label"
-        className="focus-ring h-6 rounded-md border border-border bg-background px-1.5 text-foreground text-xs"
+        className="focus-ring h-6 rounded-md border border-border bg-background px-1.5 text-foreground text-caption"
         value={value ?? ""}
         onChange={(event) => {
           const next = event.target.value;

@@ -79,7 +79,7 @@ export function ExportMenu({ datasetId, version }: { datasetId: string; version:
           >
             CSV
           </DropdownMenuItem>
-          <p className="max-w-64 px-2 pb-1.5 text-xs text-muted-foreground">
+          <p className="max-w-64 px-2 pb-1.5 text-caption text-muted-foreground">
             Open it in a spreadsheet as text: cells are not escaped against formulas.
           </p>
         </DropdownMenuContent>

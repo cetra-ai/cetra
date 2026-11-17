@@ -290,7 +290,7 @@ function ChannelForm({
         onChange={setName}
       />
       {channel ? (
-        <p className="text-sm">Kind: {channelKindLabel(channel.kind)}</p>
+        <p className="text-body">Kind: {channelKindLabel(channel.kind)}</p>
       ) : (
         <div className="flex flex-col gap-2">
           <Label id="channel-kind-label">Kind</Label>
@@ -313,7 +313,7 @@ function ChannelForm({
             ))}
           </RadioGroup>
           {errors.kind ? (
-            <p id="channel-kind-error" className="text-xs text-destructive">
+            <p id="channel-kind-error" className="text-caption text-destructive">
               {errors.kind}
             </p>
           ) : null}
@@ -393,16 +393,16 @@ function ChannelForm({
               setRecipients(event.target.value);
             }}
           />
-          <p id="channel-recipients-description" className="text-xs text-muted-foreground">
+          <p id="channel-recipients-description" className="text-caption text-muted-foreground">
             One address per line, at most 20.
           </p>
           {errors.recipients ? (
-            <p id="channel-recipients-error" className="text-xs text-destructive">
+            <p id="channel-recipients-error" className="text-caption text-destructive">
               {errors.recipients}
             </p>
           ) : null}
           {!channel ? (
-            <p className="text-xs text-muted-foreground">
+            <p className="text-caption text-muted-foreground">
               Email needs SMTP on the server. Without it the channel cannot be created.
             </p>
           ) : null}

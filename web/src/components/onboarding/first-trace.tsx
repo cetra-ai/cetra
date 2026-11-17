@@ -70,16 +70,16 @@ export function FirstTraceScreen({
           </div>
           <CopyButton value={secret} label="secret key" />
         </div>
-        <p className="text-sm text-muted-foreground">Copy it now. You won't see it again.</p>
+        <p className="text-body text-muted-foreground">Copy it now. You won't see it again.</p>
       </div>
       <SnippetTabs origin={window.location.origin} apiKey={secret} />
       {received ? (
-        <p role="status" className="flex items-center gap-2 text-sm">
+        <p role="status" className="flex items-center gap-2 text-body">
           <CircleCheck aria-hidden="true" className="size-4" />
           First trace received
         </p>
       ) : (
-        <p role="status" className="flex items-center gap-2 text-sm text-muted-foreground">
+        <p role="status" className="flex items-center gap-2 text-body text-muted-foreground">
           <Loader2 aria-hidden="true" className="size-4 animate-spin" />
           {WAITING_LINE}
         </p>

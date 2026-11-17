@@ -42,7 +42,7 @@ export function ExportMenu({
             <span className="flex flex-col">
               {EXPORT_FORMATS[format].label}
               {canExport ? null : (
-                <span className="text-muted-foreground text-xs">{EXPORT_ROLE_REASON}</span>
+                <span className="text-muted-foreground text-caption">{EXPORT_ROLE_REASON}</span>
               )}
             </span>
           </DropdownMenuItem>

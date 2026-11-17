@@ -54,12 +54,12 @@ export function TextField({
         placeholder={placeholder}
       />
       {description ? (
-        <p id={`${id}-description`} className="text-xs text-muted-foreground">
+        <p id={`${id}-description`} className="text-caption text-muted-foreground">
           {description}
         </p>
       ) : null}
       {error ? (
-        <p id={`${id}-error`} className="text-xs text-destructive">
+        <p id={`${id}-error`} className="text-caption text-destructive">
           {error}
         </p>
       ) : null}

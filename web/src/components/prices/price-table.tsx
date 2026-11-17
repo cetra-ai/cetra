@@ -47,7 +47,7 @@ export function PriceTable({
               <div className="flex flex-col gap-0.5">
                 <span>{row.model_name}</span>
                 {row.match_pattern !== escapeRegex(row.model_name) ? (
-                  <span className="font-mono text-xs text-muted-foreground">
+                  <span className="font-mono text-caption text-muted-foreground">
                     {row.match_pattern}
                   </span>
                 ) : null}

@@ -490,8 +490,8 @@ function TracesPage() {
                 />
                 {filterError ? (
                   <div className="mx-auto flex max-w-md flex-col gap-2 px-4 py-16">
-                    <h2 className="text-sm font-medium">{filterError.title}</h2>
-                    <p className="text-sm text-destructive">{filterMessage(filterError)}</p>
+                    <h2 className="text-body font-medium">{filterError.title}</h2>
+                    <p className="text-body text-destructive">{filterMessage(filterError)}</p>
                   </div>
                 ) : probing ? (
                   <div className="flex flex-col gap-2 p-4">
@@ -574,12 +574,14 @@ function TracesPage() {
                         needsOnboarding ? (
                           <div className="flex flex-col items-center gap-3 px-4 py-16 text-center">
                             <Waypoints className="size-8 text-muted-foreground" />
-                            <h2 className="text-lg font-medium">No traces in this time range.</h2>
+                            <h2 className="text-title font-medium">
+                              No traces in this time range.
+                            </h2>
                           </div>
                         ) : (
                           <div className="flex flex-col items-center gap-3 px-4 py-16 text-center">
                             <Waypoints className="size-8 text-muted-foreground" />
-                            <h2 className="text-lg font-medium">No traces match</h2>
+                            <h2 className="text-title font-medium">No traces match</h2>
                             <Button
                               type="button"
                               variant="outline"

@@ -379,7 +379,7 @@ function SectionError({ message }: { message: string | undefined }) {
     return null;
   }
   return (
-    <p role="alert" className="text-xs text-destructive">
+    <p role="alert" className="text-caption text-destructive">
       {message}
     </p>
   );
@@ -593,7 +593,9 @@ export function EvaluatorForm({
                   ))}
                 </SelectContent>
               </Select>
-              <p className="text-xs text-muted-foreground">Replaces the name, prompt and output.</p>
+              <p className="text-caption text-muted-foreground">
+                Replaces the name, prompt and output.
+              </p>
             </div>
           ) : null}
 
@@ -609,10 +611,10 @@ export function EvaluatorForm({
           />
 
           {saved ? (
-            <p className="text-sm text-muted-foreground">Kind: {KIND_LABELS[values.kind]}</p>
+            <p className="text-body text-muted-foreground">Kind: {KIND_LABELS[values.kind]}</p>
           ) : (
             <div className="flex flex-col gap-2">
-              <span className="text-sm leading-none font-medium">Kind</span>
+              <span className="text-body leading-none font-medium">Kind</span>
               <RadioGroup
                 aria-label="Kind"
                 value={values.kind}
@@ -652,7 +654,7 @@ export function EvaluatorForm({
                   </SelectContent>
                 </Select>
                 {connections.isSuccess && connectionList.length === 0 ? (
-                  <p className="text-xs text-muted-foreground">
+                  <p className="text-caption text-muted-foreground">
                     No connections. An org admin adds them in{" "}
                     <Link
                       to="/$org/settings/llm-connections"
@@ -688,13 +690,13 @@ export function EvaluatorForm({
                     set({ prompt: event.target.value });
                   }}
                 />
-                <p id="evaluator-prompt-variables" className="text-xs text-muted-foreground">
+                <p id="evaluator-prompt-variables" className="text-caption text-muted-foreground">
                   {variables.length > 0 ? `Variables: ${variables.join(", ")}` : "No variables."}
                 </p>
                 <SectionError message={errors.prompt} />
               </div>
               <div className="flex flex-col gap-2">
-                <span className="text-sm leading-none font-medium">Output</span>
+                <span className="text-body leading-none font-medium">Output</span>
                 <OutputFields
                   judge
                   value={values.output}
@@ -722,7 +724,7 @@ export function EvaluatorForm({
                   setAdvancedOpen(event.currentTarget.open);
                 }}
               >
-                <summary className="cursor-pointer text-sm font-medium">Advanced</summary>
+                <summary className="cursor-pointer text-body font-medium">Advanced</summary>
                 <div className="mt-4 flex flex-col gap-4">
                   <div className="flex flex-col gap-4 sm:flex-row">
                     <TextField
@@ -796,7 +798,7 @@ export function EvaluatorForm({
                   set({ checkParams });
                 }}
               />
-              <p className="text-sm text-muted-foreground">
+              <p className="text-body text-muted-foreground">
                 Output: {checkDataType(values.check) === "numeric" ? "Numeric" : "Boolean"}
               </p>
               <SectionError message={errors.config} />
@@ -806,7 +808,7 @@ export function EvaluatorForm({
           {values.kind === "webhook" ? (
             <section className="flex flex-col gap-4" aria-label="Webhook">
               {saved ? (
-                <div className="flex flex-col gap-2 text-sm">
+                <div className="flex flex-col gap-2 text-body">
                   <p>Endpoint host: {stringOf(config.url_host) || "—"}</p>
                   <p>Headers: {headerNames.length > 0 ? headerNames.join(", ") : "none"}</p>
                   <div className="flex items-center gap-2">
@@ -848,10 +850,10 @@ export function EvaluatorForm({
                     }}
                   />
                   <fieldset className="flex flex-col gap-2">
-                    <legend className="text-sm leading-none font-medium">Headers</legend>
+                    <legend className="text-body leading-none font-medium">Headers</legend>
                     <div className="flex items-center justify-end gap-2">
                       {saved ? (
-                        <p className="mr-auto text-xs text-muted-foreground">
+                        <p className="mr-auto text-caption text-muted-foreground">
                           Values are hidden. Set every header again to change them.
                         </p>
                       ) : null}
@@ -927,7 +929,7 @@ export function EvaluatorForm({
                 />
               ) : null}
               <div className="flex flex-col gap-2">
-                <span className="text-sm leading-none font-medium">Output</span>
+                <span className="text-body leading-none font-medium">Output</span>
                 <OutputFields
                   judge={false}
                   value={values.output}

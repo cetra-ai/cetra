@@ -140,7 +140,7 @@ function ChannelsPage() {
                       </div>
                     </TableCell>
                     <TableCell>
-                      <span className="font-mono text-xs">{channel.target_hint}</span>
+                      <span className="font-mono text-caption">{channel.target_hint}</span>
                     </TableCell>
                     <TableCell>
                       {last ? (
@@ -152,7 +152,7 @@ function ChannelsPage() {
                             <TimeText value={last.at} style="datetime" />
                           </div>
                           {last.error ? (
-                            <p className="text-xs text-muted-foreground">{last.error}</p>
+                            <p className="text-caption text-muted-foreground">{last.error}</p>
                           ) : null}
                         </div>
                       ) : (

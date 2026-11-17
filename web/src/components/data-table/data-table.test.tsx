@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { Clock } from "lucide-react";
 import { afterEach, expect, it, vi } from "vitest";
 import { DataTable, type DataTableColumn, ROW_HEIGHT } from "@/components/data-table/data-table";
+import { DENSITY_STORAGE_KEY, ThemeProvider } from "@/components/theme-provider";
 
 interface Item {
   id: string;
@@ -682,4 +683,27 @@ it("names the resize handle by meta.label when the header is a render function",
     />,
   );
   expect(screen.getByRole("separator", { name: "Resize Name" })).toBeInTheDocument();
+});
+
+it("spaces body rows by the comfortable row height when that density is set", () => {
+  localStorage.setItem(DENSITY_STORAGE_KEY, "comfortable");
+  render(
+    <ThemeProvider>
+      <DataTable
+        tableId="items-comfortable-test"
+        ariaLabel="Items"
+        columns={columns}
+        rows={ITEMS}
+        getRowId={(row) => row.id}
+        onActivate={() => undefined}
+        hasNextPage={false}
+        isFetchingNextPage={false}
+        fetchNextPage={() => undefined}
+        emptyState={null}
+      />
+    </ThemeProvider>,
+  );
+  expect(rowOf("broken").style.transform).toBe("translateY(32px)");
+  expect(rowOf("broken").style.height).toBe("32px");
+  expect(rowOf("fine").style.transform).toBe("translateY(0px)");
 });

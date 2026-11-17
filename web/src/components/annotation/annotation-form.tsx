@@ -58,20 +58,20 @@ export function AnnotationForm({
   if (me.isError || definitions.isError || scores.isError) {
     const error = me.error ?? definitions.error ?? scores.error;
     return (
-      <p className="text-sm">{problemOf(error)?.title ?? "Could not load the annotation form"}</p>
+      <p className="text-body">{problemOf(error)?.title ?? "Could not load the annotation form"}</p>
     );
   }
   if (!canAnnotate(data.role)) {
-    return <p className="text-xs text-muted-foreground">Only members can annotate.</p>;
+    return <p className="text-caption text-muted-foreground">Only members can annotate.</p>;
   }
   if (definitions.data.data.length === 0) {
     return (
       <div className="flex flex-col gap-1">
-        <p className="text-xs text-muted-foreground">No score definitions yet.</p>
+        <p className="text-caption text-muted-foreground">No score definitions yet.</p>
         <Link
           to="/$org/$project/settings/score-definitions"
           params={{ org, project }}
-          className="w-fit text-xs underline underline-offset-4"
+          className="w-fit text-caption underline underline-offset-4"
         >
           Add score definitions
         </Link>
@@ -285,9 +285,9 @@ function DefinitionRow({
 
   return (
     <fieldset className="flex flex-col gap-1">
-      <legend className="text-xs font-medium">{name}</legend>
+      <legend className="text-caption font-medium">{name}</legend>
       {definition.description ? (
-        <p id={descriptionId} className="text-xs text-muted-foreground">
+        <p id={descriptionId} className="text-caption text-muted-foreground">
           {definition.description}
         </p>
       ) : null}
@@ -325,9 +325,9 @@ function DefinitionRow({
           </Button>
         ) : null}
       </div>
-      {hint ? <p className="text-xs text-muted-foreground">{hint}</p> : null}
+      {hint ? <p className="text-caption text-muted-foreground">{hint}</p> : null}
       {invalid ? (
-        <p id={errorId} className="text-xs text-destructive">
+        <p id={errorId} className="text-caption text-destructive">
           {error}
         </p>
       ) : null}
@@ -374,7 +374,7 @@ function renderControl(
             }}
           />
           {range ? (
-            <span id={rangeId} className="text-xs text-muted-foreground">
+            <span id={rangeId} className="text-caption text-muted-foreground">
               {range}
             </span>
           ) : null}

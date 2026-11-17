@@ -140,7 +140,7 @@ function ConnectionList({
                     <div className="flex flex-col gap-0.5">
                       <Badge variant="destructive">Failing</Badge>
                       {connection.last_error ? (
-                        <span className="text-xs text-muted-foreground">
+                        <span className="text-caption text-muted-foreground">
                           {connection.last_error}
                         </span>
                       ) : null}

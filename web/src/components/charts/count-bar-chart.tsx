@@ -84,8 +84,8 @@ function CountTooltip({
     return null;
   }
   return (
-    <div className="grid min-w-32 gap-1 rounded-md border bg-popover px-2.5 py-1.5 text-xs shadow-md">
-      <div className="font-mono text-[11px] text-muted-foreground">
+    <div className="grid min-w-32 gap-1 rounded-md border bg-popover px-2.5 py-1.5 text-caption shadow-md">
+      <div className="font-mono text-caption text-muted-foreground">
         {formatTimestamp(new Date(row.time).toISOString(), zone, "datetime")}
       </div>
       <div className="flex items-center justify-between gap-4">

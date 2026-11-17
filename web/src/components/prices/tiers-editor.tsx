@@ -82,7 +82,7 @@ export function TiersEditor({
               ))}
             </div>
             {rowError ? (
-              <p role="alert" className="text-xs text-destructive">
+              <p role="alert" className="text-caption text-destructive">
                 {rowError}
               </p>
             ) : null}
@@ -102,7 +102,7 @@ export function TiersEditor({
           Add tier
         </Button>
         {tiers.length >= MAX_TIERS ? (
-          <p className="text-xs text-muted-foreground">At most {MAX_TIERS} tiers.</p>
+          <p className="text-caption text-muted-foreground">At most {MAX_TIERS} tiers.</p>
         ) : null}
       </div>
     </div>

@@ -35,6 +35,7 @@ import {
   readColumnSizes,
   writeColumnSizes,
 } from "@/components/data-table/column-size";
+import { ROW_HEIGHTS, useRowHeight } from "@/components/theme-provider";
 import type { RowAnchor } from "@/lib/list-return";
 import { matchesBinding } from "@/lib/shortcuts";
 
@@ -54,7 +55,8 @@ const features = tableFeatures({
 
 export type DataTableColumn<Row extends RowData> = ColumnDef<typeof features, Row>;
 
-export const ROW_HEIGHT = 28;
+/** The compact row height, which tests use. Components use `useRowHeight()`, which follows the density. */
+export const ROW_HEIGHT = ROW_HEIGHTS.compact;
 const OVERSCAN = 14;
 const FETCH_AHEAD = 20;
 /** Pointer travel, in px, that turns a press on a header into a column drag. */
@@ -134,6 +136,7 @@ export function DataTable<Row extends RowData>({
 }: DataTableProps<Row>) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const headerRef = useRef<HTMLDivElement>(null);
+  const rowHeight = useRowHeight();
   const [columnSizing, setColumnSizing] = useState(() => readColumnSizes(tableId));
   const [focusedIndex, setFocusedIndex] = useState<number | null>(null);
   const [reorderDrag, setReorderDrag] = useState<ReorderDrag | null>(null);
@@ -157,16 +160,16 @@ export function DataTable<Row extends RowData>({
     if (!scroller || !source.onScrollAnchor) {
       return;
     }
-    const index = Math.floor(scroller.scrollTop / ROW_HEIGHT);
+    const index = Math.floor(scroller.scrollTop / rowHeight);
     const row = source.rows[index];
     if (row === undefined) {
       return;
     }
     source.onScrollAnchor({
       rowId: source.getRowId(row),
-      offset: scroller.scrollTop - index * ROW_HEIGHT,
+      offset: scroller.scrollTop - index * rowHeight,
     });
-  }, []);
+  }, [rowHeight]);
   // A row opened before the timer fires still reports the position it was opened from.
   const flushAnchor = useCallback(() => {
     if (anchorTimer.current !== undefined) {
@@ -192,11 +195,11 @@ export function DataTable<Row extends RowData>({
     const canFetch = hasNextPage && restoreFetches.current < RESTORE_MAX_PAGES;
     // The anchor goes to the top of the scrollport, so a screen of rows must be loaded below it:
     // with fewer, the scroll is clamped and lands short of it.
-    const rowsOnScreen = Math.ceil((scroller?.clientHeight ?? 0) / ROW_HEIGHT);
+    const rowsOnScreen = Math.ceil((scroller?.clientHeight ?? 0) / rowHeight);
     if (index >= 0 && (rows.length - index >= rowsOnScreen || !canFetch)) {
       restoreDone.current = true;
       if (scroller) {
-        scroller.scrollTop = index * ROW_HEIGHT + restoreAnchor.offset;
+        scroller.scrollTop = index * rowHeight + restoreAnchor.offset;
         scroller.dispatchEvent(new Event("scroll"));
       }
       return;
@@ -210,7 +213,7 @@ export function DataTable<Row extends RowData>({
     }
     restoreFetches.current += 1;
     fetchNextPage();
-  }, [restoreAnchor, rows, getRowId, hasNextPage, isFetchingNextPage, fetchNextPage]);
+  }, [restoreAnchor, rows, getRowId, hasNextPage, isFetchingNextPage, fetchNextPage, rowHeight]);
 
   function commit(next: Record<string, number>) {
     setColumnSizing(next);
@@ -277,9 +280,15 @@ export function DataTable<Row extends RowData>({
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => ROW_HEIGHT,
+    estimateSize: () => rowHeight,
     overscan: OVERSCAN,
   });
+
+  // A density change alters every row's height, so the measurements must be redone.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: rowHeight is the trigger; estimateSize reads it
+  useEffect(() => {
+    virtualizer.measure();
+  }, [rowHeight, virtualizer]);
 
   const virtualRows = virtualizer.getVirtualItems();
   const lastIndex = virtualRows.at(-1)?.index ?? -1;
@@ -537,7 +546,7 @@ export function DataTable<Row extends RowData>({
           <div
             role="row"
             aria-rowindex={1}
-            className="grid h-row w-full shrink-0 items-center border-b bg-surface select-none text-[11px] font-medium tracking-wide text-muted-foreground uppercase"
+            className="grid h-row w-full shrink-0 items-center border-b bg-surface select-none text-caption font-medium tracking-wide text-muted-foreground uppercase"
             style={{ gridTemplateColumns: template, minWidth: totalWidth }}
           >
             {headerGroup.headers.map((header) => {
@@ -658,7 +667,7 @@ export function DataTable<Row extends RowData>({
           <div
             className="relative"
             style={{
-              height: virtualizer.getTotalSize() + (isFetchingNextPage ? ROW_HEIGHT : 0),
+              height: virtualizer.getTotalSize() + (isFetchingNextPage ? rowHeight : 0),
               // Faint row lines show where rows are not rendered yet, so blank space looks like empty rows.
               backgroundImage:
                 "linear-gradient(to bottom, transparent calc(var(--row-height) - 1px), color-mix(in oklab, var(--border) 60%, transparent) 0)",
@@ -677,6 +686,7 @@ export function DataTable<Row extends RowData>({
                   row={row}
                   index={item.index}
                   start={item.start}
+                  rowHeight={rowHeight}
                   selected={selected}
                   focused={focusedIndex === item.index}
                   highlighted={highlightedRowIds?.has(row.id) ?? false}
@@ -694,7 +704,7 @@ export function DataTable<Row extends RowData>({
                 role="row"
                 aria-rowindex={rows.length + 2}
                 className="absolute right-0 left-0 flex items-center px-2 text-muted-foreground"
-                style={{ top: virtualizer.getTotalSize(), height: ROW_HEIGHT }}
+                style={{ top: virtualizer.getTotalSize(), height: rowHeight }}
               >
                 <Loader2 className="size-3 animate-spin" />
                 <span className="sr-only">Loading more</span>
@@ -711,6 +721,7 @@ interface BodyRowProps<TData extends RowData> {
   row: TableRow<typeof features, TData>;
   index: number;
   start: number;
+  rowHeight: number;
   selected: boolean;
   focused: boolean;
   highlighted: boolean;
@@ -728,6 +739,7 @@ function BodyRowView<TData extends RowData>({
   row,
   index,
   start,
+  rowHeight,
   selected,
   focused,
   highlighted,
@@ -752,7 +764,7 @@ function BodyRowView<TData extends RowData>({
         highlighted && "live-row",
       )}
       style={{
-        height: ROW_HEIGHT,
+        height: rowHeight,
         transform: `translateY(${start}px)`,
         gridTemplateColumns: template,
         minWidth: totalWidth,

@@ -90,7 +90,7 @@ function CompareView() {
       to="/$org/$project/experiments"
       params={{ org, project }}
       search={{}}
-      className="w-fit rounded-sm text-xs text-muted-foreground underline-offset-4 outline-none hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 focus-visible:outline-solid"
+      className="w-fit rounded-sm text-caption text-muted-foreground underline-offset-4 outline-none hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 focus-visible:outline-solid"
     >
       Experiments
     </Link>
@@ -116,10 +116,10 @@ function CompareView() {
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 overflow-auto px-4 py-6">
       {backLink}
-      <h1 className="text-lg font-medium">Compare experiments</h1>
+      <h1 className="text-title font-medium">Compare experiments</h1>
 
       {failed ? (
-        <div role="alert" className="rounded-md border border-status-error px-3 py-2 text-sm">
+        <div role="alert" className="rounded-md border border-status-error px-3 py-2 text-body">
           {failureStatus === 404
             ? "One of these experiments was not found. It may have been deleted or be outside your plan's data window."
             : problemMessage(failure, "These experiments cannot be compared")}
@@ -130,7 +130,7 @@ function CompareView() {
         <p
           key={warning}
           role="status"
-          className="rounded-md border border-amber-500 px-3 py-2 text-sm text-amber-700 dark:text-amber-400"
+          className="rounded-md border border-amber-500 px-3 py-2 text-body text-amber-700 dark:text-amber-400"
         >
           {warning}
         </p>
@@ -172,12 +172,12 @@ function CompareView() {
             {rows.length > 0 ? (
               <CompareTable rows={rows} experiments={experiments} />
             ) : query.hasNextPage ? null : (
-              <p className="text-sm text-muted-foreground">
+              <p className="text-body text-muted-foreground">
                 {regressionsOnly ? "No regressions at this threshold" : "No items to compare"}
               </p>
             )}
             {nextPageFailure === undefined ? null : (
-              <p role="alert" className="text-sm text-status-error">
+              <p role="alert" className="text-body text-status-error">
                 {problemMessage(nextPageFailure, "The next page could not be loaded")}
               </p>
             )}
@@ -266,12 +266,12 @@ function ThresholdInput({ threshold }: { threshold: number }) {
           setDraft(event.target.value);
         }}
       />
-      <p id="regression-threshold-help" className="max-w-md text-xs text-muted-foreground">
+      <p id="regression-threshold-help" className="max-w-md text-caption text-muted-foreground">
         A score that drops by more than this, or a new error, marks a regression. Higher scores are
         better.
       </p>
       {invalid ? (
-        <p id="regression-threshold-range" className="text-xs text-status-error">
+        <p id="regression-threshold-range" className="text-caption text-status-error">
           Between 0 and 1000
         </p>
       ) : null}
@@ -356,7 +356,7 @@ function ScoreTable({
                           {deltaText(delta.delta, dataType)}
                           <span className="sr-only"> versus baseline</span>
                         </Badge>
-                        <span className="text-xs text-muted-foreground">
+                        <span className="text-caption text-muted-foreground">
                           {`n = ${delta.n_compared}`}
                         </span>
                       </span>

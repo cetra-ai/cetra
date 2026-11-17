@@ -103,7 +103,7 @@ export function TranscriptView({
     <section aria-label="Transcript" className="flex min-h-0 flex-1 flex-col">
       <TreeToolbar mode={mode} onMode={onMode} />
       {items.length === 0 ? (
-        <p className="p-3 text-xs text-muted-foreground">
+        <p className="p-3 text-caption text-muted-foreground">
           No LLM or tool calls in this trace. Switch to Tree.
         </p>
       ) : (
@@ -175,7 +175,7 @@ function SectionRow({
     <button
       type="button"
       aria-expanded={!collapsed}
-      className="flex h-6 w-full items-center gap-1 text-left text-xs"
+      className="flex h-6 w-full items-center gap-1 text-left text-caption"
       style={{ paddingLeft: 8 + item.depth * 12 }}
       onClick={onToggle}
     >
@@ -246,7 +246,7 @@ function TurnRow({
     >
       <button
         type="button"
-        className="flex w-full items-center gap-2 text-left text-xs"
+        className="flex w-full items-center gap-2 text-left text-caption"
         onClick={onSelect}
       >
         <KindIcon kind={span.span_kind} />
@@ -264,7 +264,7 @@ function TurnRow({
         ) : null}
       </button>
       {detail.isError ? (
-        <p className="text-xs">Could not load this span</p>
+        <p className="text-caption">Could not load this span</p>
       ) : !loaded ||
         (span.span_kind === "llm" && previousLlmId !== undefined && previous.isPending) ? (
         <Skeleton className="h-4 w-2/3" />
@@ -273,7 +273,9 @@ function TurnRow({
       ) : (
         <>
           {previousLlmId !== undefined && previous.isError ? (
-            <p className="text-xs text-muted-foreground">Earlier context could not be loaded</p>
+            <p className="text-caption text-muted-foreground">
+              Earlier context could not be loaded
+            </p>
           ) : null}
           <LlmTurn
             detail={loaded}

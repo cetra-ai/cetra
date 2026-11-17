@@ -34,12 +34,12 @@ function AlertRulePage() {
         <Link
           to="/$org/$project/alerts"
           params={{ org, project }}
-          className="w-fit text-sm text-muted-foreground underline-offset-4 hover:underline"
+          className="w-fit text-body text-muted-foreground underline-offset-4 hover:underline"
         >
           Back to alerts
         </Link>
         <div className="flex flex-wrap items-center gap-3">
-          <h1 className="text-lg font-medium">{rule.name}</h1>
+          <h1 className="text-title font-medium">{rule.name}</h1>
           <StateBadge state={rule.state} enabled={rule.enabled} />
         </div>
       </div>

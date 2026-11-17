@@ -34,10 +34,10 @@ export function ScoreSummaryCards({ summary }: { summary: Schema<"ExperimentSumm
 function Card({ title, text, tone }: { title: string; text: string; tone?: "error" }) {
   return (
     <li className="flex flex-col gap-1 rounded-md border p-3">
-      <span className="text-xs text-muted-foreground">{title}</span>
+      <span className="text-caption text-muted-foreground">{title}</span>
       <span
         className={
-          tone === "error" ? "text-sm tabular-nums text-status-error" : "text-sm tabular-nums"
+          tone === "error" ? "text-body tabular-nums text-status-error" : "text-body tabular-nums"
         }
       >
         {text}

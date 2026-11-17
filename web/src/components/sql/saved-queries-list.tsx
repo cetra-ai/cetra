@@ -24,13 +24,13 @@ export function SavedQueriesList({
 
   if (views.isError || me.isError) {
     return (
-      <p role="alert" className="text-[12px] text-destructive">
+      <p role="alert" className="text-body text-destructive">
         Saved queries could not be loaded.
       </p>
     );
   }
   if (views.data === undefined || me.data === undefined) {
-    return <p className="text-[12px] text-muted-foreground">Loading…</p>;
+    return <p className="text-body text-muted-foreground">Loading…</p>;
   }
 
   const all = views.data.data;
@@ -46,16 +46,16 @@ export function SavedQueriesList({
       <Input
         aria-label="Filter saved queries"
         placeholder="Filter saved queries"
-        className="h-7 text-[12px] md:text-[12px]"
+        className="h-7 text-body md:text-body"
         value={filter}
         onChange={(event) => setFilter(event.target.value)}
       />
       {all.length === 0 ? (
-        <p className="text-[12px] text-muted-foreground">
+        <p className="text-body text-muted-foreground">
           No saved queries yet. Save one with Saved queries → Save as…
         </p>
       ) : matching.length === 0 ? (
-        <p className="text-[12px] text-muted-foreground">No match</p>
+        <p className="text-body text-muted-foreground">No match</p>
       ) : (
         <>
           <Group title="Mine" views={mine} viewId={viewId} onLoad={onLoad} />
@@ -82,7 +82,7 @@ function Group({
   }
   return (
     <section className="flex flex-col gap-0.5">
-      <h3 className="px-2 text-[11px] text-muted-foreground">{title}</h3>
+      <h3 className="px-2 text-caption text-muted-foreground">{title}</h3>
       {views.map((view) => {
         const loaded = view.id === viewId;
         return (
@@ -92,7 +92,7 @@ function Group({
             title={view.name}
             aria-current={loaded ? "true" : undefined}
             className={cn(
-              "flex w-full items-center gap-1.5 rounded px-2 py-1 text-left text-[12px] hover:bg-muted",
+              "flex w-full items-center gap-1.5 rounded px-2 py-1 text-left text-body hover:bg-muted",
               loaded && "bg-muted font-medium",
             )}
             onClick={() => onLoad(view)}

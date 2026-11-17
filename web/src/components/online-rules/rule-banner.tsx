@@ -41,7 +41,7 @@ export function RuleBanner({
   return (
     <div
       role="alert"
-      className="rounded-md border border-destructive/40 bg-destructive/5 px-4 py-3 text-sm"
+      className="rounded-md border border-destructive/40 bg-destructive/5 px-4 py-3 text-body"
     >
       {message}
     </div>

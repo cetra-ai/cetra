@@ -38,12 +38,10 @@ export function SpanHeader({ span, detached }: { span: HeaderSpan; detached: boo
       <div className="flex min-w-0 items-center gap-2">
         <KindIcon kind={span.span_kind} />
         <div className="flex min-w-0 flex-col">
-          <span className="text-[11px] uppercase tracking-wide text-muted-foreground">
+          <span className="text-caption uppercase tracking-wide text-muted-foreground">
             {span.parent_span_id === undefined ? "Root span" : kindLabel(span.span_kind)}
           </span>
-          <span className="min-w-0 truncate text-[15px] font-semibold select-text">
-            {span.name}
-          </span>
+          <span className="min-w-0 truncate text-title font-semibold select-text">{span.name}</span>
         </div>
         {span.status === "ok" ? (
           <StatusPill className="bg-status-ok/12 text-status-ok">OK</StatusPill>
@@ -52,7 +50,7 @@ export function SpanHeader({ span, detached }: { span: HeaderSpan; detached: boo
           <StatusPill className="bg-status-error/12 text-status-error">Error</StatusPill>
         ) : null}
         {span.status_message ? (
-          <span className="min-w-0 truncate text-[12px] text-muted-foreground select-text">
+          <span className="min-w-0 truncate text-body text-muted-foreground select-text">
             {span.status_message}
           </span>
         ) : null}
@@ -117,14 +115,14 @@ export function SpanHeader({ span, detached }: { span: HeaderSpan; detached: boo
           )
         ) : null}
       </div>
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-muted-foreground">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-body text-muted-foreground">
         {span.provider ? <Pair label="provider">{span.provider}</Pair> : null}
         {detail?.operation ? <Pair label="operation">{detail.operation}</Pair> : null}
         {span.service_name ? <Pair label="service">{span.service_name}</Pair> : null}
         {span.environment ? (
           <span
             className={cn(
-              "inline-flex rounded-sm border px-1.5 text-[11px]",
+              "inline-flex rounded-sm border px-1.5 text-caption",
               environmentClasses(span.environment).pill,
             )}
           >
@@ -158,7 +156,7 @@ export function SpanHeader({ span, detached }: { span: HeaderSpan; detached: boo
         {detail && detail.truncated.length > 0 ? (
           <Tooltip>
             <TooltipTrigger asChild>
-              <Badge variant="outline" className="h-4 px-1.5 text-[11px] text-muted-foreground">
+              <Badge variant="outline" className="h-4 px-1.5 text-caption text-muted-foreground">
                 truncated at ingest
               </Badge>
             </TooltipTrigger>
@@ -166,7 +164,7 @@ export function SpanHeader({ span, detached }: { span: HeaderSpan; detached: boo
           </Tooltip>
         ) : null}
         {detached ? (
-          <Badge variant="secondary" className="h-4 px-1.5 text-[11px]">
+          <Badge variant="secondary" className="h-4 px-1.5 text-caption">
             detached
           </Badge>
         ) : null}
@@ -174,7 +172,7 @@ export function SpanHeader({ span, detached }: { span: HeaderSpan; detached: boo
           <Badge
             key={convention}
             variant="outline"
-            className="h-4 px-1.5 text-[11px] text-muted-foreground"
+            className="h-4 px-1.5 text-caption text-muted-foreground"
           >
             {convention}
           </Badge>
@@ -186,7 +184,7 @@ export function SpanHeader({ span, detached }: { span: HeaderSpan; detached: boo
 
 function StatusPill({ className, children }: { className: string; children: ReactNode }) {
   return (
-    <span className={cn("rounded px-1.5 text-[11px] font-medium", className)}>{children}</span>
+    <span className={cn("rounded px-1.5 text-caption font-medium", className)}>{children}</span>
   );
 }
 

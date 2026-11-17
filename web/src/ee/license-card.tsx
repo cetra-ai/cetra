@@ -25,8 +25,8 @@ export function LicenseCard() {
 
   return (
     <section aria-label="Licence" className="flex flex-col gap-2">
-      <h3 className="text-base font-medium">Licence</h3>
-      <dl className="grid grid-cols-[minmax(10rem,max-content)_1fr] gap-x-6 gap-y-2 text-sm">
+      <h3 className="text-ui font-medium">Licence</h3>
+      <dl className="grid grid-cols-[minmax(10rem,max-content)_1fr] gap-x-6 gap-y-2 text-body">
         <dt className="text-muted-foreground">Status</dt>
         <dd>
           {data.status === "grace" ? (
@@ -56,7 +56,7 @@ export function LicenseCard() {
             : "None"}
         </dd>
       </dl>
-      <p className="text-sm text-muted-foreground">
+      <p className="text-body text-muted-foreground">
         Set the key with CETRA_LICENSE_KEY and restart the server.
       </p>
     </section>

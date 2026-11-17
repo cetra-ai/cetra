@@ -134,7 +134,7 @@ export function SavedQueriesMenu({
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="min-w-56">
           {problem ? (
-            <p role="alert" className="px-2 py-1 text-xs text-destructive">
+            <p role="alert" className="px-2 py-1 text-caption text-destructive">
               {problem}
             </p>
           ) : null}
@@ -229,7 +229,7 @@ export function SavedQueriesMenu({
               </span>
             </DisabledReason>
           )}
-          {problem ? <p className="text-xs text-destructive">{problem}</p> : null}
+          {problem ? <p className="text-caption text-destructive">{problem}</p> : null}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={closeDialog}>
               Cancel
@@ -283,7 +283,7 @@ export function SavedQueriesMenu({
             <DialogDescription>Change the name shown in the saved queries menu.</DialogDescription>
           </DialogHeader>
           <NameField name={name} onName={setName} />
-          {problem ? <p className="text-xs text-destructive">{problem}</p> : null}
+          {problem ? <p className="text-caption text-destructive">{problem}</p> : null}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={closeDialog}>
               Cancel
@@ -324,7 +324,7 @@ export function SavedQueriesMenu({
               Delete {loaded?.name ?? "this query"}? This cannot be undone.
             </DialogDescription>
           </DialogHeader>
-          {problem ? <p className="text-xs text-destructive">{problem}</p> : null}
+          {problem ? <p className="text-caption text-destructive">{problem}</p> : null}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={closeDialog}>
               Cancel
@@ -364,7 +364,7 @@ export function SavedQueriesMenu({
 }
 
 function BlockedReason({ children }: { children: string }) {
-  return <span className="text-muted-foreground text-xs">{children}</span>;
+  return <span className="text-muted-foreground text-caption">{children}</span>;
 }
 
 function problemText(error: unknown): string {

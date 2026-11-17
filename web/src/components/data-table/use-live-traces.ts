@@ -1,7 +1,6 @@
 import { type QueryKey, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Schema } from "@/api/types";
-import { ROW_HEIGHT } from "@/components/data-table/data-table";
 import {
   firstPageOnly,
   firstPageWouldExceed,
@@ -13,6 +12,7 @@ import {
   type TracePages,
   traceInList,
 } from "@/components/data-table/live-list";
+import { useRowHeight } from "@/components/theme-provider";
 import { type StreamEvent, type StreamStatus, useStream } from "@/lib/sse";
 
 const HIGHLIGHT_MS = 1_500;
@@ -43,6 +43,7 @@ export function useLiveTraces({
   overflowed: boolean;
 } {
   const queryClient = useQueryClient();
+  const rowHeight = useRowHeight();
   const queryKeyRef = useRef(queryKey);
   queryKeyRef.current = queryKey;
   const selectedRef = useRef(selectedId);
@@ -252,7 +253,7 @@ export function useLiveTraces({
     mark(result.inserted);
     // Only a new first row moves the rows already in view; one inserted lower does not.
     if (selectedRef.current && result.data.pages[0]?.data[0]?.trace_id === trace.trace_id) {
-      scrollAdjust.current += ROW_HEIGHT;
+      scrollAdjust.current += rowHeight;
     }
   }
 

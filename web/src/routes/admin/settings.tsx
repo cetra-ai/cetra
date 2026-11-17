@@ -55,14 +55,14 @@ function AdminSettingsPage() {
 
   return (
     <>
-      <h2 className="text-lg font-medium">Settings</h2>
-      <p className="text-sm text-muted-foreground">
+      <h2 className="text-title font-medium">Settings</h2>
+      <p className="text-body text-muted-foreground">
         These come from the server's configuration and can't be changed here. Edit cetra.toml or the
         CETRA_* environment variables, then restart the server.
       </p>
       <dl
         aria-label="Instance settings"
-        className="grid grid-cols-[minmax(10rem,max-content)_1fr] gap-x-6 gap-y-2 text-sm"
+        className="grid grid-cols-[minmax(10rem,max-content)_1fr] gap-x-6 gap-y-2 text-body"
       >
         <dt className="text-muted-foreground">Public URL</dt>
         <dd className="font-mono">{data.public_url}</dd>
@@ -103,8 +103,8 @@ function AdminSettingsPage() {
         </dd>
       </dl>
       <LicenseCard />
-      <h3 className="text-base font-medium">Test email</h3>
-      <p className="text-sm text-muted-foreground">{`Sends a test message to ${me.user.email}.`}</p>
+      <h3 className="text-ui font-medium">Test email</h3>
+      <p className="text-body text-muted-foreground">{`Sends a test message to ${me.user.email}.`}</p>
       <DisabledReason
         reason={
           data.smtp_enabled

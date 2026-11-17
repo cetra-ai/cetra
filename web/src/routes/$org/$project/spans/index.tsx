@@ -281,8 +281,8 @@ function SpansPage() {
                 />
                 {filterError ? (
                   <div className="mx-auto flex max-w-md flex-col gap-2 px-4 py-16">
-                    <h2 className="text-sm font-medium">{filterError.title}</h2>
-                    <p className="text-sm text-destructive">{filterMessage(filterError)}</p>
+                    <h2 className="text-body font-medium">{filterError.title}</h2>
+                    <p className="text-body text-destructive">{filterMessage(filterError)}</p>
                   </div>
                 ) : !hold && list.data ? (
                   <DataTable

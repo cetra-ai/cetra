@@ -94,7 +94,10 @@ function count(n: number, noun: string): string {
 /** The user's plan as a coloured pill. */
 export function PlanPill({ plan }: { plan: string }) {
   return (
-    <Badge variant="secondary" className={cn("h-4 px-1.5 text-[10px]", categoryClasses(plan).pill)}>
+    <Badge
+      variant="secondary"
+      className={cn("h-4 px-1.5 text-caption", categoryClasses(plan).pill)}
+    >
       {plan}
     </Badge>
   );
@@ -171,7 +174,7 @@ export function UserScores({ scores }: { scores: readonly Schema<"UserScore">[] 
             text={scoreText(score)}
             className="num"
           />
-          <span className="num text-[11px] text-muted-foreground">{score.count}</span>
+          <span className="num text-caption text-muted-foreground">{score.count}</span>
         </li>
       ))}
     </ul>
@@ -197,7 +200,7 @@ export function UserMetadata({ metadata }: { metadata: Record<string, string> | 
         return (
           <li
             key={key}
-            className="inline-flex min-w-0 items-center gap-1 rounded-md border bg-surface px-1.5 py-0.5 text-[12px]"
+            className="inline-flex min-w-0 items-center gap-1 rounded-md border bg-surface px-1.5 py-0.5 text-body"
           >
             <span className="text-muted-foreground">{key}</span>
             {flag ? <span aria-hidden="true">{flag}</span> : null}

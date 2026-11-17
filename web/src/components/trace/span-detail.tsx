@@ -68,7 +68,7 @@ export function SpanDetail({
   }
   if (span.isError) {
     return (
-      <p className="p-3 text-sm">{problemOf(span.error)?.title ?? "Could not load this span"}</p>
+      <p className="p-3 text-body">{problemOf(span.error)?.title ?? "Could not load this span"}</p>
     );
   }
 
@@ -99,20 +99,20 @@ export function SpanDetail({
         >
           <TabsList variant="line" className="h-9 px-3">
             {messages ? (
-              <TabsTrigger value="chat" className="text-[12px]">
+              <TabsTrigger value="chat" className="text-body">
                 Chat
               </TabsTrigger>
             ) : null}
-            <TabsTrigger value="io" className="text-[12px]">
+            <TabsTrigger value="io" className="text-body">
               Input / Output
             </TabsTrigger>
-            <TabsTrigger value="attributes" className="text-[12px]">
+            <TabsTrigger value="attributes" className="text-body">
               Attributes
             </TabsTrigger>
-            <TabsTrigger value="scores" className="text-[12px]">
+            <TabsTrigger value="scores" className="text-body">
               Scores
             </TabsTrigger>
-            <TabsTrigger value="annotate" className="text-[12px]">
+            <TabsTrigger value="annotate" className="text-body">
               Annotate
             </TabsTrigger>
           </TabsList>

@@ -33,7 +33,7 @@ export function LiveToggle({
         disabled={disabled}
         onCheckedChange={onPressedChange}
       />
-      <Label htmlFor="traces-live" className="text-xs font-normal">
+      <Label htmlFor="traces-live" className="text-caption font-normal">
         Live
       </Label>
     </span>

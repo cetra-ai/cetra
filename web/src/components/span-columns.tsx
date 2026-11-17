@@ -231,7 +231,7 @@ function spanColumnDefs(): DataTableColumn<Schema<"SpanSummary">>[] {
         return (
           <span
             className={cn(
-              "inline-flex rounded-sm border px-1.5 text-[11px]",
+              "inline-flex rounded-sm border px-1.5 text-caption",
               environmentClasses(env).pill,
             )}
           >
@@ -337,7 +337,7 @@ function Tags({ tags }: { tags: string[] }) {
         <Badge
           key={tag}
           variant="secondary"
-          className={cn("h-4 px-1.5 text-[10px]", categoryClasses(tag).pill)}
+          className={cn("h-4 px-1.5 text-caption", categoryClasses(tag).pill)}
         >
           {tag}
         </Badge>

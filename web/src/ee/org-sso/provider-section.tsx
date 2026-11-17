@@ -108,10 +108,10 @@ export function ProviderSection({
   return (
     <section aria-labelledby="sso-provider-heading" className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 id="sso-provider-heading" className="text-base font-medium">
+        <h2 id="sso-provider-heading" className="text-ui font-medium">
           Identity provider
         </h2>
-        <p className="text-sm text-muted-foreground">
+        <p className="text-body text-muted-foreground">
           One OpenID Connect provider for this organization.
         </p>
       </div>
@@ -194,14 +194,14 @@ export function ProviderSection({
               ))}
             </SelectContent>
           </Select>
-          <p className="text-xs text-muted-foreground">Viewers do not use a seat.</p>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-caption text-muted-foreground">Viewers do not use a seat.</p>
+          <p className="text-caption text-muted-foreground">
             Anyone with a verified-domain email who signs in through the provider joins with this
             role, including people removed earlier; block someone at your identity provider.
           </p>
         </div>
         {provider ? null : (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-caption text-muted-foreground">
             Save the provider, then register its callback URL below.
           </p>
         )}
@@ -214,12 +214,14 @@ export function ProviderSection({
         </DisabledReason>
       </form>
       <div className="flex flex-col gap-2">
-        <p className="text-sm font-medium">Callback URL</p>
+        <p className="text-body font-medium">Callback URL</p>
         <div className="flex items-center gap-2">
-          <code className="break-all rounded bg-muted px-2 py-1 text-xs">{sso.callback_url}</code>
+          <code className="break-all rounded bg-muted px-2 py-1 text-caption">
+            {sso.callback_url}
+          </code>
           <CopyButton value={sso.callback_url} label="callback URL" />
         </div>
-        <p className="text-xs text-muted-foreground">
+        <p className="text-caption text-muted-foreground">
           Register this redirect URI at your identity provider.
         </p>
       </div>

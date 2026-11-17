@@ -383,7 +383,7 @@ function ConnectionForm({
             ))}
           </SelectContent>
         </Select>
-        <p id="connection-provider-description" className="text-xs text-muted-foreground">
+        <p id="connection-provider-description" className="text-caption text-muted-foreground">
           OpenAI-compatible covers any server with an OpenAI-style API: Azure, vLLM, Ollama,
           OpenRouter, LiteLLM.
         </p>
@@ -440,7 +440,10 @@ function ConnectionForm({
             ))}
           </SelectContent>
         </Select>
-        <p id="connection-structured-output-description" className="text-xs text-muted-foreground">
+        <p
+          id="connection-structured-output-description"
+          className="text-caption text-muted-foreground"
+        >
           Use Tool call or Prompt only if the provider rejects native structured output.
         </p>
       </div>
@@ -450,7 +453,7 @@ function ConnectionForm({
           setAdvancedOpen(event.currentTarget.open);
         }}
       >
-        <summary className="cursor-pointer text-sm font-medium">Advanced</summary>
+        <summary className="cursor-pointer text-body font-medium">Advanced</summary>
         <div className="mt-4 flex flex-col gap-4">
           <div className="flex flex-col gap-4 sm:flex-row">
             <TextField
@@ -475,10 +478,10 @@ function ConnectionForm({
             />
           </div>
           <fieldset className="flex flex-col gap-2">
-            <legend className="text-sm leading-none font-medium">Extra headers</legend>
+            <legend className="text-body leading-none font-medium">Extra headers</legend>
             <div className="flex items-center justify-end gap-2">
               {connection !== undefined ? (
-                <p className="mr-auto text-xs text-muted-foreground">
+                <p className="mr-auto text-caption text-muted-foreground">
                   Values are hidden. Set every header again to change them.
                 </p>
               ) : null}
@@ -523,7 +526,7 @@ function ConnectionForm({
               </div>
             ))}
             {errors.headers ? (
-              <p role="alert" className="text-xs text-destructive">
+              <p role="alert" className="text-caption text-destructive">
                 {errors.headers}
               </p>
             ) : null}

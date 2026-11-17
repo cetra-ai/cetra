@@ -109,7 +109,7 @@ export function MappingTable({
 
   return (
     <div className="flex flex-col gap-2">
-      <span className="text-sm leading-none font-medium">Variable mapping</span>
+      <span className="text-body leading-none font-medium">Variable mapping</span>
       {rows.map((row, index) => {
         const error = errorFor?.(row.variable);
         return (
@@ -149,7 +149,7 @@ export function MappingTable({
               </Button>
             </div>
             {error ? (
-              <p role="alert" className="text-xs text-destructive">
+              <p role="alert" className="text-caption text-destructive">
                 {error}
               </p>
             ) : null}

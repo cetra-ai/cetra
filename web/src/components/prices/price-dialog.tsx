@@ -233,7 +233,7 @@ function PriceEditor({
         onChange={field("modelName")}
       />
       <fieldset className="flex flex-col gap-2">
-        <legend className="text-sm leading-none font-medium">Match</legend>
+        <legend className="text-body leading-none font-medium">Match</legend>
         <RadioGroup
           value={form.matchKind}
           disabled={pending}
@@ -330,11 +330,11 @@ function PriceEditor({
           description="Empty uses the output price."
         />
       </div>
-      <p className="text-xs text-muted-foreground">
+      <p className="text-caption text-muted-foreground">
         A judge model with a budget needs both an input and an output price.
       </p>
       <div className="flex flex-col gap-3">
-        <h3 className="text-sm leading-none font-medium">Long-context tiers</h3>
+        <h3 className="text-body leading-none font-medium">Long-context tiers</h3>
         <TiersEditor
           tiers={form.tiers}
           errors={errors}

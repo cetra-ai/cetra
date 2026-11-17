@@ -53,7 +53,7 @@ export function StatusSection({
 
   return (
     <section aria-labelledby="sso-status-heading" className="flex flex-col gap-4">
-      <h2 id="sso-status-heading" className="text-base font-medium">
+      <h2 id="sso-status-heading" className="text-ui font-medium">
         Status
       </h2>
       <div className="flex flex-col gap-3">
@@ -68,7 +68,7 @@ export function StatusSection({
           />
           <Label htmlFor="sso-enabled">Enabled</Label>
         </div>
-        <p className="text-xs text-muted-foreground">
+        <p className="text-caption text-muted-foreground">
           Send people with these domains to the identity provider when they sign in.
         </p>
         <div className="flex items-center gap-2">
@@ -87,12 +87,12 @@ export function StatusSection({
           />
           <Label htmlFor="sso-enforced">Enforced</Label>
         </div>
-        <p className="text-xs text-muted-foreground">
+        <p className="text-caption text-muted-foreground">
           Require it: password sign-in and personal access tokens stop working for these domains.
           API keys keep working.
         </p>
         {provider ? null : (
-          <p className="text-xs text-muted-foreground">Save an identity provider first.</p>
+          <p className="text-caption text-muted-foreground">Save an identity provider first.</p>
         )}
         <FormError message={enforceOpen ? undefined : patchError} />
       </div>
@@ -100,11 +100,11 @@ export function StatusSection({
         <div className="flex flex-col gap-1">
           <a
             href={ssoAuthorizeHref(firstVerified, `/${org}/settings/sso`)}
-            className="w-fit text-sm underline underline-offset-4"
+            className="w-fit text-body underline underline-offset-4"
           >
             Test sign-in
           </a>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-caption text-muted-foreground">
             Sign in through the provider once before you enforce it.
           </p>
         </div>

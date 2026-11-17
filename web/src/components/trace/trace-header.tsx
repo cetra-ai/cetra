@@ -120,7 +120,7 @@ export function TraceHeader({
       <section aria-label="Trace" className="flex shrink-0 flex-col gap-2 border-b px-4 py-3">
         <div className="flex min-w-0 items-center gap-2">
           {backLink}
-          <span className="min-w-0 truncate text-[15px] font-semibold select-text">
+          <span className="min-w-0 truncate text-title font-semibold select-text">
             {trace.name}
           </span>
           {trace.status === "ok" ? (
@@ -140,7 +140,7 @@ export function TraceHeader({
                   />
                   <span className="sr-only">{live.status}</span>
                 </span>
-                <Badge variant="secondary" className="h-4 px-1.5 text-[10px]">
+                <Badge variant="secondary" className="h-4 px-1.5 text-caption">
                   Live
                 </Badge>
                 <Button type="button" variant="ghost" size="xs" onClick={live.onStop}>
@@ -218,7 +218,7 @@ export function TraceHeader({
             ) : null}
           </div>
         </div>
-        <div className="flex flex-wrap items-center gap-2 text-[12px] text-muted-foreground">
+        <div className="flex flex-wrap items-center gap-2 text-body text-muted-foreground">
           <MetricChip icon={Clock} label="Start time">
             <TimeText value={trace.start_time} style="datetime" />
           </MetricChip>
@@ -263,7 +263,7 @@ export function TraceHeader({
           {trace.environment ? (
             <span
               className={cn(
-                "inline-flex rounded-sm border px-1.5 text-[11px]",
+                "inline-flex rounded-sm border px-1.5 text-caption",
                 environmentClasses(trace.environment).pill,
               )}
             >
@@ -275,7 +275,7 @@ export function TraceHeader({
             <span
               key={tag}
               className={cn(
-                "inline-flex rounded-sm border px-1.5 text-[11px]",
+                "inline-flex rounded-sm border px-1.5 text-caption",
                 categoryClasses(tag).pill,
               )}
             >
@@ -283,7 +283,7 @@ export function TraceHeader({
             </span>
           ))}
           {scoreBadges(trace.scores).map((score) => (
-            <Badge key={score.score_id} variant="secondary" className="h-4 px-1.5 text-[10px]">
+            <Badge key={score.score_id} variant="secondary" className="h-4 px-1.5 text-caption">
               {score.name}{" "}
               <ScoreBadge name={score.name} value={score.value} text={badgeValue(score.value)} />
             </Badge>
@@ -309,7 +309,7 @@ export function TraceHeader({
 
 function StatusPill({ className, children }: { className: string; children: ReactNode }) {
   return (
-    <span className={cn("rounded px-1.5 text-[11px] font-medium", className)}>{children}</span>
+    <span className={cn("rounded px-1.5 text-caption font-medium", className)}>{children}</span>
   );
 }
 

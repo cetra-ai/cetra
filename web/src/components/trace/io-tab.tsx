@@ -26,7 +26,7 @@ function JsonSection({ label, value }: { label: string; value: unknown }) {
     <section className="flex flex-col gap-1">
       <button
         type="button"
-        className="flex items-center gap-1 self-start text-[12px] font-medium"
+        className="flex items-center gap-1 self-start text-body font-medium"
         aria-expanded={open}
         onClick={() => setOpen((current) => !current)}
       >

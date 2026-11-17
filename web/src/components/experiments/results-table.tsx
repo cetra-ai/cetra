@@ -53,7 +53,7 @@ export function ResultsTable({
             <TableCell>
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <span className="font-mono text-xs">{shortId(row.dataset_item_id)}</span>
+                  <span className="font-mono text-caption">{shortId(row.dataset_item_id)}</span>
                 </TooltipTrigger>
                 <TooltipContent>{row.dataset_item_id}</TooltipContent>
               </Tooltip>
@@ -101,7 +101,7 @@ export function ResultsTable({
                 <Link
                   to="/$org/$project/traces/$traceId"
                   params={{ org, project, traceId: row.trace_id }}
-                  className="rounded-sm text-xs underline-offset-4 outline-none hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 focus-visible:outline-solid"
+                  className="rounded-sm text-caption underline-offset-4 outline-none hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 focus-visible:outline-solid"
                 >
                   trace
                 </Link>
@@ -118,9 +118,9 @@ function JsonCell({ value }: { value: unknown }) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span className="block max-w-xs truncate font-mono text-xs">{previewJson(value)}</span>
+        <span className="block max-w-xs truncate font-mono text-caption">{previewJson(value)}</span>
       </TooltipTrigger>
-      <TooltipContent className="max-w-lg break-all font-mono text-xs">
+      <TooltipContent className="max-w-lg break-all font-mono text-caption">
         <span className="block whitespace-pre-wrap">{previewJson(value, TOOLTIP_CHARS)}</span>
       </TooltipContent>
     </Tooltip>

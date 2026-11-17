@@ -21,7 +21,7 @@ function AdminLayout() {
   return (
     <TopBarLayout>
       <main className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-4 overflow-auto px-4 py-6">
-        <h1 className="text-2xl font-medium">Instance admin</h1>
+        <h1 className="text-heading font-medium">Instance admin</h1>
         <nav aria-label="Instance admin" className="flex gap-1 border-b">
           <AdminTab to="/admin/users" label="Users" />
           <AdminTab to="/admin/settings" label="Settings" />
@@ -36,7 +36,7 @@ function AdminTab({ to, label }: { to: "/admin/users" | "/admin/settings"; label
   return (
     <Link
       to={to}
-      className="-mb-px border-b-2 border-transparent px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground focus-ring rounded-t-sm"
+      className="-mb-px border-b-2 border-transparent px-3 py-1.5 text-body text-muted-foreground hover:text-foreground focus-ring rounded-t-sm"
       activeProps={{ "aria-current": "page", className: "border-primary text-foreground" }}
     >
       {label}

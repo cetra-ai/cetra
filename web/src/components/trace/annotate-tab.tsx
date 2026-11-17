@@ -26,7 +26,7 @@ export function AnnotateTab({ traceId, spanId }: { traceId: string; spanId: stri
   }
   if (trace.isError) {
     return (
-      <p className="text-sm">{problemOf(trace.error)?.title ?? "Could not load this trace"}</p>
+      <p className="text-body">{problemOf(trace.error)?.title ?? "Could not load this trace"}</p>
     );
   }
 

@@ -58,7 +58,7 @@ export function DatasetSettings({ dataset }: { dataset: Schema<"Dataset"> }) {
 
   return (
     <div className="flex flex-col gap-6">
-      <dl className="grid grid-cols-[10rem_1fr] gap-x-4 gap-y-3 text-sm">
+      <dl className="grid grid-cols-[10rem_1fr] gap-x-4 gap-y-3 text-body">
         <dt className="text-muted-foreground">Name</dt>
         <dd>{dataset.name}</dd>
         <dt className="text-muted-foreground">Description</dt>

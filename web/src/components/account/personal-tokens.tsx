@@ -52,7 +52,7 @@ export function PersonalTokens() {
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-center justify-between gap-4">
-        <p className="text-sm text-muted-foreground">
+        <p className="text-body text-muted-foreground">
           Tokens let the CLI and MCP clients act as you. Treat them like passwords.
         </p>
         <Button type="button" onClick={() => setCreating(true)} className="ml-auto">

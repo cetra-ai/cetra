@@ -103,9 +103,13 @@ export function ItemsTable({
                     {shortId(item.id)}
                   </Button>
                 </TableCell>
-                <TableCell className="max-w-xs truncate font-mono text-xs">{input}</TableCell>
-                <TableCell className="max-w-xs truncate font-mono text-xs">{expected}</TableCell>
-                <TableCell className="max-w-xs truncate font-mono text-xs">{metadata}</TableCell>
+                <TableCell className="max-w-xs truncate font-mono text-caption">{input}</TableCell>
+                <TableCell className="max-w-xs truncate font-mono text-caption">
+                  {expected}
+                </TableCell>
+                <TableCell className="max-w-xs truncate font-mono text-caption">
+                  {metadata}
+                </TableCell>
                 <TableCell>
                   {item.source_trace_id !== undefined ? (
                     <Link
@@ -122,7 +126,7 @@ export function ItemsTable({
                     "—"
                   )}
                 </TableCell>
-                <TableCell className="font-mono text-xs">{`v${item.version}`}</TableCell>
+                <TableCell className="font-mono text-caption">{`v${item.version}`}</TableCell>
               </TableRow>
             ))}
           </TableBody>

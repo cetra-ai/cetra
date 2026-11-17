@@ -20,12 +20,12 @@ export function MessageView({
   const Icon = roleIcon(role);
   return (
     <article className={cn("rounded-md border border-l-2 bg-card", roleBorder(role))}>
-      <header className="flex flex-wrap items-center gap-2 border-b px-3 py-1.5 text-[12px]">
+      <header className="flex flex-wrap items-center gap-2 border-b px-3 py-1.5 text-body">
         <Icon className="size-3.5 text-muted-foreground" aria-hidden />
         <span className="font-medium">{capitalise(role)}</span>
         {message.name ? <span className="text-muted-foreground">{message.name}</span> : null}
         {message.finish_reason ? (
-          <Badge variant="outline" className="text-[11px] text-muted-foreground">
+          <Badge variant="outline" className="text-caption text-muted-foreground">
             {message.finish_reason}
           </Badge>
         ) : null}

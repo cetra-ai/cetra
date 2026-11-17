@@ -99,7 +99,7 @@ export function FilterBar({
         )}
       </div>
       {error ? (
-        <p className="text-[12px] leading-4 break-words text-destructive">{filterMessage(error)}</p>
+        <p className="text-body leading-4 break-words text-destructive">{filterMessage(error)}</p>
       ) : null}
     </div>
   );
@@ -158,14 +158,14 @@ function Chips({
       <button
         type="button"
         aria-label="Edit filter"
-        className="focus-ring h-6 min-w-8 flex-1 truncate rounded-sm px-1 text-left text-xs text-muted-foreground"
+        className="focus-ring h-6 min-w-8 flex-1 truncate rounded-sm px-1 text-left text-caption text-muted-foreground"
         onClick={() => onEditText()}
       >
         {conjuncts.length === 0 ? placeholder : ""}
       </button>
       <button
         type="button"
-        className="focus-ring shrink-0 rounded-sm px-1 text-xs text-muted-foreground"
+        className="focus-ring shrink-0 rounded-sm px-1 text-caption text-muted-foreground"
         onClick={() => onEditText()}
       >
         Edit as text
@@ -184,7 +184,7 @@ function ChipShell({
   children: ReactNode;
 }) {
   return (
-    <span className="inline-flex h-6 max-w-64 shrink-0 items-center rounded-md bg-muted text-xs">
+    <span className="inline-flex h-6 max-w-64 shrink-0 items-center rounded-md bg-muted text-caption">
       {children}
       <button
         type="button"
@@ -276,7 +276,7 @@ function ChipForm({
         }
       }}
     >
-      <label className="flex flex-col gap-1 text-xs">
+      <label className="flex flex-col gap-1 text-caption">
         Field
         <select
           aria-label="Field"
@@ -306,7 +306,7 @@ function ChipForm({
         </select>
       </label>
       {kind === "string_map" || isCall(draft.target) ? (
-        <label className="flex flex-col gap-1 text-xs">
+        <label className="flex flex-col gap-1 text-caption">
           {kind === "string_map" ? "Key" : "Score"}
           <input
             aria-label={kind === "string_map" ? "Key" : "Score"}
@@ -319,7 +319,7 @@ function ChipForm({
           />
         </label>
       ) : null}
-      <label className="flex flex-col gap-1 text-xs">
+      <label className="flex flex-col gap-1 text-caption">
         Operator
         <select
           aria-label="Operator"
@@ -338,7 +338,7 @@ function ChipForm({
         </select>
       </label>
       {needsValue(op) ? (
-        <label className="flex flex-col gap-1 text-xs">
+        <label className="flex flex-col gap-1 text-caption">
           Value
           <input
             aria-label="Value"

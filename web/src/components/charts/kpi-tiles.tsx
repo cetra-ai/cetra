@@ -42,7 +42,7 @@ export function KpiRowSkeleton() {
     <div className="grid grid-cols-2 gap-2 md:grid-cols-5">
       {TILES.map((tile) => (
         <div key={tile.metric} className="flex h-16 flex-col justify-center rounded-md border px-3">
-          <span className="text-muted-foreground text-xs">{tile.label}</span>
+          <span className="text-muted-foreground text-caption">{tile.label}</span>
           <Skeleton className="mt-1 h-4 w-16" />
         </div>
       ))}
@@ -60,9 +60,9 @@ function KpiTile({ tile, kpi }: { tile: (typeof TILES)[number]; kpi?: Schema<"Kp
         className="focus-ring flex h-16 flex-col justify-center rounded-md border px-3 text-left"
         aria-label={`${tile.label}: ${delta.value === undefined ? "—" : formatKpi(tile.metric, delta.value)}`}
       >
-        <span className="text-muted-foreground text-xs">{tile.label}</span>
+        <span className="text-muted-foreground text-caption">{tile.label}</span>
         <span className="flex items-baseline gap-2">
-          <span className="font-mono text-sm tabular-nums">
+          <span className="font-mono text-body tabular-nums">
             {delta.value === undefined ? "—" : formatKpi(tile.metric, delta.value)}
           </span>
           <Delta adverse={tile.adverse} direction={delta.direction} changePct={delta.changePct} />
@@ -85,7 +85,10 @@ export function Delta({
   const Icon = direction === "up" ? ArrowUp : direction === "down" ? ArrowDown : Minus;
   return (
     <span
-      className={cn("inline-flex items-center gap-0.5 text-xs", deltaClass(adverse, direction))}
+      className={cn(
+        "inline-flex items-center gap-0.5 text-caption",
+        deltaClass(adverse, direction),
+      )}
     >
       <Icon aria-hidden className="size-3" />
       {changePct === undefined ? null : `${formatChange(changePct)}%`}

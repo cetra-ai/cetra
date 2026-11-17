@@ -86,7 +86,7 @@ export function SpanBar({
         aria-hidden="true"
         data-placement={placement}
         className={cn(
-          "pointer-events-none absolute top-1/2 -translate-y-1/2 font-mono text-[10px] whitespace-nowrap text-muted-foreground tabular-nums",
+          "pointer-events-none absolute top-1/2 -translate-y-1/2 font-mono text-caption whitespace-nowrap text-muted-foreground tabular-nums",
           placement === "inside" && "rounded-sm bg-background/80 px-1 text-foreground",
         )}
         style={labelStyle}

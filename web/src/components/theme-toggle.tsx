@@ -1,6 +1,7 @@
 import { Moon, Sun } from "lucide-react";
 import {
   applyPalette,
+  type Density,
   type Palette,
   readStoredPalette,
   type Theme,
@@ -31,8 +32,13 @@ export const PALETTE_OPTIONS = [
   { value: "nord", label: "Nord" },
 ] as const satisfies ReadonlyArray<{ value: Palette; label: string }>;
 
+export const DENSITY_OPTIONS = [
+  { value: "compact", label: "Compact" },
+  { value: "comfortable", label: "Comfortable" },
+] as const satisfies ReadonlyArray<{ value: Density; label: string }>;
+
 export function ThemeToggle() {
-  const { theme, resolvedTheme, setTheme, palette, setPalette } = useTheme();
+  const { theme, resolvedTheme, setTheme, palette, setPalette, density, setDensity } = useTheme();
   const Icon = resolvedTheme === "dark" ? Moon : Sun;
 
   return (
@@ -64,7 +70,9 @@ export function ThemeToggle() {
           ))}
         </DropdownMenuRadioGroup>
         <DropdownMenuSeparator />
-        <DropdownMenuLabel className="text-xs text-muted-foreground">Palette</DropdownMenuLabel>
+        <DropdownMenuLabel className="text-caption text-muted-foreground">
+          Palette
+        </DropdownMenuLabel>
         <DropdownMenuRadioGroup
           value={palette}
           onValueChange={(value) => {
@@ -80,6 +88,22 @@ export function ThemeToggle() {
                 applyPalette(option.value);
               }}
             >
+              {option.label}
+            </DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel className="text-caption text-muted-foreground">
+          Density
+        </DropdownMenuLabel>
+        <DropdownMenuRadioGroup
+          value={density}
+          onValueChange={(value) => {
+            setDensity(value as Density);
+          }}
+        >
+          {DENSITY_OPTIONS.map((option) => (
+            <DropdownMenuRadioItem key={option.value} value={option.value}>
               {option.label}
             </DropdownMenuRadioItem>
           ))}

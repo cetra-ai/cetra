@@ -48,7 +48,7 @@ export function OrgInvites({ org, actorRole }: { org: string; actorRole: OrgRole
   return (
     <section aria-labelledby="invites-heading" className="flex flex-col gap-3">
       <div className="flex items-center justify-between">
-        <h2 id="invites-heading" className="text-sm font-medium">
+        <h2 id="invites-heading" className="text-body font-medium">
           Pending invitations
         </h2>
         <Button type="button" size="sm" onClick={() => setInviting(true)}>
@@ -64,7 +64,7 @@ export function OrgInvites({ org, actorRole }: { org: string; actorRole: OrgRole
           <Skeleton className="h-8 w-full" />
         </>
       ) : rows.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No pending invitations.</p>
+        <p className="text-body text-muted-foreground">No pending invitations.</p>
       ) : (
         <Table aria-label="Pending invitations">
           <TableHeader>

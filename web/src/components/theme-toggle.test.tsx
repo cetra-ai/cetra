@@ -1,7 +1,11 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
-import { PALETTE_STORAGE_KEY, ThemeProvider } from "@/components/theme-provider";
+import {
+  DENSITY_STORAGE_KEY,
+  PALETTE_STORAGE_KEY,
+  ThemeProvider,
+} from "@/components/theme-provider";
 import { ThemeToggle } from "@/components/theme-toggle";
 
 describe("ThemeToggle", () => {
@@ -85,5 +89,34 @@ describe("ThemeToggle palettes", () => {
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
     expect(document.documentElement.dataset.palette).toBe("nord");
     expect(localStorage.getItem(PALETTE_STORAGE_KEY)).toBe("nord");
+  });
+});
+
+describe("ThemeToggle density", () => {
+  beforeEach(() => {
+    delete document.documentElement.dataset.density;
+  });
+
+  it("picks Comfortable, marks it on the page, and remembers it", async () => {
+    const user = userEvent.setup();
+    render(
+      <ThemeProvider>
+        <ThemeToggle />
+      </ThemeProvider>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Theme" }));
+    await user.click(screen.getByRole("menuitemradio", { name: "Comfortable" }));
+
+    expect(document.documentElement.dataset.density).toBe("comfortable");
+    expect(localStorage.getItem(DENSITY_STORAGE_KEY)).toBe("comfortable");
+
+    await user.click(screen.getByRole("button", { name: "Theme" }));
+    expect(screen.getByRole("menuitemradio", { name: "Comfortable" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    await user.click(screen.getByRole("menuitemradio", { name: "Compact" }));
+    expect(document.documentElement.dataset.density).toBeUndefined();
   });
 });

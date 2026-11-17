@@ -124,7 +124,7 @@ function OnlineRulePage() {
     <div className="mx-auto flex w-full max-w-4xl flex-1 flex-col gap-6 overflow-auto px-4 py-6">
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div className="flex flex-col gap-2">
-          <h1 className="text-lg font-medium">{rule.name}</h1>
+          <h1 className="text-title font-medium">{rule.name}</h1>
           <div>
             <Badge variant="outline">{ruleStatusLabel(rule)}</Badge>
           </div>
@@ -145,7 +145,7 @@ function OnlineRulePage() {
         ) : null}
       </header>
       {resume.error ? (
-        <p role="alert" className="text-sm text-destructive">
+        <p role="alert" className="text-body text-destructive">
           {problemMessage(resume.error, "Could not resume the rule.")}
         </p>
       ) : null}
@@ -153,8 +153,8 @@ function OnlineRulePage() {
       <RuleBanner rule={rule} connectionName={connectionName} />
 
       <section aria-label="Details" className="flex flex-col gap-3">
-        <h2 className="text-sm font-medium">Details</h2>
-        <dl className="grid grid-cols-[10rem_1fr] gap-x-4 gap-y-2 text-sm">
+        <h2 className="text-body font-medium">Details</h2>
+        <dl className="grid grid-cols-[10rem_1fr] gap-x-4 gap-y-2 text-body">
           <dt className="text-muted-foreground">Evaluator</dt>
           <dd>
             {evaluator.data ? (
@@ -180,7 +180,7 @@ function OnlineRulePage() {
             {Object.keys(rule.variable_mapping).length === 0 ? (
               "—"
             ) : (
-              <ul className="flex flex-col gap-1 font-mono text-xs">
+              <ul className="flex flex-col gap-1 font-mono text-caption">
                 {Object.entries(rule.variable_mapping).map(([variable, expression]) => (
                   <li key={variable}>
                     {variable} ← {expression}
@@ -196,12 +196,12 @@ function OnlineRulePage() {
 
       {rule.spend !== undefined && rule.budget_usd !== undefined ? (
         <section aria-label="Spend" className="flex flex-col gap-2">
-          <h2 className="text-sm font-medium">Spend</h2>
-          <p className="text-sm">
+          <h2 className="text-body font-medium">Spend</h2>
+          <p className="text-body">
             {`${formatCost(spent)} spent of ${formatCost(rule.budget_usd)} ${period}`}
           </p>
           {rule.spend.reserved_usd > 0 ? (
-            <p className="text-xs text-muted-foreground">
+            <p className="text-caption text-muted-foreground">
               {`+${formatCost(rule.spend.reserved_usd)} reserved`}
             </p>
           ) : null}
@@ -219,17 +219,17 @@ function OnlineRulePage() {
       ) : null}
 
       <section aria-label="Last 24 hours" className="flex flex-col gap-2">
-        <h2 className="text-sm font-medium">Last 24 hours</h2>
-        <dl className="flex flex-wrap gap-6 text-sm">
+        <h2 className="text-body font-medium">Last 24 hours</h2>
+        <dl className="flex flex-wrap gap-6 text-body">
           {COUNT_LABELS.map(([key, label]) => (
             <div key={key} className="flex flex-col">
-              <dt className="text-xs text-muted-foreground">{label}</dt>
-              <dd className="text-lg tabular-nums">{rule.jobs_last_24h[key]}</dd>
+              <dt className="text-caption text-muted-foreground">{label}</dt>
+              <dd className="text-title tabular-nums">{rule.jobs_last_24h[key]}</dd>
             </div>
           ))}
         </dl>
         {rule.dropped_last_hour > 0 ? (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-caption text-muted-foreground">
             {`${rule.dropped_last_hour} matches dropped this hour by the 10 000 per hour cap`}
           </p>
         ) : null}
@@ -237,7 +237,7 @@ function OnlineRulePage() {
 
       <section aria-label="Backfills" className="flex flex-col gap-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-sm font-medium">Backfills</h2>
+          <h2 className="text-body font-medium">Backfills</h2>
           {canManage ? (
             <DisabledReason reason={backfillReason}>
               <Button
@@ -264,7 +264,7 @@ function OnlineRulePage() {
       </section>
 
       <section aria-label="Jobs" className="flex flex-col gap-3">
-        <h2 className="text-sm font-medium">Jobs</h2>
+        <h2 className="text-body font-medium">Jobs</h2>
         <JobsTable org={org} project={project} filters={{ rule_id: rule.id }} />
       </section>
     </div>

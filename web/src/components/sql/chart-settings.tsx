@@ -51,7 +51,7 @@ export function ChartSettings({
   const id = useId();
 
   return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[12px]">
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-body">
       <fieldset aria-label="Chart type" className="m-0 flex items-center gap-1 border-0 p-0">
         <span className="text-muted-foreground">Type</span>
         {(["line", "bar"] as const).map((kind) => (
@@ -65,7 +65,7 @@ export function ChartSettings({
                 onChange({ ...config, kind });
               }
             }}
-            className="h-7 px-2 text-[12px]"
+            className="h-7 px-2 text-body"
           >
             {kind === "line" ? "Line" : "Bar"}
           </Toggle>
@@ -75,12 +75,12 @@ export function ChartSettings({
       <div className="flex items-center gap-1">
         <span className="text-muted-foreground">X</span>
         <Select value={config.x} onValueChange={(x) => onChange(withX(config, columns, x))}>
-          <SelectTrigger size="sm" aria-label="X column" className="h-7 text-[12px]">
+          <SelectTrigger size="sm" aria-label="X column" className="h-7 text-body">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
             {columns.x.map((name) => (
-              <SelectItem key={name} value={name} className="text-[12px]">
+              <SelectItem key={name} value={name} className="text-body">
                 {name}
               </SelectItem>
             ))}
@@ -92,11 +92,11 @@ export function ChartSettings({
         <span className="text-muted-foreground">Y</span>
         <Popover>
           <PopoverTrigger asChild>
-            <Button variant="outline" size="sm" aria-label="Y columns" className="h-7 text-[12px]">
+            <Button variant="outline" size="sm" aria-label="Y columns" className="h-7 text-body">
               {yCount} {yCount === 1 ? "column" : "columns"}
             </Button>
           </PopoverTrigger>
-          <PopoverContent align="start" className="w-56 gap-2 p-2 text-[12px]">
+          <PopoverContent align="start" className="w-56 gap-2 p-2 text-body">
             {yChoices.map((name, index) => {
               const checked = config.y.includes(name);
               // At most CHART_MAX_SERIES columns, and at least one.
@@ -136,15 +136,15 @@ export function ChartSettings({
           disabled={!splitEnabled}
           onValueChange={(value) => onChange({ ...config, splitBy: value === NONE ? null : value })}
         >
-          <SelectTrigger size="sm" aria-label="Split by column" className="h-7 text-[12px]">
+          <SelectTrigger size="sm" aria-label="Split by column" className="h-7 text-body">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value={NONE} className="text-[12px]">
+            <SelectItem value={NONE} className="text-body">
               None
             </SelectItem>
             {splitChoices.map((name) => (
-              <SelectItem key={name} value={name} className="text-[12px]">
+              <SelectItem key={name} value={name} className="text-body">
                 {name}
               </SelectItem>
             ))}

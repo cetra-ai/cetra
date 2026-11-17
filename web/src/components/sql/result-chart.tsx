@@ -72,7 +72,7 @@ export const SqlResultChart = memo(function SqlResultChart({
   const config = chosen?.result === result ? chosen.config : automatic;
   const spec = useMemo(() => (config ? buildChart(result, config) : null), [result, config]);
   if (!config) {
-    return <p className="text-muted-foreground text-sm">{NO_CHART}</p>;
+    return <p className="text-muted-foreground text-body">{NO_CHART}</p>;
   }
   const style = spec ? tickStyle(spec) : "datetime";
   const tick = (value: unknown) =>
@@ -89,7 +89,7 @@ export const SqlResultChart = memo(function SqlResultChart({
       />
       {spec ? (
         <>
-          {spec.clipped ? <p className="text-muted-foreground text-xs">{CLIPPED}</p> : null}
+          {spec.clipped ? <p className="text-muted-foreground text-caption">{CLIPPED}</p> : null}
           <ChartContainer config={{}} className="aspect-auto min-h-64 w-full flex-1">
             <ComposedChart data={spec.data} margin={{ left: 8, right: 8, top: 8, bottom: 8 }}>
               <CartesianGrid vertical={false} />
@@ -126,7 +126,7 @@ export const SqlResultChart = memo(function SqlResultChart({
           </ChartContainer>
         </>
       ) : (
-        <p className="text-muted-foreground text-sm">{NO_CHART}</p>
+        <p className="text-muted-foreground text-body">{NO_CHART}</p>
       )}
     </section>
   );

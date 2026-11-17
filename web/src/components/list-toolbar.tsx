@@ -73,7 +73,7 @@ export function ListToolbar({
       ref={barRef}
       className="flex min-h-9 shrink-0 items-center gap-2 overflow-x-auto border-b px-3"
     >
-      <h1 className="shrink-0 text-sm font-medium">{title}</h1>
+      <h1 className="shrink-0 text-body font-medium">{title}</h1>
       <TimeRangePicker state={range} onChange={onRange} />
       <Button type="button" variant="ghost" size="icon-xs" aria-label="Refresh" onClick={onRefresh}>
         <RefreshCw />
@@ -99,7 +99,7 @@ export function ListToolbar({
       {columns}
       {views}
       {loaded !== undefined ? (
-        <span className="shrink-0 text-xs text-muted-foreground">{loaded} loaded</span>
+        <span className="shrink-0 text-caption text-muted-foreground">{loaded} loaded</span>
       ) : null}
     </div>
   );
@@ -116,7 +116,7 @@ function UpdatedAgo({ at }: { at: number }) {
   const seconds = Math.max(0, Math.floor((Date.now() - at) / 1000));
   const label =
     seconds < 60 ? `Updated ${seconds}s ago` : `Updated ${Math.floor(seconds / 60)} min ago`;
-  return <span className="shrink-0 text-xs text-muted-foreground">{label}</span>;
+  return <span className="shrink-0 text-caption text-muted-foreground">{label}</span>;
 }
 
 function Flag({
@@ -137,7 +137,7 @@ function Flag({
       <TooltipTrigger asChild>
         <span className="inline-flex shrink-0 items-center gap-1.5">
           <Switch id={id} size="sm" checked={checked} onCheckedChange={onCheckedChange} />
-          <Label htmlFor={id} className="text-xs font-normal">
+          <Label htmlFor={id} className="text-caption font-normal">
             {label}
           </Label>
         </span>
@@ -202,7 +202,7 @@ function SearchBox({
       aria-label="Search"
       value={draft}
       placeholder="Search"
-      className="h-7 w-44 shrink-0 text-xs"
+      className="h-7 w-44 shrink-0 text-caption"
       onChange={(event) => {
         setDraft(event.target.value);
         schedule(event.target.value);

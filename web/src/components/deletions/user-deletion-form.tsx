@@ -118,10 +118,10 @@ export function UserDeletionForm() {
   return (
     <section aria-labelledby={headingId} className="flex max-w-md flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 id={headingId} className="text-base font-medium">
+        <h2 id={headingId} className="text-ui font-medium">
           Delete a user's data
         </h2>
-        <p className="text-sm text-muted-foreground">{EXPLANATION}</p>
+        <p className="text-body text-muted-foreground">{EXPLANATION}</p>
       </div>
       <form
         noValidate

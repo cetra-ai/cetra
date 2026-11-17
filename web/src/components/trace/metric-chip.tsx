@@ -18,7 +18,7 @@ export function MetricChip({
     <span
       {...props}
       className={cn(
-        "inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[12px]",
+        "inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-body",
         className,
       )}
     >

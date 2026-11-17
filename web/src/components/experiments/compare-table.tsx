@@ -76,15 +76,15 @@ export function CompareTable({
           return (
             <TableRow key={row.dataset_item_id} data-regressed={regressed ? "true" : undefined}>
               <TableCell>
-                <span className="font-mono text-xs">{shortId(row.dataset_item_id)}</span>
+                <span className="font-mono text-caption">{shortId(row.dataset_item_id)}</span>
               </TableCell>
               <TableCell>
-                <span className="block max-w-xs truncate font-mono text-xs">
+                <span className="block max-w-xs truncate font-mono text-caption">
                   {previewJson(row.input)}
                 </span>
               </TableCell>
               <TableCell>
-                <span className="block max-w-xs truncate font-mono text-xs">
+                <span className="block max-w-xs truncate font-mono text-caption">
                   {previewJson(row.expected_output)}
                 </span>
               </TableCell>
@@ -132,9 +132,9 @@ const CellView = memo(function CellView({
   return (
     <div className="flex max-w-sm flex-col gap-2">
       {cell.output === undefined ? (
-        <p className="text-xs text-muted-foreground">No output</p>
+        <p className="text-caption text-muted-foreground">No output</p>
       ) : baseline ? (
-        <p className="whitespace-pre-wrap font-mono text-xs">
+        <p className="whitespace-pre-wrap font-mono text-caption">
           {previewJson(cell.output, BASELINE_OUTPUT_CHARS)}
         </p>
       ) : (
@@ -152,13 +152,13 @@ const CellView = memo(function CellView({
       {scores.length > 0 ? (
         <div className="flex flex-wrap gap-1">
           {scores.map(([name, value]) => (
-            <span key={name} className="rounded border px-1.5 text-xs tabular-nums">
+            <span key={name} className="rounded border px-1.5 text-caption tabular-nums">
               {`${name} ${value.toFixed(3)}`}
             </span>
           ))}
         </div>
       ) : null}
-      <div className="flex flex-wrap gap-x-3 text-xs text-muted-foreground">
+      <div className="flex flex-wrap gap-x-3 text-caption text-muted-foreground">
         {cell.latency_ns === undefined ? null : <span>{formatDuration(cell.latency_ns)}</span>}
         {cell.trace_id === undefined ? null : (
           <Link

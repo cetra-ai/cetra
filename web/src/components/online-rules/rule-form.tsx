@@ -279,7 +279,7 @@ function SectionError({ message }: { message: string | undefined }) {
     return null;
   }
   return (
-    <p role="alert" className="text-xs text-destructive">
+    <p role="alert" className="text-caption text-destructive">
       {message}
     </p>
   );
@@ -470,7 +470,7 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
             </SelectContent>
           </Select>
           {saved ? (
-            <p id="rule-evaluator-help" className="text-xs text-muted-foreground">
+            <p id="rule-evaluator-help" className="text-caption text-muted-foreground">
               The evaluator cannot change after the rule is created.
             </p>
           ) : null}
@@ -478,7 +478,7 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
         </div>
 
         <div className="flex flex-col gap-2">
-          <span className="text-sm leading-none font-medium">Target</span>
+          <span className="text-body leading-none font-medium">Target</span>
           <RadioGroup
             aria-label="Target"
             value={values.target}
@@ -496,7 +496,7 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
             ))}
           </RadioGroup>
           {saved ? (
-            <p className="text-xs text-muted-foreground">
+            <p className="text-caption text-muted-foreground">
               The target cannot change after the rule is created.
             </p>
           ) : null}
@@ -516,7 +516,7 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
               set({ filter: event.target.value });
             }}
           />
-          <p id="rule-filter-help" className="text-xs text-muted-foreground">
+          <p id="rule-filter-help" className="text-caption text-muted-foreground">
             {filterHelp}
           </p>
           <SectionError message={errors.filter} />
@@ -558,7 +558,7 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
               set({ samplePercent: event.target.value });
             }}
           />
-          <p id="rule-sample-help" className="text-xs text-muted-foreground">
+          <p id="rule-sample-help" className="text-caption text-muted-foreground">
             {sampleHelp}
           </p>
           <SectionError message={errors.sample_rate} />
@@ -594,7 +594,7 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
                       <Link
                         to="/$org/$project/settings/models"
                         params={{ org, project }}
-                        className="text-sm underline"
+                        className="text-body underline"
                       >
                         Add a model price
                       </Link>
@@ -625,7 +625,7 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
               ) : null}
             </>
           ) : evaluator === undefined ? null : (
-            <p className="text-sm text-muted-foreground">
+            <p className="text-body text-muted-foreground">
               Budgets apply to LLM judge evaluators only.
             </p>
           )}
@@ -644,7 +644,7 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
         </div>
 
         {formError ? (
-          <div role="alert" className="flex flex-col gap-1 text-sm text-destructive">
+          <div role="alert" className="flex flex-col gap-1 text-body text-destructive">
             <p>{formError.message}</p>
             {formError.hint ? <p>{formError.hint}</p> : null}
             {formError.upgrade ? (

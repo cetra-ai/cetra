@@ -82,7 +82,7 @@ export function MatchCounter({
       role="status"
       aria-live="polite"
       aria-busy={pending ? "true" : undefined}
-      className={`text-xs text-muted-foreground transition-opacity ${pending ? "opacity-60" : ""}`}
+      className={`text-caption text-muted-foreground transition-opacity ${pending ? "opacity-60" : ""}`}
     >
       {content}
     </div>

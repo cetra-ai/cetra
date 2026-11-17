@@ -343,7 +343,7 @@ function AddToDatasetForm({
   if (added !== undefined) {
     return (
       <div className="flex flex-col gap-4">
-        <p className="text-sm">{`Added to ${added.name}.`}</p>
+        <p className="text-body">{`Added to ${added.name}.`}</p>
         <DialogFooter>
           <Button type="button" variant="outline" onClick={onClose}>
             Close
@@ -371,7 +371,7 @@ function AddToDatasetForm({
     <form noValidate className="flex flex-col gap-4" onSubmit={onSubmit}>
       {spanTargetable ? (
         <div className="flex flex-col gap-2">
-          <span className="text-sm leading-none font-medium">From</span>
+          <span className="text-body leading-none font-medium">From</span>
           <RadioGroup
             aria-label="From"
             value={from}
@@ -420,7 +420,9 @@ function AddToDatasetForm({
           </SelectContent>
         </Select>
         {datasets.data?.next_cursor ? (
-          <p className="text-xs text-muted-foreground">More datasets match; refine the search.</p>
+          <p className="text-caption text-muted-foreground">
+            More datasets match; refine the search.
+          </p>
         ) : null}
         {creating ? (
           <TextField
@@ -438,7 +440,7 @@ function AddToDatasetForm({
         ) : null}
       </div>
 
-      {noRootMessage ? <p className="text-sm text-muted-foreground">{noRootMessage}</p> : null}
+      {noRootMessage ? <p className="text-body text-muted-foreground">{noRootMessage}</p> : null}
       <JsonField
         label="Input"
         value={inputText}

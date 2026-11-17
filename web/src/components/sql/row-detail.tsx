@@ -24,28 +24,28 @@ function rawText(value: unknown): string {
 
 function FieldValue({ value }: { value: unknown }) {
   if (value === null || value === undefined) {
-    return <p className="mt-1 font-mono text-[12px] text-muted-foreground">NULL</p>;
+    return <p className="mt-1 font-mono text-body text-muted-foreground">NULL</p>;
   }
   if (typeof value === "object") {
     return (
-      <pre className="mt-1 max-h-64 overflow-auto font-mono text-[12px] break-words whitespace-pre-wrap">
+      <pre className="mt-1 max-h-64 overflow-auto font-mono text-body break-words whitespace-pre-wrap">
         {JSON.stringify(value, null, 2)}
       </pre>
     );
   }
   const text = String(value);
   if (typeof value === "string" && (value.length > LONG_TEXT || value.includes("\n"))) {
-    return <pre className="mt-1 font-mono text-[12px] break-words whitespace-pre-wrap">{text}</pre>;
+    return <pre className="mt-1 font-mono text-body break-words whitespace-pre-wrap">{text}</pre>;
   }
-  return <p className="mt-1 font-mono text-[12px] break-words">{text}</p>;
+  return <p className="mt-1 font-mono text-body break-words">{text}</p>;
 }
 
 function FieldEntry({ name, type, value }: { name: string; type: string; value: unknown }) {
   return (
     <div className="border-b py-2">
       <div className="flex items-center gap-2">
-        <span className="min-w-0 truncate font-mono text-[12px]">{name}</span>
-        <span className="text-[11px] text-muted-foreground">{type}</span>
+        <span className="min-w-0 truncate font-mono text-body">{name}</span>
+        <span className="text-caption text-muted-foreground">{type}</span>
         <span className="ml-auto">
           <CopyButton value={rawText(value)} label={name} />
         </span>
@@ -88,7 +88,7 @@ export function RowDetailSheet({
         {shown ? (
           <>
             <SheetHeader className="gap-3">
-              <SheetTitle className="text-[13px]">{`Row ${shown.index + 1}`}</SheetTitle>
+              <SheetTitle className="text-ui">{`Row ${shown.index + 1}`}</SheetTitle>
               <div>
                 <Button
                   type="button"

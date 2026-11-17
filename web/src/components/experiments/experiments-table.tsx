@@ -218,7 +218,7 @@ export function CompareSelection({ experiments }: { experiments: Schema<"Experim
   }
   const reason = compareBlockReason(experiments);
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border px-3 py-2 text-sm">
+    <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border px-3 py-2 text-body">
       <p>{`Baseline: ${baseline.name}`}</p>
       <DisabledReason reason={reason}>
         <Button

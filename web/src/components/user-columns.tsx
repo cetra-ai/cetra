@@ -258,7 +258,7 @@ function UserCell({ user }: { user: Schema<"EndUserSummary"> }) {
       {name ? (
         <>
           <span className="truncate font-medium">{name}</span>
-          <span className="truncate font-mono text-[11px] text-muted-foreground">
+          <span className="truncate font-mono text-caption text-muted-foreground">
             {user.user_id}
           </span>
         </>

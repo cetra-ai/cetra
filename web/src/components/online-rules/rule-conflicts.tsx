@@ -21,7 +21,7 @@ export function RuleConflicts({
     return null;
   }
   return (
-    <ul className="flex flex-col gap-1 text-sm">
+    <ul className="flex flex-col gap-1 text-body">
       {conflicts.map((item) => (
         <li key={item.field}>
           <Link

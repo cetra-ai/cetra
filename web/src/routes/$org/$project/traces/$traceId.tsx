@@ -59,7 +59,7 @@ function TracePage() {
                     : undefined,
                 })}
                 aria-label="Back to traces"
-                className="focus-ring -ml-1 inline-flex items-center gap-0.5 rounded-sm px-1 text-[12px] text-muted-foreground hover:bg-row-hover hover:text-foreground"
+                className="focus-ring -ml-1 inline-flex items-center gap-0.5 rounded-sm px-1 text-body text-muted-foreground hover:bg-row-hover hover:text-foreground"
               >
                 <ChevronLeft aria-hidden="true" className="size-3.5" />
                 Traces

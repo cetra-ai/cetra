@@ -246,7 +246,7 @@ function AlertsPage() {
                 <div className="flex min-h-9 shrink-0 items-center gap-2 overflow-x-auto border-b px-3">
                   <Tooltip>
                     <TooltipTrigger asChild>
-                      <h1 className="shrink-0 text-sm font-medium">Alerts</h1>
+                      <h1 className="shrink-0 text-body font-medium">Alerts</h1>
                     </TooltipTrigger>
                     <TooltipContent>
                       Rules are evaluated every minute, or every 5 minutes for windows of 1 hour or
@@ -353,7 +353,7 @@ function AlertsPage() {
                                         <div className="flex flex-col items-start gap-0.5">
                                           <StateBadge state={rule.state} enabled={rule.enabled} />
                                           {bucket === "firing" && rule.last_fired_at ? (
-                                            <span className="text-xs text-muted-foreground tabular-nums">
+                                            <span className="text-caption text-muted-foreground tabular-nums">
                                               for {formatDuration(elapsedNs(rule.last_fired_at))}
                                             </span>
                                           ) : null}
@@ -493,14 +493,14 @@ function RecentEvents({
   const ruleById = new Map(rules.map((rule) => [rule.id, rule]));
   return (
     <section className="flex flex-col gap-3">
-      <h2 className="text-base font-medium">Recent events</h2>
+      <h2 className="text-ui font-medium">Recent events</h2>
       {pending ? (
         <>
           <Skeleton className="h-8 w-full" />
           <Skeleton className="h-8 w-full" />
         </>
       ) : history.length === 0 ? (
-        <p className="text-sm text-muted-foreground">
+        <p className="text-body text-muted-foreground">
           No events yet. Events appear when a rule fires or resolves.
         </p>
       ) : (
@@ -641,7 +641,7 @@ function StateStrip({
   onSelect: (state: AlertBucket | undefined) => void;
 }) {
   return (
-    <section aria-label="Summary" className="flex flex-wrap items-center gap-2 text-sm">
+    <section aria-label="Summary" className="flex flex-wrap items-center gap-2 text-body">
       {ALERT_BUCKETS.map((bucket) => {
         const selected = active === bucket;
         return (
@@ -774,7 +774,7 @@ function EnabledSwitch({
         <>
           <FormError message={problemMessage(update.error, "Could not update the rule.")} />
           {planLimited ? (
-            <p className="text-xs">Upgrade your plan or disable another rule.</p>
+            <p className="text-caption">Upgrade your plan or disable another rule.</p>
           ) : null}
           {planLimited ? <UpgradeButton url={upgradeUrl} /> : null}
         </>

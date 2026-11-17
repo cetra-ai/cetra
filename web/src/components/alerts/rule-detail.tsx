@@ -107,14 +107,14 @@ export function RuleDetail({
             </DisabledReason>
             <Label htmlFor="rule-enabled">Enabled</Label>
           </div>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-caption text-muted-foreground">
             Disabling or changing the condition resets the state to OK.
           </p>
           {update.error ? (
             <>
               <FormError message={problemMessage(update.error, "Could not update the rule.")} />
               {planLimited ? (
-                <p className="text-xs">Upgrade your plan or disable another rule.</p>
+                <p className="text-caption">Upgrade your plan or disable another rule.</p>
               ) : null}
               {planLimited ? <UpgradeButton url={upgradeUrl} /> : null}
             </>
@@ -152,18 +152,18 @@ export function RuleDetail({
       </div>
 
       {rule.last_error ? (
-        <p role="alert" className="text-sm text-destructive">
+        <p role="alert" className="text-body text-destructive">
           The last evaluation failed: {rule.last_error}
         </p>
       ) : null}
 
-      <dl className="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 text-sm">
+      <dl className="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 text-body">
         <dt className="text-muted-foreground">Condition</dt>
         <dd>{conditionSummary(rule.condition)}</dd>
         <dt className="text-muted-foreground">Filter</dt>
         <dd>
           {rule.condition.filter ? (
-            <span className="font-mono text-xs">{rule.condition.filter}</span>
+            <span className="font-mono text-caption">{rule.condition.filter}</span>
           ) : (
             "All traces"
           )}
@@ -211,9 +211,9 @@ export function RuleDetail({
       <RulePreview org={org} project={project} values={formFromRule(rule)} />
 
       <div className="flex flex-col gap-3">
-        <h2 className="text-base font-medium">History</h2>
+        <h2 className="text-ui font-medium">History</h2>
         {events.error ? (
-          <p role="alert" className="text-sm text-destructive">
+          <p role="alert" className="text-body text-destructive">
             {problemMessage(events.error, "Could not load the history.")}
           </p>
         ) : events.isPending ? (
@@ -222,7 +222,7 @@ export function RuleDetail({
             <Skeleton className="h-8 w-full" />
           </>
         ) : history.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
+          <p className="text-body text-muted-foreground">
             No events yet. Events appear when the rule fires or resolves.
           </p>
         ) : (
@@ -285,7 +285,7 @@ export function RuleDetail({
                                 </span>
                               ) : null}
                               {delivery.last_error ? (
-                                <span className="text-xs text-muted-foreground">
+                                <span className="text-caption text-muted-foreground">
                                   {delivery.last_error}
                                 </span>
                               ) : null}

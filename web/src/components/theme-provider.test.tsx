@@ -1,7 +1,12 @@
 import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
-import { THEME_STORAGE_KEY, ThemeProvider, useTheme } from "@/components/theme-provider";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  DENSITY_STORAGE_KEY,
+  THEME_STORAGE_KEY,
+  ThemeProvider,
+  useTheme,
+} from "@/components/theme-provider";
 import { setPrefersDark } from "@/test/match-media";
 
 function SchemeHarness() {
@@ -139,5 +144,64 @@ describe("ThemeProvider", () => {
     expect(() => renderProvider()).not.toThrow();
     expect(screen.getByRole("button")).toHaveTextContent("dark");
     expect(document.documentElement).toHaveClass("dark");
+  });
+});
+
+function DensityHarness() {
+  const { density, setDensity } = useTheme();
+  return (
+    <button type="button" onClick={() => setDensity("comfortable")}>
+      {density}
+    </button>
+  );
+}
+
+describe("ThemeProvider density", () => {
+  beforeEach(() => {
+    delete document.documentElement.dataset.density;
+  });
+
+  it("defaults to compact and sets no density attribute", () => {
+    render(
+      <ThemeProvider>
+        <DensityHarness />
+      </ThemeProvider>,
+    );
+    expect(screen.getByRole("button")).toHaveTextContent("compact");
+    expect(document.documentElement.dataset.density).toBeUndefined();
+    expect(localStorage.getItem(DENSITY_STORAGE_KEY)).toBeNull();
+  });
+
+  it("marks comfortable on the page and stores it", async () => {
+    const user = userEvent.setup();
+    render(
+      <ThemeProvider>
+        <DensityHarness />
+      </ThemeProvider>,
+    );
+    await user.click(screen.getByRole("button", { name: "compact" }));
+    expect(document.documentElement.dataset.density).toBe("comfortable");
+    expect(localStorage.getItem(DENSITY_STORAGE_KEY)).toBe("comfortable");
+    expect(screen.getByRole("button")).toHaveTextContent("comfortable");
+  });
+
+  it("reads a stored density on start and ignores an unknown value", () => {
+    localStorage.setItem(DENSITY_STORAGE_KEY, "comfortable");
+    const { unmount } = render(
+      <ThemeProvider>
+        <DensityHarness />
+      </ThemeProvider>,
+    );
+    expect(screen.getByRole("button")).toHaveTextContent("comfortable");
+    expect(document.documentElement.dataset.density).toBe("comfortable");
+    unmount();
+
+    localStorage.setItem(DENSITY_STORAGE_KEY, "huge");
+    render(
+      <ThemeProvider>
+        <DensityHarness />
+      </ThemeProvider>,
+    );
+    expect(screen.getByRole("button")).toHaveTextContent("compact");
   });
 });

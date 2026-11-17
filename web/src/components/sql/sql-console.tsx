@@ -167,7 +167,7 @@ export function SqlConsole({
     <TooltipProvider>
       <div className="flex h-full min-h-0 flex-1 flex-col">
         <div className="flex min-h-9 shrink-0 items-center gap-2 border-b px-3">
-          <h1 className="shrink-0 text-sm font-medium">SQL</h1>
+          <h1 className="shrink-0 text-body font-medium">SQL</h1>
           <Button
             type="button"
             variant="ghost"
@@ -197,7 +197,7 @@ export function SqlConsole({
           />
         </div>
         {savedQueries.isError ? (
-          <p role="alert" className="px-3 py-1 text-destructive text-xs">
+          <p role="alert" className="px-3 py-1 text-destructive text-caption">
             Saved queries could not be loaded.
           </p>
         ) : null}

@@ -37,7 +37,7 @@ export function TraceSummary({
       aria-label="Trace summary"
       className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto px-4 py-3"
     >
-      <h2 className="text-[15px] font-semibold">Trace summary</h2>
+      <h2 className="text-title font-semibold">Trace summary</h2>
 
       <div className="flex flex-wrap gap-1.5">
         <MetricChip icon={Timer} label="Duration">
@@ -61,15 +61,15 @@ export function TraceSummary({
       </div>
 
       <section aria-label="Scores" className="flex flex-col gap-2">
-        <h3 className="text-[12px] font-medium">Scores</h3>
+        <h3 className="text-body font-medium">Scores</h3>
         {trace.scores.length === 0 ? (
-          <p className="text-[12px] text-muted-foreground">No scores</p>
+          <p className="text-body text-muted-foreground">No scores</p>
         ) : (
           <div className="flex flex-wrap gap-1.5">
             {trace.scores.map((score) => (
               <span
                 key={score.score_id}
-                className="inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[12px]"
+                className="inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-body"
               >
                 {score.name}{" "}
                 <ScoreBadge name={score.name} value={score.value} text={badgeValue(score.value)} />
@@ -87,7 +87,7 @@ export function TraceSummary({
           <Skeleton className="h-16 w-full" />
         </div>
       ) : root.isError ? (
-        <p className="text-[12px] text-muted-foreground">
+        <p className="text-body text-muted-foreground">
           {problemOf(root.error)?.title ?? "Could not load this span"}
         </p>
       ) : (
@@ -99,7 +99,7 @@ export function TraceSummary({
 
       {errors.length > 0 ? (
         <section aria-label="Errors" className="flex flex-col gap-2">
-          <h3 className="text-[12px] font-medium">Errors</h3>
+          <h3 className="text-body font-medium">Errors</h3>
           <ul className="flex flex-col gap-1">
             {errors.map((row) => (
               <li key={row.span.span_id}>
@@ -107,7 +107,7 @@ export function TraceSummary({
                   type="button"
                   variant="ghost"
                   size="sm"
-                  className="h-auto w-full flex-col items-start gap-0.5 px-2 py-1 text-[12px]"
+                  className="h-auto w-full flex-col items-start gap-0.5 px-2 py-1 text-body"
                   onClick={() => {
                     onSelectSpan(row.span.span_id);
                   }}

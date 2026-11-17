@@ -87,7 +87,7 @@ export function ScoreDistribution({
   }
   if (query.isError) {
     return (
-      <p role="alert" className="text-xs text-destructive">
+      <p role="alert" className="text-caption text-destructive">
         Could not load the scores.
       </p>
     );
@@ -99,16 +99,16 @@ export function ScoreDistribution({
 
   return (
     <div className="flex flex-col gap-3">
-      <h3 className="text-sm font-medium">Score distribution (latest {latest} scores)</h3>
+      <h3 className="text-body font-medium">Score distribution (latest {latest} scores)</h3>
       {result.kind === "empty" ? (
-        <p className="text-xs text-muted-foreground">No scores yet.</p>
+        <p className="text-caption text-muted-foreground">No scores yet.</p>
       ) : result.kind === "text" ? (
-        <p className="text-xs text-muted-foreground">Text scores have no distribution.</p>
+        <p className="text-caption text-muted-foreground">Text scores have no distribution.</p>
       ) : (
         result.bins.map((bin) => (
           <div
             key={bin.label}
-            className="grid grid-cols-[9rem_1fr_3rem] items-center gap-2 text-xs"
+            className="grid grid-cols-[9rem_1fr_3rem] items-center gap-2 text-caption"
           >
             <span className="truncate font-mono tabular-nums">{bin.label}</span>
             <div className="h-3 rounded-sm bg-muted">

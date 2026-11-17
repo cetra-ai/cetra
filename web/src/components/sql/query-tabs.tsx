@@ -66,7 +66,7 @@ export function QueryTabs({
             title={title}
             tabIndex={isActive ? 0 : -1}
             className={cn(
-              "group flex h-7 max-w-48 shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-2 text-[12px]",
+              "group flex h-7 max-w-48 shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-2 text-body",
               isActive
                 ? "bg-muted font-medium text-foreground"
                 : "text-muted-foreground hover:bg-muted/60",

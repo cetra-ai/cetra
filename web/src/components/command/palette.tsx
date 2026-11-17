@@ -7,7 +7,7 @@ import { readRecent } from "@/components/command/recent-traces";
 import { ShortcutsHelp } from "@/components/command/shortcuts-help";
 import { projectNav } from "@/components/shell/nav";
 import { useTheme } from "@/components/theme-provider";
-import { PALETTE_OPTIONS } from "@/components/theme-toggle";
+import { DENSITY_OPTIONS, PALETTE_OPTIONS } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import {
   Command,
@@ -52,7 +52,14 @@ export function CommandPalette() {
   const navigate = useNavigate();
   const { org } = useParams({ from: "/$org" });
   const project = useMatch({ from: "/$org/$project", shouldThrow: false })?.params.project;
-  const { theme, setTheme, palette: colours, setPalette: setColours } = useTheme();
+  const {
+    theme,
+    setTheme,
+    palette: colours,
+    setPalette: setColours,
+    density,
+    setDensity,
+  } = useTheme();
   const zone = useTimeZone();
   const projects = $api.useInfiniteQuery(
     "get",
@@ -140,7 +147,7 @@ export function CommandPalette() {
       <Button
         type="button"
         variant="outline"
-        className="h-7 w-36 justify-between px-2 text-xs font-normal text-muted-foreground"
+        className="h-7 w-36 justify-between px-2 text-caption font-normal text-muted-foreground"
         aria-label="Command palette"
         aria-keyshortcuts="Meta+K Control+K"
         onClick={() => setPalette(true)}
@@ -149,7 +156,7 @@ export function CommandPalette() {
           <Search />
           Search
         </span>
-        <kbd className="font-mono text-[10px]">⌘K</kbd>
+        <kbd className="font-mono text-caption">⌘K</kbd>
       </Button>
       <CommandDialog
         open={palette}
@@ -303,6 +310,21 @@ export function CommandPalette() {
                   }}
                 >
                   {option.label}
+                </CommandItem>
+              ))}
+            </CommandGroup>
+            <CommandGroup heading="Density">
+              {DENSITY_OPTIONS.map((option) => (
+                <CommandItem
+                  key={option.value}
+                  value={`Density: ${option.label}`}
+                  data-checked={density === option.value}
+                  onSelect={() => {
+                    setDensity(option.value);
+                    closePalette();
+                  }}
+                >
+                  {`Density: ${option.label}`}
                 </CommandItem>
               ))}
             </CommandGroup>

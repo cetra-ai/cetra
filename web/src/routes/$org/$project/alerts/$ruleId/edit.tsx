@@ -42,7 +42,7 @@ function EditRulePage() {
 
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-6 overflow-auto px-4 py-6">
-      <h1 className="text-lg font-medium">Edit {rule.name}</h1>
+      <h1 className="text-title font-medium">Edit {rule.name}</h1>
       <RuleForm org={org} project={project} rule={rule} onSaved={toRule} onCancel={toRule} />
     </div>
   );
