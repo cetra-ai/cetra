@@ -2,16 +2,19 @@ import type { Schema } from "@/api/types";
 import { formatCost, formatTokens } from "@/lib/format";
 import { formatCount } from "@/lib/metrics";
 
+export const TOP_MODELS_TITLE = "Top models by cost";
+export const TOP_MODELS_UNIT = "USD";
+
 export function TopModels({ models }: { models: readonly Schema<"ModelUsage">[] }) {
   const label =
     models.length === 0
-      ? "Top models by cost: no data in range"
-      : `Top models by cost: ${models
+      ? `${TOP_MODELS_TITLE}: no data in range`
+      : `${TOP_MODELS_TITLE}: ${models
           .map((model) => `${model.model} ${formatCost(model.cost_total)}`)
           .join(", ")} in range`;
   return (
     <section aria-label={label} className="flex h-[220px] min-w-0 flex-col rounded-md border p-3">
-      <CardHeading title="Top models by cost" unit="USD" />
+      <CardHeading title={TOP_MODELS_TITLE} unit={TOP_MODELS_UNIT} />
       {models.length === 0 ? (
         <NoData />
       ) : (

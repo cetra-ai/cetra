@@ -1,6 +1,7 @@
 import { cn } from "cn";
 import { ArrowDown, ArrowUp, Minus } from "lucide-react";
 import type { Schema } from "@/api/types";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { formatKpi, type KpiDirection, type KpiMetric, kpiDelta } from "@/lib/metrics";
 
@@ -21,6 +22,20 @@ export function KpiRow({ kpis }: { kpis: readonly Schema<"Kpi">[] }) {
           tile={tile}
           kpi={kpis.find((item) => item.metric === tile.metric)}
         />
+      ))}
+    </div>
+  );
+}
+
+/** The KPI row while its data loads: each tile's label, with a bar where the value goes. */
+export function KpiRowSkeleton() {
+  return (
+    <div className="grid grid-cols-2 gap-2 md:grid-cols-5">
+      {TILES.map((tile) => (
+        <div key={tile.metric} className="flex h-16 flex-col justify-center rounded-md border px-3">
+          <span className="text-muted-foreground text-xs">{tile.label}</span>
+          <Skeleton className="mt-1 h-4 w-16" />
+        </div>
       ))}
     </div>
   );

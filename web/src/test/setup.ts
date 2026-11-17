@@ -55,6 +55,25 @@ if (typeof globalThis.ResizeObserver === "undefined") {
   };
 }
 
+// jsdom has no IntersectionObserver. Report every observed element as visible
+// at once, so lazily mounted cards render as they do in a full page.
+if (typeof globalThis.IntersectionObserver === "undefined") {
+  globalThis.IntersectionObserver = class IntersectionObserverStub {
+    constructor(private readonly callback: IntersectionObserverCallback) {}
+    observe(target: Element): void {
+      this.callback(
+        [{ isIntersecting: true, target } as IntersectionObserverEntry],
+        this as unknown as IntersectionObserver,
+      );
+    }
+    unobserve(): void {}
+    disconnect(): void {}
+    takeRecords(): IntersectionObserverEntry[] {
+      return [];
+    }
+  } as unknown as typeof IntersectionObserver;
+}
+
 beforeEach(() => {
   server.use(...savedViewHandlers(seedSavedViews()), onlineRulePreviewHandler());
 });

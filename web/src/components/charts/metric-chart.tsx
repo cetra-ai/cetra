@@ -12,8 +12,16 @@ import {
   YAxis,
 } from "recharts";
 import type { Schema } from "@/api/types";
-import { CardHeading, NoData, TopModels } from "@/components/charts/top-models";
+import { LazyMount } from "@/components/charts/lazy-mount";
+import {
+  CardHeading,
+  NoData,
+  TOP_MODELS_TITLE,
+  TOP_MODELS_UNIT,
+  TopModels,
+} from "@/components/charts/top-models";
 import { type ChartConfig, ChartContainer } from "@/components/ui/chart";
+import { Skeleton } from "@/components/ui/skeleton";
 import { formatTimestamp } from "@/lib/format";
 import {
   type ChartRow,
@@ -29,6 +37,11 @@ import {
 import { type TimeZoneSetting, useTimeZone } from "@/lib/settings";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+// Two rows on wide screens; the rest mount when scrolled near.
+const EAGER_CHARTS = 4;
+// Height of a chart card (`h-[220px]` in ChartCard), kept by placeholders.
+const CARD_HEIGHT = 220;
+// The top-models card's title and unit, as TopModels renders them.
 const PALETTE = [
   "var(--chart-1)",
   "var(--chart-2)",
@@ -144,17 +157,49 @@ export function DashboardBody({
   const byMetric = seriesByMetric(response);
   return (
     <div className="mt-3 grid grid-cols-1 gap-3 xl:grid-cols-2">
-      {CHARTS.map((spec) => (
-        <ChartCard
+      {CHARTS.map((spec, index) => (
+        <LazyMount
           key={spec.title}
-          spec={spec}
-          byMetric={byMetric}
-          bucketNs={response.bucket_ns}
-          onBucket={onBucket}
-        />
+          eager={index < EAGER_CHARTS}
+          minHeight={CARD_HEIGHT}
+          fallback={<ChartCardSkeleton title={spec.title} unit={spec.unit} />}
+        >
+          <ChartCard
+            spec={spec}
+            byMetric={byMetric}
+            bucketNs={response.bucket_ns}
+            onBucket={onBucket}
+          />
+        </LazyMount>
       ))}
       <TopModels models={response.top_models} />
     </div>
+  );
+}
+
+/** The dashboard body while its data loads: the same grid of cards, with their titles. */
+export function DashboardBodySkeleton() {
+  return (
+    <div className="mt-3 grid grid-cols-1 gap-3 xl:grid-cols-2">
+      {CHARTS.map((spec) => (
+        <ChartCardSkeleton key={spec.title} title={spec.title} unit={spec.unit} />
+      ))}
+      <ChartCardSkeleton title={TOP_MODELS_TITLE} unit={TOP_MODELS_UNIT} />
+    </div>
+  );
+}
+
+/** A chart card that is still loading: the card's box and header, with a pulsing chart area. */
+export function ChartCardSkeleton({ title, unit }: { title: string; unit: string }) {
+  return (
+    <section
+      aria-label={title}
+      aria-busy="true"
+      className="flex h-[220px] min-w-0 flex-col rounded-md border p-3"
+    >
+      <CardHeading title={title} unit={unit} />
+      <Skeleton className="mt-2 flex-1" />
+    </section>
   );
 }
 

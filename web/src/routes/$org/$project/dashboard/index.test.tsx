@@ -1,7 +1,12 @@
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
-import { expect, it } from "vitest";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { HttpResponse, http } from "msw";
+import { expect, it, vi } from "vitest";
+import type { Schema } from "@/api/types";
 import { server } from "@/mocks/node";
 import { renderApp } from "@/test/render";
+
+const DASHBOARD = "/acme/support-bot/dashboard";
+const TRACES = "/acme/support-bot/traces";
 
 const TITLES = [
   "Traces & errors",
@@ -102,7 +107,7 @@ it("opens traces for the clicked bucket", async () => {
   const { router } = await renderApp(
     "/acme/support-bot/dashboard?filter=status%20%3D%20'error'&eval=1&exp=1",
   );
-  const card = await screen.findByRole("region", { name: /Traces & errors/ });
+  const card = await screen.findByRole("region", { name: /Traces & errors: / });
   const bucket = await waitFor(() => {
     const found = card.querySelector('[aria-label="Open bucket 2026-01-01T10:00:00.000Z"]');
     expect(found).toBeInstanceOf(Element);
@@ -127,7 +132,7 @@ it("opens traces for the clicked bucket", async () => {
 
 it("gives each chart one tab stop", async () => {
   await renderApp("/acme/support-bot/dashboard");
-  const card = await screen.findByRole("region", { name: /Traces & errors/ });
+  const card = await screen.findByRole("region", { name: /Traces & errors: / });
   await waitFor(() => {
     expect(card.querySelector('[aria-label^="Open bucket"]')).toBeInstanceOf(Element);
   });
@@ -145,7 +150,7 @@ it("opens a bucket from the keyboard", async () => {
   const { router } = await renderApp(
     "/acme/support-bot/dashboard?filter=status%20%3D%20'error'&eval=1&exp=1",
   );
-  const card = await screen.findByRole("region", { name: /Traces & errors/ });
+  const card = await screen.findByRole("region", { name: /Traces & errors: / });
   const chart = await within(card).findByRole("group", { name: /^Traces & errors\./ });
   chart.focus();
   fireEvent.keyDown(chart, { key: "ArrowRight" });
@@ -167,7 +172,7 @@ it("opens a bucket from the keyboard", async () => {
 
 it("jumps to the last bucket with End", async () => {
   const { router } = await renderApp("/acme/support-bot/dashboard");
-  const card = await screen.findByRole("region", { name: /Traces & errors/ });
+  const card = await screen.findByRole("region", { name: /Traces & errors: / });
   const chart = await within(card).findByRole("group", { name: /^Traces & errors\./ });
   chart.focus();
   fireEvent.keyDown(chart, { key: "End" });
@@ -178,4 +183,112 @@ it("jumps to the last bucket with End", async () => {
       to: "2026-01-01T11:00:00.000Z",
     });
   });
+});
+
+it("reuses the cached dashboard when it is shown again within the same minute", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  vi.setSystemTime(new Date("2026-01-01T10:00:02Z"));
+  const metrics = listenMetrics();
+  try {
+    const { router } = await renderApp(DASHBOARD);
+    expect(await screen.findByRole("button", { name: "Traces: 5" })).toBeInTheDocument();
+    await act(() => router.navigate({ href: TRACES }));
+    vi.setSystemTime(new Date("2026-01-01T10:00:08Z"));
+    await act(() => router.navigate({ href: DASHBOARD }));
+    expect(screen.getByRole("button", { name: "Traces: 5" })).toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: "Loading dashboard" })).not.toBeInTheDocument();
+    expect(metrics.urls).toHaveLength(1);
+  } finally {
+    metrics.stop();
+    vi.useRealTimers();
+  }
+});
+
+it("shows the previous dashboard at once and refetches two minutes later", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  vi.setSystemTime(new Date("2026-01-01T10:00:02Z"));
+  const metrics = listenMetrics();
+  try {
+    const { router, queryClient } = await renderApp(DASHBOARD);
+    expect(await screen.findByRole("button", { name: "Traces: 5" })).toBeInTheDocument();
+    const [cached] = queryClient
+      .getQueryCache()
+      .findAll({ queryKey: ["get", "/api/v1/projects/{project}/metrics"] });
+    const body = cached?.state.data as Schema<"MetricsResponse">;
+    server.use(
+      http.get("*/api/v1/projects/*/metrics", () =>
+        HttpResponse.json({
+          ...body,
+          kpis: body.kpis.map((kpi) => (kpi.metric === "traces" ? { ...kpi, value: 9 } : kpi)),
+        }),
+      ),
+    );
+    await act(() => router.navigate({ href: TRACES }));
+    vi.setSystemTime(new Date("2026-01-01T10:02:02Z"));
+    await act(() => router.navigate({ href: DASHBOARD }));
+    expect(screen.getByRole("button", { name: "Traces: 5" })).toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: "Loading dashboard" })).not.toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Traces: 9" })).toBeInTheDocument();
+    expect(metrics.urls).toHaveLength(2);
+  } finally {
+    metrics.stop();
+    vi.useRealTimers();
+  }
+});
+
+it("fetches again when refresh is pressed within the same minute", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  vi.setSystemTime(new Date("2026-01-01T10:00:02Z"));
+  const metrics = listenMetrics();
+  try {
+    await renderApp(DASHBOARD);
+    expect(await screen.findByRole("button", { name: "Traces: 5" })).toBeInTheDocument();
+    expect(metrics.urls).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => {
+      expect(metrics.urls).toHaveLength(2);
+    });
+  } finally {
+    metrics.stop();
+    vi.useRealTimers();
+  }
+});
+
+it("shows how long ago the dashboard data was updated", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  vi.setSystemTime(new Date("2026-01-01T10:00:02Z"));
+  try {
+    await renderApp(DASHBOARD);
+    expect(await screen.findByText(/^Updated \d+s ago$/)).toBeInTheDocument();
+    act(() => {
+      vi.setSystemTime(new Date("2026-01-01T10:03:02Z"));
+      vi.advanceTimersByTime(10_000);
+    });
+    expect(await screen.findByText("Updated 3 min ago")).toBeInTheDocument();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("shows the loading skeleton with every chart title while metrics are pending", async () => {
+  server.use(http.get("*/api/v1/projects/*/metrics", () => new Promise<never>(() => {})));
+  await renderApp(DASHBOARD);
+  const status = await screen.findByRole("status", { name: "Loading dashboard" });
+  for (const title of TITLES) {
+    expect(within(status).getByRole("region", { name: title })).toHaveAttribute(
+      "aria-busy",
+      "true",
+    );
+  }
+  expect(screen.queryByRole("button", { name: /^Traces:/ })).not.toBeInTheDocument();
+});
+
+it("keeps the dashboard mounted while another project page is open", async () => {
+  const { router } = await renderApp(DASHBOARD);
+  const tile = await screen.findByRole("button", { name: "Traces: 5" });
+  await act(() => router.navigate({ href: TRACES }));
+  expect(screen.queryByRole("button", { name: "Traces: 5" })).not.toBeInTheDocument();
+  expect(tile.isConnected).toBe(true);
+  await act(() => router.navigate({ href: DASHBOARD }));
+  expect(screen.getByRole("button", { name: "Traces: 5" })).toBe(tile);
 });

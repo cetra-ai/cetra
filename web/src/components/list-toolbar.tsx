@@ -28,6 +28,7 @@ export function ListToolbar({
   views,
   loaded,
   live,
+  updatedAt,
 }: {
   title: string;
   range: RangeState;
@@ -45,6 +46,8 @@ export function ListToolbar({
   views?: ReactNode;
   loaded?: number;
   live?: ReactNode;
+  /** Epoch milliseconds of the data on screen. Shown as "Updated N ago" beside refresh when set. */
+  updatedAt?: number;
 }) {
   const searchRef = useRef<HTMLInputElement>(null);
   const barRef = useRef<HTMLDivElement>(null);
@@ -75,6 +78,7 @@ export function ListToolbar({
       <Button type="button" variant="ghost" size="icon-xs" aria-label="Refresh" onClick={onRefresh}>
         <RefreshCw />
       </Button>
+      {updatedAt !== undefined ? <UpdatedAgo at={updatedAt} /> : null}
       {live}
       <div className="min-w-0 flex-1">{filter}</div>
       {onSearch ? <SearchBox inputRef={searchRef} value={search ?? ""} onValue={onSearch} /> : null}
@@ -99,6 +103,20 @@ export function ListToolbar({
       ) : null}
     </div>
   );
+}
+
+const UPDATED_TICK_MS = 10_000;
+
+function UpdatedAgo({ at }: { at: number }) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const timer = window.setInterval(() => setTick((tick) => tick + 1), UPDATED_TICK_MS);
+    return () => window.clearInterval(timer);
+  }, []);
+  const seconds = Math.max(0, Math.floor((Date.now() - at) / 1000));
+  const label =
+    seconds < 60 ? `Updated ${seconds}s ago` : `Updated ${Math.floor(seconds / 60)} min ago`;
+  return <span className="shrink-0 text-xs text-muted-foreground">{label}</span>;
 }
 
 function Flag({
