@@ -71,6 +71,22 @@ export function ThemeToggle() {
         </DropdownMenuRadioGroup>
         <DropdownMenuSeparator />
         <DropdownMenuLabel className="text-caption text-muted-foreground">
+          Density
+        </DropdownMenuLabel>
+        <DropdownMenuRadioGroup
+          value={density}
+          onValueChange={(value) => {
+            setDensity(value as Density);
+          }}
+        >
+          {DENSITY_OPTIONS.map((option) => (
+            <DropdownMenuRadioItem key={option.value} value={option.value}>
+              {option.label}
+            </DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel className="text-caption text-muted-foreground">
           Palette
         </DropdownMenuLabel>
         <DropdownMenuRadioGroup
@@ -88,22 +104,6 @@ export function ThemeToggle() {
                 applyPalette(option.value);
               }}
             >
-              {option.label}
-            </DropdownMenuRadioItem>
-          ))}
-        </DropdownMenuRadioGroup>
-        <DropdownMenuSeparator />
-        <DropdownMenuLabel className="text-caption text-muted-foreground">
-          Density
-        </DropdownMenuLabel>
-        <DropdownMenuRadioGroup
-          value={density}
-          onValueChange={(value) => {
-            setDensity(value as Density);
-          }}
-        >
-          {DENSITY_OPTIONS.map((option) => (
-            <DropdownMenuRadioItem key={option.value} value={option.value}>
               {option.label}
             </DropdownMenuRadioItem>
           ))}
