@@ -1,6 +1,6 @@
 ---
 title: Reference
-description: The REST API, the OTLP endpoint, the CLI, span attributes, the filter language and the SQL schema.
+description: The SDKs, the REST API, the OTLP endpoint, the CLI, span attributes, the filter language and the SQL schema.
 ---
 
 import { CardGrid, LinkCard } from "@astrojs/starlight/components";
@@ -8,6 +8,16 @@ import { CardGrid, LinkCard } from "@astrojs/starlight/components";
 Use these pages to look up the exact shape of an interface.
 
 <CardGrid>
+  <LinkCard
+    title="Python SDK"
+    description="Install, configure and use the Python SDK: tracing, context, scores, datasets and experiments."
+    href="/docs/reference/python/"
+  />
+  <LinkCard
+    title="TypeScript SDK"
+    description="Install, configure and use the TypeScript SDK on Node, Bun, Deno and edge runtimes."
+    href="/docs/reference/typescript/"
+  />
   <LinkCard
     title="REST API"
     description="Authentication, errors, pagination and every public operation."

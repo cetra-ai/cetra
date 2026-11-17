@@ -149,6 +149,35 @@ export default defineConfig({
               items: [
                 { label: "Overview", link: "/docs/reference/" },
                 {
+                  label: "Python SDK",
+                  items: [
+                    { label: "Install and configure", link: "/docs/reference/python/" },
+                    { label: "Tracing", link: "/docs/reference/python/tracing/" },
+                    { label: "Context", link: "/docs/reference/python/context/" },
+                    {
+                      label: "Scores, datasets and experiments",
+                      link: "/docs/reference/python/scores-datasets-experiments/",
+                    },
+                    { label: "OpenTelemetry", link: "/docs/reference/python/opentelemetry/" },
+                    { label: "API", link: "/docs/reference/python/api/" },
+                  ],
+                },
+                {
+                  label: "TypeScript SDK",
+                  items: [
+                    { label: "Install and configure", link: "/docs/reference/typescript/" },
+                    { label: "Tracing", link: "/docs/reference/typescript/tracing/" },
+                    { label: "Context", link: "/docs/reference/typescript/context/" },
+                    {
+                      label: "Scores, datasets and experiments",
+                      link: "/docs/reference/typescript/scores-datasets-experiments/",
+                    },
+                    { label: "OpenTelemetry", link: "/docs/reference/typescript/opentelemetry/" },
+                    { label: "Runtimes", link: "/docs/reference/typescript/runtimes/" },
+                    { label: "API", link: "/docs/reference/typescript/api/" },
+                  ],
+                },
+                {
                   label: "REST API",
                   items: [
                     { label: "Overview", link: "/docs/reference/api/overview/" },
