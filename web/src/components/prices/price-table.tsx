@@ -1,79 +1,145 @@
-import type { ReactNode } from "react";
 import type { Schema } from "@/api/types";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+import { DataTable, type DataTableColumn } from "@/components/data-table/data-table";
+import { SettingsTableFrame } from "@/components/settings/settings-list";
 import { escapeRegex, formatUnitPrice, isAlwaysValid } from "@/lib/prices";
 
+type PriceRow = Schema<"ModelPrice">;
+
+export interface PriceSorting {
+  id: string;
+  desc: boolean;
+}
+
+/** Server paging of a list: the rest loads as the user scrolls. */
+export interface Paging {
+  hasNextPage: boolean;
+  isFetchingNextPage: boolean;
+  fetchNextPage: () => unknown;
+}
+
+const noop = () => undefined;
+
+/** Built-in rows have no id; their match pattern is unique. */
+function rowId(row: PriceRow): string {
+  return row.id ?? `builtin:${row.match_pattern}`;
+}
+
+const PRICE_COLUMNS: DataTableColumn<PriceRow>[] = [
+  {
+    id: "model",
+    accessorFn: (row) => row.model_name,
+    enableSorting: true,
+    size: 240,
+    header: "Model",
+    meta: { grow: true },
+    cell: ({ row }) => (
+      <div className="flex min-w-0 flex-col">
+        <span className="truncate">{row.original.model_name}</span>
+        {row.original.match_pattern !== escapeRegex(row.original.model_name) ? (
+          <span className="truncate font-mono text-caption text-muted-foreground">
+            {row.original.match_pattern}
+          </span>
+        ) : null}
+      </div>
+    ),
+  },
+  {
+    id: "provider",
+    size: 96,
+    header: "Provider",
+    cell: ({ row }) => row.original.provider ?? "Any",
+  },
+  {
+    id: "input",
+    accessorFn: (row) => row.price_input,
+    enableSorting: true,
+    size: 88,
+    header: "Input",
+    meta: { align: "right" },
+    cell: ({ row }) => formatUnitPrice(row.original.price_input),
+  },
+  {
+    id: "output",
+    accessorFn: (row) => row.price_output,
+    enableSorting: true,
+    size: 88,
+    header: "Output",
+    meta: { align: "right" },
+    cell: ({ row }) => formatUnitPrice(row.original.price_output),
+  },
+  {
+    id: "cache_read",
+    size: 96,
+    header: "Cache read",
+    meta: { align: "right" },
+    enableSorting: false,
+    cell: ({ row }) => formatUnitPrice(row.original.price_cache_read),
+  },
+  {
+    id: "cache_write",
+    size: 96,
+    header: "Cache write",
+    meta: { align: "right" },
+    enableSorting: false,
+    cell: ({ row }) => formatUnitPrice(row.original.price_cache_write),
+  },
+  {
+    id: "valid_from",
+    size: 104,
+    header: "Valid from",
+    enableSorting: false,
+    cell: ({ row }) =>
+      isAlwaysValid(row.original.valid_from) ? "Always" : row.original.valid_from.slice(0, 10),
+  },
+  {
+    id: "tiers",
+    size: 64,
+    header: "Tiers",
+    meta: { align: "right" },
+    enableSorting: false,
+    cell: ({ row }) => String(row.original.tiers.length || "—"),
+  },
+];
+
+/**
+ * A price list. The rows are sorted by the caller (`sorting`, `onSortingChange`) only when every
+ * row is loaded; a paged list passes `more` and no sorting.
+ */
 export function PriceTable({
   label,
   rows,
-  actions,
+  selectedRowId,
+  onActivate,
+  sorting,
+  onSortingChange,
+  more,
 }: {
-  /** The table's accessible name. */
   label: string;
-  rows: Schema<"ModelPrice">[];
-  /** Per-row actions (Edit, Delete); absent for read-only tables. */
-  actions?: (row: Schema<"ModelPrice">) => ReactNode;
+  rows: PriceRow[];
+  selectedRowId?: string;
+  /** Opens a row. Absent for a read-only list. */
+  onActivate?: (row: PriceRow) => void;
+  sorting?: PriceSorting;
+  onSortingChange?: (next: PriceSorting | null) => void;
+  more?: Paging;
 }) {
   return (
-    <Table aria-label={label}>
-      <TableHeader>
-        <TableRow>
-          <TableHead>Model</TableHead>
-          <TableHead>Provider</TableHead>
-          <TableHead className="text-right">Input</TableHead>
-          <TableHead className="text-right">Output</TableHead>
-          <TableHead className="text-right">Cache read</TableHead>
-          <TableHead className="text-right">Cache write</TableHead>
-          <TableHead>Valid from</TableHead>
-          <TableHead className="text-right">Tiers</TableHead>
-          {actions ? (
-            <TableHead>
-              <span className="sr-only">Actions</span>
-            </TableHead>
-          ) : null}
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {rows.map((row) => (
-          <TableRow key={row.id ?? `builtin:${row.match_pattern}`}>
-            <TableCell>
-              <div className="flex flex-col gap-0.5">
-                <span>{row.model_name}</span>
-                {row.match_pattern !== escapeRegex(row.model_name) ? (
-                  <span className="font-mono text-caption text-muted-foreground">
-                    {row.match_pattern}
-                  </span>
-                ) : null}
-              </div>
-            </TableCell>
-            <TableCell>{row.provider ?? "Any"}</TableCell>
-            <TableCell className="text-right tabular-nums">
-              {formatUnitPrice(row.price_input)}
-            </TableCell>
-            <TableCell className="text-right tabular-nums">
-              {formatUnitPrice(row.price_output)}
-            </TableCell>
-            <TableCell className="text-right tabular-nums">
-              {formatUnitPrice(row.price_cache_read)}
-            </TableCell>
-            <TableCell className="text-right tabular-nums">
-              {formatUnitPrice(row.price_cache_write)}
-            </TableCell>
-            <TableCell>
-              {isAlwaysValid(row.valid_from) ? "Always" : row.valid_from.slice(0, 10)}
-            </TableCell>
-            <TableCell className="text-right tabular-nums">{row.tiers.length || "—"}</TableCell>
-            {actions ? <TableCell>{actions(row)}</TableCell> : null}
-          </TableRow>
-        ))}
-      </TableBody>
-    </Table>
+    <SettingsTableFrame rowCount={rows.length}>
+      <DataTable
+        tableId={label.toLowerCase().replaceAll(" ", "-")}
+        ariaLabel={label}
+        columns={PRICE_COLUMNS}
+        rows={rows}
+        getRowId={rowId}
+        selectedRowId={selectedRowId}
+        onActivate={onActivate ?? noop}
+        sorting={sorting}
+        onSortingChange={onSortingChange}
+        hasNextPage={more?.hasNextPage ?? false}
+        isFetchingNextPage={more?.isFetchingNextPage ?? false}
+        fetchNextPage={more?.fetchNextPage ?? noop}
+        emptyState={null}
+      />
+    </SettingsTableFrame>
   );
 }

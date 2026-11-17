@@ -6,6 +6,7 @@ import { problemMessage } from "@/api/problem";
 import type { Schema } from "@/api/types";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { FormError } from "@/components/form/form-error";
+import { SettingsCard } from "@/components/settings/settings-card";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { storeOrgSso } from "@/ee/org-sso/cache";
@@ -52,10 +53,7 @@ export function StatusSection({
   const switchesDisabled = provider === undefined || patch.isPending;
 
   return (
-    <section aria-labelledby="sso-status-heading" className="flex flex-col gap-4">
-      <h2 id="sso-status-heading" className="text-ui font-medium">
-        Status
-      </h2>
+    <SettingsCard title="Status">
       <div className="flex flex-col gap-3">
         <div className="flex items-center gap-2">
           <Switch
@@ -135,6 +133,6 @@ export function StatusSection({
           update({ enforced: true });
         }}
       />
-    </section>
+    </SettingsCard>
   );
 }

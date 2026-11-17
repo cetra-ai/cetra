@@ -1,11 +1,12 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, useEffect, useId, useState } from "react";
+import { type FormEvent, useEffect, useState } from "react";
 import { $api } from "@/api/client";
 import { fieldErrors, problemMessage, problemOf } from "@/api/problem";
 import { deletionsKey } from "@/api/queries-settings";
 import { FormSuccess } from "@/components/form/form-success";
 import { SubmitButton } from "@/components/form/submit-button";
 import { TextField } from "@/components/form/text-field";
+import { SettingsCard } from "@/components/settings/settings-card";
 import { useProject } from "@/components/shell/project-context";
 import { TypeToConfirmDialog } from "@/components/type-to-confirm-dialog";
 
@@ -89,7 +90,6 @@ export function UserDeletionDialog({
 /** Deletes one end user's data after the user types their id to confirm. */
 export function UserDeletionForm() {
   const { org, project } = useProject();
-  const headingId = useId();
   const queryClient = useQueryClient();
   const [userId, setUserId] = useState("");
   const [userIdError, setUserIdError] = useState<string | undefined>();
@@ -116,13 +116,7 @@ export function UserDeletionForm() {
   }
 
   return (
-    <section aria-labelledby={headingId} className="flex max-w-md flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 id={headingId} className="text-ui font-medium">
-          Delete a user's data
-        </h2>
-        <p className="text-body text-muted-foreground">{EXPLANATION}</p>
-      </div>
+    <SettingsCard title="Delete a user's data" description={EXPLANATION}>
       <form
         noValidate
         aria-label="Delete a user's data"
@@ -165,6 +159,6 @@ export function UserDeletionForm() {
         }}
         onFieldError={setUserIdError}
       />
-    </section>
+    </SettingsCard>
   );
 }

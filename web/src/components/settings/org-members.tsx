@@ -1,26 +1,31 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { Loader2, MoreHorizontal } from "lucide-react";
-import { useState } from "react";
+import { Loader2 } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import { $api } from "@/api/client";
 import { problemMessage, problemOf } from "@/api/problem";
 import { meQuery } from "@/api/queries";
 import { orgMembersInit, orgMembersKey } from "@/api/queries-settings";
 import type { Schema } from "@/api/types";
-import { ConfirmDialog } from "@/components/confirm-dialog";
+import { DataTable, type DataTableColumn } from "@/components/data-table/data-table";
+import { DangerZone } from "@/components/deletions/danger-zone";
 import { DisabledReason } from "@/components/disabled-reason";
-import { FormError } from "@/components/form/form-error";
 import { UpgradeButton } from "@/components/plan/upgrade-button";
 import { useOrgEntitlements } from "@/components/plan/use-org-entitlements";
-import { TimeText } from "@/components/time-text";
+import { RelativeTime } from "@/components/relative-time";
+import { SettingsFormCard } from "@/components/settings/settings-card";
+import {
+  filterRows,
+  SettingsListToolbar,
+  SettingsPanel,
+  SettingsTableFrame,
+  type SortValue,
+  sortRows,
+} from "@/components/settings/settings-list";
+import { TypeToConfirmDialog } from "@/components/type-to-confirm-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -30,14 +35,6 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import {
   atLeast,
   canChangeRole,
   canRemoveMember,
@@ -45,116 +42,154 @@ import {
   ORG_ROLES,
   type OrgRole,
   roleLabel,
+  roleRank,
 } from "@/lib/roles";
+import type { SettingsListSearch } from "@/lib/search/settings-list";
 
-export function OrgMembers({
-  org,
-  actorRole,
-  me,
-}: {
-  org: string;
-  actorRole: OrgRole | undefined;
-  me: string;
-}) {
-  const queryClient = useQueryClient();
-  const navigate = useNavigate();
-  const [actionError, setActionError] = useState<string | undefined>();
-  // Never cleared on close, so the dialog does not blank while it animates out.
-  const [removeTarget, setRemoveTarget] = useState<Schema<"OrgMember"> | undefined>();
-  const [removeOpen, setRemoveOpen] = useState(false);
-  const query = $api.useInfiniteQuery("get", "/api/v1/orgs/{org}/members", orgMembersInit(org), {
+type Member = Schema<"OrgMember">;
+
+/** The members of the organization, read a page at a time. The list and the panel share it. */
+export function useOrgMembers(org: string) {
+  return $api.useInfiniteQuery("get", "/api/v1/orgs/{org}/members", orgMembersInit(org), {
     pageParamName: "cursor",
     initialPageParam: null,
     getNextPageParam: (page) => page.next_cursor ?? undefined,
   });
-  const patch = $api.useMutation("patch", "/api/v1/orgs/{org}/members/{user}", {
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: orgMembersKey(org) });
-      void queryClient.invalidateQueries({ queryKey: meQuery.queryKey });
-      // The new org role changes project access: drop every cached project and
-      // project-member entry ($api keys are [method, path, init], so these match
-      // by prefix whatever the path parameters are).
-      void queryClient.invalidateQueries({ queryKey: ["get", "/api/v1/projects/{project}"] });
-      void queryClient.invalidateQueries({
-        queryKey: ["get", "/api/v1/projects/{project}/members"],
-      });
+}
+
+const SORT_KEYS: Record<string, (member: Member) => SortValue> = {
+  name: (member) => member.user.name ?? member.user.email,
+  role: (member) => roleRank(member.role),
+  // RFC 3339 times with a fixed-width fraction sort as text.
+  joined: (member) => member.joined_at,
+};
+
+function memberColumns(me: string): DataTableColumn<Member>[] {
+  return [
+    {
+      id: "name",
+      size: 200,
+      header: "Name",
+      accessorFn: (member) => member.user.name ?? member.user.email,
+      enableSorting: true,
+      cell: ({ row }) => (
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="truncate">{row.original.user.name ?? "—"}</span>
+          {row.original.user.id === me ? <Badge variant="secondary">You</Badge> : null}
+        </div>
+      ),
     },
-    onError: (error) => {
-      const status = problemOf(error)?.status;
-      if (problemOf(error)?.code === "plan_limit") {
-        setActionError(problemMessage(error, "Your plan does not allow another seat."));
-        return;
-      }
-      setActionError(
-        status === 409
-          ? "An organization needs at least one owner. Make someone else an owner first."
-          : status === 403
-            ? "You can't give that role."
-            : problemMessage(error, "Could not change the role."),
-      );
+    {
+      id: "email",
+      size: 240,
+      header: "Email",
+      enableSorting: false,
+      meta: { grow: true },
+      cell: ({ row }) => (
+        <span className="truncate text-muted-foreground">{row.original.user.email}</span>
+      ),
     },
-  });
-  const remove = $api.useMutation("delete", "/api/v1/orgs/{org}/members/{user}");
-  const upgradeUrl = useOrgEntitlements(org).upgradeUrl;
-  const planLimited = problemOf(patch.error)?.code === "plan_limit";
+    {
+      id: "role",
+      size: 120,
+      header: "Role",
+      accessorFn: (member) => roleRank(member.role),
+      enableSorting: true,
+      cell: ({ row }) => roleLabel(row.original.role),
+    },
+    {
+      id: "joined",
+      size: 120,
+      header: "Joined",
+      accessorFn: (member) => member.joined_at,
+      enableSorting: true,
+      cell: ({ row }) => <RelativeTime value={row.original.joined_at} />,
+    },
+  ];
+}
+
+const noop = () => undefined;
+
+export function OrgMembers({
+  org,
+  me,
+  search,
+  onSearchChange,
+  onOpen,
+}: {
+  org: string;
+  me: string;
+  search: SettingsListSearch;
+  onSearchChange: (change: Partial<SettingsListSearch>) => void;
+  onOpen: (id: string, replace?: boolean) => void;
+}) {
+  const query = useOrgMembers(org);
+  // Typing keeps its own text: the URL holds the trimmed query, which would drop a trailing space.
+  const [text, setText] = useState(search.q ?? "");
+  useEffect(() => {
+    setText((current) => (current.trim() === (search.q ?? "") ? current : (search.q ?? "")));
+  }, [search.q]);
+  const columns = useMemo(() => memberColumns(me), [me]);
 
   if (query.error) {
     throw query.error;
   }
 
   const rows = query.data?.pages.flatMap((page) => page.data) ?? [];
-
-  function changeRole(member: Schema<"OrgMember">, value: string) {
-    const next = ORG_ROLES.find((role) => role === value);
-    if (!next || next === member.role) {
-      return;
-    }
-    setActionError(undefined);
-    patch.mutate({ params: { path: { org, user: member.user.id } }, body: { role: next } });
-  }
+  const sorting =
+    search.sort === undefined ? undefined : { id: search.sort, desc: search.desc === true };
+  const visible = sortRows(
+    filterRows(rows, search.q, (member) => [member.user.name, member.user.email]),
+    sorting,
+    SORT_KEYS,
+  );
 
   return (
     <div className="flex flex-col gap-3">
-      <FormError message={actionError} />
-      {planLimited ? <UpgradeButton url={upgradeUrl} /> : null}
+      <SettingsListToolbar
+        label="members"
+        query={text}
+        onQueryChange={(next) => {
+          setText(next);
+          onSearchChange({ q: next.trim() || undefined });
+        }}
+        count={
+          query.isPending ? undefined : `${rows.length} ${rows.length === 1 ? "member" : "members"}`
+        }
+      />
       {query.isPending ? (
         <>
           <Skeleton className="h-8 w-full" />
           <Skeleton className="h-8 w-full" />
           <Skeleton className="h-8 w-full" />
         </>
+      ) : visible.length === 0 ? (
+        <p className="text-body text-muted-foreground">No member matches.</p>
       ) : (
-        <Table aria-label="Members">
-          <TableHeader>
-            <TableRow>
-              <TableHead>Name</TableHead>
-              <TableHead>Email</TableHead>
-              <TableHead>Role</TableHead>
-              <TableHead>Joined</TableHead>
-              <TableHead>
-                <span className="sr-only">Actions</span>
-              </TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {rows.map((member) => (
-              <MemberRow
-                key={member.user.id}
-                me={me}
-                member={member}
-                actorRole={actorRole}
-                patchPending={
-                  patch.isPending && patch.variables?.params.path.user === member.user.id
-                }
-                onChangeRole={changeRole}
-                onRemove={() => {
-                  setRemoveTarget(member);
-                  setRemoveOpen(true);
-                }}
-              />
-            ))}
-          </TableBody>
-        </Table>
+        <SettingsTableFrame rowCount={visible.length}>
+          <DataTable
+            tableId="org-members"
+            ariaLabel="Members"
+            columns={columns}
+            rows={visible}
+            getRowId={(member) => member.user.id}
+            selectedRowId={search.open}
+            onActivate={(member) => {
+              onOpen(member.user.id);
+            }}
+            onSelectionMove={(member) => {
+              onOpen(member.user.id, true);
+            }}
+            hasNextPage={false}
+            isFetchingNextPage={false}
+            fetchNextPage={noop}
+            sorting={sorting}
+            onSortingChange={(next) => {
+              onSearchChange({ sort: next?.id, desc: next?.desc === true ? true : undefined });
+            }}
+            emptyState={null}
+          />
+        </SettingsTableFrame>
       )}
       {query.hasNextPage ? (
         <Button
@@ -170,77 +205,113 @@ export function OrgMembers({
           Load more
         </Button>
       ) : null}
-      <ConfirmDialog
-        open={removeOpen}
-        onOpenChange={(open) => {
-          if (!open) {
-            setRemoveOpen(false);
-            remove.reset();
-          }
-        }}
-        title={removeTarget?.user.id === me ? "Leave organization?" : "Remove member?"}
-        description={
-          removeTarget?.user.id === me ? (
-            "You will lose access to every project in this organization."
-          ) : (
-            <>
-              {removeTarget?.user.name ?? removeTarget?.user.email} loses access to every project in
-              this organization.
-            </>
-          )
-        }
-        confirmLabel={removeTarget?.user.id === me ? "Leave" : "Remove"}
-        destructive
-        pending={remove.isPending}
-        error={
-          remove.error
-            ? problemOf(remove.error)?.status === 409
-              ? "An organization needs at least one owner. Make someone else an owner first."
-              : problemMessage(remove.error, "Could not remove the member.")
-            : undefined
-        }
-        onConfirm={() => {
-          if (!removeTarget) {
-            return;
-          }
-          const self = removeTarget.user.id === me;
-          remove.mutate(
-            { params: { path: { org, user: removeTarget.user.id } } },
-            {
-              onSuccess: async () => {
-                setRemoveOpen(false);
-                remove.reset();
-                if (self) {
-                  await queryClient.refetchQueries({ queryKey: meQuery.queryKey, type: "all" });
-                  void navigate({ to: "/" });
-                } else {
-                  void queryClient.invalidateQueries({ queryKey: orgMembersKey(org) });
-                }
-              },
-            },
-          );
-        }}
-      />
     </div>
   );
 }
 
-function MemberRow({
+/** The panel of one member: the role form, and removing the member or leaving. */
+export function MemberPanel({
+  org,
+  userId,
+  actorRole,
   me,
+  onClose,
+}: {
+  org: string;
+  userId: string;
+  actorRole: OrgRole | undefined;
+  me: string;
+  onClose: (ignoreBlocker?: boolean) => void;
+}) {
+  const query = useOrgMembers(org);
+  const { hasNextPage, isFetchingNextPage, fetchNextPage } = query;
+  const member = query.data?.pages
+    .flatMap((page) => page.data)
+    .find((item) => item.user.id === userId);
+  // The member may sit on a page that is not loaded yet.
+  useEffect(() => {
+    if (member === undefined && hasNextPage && !isFetchingNextPage) {
+      void fetchNextPage();
+    }
+  }, [member, hasNextPage, isFetchingNextPage, fetchNextPage]);
+
+  if (member === undefined) {
+    return (
+      <SettingsPanel title="Member" onClose={() => onClose()}>
+        {query.isPending || hasNextPage ? (
+          <Skeleton className="h-8 w-full" />
+        ) : (
+          <p className="text-body text-muted-foreground">
+            This person is no longer a member of the organization.
+          </p>
+        )}
+      </SettingsPanel>
+    );
+  }
+
+  return (
+    <SettingsPanel
+      title={member.user.name ?? member.user.email}
+      subtitle={member.user.name ? member.user.email : undefined}
+      onClose={() => onClose()}
+    >
+      <RoleForm key={member.user.id} org={org} member={member} actorRole={actorRole} />
+      <RemoveMember
+        key={member.user.id}
+        org={org}
+        member={member}
+        actorRole={actorRole}
+        me={me}
+        onClose={onClose}
+      />
+    </SettingsPanel>
+  );
+}
+
+function roleErrorMessage(error: unknown): string {
+  const problem = problemOf(error);
+  if (problem?.code === "plan_limit") {
+    return problemMessage(error, "Your plan does not allow another seat.");
+  }
+  if (problem?.status === 409) {
+    return "An organization needs at least one owner. Make someone else an owner first.";
+  }
+  if (problem?.status === 403) {
+    return "You can't give that role.";
+  }
+  return problemMessage(error, "Could not change the role.");
+}
+
+/** Changing a member's role also changes their project access, so those cached entries go. */
+function useChangeRole(org: string) {
+  const queryClient = useQueryClient();
+  return $api.useMutation("patch", "/api/v1/orgs/{org}/members/{user}", {
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: orgMembersKey(org) });
+      void queryClient.invalidateQueries({ queryKey: meQuery.queryKey });
+      // The new org role changes project access: drop every cached project and
+      // project-member entry ($api keys are [method, path, init], so these match
+      // by prefix whatever the path parameters are).
+      void queryClient.invalidateQueries({ queryKey: ["get", "/api/v1/projects/{project}"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["get", "/api/v1/projects/{project}/members"],
+      });
+    },
+  });
+}
+
+function RoleForm({
+  org,
   member,
   actorRole,
-  patchPending,
-  onChangeRole,
-  onRemove,
 }: {
-  me: string;
-  member: Schema<"OrgMember">;
+  org: string;
+  member: Member;
   actorRole: OrgRole | undefined;
-  patchPending: boolean;
-  onChangeRole: (member: Schema<"OrgMember">, value: string) => void;
-  onRemove: () => void;
 }) {
-  const self = member.user.id === me;
+  const change = useChangeRole(org);
+  const upgradeUrl = useOrgEntitlements(org).upgradeUrl;
+  const [role, setRole] = useState<OrgRole>(member.role);
   const roleItems = grantableRoles(actorRole);
   const items = roleItems.includes(member.role) ? roleItems : [member.role, ...roleItems];
   const roleReason = !atLeast(actorRole, "admin")
@@ -248,68 +319,134 @@ function MemberRow({
     : member.role === "owner" && actorRole !== "owner"
       ? "Only an owner can change an owner's role"
       : undefined;
-  const canRemove = canRemoveMember(actorRole, member.role, self);
-  const removeReason = !atLeast(actorRole, "admin")
-    ? "Only admins and owners can remove members"
-    : member.role === "owner" && actorRole !== "owner"
-      ? "Only an owner can remove an owner"
-      : undefined;
+  const planLimited = problemOf(change.error)?.code === "plan_limit";
 
   return (
-    <TableRow>
-      <TableCell>
-        <div className="flex items-center gap-2">
-          {member.user.name ?? "—"}
-          {self ? <Badge variant="secondary">You</Badge> : null}
-        </div>
-      </TableCell>
-      <TableCell>{member.user.email}</TableCell>
-      <TableCell>
+    <SettingsFormCard
+      title="Role"
+      ariaLabel={`Role of ${member.user.email}`}
+      description="Applies to every project of this organization, unless a project overrides it."
+      dirty={role !== member.role}
+      pending={change.isPending}
+      saved={change.isSuccess}
+      error={change.error ? roleErrorMessage(change.error) : undefined}
+      disabledReason={roleReason}
+      footerExtra={planLimited ? <UpgradeButton url={upgradeUrl} /> : undefined}
+      onSubmit={() => {
+        change.mutate({ params: { path: { org, user: member.user.id } }, body: { role } });
+      }}
+    >
+      <div className="flex flex-col gap-2">
+        <Label htmlFor="member-role">Role</Label>
         <DisabledReason reason={roleReason}>
           <Select
-            value={member.role}
+            value={role}
             onValueChange={(value) => {
-              onChangeRole(member, value);
+              const next = ORG_ROLES.find((item) => item === value);
+              if (next) {
+                setRole(next);
+              }
             }}
-            disabled={!canChangeRole(actorRole, member.role) || patchPending}
+            disabled={!canChangeRole(actorRole, member.role) || change.isPending}
           >
-            <SelectTrigger aria-label={`Role of ${member.user.email}`} className="h-7 w-28">
+            <SelectTrigger id="member-role" className="w-fit">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {items.map((role) => (
-                <SelectItem key={role} value={role}>
-                  {roleLabel(role)}
+              {items.map((item) => (
+                <SelectItem key={item} value={item}>
+                  {roleLabel(item)}
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
         </DisabledReason>
-      </TableCell>
-      <TableCell>
-        <TimeText value={member.joined_at} style="datetime" />
-      </TableCell>
-      <TableCell>
-        <DisabledReason reason={canRemove ? undefined : removeReason}>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon-xs"
-                aria-label={`Actions for ${member.user.email}`}
-                disabled={!canRemove}
-              >
-                <MoreHorizontal />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuItem className="text-destructive" onSelect={onRemove}>
-                {self ? "Leave organization" : "Remove from organization"}
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </DisabledReason>
-      </TableCell>
-    </TableRow>
+      </div>
+    </SettingsFormCard>
+  );
+}
+
+function removeErrorMessage(error: unknown): string {
+  return problemOf(error)?.status === 409
+    ? "An organization needs at least one owner. Make someone else an owner first."
+    : problemMessage(error, "Could not remove the member.");
+}
+
+function RemoveMember({
+  org,
+  member,
+  actorRole,
+  me,
+  onClose,
+}: {
+  org: string;
+  member: Member;
+  actorRole: OrgRole | undefined;
+  me: string;
+  onClose: (ignoreBlocker?: boolean) => void;
+}) {
+  const queryClient = useQueryClient();
+  const navigate = useNavigate();
+  const [open, setOpen] = useState(false);
+  const remove = $api.useMutation("delete", "/api/v1/orgs/{org}/members/{user}");
+  const self = member.user.id === me;
+  const { email } = member.user;
+  const name = member.user.name ?? email;
+  const canRemove = canRemoveMember(actorRole, member.role, self);
+  const removeReason = canRemove
+    ? undefined
+    : !atLeast(actorRole, "admin")
+      ? "Only admins and owners can remove members"
+      : "Only an owner can remove an owner";
+  const description = self
+    ? "You will lose access to every project in this organization."
+    : `${name} loses access to every project in this organization.`;
+
+  return (
+    <DangerZone
+      title={self ? "Leave organization" : "Remove from organization"}
+      description={self ? "You lose access to every project." : `${name} loses access.`}
+      buttonLabel={self ? "Leave…" : "Remove…"}
+      disabledReason={removeReason}
+      onOpen={() => {
+        remove.reset();
+        setOpen(true);
+      }}
+    >
+      <TypeToConfirmDialog
+        open={open}
+        onOpenChange={(next) => {
+          setOpen(next);
+          if (!next) {
+            remove.reset();
+          }
+        }}
+        title={self ? "Leave organization?" : "Remove member?"}
+        description={description}
+        expected={email}
+        inputLabel={`Type "${email}" to confirm`}
+        confirmLabel={self ? "Leave" : "Remove"}
+        pending={remove.isPending}
+        error={remove.error ? removeErrorMessage(remove.error) : undefined}
+        onConfirm={() => {
+          remove.mutate(
+            { params: { path: { org, user: member.user.id } } },
+            {
+              onSuccess: async () => {
+                setOpen(false);
+                remove.reset();
+                if (self) {
+                  await queryClient.refetchQueries({ queryKey: meQuery.queryKey, type: "all" });
+                  void navigate({ to: "/", ignoreBlocker: true });
+                  return;
+                }
+                void queryClient.invalidateQueries({ queryKey: orgMembersKey(org) });
+                onClose(true);
+              },
+            },
+          );
+        }}
+      />
+    </DangerZone>
   );
 }

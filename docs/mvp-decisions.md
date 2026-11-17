@@ -413,6 +413,7 @@ Decisions of track L (`docs/plans/l-admin-ui/`), numbered `D-L-<n>` (`docs/roadm
 | D-L-10 | Write mocks | **Page tests mock each write they trigger with `server.use` and assert its body.** `just web-dev` gets stateless write handlers (`web/src/mocks/writes.ts`), installed only by the browser worker, that answer with the `fixtures/api/static/*-created.json` examples or `204`. |
 | D-L-11 | Forms | **No form library.** Forms use controlled inputs. The client checks only required fields, the password length (10–128) and that the two password fields match. A `400` problem's `errors[]` is shown under the named field, and `detail` above the submit button. |
 | D-L-12 | Current password | **The password form always offers an optional "Current password".** `GET /api/auth/me` does not say whether the account has a password. The server's `400` on `current_password` is shown under the field. |
+| D-L-13 | Settings pages | **Settings share one layout and one set of guards (spec 11 § Settings).** `/settings` is an overview with a live status per section instead of a redirect. Form cards save on their own, validate as you type (extends D-L-11: required fields, ranges and formats the API documents; the server stays the authority), and an unsaved card blocks navigation with a "Discard unsaved changes?" prompt. Lists edit in a row panel (`?open=`), and every destructive action is confirmed by typing the item's name. The usage meter counts units, the quantity the plan limits (D-P-38). |
 
 ## Track I — Online evaluation
 

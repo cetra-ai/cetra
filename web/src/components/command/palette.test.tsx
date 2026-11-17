@@ -103,3 +103,29 @@ it("ignores shortcuts while typing in the search box", async () => {
   expect(router.state.location.pathname).toBe("/acme/support-bot/traces");
   expect(screen.queryByRole("dialog", { name: "Keyboard shortcuts" })).not.toBeInTheDocument();
 });
+
+it("finds a project settings page by a keyword", async () => {
+  const { router, user } = await renderApp("/acme/support-bot/traces");
+  await screen.findByRole("grid", { name: "Traces" });
+  const dialog = await openPalette(user);
+  await user.type(within(dialog).getByRole("combobox"), "retention");
+  await user.click(
+    await within(dialog).findByRole("option", { name: "Project settings: General" }),
+  );
+  await waitFor(() => {
+    expect(router.state.location.pathname).toBe("/acme/support-bot/settings/general");
+  });
+});
+
+it("opens an organization settings page from inside a project", async () => {
+  const { router, user } = await renderApp("/acme/support-bot/traces");
+  await screen.findByRole("grid", { name: "Traces" });
+  const dialog = await openPalette(user);
+  await user.type(within(dialog).getByRole("combobox"), "usage");
+  await user.click(
+    await within(dialog).findByRole("option", { name: "Organization settings: Plan" }),
+  );
+  await waitFor(() => {
+    expect(router.state.location.pathname).toBe("/acme/settings/plan");
+  });
+});

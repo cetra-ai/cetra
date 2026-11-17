@@ -4,24 +4,21 @@ import { type FormEvent, useState } from "react";
 import { $api } from "@/api/client";
 import { fieldErrors, problemMessage } from "@/api/problem";
 import type { Schema } from "@/api/types";
-import { ConfirmDialog } from "@/components/confirm-dialog";
 import { CopyButton } from "@/components/copy-button";
+import { DataTable, type DataTableColumn } from "@/components/data-table/data-table";
 import { DisabledReason } from "@/components/disabled-reason";
 import { FormError } from "@/components/form/form-error";
 import { TextField } from "@/components/form/text-field";
-import { Badge } from "@/components/ui/badge";
+import { SettingsCard } from "@/components/settings/settings-card";
+import { SettingsTableFrame } from "@/components/settings/settings-list";
+import { StatusPill } from "@/components/settings/status-pill";
+import { TypeToConfirmDialog } from "@/components/type-to-confirm-dialog";
 import { Button } from "@/components/ui/button";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import { storeOrgSso } from "@/ee/org-sso/cache";
 
 const LOCKED_REASON = "Needs the Teams add-on or an enterprise licence";
+
+type Domain = Schema<"OrgSsoDomain">;
 
 /**
  * The org's email domains and how each is proven with a DNS TXT record (D-P-54).
@@ -38,12 +35,15 @@ export function DomainsSection({
 }) {
   const queryClient = useQueryClient();
   const [domain, setDomain] = useState("");
-  const [pendingRemoval, setPendingRemoval] = useState<Schema<"OrgSsoDomain"> | undefined>();
+  const [domainTouched, setDomainTouched] = useState(false);
+  const [pendingRemoval, setPendingRemoval] = useState<Domain | undefined>();
   const add = $api.useMutation("post", "/api/v1/orgs/{org}/sso/domains");
   const verify = $api.useMutation("post", "/api/v1/orgs/{org}/sso/domains/{id}/verify");
   const remove = $api.useMutation("delete", "/api/v1/orgs/{org}/sso/domains/{id}");
 
   const addFieldErrors = fieldErrors(add.error);
+  const domainRequired = domain.trim() === "" ? "Enter a domain." : undefined;
+  const domainError = addFieldErrors.domain ?? (domainTouched ? domainRequired : undefined);
   const addError =
     add.error && addFieldErrors.domain === undefined
       ? problemMessage(add.error, "Could not add the domain.")
@@ -51,12 +51,17 @@ export function DomainsSection({
 
   function onAdd(event: FormEvent) {
     event.preventDefault();
+    setDomainTouched(true);
     add.reset();
+    if (domainRequired !== undefined) {
+      return;
+    }
     add.mutate(
       { params: { path: { org } }, body: { domain: domain.trim() } },
       {
         onSuccess: (answer) => {
           setDomain("");
+          setDomainTouched(false);
           storeOrgSso(queryClient, org, answer);
         },
       },
@@ -97,17 +102,88 @@ export function DomainsSection({
     ? problemMessage(remove.error, "Could not remove the domain.")
     : undefined;
 
+  const columns: DataTableColumn<Domain>[] = [
+    {
+      id: "domain",
+      size: 200,
+      header: "Domain",
+      enableSorting: false,
+      cell: ({ row }) => <span className="font-medium">{row.original.domain}</span>,
+    },
+    {
+      id: "status",
+      size: 120,
+      header: "Status",
+      enableSorting: false,
+      cell: ({ row }) =>
+        row.original.status === "verified" ? (
+          <StatusPill tone="ok">Verified</StatusPill>
+        ) : (
+          <StatusPill tone="warn">Pending</StatusPill>
+        ),
+    },
+    {
+      id: "txt",
+      size: 380,
+      header: "DNS TXT record",
+      enableSorting: false,
+      meta: { grow: true },
+      cell: ({ row }) =>
+        row.original.status === "pending" ? (
+          <div className="flex flex-col gap-1 text-caption">
+            <span className="flex items-center gap-1">
+              <code className="break-all">{row.original.txt_name}</code>
+              <CopyButton value={row.original.txt_name} label="TXT name" />
+            </span>
+            <span className="flex items-center gap-1">
+              <code className="break-all">{row.original.txt_value}</code>
+              <CopyButton value={row.original.txt_value} label="TXT value" />
+            </span>
+          </div>
+        ) : null,
+    },
+    {
+      id: "actions",
+      size: 168,
+      header: "Actions",
+      enableSorting: false,
+      meta: { align: "right" },
+      cell: ({ row }) => (
+        <div className="flex justify-end gap-2">
+          {row.original.status === "pending" ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={locked || verify.isPending}
+              onClick={() => {
+                onVerify(row.original.id);
+              }}
+            >
+              Verify
+            </Button>
+          ) : null}
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              remove.reset();
+              setPendingRemoval(row.original);
+            }}
+          >
+            Remove
+          </Button>
+        </div>
+      ),
+    },
+  ];
+
   return (
-    <section aria-labelledby="sso-domains-heading" className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 id="sso-domains-heading" className="text-ui font-medium">
-          Domains
-        </h2>
-        <p className="text-body text-muted-foreground">
-          People with these email domains sign in through the provider. Prove each domain with its
-          DNS TXT record, then verify it.
-        </p>
-      </div>
+    <SettingsCard
+      title="Domains"
+      description="People with these email domains sign in through the provider. Prove each domain with its DNS TXT record, then verify it."
+    >
       <form
         noValidate
         aria-label="Add domain"
@@ -120,93 +196,43 @@ export function DomainsSection({
           value={domain}
           placeholder="example.com"
           disabled={locked || add.isPending}
-          error={addFieldErrors.domain}
-          onChange={setDomain}
+          error={domainError}
+          onChange={(value) => {
+            setDomain(value);
+            setDomainTouched(true);
+          }}
         />
         <FormError message={addError} />
         <DisabledReason reason={locked ? LOCKED_REASON : undefined}>
-          <Button type="submit" variant="outline" disabled={locked || add.isPending}>
+          <Button
+            type="submit"
+            variant="outline"
+            disabled={locked || add.isPending || domainRequired !== undefined}
+          >
             Add domain
           </Button>
         </DisabledReason>
       </form>
-      <Table aria-label="Domains">
-        <TableHeader>
-          <TableRow>
-            <TableHead>Domain</TableHead>
-            <TableHead>Status</TableHead>
-            <TableHead>DNS TXT record</TableHead>
-            <TableHead>
-              <span className="sr-only">Actions</span>
-            </TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {sso.domains.length === 0 ? (
-            <TableRow>
-              <TableCell colSpan={4} className="text-muted-foreground">
-                No domains yet.
-              </TableCell>
-            </TableRow>
-          ) : null}
-          {sso.domains.map((row) => (
-            <TableRow key={row.id}>
-              <TableCell className="font-medium">{row.domain}</TableCell>
-              <TableCell>
-                {row.status === "verified" ? (
-                  <Badge>Verified</Badge>
-                ) : (
-                  <Badge variant="outline">Pending</Badge>
-                )}
-              </TableCell>
-              <TableCell>
-                {row.status === "pending" ? (
-                  <div className="flex flex-col gap-1 text-caption">
-                    <span className="flex items-center gap-1">
-                      <code className="break-all">{row.txt_name}</code>
-                      <CopyButton value={row.txt_name} label="TXT name" />
-                    </span>
-                    <span className="flex items-center gap-1">
-                      <code className="break-all">{row.txt_value}</code>
-                      <CopyButton value={row.txt_value} label="TXT value" />
-                    </span>
-                  </div>
-                ) : null}
-              </TableCell>
-              <TableCell>
-                <div className="flex justify-end gap-2">
-                  {row.status === "pending" ? (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      disabled={locked || verify.isPending}
-                      onClick={() => {
-                        onVerify(row.id);
-                      }}
-                    >
-                      Verify
-                    </Button>
-                  ) : null}
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => {
-                      remove.reset();
-                      setPendingRemoval(row);
-                    }}
-                  >
-                    Remove
-                  </Button>
-                </div>
-              </TableCell>
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
+      <SettingsTableFrame rowCount={sso.domains.length}>
+        {sso.domains.length === 0 ? (
+          <p className="p-3 text-body text-muted-foreground">No domains yet.</p>
+        ) : (
+          <DataTable
+            tableId="sso-domains"
+            ariaLabel="Domains"
+            columns={columns}
+            rows={sso.domains}
+            getRowId={(row) => row.id}
+            onActivate={() => undefined}
+            hasNextPage={false}
+            isFetchingNextPage={false}
+            fetchNextPage={() => undefined}
+            emptyState={null}
+          />
+        )}
+      </SettingsTableFrame>
       <FormError message={verifyError} />
-      <ConfirmDialog
+      <TypeToConfirmDialog
         open={pendingRemoval !== undefined}
         onOpenChange={(open) => {
           if (!open) {
@@ -215,12 +241,13 @@ export function DomainsSection({
         }}
         title={`Remove ${pendingRemoval?.domain ?? "domain"}?`}
         description="People with this domain's emails will no longer be sent to your identity provider."
+        expected={pendingRemoval?.domain ?? ""}
+        inputLabel={`Type "${pendingRemoval?.domain ?? ""}" to confirm`}
         confirmLabel="Remove domain"
-        destructive
         pending={remove.isPending}
         error={removeError}
         onConfirm={confirmRemove}
       />
-    </section>
+    </SettingsCard>
   );
 }

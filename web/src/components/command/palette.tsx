@@ -2,9 +2,10 @@ import { useMatch, useNavigate, useParams } from "@tanstack/react-router";
 import { Home, Search } from "lucide-react";
 import { useEffect, useState } from "react";
 import { $api } from "@/api/client";
-import { projectListInit } from "@/api/queries";
+import { projectInit, projectListInit } from "@/api/queries";
 import { readRecent } from "@/components/command/recent-traces";
 import { ShortcutsHelp } from "@/components/command/shortcuts-help";
+import { visibleOrgNav, visibleProjectNav } from "@/components/settings/settings-home";
 import { projectNav } from "@/components/shell/nav";
 import { useTheme } from "@/components/theme-provider";
 import { DENSITY_OPTIONS, PALETTE_OPTIONS } from "@/components/theme-toggle";
@@ -72,6 +73,15 @@ export function CommandPalette() {
     },
   );
   const projectRows = projects.data?.pages[0]?.data ?? [];
+  const me = $api.useQuery("get", "/api/auth/me");
+  const orgRole = me.data?.orgs.find((candidate) => candidate.slug === org)?.role;
+  // Only read inside a project: the project route has already loaded it.
+  const projectRole = $api.useQuery(
+    "get",
+    "/api/v1/projects/{project}",
+    projectInit(org, project ?? ""),
+    { enabled: project !== undefined },
+  ).data?.role;
   const traceId = project ? hexId(query, 32) : undefined;
   const spanId = project && !traceId ? hexId(query, 16) : undefined;
   const recent = project ? readRecent(org, project) : [];
@@ -283,6 +293,34 @@ export function CommandPalette() {
                 ))}
               </CommandGroup>
             ) : null}
+            <CommandGroup heading="Settings">
+              {visibleOrgNav(orgRole).map((item) => (
+                <CommandItem
+                  key={item.to}
+                  value={`Organization settings: ${item.label} ${item.keywords.join(" ")}`}
+                  onSelect={() => {
+                    closePalette();
+                    void navigate({ to: item.to, params: { org } });
+                  }}
+                >
+                  {`Organization settings: ${item.label}`}
+                </CommandItem>
+              ))}
+              {project
+                ? visibleProjectNav(projectRole).map((item) => (
+                    <CommandItem
+                      key={item.to}
+                      value={`Project settings: ${item.label} ${item.keywords.join(" ")}`}
+                      onSelect={() => {
+                        closePalette();
+                        void navigate({ to: item.to, params: { org, project } });
+                      }}
+                    >
+                      {`Project settings: ${item.label}`}
+                    </CommandItem>
+                  ))
+                : null}
+            </CommandGroup>
             <CommandGroup heading="Theme">
               {THEMES.map((option) => (
                 <CommandItem

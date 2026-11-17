@@ -18,25 +18,46 @@ function projectAs(role: string) {
 const BOB = { id: BOB_ID, email: "bob@example.com", name: "Bob Example" };
 const ADA = { id: ADA_ID, email: "ada@example.com", name: "Ada Example" };
 
+const BOB_PANEL = `/acme/support-bot/settings/members?open=${BOB_ID}`;
+const ADA_PANEL = `/acme/support-bot/settings/members?open=${ADA_ID}`;
+
+/** The access picker of the open panel. */
+function bobAccess() {
+  return screen.findByRole("combobox", { name: "Project access of bob@example.com" });
+}
+
+const projectRolesLocked = () =>
+  http.get("/api/v1/orgs/:org/entitlements", () =>
+    HttpResponse.json({ features: [], upgrade_url: "https://up.example/billing" }),
+  );
+
 it("shows effective roles and overrides", async () => {
   await renderApp("/acme/support-bot/settings/members");
 
-  const table = await screen.findByRole("table", { name: "Project members" });
+  const table = await screen.findByRole("grid", { name: "Project members" });
   const ada = within(table).getByRole("row", { name: /ada@example.com/ });
-  const adaCells = within(ada).getAllByRole("cell");
+  const adaCells = within(ada).getAllByRole("gridcell");
   expect(adaCells[0]).toHaveTextContent("Ada Example");
   expect(adaCells[1]).toHaveTextContent("Owner");
   expect(adaCells[2]).toHaveTextContent("Always admin");
   expect(adaCells[3]).toHaveTextContent("Admin");
 
   const bob = within(table).getByRole("row", { name: /bob@example.com/ });
-  expect(
-    within(bob).getByRole("combobox", { name: "Project access of bob@example.com" }),
-  ).toHaveTextContent("Viewer");
-  expect(within(bob).getAllByRole("cell")[3]).toHaveTextContent("Viewer");
+  const bobCells = within(bob).getAllByRole("gridcell");
+  expect(bobCells[2]).toHaveTextContent("Viewer");
+  expect(bobCells[3]).toHaveTextContent("Viewer");
 });
 
-it("sets an override", async () => {
+it("opens the panel from a row", async () => {
+  const { user } = await renderApp("/acme/support-bot/settings/members");
+  const table = await screen.findByRole("grid", { name: "Project members" });
+  await user.click(within(table).getByRole("row", { name: /bob@example.com/ }));
+
+  expect(await screen.findByRole("heading", { name: "Bob Example" })).toBeInTheDocument();
+  expect(await bobAccess()).toHaveTextContent("Viewer");
+});
+
+it("sets an override with Save", async () => {
   let pathUser = "";
   let body: unknown;
   server.use(
@@ -47,10 +68,10 @@ it("sets an override", async () => {
     }),
   );
 
-  const { user } = await renderApp("/acme/support-bot/settings/members");
-  await screen.findByRole("table", { name: "Project members" });
-  await user.click(screen.getByRole("combobox", { name: "Project access of bob@example.com" }));
+  const { user } = await renderApp(BOB_PANEL);
+  await user.click(await bobAccess());
   await user.click(await screen.findByRole("option", { name: "No access" }));
+  await user.click(screen.getByRole("button", { name: "Save" }));
 
   await waitFor(() => expect(body).toEqual({ role: "none" }));
   expect(pathUser).toBe(BOB_ID);
@@ -65,10 +86,10 @@ it("removes an override with Inherit", async () => {
     }),
   );
 
-  const { user } = await renderApp("/acme/support-bot/settings/members");
-  await screen.findByRole("table", { name: "Project members" });
-  await user.click(screen.getByRole("combobox", { name: "Project access of bob@example.com" }));
+  const { user } = await renderApp(BOB_PANEL);
+  await user.click(await bobAccess());
   await user.click(await screen.findByRole("option", { name: "Inherit org role" }));
+  await user.click(screen.getByRole("button", { name: "Save" }));
 
   await waitFor(() => expect(users).toEqual([BOB_ID]));
 });
@@ -82,10 +103,10 @@ it("shows the server's refusal", async () => {
     ),
   );
 
-  const { user } = await renderApp("/acme/support-bot/settings/members");
-  await screen.findByRole("table", { name: "Project members" });
-  await user.click(screen.getByRole("combobox", { name: "Project access of bob@example.com" }));
+  const { user } = await renderApp(BOB_PANEL);
+  await user.click(await bobAccess());
   await user.click(await screen.findByRole("option", { name: "Admin" }));
+  await user.click(screen.getByRole("button", { name: "Save" }));
 
   expect(await screen.findByText("owners and admins cannot be overridden")).toBeInTheDocument();
 });
@@ -95,10 +116,10 @@ it("explains a 403", async () => {
     http.put("/api/v1/projects/:project/members/:user", () => problemResponse(403, "forbidden")),
   );
 
-  const { user } = await renderApp("/acme/support-bot/settings/members");
-  await screen.findByRole("table", { name: "Project members" });
-  await user.click(screen.getByRole("combobox", { name: "Project access of bob@example.com" }));
+  const { user } = await renderApp(BOB_PANEL);
+  await user.click(await bobAccess());
   await user.click(await screen.findByRole("option", { name: "Member" }));
+  await user.click(screen.getByRole("button", { name: "Save" }));
 
   expect(await screen.findByText("Only project admins can change access.")).toBeInTheDocument();
 });
@@ -129,12 +150,13 @@ it("refreshes the caller's project role after changing their own access", async 
     ),
   );
 
-  const { user } = await renderApp("/acme/support-bot/settings/members");
-  await screen.findByRole("table", { name: "Project members" });
-  const before = projectCalls;
-
-  await user.click(screen.getByRole("combobox", { name: "Project access of ada@example.com" }));
+  const { user } = await renderApp(ADA_PANEL);
+  await user.click(
+    await screen.findByRole("combobox", { name: "Project access of ada@example.com" }),
+  );
   await user.click(await screen.findByRole("option", { name: "Member" }));
+  const before = projectCalls;
+  await user.click(screen.getByRole("button", { name: "Save" }));
 
   await waitFor(() => expect(projectCalls).toBeGreaterThan(before));
 });
@@ -169,32 +191,56 @@ it("loads more members", async () => {
     }),
   );
 
-  const { user } = await renderApp("/acme/support-bot/settings/members");
-  await screen.findByRole("table", { name: "Project members" });
-  await user.click(screen.getByRole("button", { name: "Load more" }));
+  await renderApp("/acme/support-bot/settings/members");
 
   expect(await screen.findByRole("row", { name: /carol@example.com/ })).toBeInTheDocument();
+});
+
+it("searches members by name or email", async () => {
+  const { user } = await renderApp("/acme/support-bot/settings/members");
+  await screen.findByRole("grid", { name: "Project members" });
+  await user.type(screen.getByRole("searchbox", { name: "Search project members" }), "ada@");
+
+  const table = screen.getByRole("grid", { name: "Project members" });
+  expect(within(table).getByRole("row", { name: /ada@example.com/ })).toBeInTheDocument();
+  expect(within(table).queryByRole("row", { name: /bob@example.com/ })).toBeNull();
+});
+
+it("shows an empty result when no member matches", async () => {
+  const { user } = await renderApp("/acme/support-bot/settings/members");
+  await screen.findByRole("grid", { name: "Project members" });
+  await user.type(screen.getByRole("searchbox", { name: "Search project members" }), "zzz");
+
+  expect(await screen.findByText("No member matches")).toBeInTheDocument();
+});
+
+it("sorts by name from the URL", async () => {
+  await renderApp("/acme/support-bot/settings/members?sort=name&desc=true");
+
+  const table = await screen.findByRole("grid", { name: "Project members" });
+  const names = within(table)
+    .getAllByRole("row")
+    .slice(1)
+    .map((row) => within(row).getAllByRole("gridcell")[0]?.textContent);
+  expect(names[0]).toContain("Bob Example");
+  expect(names[1]).toContain("Ada Example");
 });
 
 it("is read-only for a viewer", async () => {
   server.use(projectAs("viewer"));
 
-  await renderApp("/acme/support-bot/settings/members");
+  const { user } = await renderApp(BOB_PANEL);
 
-  const access = await screen.findByRole("combobox", {
-    name: "Project access of bob@example.com",
-  });
+  const access = await bobAccess();
   expect(access).toBeDisabled();
   expect(access.parentElement).toHaveAccessibleDescription("Only project admins can change access");
+  expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
   expect(projectNav().getByRole("link", { name: "General" })).toBeInTheDocument();
   expect(projectNav().getByRole("link", { name: "Members" })).toBeInTheDocument();
   expect(projectNav().queryByRole("link", { name: "API keys" })).toBeNull();
+  await user.click(access);
+  expect(screen.queryByRole("option", { name: "Admin" })).toBeNull();
 });
-
-const projectRolesLocked = () =>
-  http.get("/api/v1/orgs/:org/entitlements", () =>
-    HttpResponse.json({ features: [], upgrade_url: "https://up.example/billing" }),
-  );
 
 it("shows the lock and keeps removal when project roles are locked", async () => {
   const users: string[] = [];
@@ -206,8 +252,7 @@ it("shows the lock and keeps removal when project roles are locked", async () =>
     }),
   );
 
-  const { user } = await renderApp("/acme/support-bot/settings/members");
-  await screen.findByRole("table", { name: "Project members" });
+  const { user } = await renderApp(BOB_PANEL);
 
   expect(await screen.findByRole("note", { name: "Locked feature" })).toHaveTextContent(
     "Available with the Teams add-on or an enterprise licence.",
@@ -217,7 +262,7 @@ it("shows the lock and keeps removal when project roles are locked", async () =>
     "https://up.example/billing",
   );
 
-  await user.click(screen.getByRole("combobox", { name: "Project access of bob@example.com" }));
+  await user.click(await bobAccess());
   for (const name of ["Admin", "Member", "No access"]) {
     expect(await screen.findByRole("option", { name })).toHaveAttribute("aria-disabled", "true");
   }
@@ -231,12 +276,13 @@ it("shows the lock and keeps removal when project roles are locked", async () =>
   );
 
   await user.click(screen.getByRole("option", { name: "Inherit org role" }));
+  await user.click(screen.getByRole("button", { name: "Save" }));
   await waitFor(() => expect(users).toEqual([BOB_ID]));
 });
 
 it("shows no lock when project roles are allowed", async () => {
-  await renderApp("/acme/support-bot/settings/members");
-  await screen.findByRole("table", { name: "Project members" });
+  await renderApp(BOB_PANEL);
+  await bobAccess();
 
   expect(screen.queryByRole("note", { name: "Locked feature" })).toBeNull();
 });
@@ -244,11 +290,10 @@ it("shows no lock when project roles are allowed", async () => {
 it("shows no lock while the entitlements are loading", async () => {
   server.use(http.get("/api/v1/orgs/:org/entitlements", () => new Promise<Response>(() => {})));
 
-  const { user } = await renderApp("/acme/support-bot/settings/members");
-  await screen.findByRole("table", { name: "Project members" });
+  const { user } = await renderApp(BOB_PANEL);
 
   expect(screen.queryByRole("note", { name: "Locked feature" })).toBeNull();
-  await user.click(screen.getByRole("combobox", { name: "Project access of bob@example.com" }));
+  await user.click(await bobAccess());
   for (const name of ["Admin", "Member", "No access"]) {
     expect(await screen.findByRole("option", { name })).not.toHaveAttribute(
       "aria-disabled",
@@ -266,10 +311,10 @@ it("shows the plan message from the server", async () => {
     ),
   );
 
-  const { user } = await renderApp("/acme/support-bot/settings/members");
-  await screen.findByRole("table", { name: "Project members" });
-  await user.click(screen.getByRole("combobox", { name: "Project access of bob@example.com" }));
+  const { user } = await renderApp(BOB_PANEL);
+  await user.click(await bobAccess());
   await user.click(await screen.findByRole("option", { name: "Admin" }));
+  await user.click(screen.getByRole("button", { name: "Save" }));
 
   expect(
     await screen.findByText("Per-project roles need the Teams add-on or an enterprise licence."),
@@ -279,8 +324,29 @@ it("shows the plan message from the server", async () => {
 it("shows no lock to a viewer", async () => {
   server.use(projectAs("viewer"), projectRolesLocked());
 
-  await renderApp("/acme/support-bot/settings/members");
-  await screen.findByRole("combobox", { name: "Project access of bob@example.com" });
+  await renderApp(BOB_PANEL);
+  await bobAccess();
 
   expect(screen.queryByRole("note", { name: "Locked feature" })).toBeNull();
+});
+
+it("asks before discarding an unsaved override", async () => {
+  const { user } = await renderApp(BOB_PANEL);
+  await user.click(await bobAccess());
+  await user.click(await screen.findByRole("option", { name: "No access" }));
+
+  await user.click(projectNav().getByRole("link", { name: "General" }));
+  const dialog = await screen.findByRole("alertdialog", { name: "Discard unsaved changes?" });
+  await user.click(within(dialog).getByRole("button", { name: "Keep editing" }));
+
+  await waitFor(() =>
+    expect(screen.queryByRole("alertdialog", { name: "Discard unsaved changes?" })).toBeNull(),
+  );
+  expect(await bobAccess()).toHaveTextContent("No access");
+});
+
+it("says when the member is not in the loaded list", async () => {
+  await renderApp("/acme/support-bot/settings/members?open=01900000-0000-7000-8000-000000000999");
+
+  expect(await screen.findByRole("heading", { name: "Member not found" })).toBeInTheDocument();
 });
