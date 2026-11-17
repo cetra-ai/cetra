@@ -13,7 +13,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useRef, useState } from "react";
 import { $api } from "@/api/client";
 import { problemMessage } from "@/api/problem";
 import { traceDetailQuery } from "@/api/queries";
@@ -82,6 +82,8 @@ export function TraceHeader({
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [confirmOpen, setConfirmOpen] = useState(false);
+  // Captured on click, before the navigation reads it, so the list can mark its own entry first.
+  const fullPageReturn = useRef<ListReturn | undefined>(undefined);
   const deletion = $api.useMutation("post", "/api/v1/projects/{project}/deletions");
   const canDelete = atLeast(data.role, "admin");
 
@@ -169,7 +171,10 @@ export function TraceHeader({
                 to="/$org/$project/traces/$traceId"
                 params={{ org, project, traceId: trace.trace_id }}
                 search={search}
-                state={(current) => ({ ...current, listReturn: fullPageListReturn?.() })}
+                onClick={() => {
+                  fullPageReturn.current = fullPageListReturn?.();
+                }}
+                state={(current) => ({ ...current, listReturn: fullPageReturn.current })}
                 aria-label="Open full page"
                 className={cn(buttonVariants({ variant: "ghost", size: "icon-xs" }))}
               >

@@ -1,5 +1,5 @@
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createFileRoute, useLocation } from "@tanstack/react-router";
+import { createFileRoute, useLocation, useRouter } from "@tanstack/react-router";
 import { Trash2, Waypoints } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { problemOf } from "@/api/problem";
@@ -50,6 +50,7 @@ import {
   anchorOf,
   type ListReturn,
   listReturnFor,
+  markReturnPoint,
   type RowAnchor,
   rememberListReturn,
   useRestoredHighlight,
@@ -90,6 +91,7 @@ function TracesPage() {
   const canDelete = atLeast(data.role, "admin");
   const search = Route.useSearch();
   const navigate = Route.useNavigate();
+  const router = useRouter();
   const [deleteOpen, setDeleteOpen] = useState(false);
   const applyView = useCallback(
     (next: Record<string, unknown>) => {
@@ -216,6 +218,7 @@ function TracesPage() {
     }
     const ret = listReturnFor("traces", search, lastAnchor.current, search.trace);
     rememberListReturn(ret);
+    markReturnPoint(router.history, ret);
     return ret;
   }
   const traceOpen = search.trace !== undefined;

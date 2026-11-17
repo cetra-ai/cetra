@@ -16,7 +16,8 @@ type TriggerHandlers = {
 /**
  * A tooltip that costs nothing until it is needed. Before the user points at or focuses the
  * child, only the child renders. On the first pointer enter or focus the real tooltip mounts,
- * opened at once, and stays mounted.
+ * closed, and stays mounted: Radix opens it on the next pointer move, its normal way, so it
+ * closes other tooltips and closes when the pointer leaves.
  */
 export function LazyTooltip({
   content,
@@ -41,7 +42,7 @@ export function LazyTooltip({
     });
   }
   return (
-    <Tooltip defaultOpen>
+    <Tooltip>
       <TooltipTrigger asChild={asChild}>{children}</TooltipTrigger>
       <TooltipContent>{content}</TooltipContent>
     </Tooltip>

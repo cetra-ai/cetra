@@ -1,8 +1,10 @@
+import type { RouterHistory } from "@tanstack/react-router";
 import { renderHook } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import {
   type ListReturn,
   listReturnKey,
+  markReturnPoint,
   readListReturn,
   rememberListReturn,
   useListReturn,
@@ -66,4 +68,28 @@ it("treats a corrupt stored return as absent", () => {
   expect(readListReturn("traces")).toBeUndefined();
   sessionStorage.setItem(listReturnKey("traces"), JSON.stringify({ list: "traces" }));
   expect(readListReturn("traces")).toBeUndefined();
+});
+
+it("marks the list's own entry and flushes it before the detail page is pushed", () => {
+  const calls: string[] = [];
+  const history = {
+    location: { href: "/acme/support-bot/sessions?sort=cost_total", state: { __TSR_index: 0 } },
+    replace: (href: string, state: unknown) => {
+      calls.push(`replace ${href} ${JSON.stringify(state)}`);
+    },
+    flush: () => {
+      calls.push("flush");
+    },
+  } as unknown as RouterHistory;
+  markReturnPoint(history, {
+    list: "sessions",
+    search: { sort: "cost_total" },
+    anchorId: "sess-0044",
+    anchorOffset: 4,
+    openedId: "sess-0114",
+  });
+  expect(calls).toEqual([
+    'replace /acme/support-bot/sessions?sort=cost_total {"__TSR_index":0,"listRestore":{"anchorId":"sess-0044","anchorOffset":4,"openedId":"sess-0114"}}',
+    "flush",
+  ]);
 });

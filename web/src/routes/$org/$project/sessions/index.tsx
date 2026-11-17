@@ -1,5 +1,5 @@
 import { useInfiniteQuery } from "@tanstack/react-query";
-import { createFileRoute, useLocation } from "@tanstack/react-router";
+import { createFileRoute, useLocation, useRouter } from "@tanstack/react-router";
 import { MessagesSquare } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { problemOf } from "@/api/problem";
@@ -32,6 +32,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import {
   anchorOf,
   listReturnFor,
+  markReturnPoint,
   type RowAnchor,
   rememberListReturn,
   useRestoredHighlight,
@@ -64,6 +65,7 @@ function SessionsPage() {
   const { org, project } = useProject();
   const search = Route.useSearch();
   const navigate = Route.useNavigate();
+  const router = useRouter();
   const applyView = useCallback(
     (next: Record<string, unknown>) => {
       void navigate({
@@ -227,6 +229,7 @@ function SessionsPage() {
                   row.session_id,
                 );
                 rememberListReturn(listReturn);
+                markReturnPoint(router.history, listReturn);
                 void navigate({
                   to: "/$org/$project/sessions/$sessionId",
                   params: { org, project, sessionId: row.session_id },

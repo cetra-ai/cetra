@@ -64,8 +64,8 @@ const ROW_HOVER_MS = 100;
 const NO_LOCKED: ReadonlySet<string> = new Set();
 /** Quiet time, in ms, after the last scroll before the first visible row is reported. */
 const ANCHOR_SETTLE_MS = 150;
-/** Pages fetched, at most, while looking for the row a restore scrolls to. */
-const RESTORE_MAX_PAGES = 5;
+/** Pages fetched, at most, while looking for the row a restore scrolls to and the rows below it. */
+const RESTORE_MAX_PAGES = 20;
 
 interface ReorderDrag {
   id: string;
@@ -180,20 +180,26 @@ export function DataTable<Row extends RowData>({
   const restoreDone = useRef(false);
   const restoreFetches = useRef(0);
   useEffect(() => {
-    if (!restoreAnchor || restoreDone.current) {
+    // An empty table is still loading its first page (a return usually refetches): wait for rows
+    // rather than giving up, which would leave the list at the top.
+    if (!restoreAnchor || restoreDone.current || rows.length === 0) {
       return;
     }
+    const scroller = scrollRef.current;
     const index = rows.findIndex((row) => getRowId(row) === restoreAnchor.rowId);
-    if (index >= 0) {
+    const canFetch = hasNextPage && restoreFetches.current < RESTORE_MAX_PAGES;
+    // The anchor goes to the top of the scrollport, so a screen of rows must be loaded below it:
+    // with fewer, the scroll is clamped and lands short of it.
+    const rowsOnScreen = Math.ceil((scroller?.clientHeight ?? 0) / ROW_HEIGHT);
+    if (index >= 0 && (rows.length - index >= rowsOnScreen || !canFetch)) {
       restoreDone.current = true;
-      const scroller = scrollRef.current;
       if (scroller) {
         scroller.scrollTop = index * ROW_HEIGHT + restoreAnchor.offset;
         scroller.dispatchEvent(new Event("scroll"));
       }
       return;
     }
-    if (!hasNextPage || restoreFetches.current >= RESTORE_MAX_PAGES) {
+    if (!canFetch) {
       restoreDone.current = true;
       return;
     }
@@ -529,7 +535,7 @@ export function DataTable<Row extends RowData>({
           <div
             role="row"
             aria-rowindex={1}
-            className="grid h-row shrink-0 items-center border-b bg-surface select-none text-[11px] font-medium tracking-wide text-muted-foreground uppercase"
+            className="grid h-row w-full shrink-0 items-center border-b bg-surface select-none text-[11px] font-medium tracking-wide text-muted-foreground uppercase"
             style={{ gridTemplateColumns: template, minWidth: totalWidth }}
           >
             {headerGroup.headers.map((header) => {

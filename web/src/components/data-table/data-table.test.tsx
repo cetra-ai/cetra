@@ -573,7 +573,31 @@ it("scrolls to the restore row at its index times the row height plus the offset
   );
 });
 
-it("fetches at most five more pages for the restore row, then stops at the top", () => {
+it("waits for the first page when the table mounts empty, then restores", () => {
+  const table = (rows: Item[]) => (
+    <DataTable
+      tableId="restore-late-test"
+      ariaLabel="Late"
+      columns={columns}
+      rows={rows}
+      getRowId={(row) => row.id}
+      onActivate={() => undefined}
+      hasNextPage={false}
+      isFetchingNextPage={false}
+      fetchNextPage={() => undefined}
+      emptyState={null}
+      restoreAnchor={{ rowId: "r50", offset: 5 }}
+    />
+  );
+  // A return refetches the list: the table first renders with no rows and no next page.
+  const view = render(table([]));
+  view.rerender(table(manyRows(200)));
+  expect(scrollerOf(screen.getByRole("grid", { name: "Late" })).scrollTop).toBe(
+    50 * ROW_HEIGHT + 5,
+  );
+});
+
+it("fetches at most twenty more pages for the restore row, then stops at the top", () => {
   const fetchNextPage = vi.fn();
   const table = (rows: Item[]) => (
     <DataTable
@@ -587,14 +611,47 @@ it("fetches at most five more pages for the restore row, then stops at the top",
       isFetchingNextPage={false}
       fetchNextPage={fetchNextPage}
       emptyState={null}
-      restoreAnchor={{ rowId: "r999", offset: 0 }}
+      restoreAnchor={{ rowId: "missing", offset: 0 }}
     />
   );
   const view = render(table(manyRows(100)));
   expect(fetchNextPage).toHaveBeenCalledTimes(1);
-  for (let page = 2; page <= 6; page += 1) {
+  for (let page = 2; page <= 21; page += 1) {
     view.rerender(table(manyRows(100 * page)));
   }
-  expect(fetchNextPage).toHaveBeenCalledTimes(5);
+  expect(fetchNextPage).toHaveBeenCalledTimes(20);
   expect(scrollerOf(screen.getByRole("grid", { name: "Pages" })).scrollTop).toBe(0);
+});
+
+it("loads a screen of rows below a restore row near the end before scrolling to it", () => {
+  const fetchNextPage = vi.fn();
+  const clientHeight = vi
+    .spyOn(HTMLElement.prototype, "clientHeight", "get")
+    .mockReturnValue(10 * ROW_HEIGHT);
+  try {
+    const table = (rows: Item[], hasNextPage: boolean) => (
+      <DataTable
+        tableId="restore-end-test"
+        ariaLabel="End"
+        columns={columns}
+        rows={rows}
+        getRowId={(row) => row.id}
+        onActivate={() => undefined}
+        hasNextPage={hasNextPage}
+        isFetchingNextPage={false}
+        fetchNextPage={fetchNextPage}
+        emptyState={null}
+        restoreAnchor={{ rowId: "r95", offset: 4 }}
+      />
+    );
+    // r95 is loaded, but only 5 rows follow it: scrolling now would be clamped.
+    const view = render(table(manyRows(100), true));
+    expect(fetchNextPage).toHaveBeenCalledTimes(1);
+    view.rerender(table(manyRows(200), false));
+    expect(scrollerOf(screen.getByRole("grid", { name: "End" })).scrollTop).toBe(
+      95 * ROW_HEIGHT + 4,
+    );
+  } finally {
+    clientHeight.mockRestore();
+  }
 });

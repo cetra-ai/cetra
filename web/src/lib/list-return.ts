@@ -1,4 +1,4 @@
-import { useLocation } from "@tanstack/react-router";
+import { type RouterHistory, useLocation } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { STORAGE_PREFIX } from "@/product";
 
@@ -88,6 +88,25 @@ export function listReturnFor(
     ...(anchor ? { anchorId: anchor.rowId, anchorOffset: anchor.offset } : {}),
     openedId,
   };
+}
+
+/**
+ * Marks the list's own history entry with where the user was, just before it opens a detail
+ * page, so the browser's Back button restores the list as the back link does.
+ */
+export function markReturnPoint(history: RouterHistory, ret: ListReturn): void {
+  const { href, state } = history.location;
+  history.replace(href, {
+    ...state,
+    listRestore: {
+      ...(ret.anchorId !== undefined ? { anchorId: ret.anchorId } : {}),
+      ...(ret.anchorOffset !== undefined ? { anchorOffset: ret.anchorOffset } : {}),
+      ...(ret.openedId !== undefined ? { openedId: ret.openedId } : {}),
+    },
+  });
+  // The browser history batches changes: without a flush, the push that opens the detail page
+  // replaces this one and the list's entry never gets the state.
+  history.flush();
 }
 
 /** The anchor a list restores, when its return state has one. */

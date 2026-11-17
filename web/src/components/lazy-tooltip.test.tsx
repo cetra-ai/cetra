@@ -25,6 +25,9 @@ it("mounts no tooltip before the user points at the child", () => {
 it("shows the content when the user hovers the child", async () => {
   const user = userEvent.setup();
   renderTip();
+  // The first pointer enter mounts the tooltip, and Radix opens it on a later pointer move.
+  await user.hover(screen.getByText("0.90"));
+  await user.unhover(screen.getByText("0.90"));
   await user.hover(screen.getByText("0.90"));
   expect(await screen.findByRole("tooltip")).toHaveTextContent("Created by the SDK");
 });
@@ -32,10 +35,33 @@ it("shows the content when the user hovers the child", async () => {
 it("keeps the tooltip mounted after the first hover", async () => {
   const user = userEvent.setup();
   renderTip();
+  // The first pointer enter mounts the tooltip, and Radix opens it on a later pointer move.
+  await user.hover(screen.getByText("0.90"));
+  await user.unhover(screen.getByText("0.90"));
   await user.hover(screen.getByText("0.90"));
   await screen.findByRole("tooltip");
   await user.unhover(screen.getByText("0.90"));
   expect(document.querySelector("[data-slot=tooltip-trigger]")).not.toBeNull();
+});
+
+it("closes a tooltip the pointer left before it mounted", async () => {
+  const user = userEvent.setup();
+  render(
+    <TooltipProvider>
+      <LazyTooltip content="A tip">
+        <span>a</span>
+      </LazyTooltip>
+      <LazyTooltip content="B tip">
+        <span>b</span>
+      </LazyTooltip>
+    </TooltipProvider>,
+  );
+  fireEvent.pointerEnter(screen.getByText("a"));
+  fireEvent.pointerEnter(screen.getByText("b"));
+  expect(screen.queryByRole("tooltip")).toBeNull();
+  await user.hover(screen.getByText("b"));
+  expect(await screen.findByRole("tooltip")).toHaveTextContent("B tip");
+  expect(screen.getAllByRole("tooltip")).toHaveLength(1);
 });
 
 it("shows the content when the child receives focus", async () => {
@@ -47,7 +73,9 @@ it("shows the content when the child receives focus", async () => {
     </TooltipProvider>,
   );
   expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
-  // Mounting the tooltip re-creates the child, so focus is not kept on it (see the report).
+  // The first focus mounts the tooltip, which re-creates the child, so focus is not kept on it.
+  // The second focus, on the mounted button, opens the tooltip.
+  fireEvent.focus(screen.getByRole("button", { name: "Open" }));
   fireEvent.focus(screen.getByRole("button", { name: "Open" }));
   expect(await screen.findByRole("tooltip")).toHaveTextContent("Opens the trace");
 });

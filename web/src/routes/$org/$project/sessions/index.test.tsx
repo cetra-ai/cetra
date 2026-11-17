@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { expect, it, vi } from "vitest";
 import { server } from "@/mocks/node";
 import { renderApp } from "@/test/render";
@@ -128,6 +128,27 @@ it("shows the summary strip and the sessions-started chart above the table", asy
   expect(within(summary).getByText(String(sessionRows.length))).toBeInTheDocument();
   expect(summary.compareDocumentPosition(grid) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(chart.compareDocumentPosition(grid) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});
+
+it("restores the list on the browser's Back button too, with the opened row highlighted", async () => {
+  const { router } = await renderApp("/acme/support-bot/sessions?sort=cost_total&order=asc");
+  const grid = await screen.findByRole("grid", { name: "Sessions" });
+  fireEvent.click(within(grid).getByRole("row", { name: /sess-002/ }));
+  await waitFor(() => {
+    expect(router.state.location.pathname).toBe("/acme/support-bot/sessions/sess-002");
+  });
+  act(() => {
+    router.history.back();
+  });
+  await waitFor(() => {
+    expect(router.state.location.pathname).toBe("/acme/support-bot/sessions");
+  });
+  expect(router.state.location.search).toMatchObject({ sort: "cost_total", order: "asc" });
+  expect(router.state.location.state.listRestore).toMatchObject({ openedId: "sess-002" });
+  const restored = await screen.findByRole("grid", { name: "Sessions" });
+  await waitFor(() => {
+    expect(within(restored).getByRole("row", { name: /sess-002/ })).toHaveClass("live-row");
+  });
 });
 
 it("returns from a session to the same list search, with the opened row highlighted", async () => {
