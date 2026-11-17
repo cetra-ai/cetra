@@ -992,8 +992,8 @@ mod tests {
     use arrow::array::{AsArray, FixedSizeBinaryArray, RecordBatch, StringArray};
     use arrow::buffer::Buffer;
     use arrow::datatypes::{Field, Schema};
-    use counting::Counting;
     use cetra_core::schema::spans_schema;
+    use counting::Counting;
     use object_store::PutPayload;
     use object_store::memory::InMemory;
     use proptest::prelude::*;

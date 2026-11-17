@@ -65,7 +65,10 @@ impl DedupScope {
         Ok(Self {
             columns: names
                 .iter()
-                .map(|n| ScopeColumn { name: (*n).to_owned(), ..ScopeColumn::default() })
+                .map(|n| ScopeColumn {
+                    name: (*n).to_owned(),
+                    ..ScopeColumn::default()
+                })
                 .collect(),
             own: names.iter().map(|_| FrameBuilder::new()).collect(),
             own_hashes: names.iter().map(|_| HashMap::new()).collect(),
@@ -82,9 +85,11 @@ impl DedupScope {
     pub fn add_row(&mut self, values: &[Option<&[u8]>]) -> Result<()> {
         for (c, value) in values.iter().enumerate() {
             let Some(bytes) = value else { continue };
-            let (Some(col), Some(own), Some(hashes)) =
-                (self.columns.get_mut(c), self.own.get_mut(c), self.own_hashes.get_mut(c))
-            else {
+            let (Some(col), Some(own), Some(hashes)) = (
+                self.columns.get_mut(c),
+                self.own.get_mut(c),
+                self.own_hashes.get_mut(c),
+            ) else {
                 continue;
             };
             col.raw_bytes += bytes.len() as u64;
@@ -102,7 +107,8 @@ impl DedupScope {
                     col.new_in_shared_bytes += chunk.len() as u64;
                     self.shared_unique_bytes += chunk.len() as u64;
                 }
-                self.shared.add(chunk, &mut self.codec, &mut self.shared_out)?;
+                self.shared
+                    .add(chunk, &mut self.codec, &mut self.shared_out)?;
             }
             // The frame bytes are only needed as totals: drop what was written.
             self.own_out.0.clear();
@@ -159,7 +165,9 @@ mod tests {
 
     /// Non-repeating text, so chunks only match where the bytes really repeat.
     fn prose(words: usize, seed: u64) -> String {
-        const VOCAB: [&str; 8] = ["alpha", "beta", "gamma", "delta", "kappa", "omega", "sigma", "tau"];
+        const VOCAB: [&str; 8] = [
+            "alpha", "beta", "gamma", "delta", "kappa", "omega", "sigma", "tau",
+        ];
         let mut x = seed;
         let mut s = String::new();
         for _ in 0..words {
@@ -189,7 +197,9 @@ mod tests {
         let r = scope.finish().unwrap();
         let own_unique: u64 = r.columns.iter().map(|c| c.own_unique_bytes).sum();
         assert!(r.shared_unique_bytes < own_unique);
-        let [out, inp] = &r.columns[..] else { panic!("two columns") };
+        let [out, inp] = &r.columns[..] else {
+            panic!("two columns")
+        };
         // Only the chunks around the differing envelope are new in the input.
         assert!(inp.new_in_shared_bytes * 4 < inp.own_unique_bytes);
         assert!(out.shared_with_others_bytes * 4 > out.own_unique_bytes * 3);
@@ -202,7 +212,9 @@ mod tests {
         let mut scope = DedupScope::new(&["a", "b"]).unwrap();
         let a = prose(300, 1);
         let b = prose(300, 2);
-        scope.add_row(&[Some(a.as_bytes()), Some(b.as_bytes())]).unwrap();
+        scope
+            .add_row(&[Some(a.as_bytes()), Some(b.as_bytes())])
+            .unwrap();
         let r = scope.finish().unwrap();
         assert_eq!(r.columns[0].shared_with_others_bytes, 0);
         assert_eq!(r.columns[1].shared_with_others_bytes, 0);

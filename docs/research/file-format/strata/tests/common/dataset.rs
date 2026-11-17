@@ -10,9 +10,9 @@ use arrow::array::{Array, ArrayRef, AsArray, RecordBatch};
 use arrow::compute::{SortColumn, cast, concat_batches, lexsort_to_indices, take_record_batch};
 use arrow::datatypes::{DataType, Float32Type, Float64Type};
 use arrow::util::display::{ArrayFormatter, FormatOptions};
-use fmt_testdata::datagen;
 use cetra_core::batch::spans_to_record_batch;
 use cetra_core::schema::spans_schema;
+use fmt_testdata::datagen;
 
 /// Time slices of one generated dataset.
 pub struct Dataset {
