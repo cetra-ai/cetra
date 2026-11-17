@@ -23,6 +23,23 @@ it("formats the KPI values and shows a dash for missing ones", () => {
   expect(within(summary).getAllByText("—")).toHaveLength(3);
 });
 
+it("shows each KPI's change against the previous period, with the previous value on hover", () => {
+  render(
+    <UsersSummary
+      kpis={[{ metric: "traces", value: 120, previous: 100 }]}
+      users={3}
+      more={false}
+    />,
+  );
+  const summary = screen.getByRole("region", { name: "Summary" });
+  expect(within(summary).getByText("20%")).toBeInTheDocument();
+  expect(within(summary).getByText("Traces").parentElement).toHaveAttribute(
+    "title",
+    "Previous: 100",
+  );
+  expect(within(summary).getByText("Users").parentElement).not.toHaveAttribute("title");
+});
+
 it("shows dashes for every KPI while the metrics are not loaded", () => {
   render(<UsersSummary kpis={undefined} users={0} more={false} />);
   const summary = screen.getByRole("region", { name: "Summary" });

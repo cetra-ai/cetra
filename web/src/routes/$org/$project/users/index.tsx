@@ -3,7 +3,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { Users } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { problemOf } from "@/api/problem";
-import { metricsQuery, userListOptions } from "@/api/queries";
+import { metricsQuery, topUsersQuery, userListOptions } from "@/api/queries";
 import type { Schema } from "@/api/types";
 import { useShortcut } from "@/components/command/use-shortcut";
 import { ColumnChooser } from "@/components/data-table/column-chooser";
@@ -26,6 +26,7 @@ import { useProject } from "@/components/shell/project-context";
 import { Filmstrip } from "@/components/trace/filmstrip";
 import { SplitPane } from "@/components/trace/split-pane";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { TopUsers } from "@/components/user/top-users";
 import { UserPanel } from "@/components/user/user-panel";
 import { UsersSummary } from "@/components/user/users-summary";
 import { orderedUserColumns, userColumnSpecs, userScoreNames } from "@/components/user-columns";
@@ -33,6 +34,7 @@ import { formatCost } from "@/lib/format";
 import { getTraceMaximized, setTraceMaximized, useListLayout } from "@/lib/list-layout";
 import { parseUsersSearch, type UsersSearch } from "@/lib/search/users";
 import { type RangeState, rangeFromSearch, resolveRange } from "@/lib/time-range";
+import { userIdentity } from "@/lib/user-identity";
 
 const TABLE_ID = "users";
 const FILTER_PLACEHOLDER = "Filter traces, e.g. environment = 'production'";
@@ -128,6 +130,17 @@ function UsersPage() {
     }),
     enabled: !hold && !filterError,
   });
+  const top = useQuery({
+    ...topUsersQuery(org, project, {
+      from: resolved.from,
+      to: resolved.to,
+      filter: search.filter,
+      includeEval: search.eval === 1,
+      includeExperiments: search.exp === 1,
+      limit: 5,
+    }),
+    enabled: !hold && !filterError,
+  });
   const fetchNextPage = useCallback(() => {
     void list.fetchNextPage();
   }, [list.fetchNextPage]);
@@ -201,7 +214,7 @@ function UsersPage() {
             <Filmstrip
               items={rows.map((row) => ({
                 id: row.user_id,
-                label: row.user_id,
+                label: userIdentity(row.metadata).name ?? row.user_id,
                 detail: formatCost(row.cost_total),
                 status: row.error_trace_count > 0 ? "error" : "ok",
               }))}
@@ -290,6 +303,16 @@ function UsersPage() {
                       users={rows.length}
                       more={list.hasNextPage}
                     />
+                    <TopUsers
+                      users={top.data?.data ?? []}
+                      onSelect={(userId) => {
+                        void navigate({
+                          to: "/$org/$project/users",
+                          params: { org, project },
+                          search: (prev) => withUser(prev, userId),
+                        });
+                      }}
+                    />
                     <DataTable
                       tableId="users"
                       ariaLabel="Users"
@@ -340,6 +363,15 @@ function UsersPage() {
               <UserPanel
                 userId={search.user}
                 row={rows.find((row) => row.user_id === search.user)}
+                from={resolved.from}
+                to={resolved.to}
+                range={
+                  search.range
+                    ? { range: search.range }
+                    : search.from && search.to
+                      ? { from: search.from, to: search.to }
+                      : {}
+                }
                 includeEval={search.eval === 1}
                 includeExperiments={search.exp === 1}
                 layout={<TraceLayoutControls />}

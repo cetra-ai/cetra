@@ -6,10 +6,12 @@ use axum::routing::get;
 use cetra_storage as storage;
 use serde::Deserialize;
 
-use crate::api::common::{ExclusionParams, Page};
+use crate::api::common::Page;
 use crate::api::convert;
 use crate::api::sessions::SessionSummary;
-use crate::api::users::{EndUserDetail, EndUserSummary, UserListParams, UserSort};
+use crate::api::users::{
+    EndUserDetail, EndUserSummary, UserDetailParams, UserListParams, UserSort,
+};
 use crate::auth::roles::ProjectPerm;
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
@@ -87,27 +89,22 @@ async fn get_user(
     State(state): State<AppState>,
     Extension(access): Extension<ProjectAccess>,
     error::Path(path): error::Path<UserPath>,
-    error::Query(params): error::Query<ExclusionParams>,
+    error::Query(params): error::Query<UserDetailParams>,
 ) -> Result<error::Json<EndUserDetail>, ApiError> {
     let deadline = Deadline::start();
-    let ctx = open_query(&state, access.project.org_id, access.project.id, None).await?;
-    let data = storage::user_detail(
-        &ctx,
-        &path.user_id,
+    let scope = list_scope(
+        params.from,
+        params.to,
         params.include_eval,
         params.include_experiments,
-        deadline.remaining()?,
-    )
-    .await?
-    .ok_or(ApiError::NotFound)?;
+    )?;
+    let ctx = open_query(&state, access.project.org_id, access.project.id, None).await?;
+    let data = storage::user_detail(&ctx, &path.user_id, scope, deadline.remaining()?)
+        .await?
+        .ok_or(ApiError::NotFound)?;
     let mut user = convert::end_user_summaries(std::slice::from_ref(&data.user))?
         .pop()
         .ok_or(ApiError::NotFound)?;
-    let scope = storage::ListScope {
-        window: None,
-        include_eval: params.include_eval,
-        include_experiments: params.include_experiments,
-    };
     attach_user_extras(&ctx, std::slice::from_mut(&mut user), None, scope, deadline).await?;
     let mut sessions: Vec<SessionSummary> = convert::session_summaries(&data.sessions)?;
     attach_session_scores(&ctx, &mut sessions, deadline).await?;
@@ -117,7 +114,9 @@ async fn get_user(
 /// Fills `activity`, `scores` and `metadata` of each user (spec 09 § Observability data).
 ///
 /// The activity window is the request's, or without one `[first_seen, last_seen]` of the users.
-/// A user without traces in scope gets an empty activity of zeros.
+/// A one-sided request window (`from` or `to` alone) takes the open side from the users instead:
+/// the start is `first_seen` and the end is `last_seen + 1`. If the clamped window is empty, the
+/// users' own span is used. A user without traces in scope gets an empty activity of zeros.
 async fn attach_user_extras(
     ctx: &storage::QueryContext,
     users: &mut [EndUserSummary],
@@ -133,9 +132,26 @@ async fn attach_user_extras(
         .map(|user| user.last_seen)
         .max()
         .unwrap_or(first);
+    let users_span = || storage::TimeWindow::new(first, last.saturating_add(1));
     let activity = match scope.window {
-        Some(window) => window,
-        None => storage::TimeWindow::new(first, last.saturating_add(1))?,
+        Some(window) => {
+            let start = if window.from() == i64::MIN {
+                first
+            } else {
+                window.from()
+            };
+            let end = if window.to() == i64::MAX {
+                last.saturating_add(1)
+            } else {
+                window.to()
+            };
+            if start < end {
+                storage::TimeWindow::new(start, end)?
+            } else {
+                users_span()?
+            }
+        }
+        None => users_span()?,
     };
     let ids: Vec<&str> = users.iter().map(|user| user.user_id.as_str()).collect();
     let extras = storage::user_extras(
@@ -246,6 +262,106 @@ mod tests {
         assert_eq!(detail.sessions[0].trace_count, 2);
         assert_eq!(detail.sessions[0].scores.len(), 1);
         assert_eq!(detail.sessions[0].scores[0].name, "resolved");
+    }
+
+    /// Trace start of `2026-01-01T10:05:00Z` in nanoseconds (`date -u -d ... +%s`).
+    const USER_42_SECOND_TRACE_NS: i64 = 1_767_261_900_000_000_000;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn detail_with_a_window_counts_only_traces_in_it() {
+        let (app, seeded) = loaded().await;
+        // user-42's traces start at 10:00, 10:05 and 10:20 (the 10:01 eval trace
+        // is excluded). [10:04, 10:10) holds only the 10:05 trace, of sess-001.
+        let (status, body) = get_json(
+            &app,
+            &seeded,
+            "/users/user-42?from=2026-01-01T10:04:00Z&to=2026-01-01T10:10:00Z",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let detail: EndUserDetail = serde_json::from_value(body).unwrap();
+        assert_eq!(detail.user.trace_count, 1);
+        assert_eq!(detail.user.first_seen, USER_42_SECOND_TRACE_NS);
+        assert_eq!(detail.user.activity.len(), 24);
+        assert_eq!(detail.user.activity.iter().sum::<i64>(), 1);
+        let sessions: Vec<(&str, i64)> = detail
+            .sessions
+            .iter()
+            .map(|s| (s.session_id.as_str(), s.trace_count))
+            .collect();
+        assert_eq!(sessions, [("sess-001", 1)]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn detail_with_only_from_has_bucketed_activity() {
+        let (app, seeded) = loaded().await;
+        // Before user-42's first trace (10:00); no upper bound.
+        let (status, body) =
+            get_json(&app, &seeded, "/users/user-42?from=2026-01-01T00:00:00Z").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let detail: EndUserDetail = serde_json::from_value(body).unwrap();
+        assert_eq!(detail.user.trace_count, 3);
+        assert_eq!(detail.user.activity.len(), 24);
+        assert_eq!(
+            detail.user.activity.iter().sum::<i64>(),
+            detail.user.trace_count
+        );
+        // The buckets span `[from, last_seen]`: the traces, ten hours after `from`, are in the
+        // last ones. An unbounded end would put them all in the first bucket.
+        assert_eq!(detail.user.activity[0], 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn detail_with_only_to_has_bucketed_activity() {
+        let (app, seeded) = loaded().await;
+        // After user-42's last trace (10:20); no lower bound.
+        let (status, body) =
+            get_json(&app, &seeded, "/users/user-42?to=2026-01-01T12:00:00Z").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let detail: EndUserDetail = serde_json::from_value(body).unwrap();
+        assert_eq!(detail.user.trace_count, 3);
+        assert_eq!(detail.user.activity.len(), 24);
+        assert_eq!(
+            detail.user.activity.iter().sum::<i64>(),
+            detail.user.trace_count
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_with_only_from_has_bucketed_activity() {
+        let (app, seeded) = loaded().await;
+        let (status, body) = get_json(&app, &seeded, "/users?from=2026-01-01T00:00:00Z").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let page: Page<EndUserSummary> = serde_json::from_value(body).unwrap();
+        assert!(!page.data.is_empty());
+        for user in &page.data {
+            assert_eq!(user.activity.len(), 24, "{}", user.user_id);
+            assert_eq!(
+                user.activity.iter().sum::<i64>(),
+                user.trace_count,
+                "{}",
+                user.user_id
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn detail_outside_the_window_is_404() {
+        let (app, seeded) = loaded().await;
+        let (status, body) = get_json(
+            &app,
+            &seeded,
+            "/users/user-42?from=2025-01-01T00:00:00Z&to=2025-01-02T00:00:00Z",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn detail_rejects_unknown_params() {
+        let (app, seeded) = loaded().await;
+        let (status, body) = get_json(&app, &seeded, "/users/user-42?foo=1").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     }
 
     #[tokio::test(flavor = "multi_thread")]

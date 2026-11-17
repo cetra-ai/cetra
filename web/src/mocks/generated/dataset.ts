@@ -72,17 +72,21 @@ export type Dataset = {
     includeExperiments: boolean,
   ): Schema<"SessionDetail"> | undefined;
   users(includeEval: boolean, includeExperiments: boolean): UserGroup[];
+  /** The user's traces that start in `[window.from, window.to)`; an absent bound is open (UP-1). */
   user(
     userId: string,
     includeEval: boolean,
     includeExperiments: boolean,
+    window: { from?: number; to?: number },
   ): Schema<"EndUserDetail"> | undefined;
+  /** With `userId`, only that user's traces count (UP-5, UP-9). */
   metrics(
     from: number,
     to: number,
     bucket: Schema<"MetricsBucket"> | undefined,
     includeEval: boolean,
     includeExperiments: boolean,
+    userId: string | undefined,
   ): Schema<"MetricsResponse">;
 };
 
@@ -158,15 +162,19 @@ export function createDataset(options: { seed: number; now: number; traces: numb
     users(includeEval, includeExperiments) {
       return usersFrom(visibleTraces(traces, includeEval, includeExperiments));
     },
-    user(userId, includeEval, includeExperiments) {
+    user(userId, includeEval, includeExperiments, window) {
       const rows = visibleTraces(traces, includeEval, includeExperiments).filter(
-        (trace) => trace.user_id === userId,
+        (trace) => trace.user_id === userId && startsIn(trace.start_time, window),
       );
       const group = usersFrom(rows).find((item) => item.user.user_id === userId);
       if (!group) {
         return undefined;
       }
-      const user = userSummaries([group], undefined)[0];
+      const activityWindow =
+        window.from !== undefined && window.to !== undefined
+          ? { from: window.from, to: window.to }
+          : undefined;
+      const user = userSummaries([group], activityWindow)[0];
       if (!user) {
         return undefined;
       }
@@ -175,16 +183,27 @@ export function createDataset(options: { seed: number; now: number; traces: numb
       );
       return { user, sessions: sessions.slice(0, 100) };
     },
-    metrics(from, to, bucket, includeEval, includeExperiments) {
+    metrics(from, to, bucket, includeEval, includeExperiments, userId) {
+      const scoped =
+        userId === undefined ? traces : traces.filter((trace) => trace.user_id === userId);
       return metricsFrom(
-        visibleTraces(traces, includeEval, includeExperiments),
-        traces.filter((trace) => trace.environment === "cetra-eval"),
+        visibleTraces(scoped, includeEval, includeExperiments),
+        scoped.filter((trace) => trace.environment === "cetra-eval"),
         from,
         to,
         bucket,
       );
     },
   };
+}
+
+/** Whether `start` is in `[window.from, window.to)`; an absent bound is open. */
+function startsIn(start: string, window: { from?: number; to?: number }): boolean {
+  const time = Date.parse(start);
+  return (
+    (window.from === undefined || time >= window.from) &&
+    (window.to === undefined || time < window.to)
+  );
 }
 
 export function visibleTraces(

@@ -1,5 +1,11 @@
 import { expect, it } from "vitest";
-import { parseUserPageSearch, parseUsersSearch } from "./users";
+import {
+  parseUserPageSearch,
+  parseUsersSearch,
+  rangeParams,
+  userPageRange,
+  userTraceFilter,
+} from "./users";
 
 it("keeps valid user search and drops the rest", () => {
   expect(
@@ -37,4 +43,44 @@ it("keeps the exclusion flags on the user page", () => {
 it("keeps the open user and drops an empty one", () => {
   expect(parseUsersSearch({ user: " user-42 " })).toEqual({ user: "user-42" });
   expect(parseUsersSearch({ user: "   " })).toEqual({});
+});
+
+it("builds the trace filter of one user with quoted id", () => {
+  expect(userTraceFilter("o'brien")).toBe("user_id = 'o''brien'");
+});
+
+it("keeps the page range, tab and valid flags and drops the rest", () => {
+  expect(parseUserPageSearch({ range: "7d", tab: "traces" })).toEqual({
+    range: "7d",
+    tab: "traces",
+  });
+  expect(parseUserPageSearch({ tab: "bogus" })).toEqual({});
+  expect(parseUserPageSearch({ from: "2026-11-01T00:00:00Z" })).toEqual({});
+  expect(parseUserPageSearch({ from: "2026-11-02T00:00:00Z", to: "2026-11-01T00:00:00Z" })).toEqual(
+    {},
+  );
+  expect(parseUserPageSearch({ from: "2026-11-01T00:00:00Z", to: "2026-11-02T00:00:00Z" })).toEqual(
+    { from: "2026-11-01T00:00:00Z", to: "2026-11-02T00:00:00Z" },
+  );
+});
+
+it("defaults the page range to the last 30 days", () => {
+  expect(userPageRange({})).toEqual({ kind: "preset", preset: "30d" });
+  expect(userPageRange({ range: "7d" })).toEqual({ kind: "preset", preset: "7d" });
+  const absolute = {
+    from: "2026-11-01T00:00:00.000Z",
+    to: "2026-11-02T00:00:00.000Z",
+  };
+  expect(userPageRange(absolute)).toEqual({ kind: "absolute", ...absolute });
+});
+
+it("writes a range as explicit URL params", () => {
+  expect(rangeParams({ kind: "preset", preset: "24h" })).toEqual({ range: "24h" });
+  expect(
+    rangeParams({
+      kind: "absolute",
+      from: "2026-11-01T00:00:00.000Z",
+      to: "2026-11-02T00:00:00.000Z",
+    }),
+  ).toEqual({ from: "2026-11-01T00:00:00.000Z", to: "2026-11-02T00:00:00.000Z" });
 });

@@ -165,9 +165,11 @@ pub async fn user_list(ctx: &QueryContext, request: UserListRequest<'_>) -> Resu
     }
 }
 
-/// The user and the sessions of their traces. No window and no filter.
+/// The user and the sessions of their traces.
 ///
-/// An unknown `user_id` is `Ok(None)`.
+/// The scope's window and default exclusions select the traces (spec 09
+/// § Observability data, UP-1). An unknown `user_id`, or one with no trace in
+/// scope, is `Ok(None)`.
 ///
 /// # Errors
 ///
@@ -175,16 +177,10 @@ pub async fn user_list(ctx: &QueryContext, request: UserListRequest<'_>) -> Resu
 pub async fn user_detail(
     ctx: &QueryContext,
     user_id: &str,
-    include_eval: bool,
-    include_experiments: bool,
+    scope: ListScope,
     timeout: Duration,
 ) -> Result<Option<UserDetailData>, RunError> {
-    match tokio::time::timeout(
-        timeout,
-        load(ctx, user_id, include_eval, include_experiments),
-    )
-    .await
-    {
+    match tokio::time::timeout(timeout, load(ctx, user_id, scope)).await {
         Err(_) => Err(RunError::Timeout),
         Ok(result) => result,
     }
@@ -494,14 +490,8 @@ pub struct UserExtras {
 async fn load(
     ctx: &QueryContext,
     user_id: &str,
-    include_eval: bool,
-    include_experiments: bool,
+    scope: ListScope,
 ) -> Result<Option<UserDetailData>, RunError> {
-    let scope = ListScope {
-        window: None,
-        include_eval,
-        include_experiments,
-    };
     let excluded = scoped_traces(ctx, scope, false).await?;
     let excluded_plan = excluded.logical_plan().clone();
     let state = ctx.session().state();
@@ -713,13 +703,24 @@ mod tests {
         }
     }
 
-    fn assert_rows(actual: &[Value], expected: &[Value]) {
+    /// Keys of a user row that the server composes (activity, score averages, latest metadata).
+    const USER_SERVER_KEYS: &[&str] = &["activity", "scores", "metadata"];
+
+    /// Keys of a session row that the server adds from the session extras query.
+    const SESSION_SERVER_KEYS: &[&str] = &[
+        "scores",
+        "error_trace_count",
+        "first_input_preview",
+        "last_output_preview",
+    ];
+
+    /// Checks each fixture key except `server_keys`, which the server composes from
+    /// other queries and which the storage rows therefore never have.
+    fn assert_rows(actual: &[Value], expected: &[Value], server_keys: &[&str]) {
         assert_eq!(actual.len(), expected.len());
         for (row, fixture) in actual.iter().zip(expected) {
             for (key, value) in fixture.as_object().expect("object") {
-                // `activity`, `scores` and `metadata` are composed by the server, not storage
-                // columns, so the storage row never has them.
-                if matches!(key.as_str(), "activity" | "scores" | "metadata") {
+                if server_keys.contains(&key.as_str()) {
                     continue;
                 }
                 assert!(
@@ -744,14 +745,22 @@ mod tests {
             .await
             .expect("list");
         let listed = fixture("users.json");
-        assert_rows(&rows(&page), listed["data"].as_array().expect("data"));
+        assert_rows(
+            &rows(&page),
+            listed["data"].as_array().expect("data"),
+            USER_SERVER_KEYS,
+        );
         assert!(page.next_cursor.is_none());
 
         let page = user_list(&ctx, request(true, UserSort::LastSeen, SortOrder::Desc))
             .await
             .expect("eval");
         let listed = fixture("users-include-eval.json");
-        assert_rows(&rows(&page), listed["data"].as_array().expect("data"));
+        assert_rows(
+            &rows(&page),
+            listed["data"].as_array().expect("data"),
+            USER_SERVER_KEYS,
+        );
     }
 
     #[tokio::test]
@@ -770,7 +779,7 @@ mod tests {
             ),
             ("user-7", false, "fixtures/api/responses/users/user-7.json"),
         ] {
-            let detail = user_detail(&ctx, user_id, include_eval, false, TIMEOUT)
+            let detail = user_detail(&ctx, user_id, scope(include_eval), TIMEOUT)
                 .await
                 .expect("detail")
                 .unwrap_or_else(|| panic!("missing {user_id}"));
@@ -778,6 +787,7 @@ mod tests {
             assert_rows(
                 &json_rows(std::slice::from_ref(&detail.user)),
                 std::slice::from_ref(&fixture["user"]),
+                USER_SERVER_KEYS,
             );
             let sessions = json_rows(&detail.sessions);
             let expected = fixture["sessions"].as_array().expect("sessions");
@@ -786,9 +796,9 @@ mod tests {
                 ids(expected, "session_id"),
                 "{file}"
             );
-            assert_rows(&sessions, expected);
+            assert_rows(&sessions, expected, SESSION_SERVER_KEYS);
         }
-        let missing = user_detail(&ctx, "nobody", false, false, TIMEOUT)
+        let missing = user_detail(&ctx, "nobody", scope(false), TIMEOUT)
             .await
             .expect("missing");
         assert!(missing.is_none());
@@ -954,11 +964,11 @@ mod tests {
         root.environment = Some(environment::EVAL.to_owned());
         let spans = [root];
         let ctx = context_of(&spans);
-        let hidden = user_detail(&ctx, "eval-user", false, false, TIMEOUT)
+        let hidden = user_detail(&ctx, "eval-user", scope(false), TIMEOUT)
             .await
             .expect("hidden");
         assert!(hidden.is_none());
-        let shown = user_detail(&ctx, "eval-user", true, false, TIMEOUT)
+        let shown = user_detail(&ctx, "eval-user", scope(true), TIMEOUT)
             .await
             .expect("eval");
         assert!(shown.is_some());
@@ -969,11 +979,97 @@ mod tests {
         let mut root = span_row(7, 0, 1_000, 1_000);
         root.user_id = Some("lonely".to_owned());
         let spans = [root];
-        let detail = user_detail(&context_of(&spans), "lonely", false, false, TIMEOUT)
+        let detail = user_detail(&context_of(&spans), "lonely", scope(false), TIMEOUT)
             .await
             .expect("detail")
             .expect("user");
         assert!(detail.sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn user_detail_follows_the_window() {
+        let mut first = user_span(1, 1_000, "u");
+        first.session_id = Some("s1".to_owned());
+        let mut second = user_span(2, 2_000, "u");
+        second.session_id = Some("s1".to_owned());
+        let mut third = user_span(3, 3_000, "u");
+        third.session_id = Some("s2".to_owned());
+        let spans = [first, second, third];
+        let ctx = context_of(&spans);
+
+        // [1000, 3000) holds the first two traces only, and they share session s1.
+        let windowed = ListScope {
+            window: Some(window_of(1_000, 3_000)),
+            include_eval: false,
+            include_experiments: false,
+        };
+        let detail = user_detail(&ctx, "u", windowed, TIMEOUT)
+            .await
+            .expect("detail")
+            .expect("user in window");
+        let user = json_rows(std::slice::from_ref(&detail.user));
+        assert_eq!(user.len(), 1);
+        assert_eq!(user[0]["trace_count"], 2);
+        let first_seen = detail
+            .user
+            .column_by_name("first_seen")
+            .expect("first_seen")
+            .as_primitive::<arrow::datatypes::TimestampNanosecondType>()
+            .value(0);
+        assert_eq!(first_seen, 1_000);
+        let last_seen = detail
+            .user
+            .column_by_name("last_seen")
+            .expect("last_seen")
+            .as_primitive::<arrow::datatypes::TimestampNanosecondType>()
+            .value(0);
+        // last_seen is the latest end_time, and span_row ends a span 100 ns after its start.
+        assert_eq!(last_seen, 2_100);
+        let sessions = json_rows(&detail.sessions);
+        assert_eq!(sessions.len(), 1, "{sessions:?}");
+        assert_eq!(sessions[0]["session_id"], "s1");
+        assert_eq!(sessions[0]["trace_count"], 2);
+
+        // No trace of the user starts in [5000, 6000).
+        let empty = ListScope {
+            window: Some(window_of(5_000, 6_000)),
+            include_eval: false,
+            include_experiments: false,
+        };
+        let missing = user_detail(&ctx, "u", empty, TIMEOUT)
+            .await
+            .expect("empty window");
+        assert!(missing.is_none());
+    }
+
+    #[tokio::test]
+    async fn user_detail_counts_only_in_window_traces_of_a_straddling_session() {
+        // One session with three traces: two inside [1000, 3000), one after it.
+        let mut first = user_span(1, 1_000, "u");
+        first.session_id = Some("s1".to_owned());
+        let mut second = user_span(2, 2_000, "u");
+        second.session_id = Some("s1".to_owned());
+        let mut after = user_span(3, 3_000, "u");
+        after.session_id = Some("s1".to_owned());
+        let spans = [first, second, after];
+        let ctx = context_of(&spans);
+
+        let windowed = ListScope {
+            window: Some(window_of(1_000, 3_000)),
+            include_eval: false,
+            include_experiments: false,
+        };
+        let detail = user_detail(&ctx, "u", windowed, TIMEOUT)
+            .await
+            .expect("detail")
+            .expect("user in window");
+        let user = json_rows(std::slice::from_ref(&detail.user));
+        assert_eq!(user.len(), 1);
+        assert_eq!(user[0]["trace_count"], 2);
+        let sessions = json_rows(&detail.sessions);
+        assert_eq!(sessions.len(), 1, "{sessions:?}");
+        assert_eq!(sessions[0]["session_id"], "s1");
+        assert_eq!(sessions[0]["trace_count"], 2);
     }
 
     #[tokio::test]

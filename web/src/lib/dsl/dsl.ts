@@ -205,9 +205,9 @@ export function serializeChip(chip: Chip): string {
       return `${serializeField(chip.field)} @> [${values}]`;
     }
     case "score":
-      return `${chip.fn}(${quote(chip.name)}) ${chip.op} ${serializeValue(chip.value)}`;
+      return `${chip.fn}(${quoteString(chip.name)}) ${chip.op} ${serializeValue(chip.value)}`;
     case "has_score":
-      return `${chip.negated ? "NOT " : ""}has_score(${quote(chip.name)})`;
+      return `${chip.negated ? "NOT " : ""}has_score(${quoteString(chip.name)})`;
     case "raw":
       return chip.text;
   }
@@ -479,7 +479,7 @@ function wrapped(
 
 function serializeField(field: Field): string {
   if ("key" in field) {
-    return `${field.column.toLowerCase()}[${quote(field.key)}]`;
+    return `${field.column.toLowerCase()}[${quoteString(field.key)}]`;
   }
   return field.column.toLowerCase();
 }
@@ -487,7 +487,7 @@ function serializeField(field: Field): string {
 function serializeValue(value: ChipValue): string {
   switch (value.kind) {
     case "string":
-      return quote(value.value);
+      return quoteString(value.value);
     case "number":
       return value.text;
     case "boolean":
@@ -495,7 +495,7 @@ function serializeValue(value: ChipValue): string {
   }
 }
 
-function quote(value: string): string {
+export function quoteString(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
 }
 

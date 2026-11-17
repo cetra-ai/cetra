@@ -250,3 +250,85 @@ it("gives each session the previews of its earliest and latest traces and counts
   expect(withErrors).toBeGreaterThan(0);
   expect(multiTurn).toBeGreaterThan(0);
 });
+
+const DAY_MS = 86_400_000;
+
+/** A trace the default lists show: no evaluation and no experiment trace. */
+function isVisible(trace: Schema<"TraceSummary">): boolean {
+  return trace.environment !== "cetra-eval" && trace.metadata["cetra.experiment_id"] === undefined;
+}
+
+/** The visible trace of the user with the most visible traces, so that its traces span several days. */
+function busiestUser(dataset: Dataset): string {
+  const counts = new Map<string, number>();
+  for (const trace of dataset.traces) {
+    if (trace.user_id && isVisible(trace)) {
+      counts.set(trace.user_id, (counts.get(trace.user_id) ?? 0) + 1);
+    }
+  }
+  const [userId] = [...counts.entries()].sort((left, right) => right[1] - left[1])[0] ?? [];
+  if (!userId) {
+    throw new Error("the dataset has a user with visible traces");
+  }
+  return userId;
+}
+
+it("counts a user's traces in a window only: trace count, first seen, sessions and activity", () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 400 });
+  const userId = busiestUser(dataset);
+  const mine = dataset.traces.filter((trace) => trace.user_id === userId);
+  // The UTC day of the user's latest trace: some of the user's traces are on other days.
+  const latest = Math.max(...mine.map((trace) => Date.parse(trace.start_time)));
+  const day = Math.floor(latest / DAY_MS) * DAY_MS;
+  const inDay = mine.filter((trace) => {
+    const start = Date.parse(trace.start_time);
+    return start >= day && start < day + DAY_MS;
+  });
+  expect(inDay.length).toBeGreaterThan(0);
+  expect(inDay.length).toBeLessThan(mine.length);
+
+  const detail = dataset.user(userId, false, false, { from: day, to: day + DAY_MS });
+  expect(detail?.user.trace_count).toBe(inDay.length);
+  expect(Date.parse(detail?.user.first_seen ?? "")).toBe(
+    Math.min(...inDay.map((trace) => Date.parse(trace.start_time))),
+  );
+  expect(detail?.user.activity.reduce((sum, count) => sum + count, 0)).toBe(inDay.length);
+
+  const sessionIds = new Set(
+    inDay.flatMap((trace) => (trace.session_id ? [trace.session_id] : [])),
+  );
+  expect(detail?.sessions.map((session) => session.session_id).sort()).toEqual(
+    [...sessionIds].sort(),
+  );
+  for (const session of detail?.sessions ?? []) {
+    expect(session.trace_count).toBe(
+      inDay.filter((trace) => trace.session_id === session.session_id).length,
+    );
+  }
+});
+
+it("has no user detail for a window without any of the user's traces", () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 400 });
+  const userId = busiestUser(dataset);
+  const from = Date.parse("2000-01-01T00:00:00.000Z");
+  expect(dataset.user(userId, false, false, { from, to: from + DAY_MS })).toBeUndefined();
+});
+
+it("counts only the user's traces in metrics when a user is given", () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 400 });
+  const userId = busiestUser(dataset);
+  const from = NOW - 90 * DAY_MS;
+  const to = NOW + DAY_MS;
+  const inRange = (trace: Schema<"TraceSummary">) => {
+    const start = Date.parse(trace.start_time);
+    return start >= from && start < to;
+  };
+  const visible = dataset.traces.filter((trace) => isVisible(trace) && inRange(trace));
+  const tracesKpi = (userIdArg: string | undefined) =>
+    dataset
+      .metrics(from, to, undefined, false, false, userIdArg)
+      .kpis.find((kpi) => kpi.metric === "traces")?.value;
+
+  expect(tracesKpi(userId)).toBe(visible.filter((trace) => trace.user_id === userId).length);
+  expect(tracesKpi(undefined)).toBe(visible.length);
+});

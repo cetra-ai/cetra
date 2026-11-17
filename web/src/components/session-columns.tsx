@@ -15,20 +15,14 @@ import type { Schema } from "@/api/types";
 import type { ColumnSpec } from "@/components/data-table/column-layout";
 import type { DataTableColumn } from "@/components/data-table/data-table";
 import { LazyTooltip } from "@/components/lazy-tooltip";
+import { RelativeTime } from "@/components/relative-time";
 import { ScoreBadge } from "@/components/score-badge";
 import { TimeText } from "@/components/time-text";
 import { formatScore, Preview } from "@/components/trace-columns";
 import { Badge } from "@/components/ui/badge";
 import { BarCell } from "@/components/user/bar-cell";
-import {
-  formatCost,
-  formatDuration,
-  formatRelative,
-  formatTimestamp,
-  formatTokens,
-} from "@/lib/format";
+import { formatCost, formatDuration, formatTokens } from "@/lib/format";
 import { SESSION_COLUMN_IDS, type SessionColumnId } from "@/lib/search/sessions";
-import { useTimeZone } from "@/lib/settings";
 
 const HIDDEN = new Set<SessionColumnId>(["tags", "last_answer"]);
 
@@ -244,21 +238,6 @@ function sessionColumnDefs(
   ];
   const names = sessionScoreNames(rows);
   return [...fixed, ...names.map((name) => scoreColumn(name))];
-}
-
-/** A preview on one line; the full text shows on hover. */
-/** Relative time; the exact time in the user's zone is the tooltip. */
-function RelativeTime({ value }: { value: string }) {
-  const zone = useTimeZone();
-  return (
-    <time
-      dateTime={value}
-      title={formatTimestamp(value, zone, "datetime")}
-      className="tabular-nums"
-    >
-      {formatRelative(value, Date.now())}
-    </time>
-  );
 }
 
 function scoreColumn(name: string): DataTableColumn<Schema<"SessionSummary">> {

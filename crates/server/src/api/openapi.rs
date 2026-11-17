@@ -118,7 +118,9 @@ use super::traces::{
     TraceListParams, TraceSort, TraceStreamParams, TraceSummary,
 };
 use super::usage::{OrgUsage, UsageDay, UsageParams};
-use super::users::{EndUserDetail, EndUserSummary, UserListParams, UserScore, UserSort};
+use super::users::{
+    EndUserDetail, EndUserSummary, UserDetailParams, UserListParams, UserScore, UserSort,
+};
 
 const PROJECT: &str = "/api/v1/projects/{project}";
 const COOKIE_NAME: &str = concat!(cetra_core::cetra_name!(), "_session");
@@ -2312,7 +2314,7 @@ fn session_paths(paths: PathsBuilder) -> PathsBuilder {
         .description(Some(format!(
             "{EXCLUSIONS} Sessions are the user's 100 most recent."
         )))
-        .parameters(Some(with_query::<ExclusionParams>(vec![
+        .parameters(Some(with_query::<UserDetailParams>(vec![
             project_param(),
             path_string("user_id", "End-user id."),
         ])))
