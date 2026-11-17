@@ -45,6 +45,33 @@ export default defineConfig({
                     { label: "Send OpenTelemetry", link: "/docs/get-started/opentelemetry/" },
                   ],
                 },
+                {
+                  label: "Concepts",
+                  items: [
+                    { label: "Data model", link: "/docs/concepts/data-model/" },
+                    { label: "How cetra works", link: "/docs/concepts/how-cetra-works/" },
+                    { label: "Semantic conventions", link: "/docs/concepts/conventions/" },
+                    { label: "Glossary", link: "/docs/concepts/glossary/" },
+                  ],
+                },
+                {
+                  label: "Tracing",
+                  items: [
+                    { label: "Traces", link: "/docs/tracing/traces/" },
+                    { label: "Sessions", link: "/docs/tracing/sessions/" },
+                    { label: "Users", link: "/docs/tracing/users/" },
+                    { label: "Metadata and tags", link: "/docs/tracing/metadata-and-tags/" },
+                    { label: "Filters and search", link: "/docs/tracing/filters-and-search/" },
+                    { label: "SQL console", link: "/docs/tracing/sql-console/" },
+                    { label: "Dashboard", link: "/docs/tracing/dashboard/" },
+                    { label: "Cost and tokens", link: "/docs/tracing/cost-and-tokens/" },
+                    { label: "Media", link: "/docs/tracing/media/" },
+                    {
+                      label: "Masking, sampling and truncation",
+                      link: "/docs/tracing/privacy-controls/",
+                    },
+                  ],
+                },
               ],
             },
             {
@@ -100,6 +127,9 @@ export default defineConfig({
                 },
                 { label: "OTLP endpoint", link: "/docs/reference/otlp/" },
                 { label: "CLI", link: "/docs/reference/cli/" },
+                { label: "Span attributes", link: "/docs/reference/attributes/" },
+                { label: "Filter language", link: "/docs/reference/filter-language/" },
+                { label: "SQL schema", link: "/docs/reference/sql-schema/" },
               ],
             },
           ],

@@ -1,0 +1,120 @@
+---
+title: Cost and tokens
+description: See where token counts and costs come from, how cetra computes a cost, and how to set prices for your own models.
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+Use this page to learn how cetra fills in the token counts and the cost of a model call, and how to correct them.
+
+cetra records tokens and cost on `llm` and `embedding` spans only. A parent span, such as a chain, shows no tokens of its own. A trace adds up the spans below it.
+
+## Token counts
+
+cetra reads token counts from the attributes of each convention, and stores five counts per span: input, output, cache read, cache write and reasoning, plus a total. The [span attributes](/docs/reference/attributes/) page lists the names.
+
+Counts follow OpenTelemetry's meaning:
+
+- **Input tokens** include the cached tokens.
+- **Output tokens** include the reasoning tokens.
+
+Some sources count differently, for example when a library reports the cache separately. cetra adds the cache or the reasoning back, so the stored counts mean the same whatever sent them. The total is the total the span reports, or input plus output.
+
+## Reported cost and computed cost
+
+Each span shows where its cost came from:
+
+- **Reported.** Your code or your instrumentation sent a cost, and cetra keeps it. It never replaces it with a price table figure.
+- **Computed.** cetra multiplied the token counts by a price.
+- **None.** cetra found no price, or the span has no token counts.
+
+To report a cost yourself:
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* test */}
+```python
+import cetra
+
+cetra.init()
+
+with cetra.llm_span(
+    "chat",
+    provider="acme",
+    model="acme-1",
+    input_messages=[{"role": "user", "content": "hi"}],
+) as s:
+    s.set_output_messages([{"role": "assistant", "content": "hello"}])
+    s.set_usage(input_tokens=12, output_tokens=3)
+    s.set_cost(total_usd=0.0004)
+
+cetra.flush()
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+{/* untested: the imports line is part of the example below */}
+```ts
+import { withLlmSpan } from "@cetra-ai/sdk";
+```
+
+{/* example:with-llm-span */}
+```ts
+withLlmSpan(
+  "chat",
+  {
+    provider: "openai",
+    model: "gpt-4o-mini",
+    inputMessages: [{ role: "user", content: "hi" }],
+    params: { temperature: 0.2 },
+  },
+  (span) => {
+    span.setOutputMessages([{ role: "assistant", content: "hello" }]);
+    span.setUsage({ inputTokens: 12, outputTokens: 3 });
+  },
+);
+```
+
+Call `span.setCost(totalUsd)` on the handle to report a cost.
+
+  </TabItem>
+  <TabItem label="Attributes">
+
+Set `cetra.cost.total` to the cost in USD. cetra also reads `llm.cost.total` and `gen_ai.usage.cost`, with the parts `llm.cost.prompt`, `llm.cost.completion`, `gen_ai.usage.input_cost` and `gen_ai.usage.output_cost`.
+
+  </TabItem>
+</Tabs>
+
+## How cetra computes a cost
+
+When a span has no reported cost, cetra looks for a price for its model and provider, as of the span's start time:
+
+1. It builds the list of prices that apply: your project's prices, then your organization's, then the built-in table that ships with cetra.
+2. A price applies when its model pattern matches the model name, ignoring case, its provider matches, and its start date is not after the span's start.
+3. The most specific wins: project over organization over built-in, then the latest start date, then the longest pattern.
+4. cetra prices uncached input, cache reads, cache writes, output and reasoning tokens separately, per million tokens. A price can have tiers for long inputs, chosen by the number of input tokens.
+
+Embedding spans use the input price only.
+
+If no price matches, the cost is empty and the UI shows a dash. cetra never shows zero for an unknown cost. A span whose token counts are missing also has no cost.
+
+cetra computes the cost once, when it receives the span. A change in prices does not change spans that are already stored.
+
+## Custom model prices
+
+Add prices for a model that cetra does not know, such as a fine-tuned or self-hosted model, or to override a built-in price.
+
+1. Open **Settings**, then **Models**, in the organization or in the project. An organization's prices apply to all its projects. A project's prices apply to that project only and win over the organization's.
+2. Select **Add price**.
+3. Enter the model name, a pattern that matches the model names your spans carry (a regular expression, matched against the whole name, ignoring case), and optionally a provider.
+4. Enter the prices per million tokens: input, output, and optionally cache read, cache write and reasoning.
+5. Set **Valid from**. The price applies only to spans that start at or after that time.
+6. Save.
+
+The Models page has a **Which price applies?** check: enter a model and a provider and it shows the price cetra would use. An organization or project can hold up to 500 prices. New prices apply to spans received after you save them.
+
+## Filter and query
+
+Filter on `cost_total > 0.10` or `total_tokens > 10000`. In SQL, `cost_source` tells you whether a span's cost was `reported`, `computed` or `none`. See the [SQL schema](/docs/reference/sql-schema/).

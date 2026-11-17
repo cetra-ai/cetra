@@ -295,4 +295,61 @@ mod tests {
         assert!(marker::TRUNCATED_MESSAGES_PREFIX.contains(PRODUCT));
         assert!(marker::MAX_DEPTH.contains(PRODUCT));
     }
+
+    /// A new attribute constant joins this list and the site's attribute page (D-W-7).
+    const ATTRIBUTES: &[&str] = &[
+        attr::SPAN_KIND,
+        attr::INPUT,
+        attr::INPUT_FORMAT,
+        attr::OUTPUT,
+        attr::OUTPUT_FORMAT,
+        attr::SESSION_ID,
+        attr::USER_ID,
+        attr::TAGS,
+        attr::METADATA_PREFIX,
+        attr::ENVIRONMENT,
+        attr::RELEASE,
+        attr::TTFT_NS,
+        attr::COST_TOTAL,
+        attr::EXPERIMENT_ID,
+        attr::DATASET_ITEM_ID,
+        metadata_key::EXPERIMENT_ID,
+        metadata_key::DATASET_ITEM_ID,
+        metadata_key::EVAL_TARGET_TRACE_ID,
+        metadata_key::EVAL_TARGET_SPAN_ID,
+        metadata_key::EVAL_RULE_ID,
+        metadata_key::EVAL_EXPERIMENT_ID,
+        metadata_key::EVAL_EVALUATOR_ID,
+        metadata_key::NORMALIZE_ERROR,
+        metadata_key::NORMALIZE_WARNING,
+    ];
+
+    #[test]
+    fn the_attribute_reference_names_every_cetra_attribute() {
+        let page = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../website/src/content/docs/docs/reference/attributes.md"
+        ));
+        // Every `cetra.`-prefixed attribute written in backticks on the page.
+        let documented: std::collections::BTreeSet<&str> = page
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|token| token.starts_with("cetra."))
+            .collect();
+        // A prefix constant is written with a `<key>` placeholder.
+        let expected: std::collections::BTreeSet<String> = ATTRIBUTES
+            .iter()
+            .map(|name| {
+                if name.ends_with('.') {
+                    format!("{name}<key>")
+                } else {
+                    (*name).to_owned()
+                }
+            })
+            .collect();
+        let expected: std::collections::BTreeSet<&str> =
+            expected.iter().map(String::as_str).collect();
+        assert_eq!(documented, expected);
+    }
 }

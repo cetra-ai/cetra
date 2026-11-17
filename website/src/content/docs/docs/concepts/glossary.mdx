@@ -1,0 +1,29 @@
+---
+title: Glossary
+description: The terms used in the cetra documentation and in the UI, in alphabetical order.
+---
+
+Use this page to look up a term.
+
+| Term | Meaning |
+|---|---|
+| API key | A key that starts with `sk-cetra-`. It lets your code send spans and call the API for one project. |
+| Dataset | A versioned set of dataset items that you run experiments on. |
+| Dataset item | One entry of a dataset: an input and, optionally, an expected output. |
+| Environment | A label on spans, such as `production` or `staging`. It is a field, not a separate object. |
+| Evaluator | A check, an LLM judge or a webhook that produces a score for a trace or a span. |
+| Experiment | A run of your application over a dataset, recorded with one result and one trace per item, and compared with other experiments. |
+| LLM judge | An evaluator that asks a language model to score an output. |
+| Member | A person who signs in to cetra as part of an organization. |
+| Online rule | A rule that runs an evaluator on live traces that match a filter. |
+| Organization | The account that owns projects and has members. Also written org. |
+| OTLP | The OpenTelemetry protocol that SDKs and exporters use to send spans to cetra. |
+| Personal access token | A token that starts with `pat-cetra-`. It lets the CLI and the MCP server act as you. |
+| Project | The unit that holds your data: spans, scores, datasets, API keys and settings. |
+| Public key | A key that starts with `pk-cetra-`. It is safe to ship in a browser and is used to send feedback from users. |
+| Score | A value attached to a trace, a span or a session: a number, a boolean, a category or a text. |
+| Session | A group of traces that share a session ID, such as the turns of one chat. |
+| Span | One unit of work in a trace, such as a model call or a tool call. |
+| Span kind | The type of a span: `llm`, `embedding`, `tool`, `agent`, `chain`, `retriever`, `reranker`, `guardrail`, `evaluator` or `span`. |
+| Trace | All the spans that share a trace ID, shown as a tree. |
+| User | The end user of your application, identified by the user ID you set on spans. |

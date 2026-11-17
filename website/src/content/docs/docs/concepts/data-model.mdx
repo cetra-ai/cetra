@@ -1,0 +1,84 @@
+---
+title: Data model
+description: The objects cetra stores, how they relate, and how IDs and timestamps look.
+---
+
+Read this page to learn what a trace, a span, a session and the other objects in cetra are, and how they connect.
+
+## Overview
+
+Everything belongs to an organization. An organization holds projects, and a project holds your data.
+
+```text
+Organization
+└── Project
+    ├── Trace
+    │   └── Span (a tree: each span has a parent, except the root)
+    ├── Session   (the traces that share a session ID)
+    ├── User      (the traces that share a user ID)
+    ├── Score     (on a span, a trace or a session)
+    ├── Dataset
+    │   └── Dataset item
+    └── Experiment
+        └── Experiment result (one per dataset item)
+```
+
+Sessions and users are not objects you create. cetra builds them from the `session ID` and `user ID` that your spans carry.
+
+## Organizations, projects and environments
+
+An organization is the account that owns projects and has members. A project is the unit of data: its spans, scores, datasets, API keys and settings stay apart from every other project's. An API key sends data to one project.
+
+An environment is a label on your data, such as `production` or `staging`. It is a field on each span, not a separate object, so one project can hold several environments. You set it with `CETRA_ENVIRONMENT` or the `environment` option of the SDKs. Two names are reserved: `cetra-eval` marks the traces of evaluators, and `experiment` is the default for experiment runs. The UI hides both until you ask for them.
+
+## Traces and spans
+
+A span is one unit of work: a call to a model, a tool, a retrieval or a step of your own code. A span has a name, a start and end time, a status, an input and an output, and attributes. Spans form a tree: each span points to its parent. A trace is all the spans that share a trace ID. The span without a parent is the root.
+
+cetra builds the trace from its spans. You never send a trace by itself. A trace shows the name of its root span, its total duration, cost and token counts, and the sessions, users and tags found on its spans. If the root span never arrives, cetra uses the earliest span as the entry point.
+
+### Span kinds
+
+Each span has one kind. cetra reads it from the instrumentation, or from `cetra.span.kind`.
+
+| Kind | Meaning |
+|---|---|
+| `llm` | A call to a generative model. |
+| `embedding` | A call to an embedding model. |
+| `tool` | The run of a tool or function. |
+| `agent` | An agent invocation or loop. |
+| `chain` | A step of a pipeline. The default for spans you trace yourself. |
+| `retriever` | A retrieval from a vector store or a search. |
+| `reranker` | A reranking step. |
+| `guardrail` | A guardrail check. |
+| `evaluator` | An evaluation step, including cetra's own judges. |
+| `span` | Anything else, such as an HTTP or database call. |
+
+Only `llm` and `embedding` spans carry token counts and cost. Totals on a trace add them up, so a parent span never counts them twice.
+
+## Sessions
+
+A session groups traces that belong together, such as the turns of one chat. Set the same session ID on each trace and cetra lists them as one session, in order, with the total cost, tokens and errors. See [Sessions](/docs/tracing/sessions/).
+
+## Users
+
+A user is the end user of your application, identified by the user ID you set. cetra lists each user with their traces, sessions and cost. See [Users](/docs/tracing/users/).
+
+## Scores
+
+A score is a value attached to a trace, a span or a session: a number, a boolean, a category or a text. People, your code, evaluators and LLM judges write scores. A score has a name, such as `helpful`, and a source that says who wrote it. Scores live apart from spans, so you can add one at any time.
+
+## Datasets and experiments
+
+A dataset is a versioned set of dataset items. Each item has an input and, optionally, an expected output. An experiment runs your application over a dataset and records one result per item, with the trace of the run and its scores. Comparing experiments shows how a change affects quality, cost and latency.
+
+## IDs and timestamps
+
+| Value | Format |
+|---|---|
+| Trace ID | 16 bytes, shown as 32 lowercase hex characters. |
+| Span ID | 8 bytes, shown as 16 lowercase hex characters. |
+| Other IDs (scores, datasets, experiments) | UUIDs. |
+| Time | Nanoseconds since the Unix epoch, in UTC. The API shows times as RFC 3339 strings with nine fractional digits, such as `2026-01-01T10:05:00.123456789Z`. |
+
+The UI shows times in your time zone. Hover a time to see the full UTC value.

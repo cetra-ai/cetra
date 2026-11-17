@@ -1,0 +1,45 @@
+---
+title: Filters and search
+description: Narrow the trace, span and session lists with the filter bar, full-text search and saved views.
+---
+
+Use the filter bar to keep only the rows you care about, and the search box to find text in inputs and outputs.
+
+## The filter bar
+
+The filter bar is above each list. It holds one text: a condition written in the [filter language](/docs/reference/filter-language/), the same as the text after `WHERE` in SQL. As you type, the bar suggests column names. A simple condition such as `status = 'error'` becomes a chip that you can edit or remove.
+
+If the filter is wrong, the bar underlines the problem and shows the message. cetra never applies a broken filter.
+
+Here are a few filters:
+
+| Filter | Finds |
+|---|---|
+| `status = 'error'` | Traces with at least one error. |
+| `cost_total > 0.10 AND tags @> ['beta']` | Costly traces that carry the tag `beta`. |
+| `metadata['customer'] = 'acme' AND duration_ms > 5000` | Slow traces for one customer. |
+| `score('hallucination') >= 0.5` | Traces whose latest `hallucination` score is high. |
+
+Each list reads one view: `traces`, `spans` or `sessions`. A filter can use the columns of that view. See the [SQL schema](/docs/reference/sql-schema/).
+
+Lists hide evaluation traces and experiment traces. A filter that names `environment` shows evaluation traces. The two toggles in the header show them or hide them.
+
+## Time range
+
+Every list has a time range. Pick a preset, or enter your own start and end. You can also type a duration, such as `2h`, which becomes an absolute range. The filter applies inside the range.
+
+## Search
+
+The search box finds text in the `input`, `output` and `name` of spans, and in their system instructions. It ignores case. You type the text as it is: cetra escapes the characters that would act as wildcards. On the trace list, a trace matches when any of its spans matches.
+
+Search reads the stored payloads, so it needs a time range. Keep the range short for the fastest results. For a pattern, use `ILIKE` in the filter bar, for example `input ILIKE '%refund%'` on the spans list.
+
+## Saved views
+
+Everything on a list page is in its URL: the range, filter, search, sort and columns. A saved view stores that state under a name.
+
+Open the **Views** menu to save the current state, to save a copy under another name, or to rename or delete a view. A view is private to you, or shared with the project. Mark a view as your default and cetra applies it when you open the list with no other settings. A dot shows when the current state differs from the loaded view.
+
+## Click to filter
+
+Selecting a value in a list, for example a model name, adds it to the filter. Selecting a point on a dashboard chart opens the trace list filtered to that period.

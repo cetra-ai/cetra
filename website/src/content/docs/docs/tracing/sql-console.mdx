@@ -1,0 +1,99 @@
+---
+title: SQL console
+description: Query your traces, spans, sessions and scores with SQL, save queries, export results and run them from the CLI.
+---
+
+Use the SQL console when a filter is not enough: to aggregate, join or export your data.
+
+Select **SQL** in the sidebar. The console has an editor with autocomplete from the schema, a results grid with a chart tab, and a schema browser at the side. Press `⌘↵` (or `Ctrl+Enter`) to run the query.
+
+## The tables
+
+You query views of your project's data: `spans`, `traces`, `sessions`, `scores`, `experiment_items` and `dataset_items`. Write their names without a prefix. See the [SQL schema](/docs/reference/sql-schema/) for every column.
+
+The console shows raw data. Unlike the lists, it does not hide evaluation traces or experiment traces. Filter them out yourself with `environment`.
+
+## Examples
+
+The **Examples** menu holds ready-made queries. Three of them:
+
+Cost per model per day:
+
+```sql
+SELECT date_trunc('day', start_time) AS day, model, sum(cost_total) AS cost
+FROM spans
+WHERE span_kind = 'llm' AND model IS NOT NULL
+GROUP BY day, model
+ORDER BY day, cost DESC
+```
+
+Latency percentiles of model calls, per model:
+
+```sql
+SELECT model,
+  approx_percentile_cont(duration_ms, 0.5) AS p50_ms,
+  approx_percentile_cont(duration_ms, 0.95) AS p95_ms,
+  approx_percentile_cont(duration_ms, 0.99) AS p99_ms,
+  count(*) AS calls
+FROM spans
+WHERE span_kind = 'llm' AND model IS NOT NULL
+GROUP BY model
+ORDER BY calls DESC
+```
+
+Users by spend:
+
+```sql
+SELECT user_id, count(*) AS traces, sum(cost_total) AS cost
+FROM traces
+WHERE user_id IS NOT NULL
+GROUP BY user_id
+ORDER BY cost DESC
+LIMIT 50
+```
+
+## Parameters
+
+Write a parameter as `{name:Type}`, where the type is `String`, `Int`, `Float`, `Bool` or `Timestamp`. The console asks for a value for each one. A `Timestamp` takes an RFC 3339 time or epoch milliseconds.
+
+```sql
+SELECT trace_id, name, cost_total
+FROM traces
+WHERE user_id = {user:String} AND cost_total > {min_cost:Float}
+ORDER BY cost_total DESC
+```
+
+## Time range
+
+The range picker sets the period that every query reads, for `spans`, `traces` and `scores`. Keep it as short as you can. Without a range, a query reads all the history your plan allows.
+
+## Limits
+
+The console runs read-only queries in a sandbox:
+
+- One statement per run: a `SELECT`, `WITH`, `VALUES`, a set operation, or `EXPLAIN` of one of them. Statements that change data or settings are refused.
+- Queries are limited in size and in the number of tables they read.
+- A query that runs too long is stopped, and so is one that needs more memory than the server allows. The error says which.
+- A result holds at most 10,000 rows. When more rows match, the result is marked as truncated. Exports are not capped at that figure.
+- Some functions are not available, such as those that can build very large values (`generate_series`, `repeat`, `replace`).
+
+Errors show in the console with the position of the problem.
+
+## Saved queries and history
+
+Save a query with its parameters and range. A saved query is private to you or shared with the project. The console also keeps your last 50 runs in your browser.
+
+## Export
+
+Export a result as CSV, NDJSON or Parquet. In CSV, a cell that starts with `=`, `+`, `-` or `@` gets a leading `'`, so a spreadsheet does not run it as a formula.
+
+## From the command line
+
+`cetra query` runs the same SQL against a running server and prints a table, JSON, CSV, NDJSON or Parquet.
+
+```bash
+cetra query --project acme/demo --since 24h \
+  "SELECT model, count(*) AS calls FROM spans WHERE span_kind = 'llm' GROUP BY model"
+```
+
+See the [CLI reference](/docs/reference/cli/).
