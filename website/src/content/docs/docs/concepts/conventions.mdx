@@ -12,13 +12,13 @@ Instrumentation libraries describe an LLM call with attributes, and they do not 
 | Convention | cetra recognizes it by | What cetra reads |
 |---|---|---|
 | cetra | any attribute starting with `cetra.` | Kind, input, output, session, user, tags, metadata, environment, release, time to first token, cost |
-| OpenTelemetry GenAI | `gen_ai.*` attributes, or events named `gen_ai.*` | Operation, models, provider, messages, system instructions, tool definitions, token counts, finish reasons, conversation ID |
-| OpenInference | `openinference.span.kind`, or `llm.*`, `input.value`, `output.value`, `embedding.*`, `retrieval.*`, `tool.*` | Kind, models, input and output messages, tool definitions, token counts, cost, session, user |
-| Vercel AI SDK | `ai.*` attributes | Operation, models, prompt, response, tool calls, token counts, telemetry metadata |
-| OpenLLMetry | `traceloop.*`, or `gen_ai.prompt.N.*` and `gen_ai.completion.N.*` | Kind, prompt and completion messages, entity input and output, association properties |
-| Langfuse | `langfuse.*` attributes | Observation type, input, output, model, usage, cost, session, user, tags, metadata |
-| Laminar | `lmnr.*` attributes | Span type, input, output, association properties |
-| Google ADK | `gcp.vertex.agent.*` attributes | Request, response, tool calls, session |
+| [OpenTelemetry GenAI](/docs/integrations/opentelemetry-genai/) | `gen_ai.*` attributes, or events named `gen_ai.*` | Operation, models, provider, messages, system instructions, tool definitions, token counts, finish reasons, conversation ID |
+| [OpenInference](/docs/integrations/openinference/) | `openinference.span.kind`, or `llm.*`, `input.value`, `output.value`, `embedding.*`, `retrieval.*`, `tool.*` | Kind, models, input and output messages, tool definitions, token counts, cost, session, user |
+| [Vercel AI SDK](/docs/integrations/vercel-ai-sdk/) | `ai.*` attributes | Operation, models, prompt, response, tool calls, token counts, telemetry metadata |
+| [OpenLLMetry](/docs/integrations/openllmetry/) | `traceloop.*`, or `gen_ai.prompt.N.*` and `gen_ai.completion.N.*` | Kind, prompt and completion messages, entity input and output, association properties |
+| [Langfuse](/docs/integrations/from-langfuse/) | `langfuse.*` attributes | Observation type, input, output, model, usage, cost, session, user, tags, metadata |
+| [Laminar](/docs/integrations/from-laminar/) | `lmnr.*` attributes | Span type, input, output, association properties |
+| [Google ADK](/docs/integrations/google-adk/) | `gcp.vertex.agent.*` attributes | Request, response, tool calls, session |
 
 [Span attributes](/docs/reference/attributes/) lists every attribute and the field it feeds.
 

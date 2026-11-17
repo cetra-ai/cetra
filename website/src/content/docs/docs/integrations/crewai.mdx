@@ -1,0 +1,42 @@
+---
+title: CrewAI
+description: "Trace CrewAI with cetra from Python, with the OpenInference CrewAI instrumentation."
+---
+
+import Backing from "../../../../components/Backing.astro";
+
+cetra can trace CrewAI crews, agents, tasks and tool uses from Python through the OpenInference CrewAI instrumentation.
+
+<Backing tests={["sdks/python/tests/test_instrument.py::test_other_registry_entries_import[crewai]"]} />
+
+## Install
+
+```bash
+pip install "cetra-sdk[crewai]" crewai
+```
+
+## Set up
+
+{/* untested: needs cetra-sdk[crewai] and a model key */}
+```python
+import cetra
+
+cetra.init(instrument=["crewai"])
+
+# Build and run your crew as usual. CrewAI runs are traced from here on.
+```
+
+## What you get
+
+cetra reads the spans of the OpenInference CrewAI instrumentation with the OpenInference convention. See [Semantic conventions](/docs/concepts/conventions/).
+
+## Limits
+
+- No captured spans of this instrumentation are in the repository. The only check is an SDK test that imports the instrumentor when the extra is installed. This page does not say which CrewAI operations are traced.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Online rules](/docs/evaluation/online-rules/): score these traces automatically.

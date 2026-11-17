@@ -142,6 +142,54 @@ export default defineConfig({
               ],
             },
             {
+              label: "Integrations",
+              link: "/docs/integrations/",
+              icon: "puzzle",
+              items: [
+                { label: "All integrations", link: "/docs/integrations/" },
+                {
+                  label: "Providers",
+                  items: [
+                    { label: "OpenAI", link: "/docs/integrations/openai/" },
+                    { label: "Anthropic", link: "/docs/integrations/anthropic/" },
+                    { label: "Google Gen AI", link: "/docs/integrations/google-genai/" },
+                    { label: "Amazon Bedrock", link: "/docs/integrations/bedrock/" },
+                    { label: "LiteLLM", link: "/docs/integrations/litellm/" },
+                  ],
+                },
+                {
+                  label: "Frameworks",
+                  items: [
+                    { label: "LangChain and LangGraph", link: "/docs/integrations/langchain/" },
+                    { label: "LlamaIndex", link: "/docs/integrations/llama-index/" },
+                    { label: "Vercel AI SDK", link: "/docs/integrations/vercel-ai-sdk/" },
+                    { label: "OpenAI Agents SDK", link: "/docs/integrations/openai-agents/" },
+                    { label: "CrewAI", link: "/docs/integrations/crewai/" },
+                    { label: "DSPy", link: "/docs/integrations/dspy/" },
+                    { label: "Google ADK", link: "/docs/integrations/google-adk/" },
+                  ],
+                },
+                {
+                  label: "Instrumentation libraries",
+                  items: [
+                    { label: "OpenInference", link: "/docs/integrations/openinference/" },
+                    { label: "OpenLLMetry", link: "/docs/integrations/openllmetry/" },
+                    {
+                      label: "OpenTelemetry GenAI",
+                      link: "/docs/integrations/opentelemetry-genai/",
+                    },
+                  ],
+                },
+                {
+                  label: "Migrating",
+                  items: [
+                    { label: "From Langfuse", link: "/docs/integrations/from-langfuse/" },
+                    { label: "From Laminar", link: "/docs/integrations/from-laminar/" },
+                  ],
+                },
+              ],
+            },
+            {
               label: "Reference",
               id: "reference",
               link: "/docs/reference/",
