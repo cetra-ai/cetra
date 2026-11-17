@@ -702,6 +702,17 @@
     "file": "responses/datasets/01900000-0000-7000-8000-000000000c01/items.json"
   },
   {
+    "operation_id": "list_dataset_version_changes",
+    "path_params": {
+      "dataset": "01900000-0000-7000-8000-000000000c01",
+      "version": "2"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/datasets/01900000-0000-7000-8000-000000000c01/versions/2/changes.json"
+  },
+  {
     "operation_id": "list_dataset_versions",
     "path_params": {
       "dataset": "01900000-0000-7000-8000-000000000c01"
@@ -760,6 +771,16 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/evaluators.json"
+  },
+  {
+    "operation_id": "list_experiment_trends",
+    "path_params": {},
+    "query": {
+      "ids": "01900000-0000-7000-8000-000000000c01"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/dataset-trends.json"
   },
   {
     "operation_id": "list_experiments",
@@ -964,6 +985,16 @@
     "file": "responses/users.json"
   },
   {
+    "operation_id": "patch_dataset_items",
+    "path_params": {
+      "dataset": "01900000-0000-7000-8000-000000000c01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/dataset-items-edited.json"
+  },
+  {
     "operation_id": "post_admin_user",
     "path_params": {},
     "query": {},
@@ -1038,6 +1069,26 @@
     "status": 201,
     "content_type": "application/json",
     "file": "static/dataset-item-from-trace.json"
+  },
+  {
+    "operation_id": "post_dataset_items_delete",
+    "path_params": {
+      "dataset": "01900000-0000-7000-8000-000000000c01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/dataset-items-deleted.json"
+  },
+  {
+    "operation_id": "post_dataset_items_from_traces",
+    "path_params": {
+      "dataset": "01900000-0000-7000-8000-000000000c01"
+    },
+    "query": {},
+    "status": 201,
+    "content_type": "application/json",
+    "file": "static/dataset-items-from-traces.json"
   },
   {
     "operation_id": "post_evaluator",
@@ -1196,6 +1247,16 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/model-price-resolution.json"
+  },
+  {
+    "operation_id": "restore_dataset",
+    "path_params": {
+      "dataset": "01900000-0000-7000-8000-000000000c01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/dataset-restored.json"
   },
   {
     "operation_id": "run_sql",

@@ -1,6 +1,7 @@
 //! Dataset routes (spec 09 § Datasets & experiments, D-J-2 to D-J-5). Project readers list and
 //! read; `ManageDatasets` writes (member and above, a `write` key, a read-write token).
 
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::future::Future;
 use std::io;
@@ -12,8 +13,10 @@ use axum::extract::{DefaultBodyLimit, Extension, Multipart, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
+use cetra_core::ids::OrgId;
 use cetra_core::ids::{ProjectId, SpanId, TraceId};
 use cetra_eval::{TraceData, VariableMapping, resolve};
+use cetra_storage::RunError;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sqlx::{SqliteConnection, SqlitePool};
@@ -23,11 +26,15 @@ use uuid::Uuid;
 use crate::api::common::{FieldError, Page};
 use crate::api::datasets::{
     AddItemsRequest, AddItemsResponse, CreateDatasetRequest, Dataset, DatasetItem,
-    DatasetItemListParams, DatasetItemParams, DatasetListParams, DatasetVersion,
-    DatasetVersionListParams, ExportFormat, ExportParams, FromTraceRequest, ImportFormat,
-    ImportMapping, ImportParams, ImportPreview, ImportResult, ImportRowError, NewDatasetItem,
-    PreviewParams, UpdateDatasetRequest, UpdateItemRequest,
+    DatasetItemListParams, DatasetItemParams, DatasetListParams, DatasetTrend, DatasetVersion,
+    DatasetVersionListParams, DeleteItemsRequest, EditItemsRequest, EditItemsResponse,
+    ExperimentScoreMean, ExperimentTrend, ExperimentTrendParams, ExperimentTrends, ExportFormat,
+    ExportParams, FromTraceRequest, FromTracesRequest, FromTracesResult, ImportFormat,
+    ImportMapping, ImportParams, ImportPreview, ImportResult, ImportRowError, ItemChange,
+    ItemChangeKind, ItemChangeListParams, NewDatasetItem, PreviewParams, RestoreRequest,
+    SkippedTrace, UpdateDatasetRequest, UpdateItemRequest,
 };
+use crate::api::experiments::CLOCK_SKEW_NS;
 use crate::auth::principal::Principal;
 use crate::auth::roles::ProjectPerm;
 use crate::datasets::import::{self, FileError};
@@ -38,19 +45,25 @@ use crate::datasets::{
 use crate::entitlements::Visibility;
 use crate::eval::execute;
 use crate::eval::trace_load::{self, LoadError, LoadedTrace};
+use crate::experiments::visible_from;
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
 use crate::meta::MetaError;
 use crate::meta::datasets as store;
 use crate::meta::datasets::{
-    DatasetFields, DatasetKey, DatasetRow, ItemRow, NewRevision, VersionChange,
+    DatasetFields, DatasetKey, DatasetRow, ItemRow, NewRevision, VersionChange, VersionCounts,
 };
+use crate::meta::experiments as experiment_store;
 
 use super::orgs::page_named;
+use super::read::{Deadline, open_query};
 
 /// Bodies of dataset create and update: a name, a description and two schemas of ≤ 64 KiB.
 const DATASET_BODY_LIMIT: usize = 256 * 1024;
+
+/// Items read per page by a restore (D-J-24).
+const RESTORE_PAGE: u32 = 1_000;
 
 /// A batch add: up to 1 000 items of at most 1 MiB, within 16 MiB (D-J-4).
 const ITEMS_BODY_LIMIT: usize = 16 * 1024 * 1024;
@@ -107,6 +120,16 @@ pub(crate) fn routes() -> Vec<RouteDef> {
         },
         RouteDef {
             method: Method::GET,
+            path: "/api/v1/projects/{project}/dataset-trends",
+            access: Access::Project {
+                perm: ProjectPerm::View,
+                session_only: false,
+            },
+            documented: true,
+            handler: get(experiment_trends),
+        },
+        RouteDef {
+            method: Method::GET,
             path: "/api/v1/projects/{project}/datasets/{dataset}",
             access: Access::Project {
                 perm: ProjectPerm::View,
@@ -147,6 +170,16 @@ pub(crate) fn routes() -> Vec<RouteDef> {
         },
         RouteDef {
             method: Method::GET,
+            path: "/api/v1/projects/{project}/datasets/{dataset}/versions/{version}/changes",
+            access: Access::Project {
+                perm: ProjectPerm::View,
+                session_only: false,
+            },
+            documented: true,
+            handler: get(list_changes),
+        },
+        RouteDef {
+            method: Method::GET,
             path: "/api/v1/projects/{project}/datasets/{dataset}/items",
             access: Access::Project {
                 perm: ProjectPerm::View,
@@ -164,6 +197,46 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             },
             documented: true,
             handler: post(add_items).layer(DefaultBodyLimit::max(ITEMS_BODY_LIMIT)),
+        },
+        RouteDef {
+            method: Method::PATCH,
+            path: "/api/v1/projects/{project}/datasets/{dataset}/items",
+            access: Access::Project {
+                perm: ProjectPerm::ManageDatasets,
+                session_only: false,
+            },
+            documented: true,
+            handler: patch(edit_items).layer(DefaultBodyLimit::max(ITEMS_BODY_LIMIT)),
+        },
+        RouteDef {
+            method: Method::POST,
+            path: "/api/v1/projects/{project}/datasets/{dataset}/items/from-traces",
+            access: Access::Project {
+                perm: ProjectPerm::ManageDatasets,
+                session_only: false,
+            },
+            documented: true,
+            handler: post(add_from_traces).layer(DefaultBodyLimit::max(DATASET_BODY_LIMIT)),
+        },
+        RouteDef {
+            method: Method::POST,
+            path: "/api/v1/projects/{project}/datasets/{dataset}/restore",
+            access: Access::Project {
+                perm: ProjectPerm::ManageDatasets,
+                session_only: false,
+            },
+            documented: true,
+            handler: post(restore_version).layer(DefaultBodyLimit::max(DATASET_BODY_LIMIT)),
+        },
+        RouteDef {
+            method: Method::POST,
+            path: "/api/v1/projects/{project}/datasets/{dataset}/items/delete",
+            access: Access::Project {
+                perm: ProjectPerm::ManageDatasets,
+                session_only: false,
+            },
+            documented: true,
+            handler: post(delete_items).layer(DefaultBodyLimit::max(DATASET_BODY_LIMIT)),
         },
         RouteDef {
             method: Method::GET,
@@ -242,6 +315,13 @@ pub(crate) fn routes() -> Vec<RouteDef> {
 #[derive(Debug, Deserialize)]
 pub(crate) struct DatasetPath {
     pub(crate) dataset: String,
+}
+
+/// The `{dataset}` and `{version}` segments of a version route.
+#[derive(Debug, Deserialize)]
+pub(crate) struct VersionPath {
+    pub(crate) dataset: String,
+    pub(crate) version: i64,
 }
 
 /// The `{dataset}` and `{item_id}` segments of an item route.
@@ -720,9 +800,68 @@ async fn list_versions(
             description: version.description,
             created_by: version.created_by,
             created_at: version.created_at,
+            added: version.counts.added,
+            edited: version.counts.edited,
+            deleted: version.counts.deleted,
         })
         .collect();
     Ok(error::Json(Page { data, next_cursor }))
+}
+
+/// `GET …/versions/{version}/changes` (D-J-24): the items the version changed, paged by item id.
+/// A version outside 1 to the current one is 404.
+async fn list_changes(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(VersionPath { dataset, version }): error::Path<VersionPath>,
+    error::Query(params): error::Query<ItemChangeListParams>,
+) -> Result<error::Json<Page<ItemChange>>, ApiError> {
+    let row = find(&state, access.project.id, &dataset).await?;
+    if !(1..=row.current_version).contains(&version) {
+        return Err(ApiError::NotFound);
+    }
+    let after = match params.cursor.as_deref() {
+        None => None,
+        Some(cursor) => Some(cursor.parse::<Uuid>().map_err(|_| invalid_cursor())?),
+    };
+    let limit = params.limit.get();
+    let mut changes =
+        store::list_changes(state.meta.reader(), row.id, version, after, limit).await?;
+    let more = changes.len() > limit as usize;
+    changes.truncate(limit as usize);
+    let next_cursor = if more {
+        changes.last().map(|last| last.item_id.to_string())
+    } else {
+        None
+    };
+    let data = changes
+        .iter()
+        .map(|change| ItemChange {
+            item_id: change.item_id,
+            change: match (&change.before, &change.after) {
+                (None, _) => ItemChangeKind::Added,
+                (Some(_), None) => ItemChangeKind::Deleted,
+                (Some(_), Some(_)) => ItemChangeKind::Edited,
+            },
+            before: change.before.as_ref().map(item_json),
+            after: change.after.as_ref().map(item_json),
+        })
+        .collect();
+    Ok(error::Json(Page { data, next_cursor }))
+}
+
+/// The trimmed search text of an item list: 1 to 200 characters (D-J-22).
+fn check_search(q: &str) -> Result<String, ApiError> {
+    let trimmed = q.trim();
+    let length = trimmed.chars().count();
+    if (1..=200).contains(&length) {
+        Ok(trimmed.to_owned())
+    } else {
+        Err(bad_request(vec![field_error(
+            "q",
+            "must be 1 to 200 characters",
+        )]))
+    }
 }
 
 async fn list_items(
@@ -737,8 +876,20 @@ async fn list_items(
         None => None,
         Some(cursor) => Some(cursor.parse::<Uuid>().map_err(|_| invalid_cursor())?),
     };
+    let needle = match params.q.as_deref() {
+        None => None,
+        Some(q) => Some(check_search(q)?),
+    };
     let limit = params.limit.get();
-    let mut items = store::list_items(state.meta.reader(), row.id, version, after, limit).await?;
+    let mut items = store::list_items(
+        state.meta.reader(),
+        row.id,
+        version,
+        after,
+        limit,
+        needle.as_deref(),
+    )
+    .await?;
     let more = items.len() > limit as usize;
     items.truncate(limit as usize);
     let next_cursor = if more {
@@ -855,11 +1006,11 @@ async fn export_page(
         );
         io::Error::other("dataset export failed")
     };
-    let mut rows = match store::list_items(&pool, dataset, version, cursor.after, EXPORT_PAGE).await
-    {
-        Ok(rows) => rows,
-        Err(error) => return Err(fail(&error)),
-    };
+    let mut rows =
+        match store::list_items(&pool, dataset, version, cursor.after, EXPORT_PAGE, None).await {
+            Ok(rows) => rows,
+            Err(error) => return Err(fail(&error)),
+        };
     // The store returns one more row than asked when there is a next page.
     let more = rows.len() > EXPORT_PAGE as usize;
     rows.truncate(EXPORT_PAGE as usize);
@@ -1119,6 +1270,25 @@ async fn update_item(
     }
 }
 
+/// The values an edit makes of a live revision: the fields the patch sets replace the live ones.
+fn edited_values(live: &ItemRow, patch: ItemPatch) -> ItemValues {
+    ItemValues {
+        input: patch.input.unwrap_or_else(|| live.input.clone()),
+        expected_output: match patch.expected_output {
+            None => live.expected_output.clone(),
+            Some(value) => value,
+        },
+        metadata: patch.metadata.unwrap_or_else(|| live.metadata.clone()),
+    }
+}
+
+/// Whether `values` are the live revision's own (an edit that changes nothing writes no version).
+fn is_unchanged(live: &ItemRow, values: &ItemValues) -> bool {
+    values.input == live.input
+        && values.expected_output == live.expected_output
+        && values.metadata == live.metadata
+}
+
 /// The item edit's write transaction. A body that changes nothing writes no version and answers
 /// the live revision with `None` (D-J-3). Otherwise the live revision closes and its replacement
 /// is inserted in one new version, which is answered with the revision and the version; the
@@ -1138,18 +1308,8 @@ async fn update_item_tx(
     let Some(live) = store::get_live_item_tx(conn, row.id, item).await? else {
         return Ok(Err(WriteOutcome::NotFound));
     };
-    let values = ItemValues {
-        input: patch.input.unwrap_or_else(|| live.input.clone()),
-        expected_output: match patch.expected_output {
-            None => live.expected_output.clone(),
-            Some(value) => value,
-        },
-        metadata: patch.metadata.unwrap_or_else(|| live.metadata.clone()),
-    };
-    let unchanged = values.input == live.input
-        && values.expected_output == live.expected_output
-        && values.metadata == live.metadata;
-    if unchanged {
+    let values = edited_values(&live, patch);
+    if is_unchanged(&live, &values) {
         return Ok(Ok((live, None)));
     }
     let schemas = compiled_schemas(&row)?;
@@ -1238,6 +1398,7 @@ async fn delete_item_tx(
         description: description.clone(),
         created_by: created_by.clone(),
     };
+    let counts = VersionCounts::of_change(&change);
     let version = store::write_version(conn, row.id, change, now).await?;
     Ok(Some((
         row.id,
@@ -1246,7 +1407,472 @@ async fn delete_item_tx(
             description,
             created_by,
             created_at: now,
+            added: counts.added,
+            edited: counts.edited,
+            deleted: counts.deleted,
         },
+    )))
+}
+
+/// A batch must hold 1 to [`MAX_BATCH_ITEMS`] entries: a 400 on `field` (`noun` names them)
+/// when it does not.
+fn check_batch_len(len: usize, field: &str, noun: &str) -> Result<(), ApiError> {
+    if (1..=MAX_BATCH_ITEMS).contains(&len) {
+        Ok(())
+    } else {
+        Err(bad_request(vec![field_error(
+            field,
+            format!("must hold 1 to {MAX_BATCH_ITEMS} {noun}"),
+        )]))
+    }
+}
+
+/// One 400 per id that repeats an earlier id of the batch (D-J-23). Each entry pairs the field
+/// that names the id with the id.
+fn repeated_ids(ids: &[(String, Uuid)]) -> Vec<FieldError> {
+    let mut seen = HashSet::new();
+    ids.iter()
+        .filter(|(_, id)| !seen.insert(*id))
+        .map(|(field, _)| field_error(field, "appears more than once"))
+        .collect()
+}
+
+/// `error` with its field moved under `prefix` (`items[3]` makes `input` into `items[3].input`).
+fn prefixed(prefix: &str, error: FieldError) -> FieldError {
+    FieldError {
+        field: format!("{prefix}.{}", error.field),
+        ..error
+    }
+}
+
+/// `PATCH …/items` (D-J-23): edits of up to 1 000 live items in one new version. Every item is
+/// checked before anything is written; an item that changes nothing is left out.
+async fn edit_items(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(DatasetPath { dataset }): error::Path<DatasetPath>,
+    error::Json(body): error::Json<EditItemsRequest>,
+) -> Result<error::Json<EditItemsResponse>, ApiError> {
+    check_batch_len(body.items.len(), "items", "items")?;
+    let ids: Vec<(String, Uuid)> = body
+        .items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| (format!("items[{index}].id"), item.id))
+        .collect();
+    let mut errors = repeated_ids(&ids);
+    let mut patches = Vec::with_capacity(body.items.len());
+    for (index, item) in body.items.into_iter().enumerate() {
+        let id = item.id;
+        let request = UpdateItemRequest {
+            input: item.input,
+            expected_output: item.expected_output,
+            metadata: item.metadata,
+        };
+        match check_item_patch(request) {
+            Ok(patch) => patches.push((id, patch)),
+            Err(found) => errors.extend(
+                found
+                    .into_iter()
+                    .map(|error| prefixed(&format!("items[{index}]"), error)),
+            ),
+        }
+    }
+    if !errors.is_empty() {
+        errors.truncate(MAX_LISTED_ERRORS);
+        return Err(bad_request(errors));
+    }
+    let project = access.project.id;
+    let key = DatasetKey::parse(&dataset);
+    let now = state.clock.now_ns();
+    let actor = created_by(&principal);
+    let created_by = actor.clone();
+    let outcome = state
+        .meta
+        .write(move |conn| {
+            Box::pin(
+                async move { edit_items_tx(conn, project, key, patches, created_by, now).await },
+            )
+        })
+        .await?;
+    let (dataset_id, response, changed) = match outcome {
+        Ok(edited) => edited,
+        Err(WriteOutcome::NotFound) => return Err(ApiError::NotFound),
+        Err(WriteOutcome::Invalid(errors)) => return Err(bad_request(errors)),
+    };
+    if let Some(version) = &response.version {
+        tracing::info!(
+            target: "audit",
+            dataset_id = %dataset_id,
+            project_id = %project,
+            actor = %actor.as_deref().unwrap_or("-"),
+            count = changed,
+            version = version.version,
+            "dataset items edited"
+        );
+    }
+    Ok(error::Json(response))
+}
+
+/// The batch edit's write transaction. `patches` holds every request item in request order, each
+/// parsed, so the index of an item here is its index in the request. Answers the dataset's id,
+/// the response and the number of changed items.
+async fn edit_items_tx(
+    conn: &mut SqliteConnection,
+    project: ProjectId,
+    key: DatasetKey,
+    patches: Vec<(Uuid, ItemPatch)>,
+    created_by: Option<String>,
+    now: i64,
+) -> Result<Result<(Uuid, EditItemsResponse, usize), WriteOutcome>, MetaError> {
+    let Some(row) = store::get_dataset_tx(conn, project, &key).await? else {
+        return Ok(Err(WriteOutcome::NotFound));
+    };
+    let schemas = compiled_schemas(&row)?;
+    let ids: Vec<Uuid> = patches.iter().map(|(id, _)| *id).collect();
+    let mut errors = Vec::new();
+    let mut close = Vec::new();
+    let mut insert = Vec::new();
+    for (index, (item, patch)) in patches.into_iter().enumerate() {
+        let Some(live) = store::get_live_item_tx(conn, row.id, item).await? else {
+            errors.push(field_error(&format!("items[{index}].id"), "no such item"));
+            continue;
+        };
+        let values = edited_values(&live, patch);
+        if is_unchanged(&live, &values) {
+            continue;
+        }
+        errors.extend(check_item(&format!("items[{index}]"), &values, &schemas));
+        close.push(item);
+        insert.push(NewRevision {
+            revision_id: Uuid::now_v7(),
+            item_id: item,
+            input: values.input,
+            expected_output: values.expected_output,
+            metadata: values.metadata,
+            source_trace_id: live.source_trace_id,
+            source_span_id: live.source_span_id,
+        });
+    }
+    if !errors.is_empty() {
+        errors.truncate(MAX_LISTED_ERRORS);
+        return Ok(Err(WriteOutcome::Invalid(errors)));
+    }
+    let changed = close.len();
+    let version = if changed == 0 {
+        None
+    } else {
+        let description = match close.as_slice() {
+            [item] => format!("edit item {item}"),
+            _ => format!("edit {changed} items"),
+        };
+        let change = VersionChange {
+            close,
+            insert,
+            description: description.clone(),
+            created_by: created_by.clone(),
+        };
+        let counts = VersionCounts::of_change(&change);
+        let number = store::write_version(conn, row.id, change, now).await?;
+        Some(DatasetVersion {
+            version: number,
+            description,
+            created_by,
+            created_at: now,
+            added: counts.added,
+            edited: counts.edited,
+            deleted: counts.deleted,
+        })
+    };
+    let mut items = Vec::with_capacity(ids.len());
+    for item in ids {
+        let live =
+            store::get_live_item_tx(conn, row.id, item)
+                .await?
+                .ok_or(MetaError::Corrupt {
+                    table: "dataset_items",
+                    column: "item_id",
+                })?;
+        items.push(item_json(&live));
+    }
+    Ok(Ok((row.id, EditItemsResponse { version, items }, changed)))
+}
+
+/// `POST …/items/delete` (D-J-23): closes up to 1 000 live items in one new version.
+async fn delete_items(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(DatasetPath { dataset }): error::Path<DatasetPath>,
+    error::Json(body): error::Json<DeleteItemsRequest>,
+) -> Result<error::Json<DatasetVersion>, ApiError> {
+    check_batch_len(body.ids.len(), "ids", "ids")?;
+    let ids: Vec<(String, Uuid)> = body
+        .ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (format!("ids[{index}]"), *id))
+        .collect();
+    let errors = repeated_ids(&ids);
+    if !errors.is_empty() {
+        return Err(bad_request(errors));
+    }
+    let project = access.project.id;
+    let key = DatasetKey::parse(&dataset);
+    let now = state.clock.now_ns();
+    let actor = created_by(&principal);
+    let created_by = actor.clone();
+    let ids = body.ids;
+    let outcome = state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move { delete_items_tx(conn, project, key, ids, created_by, now).await })
+        })
+        .await?;
+    let (dataset_id, version, count) = match outcome {
+        Ok(deleted) => deleted,
+        Err(WriteOutcome::NotFound) => return Err(ApiError::NotFound),
+        Err(WriteOutcome::Invalid(errors)) => return Err(bad_request(errors)),
+    };
+    tracing::info!(
+        target: "audit",
+        dataset_id = %dataset_id,
+        project_id = %project,
+        actor = %actor.as_deref().unwrap_or("-"),
+        count,
+        version = version.version,
+        "dataset items deleted"
+    );
+    Ok(error::Json(version))
+}
+
+/// The batch delete's write transaction: every id must be a live item, or nothing is written.
+async fn delete_items_tx(
+    conn: &mut SqliteConnection,
+    project: ProjectId,
+    key: DatasetKey,
+    ids: Vec<Uuid>,
+    created_by: Option<String>,
+    now: i64,
+) -> Result<Result<(Uuid, DatasetVersion, usize), WriteOutcome>, MetaError> {
+    let Some(row) = store::get_dataset_tx(conn, project, &key).await? else {
+        return Ok(Err(WriteOutcome::NotFound));
+    };
+    let mut errors = Vec::new();
+    for (index, id) in ids.iter().enumerate() {
+        if store::get_live_item_tx(conn, row.id, *id).await?.is_none() {
+            errors.push(field_error(&format!("ids[{index}]"), "no such item"));
+        }
+    }
+    if !errors.is_empty() {
+        errors.truncate(MAX_LISTED_ERRORS);
+        return Ok(Err(WriteOutcome::Invalid(errors)));
+    }
+    let count = ids.len();
+    let description = match ids.as_slice() {
+        [item] => format!("delete item {item}"),
+        _ => format!("delete {count} items"),
+    };
+    let change = VersionChange {
+        close: ids,
+        insert: Vec::new(),
+        description: description.clone(),
+        created_by: created_by.clone(),
+    };
+    let counts = VersionCounts::of_change(&change);
+    let version = store::write_version(conn, row.id, change, now).await?;
+    Ok(Ok((
+        row.id,
+        DatasetVersion {
+            version,
+            description,
+            created_by,
+            created_at: now,
+            added: counts.added,
+            edited: counts.edited,
+            deleted: counts.deleted,
+        },
+        count,
+    )))
+}
+
+/// `POST …/restore` (D-J-24): makes the live items those of an earlier version, as one new
+/// version. Live items the version lacks, or holds a different revision of, are closed; items the
+/// version holds and the live set lacks, or holds differently, get a new revision copying its
+/// content and source ids under the same item id.
+async fn restore_version(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(DatasetPath { dataset }): error::Path<DatasetPath>,
+    error::Json(body): error::Json<RestoreRequest>,
+) -> Result<error::Json<DatasetVersion>, ApiError> {
+    let project = access.project.id;
+    let key = DatasetKey::parse(&dataset);
+    let now = state.clock.now_ns();
+    let actor = created_by(&principal);
+    let created_by = actor.clone();
+    let target = body.version;
+    let outcome = state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move { restore_tx(conn, project, key, target, created_by, now).await })
+        })
+        .await?;
+    let (dataset_id, version, changed) = match outcome {
+        Ok(restored) => restored,
+        Err(WriteOutcome::NotFound) => return Err(ApiError::NotFound),
+        Err(WriteOutcome::Invalid(errors)) => return Err(bad_request(errors)),
+    };
+    tracing::info!(
+        target: "audit",
+        dataset_id = %dataset_id,
+        project_id = %project,
+        actor = %actor.as_deref().unwrap_or("-"),
+        count = changed,
+        version = version.version,
+        restored_version = target,
+        "dataset restored"
+    );
+    Ok(error::Json(version))
+}
+
+/// One page of the items of `version` (`None`: the live items), inside a write transaction.
+async fn page_items_tx(
+    conn: &mut SqliteConnection,
+    dataset: Uuid,
+    version: Option<i64>,
+    after: Option<Uuid>,
+) -> Result<Vec<ItemRow>, MetaError> {
+    match version {
+        Some(version) => store::version_items_tx(conn, dataset, version, after, RESTORE_PAGE).await,
+        None => store::live_items_tx(conn, dataset, after, RESTORE_PAGE).await,
+    }
+}
+
+/// Every item of `version` (`None`: every live item), ordered by item id, read in pages.
+async fn all_items_tx(
+    conn: &mut SqliteConnection,
+    dataset: Uuid,
+    version: Option<i64>,
+) -> Result<Vec<ItemRow>, MetaError> {
+    let mut all = Vec::new();
+    let mut after = None;
+    loop {
+        let mut page = page_items_tx(conn, dataset, version, after).await?;
+        let more = page.len() > RESTORE_PAGE as usize;
+        page.truncate(RESTORE_PAGE as usize);
+        let Some(last) = page.last().map(|row| row.item_id) else {
+            break;
+        };
+        all.extend(page);
+        if !more {
+            break;
+        }
+        after = Some(last);
+    }
+    Ok(all)
+}
+
+/// The restore's write transaction (D-J-24). Answers the dataset id, the new version and the
+/// number of items it changed. A target outside the earlier versions, or one that changes
+/// nothing, is a 400 on `version` and writes nothing; a restored item that breaks the current
+/// schemas is a 400 on its `items[<id>]` field.
+async fn restore_tx(
+    conn: &mut SqliteConnection,
+    project: ProjectId,
+    key: DatasetKey,
+    target: i64,
+    created_by: Option<String>,
+    now: i64,
+) -> Result<Result<(Uuid, DatasetVersion, usize), WriteOutcome>, MetaError> {
+    let Some(row) = store::get_dataset_tx(conn, project, &key).await? else {
+        return Ok(Err(WriteOutcome::NotFound));
+    };
+    if !(0..row.current_version).contains(&target) {
+        return Ok(Err(WriteOutcome::Invalid(vec![field_error(
+            "version",
+            format!(
+                "must be an earlier version, 0 to {}",
+                row.current_version - 1
+            ),
+        )])));
+    }
+    let schemas = compiled_schemas(&row)?;
+    let live = all_items_tx(conn, row.id, None).await?;
+    let wanted = all_items_tx(conn, row.id, Some(target)).await?;
+    let live_revisions: HashMap<Uuid, Uuid> = live
+        .iter()
+        .map(|item| (item.item_id, item.revision_id))
+        .collect();
+    let wanted_revisions: HashMap<Uuid, Uuid> = wanted
+        .iter()
+        .map(|item| (item.item_id, item.revision_id))
+        .collect();
+    let close: Vec<Uuid> = live
+        .iter()
+        .filter(|item| wanted_revisions.get(&item.item_id) != Some(&item.revision_id))
+        .map(|item| item.item_id)
+        .collect();
+    let mut errors = Vec::new();
+    let mut insert = Vec::new();
+    for item in &wanted {
+        if live_revisions.get(&item.item_id) == Some(&item.revision_id) {
+            continue;
+        }
+        let values = ItemValues {
+            input: item.input.clone(),
+            expected_output: item.expected_output.clone(),
+            metadata: item.metadata.clone(),
+        };
+        errors.extend(check_item(
+            &format!("items[{}]", item.item_id),
+            &values,
+            &schemas,
+        ));
+        insert.push(NewRevision {
+            revision_id: Uuid::now_v7(),
+            item_id: item.item_id,
+            input: values.input,
+            expected_output: values.expected_output,
+            metadata: values.metadata,
+            source_trace_id: item.source_trace_id,
+            source_span_id: item.source_span_id,
+        });
+    }
+    if !errors.is_empty() {
+        errors.truncate(MAX_LISTED_ERRORS);
+        return Ok(Err(WriteOutcome::Invalid(errors)));
+    }
+    if close.is_empty() && insert.is_empty() {
+        return Ok(Err(WriteOutcome::Invalid(vec![field_error(
+            "version",
+            "the latest version already holds these items",
+        )])));
+    }
+    let description = format!("restore version {target}");
+    let change = VersionChange {
+        close,
+        insert,
+        description: description.clone(),
+        created_by: created_by.clone(),
+    };
+    let counts = VersionCounts::of_change(&change);
+    let number = store::write_version(conn, row.id, change, now).await?;
+    let changed = usize::try_from(counts.added + counts.edited + counts.deleted).unwrap_or(0);
+    Ok(Ok((
+        row.id,
+        DatasetVersion {
+            version: number,
+            description,
+            created_by,
+            created_at: now,
+            added: counts.added,
+            edited: counts.edited,
+            deleted: counts.deleted,
+        },
+        changed,
     )))
 }
 
@@ -1643,6 +2269,436 @@ async fn add_from_trace(
         .await?
         .ok_or(ApiError::NotFound)?;
     Ok((StatusCode::CREATED, error::Json(item_json(&row))))
+}
+
+/// The most datasets one trends request names (D-J-26).
+const MAX_TREND_DATASETS: usize = 100;
+/// Experiments per dataset in the trends answer (D-J-26).
+const TRENDS_PER_DATASET: u32 = 10;
+
+/// The dataset ids of a trends request: 1 to 100 distinct UUIDs, comma-separated.
+fn parse_trend_ids(text: &str) -> Result<Vec<Uuid>, ApiError> {
+    let ids = text
+        .split(',')
+        .map(|part| part.trim().parse::<Uuid>())
+        .collect::<Result<Vec<Uuid>, _>>()
+        .map_err(|_| bad_request(vec![field_error("ids", "must be comma-separated UUIDs")]))?;
+    if !(1..=MAX_TREND_DATASETS).contains(&ids.len()) {
+        return Err(bad_request(vec![field_error(
+            "ids",
+            format!("must hold 1 to {MAX_TREND_DATASETS} ids"),
+        )]));
+    }
+    let mut seen = HashSet::new();
+    if !ids.iter().all(|id| seen.insert(*id)) {
+        return Err(bad_request(vec![field_error("ids", "must be distinct")]));
+    }
+    Ok(ids)
+}
+
+/// The score means of `experiments` (D-J-26), keyed by experiment id text, from one storage
+/// read. `None` when storage is busy or the read times out: the trends then go without scores.
+async fn trend_scores(
+    state: &AppState,
+    org: OrgId,
+    project: ProjectId,
+    experiments: &[experiment_store::TrendRow],
+) -> Result<Option<HashMap<String, Vec<ExperimentScoreMean>>>, ApiError> {
+    let Some(oldest) = experiments.iter().map(|row| row.created_at).min() else {
+        return Ok(Some(HashMap::new()));
+    };
+    let ids: Vec<String> = experiments.iter().map(|row| row.id.to_string()).collect();
+    let since = oldest.saturating_sub(CLOCK_SKEW_NS);
+    let read = async {
+        let ctx = open_query(state, org, project, None).await?;
+        cetra_storage::experiment_score_means(&ctx, &ids, since, Deadline::start().remaining()?)
+            .await
+            .map_err(ApiError::from)
+    }
+    .await;
+    let means = match read {
+        Ok(means) => means,
+        Err(ApiError::Unavailable { .. } | ApiError::Query(RunError::Timeout)) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut grouped: HashMap<String, Vec<ExperimentScoreMean>> = HashMap::new();
+    for mean in means {
+        grouped
+            .entry(mean.experiment_id)
+            .or_default()
+            .push(ExperimentScoreMean {
+                name: mean.name,
+                data_type: mean.data_type,
+                mean: mean.mean,
+                count: mean.count,
+            });
+    }
+    for scores in grouped.values_mut() {
+        scores.sort_by(|left, right| {
+            (&left.name, &left.data_type).cmp(&(&right.name, &right.data_type))
+        });
+    }
+    Ok(Some(grouped))
+}
+
+/// `GET …/dataset-trends` (D-J-26): for each dataset of `ids` in the project, its latest visible
+/// experiments with their result and error counts, and their score means. Its own path, so a
+/// dataset named `experiment-trends` is still reached by `…/datasets/{dataset}`.
+async fn experiment_trends(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Query(params): error::Query<ExperimentTrendParams>,
+) -> Result<error::Json<ExperimentTrends>, ApiError> {
+    let requested = parse_trend_ids(&params.ids)?;
+    let project = access.project.id;
+    let org = access.project.org_id;
+    let known: HashSet<Uuid> = store::list_datasets(state.meta.reader(), project, None)
+        .await?
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    let datasets: Vec<Uuid> = requested
+        .into_iter()
+        .filter(|id| known.contains(id))
+        .collect();
+    let rows = experiment_store::trends(
+        state.meta.reader(),
+        project,
+        &datasets,
+        visible_from(&state, org),
+        TRENDS_PER_DATASET,
+    )
+    .await?;
+    let scores = trend_scores(&state, org, project, &rows).await?;
+    let data = datasets
+        .iter()
+        .map(|dataset| DatasetTrend {
+            dataset_id: *dataset,
+            experiments: rows
+                .iter()
+                .filter(|row| row.dataset_id == *dataset)
+                .map(|row| ExperimentTrend {
+                    id: row.id,
+                    name: row.name.clone(),
+                    status: row.status.clone(),
+                    created_at: row.created_at,
+                    result_count: row.result_count,
+                    error_count: row.error_count,
+                    scores: scores.as_ref().map(|grouped| {
+                        grouped
+                            .get(&row.id.to_string())
+                            .cloned()
+                            .unwrap_or_default()
+                    }),
+                })
+                .collect(),
+        })
+        .collect();
+    Ok(error::Json(ExperimentTrends {
+        data,
+        scores_unavailable: scores.is_none(),
+    }))
+}
+
+/// The most traces one bulk add copies (D-J-25).
+const MAX_TRACE_BATCH: usize = 100;
+
+/// Why a trace of a bulk add was not copied, in words for the request's `skipped` list.
+fn load_refusal(error: &LoadError) -> &'static str {
+    match error {
+        LoadError::EvaluationTrace => "an evaluation trace cannot be added to a dataset",
+        LoadError::TooLarge => "the trace is too large to load",
+        _ => "the trace or span was not found",
+    }
+}
+
+/// Why `item_from` refused a trace of a bulk add, or the error itself when it is not a refusal of
+/// the trace (the caller answers that error for the whole request).
+fn copy_refusal(error: ApiError) -> Result<String, ApiError> {
+    match error {
+        ApiError::BadRequest { errors, .. } => Ok(errors.first().map_or_else(
+            || "the trace cannot be copied".to_owned(),
+            |error| format!("{}: {}", error.field, error.message),
+        )),
+        ApiError::NotFound => Ok("the trace or span was not found".to_owned()),
+        other => Err(other),
+    }
+}
+
+/// A trace of a bulk add that passed its checks, ready to be written.
+struct CopyPlan {
+    index: usize,
+    trace_id: TraceId,
+    source: SpanId,
+    values: ItemValues,
+    users: Vec<(String, i64)>,
+}
+
+/// The write transaction of a bulk add: what it found and wrote.
+enum CopiesWrite {
+    Gone,
+    SchemaChanged,
+    /// No copy was left after the deletion guard; the listed indices were blocked.
+    Nothing {
+        blocked: Vec<usize>,
+    },
+    Written {
+        version: DatasetVersion,
+        items: Vec<Uuid>,
+        blocked: Vec<usize>,
+    },
+}
+
+/// `POST …/items/from-traces` (D-J-25): copies up to 100 traces as `from-trace` does, in one new
+/// version. A trace that cannot be copied is listed in `skipped`; storage busy is a 503 for the
+/// whole call, and no copyable trace is a 400 with the reasons as `items[i]` field errors.
+async fn add_from_traces(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(DatasetPath { dataset }): error::Path<DatasetPath>,
+    error::Json(body): error::Json<FromTracesRequest>,
+) -> Result<(StatusCode, error::Json<FromTracesResult>), ApiError> {
+    if !(1..=MAX_TRACE_BATCH).contains(&body.items.len()) {
+        return Err(bad_request(vec![field_error(
+            "items",
+            format!("must hold 1 to {MAX_TRACE_BATCH} items"),
+        )]));
+    }
+    let mut refs = Vec::with_capacity(body.items.len());
+    let mut errors = Vec::new();
+    for (index, item) in body.items.iter().enumerate() {
+        let trace = item.trace_id.parse::<TraceId>();
+        let span = match item.span_id.as_deref() {
+            Some(text) => text.parse::<SpanId>().map(Some),
+            None => Ok(None),
+        };
+        match (trace, span) {
+            (Ok(trace), Ok(span)) => refs.push((index, trace, span)),
+            (Err(_), _) => errors.push(field_error(
+                &format!("items[{index}].trace_id"),
+                "must be 32 hex digits",
+            )),
+            (Ok(_), Err(_)) => errors.push(field_error(
+                &format!("items[{index}].span_id"),
+                "must be 16 hex digits",
+            )),
+        }
+    }
+    if !errors.is_empty() {
+        return Err(bad_request(errors));
+    }
+
+    let project = access.project.id;
+    let used = find(&state, project, &dataset).await?;
+    let schemas = Schemas::of(&used)?;
+    let mut copies: Vec<CopyPlan> = Vec::new();
+    let mut skipped: Vec<(usize, String)> = Vec::new();
+    for (index, trace_id, span_id) in refs {
+        let text = &body.items[index];
+        let loaded = match trace_load::load_trace(
+            &state,
+            project,
+            Visibility::window(&state, access.project.org_id),
+            trace_id,
+            span_id,
+            None,
+        )
+        .await
+        {
+            Ok(loaded) => loaded,
+            Err(
+                error @ (LoadError::NotFound
+                | LoadError::NoTargetSpan
+                | LoadError::EvaluationTrace
+                | LoadError::TooLarge),
+            ) => {
+                skipped.push((index, load_refusal(&error).to_owned()));
+                continue;
+            }
+            Err(error) => return Err(trace_load_failed(error)),
+        };
+        // The same request shape `from-trace` reads, without overrides.
+        let request = FromTraceRequest {
+            trace_id: text.trace_id.clone(),
+            span_id: text.span_id.clone(),
+            input: None,
+            expected_output: None,
+            metadata: None,
+        };
+        let (source, values) = match item_from(&loaded, span_id, &request) {
+            Ok(copied) => copied,
+            Err(error) => {
+                skipped.push((index, copy_refusal(error)?));
+                continue;
+            }
+        };
+        if let Some(first) = check_item("", &values, &schemas).first() {
+            skipped.push((index, format!("{}: {}", first.field, first.message)));
+            continue;
+        }
+        let users = execute::users_of(&loaded.spans);
+        copies.push(CopyPlan {
+            index,
+            trace_id,
+            source,
+            values,
+            users,
+        });
+    }
+    if copies.is_empty() {
+        return Err(refusals(&skipped));
+    }
+
+    let actor = created_by(&principal);
+    let created_by = actor.clone();
+    let now = state.clock.now_ns();
+    let key = DatasetKey::Id(used.id);
+    let input_schema = used.input_schema.clone();
+    let expected_schema = used.expected_schema.clone();
+    let deletions = state.clone();
+    let outcome = state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                let Some(row) = store::get_dataset_tx(conn, project, &key).await? else {
+                    return Ok(CopiesWrite::Gone);
+                };
+                if row.input_schema != input_schema || row.expected_schema != expected_schema {
+                    return Ok(CopiesWrite::SchemaChanged);
+                }
+                // The deletion guard is asked for every trace inside the transaction (D-J-9).
+                let mut blocked = Vec::new();
+                let mut inserts = Vec::new();
+                let mut traces = Vec::new();
+                let mut items = Vec::new();
+                for copy in copies {
+                    let users = execute::borrowed_users(&copy.users);
+                    if deletions
+                        .deletions
+                        .guard
+                        .blocking(project, copy.trace_id, &users, now)
+                        .is_some()
+                    {
+                        blocked.push(copy.index);
+                        continue;
+                    }
+                    let item_id = Uuid::now_v7();
+                    items.push(item_id);
+                    traces.push(copy.trace_id);
+                    inserts.push(NewRevision {
+                        revision_id: Uuid::now_v7(),
+                        item_id,
+                        input: copy.values.input,
+                        expected_output: copy.values.expected_output,
+                        metadata: copy.values.metadata,
+                        source_trace_id: Some(copy.trace_id),
+                        source_span_id: Some(copy.source),
+                    });
+                }
+                if inserts.is_empty() {
+                    return Ok(CopiesWrite::Nothing { blocked });
+                }
+                // One written trace gets the single-trace form, as `from-trace` writes it (D-J-25).
+                let description = match traces.as_slice() {
+                    [trace] => format!("add from trace {}", trace.to_hex()),
+                    _ => format!("add from {} traces", traces.len()),
+                };
+                let change = VersionChange {
+                    close: Vec::new(),
+                    insert: inserts,
+                    description: description.clone(),
+                    created_by: created_by.clone(),
+                };
+                let counts = VersionCounts::of_change(&change);
+                let version = store::write_version(conn, row.id, change, now).await?;
+                Ok(CopiesWrite::Written {
+                    version: DatasetVersion {
+                        version,
+                        description,
+                        created_by,
+                        created_at: now,
+                        added: counts.added,
+                        edited: counts.edited,
+                        deleted: counts.deleted,
+                    },
+                    items,
+                    blocked,
+                })
+            })
+        })
+        .await?;
+    let (version, item_ids, blocked) = match outcome {
+        CopiesWrite::Gone => return Err(ApiError::NotFound),
+        CopiesWrite::SchemaChanged => {
+            return Err(ApiError::Conflict {
+                detail: "the dataset's schema changed; retry",
+            });
+        }
+        CopiesWrite::Nothing { blocked } => {
+            skipped.extend(
+                blocked
+                    .into_iter()
+                    .map(|index| (index, "a deletion blocks this trace".to_owned())),
+            );
+            skipped.sort_by_key(|(index, _)| *index);
+            return Err(refusals(&skipped));
+        }
+        CopiesWrite::Written {
+            version,
+            items,
+            blocked,
+        } => (version, items, blocked),
+    };
+    skipped.extend(
+        blocked
+            .into_iter()
+            .map(|index| (index, "a deletion blocks this trace".to_owned())),
+    );
+    skipped.sort_by_key(|(index, _)| *index);
+    let mut items = Vec::with_capacity(item_ids.len());
+    for item_id in &item_ids {
+        let row = store::get_item(state.meta.reader(), used.id, *item_id, version.version)
+            .await?
+            .ok_or(ApiError::NotFound)?;
+        items.push(item_json(&row));
+    }
+    tracing::info!(
+        target: "audit",
+        dataset_id = %used.id,
+        project_id = %project,
+        actor = %actor.as_deref().unwrap_or("-"),
+        version = version.version,
+        count = items.len(),
+        skipped = skipped.len(),
+        "dataset items added from traces"
+    );
+    let skipped = skipped
+        .into_iter()
+        .map(|(index, message)| SkippedTrace {
+            index: i64::try_from(index).unwrap_or(i64::MAX),
+            trace_id: body.items[index].trace_id.clone(),
+            message,
+        })
+        .collect();
+    Ok((
+        StatusCode::CREATED,
+        error::Json(FromTracesResult {
+            version,
+            items,
+            skipped,
+        }),
+    ))
+}
+
+/// The 400 of a bulk add that copied no trace: each refusal as an `items[i]` field error.
+fn refusals(skipped: &[(usize, String)]) -> ApiError {
+    let errors = skipped
+        .iter()
+        .map(|(index, message)| field_error(&format!("items[{index}]"), message))
+        .take(MAX_LISTED_ERRORS)
+        .collect();
+    bad_request(errors)
 }
 
 /// One permit of [`IMPORTS`], or 503 when every one is taken.
@@ -2790,6 +3846,731 @@ mod tests {
                 .status,
             404
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn item_search_filters_the_listed_items() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        post_items(
+            &app,
+            &seeded,
+            "faq",
+            json!({ "items": [
+                { "input": "Where is my ORDER" },
+                { "input": "unrelated", "expected_output": "order shipped" },
+                { "input": "plain", "metadata": { "channel": "email" } },
+            ] }),
+        )
+        .await;
+
+        let found: Value = get(&app, &seeded, "faq/items?q=%20order%20").await.json();
+        assert_eq!(found["data"].as_array().unwrap().len(), 2);
+        let by_key: Value = get(&app, &seeded, "faq/items?q=channel").await.json();
+        assert_eq!(by_key["data"].as_array().unwrap().len(), 1);
+        let none: Value = get(&app, &seeded, "faq/items?q=absent").await.json();
+        assert!(none["data"].as_array().unwrap().is_empty());
+        let all: Value = get(&app, &seeded, "faq/items").await.json();
+        assert_eq!(all["data"].as_array().unwrap().len(), 3);
+
+        let blank = format!("faq/items?q={}", "%20".repeat(3));
+        assert_eq!(
+            field_errors(&get(&app, &seeded, &blank).await),
+            vec![("q".to_owned(), "must be 1 to 200 characters".to_owned())]
+        );
+        let long = format!("faq/items?q={}", "x".repeat(201));
+        assert_eq!(
+            field_errors(&get(&app, &seeded, &long).await),
+            vec![("q".to_owned(), "must be 1 to 200 characters".to_owned())]
+        );
+        let longest = format!("faq/items?q={}", "x".repeat(200));
+        assert_eq!(get(&app, &seeded, &longest).await.status, 200);
+    }
+
+    /// `PATCH …/{dataset}/items` (the batch edit) with `body`.
+    async fn batch_edit(
+        app: &TestApp,
+        seeded: &Seeded,
+        dataset: &str,
+        body: Value,
+    ) -> TestResponse {
+        app.request(Method::PATCH, &format!("{}/{dataset}/items", base(seeded)))
+            .header("cookie", &seeded.cookie)
+            .json(&body)
+            .send()
+            .await
+    }
+
+    /// `POST …/{dataset}/items/delete` (the batch delete) with `body`.
+    async fn batch_delete(
+        app: &TestApp,
+        seeded: &Seeded,
+        dataset: &str,
+        body: Value,
+    ) -> TestResponse {
+        app.request(
+            Method::POST,
+            &format!("{}/{dataset}/items/delete", base(seeded)),
+        )
+        .header("cookie", &seeded.cookie)
+        .json(&body)
+        .send()
+        .await
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn batch_edit_writes_one_version_for_the_changed_items() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let ids = item_ids(
+            &post_items(
+                &app,
+                &seeded,
+                "faq",
+                json!({ "items": [ { "input": "a" }, { "input": "b" }, { "input": "c" } ] }),
+            )
+            .await,
+        );
+
+        // Two of three change; the middle one is sent unchanged and is left out.
+        let edited = batch_edit(
+            &app,
+            &seeded,
+            "faq",
+            json!({ "items": [
+                { "id": ids[0], "input": "a2" },
+                { "id": ids[1], "input": "b" },
+                { "id": ids[2], "expected_output": "c-out" },
+            ] }),
+        )
+        .await;
+        assert_eq!(
+            edited.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&edited.body)
+        );
+        let edited: Value = edited.json();
+        assert_eq!(edited["version"]["version"], 2);
+        assert_eq!(edited["version"]["description"], "edit 2 items");
+        let answered = edited["items"].as_array().unwrap();
+        assert_eq!(
+            answered
+                .iter()
+                .map(|item| item["id"].clone())
+                .collect::<Vec<_>>(),
+            ids.iter().map(|id| json!(id)).collect::<Vec<_>>()
+        );
+        assert_eq!(answered[0]["input"], "a2");
+        assert_eq!(answered[0]["version"], 2);
+        assert_eq!(
+            answered[1]["version"], 1,
+            "the unchanged item keeps its revision"
+        );
+        assert_eq!(answered[2]["expected_output"], "c-out");
+
+        // Nothing changes: no version, the items as they are.
+        let same = batch_edit(
+            &app,
+            &seeded,
+            "faq",
+            json!({ "items": [ { "id": ids[0], "input": "a2" } ] }),
+        )
+        .await;
+        assert_eq!(same.status, 200);
+        let same: Value = same.json();
+        assert!(same["version"].is_null());
+        assert_eq!(same["items"][0]["version"], 2);
+        let dataset: Value = get(&app, &seeded, "faq").await.json();
+        assert_eq!(dataset["current_version"], 2);
+
+        // Exactly one changed item: the single-item description.
+        let single = batch_edit(
+            &app,
+            &seeded,
+            "faq",
+            json!({ "items": [ { "id": ids[1], "input": "b2" } ] }),
+        )
+        .await;
+        assert_eq!(single.status, 200);
+        let single: Value = single.json();
+        assert_eq!(single["version"]["version"], 3);
+        assert_eq!(
+            single["version"]["description"],
+            format!("edit item {}", ids[1])
+        );
+        let before: Value = get(&app, &seeded, "faq/items?version=1").await.json();
+        assert_eq!(before["data"][0]["input"], "a");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn batch_edit_refuses_a_bad_batch_and_writes_nothing() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let ids = item_ids(
+            &post_items(
+                &app,
+                &seeded,
+                "faq",
+                json!({ "items": [ { "input": "a" } ] }),
+            )
+            .await,
+        );
+        let unknown = Uuid::now_v7().to_string();
+
+        let missing = batch_edit(
+            &app,
+            &seeded,
+            "faq",
+            json!({ "items": [ { "id": ids[0], "input": "x" }, { "id": unknown, "input": "y" } ] }),
+        )
+        .await;
+        assert_eq!(
+            field_errors(&missing),
+            vec![("items[1].id".to_owned(), "no such item".to_owned())]
+        );
+
+        let repeated = batch_edit(
+            &app,
+            &seeded,
+            "faq",
+            json!({ "items": [ { "id": ids[0], "input": "x" }, { "id": ids[0], "input": "y" } ] }),
+        )
+        .await;
+        assert_eq!(
+            field_errors(&repeated),
+            vec![(
+                "items[1].id".to_owned(),
+                "appears more than once".to_owned()
+            )]
+        );
+
+        let null_input = batch_edit(
+            &app,
+            &seeded,
+            "faq",
+            json!({ "items": [ { "id": ids[0], "input": null } ] }),
+        )
+        .await;
+        assert_eq!(
+            field_errors(&null_input),
+            vec![("items[0].input".to_owned(), "must not be null".to_owned())]
+        );
+
+        let empty = batch_edit(&app, &seeded, "faq", json!({ "items": [] })).await;
+        assert_eq!(
+            field_errors(&empty),
+            vec![("items".to_owned(), "must hold 1 to 1000 items".to_owned())]
+        );
+
+        let dataset: Value = get(&app, &seeded, "faq").await.json();
+        assert_eq!(dataset["current_version"], 1);
+        let kept: Value = get(&app, &seeded, &format!("faq/items/{}", ids[0]))
+            .await
+            .json();
+        assert_eq!(kept["input"], "a");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn batch_edit_checks_each_item_against_the_schema() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let dataset = create(
+            &app,
+            &seeded,
+            json!({ "name": "faq", "input_schema": serde_json::from_str::<Value>(FAQ_SCHEMA).unwrap() }),
+        )
+        .await;
+        assert_eq!(dataset.status, 201);
+        let ids = item_ids(
+            &post_items(
+                &app,
+                &seeded,
+                "faq",
+                json!({ "items": [ { "input": { "question": "a" } } ] }),
+            )
+            .await,
+        );
+
+        let refused = batch_edit(
+            &app,
+            &seeded,
+            "faq",
+            json!({ "items": [ { "id": ids[0], "input": { "q": "b" } } ] }),
+        )
+        .await;
+        let errors = field_errors(&refused);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].0, "items[0].input");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn batch_delete_closes_the_items_in_one_version() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let ids = item_ids(
+            &post_items(
+                &app,
+                &seeded,
+                "faq",
+                json!({ "items": [ { "input": 1 }, { "input": 2 }, { "input": 3 } ] }),
+            )
+            .await,
+        );
+
+        let unknown = Uuid::now_v7().to_string();
+        assert_eq!(
+            field_errors(
+                &batch_delete(&app, &seeded, "faq", json!({ "ids": [ids[0], unknown] })).await
+            ),
+            vec![("ids[1]".to_owned(), "no such item".to_owned())]
+        );
+        assert_eq!(
+            field_errors(
+                &batch_delete(&app, &seeded, "faq", json!({ "ids": [ids[0], ids[0]] })).await
+            ),
+            vec![("ids[1]".to_owned(), "appears more than once".to_owned())]
+        );
+        assert_eq!(
+            field_errors(&batch_delete(&app, &seeded, "faq", json!({ "ids": [] })).await),
+            vec![("ids".to_owned(), "must hold 1 to 1000 ids".to_owned())]
+        );
+
+        let deleted = batch_delete(&app, &seeded, "faq", json!({ "ids": [ids[0], ids[2]] })).await;
+        assert_eq!(
+            deleted.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&deleted.body)
+        );
+        let deleted: Value = deleted.json();
+        assert_eq!(deleted["version"], 2);
+        assert_eq!(deleted["description"], "delete 2 items");
+
+        let listed: Value = get(&app, &seeded, "faq/items").await.json();
+        assert_eq!(listed["data"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["data"][0]["id"], json!(ids[1]));
+        let before: Value = get(&app, &seeded, "faq/items?version=1").await.json();
+        assert_eq!(before["data"].as_array().unwrap().len(), 3);
+
+        // Deleted ids are no longer live.
+        assert_eq!(
+            field_errors(&batch_delete(&app, &seeded, "faq", json!({ "ids": [ids[0]] })).await),
+            vec![("ids[0]".to_owned(), "no such item".to_owned())]
+        );
+
+        // Exactly one id: the single-item description.
+        let one = batch_delete(&app, &seeded, "faq", json!({ "ids": [ids[1]] })).await;
+        assert_eq!(one.status, 200);
+        let one: Value = one.json();
+        assert_eq!(one["version"], 3);
+        assert_eq!(one["description"], format!("delete item {}", ids[1]));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn versions_count_their_changes_and_list_them() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let ids = item_ids(
+            &post_items(
+                &app,
+                &seeded,
+                "faq",
+                json!({ "items": [ { "input": "a" }, { "input": "b" }, { "input": "c" } ] }),
+            )
+            .await,
+        );
+        let (a, b, c) = (ids[0].clone(), ids[1].clone(), ids[2].clone());
+
+        // v2: one item edited, through a batch of one.
+        let edited = batch_edit(
+            &app,
+            &seeded,
+            "faq",
+            json!({ "items": [ { "id": a, "input": "a2" } ] }),
+        )
+        .await;
+        assert_eq!(edited.status, 200);
+        let edited: Value = edited.json();
+        assert_eq!(edited["version"]["edited"], 1);
+        assert_eq!(edited["version"]["added"], 0);
+        assert_eq!(edited["version"]["deleted"], 0);
+
+        // v3: one item deleted through the single-item route.
+        let deleted = app
+            .request(Method::DELETE, &format!("{}/faq/items/{b}", base(&seeded)))
+            .header("cookie", &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(deleted.status, 200);
+        let deleted: Value = deleted.json();
+        assert_eq!(deleted["version"], 3);
+        assert_eq!(deleted["deleted"], 1);
+        assert_eq!(deleted["edited"], 0);
+
+        // v4: two items edited in one batch.
+        let edited = batch_edit(
+            &app,
+            &seeded,
+            "faq",
+            json!({ "items": [
+                { "id": a, "input": "a3" },
+                { "id": c, "expected_output": "c-out" },
+            ] }),
+        )
+        .await;
+        let edited: Value = edited.json();
+        assert_eq!(edited["version"]["edited"], 2);
+
+        // v5: one item deleted in a batch.
+        let deleted = batch_delete(&app, &seeded, "faq", json!({ "ids": [c] })).await;
+        assert_eq!(deleted.status, 200);
+        let deleted: Value = deleted.json();
+        assert_eq!(deleted["deleted"], 1);
+
+        // Newest first, every version with its own counts.
+        let versions: Value = get(&app, &seeded, "faq/versions").await.json();
+        let counts: Vec<(i64, i64, i64, i64)> = versions["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|version| {
+                (
+                    version["version"].as_i64().unwrap(),
+                    version["added"].as_i64().unwrap(),
+                    version["edited"].as_i64().unwrap(),
+                    version["deleted"].as_i64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            counts,
+            [
+                (5, 0, 0, 1),
+                (4, 0, 2, 0),
+                (3, 0, 0, 1),
+                (2, 0, 1, 0),
+                (1, 3, 0, 0)
+            ]
+        );
+
+        // v1 added all three: after only.
+        let first: Value = get(&app, &seeded, "faq/versions/1/changes").await.json();
+        let rows = first["data"].as_array().unwrap();
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().all(|row| row["change"] == "added"
+            && row["before"].is_null()
+            && !row["after"].is_null()));
+        assert!(first["next_cursor"].is_null());
+
+        // v3 deleted b: before only.
+        let third: Value = get(&app, &seeded, "faq/versions/3/changes").await.json();
+        let rows = third["data"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["item_id"], json!(b));
+        assert_eq!(rows[0]["change"], "deleted");
+        assert_eq!(rows[0]["before"]["input"], "b");
+        assert!(rows[0]["after"].is_null());
+
+        // v4 edited a and c: both sides, ordered by item id, each revision its own.
+        let fourth: Value = get(&app, &seeded, "faq/versions/4/changes").await.json();
+        let rows = fourth["data"].as_array().unwrap();
+        let mut expected = [a.clone(), c.clone()];
+        expected.sort();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row["item_id"].clone())
+                .collect::<Vec<_>>(),
+            expected.iter().map(|id| json!(id)).collect::<Vec<_>>()
+        );
+        let row_of = |id: &str| rows.iter().find(|row| row["item_id"] == json!(id)).unwrap();
+        assert_eq!(row_of(&a)["change"], "edited");
+        assert_eq!(row_of(&a)["before"]["input"], "a2");
+        assert_eq!(row_of(&a)["after"]["input"], "a3");
+        assert_eq!(row_of(&a)["after"]["version"], 4);
+        assert_eq!(row_of(&c)["before"]["input"], "c");
+        assert_eq!(row_of(&c)["after"]["expected_output"], "c-out");
+
+        // v5 deleted c.
+        let fifth: Value = get(&app, &seeded, "faq/versions/5/changes").await.json();
+        assert_eq!(fifth["data"][0]["item_id"], json!(c));
+        assert_eq!(fifth["data"][0]["change"], "deleted");
+
+        // Paging by item id: two of the three added items, then the last one.
+        let page: Value = get(&app, &seeded, "faq/versions/1/changes?limit=2")
+            .await
+            .json();
+        assert_eq!(page["data"].as_array().unwrap().len(), 2);
+        let cursor = page["next_cursor"].as_str().unwrap().to_owned();
+        let rest: Value = get(
+            &app,
+            &seeded,
+            &format!("faq/versions/1/changes?limit=2&cursor={cursor}"),
+        )
+        .await
+        .json();
+        assert_eq!(rest["data"].as_array().unwrap().len(), 1);
+        assert!(rest["next_cursor"].is_null());
+
+        // Versions outside 1 to the current one are 404; the limit is 1 to 100.
+        assert_eq!(
+            get(&app, &seeded, "faq/versions/0/changes").await.status,
+            404
+        );
+        assert_eq!(
+            get(&app, &seeded, "faq/versions/6/changes").await.status,
+            404
+        );
+        assert_eq!(
+            get(&app, &seeded, "faq/versions/1/changes?limit=101")
+                .await
+                .status,
+            400
+        );
+        assert_eq!(
+            get(&app, &seeded, "faq/versions/1/changes?cursor=nope")
+                .await
+                .status,
+            400
+        );
+    }
+
+    /// `POST …/{dataset}/restore` with `body`.
+    async fn restore(app: &TestApp, seeded: &Seeded, dataset: &str, body: Value) -> TestResponse {
+        app.request(Method::POST, &format!("{}/{dataset}/restore", base(seeded)))
+            .header("cookie", &seeded.cookie)
+            .json(&body)
+            .send()
+            .await
+    }
+
+    /// The live items of `dataset` as (id, input) pairs.
+    async fn live_inputs(app: &TestApp, seeded: &Seeded, dataset: &str) -> Vec<(String, Value)> {
+        let listed: Value = get(app, seeded, &format!("{dataset}/items")).await.json();
+        listed["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| {
+                (
+                    item["id"].as_str().unwrap().to_owned(),
+                    item["input"].clone(),
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restore_takes_an_earlier_version_again() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let ids = item_ids(
+            &post_items(
+                &app,
+                &seeded,
+                "faq",
+                json!({ "items": [ { "input": "a" }, { "input": "b" }, { "input": "c" } ] }),
+            )
+            .await,
+        );
+        let (a, b, c) = (ids[0].clone(), ids[1].clone(), ids[2].clone());
+        // v2 edits a, v3 deletes b, v4 edits c.
+        batch_edit(
+            &app,
+            &seeded,
+            "faq",
+            json!({ "items": [ { "id": a, "input": "a2" } ] }),
+        )
+        .await;
+        batch_delete(&app, &seeded, "faq", json!({ "ids": [b] })).await;
+        batch_edit(
+            &app,
+            &seeded,
+            "faq",
+            json!({ "items": [ { "id": c, "input": "c2" } ] }),
+        )
+        .await;
+
+        // v5: the items of v1 again. a and c are closed and re-inserted, b is re-added.
+        let restored = restore(&app, &seeded, "faq", json!({ "version": 1 })).await;
+        assert_eq!(
+            restored.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&restored.body)
+        );
+        let restored: Value = restored.json();
+        assert_eq!(restored["version"], 5);
+        assert_eq!(restored["description"], "restore version 1");
+        assert_eq!(restored["added"], 1);
+        assert_eq!(restored["edited"], 2);
+        assert_eq!(restored["deleted"], 0);
+
+        let mut live = live_inputs(&app, &seeded, "faq").await;
+        live.sort_by(|left, right| left.0.cmp(&right.0));
+        let mut expected = vec![
+            (a.clone(), json!("a")),
+            (b.clone(), json!("b")),
+            (c.clone(), json!("c")),
+        ];
+        expected.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(live, expected);
+        let dataset: Value = get(&app, &seeded, "faq").await.json();
+        assert_eq!(dataset["current_version"], 5);
+        assert_eq!(dataset["item_count"], 3);
+
+        // The history is kept: v2 still has a2.
+        let v2: Value = get(&app, &seeded, "faq/items?version=2").await.json();
+        assert!(
+            v2["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["input"] == "a2")
+        );
+
+        // Restoring to 0 closes every live item in one version.
+        let emptied = restore(&app, &seeded, "faq", json!({ "version": 0 })).await;
+        assert_eq!(emptied.status, 200);
+        let emptied: Value = emptied.json();
+        assert_eq!(emptied["version"], 6);
+        assert_eq!(emptied["deleted"], 3);
+        assert_eq!(emptied["added"], 0);
+        assert!(live_inputs(&app, &seeded, "faq").await.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restore_refuses_a_bad_target_and_writes_nothing() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        post_items(&app, &seeded, "faq", json!({ "items": [ { "input": 1 } ] })).await;
+
+        // The current version and the versions past it are not earlier versions.
+        for target in [1, 2, -1] {
+            assert_eq!(
+                field_errors(&restore(&app, &seeded, "faq", json!({ "version": target })).await),
+                vec![(
+                    "version".to_owned(),
+                    "must be an earlier version, 0 to 0".to_owned()
+                )],
+                "target {target}"
+            );
+        }
+        let dataset: Value = get(&app, &seeded, "faq").await.json();
+        assert_eq!(dataset["current_version"], 1);
+
+        // Reading key is refused.
+        let read = app
+            .request(Method::POST, &format!("{}/faq/restore", base(&seeded)))
+            .header("authorization", &format!("Bearer {}", seeded.read_key))
+            .json(&json!({ "version": 0 }))
+            .send()
+            .await;
+        assert_eq!(read.status, 403);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restore_to_the_live_items_is_refused_and_changes_outside_are_404() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        post_items(
+            &app,
+            &seeded,
+            "faq",
+            json!({ "items": [ { "input": "a" } ] }),
+        )
+        .await;
+        let ids = item_ids(
+            &post_items(
+                &app,
+                &seeded,
+                "faq",
+                json!({ "items": [ { "input": "b" } ] }),
+            )
+            .await,
+        );
+        // v2 added b, v3 deleted b: the live items are v1's items again.
+        batch_delete(&app, &seeded, "faq", json!({ "ids": [ids[0].clone()] })).await;
+
+        let refused = restore(&app, &seeded, "faq", json!({ "version": 1 })).await;
+        assert_eq!(refused.status, 400);
+        assert_eq!(
+            field_errors(&refused),
+            vec![(
+                "version".to_owned(),
+                "the latest version already holds these items".to_owned()
+            )]
+        );
+        let dataset: Value = get(&app, &seeded, "faq").await.json();
+        assert_eq!(dataset["current_version"], 3, "a refusal writes nothing");
+
+        for version in [0, 4] {
+            let response = get(&app, &seeded, &format!("faq/versions/{version}/changes")).await;
+            assert_eq!(response.status, 404, "version {version}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restore_checks_the_current_schema() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let ids = item_ids(
+            &post_items(&app, &seeded, "faq", json!({ "items": [ { "input": 5 } ] })).await,
+        );
+        batch_edit(
+            &app,
+            &seeded,
+            "faq",
+            json!({ "items": [ { "id": ids[0], "input": { "question": "a" } } ] }),
+        )
+        .await;
+        // The live item is an object, so the schema is accepted; v1 holds a number.
+        let schema: Value = serde_json::from_str(FAQ_SCHEMA).unwrap();
+        let set = patch(&app, &seeded, "faq", json!({ "input_schema": schema })).await;
+        assert_eq!(set.status, 200);
+
+        let refused = restore(&app, &seeded, "faq", json!({ "version": 1 })).await;
+        let errors = field_errors(&refused);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].0, format!("items[{}].input", ids[0]));
+        let dataset: Value = get(&app, &seeded, "faq").await.json();
+        assert_eq!(dataset["current_version"], 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn batch_routes_need_manage_datasets() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let ids = item_ids(
+            &post_items(&app, &seeded, "faq", json!({ "items": [ { "input": 1 } ] })).await,
+        );
+        let read_header = format!("Bearer {}", seeded.read_key);
+        let edit = app
+            .request(Method::PATCH, &format!("{}/faq/items", base(&seeded)))
+            .header("authorization", &read_header)
+            .json(&json!({ "items": [ { "id": ids[0], "input": 2 } ] }))
+            .send()
+            .await;
+        assert_eq!(edit.status, 403);
+        let delete = app
+            .request(Method::POST, &format!("{}/faq/items/delete", base(&seeded)))
+            .header("authorization", &read_header)
+            .json(&json!({ "ids": [ids[0]] }))
+            .send()
+            .await;
+        assert_eq!(delete.status, 403);
+        let dataset: Value = get(&app, &seeded, "faq").await.json();
+        assert_eq!(dataset["current_version"], 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4249,6 +6030,499 @@ mod tests {
             .send()
             .await;
         assert_eq!(response.status, 403);
+    }
+
+    /// A second example trace, committed as a copy of the first one's root (its input is the same).
+    const T9: &str = "a1000000000000000000000000000009";
+
+    fn from_traces_path(seeded: &Seeded) -> String {
+        format!("{}/faq/items/from-traces", base(seeded))
+    }
+
+    async fn from_traces(app: &TestApp, seeded: &Seeded, body: Value) -> TestResponse {
+        app.request(Method::POST, &from_traces_path(seeded))
+            .header("cookie", &seeded.cookie)
+            .json(&body)
+            .send()
+            .await
+    }
+
+    /// `faq` over the example traces, plus `T9`.
+    async fn faq_with_two_traces(app: &TestApp, seeded: &Seeded) {
+        faq_with_traces(app, seeded).await;
+        let now = app.state.clock.now_ns();
+        let trace: TraceId = T9.parse().unwrap();
+        app.commit_trace_at(&seeded.project, trace, 1, now).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bulk_add_copies_what_it_can_and_lists_the_rest() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        faq_with_two_traces(&app, &seeded).await;
+
+        let response = from_traces(
+            &app,
+            &seeded,
+            json!({ "items": [
+                { "trace_id": T1 },
+                { "trace_id": "a10000000000000000000000000000ff" },
+                { "trace_id": "a1000000000000000000000000000005" },
+                { "trace_id": T9 },
+            ] }),
+        )
+        .await;
+        assert_eq!(
+            response.status,
+            201,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let result: Value = response.json();
+        assert_eq!(result["version"]["version"], 1);
+        assert_eq!(result["version"]["description"], "add from 2 traces");
+        assert_eq!(result["version"]["added"], 2);
+        let items = result["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["source_trace_id"], T1);
+        assert_eq!(items[1]["source_trace_id"], T9);
+        let skipped = result["skipped"].as_array().unwrap();
+        assert_eq!(skipped.len(), 2);
+        assert_eq!(skipped[0]["index"], 1);
+        assert_eq!(skipped[0]["trace_id"], "a10000000000000000000000000000ff");
+        assert_eq!(skipped[0]["message"], "the trace or span was not found");
+        assert_eq!(skipped[1]["index"], 2);
+        assert_eq!(
+            skipped[1]["message"],
+            "an evaluation trace cannot be added to a dataset"
+        );
+
+        let dataset: Value = get(&app, &seeded, "faq").await.json();
+        assert_eq!(dataset["current_version"], 1);
+        assert_eq!(dataset["item_count"], 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bulk_add_with_nothing_to_copy_is_a_400_and_writes_nothing() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        faq_with_traces(&app, &seeded).await;
+
+        let response = from_traces(
+            &app,
+            &seeded,
+            json!({ "items": [
+                { "trace_id": "a10000000000000000000000000000ff" },
+                { "trace_id": "a1000000000000000000000000000005" },
+            ] }),
+        )
+        .await;
+        assert_eq!(response.status, 400);
+        let errors = field_errors(&response);
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert_eq!(errors[0].0, "items[0]");
+        assert_eq!(errors[1].0, "items[1]");
+        let dataset: Value = get(&app, &seeded, "faq").await.json();
+        assert_eq!(dataset["current_version"], 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bulk_add_refuses_a_bad_batch() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        faq_with_traces(&app, &seeded).await;
+
+        let empty = from_traces(&app, &seeded, json!({ "items": [] })).await;
+        assert_eq!(
+            field_errors(&empty),
+            vec![("items".to_owned(), "must hold 1 to 100 items".to_owned())]
+        );
+        let many: Vec<Value> = (0..101).map(|_| json!({ "trace_id": T1 })).collect();
+        let too_many = from_traces(&app, &seeded, json!({ "items": many })).await;
+        assert_eq!(
+            field_errors(&too_many),
+            vec![("items".to_owned(), "must hold 1 to 100 items".to_owned())]
+        );
+        let bad_trace = from_traces(
+            &app,
+            &seeded,
+            json!({ "items": [ { "trace_id": T1 }, { "trace_id": "xyz" } ] }),
+        )
+        .await;
+        assert_eq!(field_errors(&bad_trace)[0].0, "items[1].trace_id");
+        let bad_span = from_traces(
+            &app,
+            &seeded,
+            json!({ "items": [ { "trace_id": T1, "span_id": "xyz" } ] }),
+        )
+        .await;
+        assert_eq!(field_errors(&bad_span)[0].0, "items[0].span_id");
+        let unknown_field = from_traces(
+            &app,
+            &seeded,
+            json!({ "items": [ { "trace_id": T1, "input": 1 } ] }),
+        )
+        .await;
+        assert_eq!(unknown_field.status, 400);
+
+        let dataset: Value = get(&app, &seeded, "faq").await.json();
+        assert_eq!(dataset["current_version"], 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bulk_add_asks_the_deletion_guard_for_each_trace() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        faq_with_two_traces(&app, &seeded).await;
+        let trace: TraceId = T1.parse().unwrap();
+        app.state.deletions.guard.add_traces(
+            seeded.project.id,
+            &[trace],
+            Uuid::now_v7(),
+            app.state.clock.now_ns(),
+        );
+
+        let response = from_traces(
+            &app,
+            &seeded,
+            json!({ "items": [ { "trace_id": T1 }, { "trace_id": T9 } ] }),
+        )
+        .await;
+        assert_eq!(response.status, 201);
+        let result: Value = response.json();
+        assert_eq!(
+            result["version"]["description"],
+            format!("add from trace {T9}")
+        );
+        assert_eq!(result["items"].as_array().unwrap().len(), 1);
+        assert_eq!(result["items"][0]["source_trace_id"], T9);
+        let skipped = result["skipped"].as_array().unwrap();
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0]["index"], 0);
+        assert_eq!(skipped[0]["message"], "a deletion blocks this trace");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bulk_add_checks_the_schema_of_each_copy() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        app.load_example_dataset(seeded.project.id).await;
+        let created = create(
+            &app,
+            &seeded,
+            json!({ "name": "faq", "input_schema": { "type": "object" } }),
+        )
+        .await;
+        assert_eq!(created.status, 201);
+
+        // The roots' inputs are strings, which the object schema refuses.
+        let response = from_traces(
+            &app,
+            &seeded,
+            json!({ "items": [ { "trace_id": T1 }, { "trace_id": T1 } ] }),
+        )
+        .await;
+        assert_eq!(response.status, 400);
+        let errors = field_errors(&response);
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert_eq!(errors[0].0, "items[0]");
+        assert_eq!(errors[1].0, "items[1]");
+        let dataset: Value = get(&app, &seeded, "faq").await.json();
+        assert_eq!(dataset["current_version"], 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bulk_add_needs_manage_datasets() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        faq_with_traces(&app, &seeded).await;
+        let response = app
+            .request(Method::POST, &from_traces_path(&seeded))
+            .header("authorization", &format!("Bearer {}", seeded.read_key))
+            .json(&json!({ "items": [ { "trace_id": T1 } ] }))
+            .send()
+            .await;
+        assert_eq!(response.status, 403);
+    }
+
+    /// `GET …/dataset-trends?ids=…`.
+    async fn get_trends(app: &TestApp, seeded: &Seeded, ids: &str) -> TestResponse {
+        app.request(
+            Method::GET,
+            &format!(
+                "/api/v1/projects/{}/dataset-trends?ids={ids}",
+                seeded.project.id
+            ),
+        )
+        .header("cookie", &seeded.cookie)
+        .send()
+        .await
+    }
+
+    /// Starts an experiment of `dataset` (a name) and returns its id.
+    async fn start_experiment(app: &TestApp, seeded: &Seeded, name: &str, dataset: &str) -> Uuid {
+        let response = app
+            .request(
+                Method::POST,
+                &format!("/api/v1/projects/{}/experiments", seeded.project.id),
+            )
+            .header("cookie", &seeded.cookie)
+            .json(&json!({ "name": name, "dataset": dataset }))
+            .send()
+            .await;
+        assert_eq!(
+            response.status,
+            201,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let created: Value = response.json();
+        created["experiment"]["id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
+    /// Commits one score of `experiment` on `trace` through storage, as an experiment writes it.
+    async fn commit_experiment_score(
+        app: &TestApp,
+        seeded: &Seeded,
+        experiment: Uuid,
+        trace: TraceId,
+        name: &str,
+        value: cetra_core::score::ScoreValue,
+    ) {
+        let now = app.state.clock.now_ns();
+        let score = cetra_core::score::Score {
+            project_id: seeded.project.id,
+            score_id: Uuid::now_v7(),
+            target: cetra_core::score::ScoreTarget::Trace { trace_id: trace },
+            session_id: None,
+            user_id: None,
+            name: name.to_owned(),
+            value,
+            reason: None,
+            source: cetra_core::enums::ScoreSource::Api,
+            evaluator_id: None,
+            rule_id: None,
+            experiment_id: Some(experiment),
+            dataset_item_id: None,
+            author_user_id: None,
+            metadata: std::collections::BTreeMap::new(),
+            created_at: now,
+            updated_at: now,
+            deleted: false,
+            ingest_time: now,
+        };
+        let batch = cetra_core::batch::scores_to_record_batch(&[score]).unwrap();
+        app.state
+            .storage
+            .append_scores(seeded.project.id, batch)
+            .await
+            .unwrap();
+    }
+
+    /// The id of the dataset `name`.
+    async fn dataset_id(app: &TestApp, seeded: &Seeded, name: &str) -> String {
+        let dataset: Value = get(app, seeded, name).await.json();
+        dataset["id"].as_str().unwrap().to_owned()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn trends_list_the_latest_experiments_with_score_means() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        create_ok(&app, &seeded, "other").await;
+        post_items(
+            &app,
+            &seeded,
+            "other",
+            json!({ "items": [ { "input": "o" } ] }),
+        )
+        .await;
+        let items = item_ids(
+            &post_items(
+                &app,
+                &seeded,
+                "faq",
+                json!({ "items": [ { "input": "a" }, { "input": "b" } ] }),
+            )
+            .await,
+        );
+        // Eleven experiments: the oldest falls out of the latest ten.
+        let mut experiments = Vec::new();
+        for index in 0..11 {
+            experiments.push(start_experiment(&app, &seeded, &format!("e{index}"), "faq").await);
+        }
+        let newest = experiments[10];
+        let results = app
+            .request(
+                Method::POST,
+                &format!(
+                    "/api/v1/projects/{}/experiments/{newest}/items",
+                    seeded.project.id
+                ),
+            )
+            .header("cookie", &seeded.cookie)
+            .json(&json!({ "results": [
+                { "dataset_item_id": items[0], "repetition": 0, "output": "x" },
+                { "dataset_item_id": items[1], "repetition": 0, "output": "y", "error": "boom" },
+            ] }))
+            .send()
+            .await;
+        assert_eq!(
+            results.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&results.body)
+        );
+        let trace: TraceId = T1.parse().unwrap();
+        for value in [0.5, 1.0] {
+            commit_experiment_score(
+                &app,
+                &seeded,
+                newest,
+                trace,
+                "accuracy",
+                cetra_core::score::ScoreValue::Numeric(value),
+            )
+            .await;
+        }
+        commit_experiment_score(
+            &app,
+            &seeded,
+            newest,
+            trace,
+            "passed",
+            cetra_core::score::ScoreValue::Boolean(true),
+        )
+        .await;
+        let other = start_experiment(&app, &seeded, "o1", "other").await;
+
+        let faq_id = dataset_id(&app, &seeded, "faq").await;
+        let other_id = dataset_id(&app, &seeded, "other").await;
+        let response = get_trends(
+            &app,
+            &seeded,
+            &format!("{faq_id},{other_id},{}", Uuid::now_v7()),
+        )
+        .await;
+        assert_eq!(
+            response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let trends: Value = response.json();
+        assert_eq!(trends["scores_unavailable"], false);
+        let data = trends["data"].as_array().unwrap();
+        assert_eq!(data.len(), 2, "an unknown id is left out");
+        assert_eq!(data[0]["dataset_id"], json!(faq_id));
+        assert_eq!(data[1]["dataset_id"], json!(other_id));
+
+        let faq = data[0]["experiments"].as_array().unwrap();
+        assert_eq!(faq.len(), 10);
+        assert_eq!(faq[0]["id"], json!(newest));
+        assert_eq!(faq[0]["name"], "e10");
+        assert_eq!(faq[0]["result_count"], 2);
+        assert_eq!(faq[0]["error_count"], 1);
+        let scores = faq[0]["scores"].as_array().unwrap();
+        assert_eq!(scores.len(), 2, "{scores:?}");
+        assert_eq!(scores[0]["name"], "accuracy");
+        assert_eq!(scores[0]["data_type"], "numeric");
+        assert_eq!(scores[0]["count"], 2);
+        assert!((scores[0]["mean"].as_f64().unwrap() - 0.75).abs() < 1e-9);
+        assert_eq!(scores[1]["name"], "passed");
+        assert_eq!(scores[1]["data_type"], "boolean");
+        assert_eq!(scores[1]["mean"], 1.0);
+        assert_eq!(faq[9]["name"], "e1");
+
+        let others = data[1]["experiments"].as_array().unwrap();
+        assert_eq!(others.len(), 1);
+        assert_eq!(others[0]["id"], json!(other));
+        assert!(others[0]["scores"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn trends_leave_out_hidden_experiments() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        post_items(
+            &app,
+            &seeded,
+            "faq",
+            json!({ "items": [ { "input": "a" } ] }),
+        )
+        .await;
+        start_experiment(&app, &seeded, "old", "faq").await;
+        // Two days on, a one-day window no longer reaches the first experiment.
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-01T00:00:00Z",
+            &json!({ "data_access_days": 1 }),
+        );
+        app.state.clock.set(app.state.clock.now_ns() + 2 * DAY_NS);
+        start_experiment(&app, &seeded, "fresh", "faq").await;
+
+        let faq_id = dataset_id(&app, &seeded, "faq").await;
+        let trends: Value = get_trends(&app, &seeded, &faq_id).await.json();
+        let names: Vec<&str> = trends["data"][0]["experiments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|experiment| experiment["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["fresh"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dataset_named_experiment_trends_is_still_a_dataset() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "experiment-trends").await;
+
+        let response = get(&app, &seeded, "experiment-trends").await;
+        assert_eq!(response.status, 200);
+        let dataset: Value = response.json();
+        assert_eq!(dataset["name"], "experiment-trends");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn trends_refuse_a_bad_id_list_and_need_only_view() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let faq_id = dataset_id(&app, &seeded, "faq").await;
+
+        for ids in [
+            String::new(),
+            "faq".to_owned(),
+            format!("{faq_id},{faq_id}"),
+        ] {
+            let response = get_trends(&app, &seeded, &ids).await;
+            assert_eq!(response.status, 400, "{ids}");
+            assert_eq!(field_errors(&response)[0].0, "ids", "{ids}");
+        }
+        let many: Vec<String> = (0..101).map(|_| Uuid::now_v7().to_string()).collect();
+        let too_many = get_trends(&app, &seeded, &many.join(",")).await;
+        assert_eq!(too_many.status, 400);
+
+        let read = app
+            .request(
+                Method::GET,
+                &format!(
+                    "/api/v1/projects/{}/dataset-trends?ids={faq_id}",
+                    seeded.project.id
+                ),
+            )
+            .header("authorization", &format!("Bearer {}", seeded.read_key))
+            .send()
+            .await;
+        assert_eq!(read.status, 200);
     }
 
     #[tokio::test]

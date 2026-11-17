@@ -1,0 +1,39 @@
+{
+  "data": [
+    {
+      "item_id": "01900000-0000-7000-8000-000000000d02",
+      "change": "edited",
+      "before": {
+        "id": "01900000-0000-7000-8000-000000000d02",
+        "revision_id": "01900000-0000-7000-8000-000000000d12",
+        "version": 1,
+        "input": {
+          "question": "Can I export my traces?"
+        },
+        "expected_output": {
+          "answer": "Yes, as CSV."
+        },
+        "metadata": {
+          "topic": "data"
+        },
+        "created_at": "2026-01-01T00:00:00.000000000Z"
+      },
+      "after": {
+        "id": "01900000-0000-7000-8000-000000000d02",
+        "revision_id": "01900000-0000-7000-8000-000000000d14",
+        "version": 2,
+        "input": {
+          "question": "Can I export my traces?"
+        },
+        "expected_output": {
+          "answer": "Yes, as JSONL or CSV."
+        },
+        "metadata": {
+          "topic": "data"
+        },
+        "created_at": "2026-01-01T00:00:00.000000000Z"
+      }
+    }
+  ],
+  "next_cursor": null
+}

@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { Clock } from "lucide-react";
 import { afterEach, expect, it, vi } from "vitest";
 import { DataTable, type DataTableColumn, ROW_HEIGHT } from "@/components/data-table/data-table";
@@ -706,4 +707,111 @@ it("spaces body rows by the comfortable row height when that density is set", ()
   expect(rowOf("broken").style.transform).toBe("translateY(32px)");
   expect(rowOf("broken").style.height).toBe("32px");
   expect(rowOf("fine").style.transform).toBe("translateY(0px)");
+});
+
+function renderSelectable(options: {
+  checkedIds?: ReadonlySet<string>;
+  onCheckedChange?: (ids: ReadonlySet<string>) => void;
+  onActivate?: () => void;
+}) {
+  return render(
+    <DataTable
+      tableId="select-test"
+      ariaLabel="Items"
+      columns={columns}
+      rows={ITEMS}
+      getRowId={(row) => row.id}
+      onActivate={options.onActivate ?? (() => undefined)}
+      hasNextPage={false}
+      isFetchingNextPage={false}
+      fetchNextPage={() => undefined}
+      emptyState={null}
+      checkedIds={options.checkedIds}
+      onCheckedChange={options.onCheckedChange}
+    />,
+  );
+}
+
+it("has no checkbox column unless selection is on", () => {
+  renderTable({});
+
+  expect(screen.queryAllByRole("checkbox")).toHaveLength(0);
+  expect(screen.queryByRole("columnheader", { name: "Selection" })).toBeNull();
+  expect(screen.getByRole("grid", { name: "Items" })).toHaveAttribute("aria-colcount", "1");
+});
+
+it("adds a checkbox column first when selection is on", () => {
+  renderSelectable({ onCheckedChange: () => undefined });
+
+  const header = screen
+    .getByRole("grid", { name: "Items" })
+    .querySelector<HTMLElement>('[aria-rowindex="1"]');
+  expect(header?.style.gridTemplateColumns).toBe("32px 200px");
+  expect(screen.getByRole("grid", { name: "Items" })).toHaveAttribute("aria-colcount", "2");
+  expect(screen.getAllByRole("checkbox", { name: "Select row" })).toHaveLength(ITEMS.length);
+});
+
+it("keeps the checkbox column out of the columns that can be moved", () => {
+  renderSelectable({ onCheckedChange: () => undefined });
+
+  const selection = screen.getByRole("columnheader", { name: "Selection" });
+  expect(selection).not.toHaveAttribute("data-column-id");
+  expect(screen.getByRole("columnheader", { name: "Name" })).toHaveAttribute(
+    "data-column-id",
+    "name",
+  );
+});
+
+it("checks a row from its checkbox without activating the row", async () => {
+  const user = userEvent.setup();
+  const onActivate = vi.fn();
+  const onCheckedChange = vi.fn();
+  renderSelectable({ onActivate, onCheckedChange });
+
+  await user.click(within(rowOf("broken")).getByRole("checkbox", { name: "Select row" }));
+
+  expect(onCheckedChange).toHaveBeenCalledWith(new Set(["b"]));
+  expect(onActivate).not.toHaveBeenCalled();
+});
+
+it("shows the checked rows as checked", () => {
+  renderSelectable({ checkedIds: new Set(["a"]), onCheckedChange: () => undefined });
+
+  expect(within(rowOf("fine")).getByRole("checkbox", { name: "Select row" })).toBeChecked();
+  expect(within(rowOf("broken")).getByRole("checkbox", { name: "Select row" })).not.toBeChecked();
+});
+
+it("checks every loaded row from the header when some are checked", async () => {
+  const user = userEvent.setup();
+  const onCheckedChange = vi.fn();
+  renderSelectable({ checkedIds: new Set(["a"]), onCheckedChange });
+
+  const all = screen.getByRole("checkbox", { name: "Select all loaded rows" });
+  expect(all).toHaveAttribute("aria-checked", "mixed");
+  await user.click(all);
+
+  expect(onCheckedChange).toHaveBeenCalledWith(new Set(["a", "b"]));
+});
+
+it("clears the loaded rows from the header when they are all checked", async () => {
+  const user = userEvent.setup();
+  const onCheckedChange = vi.fn();
+  renderSelectable({ checkedIds: new Set(["a", "b"]), onCheckedChange });
+
+  await user.click(screen.getByRole("checkbox", { name: "Select all loaded rows" }));
+
+  expect(onCheckedChange).toHaveBeenCalledWith(new Set());
+});
+
+it("does not open a row when Enter is pressed on its checkbox", () => {
+  const onActivate = vi.fn();
+  renderSelectable({ onActivate, onCheckedChange: () => undefined });
+  fireEvent.click(rowOf("fine"));
+  expect(onActivate).toHaveBeenCalledTimes(1);
+
+  fireEvent.keyDown(within(rowOf("fine")).getByRole("checkbox", { name: "Select row" }), {
+    key: "Enter",
+  });
+
+  expect(onActivate).toHaveBeenCalledTimes(1);
 });

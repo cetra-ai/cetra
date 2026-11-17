@@ -49,7 +49,7 @@ export function DatasetSettings({ dataset }: { dataset: Schema<"Dataset"> }) {
           void navigate({
             to: "/$org/$project/datasets",
             params: { org, project },
-            search: { q: undefined },
+            search: { q: undefined, dataset: undefined },
           });
         },
       },

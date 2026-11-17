@@ -18,7 +18,9 @@ type SplitName =
   | "users"
   | "alerts"
   | "online-rules"
-  | "experiments";
+  | "experiments"
+  | "datasets"
+  | "dataset-items";
 
 export type SplitMode = "split" | "bottom" | "drawer" | "page";
 
@@ -31,6 +33,8 @@ const PANES = {
   alerts: { start: "alerts-list", end: "alerts-detail", startSize: 40 },
   "online-rules": { start: "online-rules-list", end: "online-rules-detail", startSize: 40 },
   experiments: { start: "experiments-list", end: "experiments-detail", startSize: 40 },
+  datasets: { start: "datasets-list", end: "datasets-detail", startSize: 40 },
+  "dataset-items": { start: "dataset-items-list", end: "dataset-items-detail", startSize: 50 },
 } as const;
 
 type SplitPaneProps = {

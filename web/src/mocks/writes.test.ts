@@ -282,6 +282,42 @@ it("creates a dataset with the given name", async () => {
   expect(response.json?.name).toBe("golden");
 });
 
+it("answers the batch edit, batch delete, restore and bulk trace writes", async () => {
+  const edited = await send(
+    "PATCH",
+    `${PROJECT}/datasets/faq/items`,
+    JSON.stringify({ items: [{ id: ITEM_ID, metadata: { topic: "exports" } }] }),
+  );
+  expect(edited.status).toBe(200);
+  expect(part(edited.json ?? {}, "version").edited).toBe(1);
+  expect(Array.isArray(edited.json?.items)).toBe(true);
+
+  const deleted = await send(
+    "POST",
+    `${PROJECT}/datasets/faq/items/delete`,
+    JSON.stringify({ ids: [ITEM_ID] }),
+  );
+  expect(deleted.status).toBe(200);
+  expect(deleted.json?.deleted).toBe(2);
+
+  const restored = await send(
+    "POST",
+    `${PROJECT}/datasets/faq/restore`,
+    JSON.stringify({ version: 1 }),
+  );
+  expect(restored.status).toBe(200);
+  expect(restored.json?.description).toBe("restore version 1");
+
+  const copied = await send(
+    "POST",
+    `${PROJECT}/datasets/faq/items/from-traces`,
+    JSON.stringify({ items: [{ trace_id: "a1000000000000000000000000000001" }] }),
+  );
+  expect(copied.status).toBe(201);
+  expect(part(copied.json ?? {}, "version").added).toBe(1);
+  expect(Array.isArray(copied.json?.skipped)).toBe(true);
+});
+
 it("answers the experiment writes", async () => {
   const created = await send(
     "POST",

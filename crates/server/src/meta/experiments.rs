@@ -444,6 +444,79 @@ async fn result_counts(
         .collect()
 }
 
+/// One of the newest visible experiments of a dataset, for the datasets list (D-J-26).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TrendRow {
+    pub(crate) id: Uuid,
+    pub(crate) dataset_id: Uuid,
+    pub(crate) name: String,
+    pub(crate) status: String,
+    pub(crate) created_at: i64,
+    pub(crate) result_count: i64,
+    /// Results with an error.
+    pub(crate) error_count: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct TrendRecord {
+    id: String,
+    dataset_id: String,
+    name: String,
+    status: String,
+    created_at: i64,
+    result_count: i64,
+    error_count: i64,
+}
+
+/// The newest `per_dataset` visible experiments of each of `datasets` in `project`, grouped by
+/// dataset and newest first (D-J-26). Result and error counts are read for those rows only.
+pub(crate) async fn trends(
+    pool: &SqlitePool,
+    project: ProjectId,
+    datasets: &[Uuid],
+    visible_from: Option<i64>,
+    per_dataset: u32,
+) -> Result<Vec<TrendRow>, MetaError> {
+    if datasets.is_empty() {
+        return Ok(Vec::new());
+    }
+    check_ids(datasets)?;
+    let mut builder = QueryBuilder::<Sqlite>::new(
+        "WITH ranked AS (SELECT e.id, e.dataset_id, e.name, e.status, e.created_at, \
+         ROW_NUMBER() OVER (PARTITION BY e.dataset_id ORDER BY e.created_at DESC, e.id DESC) AS rn \
+         FROM experiments e WHERE e.project_id = ",
+    );
+    builder.push_bind(project.to_string());
+    builder.push(" AND e.dataset_id IN (");
+    push_ids(&mut builder, datasets);
+    push_visible(&mut builder, visible_from);
+    builder
+        .push(
+            ") SELECT r.id, r.dataset_id, r.name, r.status, r.created_at, \
+             (SELECT count(*) FROM experiment_items i WHERE i.experiment_id = r.id) AS result_count, \
+             (SELECT count(*) FROM experiment_items i \
+               WHERE i.experiment_id = r.id AND i.error IS NOT NULL) AS error_count \
+             FROM ranked r WHERE r.rn <= ",
+        )
+        .push_bind(i64::from(per_dataset))
+        .push(" ORDER BY r.dataset_id, r.rn");
+    let records: Vec<TrendRecord> = builder.build_query_as().fetch_all(pool).await?;
+    records
+        .into_iter()
+        .map(|record| {
+            Ok(TrendRow {
+                id: parse_uuid(&record.id, "experiments", "id")?,
+                dataset_id: parse_uuid(&record.dataset_id, "experiments", "dataset_id")?,
+                name: record.name,
+                status: record.status,
+                created_at: record.created_at,
+                result_count: record.result_count,
+                error_count: record.error_count,
+            })
+        })
+        .collect()
+}
+
 /// The visible experiments of `project` among `ids`, in no order.
 pub(crate) async fn get_many(
     pool: &SqlitePool,
@@ -1047,7 +1120,7 @@ mod tests {
         dataset: Uuid,
         version: i64,
     ) -> Vec<crate::meta::datasets::ItemRow> {
-        list_items(db.reader(), dataset, version, None, 100)
+        list_items(db.reader(), dataset, version, None, 100, None)
             .await
             .unwrap()
     }
