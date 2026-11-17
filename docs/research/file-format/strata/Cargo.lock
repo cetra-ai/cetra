@@ -419,6 +419,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cetra-core"
+version = "0.0.0"
+dependencies = [
+ "arrow",
+ "chrono",
+ "hex",
+ "serde",
+ "serde_json",
+ "strum",
+ "thiserror",
+ "utoipa",
+ "uuid",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1782,21 +1797,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 
 [[package]]
-name = "cetra-core"
-version = "0.0.0"
-dependencies = [
- "arrow",
- "chrono",
- "hex",
- "serde",
- "serde_json",
- "strum",
- "thiserror",
- "utoipa",
- "uuid",
-]
-
-[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2394,10 +2394,10 @@ dependencies = [
  "arrow",
  "async-trait",
  "bytes",
+ "cetra-core",
  "datafusion",
  "fmt-testdata",
  "futures",
- "cetra-core",
  "memchr",
  "object_store",
  "parquet",

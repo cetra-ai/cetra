@@ -453,7 +453,18 @@ pub(crate) fn evaluate(
         Bound::Cmp(column, op, lit) => {
             let values = column_of(columns, *column)?;
             let array: &dyn Array = values.as_ref();
-            let scalar = Scalar::new(lit.clone());
+            // A scan decodes a Utf8 column with a dictionary as a dictionary array; the
+            // comparison kernels compare its values to a literal of the value type.
+            let value_type = match array.data_type() {
+                DataType::Dictionary(_, value) => value.as_ref(),
+                other => other,
+            };
+            let lit = if lit.data_type() == value_type {
+                lit.clone()
+            } else {
+                arrow::compute::cast(lit, value_type)?
+            };
+            let scalar = Scalar::new(lit);
             let mask = match op {
                 CmpOp::Eq => eq(&array, &scalar)?,
                 CmpOp::NotEq => neq(&array, &scalar)?,

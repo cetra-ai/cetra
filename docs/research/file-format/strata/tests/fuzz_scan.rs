@@ -488,6 +488,7 @@ fn fuzz_scan() {
                 } else {
                     ScanKind::Point
                 },
+                views: false,
             };
             let got = rt().block_on(file.scan(&req));
             match (&got, &want_mask) {

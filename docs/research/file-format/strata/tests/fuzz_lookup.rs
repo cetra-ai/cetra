@@ -342,7 +342,7 @@ fn fuzz_lookup() {
             };
             let np = 1 + rng.below(5);
             let proj: Vec<usize> = (0..np).map(|_| rng.below(8)).collect();
-            let got = rt().block_on(f.lookup_scan(&key, &proj)).unwrap();
+            let got = rt().block_on(f.lookup_scan(&key, &proj, false)).unwrap();
             let keep = BooleanArray::from(
                 (0..n)
                     .map(|r| full.column(0).as_fixed_size_binary().value(r) == key.as_slice())
@@ -396,6 +396,7 @@ fn fuzz_lookup() {
                 row_ranges: ranges.clone(),
                 limit,
                 kind: ScanKind::Scan,
+                views: false,
             };
             let f = if rng.below(2) == 0 {
                 &file

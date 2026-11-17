@@ -37,7 +37,7 @@ pub async fn trace_detail(
     let per_file = try_join_all(
         files
             .iter()
-            .map(|file| file.lookup_scan(&trace_id, &columns)),
+            .map(|file| file.lookup_scan(&trace_id, &columns, false)),
     )
     .await?;
     let batches: Vec<RecordBatch> = per_file.into_iter().flatten().collect();
@@ -125,6 +125,7 @@ pub async fn trace_list(
                 row_ranges: Some(std::iter::once(first_row..end).collect()),
                 limit: None,
                 kind: ScanKind::Scan,
+                views: false,
             })
             .await?;
         for batch in batches {

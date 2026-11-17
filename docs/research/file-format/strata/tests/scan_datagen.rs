@@ -137,18 +137,18 @@ async fn scan_datagen_lookup() {
 
     // Cold: the first lookup on a freshly opened file.
     file.reset_io_stats();
-    let cold = file.lookup_scan(&cold_key, &all).await.unwrap();
+    let cold = file.lookup_scan(&cold_key, &all, false).await.unwrap();
     let cold_io = file.io_stats();
 
     // Warm: the metadata is cached, so the lookup of another trace takes fewer waves.
     file.reset_io_stats();
-    let warm = file.lookup_scan(&warm_key, &all).await.unwrap();
+    let warm = file.lookup_scan(&warm_key, &all, false).await.unwrap();
     let warm_io = file.io_stats();
 
     // An absent key is above no zone: [0; 16] is below every trace id, as their first byte's low
     // bit is always set.
     file.reset_io_stats();
-    let absent = file.lookup_scan(&[0u8; 16], &all).await.unwrap();
+    let absent = file.lookup_scan(&[0u8; 16], &all, false).await.unwrap();
     let absent_io = file.io_stats();
 
     println!("file {} B, rows {}", file.size(), file.row_count());
@@ -221,6 +221,7 @@ async fn scan_datagen_scan() {
             row_ranges: None,
             limit: None,
             kind: ScanKind::Scan,
+            views: false,
         })
         .await
         .unwrap();
@@ -263,6 +264,7 @@ async fn scan_datagen_scan() {
                 row_ranges: None,
                 limit: None,
                 kind: ScanKind::Scan,
+                views: false,
             })
             .await
             .unwrap();
@@ -290,6 +292,7 @@ async fn scan_datagen_scan() {
             row_ranges: None,
             limit: None,
             kind: ScanKind::Scan,
+            views: false,
         })
         .await
         .unwrap();

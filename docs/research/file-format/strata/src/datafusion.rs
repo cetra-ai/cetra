@@ -9,6 +9,7 @@
 //! limit together, is a `Plan` error and never a dropped filter: a dropped filter returns wrong
 //! rows.
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use arrow::array::{RecordBatch, RecordBatchOptions};
@@ -179,6 +180,37 @@ pub(crate) fn to_table_batch(batch: &RecordBatch, table_schema: &SchemaRef) -> R
         columns,
         &RecordBatchOptions::new().with_row_count(Some(batch.num_rows())),
     )?)
+}
+
+/// Fewest rows in one partition's range when a file is split.
+const MIN_PARTITION_ROWS: u64 = 65_536;
+
+/// Splits each file into about `target / files` contiguous row ranges of at least
+/// `MIN_PARTITION_ROWS` rows. A file that is not split reads all its rows (`None`).
+fn split_files(files: &[Arc<StrataFile>], target: usize) -> Vec<(usize, Option<Range<u32>>)> {
+    let per_file = target.div_ceil(files.len().max(1)).max(1) as u64;
+    let mut parts = Vec::new();
+    for (index, file) in files.iter().enumerate() {
+        for rows in split_rows(file.row_count(), per_file) {
+            parts.push((index, rows));
+        }
+    }
+    parts
+}
+
+/// The row ranges of one file of `rows` rows split into at most `parts` ranges of at least
+/// `MIN_PARTITION_ROWS` rows: one `None` (all rows) when it is not split.
+fn split_rows(rows: u64, parts: u64) -> Vec<Option<Range<u32>>> {
+    let n = parts.min(rows / MIN_PARTITION_ROWS).max(1);
+    match u32::try_from(rows) {
+        Ok(rows) if n > 1 => (0..n)
+            .map(|k| {
+                let bound = |k: u64| (u64::from(rows) * k / n) as u32;
+                Some(bound(k)..bound(k + 1))
+            })
+            .collect(),
+        _ => vec![None],
+    }
 }
 
 /// Maps a Strata error to DataFusion's external error.
@@ -562,7 +594,7 @@ impl TableProvider for StrataTable {
 
     async fn scan(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         projection: Option<&Vec<usize>>,
         filters: &[Expr],
         limit: Option<usize>,
@@ -621,8 +653,9 @@ impl TableProvider for StrataTable {
             .cloned()
             .unwrap_or_else(|| (0..self.schema.fields().len()).collect());
         let schema = project_schema(&self.schema, projection)?;
+        let target = state.config().target_partitions();
         Ok(Arc::new(StrataExec::new(
-            files, indexes, predicate, lookup, limit, schema,
+            files, indexes, predicate, lookup, limit, schema, target,
         )))
     }
 }
@@ -631,6 +664,8 @@ impl TableProvider for StrataTable {
 #[derive(Debug)]
 pub struct StrataExec {
     files: Vec<Arc<StrataFile>>,
+    /// One entry per partition: the file index and the rows it reads (`None`: all of them).
+    parts: Vec<(usize, Option<Range<u32>>)>,
     projection: Vec<usize>,
     predicate: Option<Predicate>,
     lookup: Option<Vec<u8>>,
@@ -642,6 +677,8 @@ pub struct StrataExec {
 
 impl StrataExec {
     /// An exec over `files`. `schema` is the output schema, the projection of the table schema.
+    /// A scan splits each file into row ranges so that there are about `target_partitions`
+    /// partitions; a lookup reads each file whole.
     fn new(
         files: Vec<Arc<StrataFile>>,
         projection: Vec<usize>,
@@ -649,9 +686,18 @@ impl StrataExec {
         lookup: Option<Vec<u8>>,
         limit: Option<usize>,
         schema: SchemaRef,
+        target_partitions: usize,
     ) -> StrataExec {
-        // Ordering: the sort key, when its column is projected. Each partition reads at most one
-        // file, because there is one partition per file (or one partition with no file).
+        let parts = split_files(
+            &files,
+            if lookup.is_some() {
+                1
+            } else {
+                target_partitions
+            },
+        );
+        // Ordering: the sort key, when its column is projected. Each partition reads one
+        // contiguous row range of one file, which is sorted by the key.
         let sort_key = files.first().and_then(|file| file.sort_key_column());
         let mut eq = EquivalenceProperties::new(Arc::clone(&schema));
         if let Some(key) = sort_key
@@ -666,7 +712,7 @@ impl StrataExec {
                 },
             )]);
         }
-        let partitions = files.len().max(1);
+        let partitions = parts.len().max(1);
         // Prototype shortcut: the single-future stream does not consume DataFusion's cooperative
         // budget. `Cooperative` avoids the `CooperativeExec` wrapper.
         let props = PlanProperties::new(
@@ -678,6 +724,7 @@ impl StrataExec {
         .with_scheduling_type(SchedulingType::Cooperative);
         StrataExec {
             files,
+            parts,
             projection,
             predicate,
             lookup,
@@ -688,9 +735,9 @@ impl StrataExec {
         }
     }
 
-    /// The number of partitions: one per file, and one when there is no file.
+    /// The number of partitions: one per row range, and one when there is no file.
     fn partitions(&self) -> usize {
-        self.files.len().max(1)
+        self.parts.len().max(1)
     }
 }
 
@@ -702,8 +749,9 @@ impl DisplayAs for StrataExec {
         };
         write!(
             f,
-            "StrataExec: files={}, lookup={}, predicate={predicate}",
+            "StrataExec: files={}, partitions={}, lookup={}, predicate={predicate}",
             self.files.len(),
+            self.partitions(),
             self.lookup.is_some()
         )
     }
@@ -765,7 +813,13 @@ impl ExecutionPlan for StrataExec {
         let requests = MetricBuilder::new(&self.metrics).counter("strata_requests", partition);
         let waves = MetricBuilder::new(&self.metrics).counter("strata_waves", partition);
 
-        let file = self.files.get(partition).map(Arc::clone);
+        let (file, row_ranges) = match self.parts.get(partition) {
+            Some((f, rows)) => (
+                self.files.get(*f).map(Arc::clone),
+                rows.clone().map(|r| vec![r]),
+            ),
+            None => (None, None),
+        };
         let projection = self.projection.clone();
         let predicate = self.predicate.clone();
         let lookup = self.lookup.clone();
@@ -777,14 +831,15 @@ impl ExecutionPlan for StrataExec {
             };
             let before = file.io_stats();
             let batches = match lookup {
-                Some(key) => file.lookup_scan(&key, &projection).await,
+                Some(key) => file.lookup_scan(&key, &projection, true).await,
                 None => {
                     file.scan(&ScanRequest {
                         projection,
                         predicate,
-                        row_ranges: None,
+                        row_ranges,
                         limit,
                         kind: ScanKind::Scan,
+                        views: true,
                     })
                     .await
                 }
@@ -1090,6 +1145,30 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn split_rows_covers_the_file_in_large_enough_ranges() {
+        assert_eq!(split_rows(1_000, 8), vec![None]);
+        assert_eq!(split_rows(2 * MIN_PARTITION_ROWS - 1, 8), vec![None]);
+        let rows = 10 * MIN_PARTITION_ROWS + 7;
+        for parts in [2u64, 3, 8, 100] {
+            let ranges: Vec<Range<u32>> = split_rows(rows, parts)
+                .into_iter()
+                .map(Option::unwrap)
+                .collect();
+            assert_eq!(ranges.len() as u64, parts.min(10));
+            assert_eq!(ranges.first().unwrap().start, 0);
+            assert_eq!(u64::from(ranges.last().unwrap().end), rows);
+            for pair in ranges.windows(2) {
+                assert_eq!(pair[0].end, pair[1].start);
+            }
+            assert!(
+                ranges
+                    .iter()
+                    .all(|r| u64::from(r.end - r.start) >= MIN_PARTITION_ROWS)
+            );
+        }
+    }
+
     #[tokio::test]
     async fn exec_partitions_and_ordering() {
         let t = main_table().await;
@@ -1101,6 +1180,7 @@ mod tests {
             None,
             None,
             project_schema(&schema, Some(&vec![0, 1])).unwrap(),
+            8,
         );
         assert_eq!(with_key.partitions(), 1);
         assert_eq!(
@@ -1115,6 +1195,7 @@ mod tests {
             None,
             None,
             project_schema(&schema, Some(&vec![1])).unwrap(),
+            8,
         );
         assert!(without_key.properties().output_ordering().is_none());
     }

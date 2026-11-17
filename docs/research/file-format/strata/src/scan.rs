@@ -15,14 +15,14 @@ use std::sync::Arc;
 use arrow::array::{
     Array, ArrayRef, BooleanArray, RecordBatch, RecordBatchOptions, UInt32Array, new_empty_array,
 };
-use arrow::compute::{concat, take};
-use arrow::datatypes::{Field, SchemaRef};
+use arrow::compute::{cast, concat, take};
+use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 
 use crate::error::{Result, StrataError};
 use crate::file::StrataFile;
 use crate::hot::Layer;
 use crate::io::ScanKind;
-use crate::narrow::{BlockEntry, Dictionary, decode_chunk};
+use crate::narrow::{BlockEntry, Dictionary, decode_chunk_view};
 use crate::payload::{
     PayloadHeader, build_values, decode_frames, frame_segments, ids_of, payload_contains,
     read_header, refs_segments,
@@ -54,6 +54,24 @@ pub struct ScanRequest {
     pub limit: Option<usize>,
     /// How reads are coalesced.
     pub kind: ScanKind,
+    /// Top-level Utf8 columns come out as `Utf8View`, which avoids copying their strings.
+    pub views: bool,
+}
+
+/// `schema` with its top-level Utf8 fields as `Utf8View` when `views` is set.
+pub(crate) fn scan_schema(schema: Schema, views: bool) -> SchemaRef {
+    if !views {
+        return Arc::new(schema);
+    }
+    let fields: Vec<Field> = schema
+        .fields()
+        .iter()
+        .map(|field| match field.data_type() {
+            DataType::Utf8 => field.as_ref().clone().with_data_type(DataType::Utf8View),
+            _ => field.as_ref().clone(),
+        })
+        .collect();
+    Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()))
 }
 
 /// The decoded chunks read so far, by (directory id, chunk index).
@@ -171,6 +189,26 @@ fn chunk_of(entries: &[BlockEntry], row: u32) -> Result<usize> {
     }
 }
 
+/// The indexes of the chunks of `entries` that hold at least one of `rows` (ascending). It
+/// costs one binary search per chunk, not one per row.
+fn chunks_with_rows(entries: &[BlockEntry], rows: &[u32]) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut rest = rows;
+    for (index, entry) in entries.iter().enumerate() {
+        let Some(&first) = rest.first() else { break };
+        let end = u64::from(entry.first_row) + u64::from(entry.n_rows);
+        if u64::from(first) >= end {
+            continue;
+        }
+        let inside = rest.partition_point(|&row| u64::from(row) < end);
+        if inside > 0 && first >= entry.first_row {
+            out.push(index);
+        }
+        rest = rest.get(inside..).unwrap_or_default();
+    }
+    out
+}
+
 /// The row `start + offset`, checked against overflow.
 fn row_at(start: u32, offset: usize) -> Result<u32> {
     u32::try_from(offset)
@@ -222,24 +260,33 @@ fn take_rows(
             reason: "internal: missing chunk".to_string(),
         })?;
         let end = u64::from(entry.first_row) + u64::from(entry.n_rows);
-        let run = rest.iter().take_while(|&&row| u64::from(row) < end).count();
+        let run = rest.partition_point(|&row| u64::from(row) < end);
         let (head, tail) = rest
             .split_at_checked(run)
             .ok_or_else(|| StrataError::Schema {
                 reason: "internal: run of rows".to_string(),
             })?;
-        let local: Vec<u32> = head
-            .iter()
-            .map(|&row| {
-                row.checked_sub(entry.first_row)
-                    .ok_or_else(|| StrataError::Corrupt {
-                        what: "chunk row",
-                        offset: u64::from(row),
-                    })
-            })
-            .collect::<Result<_>>()?;
         let chunk = decoded_chunk(decoded, column, index)?;
-        pieces.push(take(chunk.as_ref(), &UInt32Array::from(local), None)?);
+        let corrupt_row = |row: u32| StrataError::Corrupt {
+            what: "chunk row",
+            offset: u64::from(row),
+        };
+        let (Some(&lo), Some(&hi)) = (head.first(), head.last()) else {
+            return Err(StrataError::Schema {
+                reason: "internal: empty run of rows".to_string(),
+            });
+        };
+        let start = lo
+            .checked_sub(entry.first_row)
+            .ok_or_else(|| corrupt_row(lo))?;
+        // Rows are ascending and distinct, so a run whose span equals its length is contiguous:
+        // a slice, with no copy.
+        if (hi - lo) as usize + 1 == head.len() {
+            pieces.push(chunk.slice(start as usize, head.len()));
+        } else {
+            let local: Vec<u32> = head.iter().map(|&row| row - entry.first_row).collect();
+            pieces.push(take(chunk.as_ref(), &UInt32Array::from(local), None)?);
+        }
         rest = tail;
     }
     match pieces.len() {
@@ -338,7 +385,7 @@ fn plan_chunks(
             segments.push((segment, Kind::NarrowChunk));
             pending.push((column, index, entry));
         } else {
-            let array = decode_chunk(&entry, None, &info.field, info.dict.as_deref())?;
+            let array = decode_chunk_view(&entry, None, &info.field, info.dict.as_deref())?;
             decoded.insert((column, index), array);
         }
     }
@@ -360,7 +407,7 @@ fn decode_chunks(
     }
     for ((column, index, entry), body) in pending.into_iter().zip(&bodies) {
         let info = info_of(infos, column)?;
-        let array = decode_chunk(
+        let array = decode_chunk_view(
             &entry,
             Some(body.as_slice()),
             &info.field,
@@ -460,6 +507,14 @@ fn build_batches(
                     let residual = index_of(layout.residual)?;
                     let residual =
                         take_rows(decoded, info_of(infos, residual)?, residual, batch_rows)?;
+                    // The scan decodes Utf8 children as dictionary arrays; `unshred` takes Utf8.
+                    let children = children
+                        .iter()
+                        .map(|child| match child.data_type() {
+                            DataType::Dictionary(..) => Ok(cast(child, &DataType::Utf8)?),
+                            _ => Ok(Arc::clone(child)),
+                        })
+                        .collect::<Result<Vec<_>>>()?;
                     let keys: Vec<Vec<u8>> =
                         layout.keys.iter().map(|key| key.key.clone()).collect();
                     let field = file.field_of(column)?;
@@ -470,6 +525,12 @@ fn build_batches(
                         reason: format!("internal: projection of column {column}"),
                     });
                 }
+            };
+            let field = output.field(columns.len());
+            let array = if array.data_type() == field.data_type() {
+                array
+            } else {
+                cast(&array, field.data_type())?
             };
             columns.push(array);
         }
@@ -507,7 +568,7 @@ impl StrataFile {
             None => (None, Vec::new()),
         };
         self.check_row_ranges(req.row_ranges.as_deref())?;
-        let output: SchemaRef = Arc::new(self.schema().project(&req.projection)?);
+        let output: SchemaRef = scan_schema(self.schema().project(&req.projection)?, req.views);
         if req.limit == Some(0) {
             return Ok(Vec::new());
         }
@@ -646,8 +707,8 @@ impl StrataFile {
         let mut wanted: BTreeSet<(usize, usize)> = BTreeSet::new();
         for &column in &narrow {
             let info = info_of(&infos, column)?;
-            for &row in &selection {
-                wanted.insert((column, chunk_of(&info.entries, row)?));
+            for index in chunks_with_rows(&info.entries, &selection) {
+                wanted.insert((column, index));
             }
         }
         self.decode_wave(&infos, &wanted, req.kind, &mut decoded)
@@ -668,10 +729,16 @@ impl StrataFile {
     /// Rows whose first sort-key column equals `key`, with the projected columns. It runs in
     /// waves, with the sort-key chunks of the first wave: cold (metadata not cached) it takes
     /// two waves, or three with a payload column; warm, one or two. A key the sort-key filter or
-    /// the zones rule out costs no wave.
-    pub async fn lookup_scan(&self, key: &[u8], projection: &[usize]) -> Result<Vec<RecordBatch>> {
+    /// the zones rule out costs no wave. With `views`, top-level Utf8 columns come out as
+    /// `Utf8View`.
+    pub async fn lookup_scan(
+        &self,
+        key: &[u8],
+        projection: &[usize],
+        views: bool,
+    ) -> Result<Vec<RecordBatch>> {
         self.check_projection(projection)?;
-        let output: SchemaRef = Arc::new(self.schema().project(projection)?);
+        let output: SchemaRef = scan_schema(self.schema().project(projection)?, views);
         let Some(candidates) = self.lookup_candidates(key)? else {
             return Ok(Vec::new());
         };
@@ -729,8 +796,12 @@ impl StrataFile {
                             what: "sort-key block table",
                             offset: entry.segment_offset,
                         })?;
-                    let array =
-                        decode_chunk(entry, body.as_deref(), &info.field, info.dict.as_deref())?;
+                    let array = decode_chunk_view(
+                        entry,
+                        body.as_deref(),
+                        &info.field,
+                        info.dict.as_deref(),
+                    )?;
                     decoded.insert((sort, index), array);
                 }
             }
@@ -1261,6 +1332,82 @@ mod tests {
         }
     }
 
+    fn entry(first_row: u32, n_rows: u32) -> BlockEntry {
+        BlockEntry {
+            first_row,
+            n_rows,
+            segment_offset: 0,
+            segment_len: 0,
+            encoding: crate::narrow::Encoding::ConstNull,
+            flags: 0,
+            const_len: 0,
+            min: [0; 16],
+            max: [0; 16],
+        }
+    }
+
+    #[test]
+    fn chunks_with_rows_finds_each_chunk_holding_a_row() {
+        let entries = vec![entry(0, 10), entry(10, 10), entry(20, 5), entry(25, 100)];
+        assert_eq!(chunks_with_rows(&entries, &[]), Vec::<usize>::new());
+        assert_eq!(chunks_with_rows(&entries, &[0, 9]), vec![0]);
+        assert_eq!(chunks_with_rows(&entries, &[3, 21, 124]), vec![0, 2, 3]);
+        assert_eq!(chunks_with_rows(&entries, &[10, 11, 12, 30]), vec![1, 3]);
+        let all: Vec<u32> = (0..125).collect();
+        assert_eq!(chunks_with_rows(&entries, &all), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn a_views_scan_matches_a_plain_scan() {
+        runtime().block_on(async {
+            let file = open_wide(20_000, &Config::default()).await;
+            let names = ["span_kind", "status", "model", "environment", "cost", "uid"];
+            let projection: Vec<usize> = names
+                .iter()
+                .filter_map(|n| wide_schema().index_of(n).ok())
+                .collect();
+            let predicates = [
+                None,
+                Some(Predicate::Cmp(
+                    col("status"),
+                    CmpOp::Eq,
+                    Lit::Utf8("error".into()),
+                )),
+                Some(Predicate::Cmp(
+                    col("model"),
+                    CmpOp::NotEq,
+                    Lit::Utf8("gpt-4o".into()),
+                )),
+            ];
+            for predicate in predicates {
+                let req = |views| ScanRequest {
+                    projection: projection.clone(),
+                    predicate: predicate.clone(),
+                    row_ranges: Some(vec![100..7_000, 9_000..19_500]),
+                    limit: None,
+                    kind: ScanKind::Scan,
+                    views,
+                };
+                let plain = file.scan(&req(false)).await.unwrap();
+                let viewed = file.scan(&req(true)).await.unwrap();
+                assert_eq!(plain.len(), viewed.len());
+                for (p, v) in plain.iter().zip(&viewed) {
+                    assert_eq!(p.num_rows(), v.num_rows());
+                    for (c, field) in v.schema().fields().iter().enumerate() {
+                        let want = p.column(c);
+                        if want.data_type() == &DataType::Utf8 {
+                            assert_eq!(field.data_type(), &DataType::Utf8View);
+                            let back = cast(v.column(c), &DataType::Utf8).unwrap();
+                            assert_eq!(back.as_ref(), want.as_ref());
+                        } else {
+                            assert_eq!(v.column(c).as_ref(), want.as_ref());
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     /// Runs `req` on `file` and compares the result with the oracle.
     async fn check(file: &StrataFile, p: Predicate, projection: &[usize]) {
         let req = ScanRequest {
@@ -1269,6 +1416,7 @@ mod tests {
             row_ranges: None,
             limit: None,
             kind: ScanKind::Scan,
+            views: false,
         };
         let batches = file.scan(&req).await.unwrap();
         let want = oracle(file, Some(&p), None, projection).await.unwrap();
@@ -1421,6 +1569,7 @@ mod tests {
                 row_ranges: None,
                 limit: None,
                 kind: ScanKind::Scan,
+                views: false,
             };
             let batches = file.scan(&req).await.unwrap();
             let stats = file.io_stats();
@@ -1449,6 +1598,7 @@ mod tests {
                 row_ranges: None,
                 limit: None,
                 kind: ScanKind::Scan,
+                views: false,
             };
             let batches = file.scan(&req).await.unwrap();
             let stats = file.io_stats();
@@ -1478,6 +1628,7 @@ mod tests {
                 row_ranges: None,
                 limit: None,
                 kind: ScanKind::Scan,
+                views: false,
             };
             let batches = file.scan(&req).await.unwrap();
             assert!(batches.is_empty());
@@ -1497,6 +1648,7 @@ mod tests {
                 row_ranges: Some(ranges.clone()),
                 limit: None,
                 kind: ScanKind::Scan,
+                views: false,
             };
             let batches = file.scan(&req).await.unwrap();
             let want = oracle(&file, None, Some(ranges.as_slice()), &projection)
@@ -1513,6 +1665,7 @@ mod tests {
                 row_ranges: Some(vec![100..9_000, 15_000..15_050]),
                 limit: None,
                 kind: ScanKind::Scan,
+                views: false,
             };
             let batches = file.scan(&req).await.unwrap();
             let restricted = [100..9_000, 15_000..15_050];
@@ -1536,6 +1689,7 @@ mod tests {
                 row_ranges: None,
                 limit: Some(7),
                 kind: ScanKind::Scan,
+                views: false,
             };
             let batches = file.scan(&req).await.unwrap();
             let want = oracle(&file, Some(&p), None, &projection)
@@ -1566,6 +1720,7 @@ mod tests {
                 row_ranges: None,
                 limit: None,
                 kind: ScanKind::Scan,
+                views: false,
             };
             let batches = file.scan(&req).await.unwrap();
             assert!(batches.iter().all(|b| b.num_columns() == 0));
@@ -1589,6 +1744,7 @@ mod tests {
                     row_ranges: ranges,
                     limit: None,
                     kind: ScanKind::Scan,
+                    views: false,
                 };
                 let file = &file;
                 async move { file.scan(&req).await }
@@ -1719,6 +1875,7 @@ mod tests {
                     row_ranges: None,
                     limit: None,
                     kind: ScanKind::Scan,
+                    views: false,
                 };
                 let got = file.scan(&req).await;
                 let want = oracle(&file, Some(&p), None, &req.projection).await;
@@ -1777,6 +1934,7 @@ mod tests {
             row_ranges: None,
             limit: None,
             kind: ScanKind::Scan,
+            views: false,
         };
         let batches = file.scan(&req).await.unwrap();
         let schema = Arc::new(file.schema().project(projection).unwrap());
@@ -1827,6 +1985,7 @@ mod tests {
                 row_ranges: None,
                 limit: None,
                 kind: ScanKind::Scan,
+                views: false,
             };
             file.reset_io_stats();
             let batches = file.scan(&req).await.unwrap();
@@ -1861,6 +2020,7 @@ mod tests {
                 row_ranges: Some(vec![ranges.clone()]),
                 limit: None,
                 kind: ScanKind::Scan,
+                views: false,
             };
             let batches = file.scan(&req).await.unwrap();
             let want = oracle(
@@ -1906,6 +2066,7 @@ mod tests {
                     row_ranges: None,
                     limit: None,
                     kind: ScanKind::Scan,
+                    views: false,
                 })
                 .await;
             assert!(matches!(result, Err(StrataError::Unsupported { .. })));
@@ -1916,6 +2077,7 @@ mod tests {
                     row_ranges: None,
                     limit: None,
                     kind: ScanKind::Scan,
+                    views: false,
                 })
                 .await;
             assert!(matches!(long, Err(StrataError::Unsupported { .. })));
@@ -1952,6 +2114,7 @@ mod tests {
                 row_ranges: None,
                 limit: None,
                 kind: ScanKind::Scan,
+                views: false,
             };
             file.scan(&req).await.unwrap();
             // Metadata, up to four `Contains` waves, the filter and the projection.
@@ -1972,7 +2135,7 @@ mod tests {
             // Cold: the metadata and the narrow chunks, two waves.
             file.reset_io_stats();
             let got = file
-                .lookup_scan(&trace(1_000).to_be_bytes(), &all)
+                .lookup_scan(&trace(1_000).to_be_bytes(), &all, false)
                 .await
                 .unwrap();
             assert_eq!(file.io_stats().waves, 2);
@@ -1982,7 +2145,7 @@ mod tests {
             // Warm: one wave.
             file.reset_io_stats();
             let got = file
-                .lookup_scan(&trace(15_000).to_be_bytes(), &all)
+                .lookup_scan(&trace(15_000).to_be_bytes(), &all, false)
                 .await
                 .unwrap();
             assert_eq!(file.io_stats().waves, 1);
@@ -1992,13 +2155,13 @@ mod tests {
             // A key above every zone costs nothing; [0; 16] is present, in rows 0 to 4.
             file.reset_io_stats();
             assert!(
-                file.lookup_scan(&[0xFF; 16], &all)
+                file.lookup_scan(&[0xFF; 16], &all, false)
                     .await
                     .unwrap()
                     .is_empty()
             );
             assert_eq!(file.io_stats().waves, 0);
-            let present = file.lookup_scan(&[0u8; 16], &all).await.unwrap();
+            let present = file.lookup_scan(&[0u8; 16], &all, false).await.unwrap();
             let rows: usize = present.iter().map(RecordBatch::num_rows).sum();
             assert_eq!(rows, 5);
         });
@@ -2039,6 +2202,7 @@ mod tests {
                 row_ranges: None,
                 limit: None,
                 kind: ScanKind::Scan,
+                views: false,
             };
             assert!(file.scan(&req).await.unwrap().is_empty());
             assert_eq!(file.io_stats().waves, 1);

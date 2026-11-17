@@ -1,8 +1,9 @@
 //! Sorted file-level dictionaries for Utf8 columns and the elements of List(Utf8) columns.
 
 use std::collections::BTreeSet;
+use std::sync::{Arc, OnceLock};
 
-use arrow::array::{Array, AsArray, ListArray, StringArray};
+use arrow::array::{Array, ArrayRef, AsArray, ListArray, StringArray};
 use arrow::datatypes::DataType;
 
 use crate::config::Config;
@@ -11,12 +12,38 @@ use crate::format::{Cursor, MAX_DICT_VALUES, Out};
 
 /// The distinct values of a column, sorted bytewise. A code is the index of a value. Every
 /// value is valid UTF-8, checked once when the dictionary is built or decoded.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Dictionary {
     values: Vec<String>,
+    /// The values as one Arrow array, built on first use. Decoded chunks share it.
+    array: OnceLock<ArrayRef>,
 }
 
+impl PartialEq for Dictionary {
+    fn eq(&self, other: &Self) -> bool {
+        self.values == other.values
+    }
+}
+
+impl Eq for Dictionary {}
+
 impl Dictionary {
+    /// A dictionary of `values`, which must be sorted, distinct and valid UTF-8.
+    fn from_values(values: Vec<String>) -> Self {
+        Self {
+            values,
+            array: OnceLock::new(),
+        }
+    }
+
+    /// The values as one Utf8 array, indexed by code. It is built once, and every chunk
+    /// decoded as a dictionary array shares it.
+    pub(crate) fn values_array(&self) -> ArrayRef {
+        Arc::clone(self.array.get_or_init(|| {
+            Arc::new(StringArray::from_iter_values(self.values.iter())) as ArrayRef
+        }))
+    }
+
     /// The code of `v`, or `None` when `v` is not in the dictionary.
     pub fn code_of(&self, v: &[u8]) -> Option<u32> {
         self.values
@@ -107,7 +134,7 @@ impl Dictionary {
             }
             values.push(text.to_string());
         }
-        Ok(Self { values })
+        Ok(Self::from_values(values))
     }
 }
 
@@ -184,9 +211,9 @@ pub(crate) fn build(
     if size > max_bytes {
         return None;
     }
-    Some(Dictionary {
-        values: distinct.into_iter().map(str::to_string).collect(),
-    })
+    Some(Dictionary::from_values(
+        distinct.into_iter().map(str::to_string).collect(),
+    ))
 }
 
 #[cfg(test)]

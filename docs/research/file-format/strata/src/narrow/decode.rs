@@ -3,11 +3,12 @@
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayData, ArrayRef, BinaryArray, ListArray, MapArray, StringArray, StringBuilder, StructArray,
-    make_array, new_null_array,
+    ArrayData, ArrayRef, BinaryArray, DictionaryArray, ListArray, MapArray, StringArray,
+    StringBuilder, StructArray, UInt32Array, make_array, new_null_array,
 };
 use arrow::buffer::{BooleanBuffer, Buffer, NullBuffer, OffsetBuffer, ScalarBuffer};
-use arrow::datatypes::{DataType, Field};
+use arrow::compute::cast;
+use arrow::datatypes::{DataType, Field, UInt32Type};
 use arrow::ipc::reader::StreamReader;
 
 use super::bitpack::unpack;
@@ -333,9 +334,66 @@ fn decode_fsb(
     build_array(dt, n, nulls, values, at)
 }
 
+/// Decodes a chunk for a scan: like [`decode_chunk`], except that a top-level Utf8 column with
+/// a dictionary comes out as `Dictionary(UInt32, Utf8)` over the dictionary's shared values, so
+/// no row's string is copied. Every chunk of such a column has that type, whatever its
+/// encoding, so the chunks concatenate. A Utf8 column without a dictionary stays Utf8.
+pub fn decode_chunk_view(
+    entry: &BlockEntry,
+    body: Option<&[u8]>,
+    field: &Field,
+    dict: Option<&Dictionary>,
+) -> Result<ArrayRef> {
+    let Some(dict) = dict.filter(|_| field.data_type() == &DataType::Utf8) else {
+        return decode_chunk(entry, body, field, dict);
+    };
+    let at = entry.segment_offset;
+    let dict_type = || DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8));
+    if entry.encoding != Encoding::Dict {
+        let array = decode_chunk(entry, body, field, Some(dict))?;
+        return Ok(cast(&array, &dict_type())?);
+    }
+    if entry.n_rows > MAX_CHUNK_ROWS {
+        return Err(StrataError::Corrupt {
+            what: "chunk rows",
+            offset: at,
+        });
+    }
+    let n = entry.n_rows as usize;
+    let body = body.ok_or_else(|| StrataError::Corrupt {
+        what: "chunk body",
+        offset: at,
+    })?;
+    let mut c = Cursor::new(body, at);
+    let nulls = if entry.flags & flags::HAS_NULLS != 0 {
+        Some(read_validity(&mut c, n)?)
+    } else {
+        None
+    };
+    let codes = read_codes(&mut c, n, at)?;
+    expect_end(&c, at)?;
+    let keys: Vec<u32> = codes
+        .into_iter()
+        .map(|code| {
+            u32::try_from(code)
+                .ok()
+                .filter(|&code| (code as usize) < dict.len())
+                .ok_or_else(|| StrataError::Corrupt {
+                    what: "dictionary code",
+                    offset: at,
+                })
+        })
+        .collect::<Result<_>>()?;
+    let keys = UInt32Array::new(keys.into(), nulls);
+    Ok(Arc::new(DictionaryArray::<UInt32Type>::try_new(
+        keys,
+        dict.values_array(),
+    )?))
+}
+
 /// The dictionary a `Dict` or `ListDict` chunk needs.
 fn require_dict(dict: Option<&Dictionary>, at: u64) -> Result<&Dictionary> {
-    dict.ok_or(StrataError::Corrupt {
+    dict.ok_or_else(|| StrataError::Corrupt {
         what: "chunk dictionary",
         offset: at,
     })
@@ -358,7 +416,7 @@ fn code_str(dict: &Dictionary, code: u64, at: u64) -> Result<&str> {
     u32::try_from(code)
         .ok()
         .and_then(|code| dict.str_value(code))
-        .ok_or(StrataError::Corrupt {
+        .ok_or_else(|| StrataError::Corrupt {
             what: "dictionary code",
             offset: at,
         })

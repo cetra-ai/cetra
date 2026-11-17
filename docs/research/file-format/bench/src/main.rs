@@ -79,7 +79,15 @@ async fn main() -> R<()> {
         Some("query") => {
             let runs: usize = args.get(3).map(|s| s.parse()).transpose()?.unwrap_or(5);
             let only = args.get(4).cloned();
-            query(&args[2], runs, only).await
+            let guard = match std::env::var("FMT_PPROF") {
+                Ok(_) => Some(pprof::ProfilerGuardBuilder::default().frequency(997).build()?),
+                Err(_) => None,
+            };
+            let r = query(&args[2], runs, only).await;
+            if let Some(g) = guard {
+                print_profile(&g.report().build()?);
+            }
+            r
         }
         Some("profile") => {
             let loc = location(&args[2])?;
@@ -920,7 +928,9 @@ async fn query(dir: &str, runs: usize, only: Option<String>) -> R<()> {
     println!("{:16} {:20} {:>9} {:>9} {:>12} {:>6}  {:>8} {:>10}  {:>10} {:>10}", "variant", "query", "median", "min", "cpu med", "rows", "reqs", "KiB", "waves_max", "waves_sum");
     println!("(times are per query, or per id for trace queries; cpu is process CPU time; trace queries: reqs, KiB and waves per id; waves are for st and st_fast only; rows are totals)");
 
-    let variants: Vec<&str> = PQ_VARIANTS.iter().chain(VX_VARIANTS).chain(&["st"]).copied().collect();
+    let wanted: Option<Vec<String>> = std::env::var("FMT_VARIANTS").ok().map(|v| v.split(',').map(str::to_owned).collect());
+    let wants = |v: &str| wanted.as_ref().is_none_or(|w| w.iter().any(|x| x == v));
+    let variants: Vec<&str> = PQ_VARIANTS.iter().chain(VX_VARIANTS).chain(&["st"]).copied().filter(|v| wants(v)).collect();
     let mut dirs: Vec<&str> = Vec::new();
     for variant in variants {
         if !has_files(&loc, variant).await? {
@@ -931,12 +941,12 @@ async fn query(dir: &str, runs: usize, only: Option<String>) -> R<()> {
         measure(&loc, variant, &Runner::Sql(ctx, files), &queries, &ids, runs, only).await?;
         dirs.push(variant);
     }
-    if has_files(&loc, "st").await? {
+    if wants("st_fast") && has_files(&loc, "st").await? {
         let files = open_strata(&loc, "st").await?;
         measure(&loc, "st_fast", &Runner::StFast(files), &queries, &ids, runs, only).await?;
     }
     for variant in PQ_VARIANTS {
-        if has_files(&loc, variant).await? {
+        if wants(&format!("pq_fast/{variant}")) && has_files(&loc, variant).await? {
             let files = open_pq_fast(&loc, variant).await?;
             measure(&loc, &format!("pq_fast/{variant}"), &Runner::PqFast(files), &queries, &ids, runs, only).await?;
         }
@@ -1058,6 +1068,42 @@ async fn trace_lookup_cold(loc: &Location, ids: &[[u8; 16]], runs: usize) -> R<(
         println!("{label:16} {:>10.2} {:>10.1} {:>10.1} {w:>8} {:>8}", ms / n, kib / n, reqs / n, rows / runs);
     }
     Ok(())
+}
+
+/// Prints the top functions of a CPU profile by self and by inclusive samples.
+fn print_profile(report: &pprof::Report) {
+    use std::collections::HashMap;
+    let mut own: HashMap<String, isize> = HashMap::new();
+    let mut incl: HashMap<String, isize> = HashMap::new();
+    let mut total = 0isize;
+    for (frames, count) in &report.data {
+        total += count;
+        let names: Vec<String> = frames
+            .frames
+            .iter()
+            .map(|f| f.first().map_or_else(|| "?".to_owned(), |s| s.name()))
+            .map(|n| n.split("::h").next().unwrap_or(&n).to_owned())
+            .collect();
+        if let Some(top) = names.first() {
+            *own.entry(top.clone()).or_default() += count;
+        }
+        let mut seen = std::collections::HashSet::new();
+        for n in names {
+            if seen.insert(n.clone()) {
+                *incl.entry(n).or_default() += count;
+            }
+        }
+    }
+    let show = |title: &str, m: HashMap<String, isize>, n: usize, filter: bool| {
+        let mut v: Vec<_> = m.into_iter().filter(|(k, _)| !filter || k.contains("strata") || k.contains("arrow") || k.contains("datafusion") || k.contains("zstd")).collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1));
+        println!("== profile: {title} ({total} samples)");
+        for (k, c) in v.into_iter().take(n) {
+            println!("  {:5.1}%  {}", 100.0 * c as f64 / total.max(1) as f64, k.chars().take(150).collect::<String>());
+        }
+    };
+    show("self", own, 40, false);
+    show("inclusive, strata/arrow/datafusion/zstd", incl, 60, true);
 }
 
 // ------------------------------------------------------------------ dedup

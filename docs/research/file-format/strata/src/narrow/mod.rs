@@ -12,7 +12,7 @@ mod encode;
 mod lengths;
 
 pub use chunker::chunk_ranges;
-pub use decode::decode_chunk;
+pub use decode::{decode_chunk, decode_chunk_view};
 pub use dict::{Dictionary, for_column};
 pub use encode::{EncodedChunk, encode_chunk};
 
