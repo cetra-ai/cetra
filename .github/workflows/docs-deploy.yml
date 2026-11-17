@@ -1,0 +1,46 @@
+name: Docs deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-deploy-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    # The job runs the PR's code with a deploy token: only main and owner-authored,
+    # owner-triggered same-repository PRs (the CI_CACHE_ALLOWED gate of ci.yml, D-W-3).
+    if: >-
+      ${{
+        (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+        (github.event_name == 'pull_request' &&
+         github.event.pull_request.user.login == 'sebastiencs' &&
+         github.event.pull_request.head.repo.full_name == github.repository &&
+         github.actor == 'sebastiencs' && github.triggering_actor == 'sebastiencs')
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: ${{ github.event_name == 'push' && 'docs-production' || 'docs-preview' }}
+      url: ${{ github.event_name == 'push' && 'https://cetra.sh/docs/' || format('https://pr-{0}.cetra-site.pages.dev/docs/', github.event.pull_request.number) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/js # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+      - name: Deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          BRANCH: ${{ github.event_name == 'push' && 'main' || format('pr-{0}', github.event.pull_request.number) }}
+        run: just docs-deploy "$BRANCH"
+      - name: Summary
+        env:
+          URL: ${{ github.event_name == 'push' && 'https://cetra.sh/docs/' || format('https://pr-{0}.cetra-site.pages.dev/docs/', github.event.pull_request.number) }}
+        run: echo "Deployed to $URL" >> "$GITHUB_STEP_SUMMARY"

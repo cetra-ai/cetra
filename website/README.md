@@ -31,3 +31,14 @@ Lints, tests the scripts, type-checks, checks terms and descriptions, and builds
 2. Add it to the topic's `items` in `astro.config.mjs`.
 3. Link to other pages with absolute paths and a trailing slash, for example `/docs/tracing/sessions/`. The build fails on a broken link or anchor, and on a relative link.
 4. Run `just check-docs`.
+
+## Deployment
+
+The site is a Cloudflare Pages project, `cetra-site` (D-W-3).
+
+- A push to `main` deploys production: `https://cetra.sh/` (and `https://cetra-site.pages.dev/`).
+- A pull request authored and triggered by the repository owner, from a branch of this repository, deploys a preview at `https://pr-<number>.cetra-site.pages.dev/`. Other PRs are not deployed, because the job runs the PR's code with a deploy token. Pages adds `X-Robots-Tag: noindex` to previews, so they are not indexed.
+- The workflow is `.github/workflows/docs-deploy.yml`. It runs in the GitHub environments `docs-production` and `docs-preview`, which hold the secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
+- To deploy by hand, set those two variables and run `just docs-deploy <branch>`, where `<branch>` is `main` or `pr-<number>`.
+
+`public/_headers` sets the security headers and long caching for `/_astro/*`; `public/robots.txt` allows all and points to the sitemap.
