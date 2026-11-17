@@ -58,6 +58,17 @@ function rangeOf(definition: Schema<"ScoreDefinition">): string {
   return "No range";
 }
 
+/** The direction as an arrow and a word, or nothing when it is `none`. */
+function directionArrow(direction: Schema<"ScoreDirection">): string | undefined {
+  if (direction === "higher") {
+    return "↑ higher";
+  }
+  if (direction === "lower") {
+    return "↓ lower";
+  }
+  return undefined;
+}
+
 function ScoreDefinitionsPage() {
   const { org, project, ref, data } = useProject();
   const canManage = canManageEvaluation(data.role);
@@ -152,7 +163,14 @@ function ScoreDefinitionsPage() {
             {rows.map((definition) => (
               <TableRow key={definition.id}>
                 <TableCell>{definition.name}</TableCell>
-                <TableCell>{SCORE_DATA_TYPE_LABELS[definition.data_type]}</TableCell>
+                <TableCell>
+                  <span>{SCORE_DATA_TYPE_LABELS[definition.data_type]}</span>
+                  {directionArrow(definition.direction) ? (
+                    <span className="ml-2 text-muted-foreground">
+                      {directionArrow(definition.direction)}
+                    </span>
+                  ) : null}
+                </TableCell>
                 <TableCell>{rangeOf(definition)}</TableCell>
                 <TableCell>{definition.description ?? "—"}</TableCell>
                 <TableCell>

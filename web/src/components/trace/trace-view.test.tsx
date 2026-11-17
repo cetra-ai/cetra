@@ -32,7 +32,7 @@ describe("trace header", () => {
     expect(within(header).getByText("production")).toBeInTheDocument();
     expect(within(header).getByText("v1.4.0")).toBeInTheDocument();
     expect(within(header).getByText("beta")).toBeInTheDocument();
-    expect(within(header).getByText("helpfulness 0.9")).toBeInTheDocument();
+    expect(header).toHaveTextContent("helpfulness 0.9");
     expect(within(header).getByRole("link", { name: "Open full page" })).toHaveAttribute(
       "href",
       `/acme/support-bot/traces/${TRACE}?span=${ROOT}`,

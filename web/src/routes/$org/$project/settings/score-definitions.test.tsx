@@ -38,6 +38,7 @@ it("lists the definitions with their range and status", async () => {
   expect(within(table).getByText("0 – 1")).toBeInTheDocument();
   expect(within(table).getByText("How relevant the answer is, from 0 to 1.")).toBeInTheDocument();
   expect(within(table).getByText("Live")).toBeInTheDocument();
+  expect(within(table).getByText("↑ higher")).toBeInTheDocument();
   expect(projectNav().getByRole("link", { name: "Score definitions" })).toHaveAttribute(
     "aria-current",
     "page",
@@ -86,6 +87,63 @@ it("refuses a categorical definition with no categories without calling the serv
 
   expect(await within(dialog).findByText("Add at least one category.")).toBeInTheDocument();
   expect(calls).toBe(0);
+});
+
+it("offers a direction only once a numeric definition has a range", async () => {
+  const { user } = await renderApp("/acme/support-bot/settings/score-definitions");
+  await screen.findByRole("table", { name: "Score definitions" });
+  const dialog = await openAdd(user);
+  await user.click(within(dialog).getByRole("combobox", { name: "Direction" }));
+
+  const higher = await screen.findByRole("option", { name: "Higher is better" });
+  expect(higher).toHaveAttribute("aria-disabled", "true");
+  expect(screen.getByRole("option", { name: "No direction" })).not.toHaveAttribute(
+    "aria-disabled",
+    "true",
+  );
+  expect(dialog).toHaveTextContent("Set a range to choose a direction.");
+  await user.keyboard("{Escape}");
+
+  await user.type(within(dialog).getByLabelText("Minimum"), "0");
+  await user.type(within(dialog).getByLabelText("Maximum"), "1");
+  await user.click(within(dialog).getByRole("combobox", { name: "Direction" }));
+  expect(await screen.findByRole("option", { name: "Higher is better" })).not.toHaveAttribute(
+    "aria-disabled",
+    "true",
+  );
+});
+
+it("sends lower when Lower is better is picked", async () => {
+  let body: unknown;
+  server.use(
+    http.post("/api/v1/projects/:project/score-definitions", async ({ request }) => {
+      body = await request.json();
+      return HttpResponse.json(
+        { ...DEFINITION, name: "latency", direction: "lower" },
+        { status: 201 },
+      );
+    }),
+  );
+
+  const { user } = await renderApp("/acme/support-bot/settings/score-definitions");
+  await screen.findByRole("table", { name: "Score definitions" });
+  const dialog = await openAdd(user);
+  await user.type(within(dialog).getByLabelText("Name"), "latency");
+  await user.type(within(dialog).getByLabelText("Minimum"), "0");
+  await user.type(within(dialog).getByLabelText("Maximum"), "10");
+  await user.click(within(dialog).getByRole("combobox", { name: "Direction" }));
+  await user.click(await screen.findByRole("option", { name: "Lower is better" }));
+  await user.click(within(dialog).getByRole("button", { name: "Add definition" }));
+
+  await waitFor(() =>
+    expect(body).toEqual({
+      name: "latency",
+      data_type: "numeric",
+      min_value: 0,
+      max_value: 10,
+      direction: "lower",
+    }),
+  );
 });
 
 it("sends only the changed fields on edit", async () => {

@@ -1,7 +1,20 @@
 import { cn } from "cn";
+import {
+  Clock,
+  Coins,
+  DollarSign,
+  Gauge,
+  ListTree,
+  MessagesSquare,
+  Tag,
+  Timer,
+  TriangleAlert,
+  User,
+} from "lucide-react";
 import type { Schema } from "@/api/types";
 import type { ColumnSpec } from "@/components/data-table/column-layout";
 import type { DataTableColumn } from "@/components/data-table/data-table";
+import { ScoreBadge } from "@/components/score-badge";
 import { TimeText } from "@/components/time-text";
 import { formatScore } from "@/components/trace-columns";
 import { Badge } from "@/components/ui/badge";
@@ -80,7 +93,7 @@ function sessionColumnDefs(names: readonly string[]): DataTableColumn<Schema<"Se
       size: 160,
       header: "Session",
       enableSorting: false,
-      meta: { mono: true },
+      meta: { mono: true, icon: MessagesSquare },
       cell: ({ row }) => row.original.session_id,
     },
     {
@@ -88,6 +101,7 @@ function sessionColumnDefs(names: readonly string[]): DataTableColumn<Schema<"Se
       accessorFn: (row) => row.start_time,
       size: 168,
       header: "Start",
+      meta: { icon: Clock },
       enableSorting: true,
       cell: ({ row }) => <TimeText value={row.original.start_time} style="datetime" />,
     },
@@ -96,6 +110,7 @@ function sessionColumnDefs(names: readonly string[]): DataTableColumn<Schema<"Se
       accessorFn: (row) => row.end_time,
       size: 168,
       header: "Last activity",
+      meta: { icon: Clock },
       enableSorting: true,
       cell: ({ row }) => <TimeText value={row.original.end_time} style="datetime" />,
     },
@@ -105,7 +120,7 @@ function sessionColumnDefs(names: readonly string[]): DataTableColumn<Schema<"Se
       size: 72,
       header: "Traces",
       enableSorting: true,
-      meta: { align: "right" },
+      meta: { align: "right", icon: ListTree },
       cell: ({ row }) => <span className="num">{row.original.trace_count}</span>,
     },
     {
@@ -113,7 +128,7 @@ function sessionColumnDefs(names: readonly string[]): DataTableColumn<Schema<"Se
       size: 140,
       header: "User",
       enableSorting: false,
-      meta: { mono: true },
+      meta: { mono: true, icon: User },
       cell: ({ row }) => row.original.user_id ?? "—",
     },
     {
@@ -122,7 +137,7 @@ function sessionColumnDefs(names: readonly string[]): DataTableColumn<Schema<"Se
       size: 88,
       header: "Duration",
       enableSorting: false,
-      meta: { align: "right" },
+      meta: { align: "right", icon: Timer },
       cell: ({ row }) => <span className="num">{formatDuration(row.original.duration_ns)}</span>,
     },
     {
@@ -131,7 +146,7 @@ function sessionColumnDefs(names: readonly string[]): DataTableColumn<Schema<"Se
       size: 80,
       header: "Tokens",
       enableSorting: false,
-      meta: { align: "right" },
+      meta: { align: "right", icon: Coins },
       cell: ({ row }) => <span className="num">{formatTokens(row.original.total_tokens)}</span>,
     },
     {
@@ -140,7 +155,7 @@ function sessionColumnDefs(names: readonly string[]): DataTableColumn<Schema<"Se
       size: 88,
       header: "Cost",
       enableSorting: true,
-      meta: { align: "right" },
+      meta: { align: "right", icon: DollarSign },
       cell: ({ row }) => <span className="num">{formatCost(row.original.cost_total)}</span>,
     },
     {
@@ -149,7 +164,7 @@ function sessionColumnDefs(names: readonly string[]): DataTableColumn<Schema<"Se
       size: 72,
       header: "Errors",
       enableSorting: false,
-      meta: { align: "right" },
+      meta: { align: "right", icon: TriangleAlert },
       cell: ({ row }) => (
         <span className={cn("num", row.original.error_count > 0 && "text-destructive")}>
           {row.original.error_count}
@@ -161,6 +176,7 @@ function sessionColumnDefs(names: readonly string[]): DataTableColumn<Schema<"Se
       size: 140,
       header: "Tags",
       enableSorting: false,
+      meta: { icon: Tag },
       cell: ({ row }) => <Tags tags={row.original.tags} />,
     },
   ];
@@ -173,6 +189,7 @@ function scoreColumn(name: string): DataTableColumn<Schema<"SessionSummary">> {
     size: 96,
     header: name,
     enableSorting: false,
+    meta: { icon: Gauge },
     cell: ({ row }) => <ScoreCell session={row.original} name={name} />,
   };
 }
@@ -186,7 +203,12 @@ function ScoreCell({ session, name }: { session: Schema<"SessionSummary">; name:
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span className={numeric ? "num" : "block truncate"}>{formatScore(score.value)}</span>
+        <ScoreBadge
+          name={name}
+          value={score.value}
+          text={formatScore(score.value)}
+          className={numeric ? "num" : "block truncate"}
+        />
       </TooltipTrigger>
       <TooltipContent>{SOURCE_LABEL[score.source]}</TooltipContent>
     </Tooltip>

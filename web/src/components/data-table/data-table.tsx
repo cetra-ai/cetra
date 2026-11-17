@@ -16,7 +16,7 @@ import {
 } from "@tanstack/react-table";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn } from "cn";
-import { ArrowDown, ArrowUp, Loader2 } from "lucide-react";
+import { ArrowDown, ArrowUp, Loader2, type LucideIcon } from "lucide-react";
 import { type KeyboardEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import {
   columnSizesAfterReset,
@@ -29,7 +29,7 @@ import { matchesBinding } from "@/lib/shortcuts";
 const features = tableFeatures({
   columnSizingFeature,
   rowSortingFeature,
-  columnMeta: {} as { align?: "left" | "right"; mono?: boolean },
+  columnMeta: {} as { align?: "left" | "right"; mono?: boolean; icon?: LucideIcon },
 });
 
 export type DataTableColumn<Row extends RowData> = ColumnDef<typeof features, Row>;
@@ -57,6 +57,8 @@ export interface DataTableProps<Row extends RowData> {
   highlightedRowIds?: ReadonlySet<string>;
   /** Floating control drawn over the top of the scrollport, for the live pill. */
   notice?: ReactNode;
+  /** Marks a row, e.g. `"error"` draws a red edge. A selected row keeps its selected style. */
+  rowTone?: (row: Row) => "error" | undefined;
 }
 
 export function DataTable<Row extends RowData>({
@@ -76,6 +78,7 @@ export function DataTable<Row extends RowData>({
   emptyState,
   highlightedRowIds,
   notice,
+  rowTone,
 }: DataTableProps<Row>) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const headerRef = useRef<HTMLDivElement>(null);
@@ -222,7 +225,7 @@ export function DataTable<Row extends RowData>({
           <div
             role="row"
             aria-rowindex={1}
-            className="grid h-row shrink-0 items-center border-b bg-background text-[11px] font-medium text-muted-foreground uppercase"
+            className="grid h-row shrink-0 items-center border-b bg-surface text-[11px] font-medium tracking-wide text-muted-foreground uppercase"
             style={{ gridTemplateColumns: template, minWidth: totalWidth }}
           >
             {headerGroup.headers.map((header) => {
@@ -232,6 +235,7 @@ export function DataTable<Row extends RowData>({
                 typeof header.column.columnDef.header === "string"
                   ? header.column.columnDef.header
                   : "column";
+              const HeaderIcon = header.column.columnDef.meta?.icon;
               return (
                 <div
                   key={header.id}
@@ -255,7 +259,7 @@ export function DataTable<Row extends RowData>({
                     <button
                       type="button"
                       id={`${tableId}-${header.id}-label`}
-                      className="inline-flex min-w-0 items-center gap-1"
+                      className="inline-flex min-w-0 items-center gap-1 uppercase hover:text-foreground"
                       onClick={() => {
                         if (sorting?.id !== header.column.id) {
                           onSortingChange({ id: header.column.id, desc: true });
@@ -269,12 +273,24 @@ export function DataTable<Row extends RowData>({
                       }}
                     >
                       <span className="truncate">
+                        {HeaderIcon ? (
+                          <HeaderIcon
+                            aria-hidden
+                            className="mr-1 inline-block size-3 align-[-2px] opacity-70"
+                          />
+                        ) : null}
                         {flexRender(header.column.columnDef.header, header.getContext())}
                       </span>
                       <SortArrow direction={sorted} />
                     </button>
                   ) : (
                     <span id={`${tableId}-${header.id}-label`} className="min-w-0 truncate">
+                      {HeaderIcon ? (
+                        <HeaderIcon
+                          aria-hidden
+                          className="mr-1 inline-block size-3 align-[-2px] opacity-70"
+                        />
+                      ) : null}
                       {flexRender(header.column.columnDef.header, header.getContext())}
                     </span>
                   )}
@@ -297,7 +313,7 @@ export function DataTable<Row extends RowData>({
             })}
           </div>
           {/* Lets the header scroll as far as the body, whose overflow-auto can scroll one gutter further. */}
-          <div aria-hidden="true" className="w-8 shrink-0 border-b" />
+          <div aria-hidden="true" className="w-8 shrink-0 border-b bg-surface" />
         </div>
       ) : null}
       <div
@@ -329,6 +345,7 @@ export function DataTable<Row extends RowData>({
               }
               const selected = row.id === selectedRowId;
               const focused = focusedIndex === item.index;
+              const errorTone = !selected && rowTone?.(row.original) === "error";
               return (
                 <div
                   key={row.id}
@@ -337,11 +354,12 @@ export function DataTable<Row extends RowData>({
                   aria-selected={selected}
                   data-focused={focused ? "" : undefined}
                   className={cn(
-                    "absolute top-0 grid w-full items-center border-b",
+                    "absolute top-0 grid w-full items-center border-b border-border/60",
                     selected
                       ? "bg-selection shadow-[inset_2px_0_0_var(--primary)]"
-                      : "hover:bg-muted",
-                    focused && !selected && "bg-muted",
+                      : "hover:bg-row-hover",
+                    focused && !selected && "bg-row-hover",
+                    errorTone && "shadow-[inset_2px_0_0_var(--status-error)]",
                     highlightedRowIds?.has(row.id) && "live-row",
                   )}
                   style={{

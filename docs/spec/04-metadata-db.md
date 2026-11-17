@@ -235,6 +235,7 @@ CREATE TABLE score_definitions (
   categories TEXT,                    -- JSON [{label, value?}]
   min_value REAL, max_value REAL,
   description TEXT,
+  direction TEXT NOT NULL DEFAULT 'none',  -- higher | lower | none
   archived_at INTEGER,
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );

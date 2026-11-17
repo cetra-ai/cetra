@@ -38,8 +38,23 @@ export const SCORE_DATA_TYPE_LABELS: Record<Schema<"ScoreDataType">, string> = {
 
 const DATA_TYPES: Schema<"ScoreDataType">[] = ["numeric", "boolean", "categorical", "text"];
 
+export const DIRECTION_LABELS: Record<Schema<"ScoreDirection">, string> = {
+  higher: "Higher is better",
+  lower: "Lower is better",
+  none: "No direction",
+};
+
+const DIRECTIONS: Schema<"ScoreDirection">[] = ["higher", "lower", "none"];
+
 /** Field errors the form renders under their field; any other one is shown above the button. */
-const PLACED_FIELDS = new Set(["name", "categories", "min_value", "max_value", "description"]);
+const PLACED_FIELDS = new Set([
+  "name",
+  "categories",
+  "min_value",
+  "max_value",
+  "direction",
+  "description",
+]);
 
 function useCreateDefinition() {
   return $api.useMutation("post", "/api/v1/projects/{project}/score-definitions");
@@ -153,6 +168,9 @@ function DefinitionForm({
     ),
   );
   const [description, setDescription] = useState(definition?.description ?? "");
+  const [direction, setDirection] = useState<Schema<"ScoreDirection">>(
+    definition?.direction ?? "none",
+  );
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | undefined>();
   const pending = definition === undefined ? create.isPending : patch.isPending;
@@ -166,6 +184,21 @@ function DefinitionForm({
           : { label: row.label.trim(), value: Number(row.value) },
       );
   }
+
+  // A direction needs a range (numeric) or a value on every category (categorical), SD-3.
+  const categoriesWithValues = categoryList();
+  const canChooseDirection =
+    dataType === "numeric"
+      ? optionalNumber(minValue) !== undefined && optionalNumber(maxValue) !== undefined
+      : dataType === "categorical"
+        ? categoriesWithValues.length > 0 &&
+          categoriesWithValues.every((category) => category.value !== undefined)
+        : true;
+  const directionHint = canChooseDirection
+    ? undefined
+    : dataType === "numeric"
+      ? "Set a range to choose a direction."
+      : "Give every category a value to choose a direction.";
 
   function onSubmit(event: FormEvent) {
     event.preventDefault();
@@ -223,6 +256,9 @@ function DefinitionForm({
           body.max_value = max;
         }
       }
+      if (dataType !== "text" && direction !== "none") {
+        body.direction = direction;
+      }
       if (trimmedDescription !== "") {
         body.description = trimmedDescription;
       }
@@ -251,6 +287,9 @@ function DefinitionForm({
       if (max !== undefined && max !== definition.max_value) {
         body.max_value = max;
       }
+    }
+    if (dataType !== "text" && direction !== definition.direction) {
+      body.direction = direction;
     }
     if (trimmedDescription !== (definition.description ?? "")) {
       body.description = trimmedDescription;
@@ -410,6 +449,37 @@ function DefinitionForm({
           {errors.categories ? (
             <p className="text-xs text-destructive">{errors.categories}</p>
           ) : null}
+        </div>
+      ) : null}
+      {dataType !== "text" ? (
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="score-direction">Direction</Label>
+          <Select
+            value={direction}
+            onValueChange={(value) => {
+              const next = DIRECTIONS.find((item) => item === value);
+              if (next) {
+                setDirection(next);
+              }
+            }}
+          >
+            <SelectTrigger id="score-direction" className="w-fit">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {DIRECTIONS.map((item) => (
+                <SelectItem
+                  key={item}
+                  value={item}
+                  disabled={item !== "none" && !canChooseDirection}
+                >
+                  {DIRECTION_LABELS[item]}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {directionHint ? <p className="text-xs text-muted-foreground">{directionHint}</p> : null}
+          {errors.direction ? <p className="text-xs text-destructive">{errors.direction}</p> : null}
         </div>
       ) : null}
       <div className="flex flex-col gap-1.5">

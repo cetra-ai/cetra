@@ -18,6 +18,34 @@ const PROJECT = "/api/v1/projects/:project";
 
 type Order = Schema<"SortOrder">;
 
+const DEFINED_AT = "2026-01-01T09:00:00.000000000Z";
+
+/** Definitions of the generated scores, both "higher is better", so lists show their tones. */
+const SCORE_DEFINITIONS: Schema<"ScoreDefinition">[] = [
+  {
+    id: "01900000-0000-7000-8000-000000000611",
+    name: "correctness",
+    data_type: "numeric",
+    categories: [],
+    min_value: 0,
+    max_value: 1,
+    description: "How correct the answer is, from 0 to 1.",
+    direction: "higher",
+    created_at: DEFINED_AT,
+    updated_at: DEFINED_AT,
+  },
+  {
+    id: "01900000-0000-7000-8000-000000000612",
+    name: "relevance",
+    data_type: "boolean",
+    categories: [],
+    description: "Whether the answer is relevant.",
+    direction: "higher",
+    created_at: DEFINED_AT,
+    updated_at: DEFINED_AT,
+  },
+];
+
 export function largeHandlers(dataset: Dataset): HttpHandler[] {
   return [
     traceStreamHandler(liveTraceSource(dataset)),
@@ -37,6 +65,9 @@ export function largeHandlers(dataset: Dataset): HttpHandler[] {
     ),
     http.get(`${PROJECT}/users`, ({ request }) => listUsers(dataset, request)),
     http.get(`${PROJECT}/metrics`, ({ request }) => metrics(dataset, request)),
+    http.get(`${PROJECT}/score-definitions`, () =>
+      HttpResponse.json({ data: SCORE_DEFINITIONS, next_cursor: null }),
+    ),
   ];
 }
 

@@ -1901,6 +1901,7 @@ mod tests {
             min_value: Some(0.0),
             max_value: Some(1.0),
             description: None,
+            direction: crate::api::score_definitions::ScoreDirection::None,
             archived_at,
         }
     }
@@ -1918,6 +1919,7 @@ mod tests {
             min_value: None,
             max_value: None,
             description: None,
+            direction: crate::api::score_definitions::ScoreDirection::None,
             archived_at: None,
         }
     }

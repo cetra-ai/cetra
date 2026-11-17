@@ -624,7 +624,7 @@ function lastPresent(series: MetricSeries): number | undefined {
   return last;
 }
 
-function axisStyle(rows: ChartRow[]): "time" | "datetime" {
+export function axisStyle(rows: readonly { time: number }[]): "time" | "datetime" {
   const first = rows[0]?.time;
   const last = rows[rows.length - 1]?.time;
   if (first === undefined || last === undefined || last - first < DAY_MS) {
@@ -633,7 +633,11 @@ function axisStyle(rows: ChartRow[]): "time" | "datetime" {
   return "datetime";
 }
 
-function formatTick(value: unknown, zone: TimeZoneSetting, style: "time" | "datetime"): string {
+export function formatTick(
+  value: unknown,
+  zone: TimeZoneSetting,
+  style: "time" | "datetime",
+): string {
   const ms = typeof value === "number" ? value : Number(value);
   if (Number.isNaN(ms)) {
     return "";

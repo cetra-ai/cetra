@@ -246,7 +246,7 @@ function pointMap(points: readonly Point[]): Map<number, number | undefined> {
   return byTime;
 }
 
-function epochMs(rfc3339: string): number | undefined {
+export function epochMs(rfc3339: string): number | undefined {
   const parsed = Date.parse(rfc3339);
   if (!Number.isNaN(parsed)) {
     return parsed;

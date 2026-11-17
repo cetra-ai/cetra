@@ -1,7 +1,20 @@
 import { cn } from "cn";
+import {
+  Activity,
+  Braces,
+  Clock,
+  Coins,
+  DollarSign,
+  Gauge,
+  ListTree,
+  MessagesSquare,
+  TriangleAlert,
+  User,
+} from "lucide-react";
 import type { Schema } from "@/api/types";
 import type { ColumnSpec } from "@/components/data-table/column-layout";
 import type { DataTableColumn } from "@/components/data-table/data-table";
+import { ScoreAverageBadge } from "@/components/score-badge";
 import { TimeText } from "@/components/time-text";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { BarCell } from "@/components/user/bar-cell";
@@ -80,7 +93,7 @@ function userColumnDefs(
       size: 160,
       header: "User",
       enableSorting: false,
-      meta: { mono: true },
+      meta: { mono: true, icon: User },
       cell: ({ row }) => row.original.user_id,
     },
     {
@@ -88,6 +101,7 @@ function userColumnDefs(
       size: 96,
       header: "Activity",
       enableSorting: false,
+      meta: { icon: Activity },
       cell: ({ row }) => (
         <Sparkline
           values={row.original.activity}
@@ -101,7 +115,7 @@ function userColumnDefs(
       size: 72,
       header: "Traces",
       enableSorting: true,
-      meta: { align: "right" },
+      meta: { align: "right", icon: ListTree },
       cell: ({ row }) => (
         <BarCell value={row.original.trace_count} max={maxTraces}>
           <span className="num">{row.original.trace_count}</span>
@@ -114,7 +128,7 @@ function userColumnDefs(
       size: 88,
       header: "Sessions",
       enableSorting: true,
-      meta: { align: "right" },
+      meta: { align: "right", icon: MessagesSquare },
       cell: ({ row }) => <span className="num">{row.original.session_count}</span>,
     },
     {
@@ -138,7 +152,7 @@ function userColumnDefs(
       size: 80,
       header: "Tokens",
       enableSorting: true,
-      meta: { align: "right" },
+      meta: { align: "right", icon: Coins },
       cell: ({ row }) => (
         <BarCell value={row.original.total_tokens} max={maxTokens}>
           <span className="num">{formatTokens(row.original.total_tokens)}</span>
@@ -151,7 +165,7 @@ function userColumnDefs(
       size: 88,
       header: "Cost",
       enableSorting: true,
-      meta: { align: "right" },
+      meta: { align: "right", icon: DollarSign },
       cell: ({ row }) => (
         <BarCell value={row.original.cost_total} max={maxCost}>
           <span className="num">{formatCost(row.original.cost_total)}</span>
@@ -164,7 +178,7 @@ function userColumnDefs(
       size: 72,
       header: "Errors",
       enableSorting: true,
-      meta: { align: "right" },
+      meta: { align: "right", icon: TriangleAlert },
       cell: ({ row }) => (
         <span className={cn("num", row.original.error_count > 0 && "text-destructive")}>
           {row.original.error_count}
@@ -177,7 +191,7 @@ function userColumnDefs(
       size: 88,
       header: "Error rate",
       enableSorting: true,
-      meta: { align: "right" },
+      meta: { align: "right", icon: TriangleAlert },
       cell: ({ row }) => {
         const { trace_count: traces, error_trace_count: errors } = row.original;
         return (
@@ -192,6 +206,7 @@ function userColumnDefs(
       size: 220,
       header: "Metadata",
       enableSorting: false,
+      meta: { icon: Braces },
       cell: ({ row }) => <MetadataCell metadata={row.original.metadata} />,
     },
     {
@@ -200,6 +215,7 @@ function userColumnDefs(
       size: 168,
       header: "First seen",
       enableSorting: true,
+      meta: { icon: Clock },
       cell: ({ row }) => <TimeText value={row.original.first_seen} style="datetime" />,
     },
     {
@@ -208,6 +224,7 @@ function userColumnDefs(
       size: 168,
       header: "Last seen",
       enableSorting: true,
+      meta: { icon: Clock },
       cell: ({ row }) => <TimeText value={row.original.last_seen} style="datetime" />,
     },
   ];
@@ -223,7 +240,7 @@ function scoreColumn(name: string): DataTableColumn<Schema<"EndUserSummary">> {
     size: 96,
     header: name,
     enableSorting: false,
-    meta: { align: "right" },
+    meta: { align: "right", icon: Gauge },
     cell: ({ row }) => <ScoreCell user={row.original} name={name} />,
   };
 }
@@ -242,7 +259,13 @@ function ScoreCell({ user, name }: { user: Schema<"EndUserSummary">; name: strin
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span className="num">{text}</span>
+        <ScoreAverageBadge
+          name={name}
+          avg={score.avg}
+          dataType={score.data_type}
+          text={text}
+          className="num"
+        />
       </TooltipTrigger>
       <TooltipContent>{`${score.count} scores`}</TooltipContent>
     </Tooltip>

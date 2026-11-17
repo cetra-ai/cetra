@@ -220,6 +220,36 @@ it("answers the channel and alert rule writes", async () => {
   expect((await send("DELETE", `${PROJECT}/alert-rules/${FIRING_RULE_ID}`)).status).toBe(204);
 });
 
+it("refuses a direction on a text definition and a numeric one without a range", async () => {
+  const text = await send(
+    "POST",
+    `${PROJECT}/score-definitions`,
+    JSON.stringify({ name: "summary", data_type: "text", direction: "higher" }),
+  );
+  expect(text.status).toBe(400);
+  expect(text.json?.errors).toEqual([
+    { field: "direction", message: "a text score has no direction" },
+  ]);
+
+  const unranged = await send(
+    "POST",
+    `${PROJECT}/score-definitions`,
+    JSON.stringify({ name: "accuracy", data_type: "numeric", direction: "lower" }),
+  );
+  expect(unranged.status).toBe(400);
+  expect(unranged.json?.errors).toEqual([
+    { field: "direction", message: "direction needs min_value and max_value" },
+  ]);
+
+  const created = await send(
+    "POST",
+    `${PROJECT}/score-definitions`,
+    JSON.stringify({ name: "accuracy", data_type: "numeric", min_value: 0, max_value: 1 }),
+  );
+  expect(created.status).toBe(201);
+  expect(created.json?.direction).toBe("none");
+});
+
 it("answers the score writes", async () => {
   const created = await send(
     "POST",

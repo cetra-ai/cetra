@@ -656,7 +656,7 @@ CREATE TABLE score_definitions (
   archived_at INTEGER,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
-)
+, direction TEXT NOT NULL DEFAULT 'none')
 
 index score_definitions_live
 CREATE UNIQUE INDEX score_definitions_live ON score_definitions(project_id, name) WHERE archived_at IS NULL

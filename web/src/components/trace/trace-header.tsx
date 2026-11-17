@@ -12,6 +12,7 @@ import { ConfirmDialog } from "@/components/confirm-dialog";
 import { CopyButton } from "@/components/copy-button";
 import { DisabledReason } from "@/components/disabled-reason";
 import { IdText } from "@/components/id-text";
+import { ScoreBadge } from "@/components/score-badge";
 import { useProject } from "@/components/shell/project-context";
 import { StatusDot } from "@/components/status-dot";
 import { TimeText } from "@/components/time-text";
@@ -199,7 +200,8 @@ export function TraceHeader({
           ))}
           {scoreBadges(trace.scores).map((score) => (
             <Badge key={score.score_id} variant="secondary" className="h-4 px-1.5 text-[10px]">
-              {score.name} {badgeValue(score.value)}
+              {score.name}{" "}
+              <ScoreBadge name={score.name} value={score.value} text={badgeValue(score.value)} />
             </Badge>
           ))}
         </div>

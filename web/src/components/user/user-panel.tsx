@@ -7,6 +7,7 @@ import { problemOf } from "@/api/problem";
 import { userQuery } from "@/api/queries";
 import type { Schema } from "@/api/types";
 import { IdText } from "@/components/id-text";
+import { ScoreAverageBadge } from "@/components/score-badge";
 import { useProject } from "@/components/shell/project-context";
 import { TimeText } from "@/components/time-text";
 import { Button } from "@/components/ui/button";
@@ -110,7 +111,13 @@ export function UserPanel({
                   {user.scores.map((score) => (
                     <li key={`${score.name}:${score.data_type}`} className="flex gap-2">
                       <span className="min-w-0 truncate">{score.name}</span>
-                      <span className="num">{scoreText(score)}</span>
+                      <ScoreAverageBadge
+                        name={score.name}
+                        avg={score.avg}
+                        dataType={score.data_type}
+                        text={scoreText(score)}
+                        className="num"
+                      />
                       <span className="num text-muted-foreground">{score.count}</span>
                     </li>
                   ))}

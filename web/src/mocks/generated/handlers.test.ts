@@ -255,3 +255,13 @@ it("answers an unknown span with not_found", async () => {
   expect(response.status).toBe(404);
   expect(await response.json()).toMatchObject({ code: "not_found" });
 });
+
+it("defines the generated scores so lists can colour them", async () => {
+  server.use(...largeHandlers(createDataset({ seed: 1, now: NOW, traces: 5 })));
+  const response = await fetch(`${PROJECT}/score-definitions`);
+  const body = (await response.json()) as { data: { name: string; direction: string }[] };
+  expect(body.data.map((item) => [item.name, item.direction])).toEqual([
+    ["correctness", "higher"],
+    ["relevance", "higher"],
+  ]);
+});

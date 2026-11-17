@@ -1,4 +1,5 @@
 import { type HttpHandler, HttpResponse, http } from "msw";
+import type { Schema } from "@/api/types";
 import datasetItemDocument from "../../../fixtures/api/responses/datasets/01900000-0000-7000-8000-000000000c01/items/01900000-0000-7000-8000-000000000d02.json";
 import datasetVersionsDocument from "../../../fixtures/api/responses/datasets/01900000-0000-7000-8000-000000000c01/versions.json";
 import datasetDocument from "../../../fixtures/api/responses/datasets/01900000-0000-7000-8000-000000000c01.json";
@@ -532,10 +533,40 @@ const RESPONSES: Record<string, Respond> = {
   patch_evaluator: ({ body }) => HttpResponse.json({ ...evaluatorDocument, ...named(body) }),
   delete_evaluator: () => noContent(),
   post_evaluator_test: () => HttpResponse.json(evaluatorTestResultDocument),
-  post_score_definition: ({ body }) =>
-    HttpResponse.json({ ...scoreDefinitionDocument, ...named(body) }, { status: 201 }),
-  patch_score_definition: ({ body }) =>
-    HttpResponse.json({ ...scoreDefinitionDocument, ...named(body) }),
+  post_score_definition: ({ body }) => {
+    const request = body as Schema<"CreateScoreDefinitionRequest">;
+    const direction = request.direction ?? "none";
+    const issues = directionIssues({
+      data_type: request.data_type,
+      direction,
+      min_value: request.min_value,
+      max_value: request.max_value,
+      categories: request.categories ?? [],
+    });
+    if (issues.length > 0) {
+      return problem(400, "bad_request", undefined, issues);
+    }
+    return HttpResponse.json(
+      { ...scoreDefinitionDocument, ...named(body), direction },
+      { status: 201 },
+    );
+  },
+  patch_score_definition: ({ body }) => {
+    // The mock serves one definition, so a patch is checked against that definition's type and range.
+    const request = body as Schema<"UpdateScoreDefinitionRequest">;
+    const direction = request.direction ?? scoreDefinitionDocument.direction;
+    const issues = directionIssues({
+      data_type: scoreDefinitionDocument.data_type,
+      direction,
+      min_value: request.min_value ?? scoreDefinitionDocument.min_value,
+      max_value: request.max_value ?? scoreDefinitionDocument.max_value,
+      categories: request.categories ?? scoreDefinitionDocument.categories,
+    });
+    if (issues.length > 0) {
+      return problem(400, "bad_request", undefined, issues);
+    }
+    return HttpResponse.json({ ...scoreDefinitionDocument, ...named(body), direction });
+  },
   delete_score_definition: () => noContent(),
   post_model_price: ({ body }) =>
     HttpResponse.json({ ...modelPriceDocument, ...priced(body) }, { status: 201 }),
@@ -719,6 +750,36 @@ function named(body: Record<string, unknown>): { name: string } | Record<string,
   return typeof body.name === "string" ? { name: body.name } : {};
 }
 
+interface DirectionTarget {
+  data_type: string;
+  direction: string;
+  min_value?: number;
+  max_value?: number;
+  categories: { value?: number }[];
+}
+
+/** The direction checks of spec 09 for a definition, with the server's messages (SD-3). */
+function directionIssues(target: DirectionTarget): FieldIssue[] {
+  if (target.direction === "none") {
+    return [];
+  }
+  let message: string | undefined;
+  if (target.data_type === "text") {
+    message = "a text score has no direction";
+  } else if (
+    target.data_type === "numeric" &&
+    (target.min_value === undefined || target.max_value === undefined)
+  ) {
+    message = "direction needs min_value and max_value";
+  } else if (
+    target.data_type === "categorical" &&
+    target.categories.some((category) => category.value === undefined)
+  ) {
+    message = "direction needs a value on every category";
+  }
+  return message === undefined ? [] : [{ field: "direction", message }];
+}
+
 /** The price fixture's overrides, with the trimmed `model_name` from the body when it is one. */
 function priced(body: Record<string, unknown>): { model_name: string } | Record<string, never> {
   const name = trimmed(body.model_name);
@@ -727,7 +788,17 @@ function priced(body: Record<string, unknown>): { model_name: string } | Record<
 
 const TITLES: Record<400 | 404, string> = { 400: "Bad Request", 404: "Not Found" };
 
-function problem(status: 400 | 404, code: string, detail?: string): Response {
+interface FieldIssue {
+  field: string;
+  message: string;
+}
+
+function problem(
+  status: 400 | 404,
+  code: string,
+  detail?: string,
+  errors: FieldIssue[] = [],
+): Response {
   return HttpResponse.json(
     {
       type: "about:blank",
@@ -735,6 +806,7 @@ function problem(status: 400 | 404, code: string, detail?: string): Response {
       status,
       code,
       ...(detail !== undefined ? { detail } : {}),
+      ...(errors.length > 0 ? { errors } : {}),
     },
     { status, headers: { "Content-Type": "application/problem+json" } },
   );

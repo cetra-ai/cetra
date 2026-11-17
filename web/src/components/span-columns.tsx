@@ -1,3 +1,17 @@
+import { cn } from "cn";
+import {
+  Clock,
+  Coins,
+  DollarSign,
+  Layers,
+  MessageSquare,
+  MessageSquareText,
+  MessagesSquare,
+  Sparkles,
+  Tag,
+  Timer,
+  User,
+} from "lucide-react";
 import type { Schema } from "@/api/types";
 import type { ColumnSpec } from "@/components/data-table/column-layout";
 import type { DataTableColumn } from "@/components/data-table/data-table";
@@ -6,6 +20,7 @@ import { StatusDot } from "@/components/status-dot";
 import { TimeText } from "@/components/time-text";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { categoryClasses, providerClasses } from "@/lib/colors";
 import { formatCost, formatDuration, formatTokens } from "@/lib/format";
 import { SPAN_COLUMN_IDS, type SpanColumnId } from "@/lib/search/spans";
 
@@ -70,6 +85,11 @@ export function spanColumnSpecs(): SpanColumn[] {
   }));
 }
 
+/** Failed spans get a red edge, unless they are selected (the selected style wins). */
+export function spanRowTone(row: Schema<"SpanSummary">) {
+  return row.status === "error" ? ("error" as const) : undefined;
+}
+
 export function orderedSpanColumns(
   visible: readonly string[],
 ): DataTableColumn<Schema<"SpanSummary">>[] {
@@ -93,6 +113,7 @@ function spanColumnDefs(): DataTableColumn<Schema<"SpanSummary">>[] {
       accessorFn: (row) => row.start_time,
       size: 132,
       header: "Start",
+      meta: { icon: Clock },
       enableSorting: true,
       cell: ({ row }) => <TimeText value={row.original.start_time} style="datetime" />,
     },
@@ -117,18 +138,35 @@ function spanColumnDefs(): DataTableColumn<Schema<"SpanSummary">>[] {
       id: "model",
       size: 140,
       header: "Model",
-      cell: ({ row }) => row.original.model ?? "—",
+      meta: { icon: Sparkles },
+      cell: ({ row }) => {
+        const model = row.original.model;
+        if (!model) {
+          return "—";
+        }
+        return (
+          <span className="flex min-w-0 items-center gap-1.5">
+            <span
+              aria-hidden
+              className={cn("size-2 shrink-0 rounded-full", providerClasses(model).dot)}
+            />
+            <span className="truncate">{model}</span>
+          </span>
+        );
+      },
     },
     {
       id: "input",
       size: 280,
       header: "Input",
+      meta: { icon: MessageSquare },
       cell: ({ row }) => <Preview text={row.original.input_preview} />,
     },
     {
       id: "output",
       size: 280,
       header: "Output",
+      meta: { icon: MessageSquareText },
       cell: ({ row }) => <Preview text={row.original.output_preview} />,
     },
     {
@@ -137,7 +175,7 @@ function spanColumnDefs(): DataTableColumn<Schema<"SpanSummary">>[] {
       size: 80,
       header: "Duration",
       enableSorting: true,
-      meta: { align: "right" },
+      meta: { align: "right", icon: Timer },
       cell: ({ row }) => <span className="num">{formatDuration(row.original.duration_ns)}</span>,
     },
     {
@@ -154,7 +192,7 @@ function spanColumnDefs(): DataTableColumn<Schema<"SpanSummary">>[] {
       size: 72,
       header: "Tokens",
       enableSorting: true,
-      meta: { align: "right" },
+      meta: { align: "right", icon: Coins },
       cell: ({ row }) => <TokenCount span={row.original} />,
     },
     {
@@ -163,28 +201,44 @@ function spanColumnDefs(): DataTableColumn<Schema<"SpanSummary">>[] {
       size: 80,
       header: "Cost",
       enableSorting: true,
-      meta: { align: "right" },
+      meta: { align: "right", icon: DollarSign },
       cell: ({ row }) => <span className="num">{formatCost(row.original.cost_total)}</span>,
     },
     {
       id: "session",
       size: 120,
       header: "Session",
-      meta: { mono: true },
+      meta: { mono: true, icon: MessagesSquare },
       cell: ({ row }) => row.original.session_id ?? "—",
     },
     {
       id: "user",
       size: 100,
       header: "User",
-      meta: { mono: true },
+      meta: { mono: true, icon: User },
       cell: ({ row }) => row.original.user_id ?? "—",
     },
     {
       id: "env",
-      size: 88,
+      size: 112,
       header: "Env",
-      cell: ({ row }) => row.original.environment ?? "—",
+      meta: { icon: Layers },
+      cell: ({ row }) => {
+        const env = row.original.environment;
+        if (!env) {
+          return "—";
+        }
+        return (
+          <span
+            className={cn(
+              "inline-flex rounded-sm border px-1.5 text-[11px]",
+              categoryClasses(env).pill,
+            )}
+          >
+            {env}
+          </span>
+        );
+      },
     },
     {
       id: "provider",
@@ -208,6 +262,7 @@ function spanColumnDefs(): DataTableColumn<Schema<"SpanSummary">>[] {
       id: "tags",
       size: 140,
       header: "Tags",
+      meta: { icon: Tag },
       cell: ({ row }) => <Tags tags={row.original.tags} />,
     },
     {
@@ -281,7 +336,11 @@ function Tags({ tags }: { tags: string[] }) {
   return (
     <span className="flex min-w-0 items-center gap-1">
       {shown.map((tag) => (
-        <Badge key={tag} variant="secondary" className="h-4 px-1.5 text-[10px]">
+        <Badge
+          key={tag}
+          variant="secondary"
+          className={cn("h-4 px-1.5 text-[10px]", categoryClasses(tag).pill)}
+        >
           {tag}
         </Badge>
       ))}

@@ -3498,6 +3498,11 @@ export interface components {
             /** @description What the score means, at most 1 000 characters. */
             description?: string;
             /**
+             * @description Which way the score should move to be good. Omitted means `none`. `higher` and `lower`
+             *     need a numeric range or a value on every category, and are refused on text.
+             */
+            direction?: components["schemas"]["ScoreDirection"];
+            /**
              * Format: double
              * @description Highest allowed value. Only for numeric scores, above `min_value`.
              */
@@ -6100,6 +6105,8 @@ export interface components {
             data_type: components["schemas"]["ScoreDataType"];
             /** @description What the score means. Omitted when unset. */
             description?: string;
+            /** @description Which way the score should move to be good. `none` when unset. */
+            direction: components["schemas"]["ScoreDirection"];
             /**
              * Format: uuid
              * @description Definition id.
@@ -6165,6 +6172,11 @@ export interface components {
                 [key: string]: components["schemas"]["ScoreDelta"];
             };
         };
+        /**
+         * @description Which way a score should move to be good. Drives the colour of its value in the UI.
+         * @enum {string}
+         */
+        ScoreDirection: "higher" | "lower" | "none";
         /** @description One page of results. `next_cursor` is null when there is no next page. */
         ScorePage: {
             /** @description Items in this page. */
@@ -7324,6 +7336,8 @@ export interface components {
             categories?: components["schemas"]["ScoreDefinitionCategory"][];
             /** @description What the score means. An empty string clears it. */
             description?: string;
+            /** @description Which way the score should move to be good. Same rules as on create. */
+            direction?: components["schemas"]["ScoreDirection"];
             /**
              * Format: double
              * @description Highest allowed value. Only for numeric scores, above `min_value`.

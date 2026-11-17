@@ -22,7 +22,7 @@ import { ListToolbar } from "@/components/list-toolbar";
 import { useDefaultSavedView } from "@/components/saved-views/default-view";
 import { SavedViewsMenu } from "@/components/saved-views/saved-views-menu";
 import { useProject } from "@/components/shell/project-context";
-import { orderedSpanColumns, spanColumnSpecs } from "@/components/span-columns";
+import { orderedSpanColumns, spanColumnSpecs, spanRowTone } from "@/components/span-columns";
 import { Filmstrip } from "@/components/trace/filmstrip";
 import { SplitPane } from "@/components/trace/split-pane";
 import { TraceView } from "@/components/trace/trace-view";
@@ -290,6 +290,7 @@ function SpansPage() {
                     rows={rows}
                     getRowId={(row) => `${row.trace_id}:${row.span_id}`}
                     selectedRowId={selectedRowId}
+                    rowTone={spanRowTone}
                     onActivate={(row) => {
                       void navigate({
                         to: "/$org/$project/spans",

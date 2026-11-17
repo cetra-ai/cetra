@@ -71,6 +71,12 @@ it("renders the fixture traces in the default columns", async () => {
   }
 });
 
+it("renders the traces-over-time chart above the table", async () => {
+  await renderApp("/acme/support-bot/traces");
+  await screen.findByRole("grid", { name: "Traces" });
+  expect(screen.getByRole("img", { name: "Traces over time" })).toBeInTheDocument();
+});
+
 it("sorts from the URL without reordering the server page", async () => {
   const urls: URL[] = [];
   const onStart = ({ request }: { request: Request }) => {

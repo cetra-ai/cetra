@@ -18949,6 +18949,10 @@
             "type": "string",
             "description": "What the score means, at most 1 000 characters."
           },
+          "direction": {
+            "$ref": "#/components/schemas/ScoreDirection",
+            "description": "Which way the score should move to be good. Omitted means `none`. `higher` and `lower`\nneed a numeric range or a value on every category, and are refused on text."
+          },
           "max_value": {
             "type": "number",
             "format": "double",
@@ -23786,6 +23790,7 @@
           "name",
           "data_type",
           "categories",
+          "direction",
           "created_at",
           "updated_at"
         ],
@@ -23814,6 +23819,10 @@
           "description": {
             "type": "string",
             "description": "What the score means. Omitted when unset."
+          },
+          "direction": {
+            "$ref": "#/components/schemas/ScoreDirection",
+            "description": "Which way the score should move to be good. `none` when unset."
           },
           "id": {
             "type": "string",
@@ -23927,6 +23936,15 @@
             }
           }
         }
+      },
+      "ScoreDirection": {
+        "type": "string",
+        "description": "Which way a score should move to be good. Drives the colour of its value in the UI.",
+        "enum": [
+          "higher",
+          "lower",
+          "none"
+        ]
       },
       "ScorePage": {
         "type": "object",
@@ -25997,6 +26015,10 @@
           "description": {
             "type": "string",
             "description": "What the score means. An empty string clears it."
+          },
+          "direction": {
+            "$ref": "#/components/schemas/ScoreDirection",
+            "description": "Which way the score should move to be good. Same rules as on create."
           },
           "max_value": {
             "type": "number",

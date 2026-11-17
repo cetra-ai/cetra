@@ -15,7 +15,7 @@ use uuid::Uuid;
 use crate::api::common::{FieldError, Page};
 use crate::api::score_definitions::{
     CreateScoreDefinitionRequest, ScoreDefinition, ScoreDefinitionCategory,
-    ScoreDefinitionListParams, UpdateScoreDefinitionRequest,
+    ScoreDefinitionListParams, ScoreDirection, UpdateScoreDefinitionRequest,
 };
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::ProjectPerm;
@@ -121,6 +121,7 @@ async fn create_score_definition(
         min_value: body.min_value,
         max_value: body.max_value,
         description: body.description.filter(|text| !text.is_empty()),
+        direction: body.direction.unwrap_or_default(),
         archived_at: None,
     };
     let errors = check_fields(body.data_type, &fields);
@@ -282,6 +283,7 @@ fn fields_of(row: &DefinitionRow) -> DefinitionFields {
         min_value: row.min_value,
         max_value: row.max_value,
         description: row.description.clone(),
+        direction: row.direction,
         archived_at: row.archived_at,
     }
 }
@@ -309,6 +311,7 @@ fn merged_fields(
             Some("") => None,
             Some(text) => Some(text.to_owned()),
         },
+        direction: body.direction.unwrap_or(row.direction),
         archived_at: match body.archived {
             None => row.archived_at,
             Some(true) => row.archived_at.or(Some(now)),
@@ -325,6 +328,7 @@ fn sent(body: &UpdateScoreDefinitionRequest, field: &str) -> bool {
         "categories" => body.categories.is_some(),
         "min_value" | "max_value" => body.min_value.is_some() || body.max_value.is_some(),
         "description" => body.description.is_some(),
+        "direction" => body.direction.is_some(),
         _ => true,
     }
 }
@@ -355,6 +359,7 @@ fn definition_json(row: &DefinitionRow) -> ScoreDefinition {
         min_value: row.min_value,
         max_value: row.max_value,
         description: row.description.clone(),
+        direction: row.direction,
         archived_at: row.archived_at,
         created_at: row.created_at,
         updated_at: row.updated_at,
@@ -420,7 +425,28 @@ fn check_fields(data_type: ScoreDataType, fields: &DefinitionFields) -> Vec<Fiel
             "description must be at most 1000 characters",
         ));
     }
+    if fields.direction != ScoreDirection::None
+        && let Some(message) = direction_error(data_type, fields)
+    {
+        errors.push(field_error("direction", message));
+    }
     errors
+}
+
+/// Why a direction does not fit a definition of `data_type` (spec 04, D-I-47, SD-3). `None`
+/// when it fits. Boolean accepts every direction.
+fn direction_error(data_type: ScoreDataType, fields: &DefinitionFields) -> Option<&'static str> {
+    match data_type {
+        ScoreDataType::Boolean => None,
+        ScoreDataType::Text => Some("a text score has no direction"),
+        ScoreDataType::Numeric => (fields.min_value.is_none() || fields.max_value.is_none())
+            .then_some("direction needs min_value and max_value"),
+        ScoreDataType::Categorical => fields
+            .categories
+            .iter()
+            .any(|category| category.value.is_none())
+            .then_some("direction needs a value on every category"),
+    }
 }
 
 /// 1 to 100 categories with unique labels of 1 to 255 bytes and finite values.
@@ -631,6 +657,106 @@ mod tests {
         )
         .await;
         assert_eq!(response.json::<Value>()["name"], "padded-2");
+    }
+
+    #[tokio::test]
+    async fn direction_round_trips_and_fits_the_type() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+
+        let mut ranged = numeric_body("relevance");
+        ranged["direction"] = json!("higher");
+        let created = create_ok(&app, &seeded, ranged).await;
+        assert_eq!(created["direction"], "higher");
+        let page = list(&app, &seeded, "").await;
+        assert_eq!(page["data"][0]["direction"], "higher");
+
+        // A directional numeric score needs both bounds.
+        let open_ended = create(
+            &app,
+            &seeded,
+            json!({"name": "tone-2", "data_type": "numeric", "min_value": 0.0, "direction": "lower"}),
+        )
+        .await;
+        assert_eq!(
+            field_errors(&open_ended),
+            vec![(
+                "direction".to_owned(),
+                "direction needs min_value and max_value".to_owned()
+            )]
+        );
+
+        let text = create(
+            &app,
+            &seeded,
+            json!({"name": "notes", "data_type": "text", "direction": "higher"}),
+        )
+        .await;
+        assert_eq!(
+            field_errors(&text),
+            vec![(
+                "direction".to_owned(),
+                "a text score has no direction".to_owned()
+            )]
+        );
+
+        // A directional categorical score needs a value on every category.
+        let unvalued = create(
+            &app,
+            &seeded,
+            json!({
+                "name": "tone",
+                "data_type": "categorical",
+                "categories": [{"label": "good", "value": 1.0}, {"label": "bad"}],
+                "direction": "higher"
+            }),
+        )
+        .await;
+        assert_eq!(
+            field_errors(&unvalued),
+            vec![(
+                "direction".to_owned(),
+                "direction needs a value on every category".to_owned()
+            )]
+        );
+        let valued = create_ok(
+            &app,
+            &seeded,
+            json!({
+                "name": "tone",
+                "data_type": "categorical",
+                "categories": [{"label": "good", "value": 1.0}, {"label": "bad", "value": 0.0}],
+                "direction": "higher"
+            }),
+        )
+        .await;
+        assert_eq!(valued["direction"], "higher");
+
+        // A boolean takes every direction, and an omitted one is none.
+        let boolean = create_ok(
+            &app,
+            &seeded,
+            json!({"name": "thumbs", "data_type": "boolean"}),
+        )
+        .await;
+        assert_eq!(boolean["direction"], "none");
+        let id = boolean["id"].as_str().unwrap().to_owned();
+        let response = patch(&app, &seeded, &id, json!({"direction": "lower"})).await;
+        assert_eq!(
+            response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        assert_eq!(response.json::<Value>()["direction"], "lower");
+        let listed = list(&app, &seeded, "").await;
+        let thumbs = listed["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == "thumbs")
+            .unwrap();
+        assert_eq!(thumbs["direction"], "lower");
     }
 
     #[tokio::test]

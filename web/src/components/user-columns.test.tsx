@@ -1,10 +1,13 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, within } from "@testing-library/react";
 import { expect, it } from "vitest";
 import type { Schema } from "@/api/types";
 import { DataTable } from "@/components/data-table/data-table";
+import { ProjectProvider } from "@/components/shell/project-context";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { orderedUserColumns, userColumnSpecs, userScoreNames } from "@/components/user-columns";
 import { USER_COLUMN_IDS } from "@/lib/search/users";
+import projectFixture from "../../../fixtures/api/static/project.json";
 
 const ACTIVITY = Array.from({ length: 24 }, (_, index) => (index === 3 ? 4 : 0));
 
@@ -30,21 +33,33 @@ function summary(overrides: Partial<Schema<"EndUserSummary">> = {}): Schema<"End
 }
 
 function renderColumns(rows: Schema<"EndUserSummary">[], visible: string[]) {
+  const queryClient = new QueryClient();
   return render(
-    <TooltipProvider>
-      <DataTable
-        tableId="users-test"
-        ariaLabel="Users"
-        columns={orderedUserColumns(rows, visible)}
-        rows={rows}
-        getRowId={(row) => row.user_id}
-        onActivate={() => undefined}
-        hasNextPage={false}
-        isFetchingNextPage={false}
-        fetchNextPage={() => undefined}
-        emptyState={null}
-      />
-    </TooltipProvider>,
+    <QueryClientProvider client={queryClient}>
+      <ProjectProvider
+        value={{
+          org: "acme",
+          project: "support-bot",
+          ref: "acme/support-bot",
+          data: projectFixture as Schema<"Project">,
+        }}
+      >
+        <TooltipProvider>
+          <DataTable
+            tableId="users-test"
+            ariaLabel="Users"
+            columns={orderedUserColumns(rows, visible)}
+            rows={rows}
+            getRowId={(row) => row.user_id}
+            onActivate={() => undefined}
+            hasNextPage={false}
+            isFetchingNextPage={false}
+            fetchNextPage={() => undefined}
+            emptyState={null}
+          />
+        </TooltipProvider>
+      </ProjectProvider>
+    </QueryClientProvider>,
   );
 }
 

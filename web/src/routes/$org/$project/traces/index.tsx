@@ -32,7 +32,13 @@ import { useProject } from "@/components/shell/project-context";
 import { Filmstrip } from "@/components/trace/filmstrip";
 import { SplitPane } from "@/components/trace/split-pane";
 import { TraceView } from "@/components/trace/trace-view";
-import { orderedTraceColumns, scoreNames, traceColumnSpecs } from "@/components/trace-columns";
+import { TracesHistogram } from "@/components/trace/traces-histogram";
+import {
+  orderedTraceColumns,
+  scoreNames,
+  traceColumnSpecs,
+  traceRowTone,
+} from "@/components/trace-columns";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -172,6 +178,18 @@ function TracesPage() {
       search: (prev) => withCols(prev, choice?.join(",")),
     });
   }
+  function changeRange(next: RangeState) {
+    seenRange.current = next.kind === "preset" ? next.preset : `${next.from}\n${next.to}`;
+    setAnchor(Date.now());
+    void navigate({
+      to: "/$org/$project/traces",
+      params: { org, project },
+      search: (prev) => {
+        const ranged = withRange(prev, next);
+        return traceLiveReason(ranged) ? withoutLive(ranged) : ranged;
+      },
+    });
+  }
   const layout = useListLayout();
   const traceOpen = search.trace !== undefined;
   const listScroll = useRef(0);
@@ -296,19 +314,7 @@ function TracesPage() {
                 <ListToolbar
                   title="Traces"
                   range={range}
-                  onRange={(next) => {
-                    seenRange.current =
-                      next.kind === "preset" ? next.preset : `${next.from}\n${next.to}`;
-                    setAnchor(Date.now());
-                    void navigate({
-                      to: "/$org/$project/traces",
-                      params: { org, project },
-                      search: (prev) => {
-                        const ranged = withRange(prev, next);
-                        return traceLiveReason(ranged) ? withoutLive(ranged) : ranged;
-                      },
-                    });
-                  }}
+                  onRange={changeRange}
                   onRefresh={() => setAnchor(Date.now())}
                   live={
                     <LiveToggle
@@ -420,75 +426,90 @@ function TracesPage() {
                     <OnboardingPanel origin={window.location.origin} />
                   </div>
                 ) : !hold && list.data && !probing ? (
-                  <DataTable
-                    tableId="traces"
-                    ariaLabel="Traces"
-                    columns={tableColumns}
-                    rows={rows}
-                    getRowId={(row) => row.trace_id}
-                    selectedRowId={search.trace}
-                    onActivate={(row) => {
-                      void navigate({
-                        to: "/$org/$project/traces",
-                        params: { org, project },
-                        search: (prev) => ({ ...withoutSpan(prev), trace: row.trace_id }),
-                      });
-                    }}
-                    onSelectionMove={(row) => {
-                      void navigate({
-                        to: "/$org/$project/traces",
-                        params: { org, project },
-                        search: (prev) => ({ ...withoutSpan(prev), trace: row.trace_id }),
-                        replace: true,
-                      });
-                    }}
-                    hasNextPage={list.hasNextPage}
-                    isFetchingNextPage={list.isFetchingNextPage}
-                    fetchNextPage={fetchNextPage}
-                    sorting={{
-                      id: SORT_COLUMN[search.sort ?? "start_time"],
-                      desc: (search.order ?? "desc") === "desc",
-                    }}
-                    onSortingChange={(next) => {
-                      void navigate({
-                        to: "/$org/$project/traces",
-                        params: { org, project },
-                        search: (prev) => {
-                          const sorted = withSort(prev, next);
-                          return traceLiveReason(sorted) ? withoutLive(sorted) : sorted;
-                        },
-                      });
-                    }}
-                    highlightedRowIds={live.highlighted}
-                    notice={
-                      live.pending > 0 ? (
-                        <Button type="button" size="xs" variant="secondary" onClick={live.reveal}>
-                          {live.overflowed ? `${live.pending}+` : live.pending} new traces ↑
-                        </Button>
-                      ) : null
-                    }
-                    emptyState={
-                      needsOnboarding ? (
-                        <div className="flex flex-col items-center gap-3 px-4 py-16 text-center">
-                          <Waypoints className="size-8 text-muted-foreground" />
-                          <h2 className="text-lg font-medium">No traces in this time range.</h2>
-                        </div>
-                      ) : (
-                        <div className="flex flex-col items-center gap-3 px-4 py-16 text-center">
-                          <Waypoints className="size-8 text-muted-foreground" />
-                          <h2 className="text-lg font-medium">No traces match</h2>
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            onClick={clearConstraints}
-                          >
-                            Clear filters
+                  <>
+                    <TracesHistogram
+                      org={org}
+                      project={project}
+                      from={resolved.from}
+                      to={resolved.to}
+                      filter={search.filter}
+                      includeEval={search.eval === 1}
+                      includeExperiments={search.exp === 1}
+                      onRange={(fromIso, toIso) => {
+                        changeRange({ kind: "absolute", from: fromIso, to: toIso });
+                      }}
+                    />
+                    <DataTable
+                      tableId="traces"
+                      ariaLabel="Traces"
+                      rowTone={traceRowTone}
+                      columns={tableColumns}
+                      rows={rows}
+                      getRowId={(row) => row.trace_id}
+                      selectedRowId={search.trace}
+                      onActivate={(row) => {
+                        void navigate({
+                          to: "/$org/$project/traces",
+                          params: { org, project },
+                          search: (prev) => ({ ...withoutSpan(prev), trace: row.trace_id }),
+                        });
+                      }}
+                      onSelectionMove={(row) => {
+                        void navigate({
+                          to: "/$org/$project/traces",
+                          params: { org, project },
+                          search: (prev) => ({ ...withoutSpan(prev), trace: row.trace_id }),
+                          replace: true,
+                        });
+                      }}
+                      hasNextPage={list.hasNextPage}
+                      isFetchingNextPage={list.isFetchingNextPage}
+                      fetchNextPage={fetchNextPage}
+                      sorting={{
+                        id: SORT_COLUMN[search.sort ?? "start_time"],
+                        desc: (search.order ?? "desc") === "desc",
+                      }}
+                      onSortingChange={(next) => {
+                        void navigate({
+                          to: "/$org/$project/traces",
+                          params: { org, project },
+                          search: (prev) => {
+                            const sorted = withSort(prev, next);
+                            return traceLiveReason(sorted) ? withoutLive(sorted) : sorted;
+                          },
+                        });
+                      }}
+                      highlightedRowIds={live.highlighted}
+                      notice={
+                        live.pending > 0 ? (
+                          <Button type="button" size="xs" variant="secondary" onClick={live.reveal}>
+                            {live.overflowed ? `${live.pending}+` : live.pending} new traces ↑
                           </Button>
-                        </div>
-                      )
-                    }
-                  />
+                        ) : null
+                      }
+                      emptyState={
+                        needsOnboarding ? (
+                          <div className="flex flex-col items-center gap-3 px-4 py-16 text-center">
+                            <Waypoints className="size-8 text-muted-foreground" />
+                            <h2 className="text-lg font-medium">No traces in this time range.</h2>
+                          </div>
+                        ) : (
+                          <div className="flex flex-col items-center gap-3 px-4 py-16 text-center">
+                            <Waypoints className="size-8 text-muted-foreground" />
+                            <h2 className="text-lg font-medium">No traces match</h2>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={clearConstraints}
+                            >
+                              Clear filters
+                            </Button>
+                          </div>
+                        )
+                      }
+                    />
+                  </>
                 ) : null}
               </TooltipProvider>
             </div>

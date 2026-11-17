@@ -105,7 +105,7 @@ use super::saved_views::{CreateSavedView, SavedView, SavedViewListParams, Update
 use super::schema::SchemaResponse;
 use super::score_definitions::{
     CreateScoreDefinitionRequest, ScoreDefinition, ScoreDefinitionCategory,
-    ScoreDefinitionListParams, UpdateScoreDefinitionRequest,
+    ScoreDefinitionListParams, ScoreDirection, UpdateScoreDefinitionRequest,
 };
 use super::scores::{
     FeedbackRequest, FeedbackResult, FeedbackValue, ScoreBatch, ScoreCreate, ScoreListParams,
@@ -304,6 +304,7 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<EvaluatorTestResult>();
     set.insert_page::<Evaluator>("EvaluatorPage");
     set.insert::<ScoreDefinitionCategory>();
+    set.insert::<ScoreDirection>();
     set.insert::<ScoreDefinition>();
     set.insert::<CreateScoreDefinitionRequest>();
     set.insert::<UpdateScoreDefinitionRequest>();
