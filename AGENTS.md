@@ -26,6 +26,7 @@ Read these before writing code, and follow them:
 | `docs/roadmap.md` | Phases, waves and tracks: each track's plan, status, PRs and decision IDs |
 | `docs/plans/` | Step-by-step implementation plans; do the sub-phase you were given, nothing more |
 | `docs/research/competitors.md` | Why the decisions were made (competitor features and code-level findings) |
+| `website/` | The user documentation site (cetra.sh/docs): what users read. `website/STYLE.md` is its style guide |
 
 If the code has to deviate from the spec, update the spec **in the same change**, and add a decision to `docs/mvp-decisions.md` if the change is not a detail. A track's decisions are named `D-<track>-<n>` (e.g. `D-G-1`) and go in that track's section; only the coordinating session adds plain-numbered decisions (`docs/roadmap.md` § Decision IDs). If the spec is ambiguous or contradicts itself, stop and ask instead of guessing.
 
@@ -108,6 +109,7 @@ crates/
   cli/       cetra-cli      the `cetra` binary                                       (spec 09 § CLI)
   ui/        cetra-ui       the web UI embedded at build time (D-G-18, D-G-35)
 web/                         React UI (Vite, TanStack, shadcn/ui, pnpm)               (spec 11)
+website/                     docs site and landing page (Astro, Starlight)            (docs/plans/docs-site)
 sdks/python/                 Python SDK (uv)                                           (spec 10)
 sdks/typescript/             TypeScript SDK (pnpm)                                     (spec 10)
 fixtures/otlp/               OTLP fixtures shared by Rust golden tests and SDK tests  (spec 02 § Testing)
@@ -146,9 +148,10 @@ Run everything through `just`:
 
 | Command | What it does |
 |---|---|
-| `just check` | Rust, web, Python SDK, and TypeScript SDK (D79); **must pass before every commit** |
+| `just check` | Rust, web, Python SDK, TypeScript SDK and the docs site (D79); **must pass before every commit** |
 | `just check-rust` | format check, clippy (`-D warnings`), tests, cargo-deny |
 | `just check-web` | web lint, types, tests, production build |
+| `just check-docs` | docs site: lint, script tests, types, content checks, build with link validation |
 | `just check-release` | build-release, then check the UI is embedded |
 | `just check-py` | Python SDK format, lint, types, tests |
 | `just check-ts` | TypeScript SDK lint, types, tests, package exports |
@@ -172,6 +175,7 @@ Run everything through `just`:
 | `just openapi` | regenerate `crates/server/openapi.json` and `web/src/api/schema.gen.ts` |
 | `just web-dev` | web dev server with the API mocked from `fixtures/api` |
 | `just web-dev-server` | web dev server proxied at the real API |
+| `just docs-dev` | docs site dev server on http://localhost:4321 |
 | `just run <args>` | run the `cetra` binary |
 | `just fuzz <target> [secs]` · `just fuzz-all [secs]` | fuzz one target, or every target in turn, growing its committed corpus (track R M3) |
 | `just fuzz-seed` | write the fuzz seed files from the test fixtures (track R M3) |
@@ -229,6 +233,7 @@ The product was renamed from the working name `llmobs` to `cetra` mechanically (
 - Small commits with a short imperative subject (e.g. `Add WAL group commit`). One sub-phase gives one commit unless the plan says otherwise.
 - Don't commit generated artifacts (`target/`, `node_modules/`, `dist/`, `.venv/`).
 - A user-visible change adds a line to `CHANGELOG.md` § `[Unreleased]` (`Added`, `Changed`, `Fixed`, `Removed`); one that needs action on upgrade goes under `### Upgrade notes` (D-N-5).
+- A user-visible change updates its page under `website/src/content/docs/docs/` in the same PR.
 - When you finish, report:
   - what was done;
   - any deviation from the plan or spec, and why;

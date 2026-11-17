@@ -1,6 +1,7 @@
 packages:
   - web
   - sdks/typescript
+  - website
 
 # Minutes. D74: packages younger than 7 days are not installed.
 minimumReleaseAge: 10080

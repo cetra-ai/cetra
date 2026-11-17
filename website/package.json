@@ -1,0 +1,22 @@
+{
+  "name": "@cetra/website",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "test:scripts": "node --test scripts/",
+    "check:content": "node scripts/check-terms.mjs",
+    "check": "biome check . && pnpm test:scripts && astro check && pnpm check:content && astro build"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "0.42.10",
+    "astro": "7.4.8",
+    "starlight-links-validator": "0.27.0",
+    "starlight-sidebar-topics": "0.9.0"
+  },
+  "devDependencies": {
+    "@astrojs/check": "0.9.12",
+    "typescript": "5.9.3"
+  }
+}

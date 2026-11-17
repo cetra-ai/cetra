@@ -269,8 +269,12 @@ check-py:
 check-ts: js-install
     pnpm --dir sdks/typescript run check
 
+# Documentation site checks: lint, script tests, types, content checks, build with link validation (D-W-13)
+check-docs: js-install
+    pnpm --dir website run check
+
 # Every check (D79); must pass before every commit
-check: check-rust check-web check-py check-ts
+check: check-rust check-web check-py check-ts check-docs
 
 # Build the web, run the Rust e2e tests with the UI embedded, then the SDK suites against a real server (D-G-20, D-G-18)
 e2e: js-install
@@ -354,6 +358,10 @@ web-dev: js-install
 # Web dev server proxied at the real API (no mocks)
 web-dev-server: js-install
     pnpm --dir web run dev:server
+
+# Documentation site dev server on http://localhost:4321
+docs-dev: js-install
+    pnpm --dir website run dev
 
 # Regenerate crates/server/openapi.json and web/src/api/schema.gen.ts
 openapi: js-install
