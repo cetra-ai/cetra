@@ -1,0 +1,86 @@
+---
+title: Evaluators and LLM judges
+description: Produce scores automatically with built-in checks, LLM judges or your own webhook.
+---
+
+An evaluator is a saved recipe that reads a trace or a span and writes a score. Members of a project create and edit evaluators under **Evaluators**.
+
+## Kinds of evaluator
+
+**Checks** run inside cetra with no model call and no cost. They compare the output with an expected value or a pattern, and write a boolean or a number.
+
+| Check | Score |
+|---|---|
+| `exact_match` | Boolean: the output equals the expected text (case-sensitive and trimmed by default). |
+| `contains` | Boolean: the output contains a value, or any or all of a list. |
+| `regex` | Boolean: the pattern matches anywhere in the output. |
+| `json_valid` | Boolean: the output is valid JSON. |
+| `json_schema` | Boolean: the output matches a JSON Schema; the reason is the first error. |
+| `levenshtein` | Number from 0 to 1: how similar the output is to the expected text. |
+
+**LLM judges** send a prompt to a model through an [LLM connection](/docs/evaluation/llm-connections/) and turn the answer into a score. The output is one of:
+
+- a number in a range you choose;
+- a boolean;
+- a category from a list of labels, each with an optional numeric value.
+
+With **include reason** on, the judge also explains its answer, and the explanation becomes the score's reason.
+
+**Webhooks** call a URL you run. cetra sends a signed JSON `POST` with the evaluator, the project, the trace and the variables. Your server answers with a JSON object holding `value`, `label` or `reason`, and cetra stores it as a score. The URL, the headers and the signing secret are stored encrypted and never shown again. cetra signs the body with HMAC-SHA256 and sends the result in an `X-Cetra-Signature` header, so you can check that a request comes from cetra. Redirects are not followed.
+
+## Variables and mapping
+
+A judge prompt, or a check that needs an input, uses variables written as `{{ name }}`. A mapping says where each variable comes from in the trace:
+
+| Source | Meaning |
+|---|---|
+| `trace.input`, `trace.output` | The input and output of the root span of the trace. |
+| `span.input`, `span.output` | The span the rule targets (span rules). |
+| `span[name="retrieve"].output` | The first span with that name. |
+| `span[kind="retriever"].output` | The first span of that kind. |
+| `trace.metadata.<key>`, `span.metadata.<key>`, `span.attributes.<key>` | A metadata or attribute value. |
+| `trace.transcript` | The whole trace as a compact text tree, for judging an agent's steps. |
+
+End an expression with a JSONPath to reach inside a value, for example `trace.output$.answer`, and add `?` to make the variable optional. A missing required variable fails the evaluation with `missing variable <name>`, and a missing optional one renders as an empty string.
+
+Messages render as one `role: text` line each. Other JSON renders compactly, and a template can index into it: `{{ output.answer }}`.
+
+Experiments score in your own code, not with evaluators on the server, so evaluators cannot use `expected` or dataset item variables.
+
+## Templates
+
+You can start an LLM judge from a template and edit the prompt afterwards:
+
+| Template | Variables | Output |
+|---|---|---|
+| Hallucination | `input`, `output`, `context` | Boolean (true means hallucinated) |
+| Relevance | `input`, `output` | Number from 0 to 1 |
+| Toxicity | `output` | Boolean |
+| Correctness | `input`, `output`, `expected` | Category: correct, partially correct, incorrect |
+| Custom | Your own | Your own |
+
+## The judge's model and connection
+
+An LLM judge names a connection and a model. The model must exist at that provider, and the connection's default model is used when you leave it empty. You can also set a maximum number of output tokens (default 1024), a timeout, and a temperature (unset by default).
+
+## Test a judge on a trace
+
+Before you use an evaluator in a rule, run it once on a stored trace.
+
+1. Open the evaluator and select the test panel.
+2. Choose a trace and fill in the mapping, or type literal values for the variables.
+3. Run the test.
+
+The panel shows the value, the reason, the variables it resolved, the rendered prompt, the token usage and a link to the judge's trace. A test writes no score. You can run 10 tests or manual runs a minute.
+
+To write a real score for one trace, use **Run evaluator** on the trace or on a selected span. The run is queued, and its score is stored like any other.
+
+## The judge's own trace
+
+Every time an evaluator runs, cetra records a trace of the run in your project, whether it succeeded or failed. For a judge the trace holds the full prompt, the answer, the token counts and the cost. Open it with **View judge trace** on the score.
+
+These traces use the reserved environment `cetra-eval`. They do not count towards your application's numbers: lists, user pages, the dashboard and alerts leave them out, and online rules never select them, so a judge never judges itself. Turn on **Show evaluation traces** in a list to see them. The dashboard shows their cost as a separate series. If an external OTLP sender uses the environment `cetra-eval`, cetra renames it to `cetra-eval-external`.
+
+## What judges cost
+
+A judge call costs what your provider charges, and cetra shows the cost on the judge's trace and on the score. Checks cost nothing. Judge calls count towards the organization's usage for the month; when the monthly cap is reached, evaluations are skipped. To limit what a rule can spend, set a [budget](/docs/evaluation/online-rules/#cost-caps) on it.
