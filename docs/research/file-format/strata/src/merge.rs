@@ -1,5 +1,6 @@
-//! Merging files (design S10): a k-way merge of the inputs' sort keys, then every column
-//! decoded, interleaved and written again by the writer's own code.
+//! Merging files (design S10): a k-way merge of the inputs' sort keys, then every narrow column
+//! decoded, interleaved and written again by the writer's own code. Payload stores are copied
+//! (`payload::copy`).
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -14,6 +15,7 @@ use crate::config::Config;
 use crate::error::{Result, StrataError};
 use crate::file::StrataFile;
 use crate::format::MAX_ROWS;
+use crate::payload::{MergeCopy, same_stores};
 use crate::reader::read_column;
 use crate::writer::{FileSummary, StrataWriter, sort_key_indexes, write_file};
 
@@ -58,8 +60,8 @@ pub async fn merge(
         .cloned()
         .collect();
     if kept.is_empty() {
-        return write_file(&schema, &key_indexes, &config, 0, |i| {
-            std::future::ready(Ok(new_empty_array(schema.field(i).data_type())))
+        return write_file(&schema, &key_indexes, &config, 0, None, |i| {
+            std::future::ready(Ok(vec![new_empty_array(schema.field(i).data_type())]))
         })
         .await;
     }
@@ -105,19 +107,33 @@ pub async fn merge(
 
     let live: &[Arc<StrataFile>] = &kept;
     let config_ref: &Config = &config;
-    let sources = Arc::new(sources);
-    write_file(&schema, &key_indexes, config_ref, total, move |i| {
-        let sources = Arc::clone(&sources);
-        async move {
-            let arrays = try_join_all(live.iter().map(|file| read_column(file, i))).await?;
-            let array = {
-                let refs: Vec<&dyn Array> = arrays.iter().map(|array| array.as_ref()).collect();
-                interleave(&refs, &sources)?
-            };
-            drop(arrays);
-            Ok(array)
-        }
-    })
+    // Payload stores are copied when every input groups the same payload columns the same way;
+    // otherwise the payload columns are decoded and written again like the others.
+    let copy = same_stores(live).map(|stores| MergeCopy {
+        inputs: live,
+        sources: &sources,
+        stores,
+    });
+    let sources = Arc::new(sources.clone());
+    write_file(
+        &schema,
+        &key_indexes,
+        config_ref,
+        total,
+        copy.as_ref(),
+        move |i| {
+            let sources = Arc::clone(&sources);
+            async move {
+                let arrays = try_join_all(live.iter().map(|file| read_column(file, i))).await?;
+                let array = {
+                    let refs: Vec<&dyn Array> = arrays.iter().map(|array| array.as_ref()).collect();
+                    interleave(&refs, &sources)?
+                };
+                drop(arrays);
+                Ok(vec![array])
+            }
+        },
+    )
     .await
 }
 
@@ -402,19 +418,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shared_chunks_are_stored_once() {
+    async fn stores_are_copied_whole() {
         let config = Config::default();
         let values = random_values(300, 2_000, SEED_A);
         let even: Vec<u128> = (0..300).map(|k| 2 * k).collect();
         let odd: Vec<u128> = (0..300).map(|k| 2 * k + 1).collect();
-        // The same values under different trace ids: B's chunks are all already stored.
+        // The same values under different trace ids: the merge copies both stores as they are,
+        // so the chunks they share are held twice, in two runs.
         let (a_bytes, a_summary) = write(&bodies(&even, &values), &["trace_id"], config.clone());
-        let (b_bytes, _) = write(&bodies(&odd, &values), &["trace_id"], config.clone());
-        let expected = a_summary.columns[1].payload.as_ref().unwrap().unique_chunks;
+        let (b_bytes, b_summary) = write(&bodies(&odd, &values), &["trace_id"], config.clone());
+        let a_stats = a_summary.columns[1].payload.clone().unwrap();
+        let b_stats = b_summary.columns[1].payload.clone().unwrap();
         let (a, b) = (open(a_bytes).await, open(b_bytes).await);
         let (bytes, summary) = merge(&[a, b], &["trace_id"], config).await.unwrap();
         let stats = summary.columns[1].payload.as_ref().unwrap();
-        assert_eq!(stats.unique_chunks, expected, "unique chunks");
+        assert_eq!(
+            stats.unique_chunks,
+            a_stats.unique_chunks + b_stats.unique_chunks
+        );
+        assert_eq!(stats.frames, a_stats.frames + b_stats.frames);
+        assert_eq!(stats.frame_bytes, a_stats.frame_bytes + b_stats.frame_bytes);
         let merged = open(bytes).await;
         assert_eq!(body_rows(&merged).await, interleaved(&values, &values));
     }
@@ -422,7 +445,6 @@ mod tests {
     #[tokio::test]
     async fn needles_across_chunks_are_found_after_a_merge() {
         let config = Config {
-            payload_filters: true,
             ..Config::default()
         };
         let a_values = random_values(40, 30_000, SEED_A);

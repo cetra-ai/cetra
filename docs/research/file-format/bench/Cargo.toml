@@ -23,7 +23,7 @@ vortex-arrow = { path = "/home/sebastien/github/vortex/vortex-arrow" }
 vortex-datafusion = { path = "/home/sebastien/github/vortex/vortex-datafusion" }
 mimalloc = "0.1"
 url = "2"
-zstd = "0.13"
+zstd = { version = "0.13", features = ["experimental"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 memchr = "2"
 cpu-time = "1.0.0"

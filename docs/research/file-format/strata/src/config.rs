@@ -4,10 +4,11 @@
 #[derive(Debug, Clone)]
 pub struct Config {
     /// zstd level for narrow, refs, header and table segments. Default 3.
-    /// Payload frames use the fixed `FRAME_ZSTD_LEVEL`.
+    /// Payload frames use the fixed level of their store's role (`payload::StoreRole`),
+    /// with a trained dictionary.
     pub zstd_level: i32,
-    /// Maximum rows per narrow chunk. Default 4,096. The writer rejects values above 65,535
-    /// (the `FSB_RLE` run lengths are `u16`).
+    /// Maximum rows per narrow chunk. Default 2,048: a trace lookup reads one chunk per column.
+    /// The writer rejects values above 65,535 (the `FSB_RLE` run lengths are `u16`).
     pub chunk_max_rows: u32,
     /// Maximum value bytes per narrow chunk. Default 32 KiB.
     pub chunk_max_bytes: usize,
@@ -29,9 +30,6 @@ pub struct Config {
     /// Columns, besides the first sort-key column, that get a key filter. Names absent from the
     /// schema, or of an unsupported type, are ignored. Default `["user_id", "session_id"]`.
     pub key_filter_columns: Vec<String>,
-    /// Whether payload columns get trigram filters and edge groups for `Contains`. Default
-    /// `false`: they cost about 20% of the payload bytes, and `Contains` then reads every value.
-    pub payload_filters: bool,
     /// Suffix read length when no hot-tail length hint is given. Default 64 KiB; a longer hot
     /// tail costs one more read.
     pub open_default_suffix: u64,
@@ -41,7 +39,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             zstd_level: 3,
-            chunk_max_rows: 4_096,
+            chunk_max_rows: 2_048,
             chunk_max_bytes: 32 * 1024,
             page_max_entries: 64,
             dict_max_values: 65_535,
@@ -49,7 +47,6 @@ impl Default for Config {
             payload_min_avg: 256,
             own_store_columns: vec!["input_preview".into(), "output_preview".into()],
             key_filter_columns: vec!["user_id".into(), "session_id".into()],
-            payload_filters: false,
             open_default_suffix: 64 * 1024,
         }
     }

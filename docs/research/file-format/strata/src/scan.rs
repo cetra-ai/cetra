@@ -8,7 +8,7 @@
 //! fetches the narrow chunks that hold a selected row, then the refs pages and the frames of the
 //! payload columns. Each wave is one `fetch`, so it is counted once.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -24,8 +24,8 @@ use crate::hot::Layer;
 use crate::io::ScanKind;
 use crate::narrow::{BlockEntry, Dictionary, decode_chunk_view};
 use crate::payload::{
-    PayloadHeader, build_values, decode_frames, frame_segments, ids_of, payload_contains,
-    read_header, refs_segments,
+    FrameBodies, FrameEntry, PayloadHeader, build_values, decode_fetched_frame, frame_segments,
+    ids_of, payload_contains, read_header, refs_segments,
 };
 use crate::predicate::{
     Bound, MaskSource, Predicate, bind, bound_columns, chunk_may_match, evaluate, layout_of,
@@ -114,10 +114,6 @@ struct PayloadRead {
     n_pages: usize,
     /// The chunk ids of the rows read, `None` for a null row.
     ids: Vec<Option<Vec<u32>>>,
-    /// Indexes into `header.frames` of the frames that were fetched, in order.
-    frames: Vec<usize>,
-    /// Segments of `frames` in the wave that fetched them.
-    n_frames: usize,
 }
 
 /// Removes every range of `remove` from `ranges`. Both lists are sorted and disjoint. The
@@ -1139,8 +1135,6 @@ impl StrataFile {
                 pages,
                 n_pages: page_segments.len(),
                 ids: Vec::new(),
-                frames: Vec::new(),
-                n_frames: 0,
             });
             segments.extend(page_segments);
         }
@@ -1158,31 +1152,60 @@ impl StrataFile {
         Ok(())
     }
 
-    /// Plans the frames that the chunk ids of `reads` need, and returns their segments in the
-    /// order of the reads.
-    fn plan_frames(reads: &mut [PayloadRead]) -> Result<Vec<(SegmentRef, Kind)>> {
-        let mut segments = Vec::new();
-        for read in reads.iter_mut() {
-            let (frame_segs, frames) = frame_segments(&read.header, &read.ids)?;
-            read.n_frames = frame_segs.len();
-            read.frames = frames;
-            segments.extend(frame_segs);
+    /// Plans the frames that the chunk ids of `reads` need. A frame is fetched and decoded once
+    /// even when several columns share its store. Returns the frames' segments and entries, by
+    /// file offset.
+    fn plan_frames(reads: &[PayloadRead]) -> Result<(Segments, Vec<FrameEntry>)> {
+        let mut unique: BTreeMap<u64, FrameEntry> = BTreeMap::new();
+        for read in reads {
+            let (_, frames) = frame_segments(&read.header, &read.ids)?;
+            for index in frames {
+                let entry =
+                    read.header
+                        .store
+                        .frames
+                        .get(index)
+                        .ok_or_else(|| StrataError::Corrupt {
+                            what: "payload frame",
+                            offset: read.at,
+                        })?;
+                unique.entry(entry.offset).or_insert_with(|| entry.clone());
+            }
         }
-        Ok(segments)
+        let entries: Vec<FrameEntry> = unique.into_values().collect();
+        let segments = entries
+            .iter()
+            .map(|e| {
+                let segment = SegmentRef {
+                    offset: e.offset,
+                    len: e.len,
+                };
+                (segment, Kind::PayloadFrame)
+            })
+            .collect();
+        Ok((segments, entries))
     }
 
-    /// Decodes the fetched frames (bodies in the order of `plan_frames`), and rebuilds the values
+    /// Decodes the fetched frames (`bodies`, in the order of `entries`), and rebuilds the values
     /// of each column from them.
     fn build_payloads(
         &self,
         reads: &[PayloadRead],
+        entries: &[FrameEntry],
         bodies: Vec<Vec<u8>>,
     ) -> Result<HashMap<usize, ArrayRef>> {
-        let mut bodies = bodies.into_iter();
+        if entries.len() != bodies.len() {
+            return Err(StrataError::Corrupt {
+                what: "payload frame",
+                offset: 0,
+            });
+        }
+        let mut frames: FrameBodies = HashMap::with_capacity(entries.len());
+        for (entry, raw) in entries.iter().zip(bodies) {
+            frames.insert(entry.offset, decode_fetched_frame(entry, raw)?);
+        }
         let mut out = HashMap::with_capacity(reads.len());
         for read in reads {
-            let raws: Vec<Vec<u8>> = bodies.by_ref().take(read.n_frames).collect();
-            let frames = decode_frames(&read.header, &read.frames, raws)?;
             let field = self.field_of(read.column)?;
             let array = build_values(&read.header, &frames, &read.ids, &field, read.at)?;
             out.insert(read.column, array);
@@ -1196,9 +1219,9 @@ impl StrataFile {
         reads: &mut [PayloadRead],
         kind: ScanKind,
     ) -> Result<HashMap<usize, ArrayRef>> {
-        let segments = Self::plan_frames(reads)?;
+        let (segments, entries) = Self::plan_frames(reads)?;
         let bodies = self.fetch(&segments, kind).await?;
-        self.build_payloads(reads, bodies)
+        self.build_payloads(reads, &entries, bodies)
     }
 
     /// The values of the payload columns `columns` over `rows` (sorted, unique): the refs pages
@@ -2278,6 +2301,69 @@ mod tests {
             let present = file.lookup_scan(&[0u8; 16], &all, false).await.unwrap();
             let rows: usize = present.iter().map(RecordBatch::num_rows).sum();
             assert_eq!(rows, 5);
+        });
+    }
+
+    #[test]
+    fn a_frame_shared_by_two_columns_is_fetched_once() {
+        runtime().block_on(async {
+            // Columns `a` and `b` hold the same values, so they share every frame of the store.
+            let n = 2_000usize;
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("trace_id", DataType::FixedSizeBinary(16), false),
+                Field::new("a", DataType::Utf8, false),
+                Field::new("b", DataType::Utf8, false),
+            ]));
+            let ids: Vec<[u8; 16]> = (0..n).map(|i| ((i / 5) as u128).to_be_bytes()).collect();
+            let text: Vec<String> = (0..n)
+                .map(|i| format!("row {i} says {} ", i * 7919).repeat(40))
+                .collect();
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(
+                        arrow::array::FixedSizeBinaryArray::try_from_iter(ids.iter()).unwrap(),
+                    ),
+                    Arc::new(StringArray::from(text.clone())),
+                    Arc::new(StringArray::from(text.clone())),
+                ],
+            )
+            .unwrap();
+            let mut w = StrataWriter::new(schema, &["trace_id"], Config::default()).unwrap();
+            w.write(&batch).unwrap();
+            let (bytes, _) = w.finish().unwrap();
+            let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let path = Path::from("shared.strata");
+            store.put(&path, PutPayload::from(bytes)).await.unwrap();
+            let file = StrataFile::open(store, path, None, &Config::default())
+                .await
+                .unwrap();
+            let key = 200u128.to_be_bytes();
+            file.lookup_scan(&key, &[1, 2], false).await.unwrap();
+
+            let frame_bytes = |projection: Vec<usize>| {
+                let file = &file;
+                async move {
+                    file.reset_io_stats();
+                    let got = file.lookup_scan(&key, &projection, false).await.unwrap();
+                    let frames = file.io_stats().by_kind[Kind::PayloadFrame as usize];
+                    (got, frames)
+                }
+            };
+            let (_, one) = frame_bytes(vec![1]).await;
+            let (got, two) = frame_bytes(vec![1, 2]).await;
+            assert!(one > 0);
+            assert_eq!(one, two);
+            let got = arrow::compute::concat_batches(&got[0].schema(), &got).unwrap();
+            assert_eq!(got.num_rows(), 5);
+            for (k, row) in (1_000..1_005).enumerate() {
+                for column in 0..2 {
+                    assert_eq!(
+                        bytes_at(got.column(column).as_ref(), k),
+                        Some(text[row].as_bytes())
+                    );
+                }
+            }
         });
     }
 

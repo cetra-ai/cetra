@@ -56,6 +56,18 @@ const BLOOM: &[&str] = &["trace_id", "session_id", "user_id"];
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> R<()> {
+    let guard = match std::env::var("FMT_PPROF") {
+        Ok(_) => Some(pprof::ProfilerGuardBuilder::default().frequency(997).build()?),
+        Err(_) => None,
+    };
+    let r = run().await;
+    if let Some(g) = guard {
+        print_profile(&g.report().build()?);
+    }
+    r
+}
+
+async fn run() -> R<()> {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("gen") => {
@@ -79,15 +91,7 @@ async fn main() -> R<()> {
         Some("query") => {
             let runs: usize = args.get(3).map(|s| s.parse()).transpose()?.unwrap_or(5);
             let only = args.get(4).cloned();
-            let guard = match std::env::var("FMT_PPROF") {
-                Ok(_) => Some(pprof::ProfilerGuardBuilder::default().frequency(997).build()?),
-                Err(_) => None,
-            };
-            let r = query(&args[2], runs, only).await;
-            if let Some(g) = guard {
-                print_profile(&g.report().build()?);
-            }
-            r
+            query(&args[2], runs, only).await
         }
         Some("profile") => {
             let loc = location(&args[2])?;
@@ -98,7 +102,8 @@ async fn main() -> R<()> {
             .await
         }
         Some("merge") => merge_cmd(&args[2]).await,
-        Some("dedup") => dedup_cmd(Path::new(args.get(2).ok_or(USAGE)?)),
+        Some("zexp") => zexp_cmd(&args[2..]),
+        Some("gexp") => gexp_cmd(&args[2], &args[3..]),
         Some("lookupcols") => lookup_cols(args.get(2).ok_or(USAGE)?).await,
         Some("restrata") => restrata_cmd(Path::new(args.get(2).ok_or(USAGE)?), args.get(3).map_or("st", String::as_str)),
         Some("swe") => {
@@ -113,7 +118,7 @@ async fn main() -> R<()> {
     }
 }
 
-const USAGE: &str = "usage: fmtbench gen <dir> <traces> <files> [--swe <max_trajectories> <shard>...] | query <dir|s3://bucket/key> [runs] [only] | profile <dir|s3://bucket/key> [runs] | merge <dir> (local only) | dedup <dir> (local only) | restrata <dir> [out] (local only)\n  s3 needs AWS_ENDPOINT, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION and AWS_ALLOW_HTTP=true";
+const USAGE: &str = "usage: fmtbench gen <dir> <traces> <files> [--swe <max_trajectories> <shard>...] | query <dir|s3://bucket/key> [runs] [only] | profile <dir|s3://bucket/key> [runs] | merge <dir> (local only) | restrata <dir> [out] (local only)\n  s3 needs AWS_ENDPOINT, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION and AWS_ALLOW_HTTP=true";
 
 // ------------------------------------------------------------------ generate
 
@@ -306,41 +311,38 @@ async fn generate(dir: &Path, traces: usize, files: usize, swe: Option<(usize, &
     Ok(())
 }
 
-/// Payload columns: Strata bytes and frame counts beside the Parquet column bytes.
+/// Payload columns: Strata bytes and their parts beside the Parquet column bytes, then the
+/// G6 total of the four payload columns against the best Parquet variant.
 fn payload_table(dir: &Path, summaries: &[strata::FileSummary]) -> R<()> {
     let names = ["input", "output", "system_instructions", "tool_definitions"];
     let mut pq = Vec::new();
     for v in PQ_VARIANTS {
         pq.push((*v, column_sizes_parquet(&dir.join(v), v)?));
     }
-    println!("payload columns (KiB; st frames: total, without filter, percent with filter):");
+    println!("payload columns (KiB; a store's frames, index and store segment count in its first column):");
+    let mut st_total = 0u64;
     for n in names {
-        let (mut st_bytes, mut frames, mut no_filter, mut has_payload) = (0u64, 0u64, 0u64, false);
-        let (mut filter_bytes, mut edge_bytes, mut unique_chunks, mut chunk_refs) = (0u64, 0u64, 0u64, 0u64);
-        let (mut frame_bytes, mut ref_bytes) = (0u64, 0u64);
+        let (mut st_bytes, mut frames, mut has_payload) = (0u64, 0u64, false);
+        let (mut frame_bytes, mut ref_bytes, mut index_bytes, mut store_bytes, mut dict_bytes) = (0u64, 0u64, 0u64, 0u64, 0u64);
+        let (mut unique_chunks, mut chunk_refs) = (0u64, 0u64);
         for s in summaries {
             if let Some(c) = s.columns.iter().find(|c| c.name == n) {
                 st_bytes += c.bytes;
                 if let Some(p) = &c.payload {
                     has_payload = true;
                     frames += u64::from(p.frames);
-                    no_filter += u64::from(p.frames_without_filter);
-                    filter_bytes += p.filter_bytes;
                     frame_bytes += p.frame_bytes;
                     ref_bytes += p.ref_bytes;
-                    edge_bytes += p.edge_bytes;
+                    index_bytes += p.index_bytes;
+                    store_bytes += p.store_bytes;
+                    dict_bytes += p.dict_bytes;
                     unique_chunks += u64::from(p.unique_chunks);
                     chunk_refs += p.chunk_refs;
                 }
             }
         }
-        let (fr, nf, pct) = if has_payload {
-            let pct = 100.0 * (frames - no_filter) as f64 / frames.max(1) as f64;
-            (frames.to_string(), no_filter.to_string(), format!("{pct:.1}"))
-        } else {
-            ("-".into(), "-".into(), "-".into())
-        };
-        let mut line = format!("  {n:22} st {:>9}  frames {fr:>8}  without filter {nf:>8}  filtered {pct:>5}%", st_bytes >> 10);
+        st_total += st_bytes;
+        let mut line = format!("  {n:22} st {:>9}  frames {:>8}", st_bytes >> 10, if has_payload { frames.to_string() } else { "-".into() });
         for (v, sizes) in &pq {
             let b = sizes.iter().find(|(c, _)| c == n).map_or(0, |(_, b)| *b);
             line.push_str(&format!("  {v} {:>9}", b >> 10));
@@ -348,14 +350,22 @@ fn payload_table(dir: &Path, summaries: &[strata::FileSummary]) -> R<()> {
         println!("{line}");
         if has_payload {
             println!(
-                "  {:22}    frames {:>9} KiB  refs {:>9} KiB  filters {:>9} KiB  edges {:>9} KiB  unique chunks {unique_chunks:>9}  chunk refs {chunk_refs:>10}",
+                "  {:22}    frames {:>9} KiB  refs {:>8} KiB  index {:>8} KiB  store {:>7} KiB (dict {:>5})  unique chunks {unique_chunks:>9}  chunk refs {chunk_refs:>10}",
                 "",
                 frame_bytes >> 10,
                 ref_bytes >> 10,
-                filter_bytes >> 10,
-                edge_bytes >> 10
+                index_bytes >> 10,
+                store_bytes >> 10,
+                dict_bytes >> 10
             );
         }
+    }
+    let best = pq
+        .iter()
+        .map(|(v, sizes)| (*v, sizes.iter().filter(|(c, _)| names.contains(&c.as_str())).map(|(_, b)| *b).sum::<u64>()))
+        .min_by_key(|(_, b)| *b);
+    if let Some((v, b)) = best {
+        println!("G6 payload columns: st {} KiB, best parquet {v} {} KiB, ratio {:.3}", st_total >> 10, b >> 10, st_total as f64 / b.max(1) as f64);
     }
     Ok(())
 }
@@ -1118,6 +1128,48 @@ fn print_profile(report: &pprof::Report) {
     };
     show("self", own, 40, false);
     show("inclusive, strata/arrow/datafusion/zstd", incl, 60, true);
+    // FMT_PPROF_UNDER=<name>: the samples under the innermost frame whose name contains `name`,
+    // by the frame it calls directly.
+    if let Ok(target) = std::env::var("FMT_PPROF_UNDER") {
+        let mut callees: HashMap<String, isize> = HashMap::new();
+        for (frames, count) in &report.data {
+            let names: Vec<String> = frames
+                .frames
+                .iter()
+                .map(|f| f.first().map_or_else(|| "?".to_owned(), |s| s.name()))
+                .map(|n| n.split("::h").next().unwrap_or(&n).to_owned())
+                .collect();
+            if let Some(p) = names.iter().position(|n| n.contains(&target)) {
+                let callee = if p == 0 { "(self)".to_owned() } else { names[p - 1].clone() };
+                *callees.entry(callee).or_default() += count;
+            }
+        }
+        show(&format!("under {target}"), callees, 40, false);
+    }
+    // FMT_PPROF_CALLERS=<name>: the samples whose leaf frame contains `name`, by the first two
+    // frames above it.
+    if let Ok(target) = std::env::var("FMT_PPROF_CALLERS") {
+        let mut callers: HashMap<String, isize> = HashMap::new();
+        for (frames, count) in &report.data {
+            let names: Vec<String> = frames
+                .frames
+                .iter()
+                .map(|f| f.first().map_or_else(|| "?".to_owned(), |s| s.name()))
+                .map(|n| n.split("::h").next().unwrap_or(&n).chars().take(70).collect())
+                .collect();
+            if names.first().is_some_and(|n| n.contains(&target)) {
+                let depth: usize = std::env::var("FMT_PPROF_DEPTH").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+                let up: Vec<&str> = names.iter().skip(1).take(depth).map(String::as_str).collect();
+                *callers.entry(up.join(" < ")).or_default() += count;
+            }
+        }
+        let mut v: Vec<_> = callers.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1));
+        println!("== profile: callers of {target} ({total} samples)");
+        for (k, c) in v.into_iter().take(12) {
+            println!("  {:5.1}%  {}", 100.0 * c as f64 / total.max(1) as f64, k.replace(" < ", "\n          < "));
+        }
+    }
 }
 
 // ------------------------------------------------------------------ lookupcols
@@ -1174,6 +1226,7 @@ fn restrata_cmd(dir: &Path, out: &str) -> R<()> {
     let out_dir = dir.join(out);
     std::fs::create_dir_all(&out_dir)?;
     let (mut raw, mut bytes, mut write_time) = (0u64, 0u64, std::time::Duration::ZERO);
+    let (mut pq_bytes, mut pq_time) = (0u64, std::time::Duration::ZERO);
     let mut summaries = Vec::new();
     for (i, p) in paths.iter().enumerate() {
         let reader = ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(p)?)?.with_batch_size(65536).build()?;
@@ -1181,18 +1234,43 @@ fn restrata_cmd(dir: &Path, out: &str) -> R<()> {
         let schema = batches.first().ok_or("empty parquet file")?.schema();
         let b = concat_batches(&schema, &batches)?;
         raw += b.get_array_memory_size() as u64;
-        let t = Instant::now();
-        let mut w = StrataWriter::new(b.schema(), &["trace_id", "start_time"], Config::default())?;
-        for off in (0..b.num_rows()).step_by(8192) {
-            w.write(&b.slice(off, 8192.min(b.num_rows() - off)))?;
+        // FMT_REPEAT=n: each format writes the file n times, interleaved, and the fastest time
+        // of each counts, which keeps bursts of load on a shared machine out of G8.
+        let repeat: usize = std::env::var("FMT_REPEAT").ok().and_then(|v| v.parse().ok()).unwrap_or(1).max(1);
+        let (mut st_best, mut pq_best) = (std::time::Duration::MAX, std::time::Duration::MAX);
+        let mut written = None;
+        let mut last_pq_len = 0u64;
+        for _ in 0..repeat {
+            let t = Instant::now();
+            let mut w = StrataWriter::new(b.schema(), &["trace_id", "start_time"], Config::default())?;
+            for off in (0..b.num_rows()).step_by(8192) {
+                w.write(&b.slice(off, 8192.min(b.num_rows() - off)))?;
+            }
+            let (file, summary) = w.finish()?;
+            st_best = st_best.min(t.elapsed());
+            written = Some((file, summary));
+            // G8's reference: the same rows written by `pq_default` into memory, 8,192 rows per
+            // write call, one thread.
+            let t = Instant::now();
+            let mut pq = ArrowWriter::try_new(Vec::new(), b.schema(), Some(parquet_props("pq_default", &b.schema(), b.num_rows())))?;
+            for off in (0..b.num_rows()).step_by(8192) {
+                pq.write(&b.slice(off, 8192.min(b.num_rows() - off)))?;
+            }
+            let len = pq.into_inner()?.len() as u64;
+            pq_best = pq_best.min(t.elapsed());
+            last_pq_len = len;
         }
-        let (file, summary) = w.finish()?;
-        write_time += t.elapsed();
+        pq_bytes += last_pq_len;
+        write_time += st_best;
+        pq_time += pq_best;
+        let (file, summary) = written.ok_or("no write")?;
         std::fs::write(out_dir.join(format!("{i:03}.strata")), &file)?;
         bytes += file.len() as u64;
         summaries.push(summary);
     }
     println!("{out:12} {:>6} MiB  write {:>8.2?}  ({:.0} MiB/s of arrow)", bytes >> 20, write_time, raw as f64 / 1048576.0 / write_time.as_secs_f64());
+    println!("{:12} {:>6} MiB  write {:>8.2?}  ({:.0} MiB/s of arrow)", "pq_default", pq_bytes >> 20, pq_time, raw as f64 / 1048576.0 / pq_time.as_secs_f64());
+    println!("G8 write throughput: strata / pq_default = {:.3}", pq_time.as_secs_f64() / write_time.as_secs_f64());
     let mut payload_columns: Vec<(String, u64, u64)> = Vec::new();
     for s in &summaries {
         for c in &s.columns {
@@ -1214,110 +1292,109 @@ fn restrata_cmd(dir: &Path, out: &str) -> R<()> {
     Ok(())
 }
 
-// ------------------------------------------------------------------ dedup
+// ------------------------------------------------------------------ zexp
 
-/// Survey experiment E2: per `pq_default` file, the payload bytes with one chunk store per
-/// column (as Strata writes them) against one store shared by all payload columns.
-fn dedup_cmd(dir: &Path) -> R<()> {
-    use arrow::array::AsArray;
-    use parquet::arrow::ProjectionMask;
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-    const NAMES: [&str; 4] = ["input", "output", "system_instructions", "tool_definitions"];
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir.join("pq_default"))?
-        .map(|e| e.map(|e| e.path()))
-        .collect::<Result<_, _>>()?;
-    paths.sort();
-    let mut totals: Vec<(u64, u64, u64, u64, u64)> = vec![(0, 0, 0, 0, 0); NAMES.len()];
-    let (mut own_total, mut shared_total, mut pq_total) = (0u64, 0u64, 0u64);
-    for p in &paths {
-        let b = ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(p)?)?;
-        let pq_sizes: Vec<u64> = NAMES
-            .iter()
-            .map(|n| {
-                b.metadata()
-                    .row_groups()
-                    .iter()
-                    .flat_map(|rg| rg.columns())
-                    .filter(|c| c.column_path().parts().first().map(String::as_str) == Some(*n))
-                    .map(|c| c.compressed_size() as u64)
-                    .sum()
-            })
-            .collect();
-        let mask = ProjectionMask::columns(b.parquet_schema(), NAMES);
-        let reader = b.with_projection(mask).with_batch_size(4096).build()?;
-        let mut scope = strata::DedupScope::new(&NAMES)?;
-        for batch in reader {
-            let batch = batch?;
-            let cols: Vec<ArrayRef> = NAMES
-                .iter()
-                .map(|n| -> R<ArrayRef> { Ok(cast(batch.column_by_name(n).ok_or("missing payload column")?, &DataType::LargeBinary)?) })
-                .collect::<R<_>>()?;
-            let bins: Vec<_> = cols.iter().map(|c| c.as_binary::<i64>()).collect();
-            let mut row: Vec<Option<&[u8]>> = vec![None; NAMES.len()];
-            for r in 0..batch.num_rows() {
-                for (c, b) in bins.iter().enumerate() {
-                    row[c] = if b.is_null(r) { None } else { Some(b.value(r)) };
-                }
-                scope.add_row(&row)?;
+/// The raw bodies of every payload frame segment of a Strata file, in file order.
+fn frame_bodies(bytes: &[u8]) -> R<Vec<Vec<u8>>> {
+    let mut out = Vec::new();
+    let mut at = 8usize;
+    while at + 16 <= bytes.len() {
+        let h = &bytes[at..at + 16];
+        if u16::from_le_bytes([h[0], h[1]]) != 0x5347 {
+            break;
+        }
+        let (kind, codec) = (h[2], h[3]);
+        let raw = u32::from_le_bytes(h[4..8].try_into()?) as usize;
+        let stored = u32::from_le_bytes(h[8..12].try_into()?) as usize;
+        let body = &bytes[at + 16..at + 16 + stored];
+        if kind == 2 {
+            out.push(if codec == 1 { zstd::bulk::decompress(body, raw)? } else { body.to_vec() });
+        }
+        at += 16 + stored;
+    }
+    Ok(out)
+}
+
+/// Compression experiment on the payload frames of Strata files: size and speed per zstd
+/// level, with and without a dictionary trained on a sample of the frames, and with frames
+/// merged `m` at a time.
+fn zexp_cmd(files: &[String]) -> R<()> {
+    let mut frames = Vec::new();
+    for f in files {
+        frames.extend(frame_bodies(&std::fs::read(f)?)?);
+    }
+    let raw: usize = frames.iter().map(Vec::len).sum();
+    println!("{} frames, {} KiB raw", frames.len(), raw >> 10);
+    use zstd::zstd_safe::{CParameter, DictAttachPref};
+    let budget = 256usize << 10;
+    let step = (frames.len() * 4096 / budget).max(1);
+    let samples: Vec<&[u8]> = frames.iter().step_by(step).map(|f| &f[..f.len().min(4096)]).collect();
+    let dict = zstd::dict::from_samples(&samples, 64 << 10)?;
+    let variants: Vec<(&str, i32, usize, Vec<CParameter>)> = vec![
+        ("L3", 3, 1, vec![]),
+        ("L3 hash15", 3, 1, vec![CParameter::HashLog(15), CParameter::ChainLog(15)]),
+        ("L3 hash14", 3, 1, vec![CParameter::HashLog(14), CParameter::ChainLog(14)]),
+        ("L3 min6", 3, 1, vec![CParameter::MinMatch(6)]),
+        ("L3 128K", 3, 2, vec![]),
+        ("L2", 2, 1, vec![]),
+        ("L1", 1, 1, vec![]),
+    ];
+    for (name, level, merge, params) in variants {
+        let groups: Vec<Vec<u8>> = frames.chunks(merge).map(|g| g.concat()).collect();
+        let enc = zstd::dict::EncoderDictionary::copy(&dict, level);
+        let mut c = zstd::bulk::Compressor::with_prepared_dictionary(&enc)?;
+        c.set_parameter(CParameter::ForceAttachDict(DictAttachPref::ForceAttach))?;
+        for p in params {
+            c.set_parameter(p)?;
+        }
+        let mut best = f64::INFINITY;
+        let mut total = 0usize;
+        for _ in 0..3 {
+            let t = Instant::now();
+            total = 0;
+            for g in &groups {
+                total += c.compress(g)?.len();
             }
+            best = best.min(t.elapsed().as_secs_f64());
         }
-        let rep = scope.finish()?;
-        println!("== {}", p.display());
-        println!("  {:22} {:>10} {:>9} {:>10} {:>10} {:>10} {:>12} {:>10}", "column (KiB)", "raw", "chunks", "own uniq", "own frames", "pq_default", "in others", "new shared");
-        let mut own = 0u64;
-        for (c, col) in rep.columns.iter().enumerate() {
-            println!(
-                "  {:22} {:>10} {:>9} {:>10} {:>10} {:>10} {:>12} {:>10}",
-                col.name,
-                col.raw_bytes >> 10,
-                col.own_chunks,
-                col.own_unique_bytes >> 10,
-                col.own_frame_bytes >> 10,
-                pq_sizes[c] >> 10,
-                col.shared_with_others_bytes >> 10,
-                col.new_in_shared_bytes >> 10
-            );
-            own += col.own_frame_bytes;
-            let t = &mut totals[c];
-            t.0 += col.own_unique_bytes;
-            t.1 += col.own_frame_bytes;
-            t.2 += pq_sizes[c];
-            t.3 += col.shared_with_others_bytes;
-            t.4 += col.new_in_shared_bytes;
+        println!("{name:12} {:>8} KiB  x{:.2}  {:>6.0} MB/s", (total + dict.len()) >> 10, raw as f64 / total as f64, raw as f64 / 1e6 / best);
+    }
+    Ok(())
+}
+
+/// Index experiment: per group of `g` frames, the distinct n-grams, and for each needle the
+/// groups holding all its n-grams against the groups holding the needle itself.
+fn gexp_cmd(needles: &str, files: &[String]) -> R<()> {
+    use std::collections::HashSet;
+    let needles: Vec<Vec<u8>> = std::fs::read_to_string(needles)?.lines().map(profile::unhex).collect();
+    let mut frames = Vec::new();
+    for f in files {
+        frames.extend(frame_bodies(&std::fs::read(f)?)?);
+    }
+    for g in [1usize, 4, 16] {
+        let groups: Vec<Vec<u8>> = frames.chunks(g).map(|c| c.concat()).collect();
+        for n in [3usize, 4, 5, 6] {
+            let key = |w: &[u8]| -> u64 { w.iter().fold(0u64, |h, &b| (h << 8) | u64::from(b)) };
+            let sets: Vec<HashSet<u64>> = groups.iter().map(|t| t.windows(n).map(key).collect()).collect();
+            let distinct: usize = sets.iter().map(HashSet::len).sum();
+            let (mut cand, mut real) = (0usize, 0usize);
+            for nd in &needles {
+                let grams: Vec<u64> = nd.windows(n).map(key).collect();
+                let finder = memchr::memmem::Finder::new(nd);
+                for (t, s) in groups.iter().zip(&sets) {
+                    if grams.iter().all(|k| s.contains(k)) {
+                        cand += 1;
+                    }
+                    if finder.find(t).is_some() {
+                        real += 1;
+                    }
+                }
+            }
+            let raw: usize = groups.iter().map(Vec::len).sum();
+            println!("group {g:>2} ({} groups)  {n}-grams: {:>10} postings ({:.3} per raw byte)  needles: {:.1} candidate groups vs {:.1} real per needle",
+                groups.len(), distinct, distinct as f64 / raw as f64, cand as f64 / needles.len() as f64, real as f64 / needles.len() as f64);
         }
-        let pq: u64 = pq_sizes.iter().sum();
-        println!(
-            "  frames: own stores {} KiB, shared store {} KiB ({} chunks, {} KiB unique); pq_default {} KiB",
-            own >> 10,
-            rep.shared_frame_bytes >> 10,
-            rep.shared_chunks,
-            rep.shared_unique_bytes >> 10,
-            pq >> 10
-        );
-        own_total += own;
-        shared_total += rep.shared_frame_bytes;
-        pq_total += pq;
     }
-    println!("== total over {} files", paths.len());
-    for (n, t) in NAMES.iter().zip(&totals) {
-        println!(
-            "  {n:22} own uniq {:>9} KiB  own frames {:>9} KiB  pq_default {:>9} KiB  in others {:>9} KiB  new shared {:>9} KiB",
-            t.0 >> 10,
-            t.1 >> 10,
-            t.2 >> 10,
-            t.3 >> 10,
-            t.4 >> 10
-        );
-    }
-    let ratio = |x: u64| x as f64 / pq_total.max(1) as f64;
-    println!(
-        "  frames: own {} KiB ({:.2}x pq_default), shared {} KiB ({:.2}x); pq_default {} KiB",
-        own_total >> 10,
-        ratio(own_total),
-        shared_total >> 10,
-        ratio(shared_total),
-        pq_total >> 10
-    );
     Ok(())
 }
 

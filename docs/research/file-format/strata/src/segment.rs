@@ -42,10 +42,10 @@ pub enum Kind {
     PayloadRefs = 3,
     /// A payload header (frame table, refs page table).
     PayloadHeader = 4,
-    /// Payload filters.
-    PayloadFilters = 5,
-    /// A payload edge group.
-    PayloadEdges = 6,
+    /// A page of a payload run's gram index.
+    PayloadIndex = 5,
+    /// A payload store: its frame table, runs, dictionaries and index page tables.
+    PayloadStore = 6,
     /// A column block-table page.
     BlockTablePage = 7,
     /// A dictionary.
@@ -62,8 +62,8 @@ impl Kind {
             2 => Some(Self::PayloadFrame),
             3 => Some(Self::PayloadRefs),
             4 => Some(Self::PayloadHeader),
-            5 => Some(Self::PayloadFilters),
-            6 => Some(Self::PayloadEdges),
+            5 => Some(Self::PayloadIndex),
+            6 => Some(Self::PayloadStore),
             7 => Some(Self::BlockTablePage),
             8 => Some(Self::Dictionary),
             9 => Some(Self::KeyFilter),
@@ -80,6 +80,9 @@ pub enum Codec {
     Raw = 0,
     /// Compressed with zstd.
     Zstd = 1,
+    /// Compressed with zstd and the dictionary of the payload run that holds the segment. Only
+    /// payload frames use it.
+    ZstdDict = 2,
 }
 
 impl Codec {
@@ -88,6 +91,7 @@ impl Codec {
         match v {
             0 => Some(Self::Raw),
             1 => Some(Self::Zstd),
+            2 => Some(Self::ZstdDict),
             _ => None,
         }
     }
@@ -124,20 +128,36 @@ pub(crate) fn encode_segment(
     }
     let compressed = match prefer {
         Codec::Zstd => codec.compressor.compress(body).ok().filter(|c| match kind {
-            // A narrow chunk is decompressed on every scan: zstd must save at least 15%.
-            Kind::NarrowChunk => c.len() * 100 <= body.len() * 85,
+            // A narrow chunk is decompressed on every scan: zstd must save at least 30%.
+            Kind::NarrowChunk => c.len() * 100 <= body.len() * 70,
             _ => c.len() < body.len(),
         }),
-        Codec::Raw => None,
+        // A dictionary needs the run's encoder: `write_segment` stores such bodies.
+        Codec::Raw | Codec::ZstdDict => None,
     };
     let (codec, stored) = match &compressed {
         Some(c) => (Codec::Zstd, c.as_slice()),
         None => (Codec::Raw, body),
     };
+    write_segment(kind, codec, body.len(), stored, out)
+}
+
+/// Appends one segment whose body is already stored with `codec`: `stored` is the stored
+/// bytes and `raw_len` the length of the raw body.
+pub(crate) fn write_segment(
+    kind: Kind,
+    codec: Codec,
+    raw_len: usize,
+    stored: &[u8],
+    out: &mut Out,
+) -> Result<SegmentRef> {
     let too_big = |n: usize| StrataError::Unsupported {
         what: format!("segment body of {n} bytes"),
     };
-    let raw_len = u32::try_from(body.len()).map_err(|_| too_big(body.len()))?;
+    if raw_len > MAX_SEGMENT_RAW as usize {
+        return Err(too_big(raw_len));
+    }
+    let raw_len = u32::try_from(raw_len).map_err(|_| too_big(raw_len))?;
     let stored_len = u32::try_from(stored.len()).map_err(|_| too_big(stored.len()))?;
     let len = stored_len
         .checked_add(SEGMENT_HEADER_LEN as u32)
@@ -179,6 +199,17 @@ fn decompress(stored: &[u8], raw_len: usize) -> std::io::Result<Vec<u8>> {
 /// Checks and decodes the segment whose `bytes` (exactly its `len` bytes) start at
 /// file offset `offset`, and returns the raw body.
 pub fn decode_segment(bytes: &[u8], offset: u64, expect: Kind) -> Result<Vec<u8>> {
+    decode_segment_with(bytes, offset, expect, None)
+}
+
+/// [`decode_segment`] for a segment that may be stored with [`Codec::ZstdDict`]: `dict` is the
+/// dictionary of the run that holds it. A `ZstdDict` segment without a dictionary is corrupt.
+pub(crate) fn decode_segment_with(
+    bytes: &[u8],
+    offset: u64,
+    expect: Kind,
+    dict: Option<&zstd::dict::DecoderDictionary<'static>>,
+) -> Result<Vec<u8>> {
     let corrupt = |what: &'static str| StrataError::Corrupt { what, offset };
     let mut c = Cursor::new(bytes, offset);
     if c.u16("segment length")? != SEGMENT_MAGIC {
@@ -212,6 +243,18 @@ pub fn decode_segment(bytes: &[u8], offset: u64, expect: Kind) -> Result<Vec<u8>
         Codec::Zstd => {
             let body =
                 decompress(stored, raw_len as usize).map_err(|_| corrupt("segment decompress"))?;
+            if body.len() != raw_len as usize {
+                return Err(corrupt("segment decompress"));
+            }
+            Ok(body)
+        }
+        Codec::ZstdDict => {
+            let dict = dict.ok_or_else(|| corrupt("segment dictionary"))?;
+            let mut decompressor = zstd::bulk::Decompressor::with_prepared_dictionary(dict)
+                .map_err(|_| corrupt("segment decompress"))?;
+            let body = decompressor
+                .decompress(stored, raw_len as usize)
+                .map_err(|_| corrupt("segment decompress"))?;
             if body.len() != raw_len as usize {
                 return Err(corrupt("segment decompress"));
             }

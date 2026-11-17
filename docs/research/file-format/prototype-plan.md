@@ -148,8 +148,8 @@ bytes[stored_len]
 ```
 
 - Every reference to a segment stores its offset (the header's offset) and its length (`16 + stored_len`), so the reader fetches the header and the body in one range.
-- `codec`: 0 = raw, 1 = zstd. Level `config.zstd_level` (default 3) for narrow, frame and table segments; level 9 for payload frames (3 in v0; 9 makes `swe` payloads 10% smaller).
-- The writer stores a segment raw when zstd does not make it smaller (a#12).
+- `codec`: 0 = raw, 1 = zstd. Level `config.zstd_level` (default 3) for narrow, frame and table segments; level 9 for payload frames in v1 (3 in v0 and v2; see § S4 in v2).
+- The writer stores a segment raw when zstd does not make it smaller (a#12). A narrow chunk, which every scan decompresses, is stored raw unless zstd saves at least 30% (15% in v1), to spare scans the decompression of chunks that zstd barely shrinks. With 2,048-row chunks, it grew `light`'s files from 168 to 177 MiB.
 
 | `kind` | Content |
 |---|---|
@@ -232,7 +232,7 @@ Field sizes: 4 + 4 + 1 + 1 + 2 + 4 + 4 + 4 + 8 + 4 + 8 + 4 + 8 + 8 = **64**.
 
 **Chunks.**
 - Each column is cut into chunks independently.
-- A chunk is closed when it holds 4,096 rows, or when the bytes of its values reach 32 KiB, whichever comes first. Value bytes are the fixed width × rows, or for variable-width values the encoded width of the row: a Utf8 row with a dictionary is 4 B (its code), a Utf8 or Binary row without one is its length + 4 B, a List(Utf8) row with a dictionary is 4 B per element + 4 B, and a `MAP` row is, per entry, key length + value length + 8 B, plus 4 B. For `IPC` columns, the slice's `to_data().get_slice_memory_size()` is used, measured per 256-row step.
+- A chunk is closed when it holds 2,048 rows (4,096 before v2), or when the bytes of its values reach 32 KiB, whichever comes first. Value bytes are the fixed width × rows, or for variable-width values the encoded width of the row: a Utf8 row with a dictionary is 4 B (its code), a Utf8 or Binary row without one is its length + 4 B, a List(Utf8) row with a dictionary is 4 B per element + 4 B, and a `MAP` row is, per entry, key length + value length + 8 B, plus 4 B. For `IPC` columns, the slice's `to_data().get_slice_memory_size()` is used, measured per 256-row step.
 - The chunk is the unit of I/O and decoding: a mini-block in the Lance sense (b#1).
 
 **Block table.** One 56-byte entry per chunk, stored raw in kind 7 pages of at most 64 entries (3.6 KiB). A lookup fetches only the page holding its row range, found through hot-tail section 7. The sort-key column's entries are also copied whole into hot-tail section 3.
@@ -298,6 +298,8 @@ Field sizes: 4 + 4 + 8 + 4 + 1 + 1 + 2 + 16 + 16 = 56. `const_len` is the byte l
 **Row order.** The writer is given the sort key (`["trace_id", "start_time"]`). It checks that rows arrive in that order and returns `StrataError::Unsorted` otherwise.
 
 ### S4. Payload layer
+
+v2 replaces parts of this section; see § S4 in v2.
 
 **Classification.** A Utf8 or Binary column is a payload column when its average non-null value length in the file is ≥ `config.payload_min_avg` (256 B). It is decided per file by the writer, which buffers the file (S7).
 
@@ -400,6 +402,30 @@ The writer reports filter bytes, rollup saturation and the percentage of frames 
 
    This is complete because every chunk except a value's last is ≥ 256 B, so a needle of ≤ 64 B spans at most two chunks. Any such crossing puts R's frame among the candidates.
 5. A row matches if any of its chunks matches, or any of its pairs matches.
+
+### S4 in v2 (M9)
+
+Strata v2 replaces the payload layer's frames table, filters, edge groups and rollup above. The chunking rules, the refs pages and `Contains`'s exactness stay. The code is the reference: `strata/src/payload/{store,gram,search,copy,write}.rs`.
+
+**Chunking.** Units of 2 KiB or more (was 8 KiB) are cut by the gear chunker with pieces of 256 B to 4 KiB (average about 1 KiB, mask 10 bits; was 512 B to 8 KiB). Smaller pieces let near copies of mid-size tool outputs dedup: −13% of payload bytes on `swe`. Pieces are still merged to ≥ 256 B (`MIN_CHUNK`). A JSON scan skips strings with `memchr`.
+
+**Reuse of the previous value.** A value that equals the previous non-null value of its column reuses its chunk ids. A value that starts with the previous one, up to a chunk ending at a top-level cut (a conversation that grew by some messages), reuses those chunk ids and only cuts the rest. The prefix is checked byte for byte, so the result equals chunking from scratch. A value of 256 B or more is also remembered by its `xxh3_128`, so a value seen earlier anywhere in the store (a system prompt or tool list shared by many traces) reuses its chunk ids without being cut again. On `payload` it cuts the bytes that go through the chunker from 477 to 325 MiB per file (185 MiB end up unique). Comparing a value with the last 8 values of its column instead of the last one was tried and dropped: 10% fewer bytes to cut, no time saved, and slower writes on `swe`.
+
+**Stores and runs.** A payload store (kind 6, `PayloadStore`) holds the unique chunks of one or more payload columns: one shared store per file, plus one per `own_store_columns` column. The two roles are written differently (`StoreRole`): the shared store gets zstd level 3 frames and a dictionary; an own store (the previews) gets level 1 frames and none, since its texts are short and a dictionary costs one training per store. Every store with frames gets a gram index. The directory record of a payload column points to its store with `dict_offset`/`dict_len`, and to its header with `payload_offset`/`payload_len`. The store body: `u32 n_chunks · u32 n_frames · u32 n_runs`, then per run `u32 first_frame · u32 dict_len · dict · u32 index_rows · u32 index_frames · u32 rows_per_page · u32 n_pages · n_pages × (u64 offset · u32 len)`, then per frame `u64 offset · u32 len · u32 raw_len · u32 n_chunks`. A write makes one run; a merge copies the runs of its inputs. The column header keeps only `u32 n_rows · u32 n_pages · n_pages × (u64 offset · u32 len)`.
+
+**Frames.** A frame closes once it holds 64 KiB of raw chunk bytes (the compressed-size estimate is gone). It is compressed at its store's level and, for a shared store of at least 4 MiB of unique chunks, with a 64 KiB dictionary trained on 4 KiB samples of evenly spread frames (256 KiB in all) and attached (`ForceAttachDict`), not copied, per frame. Such frames use codec 2 (`ZstdDict`): `decode_segment` checks them, and the reader decompresses them with the run's dictionary, which is loaded with the store, in the metadata wave. A dictionary trained on one store is not reused by another: it fits another store's text badly and slows zstd down.
+
+**Gram index** (kind 5, `PayloadIndex`, raw). Per run, one bit per frame and per row: row `r` of frame `f` is set when a 5-gram of `f`'s chunks hashes to `r` (`h = ((x & 0xFF_FFFF_FFFF) × 0x9E3779B97F4A7C15) >> 32` over the gram's 5 bytes, little-endian; `r = (h × rows) >> 32`). Grams that cross a chunk boundary are covered by windows, each the last 4 bytes of a chunk and the first 63 bytes of the chunk that follows it in some value, added to the left chunk's frame: for every chunk and the chunk with the next id (only the 4 crossing grams when both are in one frame), and for every other pair seen in a value. So every gram of a needle of ≤ 64 B lies in the frame of the chunk where an occurrence starts. `rows` is about the distinct grams of a frame ÷ 0.8 (estimated by linear counting on the first, middle and last frames), so about 55% of the bits are set. The matrix is stored bit-sliced, row-major, in pages of about 1 KiB. The writer sets one byte per row for the frame being indexed and packs it into the frame's bitmap when the frame ends, then transposes the bitmaps eight frames at a time with an 8×8 bit-matrix transpose: OR-ing into a bitmap word made each gram wait on the last store to that word.
+
+**`Contains(needle)`**, exact, after the header and store (metadata):
+1. One wave: the index rows of every gram of the needle, in every run. Their AND gives the candidate frames (every frame for a needle under 5 B).
+2. One wave: every refs page of the column (scan coalescing) and the candidate frames (point coalescing, 4 KiB gaps).
+3. In the candidate frames, a chunk is a hit when it holds the needle, and a partial hit for each `k` where it ends with the needle's first `k` bytes.
+4. A row matches when it refers to a hit, or to a partial hit followed by chunks that hold the rest of the needle. A rest that needs a frame not read yet costs one more wave.
+
+**Point reads.** A read of some rows of several payload columns fetches and decompresses each frame once, even when the columns share its store: frames are planned across the columns, by file offset. A refs page is decoded only up to the last row wanted from it, since a row's list builds on earlier rows only. On `payload`, the two cut a warm full-trace lookup's execute time from 4.57 to 3.81 ms (one partition).
+
+**Merge** (S10 in v2). When every input groups the same payload columns in the same stores, each store is copied: frames and index pages byte for byte, dictionaries as they are, chunk ids shifted by the chunks of earlier inputs. Only the refs pages are written again, in the merged row order. Identical chunks of two inputs are then stored twice, in two runs. Otherwise the payload columns are decoded and written again.
 
 ### S5. Indexes
 
@@ -522,12 +548,12 @@ The Parquet baseline is measured with the same counting store (`bench/src/counti
 |---|---|
 | `trace_id = <FixedSizeBinary literal of 16 B>` | `Exact` (key index + filter); lookup mode when it is the only filter |
 | `col {=,<,<=,>,>=,!=} literal` (either side), `col IN (literals)`, `col IS [NOT] NULL`, `col BETWEEN`, with `col` a narrow column of a comparable type, and timestamp literals of any timezone normalised to ns UTC | `Exact` |
-| `AND`, `OR`, `NOT` of `Exact` shapes | `Exact` |
+| `AND`, `OR` of `Exact` shapes; `NOT` of an `Exact` shape with no `Contains` term | `Exact` |
 | `AND` or `OR` mixing `Exact` and `Inexact` terms | `Inexact` |
 | any `AND` or `OR` with a `No` term | `Unsupported` |
 | `get_field(map_col, 'k') = literal`, with `k` promoted and `residual_hits = 0` in **every** file | `Exact` (`MapKeyEq`): `get_field` returns the first entry with the key, so the same key in the residual would differ |
 | `get_field` in any other case, including `k` in some file's residual or not promoted | `Unsupported` |
-| `col LIKE '%lit%'` on a payload column, `lit` 1–64 B, with no `%`, `_` or escape character inside | `Inexact` (`Contains`; DataFusion re-checks) |
+| `col LIKE '%lit%'` on a payload column, `lit` 1–64 B, with no `%`, `_` or escape character inside | `Exact` (`Contains`, which is exact since v2). Under `NOT` it is `Unsupported`: `Contains` is FALSE on a null row, where `LIKE` is NULL |
 | any `Cast` or `TRY_CAST` on the column, a non-literal operand, `ILIKE`, anything else | `Unsupported` (no unwrapping of casts) |
 
 - Literal types must match the column's file type exactly; a mismatched literal is `Unsupported`.

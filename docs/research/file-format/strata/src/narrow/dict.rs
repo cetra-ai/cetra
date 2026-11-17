@@ -1,7 +1,9 @@
 //! Sorted file-level dictionaries for Utf8 columns and the elements of List(Utf8) columns.
 
-use std::collections::BTreeSet;
+use std::collections::{HashMap, HashSet};
+
 use std::sync::{Arc, OnceLock};
+use xxhash_rust::xxh3::Xxh3DefaultBuilder;
 
 use arrow::array::{Array, ArrayRef, AsArray, ListArray, StringArray};
 use arrow::datatypes::DataType;
@@ -17,6 +19,8 @@ pub struct Dictionary {
     values: Vec<String>,
     /// The values as one Arrow array, built on first use. Decoded chunks share it.
     array: OnceLock<ArrayRef>,
+    /// The code of each value, built on first use by `code_of`.
+    codes: OnceLock<HashMap<Box<[u8]>, u32, Xxh3DefaultBuilder>>,
 }
 
 impl PartialEq for Dictionary {
@@ -33,6 +37,7 @@ impl Dictionary {
         Self {
             values,
             array: OnceLock::new(),
+            codes: OnceLock::new(),
         }
     }
 
@@ -44,12 +49,21 @@ impl Dictionary {
         }))
     }
 
-    /// The code of `v`, or `None` when `v` is not in the dictionary.
+    /// The code of `v`, or `None` when `v` is not in the dictionary. The first call builds a
+    /// hash map of the codes, so encoding a column costs one lookup per value.
     pub fn code_of(&self, v: &[u8]) -> Option<u32> {
-        self.values
-            .binary_search_by(|x| x.as_bytes().cmp(v))
-            .ok()
-            .and_then(|i| u32::try_from(i).ok())
+        self.codes
+            .get_or_init(|| {
+                self.values
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, value)| {
+                        Some((Box::from(value.as_bytes()), u32::try_from(i).ok()?))
+                    })
+                    .collect()
+            })
+            .get(v)
+            .copied()
     }
 
     /// The value of `code`, or `None` when the code is out of range.
@@ -189,7 +203,7 @@ pub(crate) fn build(
 ) -> Option<Dictionary> {
     // The size only grows as values are inserted, so the build stops at the first value that
     // takes it over a limit. The size is checked again at the end, for the empty dictionary.
-    let mut distinct: BTreeSet<&str> = BTreeSet::new();
+    let mut distinct: HashSet<&str, Xxh3DefaultBuilder> = HashSet::default();
     let mut value_bytes = 0usize;
     for array in arrays {
         for i in 0..array.len() {
@@ -211,9 +225,9 @@ pub(crate) fn build(
     if size > max_bytes {
         return None;
     }
-    Some(Dictionary::from_values(
-        distinct.into_iter().map(str::to_string).collect(),
-    ))
+    let mut values: Vec<String> = distinct.into_iter().map(str::to_string).collect();
+    values.sort_unstable();
+    Some(Dictionary::from_values(values))
 }
 
 #[cfg(test)]

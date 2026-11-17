@@ -11,7 +11,7 @@ arrow = { version = "59.2", default-features = false, features = ["ipc"] }
 object_store = "0.13"
 bytes = "1.12"
 futures = "0.3.34"
-zstd = "0.13"
+zstd = { version = "0.13", features = ["experimental"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 thiserror = "2.0"
 memchr = "2"

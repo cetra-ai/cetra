@@ -256,13 +256,24 @@ fn translate_inner(expr: &Expr, table: &StrataTable) -> Pushed {
             low,
             high,
         }) => between(expr, *negated, low, high, table),
+        // `Contains` is FALSE on a null row where `LIKE` is NULL; the two differ only under NOT.
         Expr::Not(inner) => match translate_inner(inner, table) {
-            Pushed::Exact(p) => Pushed::Exact(Predicate::Not(Box::new(p))),
+            Pushed::Exact(p) if !has_contains(&p) => Pushed::Exact(Predicate::Not(Box::new(p))),
             _ => Pushed::No,
         },
         Expr::Like(like) => like_expr(like, table),
         Expr::Literal(ScalarValue::Boolean(v), _) => Pushed::Exact(Predicate::Const(*v)),
         _ => Pushed::No,
+    }
+}
+
+/// Whether `p` has a `Contains` term.
+fn has_contains(p: &Predicate) -> bool {
+    match p {
+        Predicate::Contains(..) => true,
+        Predicate::And(terms) | Predicate::Or(terms) => terms.iter().any(has_contains),
+        Predicate::Not(inner) => has_contains(inner),
+        _ => false,
     }
 }
 
@@ -525,7 +536,7 @@ fn needle(pattern: &str) -> Option<&str> {
     ((1..=64).contains(&lit.len()) && !lit.contains(['%', '_', '\\'])).then_some(lit)
 }
 
-/// `payload LIKE '%lit%'`: pushed as `Contains`, which is a superset of the match, so `Inexact`.
+/// `payload LIKE '%lit%'`: pushed as `Contains`, which is exact (the search checks the bytes).
 fn like_expr(like: &Like, table: &StrataTable) -> Pushed {
     let Like {
         negated,
@@ -556,7 +567,7 @@ fn like_expr(like: &Like, table: &StrataTable) -> Pushed {
     if !is_payload {
         return Pushed::No;
     }
-    Pushed::Inexact(Predicate::Contains(index, lit.as_bytes().to_vec()))
+    Pushed::Exact(Predicate::Contains(index, lit.as_bytes().to_vec()))
 }
 
 #[async_trait]
@@ -1130,9 +1141,9 @@ mod tests {
         let m = index(&t, "m");
         assert_eq!(
             translate(&col("body").like(utf8view("%abc%")), &t),
-            Pushed::Inexact(Predicate::Contains(body, b"abc".to_vec()))
+            Pushed::Exact(Predicate::Contains(body, b"abc".to_vec()))
         );
-        // NOT of an Inexact term is not pushed.
+        // NOT of a `Contains` term is not pushed: on a null row `LIKE` is NULL.
         assert_eq!(
             translate(&!col("body").like(utf8view("%abc%")), &t),
             Pushed::No
@@ -1150,8 +1161,8 @@ mod tests {
             translate(&get_field(col("m"), "k").eq(lit("v0")), &t),
             Pushed::Exact(Predicate::MapKeyEq(m, "k".into(), Lit::Utf8("v0".into())))
         );
-        // An AND with an Inexact term is Inexact. A null test on the payload column is not
-        // pushed, because it is not narrow.
+        // An AND of exact terms is exact. A null test on the payload column is not pushed,
+        // because it is not narrow.
         assert_eq!(translate(&col("body").is_not_null(), &t), Pushed::No);
         assert!(matches!(
             translate(
@@ -1160,8 +1171,18 @@ mod tests {
                     .and(col("start_time").is_not_null()),
                 &t
             ),
-            Pushed::Inexact(Predicate::And(_))
+            Pushed::Exact(Predicate::And(_))
         ));
+        // Nor is a NOT around an AND with a `Contains` term.
+        assert_eq!(
+            translate(
+                &!(col("body")
+                    .like(utf8view("%abc%"))
+                    .and(col("start_time").is_not_null())),
+                &t
+            ),
+            Pushed::No
+        );
     }
 
     #[test]

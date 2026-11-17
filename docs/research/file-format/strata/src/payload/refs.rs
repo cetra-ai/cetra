@@ -171,7 +171,7 @@ fn count(c: &mut Cursor<'_>, what: &'static str, offset: u64) -> Result<usize> {
     usize::try_from(v)
         .ok()
         .filter(|&n| n <= remaining)
-        .ok_or(StrataError::Corrupt { what, offset })
+        .ok_or_else(|| StrataError::Corrupt { what, offset })
 }
 
 /// Adds `extra` chunk ids to the running total of a page, and fails past `MAX_PAGE_IDS`.
@@ -179,15 +179,21 @@ fn add_page_ids(total: usize, extra: usize, offset: u64) -> Result<usize> {
     total
         .checked_add(extra)
         .filter(|sum| *sum <= MAX_PAGE_IDS)
-        .ok_or(StrataError::Corrupt {
+        .ok_or_else(|| StrataError::Corrupt {
             what: "refs ids",
             offset,
         })
 }
 
-/// Decodes a refs page: one entry per row, the row's full list of chunk ids, or `None` for a
-/// null row. `offset` is the page's file offset, used in errors.
-pub(crate) fn decode_page(bytes: &[u8], offset: u64) -> Result<Vec<Option<Vec<u32>>>> {
+/// Decodes the first `limit` rows of a refs page (all of them when it has fewer): one entry per
+/// row, the row's full list of chunk ids, or `None` for a null row. Also returns the page's row
+/// count. A row's list can build on an earlier row's, never a later one's, so the rows after
+/// `limit` are left undecoded. `offset` is the page's file offset, used in errors.
+pub(crate) fn decode_page(
+    bytes: &[u8],
+    offset: u64,
+    limit: usize,
+) -> Result<(usize, Vec<Option<Vec<u32>>>)> {
     let corrupt = |what: &'static str| StrataError::Corrupt { what, offset };
     let mut c = Cursor::new(bytes, offset);
     let n_rows = c.u32("refs rows")? as usize;
@@ -215,11 +221,12 @@ pub(crate) fn decode_page(bytes: &[u8], offset: u64) -> Result<Vec<Option<Vec<u3
         return Err(corrupt("refs offset"));
     }
 
-    let mut lists: Vec<Option<Vec<u32>>> = Vec::with_capacity(n_rows);
-    let mut depths: Vec<u8> = Vec::with_capacity(n_rows);
+    let decoded = n_rows.min(limit);
+    let mut lists: Vec<Option<Vec<u32>>> = Vec::with_capacity(decoded);
+    let mut depths: Vec<u8> = Vec::with_capacity(decoded);
     // The chunk ids of the rows decoded so far, with tail sharing expanded.
     let mut total_ids = 0usize;
-    for (r, window) in row_offsets.windows(2).enumerate() {
+    for (r, window) in row_offsets.windows(2).enumerate().take(decoded) {
         let [start, end] = window else {
             return Err(corrupt("refs offset"));
         };
@@ -267,7 +274,7 @@ pub(crate) fn decode_page(bytes: &[u8], offset: u64) -> Result<Vec<Option<Vec<u3
         lists.push(list);
         depths.push(depth);
     }
-    Ok(lists)
+    Ok((n_rows, lists))
 }
 
 #[cfg(test)]
@@ -280,6 +287,11 @@ pub(crate) fn decode_page(bytes: &[u8], offset: u64) -> Result<Vec<Option<Vec<u3
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    /// Every row of a page.
+    fn decode_all(bytes: &[u8], offset: u64) -> Result<Vec<Option<Vec<u32>>>> {
+        decode_page(bytes, offset, usize::MAX).map(|(_, rows)| rows)
+    }
 
     /// A page from raw records, built by hand.
     fn page(records: &[Vec<u8>]) -> Vec<u8> {
@@ -321,7 +333,7 @@ mod tests {
         let mut bytes = Vec::new();
         encode_page(&refs, &mut bytes).unwrap();
         assert!(matches!(
-            decode_page(&bytes, 0),
+            decode_all(&bytes, 0),
             Err(StrataError::Corrupt {
                 what: "refs ids",
                 ..
@@ -338,7 +350,7 @@ mod tests {
         let refs: Vec<RowRefs<'_>> = rows.iter().map(to_refs).collect();
         let mut bytes = Vec::new();
         encode_page(&refs, &mut bytes).unwrap();
-        assert_eq!(decode_page(&bytes, 0).unwrap(), rows);
+        assert_eq!(decode_all(&bytes, 0).unwrap(), rows);
     }
 
     /// Row 0 is the keyframe [7]; each later row adds the id 1 more, based on the row before.
@@ -413,7 +425,7 @@ mod tests {
             let refs: Vec<RowRefs<'_>> = rows.iter().map(to_refs).collect();
             let mut bytes = Vec::new();
             encode_page(&refs, &mut bytes).unwrap();
-            let decoded = decode_page(&bytes, 0).unwrap();
+            let decoded = decode_all(&bytes, 0).unwrap();
             prop_assert_eq!(&decoded, &rows);
 
             let mut scratch = Vec::new();
@@ -426,7 +438,7 @@ mod tests {
 
         #[test]
         fn random_bytes_never_panic(bytes in prop::collection::vec(any::<u8>(), 0..512)) {
-            let _ = decode_page(&bytes, 0);
+            let _ = decode_all(&bytes, 0);
         }
     }
 
@@ -454,7 +466,7 @@ mod tests {
             keyframes.len()
         );
         assert_eq!(
-            decode_page(&based, 0).unwrap(),
+            decode_all(&based, 0).unwrap(),
             lists.into_iter().map(Some).collect::<Vec<_>>()
         );
     }
@@ -462,33 +474,33 @@ mod tests {
     #[test]
     fn based_record_with_an_empty_base_is_corrupt() {
         let bytes = page(&[vec![TAG_KEYFRAME, 0], vec![TAG_BASED, 1, 1, 10]]);
-        assert!(is_corrupt(decode_page(&bytes, 0)));
+        assert!(is_corrupt(decode_all(&bytes, 0)));
     }
 
     #[test]
     fn based_record_reaching_past_the_first_row_is_corrupt() {
         let bytes = page(&[vec![TAG_KEYFRAME, 1, 5], vec![TAG_BASED, 2, 0]]);
-        assert!(is_corrupt(decode_page(&bytes, 0)));
+        assert!(is_corrupt(decode_all(&bytes, 0)));
     }
 
     #[test]
     fn back_of_zero_is_corrupt() {
         let bytes = page(&[vec![TAG_KEYFRAME, 1, 5], vec![TAG_BASED, 0, 0]]);
-        assert!(is_corrupt(decode_page(&bytes, 0)));
+        assert!(is_corrupt(decode_all(&bytes, 0)));
     }
 
     #[test]
     fn depth_sixteen_is_corrupt() {
         // Sixteen rows form a chain of depths 0 to 15, which is allowed.
-        assert!(decode_page(&page(&chain(16)), 0).is_ok());
+        assert!(decode_all(&page(&chain(16)), 0).is_ok());
         // A seventeenth row would have depth 16.
-        assert!(is_corrupt(decode_page(&page(&chain(17)), 0)));
+        assert!(is_corrupt(decode_all(&page(&chain(17)), 0)));
     }
 
     #[test]
     fn unknown_tag_and_trailing_bytes_are_corrupt() {
-        assert!(is_corrupt(decode_page(&page(&[vec![9]]), 0)));
-        assert!(is_corrupt(decode_page(&page(&[vec![TAG_NULL, 0]]), 0)));
+        assert!(is_corrupt(decode_all(&page(&[vec![9]]), 0)));
+        assert!(is_corrupt(decode_all(&page(&[vec![TAG_NULL, 0]]), 0)));
     }
 
     #[test]
@@ -497,6 +509,22 @@ mod tests {
         let refs: Vec<RowRefs<'_>> = rows.iter().map(to_refs).collect();
         let mut bytes = Vec::new();
         encode_page(&refs, &mut bytes).unwrap();
-        assert_eq!(decode_page(&bytes, 0).unwrap(), rows);
+        assert_eq!(decode_all(&bytes, 0).unwrap(), rows);
+    }
+
+    #[test]
+    fn a_limit_decodes_the_leading_rows() {
+        // Rows that build on earlier rows, so a prefix must still resolve its bases.
+        let rows: Vec<Option<Vec<u32>>> = (0..40u32)
+            .map(|r| (r % 9 != 4).then(|| (0..=r / 3).collect()))
+            .collect();
+        let refs: Vec<RowRefs<'_>> = rows.iter().map(to_refs).collect();
+        let mut bytes = Vec::new();
+        encode_page(&refs, &mut bytes).unwrap();
+        for limit in [0, 1, 7, 39, 40, 1_000] {
+            let (n, got) = decode_page(&bytes, 0, limit).unwrap();
+            assert_eq!(n, 40);
+            assert_eq!(got, rows[..limit.min(40)]);
+        }
     }
 }

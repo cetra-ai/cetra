@@ -224,9 +224,13 @@ async fn datafusion_equivalence() {
         println!("{name}: {} rows, equal", a.len());
     }
 
-    // Pushdown: the exact filters leave no FilterExec; the substring stays as Contains above a
-    // FilterExec; ORDER BY trace_id merges the sorted files without a sort.
-    for name in ["count_errors_6h", "user_filter", "metadata_filter"] {
+    // Pushdown: the exact filters, the substring included, leave no FilterExec; ORDER BY trace_id merges the sorted files without a sort.
+    for name in [
+        "count_errors_6h",
+        "user_filter",
+        "metadata_filter",
+        "substring_input",
+    ] {
         let sql = queries
             .iter()
             .find(|(n, _, _)| n == name)
@@ -242,15 +246,12 @@ async fn datafusion_equivalence() {
         table.exact_map_key("metadata", "customer_id"),
         "metadata['customer_id'] is not an exact map key: the bench query is not exact"
     );
-    let plan = plan_text(
-        &st,
-        "SELECT count(*) FROM t WHERE input LIKE '%zqxjneedle%'",
-    )
-    .await;
-    assert!(
-        plan.contains("FilterExec") && plan.contains("Contains"),
-        "substring_input plan:\n{plan}"
-    );
+    // NOT LIKE is not pushed (it differs on null rows) and gives Parquet's rows.
+    let sql = "SELECT count(*) FROM t WHERE NOT (input LIKE '%zqxjneedle%')";
+    assert!(plan_text(&st, sql).await.contains("FilterExec"));
+    let st_not = st.sql(sql).await.unwrap().collect().await.unwrap();
+    let pq_not = pq.sql(sql).await.unwrap().collect().await.unwrap();
+    assert_eq!(rows(&st_not), rows(&pq_not), "NOT LIKE");
     let plan = plan_text(&st, "SELECT trace_id FROM t ORDER BY trace_id").await;
     assert!(
         !plan.contains("SortExec") && plan.contains("SortPreservingMergeExec"),

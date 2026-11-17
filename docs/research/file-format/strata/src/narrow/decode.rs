@@ -7,8 +7,7 @@ use arrow::array::{
     StringBuilder, StructArray, UInt32Array, make_array, new_null_array,
 };
 use arrow::buffer::{BooleanBuffer, Buffer, NullBuffer, OffsetBuffer, ScalarBuffer};
-
-use arrow::datatypes::{DataType, Field, UInt32Type};
+use arrow::datatypes::{ArrowNativeType, DataType, Field, UInt32Type};
 use arrow::ipc::reader::StreamReader;
 
 use super::bitpack::{for_each_packed, unpack, unpack_u32};
@@ -72,7 +71,7 @@ pub fn decode_chunk(
             if entry.encoding != Encoding::Bool {
                 return Err(corrupt("encoding for type"));
             }
-            let bytes = c.bytes(n.div_ceil(8), "bool values")?.to_vec();
+            let bytes = Buffer::from(c.bytes(n.div_ceil(8), "bool values")?);
             expect_end(&c, at)?;
             build_array(dt, n, nulls, bytes, at)
         }
@@ -198,12 +197,12 @@ fn build_array(
     dt: &DataType,
     n: usize,
     nulls: Option<NullBuffer>,
-    values: Vec<u8>,
+    values: Buffer,
     at: u64,
 ) -> Result<ArrayRef> {
     let data = ArrayData::builder(dt.clone())
         .len(n)
-        .add_buffer(Buffer::from_vec(values))
+        .add_buffer(values)
         .nulls(nulls)
         .build()
         .map_err(|_| StrataError::Corrupt {
@@ -211,6 +210,18 @@ fn build_array(
             offset: at,
         })?;
     Ok(make_array(data))
+}
+
+/// Unpacks `n` values of `width` bits from `packed` into a buffer of `T`, one `cast` each.
+fn unpack_typed<T: ArrowNativeType>(
+    packed: &[u8],
+    n: usize,
+    width: u8,
+    mut cast: impl FnMut(u64) -> T,
+) -> Result<Buffer> {
+    let mut values: Vec<T> = Vec::with_capacity(n);
+    for_each_packed(packed, n, width, |delta| values.push(cast(delta)))?;
+    Ok(Buffer::from_vec(values))
 }
 
 /// Builds a numeric array from one physical value per row, checking that each value fits.
@@ -232,7 +243,7 @@ fn build_numeric(
         let le = v.to_le_bytes();
         values.extend_from_slice(le.get(..num.width).unwrap_or_default());
     }
-    build_array(dt, bits.len(), nulls, values, at)
+    build_array(dt, bits.len(), nulls, Buffer::from_vec(values), at)
 }
 
 fn decode_numeric(
@@ -259,14 +270,21 @@ fn decode_numeric(
             let rest = c.remaining();
             let packed = c.bytes(rest, "bitpack values")?;
             expect_end(c, at)?;
-            // One pass: unpack, add the base, check the range, and write the value's bytes.
-            let mut values = Vec::with_capacity(n * num.width);
+            // One pass: unpack, add the base, check the range, and write the value at its width.
             let mut fits_all = true;
-            for_each_packed(packed, n, width, |delta| {
-                let v = base.wrapping_add(delta);
+            let mut check = |v: u64| {
                 fits_all &= fits(v, num.width, num.signed);
-                values.extend_from_slice(v.to_le_bytes().get(..num.width).unwrap_or_default());
-            })
+                v
+            };
+            // Each cast keeps the low bytes of the value, which is its little-endian encoding at
+            // that width when the value fits.
+            let values = match num.width {
+                1 => unpack_typed(packed, n, width, |d| check(base.wrapping_add(d)) as u8),
+                2 => unpack_typed(packed, n, width, |d| check(base.wrapping_add(d)) as u16),
+                4 => unpack_typed(packed, n, width, |d| check(base.wrapping_add(d)) as u32),
+                8 => unpack_typed(packed, n, width, |d| check(base.wrapping_add(d))),
+                _ => return Err(corrupt("numeric width")),
+            }
             .map_err(|_| corrupt("bitpack values"))?;
             if !fits_all {
                 return Err(corrupt("value out of range"));
@@ -281,7 +299,7 @@ fn decode_numeric(
                 .ok_or_else(|| corrupt("plain values"))?;
             let raw = c.bytes(len, "plain values")?;
             expect_end(c, at)?;
-            build_array(dt, n, nulls, raw.to_vec(), at)
+            build_array(dt, n, nulls, Buffer::from(raw), at)
         }
         _ => Err(corrupt("encoding for type")),
     }
@@ -341,7 +359,7 @@ fn decode_fsb(
         _ => return Err(corrupt("encoding for type")),
     };
     expect_end(c, at)?;
-    build_array(dt, n, nulls, values, at)
+    build_array(dt, n, nulls, Buffer::from_vec(values), at)
 }
 
 /// Decodes a chunk for a scan: like [`decode_chunk`], except that a top-level Utf8 column with
@@ -712,7 +730,7 @@ fn decode_const(
                 Some(1) => 0xFF,
                 _ => return Err(corrupt("const value")),
             };
-            build_array(dt, n, None, vec![byte; n.div_ceil(8)], at)
+            build_array(dt, n, None, Buffer::from_vec(vec![byte; n.div_ceil(8)]), at)
         }
         DataType::FixedSizeBinary(w) => {
             let width = usize::try_from(*w).map_err(|_| unsupported(dt))?;
@@ -723,7 +741,7 @@ fn decode_const(
                 .min
                 .get(..width)
                 .ok_or_else(|| corrupt("const value"))?;
-            build_array(dt, n, None, value.repeat(n), at)
+            build_array(dt, n, None, Buffer::from_vec(value.repeat(n)), at)
         }
         _ => {
             let num = numeric_of(dt).ok_or_else(|| unsupported(dt))?;

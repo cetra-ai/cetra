@@ -20,9 +20,9 @@ use crate::hot::{DirectoryRecord, HotTail, Layer, PageRef, Postscript};
 use crate::index::{KeyFilter, merge_rows, zone_may_hold};
 use crate::io::{IoStats, MAX_CONCURRENT_GETS, ScanKind, coalesce};
 use crate::narrow::{BlockEntry, Dictionary, decode_chunk, is_utf8_map};
-use crate::payload::{PayloadHeader, decode_header};
+use crate::payload::{PayloadHeader, PayloadStore, decode_header};
 use crate::postings::ChunkPostings;
-use crate::segment::{Kind, SegmentRef, decode_segment};
+use crate::segment::{Kind, SegmentRef, decode_segment, decode_segment_with};
 
 #[cfg(test)]
 #[path = "../tests/common/counting.rs"]
@@ -149,6 +149,8 @@ pub(crate) struct MetadataPlan {
     pub dicts: Vec<(usize, usize)>,
     /// A payload column, and the position of its header body in the wave.
     pub headers: Vec<(usize, usize)>,
+    /// A payload store not cached yet: its offset, and the position of its body in the wave.
+    pub stores: Vec<(u64, usize)>,
     /// A column with no dictionary, which caches `None`.
     pub no_dict: Vec<usize>,
 }
@@ -194,6 +196,8 @@ pub struct StrataFile {
     dicts: Mutex<HashMap<usize, Option<Arc<Dictionary>>>>,
     /// Payload headers of each payload column, read on first use, by column id.
     payload_headers: Mutex<HashMap<usize, Arc<PayloadHeader>>>,
+    /// Payload stores, read with the first header that uses them, by segment offset.
+    payload_stores: Mutex<HashMap<u64, Arc<PayloadStore>>>,
     /// Ranged GET requests issued by `fetch`.
     requests: AtomicU64,
     /// Bytes fetched by `fetch`.
@@ -394,6 +398,7 @@ impl StrataFile {
             blocks: Mutex::new(HashMap::new()),
             dicts: Mutex::new(HashMap::new()),
             payload_headers: Mutex::new(HashMap::new()),
+            payload_stores: Mutex::new(HashMap::new()),
             requests: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             waves: AtomicU64::new(0),
@@ -479,7 +484,12 @@ impl StrataFile {
         kind: ScanKind,
     ) -> Result<Vec<Vec<u8>>> {
         self.fetch_with(segments, kind, |slice, r, k| {
-            decode_segment(slice, r.offset, k)
+            if k == Kind::PayloadFrame {
+                let dict = self.frame_dict(r.offset);
+                decode_segment_with(slice, r.offset, k, dict.as_deref().map(|d| &d.decoder))
+            } else {
+                decode_segment(slice, r.offset, k)
+            }
         })
         .await
     }
@@ -547,6 +557,22 @@ impl StrataFile {
         self.bytes.fetch_add(fetched_bytes, Ordering::Relaxed);
         self.waves.fetch_add(1, Ordering::Relaxed);
         Ok(bodies)
+    }
+
+    /// Fetches the raw bytes of `range`, which must lie before the hot tail, as one request.
+    pub(crate) async fn fetch_raw(&self, range: Range<u64>) -> Result<bytes::Bytes> {
+        if range.start > range.end || range.end > self.postscript.hot_offset {
+            return Err(StrataError::Corrupt {
+                what: "segment range",
+                offset: range.start,
+            });
+        }
+        let len = range.end - range.start;
+        let bytes = self.store.get_range(&self.path, range).await?;
+        self.requests.fetch_add(1, Ordering::Relaxed);
+        self.bytes.fetch_add(len, Ordering::Relaxed);
+        self.waves.fetch_add(1, Ordering::Relaxed);
+        Ok(bytes)
     }
 
     /// The I/O counters since the file was opened, or since the last `reset_io_stats`.
@@ -635,6 +661,21 @@ impl StrataFile {
                         };
                         segments.push((segment, Kind::PayloadHeader));
                         plan.headers.push((column, segments.len() - 1));
+                        let store_cached = self
+                            .payload_stores
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .contains_key(&record.dict_offset);
+                        let store_planned =
+                            plan.stores.iter().any(|(at, _)| *at == record.dict_offset);
+                        if !store_cached && !store_planned {
+                            let store = SegmentRef {
+                                offset: record.dict_offset,
+                                len: record.dict_len,
+                            };
+                            segments.push((store, Kind::PayloadStore));
+                            plan.stores.push((record.dict_offset, segments.len() - 1));
+                        }
                     }
                 }
                 _ => {
@@ -707,11 +748,26 @@ impl StrataFile {
             let dict = Dictionary::decode(body, record.dict_offset)?;
             dicts.push((column, Arc::new(dict)));
         }
+        for &(offset, at) in &plan.stores {
+            let body = bodies.get(at).ok_or_else(corrupt)?;
+            let store = Arc::new(PayloadStore::decode(body, offset)?);
+            self.payload_stores
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(offset, store);
+        }
         let mut headers = Vec::with_capacity(plan.headers.len());
         for &(column, at) in &plan.headers {
             let record = self.hot.directory.get(column).ok_or_else(corrupt)?;
             let body = bodies.get(at).ok_or_else(corrupt)?;
-            headers.push((column, Arc::new(decode_header(self, record, body)?)));
+            let store = self
+                .payload_stores
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&record.dict_offset)
+                .cloned()
+                .ok_or_else(corrupt)?;
+            headers.push((column, Arc::new(decode_header(self, record, body, store)?)));
         }
 
         let mut blocks = self.blocks.lock().unwrap_or_else(PoisonError::into_inner);
@@ -733,6 +789,18 @@ impl StrataFile {
             cached_headers.insert(column, header);
         }
         Ok(())
+    }
+
+    /// The dictionary of the payload run whose frame starts at `offset`, if a cached store holds
+    /// that frame and its run has one.
+    fn frame_dict(&self, offset: u64) -> Option<Arc<crate::payload::Dict>> {
+        let stores = self
+            .payload_stores
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        stores
+            .values()
+            .find_map(|store| store.dict_at(offset).cloned())
     }
 
     /// The payload header of column `column`, if it is cached.
@@ -1820,7 +1888,8 @@ mod tests {
                     (segment, Kind::NarrowChunk)
                 })
                 .collect();
-            assert_eq!(segments.len(), 5);
+            // 20,000 rows in chunks of at most 2,048.
+            assert_eq!(segments.len(), 10);
             let mut expected = Vec::new();
             for (segment, kind) in &segments {
                 expected.push(file.read_segment(segment, *kind).await.unwrap());

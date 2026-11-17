@@ -1,55 +1,60 @@
-//! Writing one payload column: each value is cut into chunks, the chunks go through the frame
-//! builder, each row's chunk ids go into refs pages, and the header ties the parts together.
+//! Writing payload columns: each value is cut into chunks, the chunks go into one store
+//! ([`super::store`]), each row's chunk ids go into refs pages, and a header per column ties
+//! its pages to the store.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
+use std::rc::Rc;
 
-use arrow::array::{Array, BinaryArray, StringArray};
+use arrow::array::{Array, ArrayRef, BinaryArray, StringArray};
 use arrow::datatypes::DataType;
+use xxhash_rust::xxh3::xxh3_128;
 
-use super::chunk::chunk_value;
-use super::frames::{FrameBuilder, FrameEntry, frame_of};
-use super::header::{EdgeGroup, PayloadHeader, RefPage};
+use super::StoreRole;
+use super::chunk::{Chunk, chunk_value_from};
+use super::header::{RefPage, encode_header};
 use super::refs::{RowRefs, encode_page};
-use super::search::{Filters, FrameFilter, encode_edge_group};
-use super::trigram::{add_trigrams, filter_bit, filter_bits, set_bit};
-use super::{
-    EDGE_GROUP_CHUNKS, FILTER_MAX_SHARE, MAX_PAGE_IDS, MAX_READ_IDS, REFS_PAGE_ROWS, ROLLUP_BITS,
-    ROLLUP_MAX_FILL,
-};
+use super::store::{KeyBuild, StoreBuilder};
+use super::{MAX_PAGE_IDS, MAX_READ_IDS, REFS_PAGE_ROWS};
 use crate::config::Config;
 use crate::error::{Result, StrataError};
-use crate::format::{Out, SEGMENT_HEADER_LEN};
+use crate::format::Out;
 use crate::segment::{Codec, Kind, SegmentCodec, SegmentRef, encode_segment};
 
 /// Statistics of one payload column.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PayloadStats {
-    /// Number of unique chunks stored.
+    /// Number of unique chunks in the column's store.
     pub unique_chunks: u32,
-    /// Number of frames written.
+    /// Number of frames in the column's store.
     pub frames: u32,
     /// Total number of chunk references over all rows.
     pub chunk_refs: u64,
-    /// Bytes written for the column: frames, refs pages, edge groups, filters and the header.
+    /// Bytes written for the column: its refs pages and header, and for the first column of a
+    /// store, the store's frames, index pages and store segment.
     pub bytes: u64,
-    /// Bytes of the frames.
+    /// Bytes of the frames (first column of a store only).
     pub frame_bytes: u64,
     /// Bytes of the refs pages.
     pub ref_bytes: u64,
-    /// Bytes of the filters segment.
-    pub filter_bytes: u64,
-    /// Bytes of the edge group segments.
-    pub edge_bytes: u64,
-    /// Frames stored without a filter, because a filter would be too large for them.
-    pub frames_without_filter: u32,
-    /// Whether the file-level rollup was kept.
-    pub rollup: bool,
+    /// Bytes of the gram index pages (first column of a store only).
+    pub index_bytes: u64,
+    /// Bytes of the store segment, dictionary included (first column of a store only).
+    pub store_bytes: u64,
+    /// Bytes of the store's zstd dictionary (first column of a store only).
+    pub dict_bytes: u64,
 }
 
-/// Whether a column is stored with the payload layer: a Utf8 or Binary column with at least
-/// one non-null value, whose average non-null length is at least `config.payload_min_avg`.
-pub(crate) fn is_payload(array: &dyn Array, config: &Config) -> bool {
-    match non_null_sizes(array) {
+/// Whether a column, given in parts, is stored with the payload layer: a Utf8 or Binary column
+/// with at least one non-null value, whose average non-null length is at least `config.payload_min_avg`.
+pub(crate) fn is_payload(parts: &[ArrayRef], config: &Config) -> bool {
+    let mut total = Some((0u64, 0u64));
+    for part in parts {
+        total = match (total, non_null_sizes(part.as_ref())) {
+            (Some((s, c)), Some((ps, pc))) => Some((s + ps, c + pc)),
+            _ => None,
+        };
+    }
+    match total {
         Some((sum, count)) if count > 0 => {
             sum >= (config.payload_min_avg as u64).saturating_mul(count)
         }
@@ -101,114 +106,192 @@ fn value_bytes(array: &dyn Array) -> Result<Vec<Option<&[u8]>>> {
     }
 }
 
-/// Writes the payload columns of a file with one chunk store shared by all of them (S4).
+/// The length of the common prefix of `a` and `b`: compared in 4 KiB blocks, then 64-byte
+/// blocks, then bytes.
+fn common_prefix(a: &[u8], b: &[u8]) -> usize {
+    let n = a.len().min(b.len());
+    let mut i = 0;
+    for block in [4096usize, 64, 1] {
+        while i + block <= n && a.get(i..i + block) == b.get(i..i + block) {
+            i += block;
+        }
+    }
+    i
+}
+
+/// A value's chunks and their ids.
+struct Cut {
+    chunks: Vec<Chunk>,
+    ids: Vec<u32>,
+}
+
+/// The last value of a column, with its cut.
+struct Previous<'a> {
+    value: &'a [u8],
+    cut: Rc<Cut>,
+}
+
+/// Values of at least this many bytes are remembered by hash, so a value seen before anywhere
+/// in the store (a system prompt or tool list shared by many traces) is not cut again.
+const SEEN_MIN: usize = 256;
+
+/// Cuts `value` into chunks. When it equals the previous value of its column, its chunks are
+/// reused whole. When it starts with the previous value up to a chunk that ends at a top-level
+/// JSON cut (a conversation that grew), those chunks are reused and only the rest is cut.
+/// Returns the chunks and how many were reused.
+fn chunk_with_reuse(value: &[u8], previous: Option<&Previous<'_>>) -> (Vec<Chunk>, usize) {
+    if let Some(p) = previous {
+        let lcp = common_prefix(p.value, value);
+        // The same value again (a system prompt on every call of a trace): all its chunks.
+        if lcp == value.len() && lcp == p.value.len() {
+            return (p.cut.chunks.clone(), p.cut.chunks.len());
+        }
+        if let Some(k) = p
+            .cut
+            .chunks
+            .iter()
+            .rposition(|c| c.at_cut && c.range.end <= lcp)
+            && let Some(from) = p.cut.chunks.get(k).map(|c| c.range.end)
+            && let Some(rest) = chunk_value_from(value, from)
+        {
+            let mut chunks = p.cut.chunks.get(..=k).unwrap_or_default().to_vec();
+            chunks.extend(rest);
+            return (chunks, k + 1);
+        }
+    }
+    (chunk_value_from(value, 0).unwrap_or_default(), 0)
+}
+
+/// Writes the payload columns of a file with one store shared by all of them (S4).
 ///
 /// Rows are walked in order and, within a row, the columns in the given order, so a value and
 /// a near copy of it in a later column of the same trace land in the same frames, where zstd
 /// matches them; an identical chunk is stored once whatever its column. Each column then gets
-/// its own refs pages and header; every header lists the same frames (and the same filters and
-/// edge groups when `filters` is set).
+/// its own refs pages and header.
 ///
-/// Segments are written in this order: the shared frames, the shared edge groups and filters,
-/// then per column its refs pages and its header. Returns, per column, the header's reference
-/// and the statistics. The shared frames, filters and edges count in the first column's bytes.
+/// Segments are written in this order: the frames, the index pages and the store segment, then
+/// per column its refs pages and its header. Returns the store segment and, per column, the
+/// header segment and the statistics. The store's bytes count in the first column.
 pub(crate) fn write_payload_columns(
-    arrays: &[&dyn Array],
-    filters: bool,
+    columns: &[&[ArrayRef]],
+    role: StoreRole,
     codec: &mut SegmentCodec,
-    frame_codec: &mut SegmentCodec,
     out: &mut Out,
-) -> Result<Vec<(SegmentRef, PayloadStats)>> {
-    let values: Vec<Vec<Option<&[u8]>>> = arrays
-        .iter()
-        .map(|array| value_bytes(*array))
-        .collect::<Result<_>>()?;
+) -> Result<(SegmentRef, Vec<(SegmentRef, PayloadStats)>)> {
+    let mut values: Vec<Vec<Option<&[u8]>>> = Vec::with_capacity(columns.len());
+    for parts in columns {
+        let mut column = Vec::new();
+        for part in *parts {
+            column.extend(value_bytes(part.as_ref())?);
+        }
+        values.push(column);
+    }
     let n_rows = values.first().map_or(0, Vec::len);
     if values.iter().any(|column| column.len() != n_rows) {
         return Err(StrataError::Schema {
             reason: "payload columns of different lengths".to_string(),
         });
     }
-    let mut frames = FrameBuilder::new();
+    let value_bytes: usize = values
+        .iter()
+        .flatten()
+        .map(|v| v.map_or(0, <[u8]>::len))
+        .sum();
+    let mut store = StoreBuilder::with_capacity(value_bytes);
+    let mut seen: HashMap<u128, Rc<Cut>, KeyBuild> = HashMap::default();
     let mut rows: Vec<Vec<Option<Vec<u32>>>> =
         values.iter().map(|_| Vec::with_capacity(n_rows)).collect();
     let mut chunk_refs = vec![0u64; values.len()];
+    let mut previous: Vec<Option<Previous<'_>>> = values.iter().map(|_| None).collect();
     for row in 0..n_rows {
         for (c, column) in values.iter().enumerate() {
             let value = column.get(row).copied().flatten();
-            let (Some(out_rows), Some(refs)) = (rows.get_mut(c), chunk_refs.get_mut(c)) else {
+            let (Some(out_rows), Some(refs), Some(prev)) =
+                (rows.get_mut(c), chunk_refs.get_mut(c), previous.get_mut(c))
+            else {
                 continue;
             };
             let Some(bytes) = value else {
                 out_rows.push(None);
                 continue;
             };
-            let mut ids = Vec::new();
-            for range in chunk_value(bytes) {
-                let chunk = bytes.get(range).unwrap_or_default();
-                ids.push(frames.add(chunk, frame_codec, out)?);
-            }
-            *refs += ids.len() as u64;
+            let same = prev
+                .as_ref()
+                .filter(|p| p.value == bytes)
+                .map(|p| Rc::clone(&p.cut));
+            let key = (same.is_none() && bytes.len() >= SEEN_MIN).then(|| xxh3_128(bytes));
+            let cut = match same.or_else(|| key.and_then(|k| seen.get(&k)).map(Rc::clone)) {
+                // The previous value again, or a value seen before: its pairs were recorded then.
+                Some(cut) => cut,
+                None => {
+                    let (chunks, reused) = chunk_with_reuse(bytes, prev.as_ref());
+                    let mut ids = Vec::with_capacity(chunks.len());
+                    if let Some(p) = prev.as_ref() {
+                        ids.extend_from_slice(p.cut.ids.get(..reused).unwrap_or_default());
+                    }
+                    for chunk in chunks.get(reused..).unwrap_or_default() {
+                        ids.push(store.add(bytes.get(chunk.range.clone()).unwrap_or_default())?);
+                    }
+                    // The pairs inside the reused prefix were recorded with the previous value.
+                    for pair in ids
+                        .get(reused.saturating_sub(1)..)
+                        .unwrap_or_default()
+                        .windows(2)
+                    {
+                        if let &[left, right] = pair {
+                            store.pair(left, right);
+                        }
+                    }
+                    let cut = Rc::new(Cut { chunks, ids });
+                    if let Some(k) = key {
+                        seen.insert(k, Rc::clone(&cut));
+                    }
+                    cut
+                }
+            };
+            *refs += cut.ids.len() as u64;
+            let ids = cut.ids.clone();
+            *prev = Some(Previous { value: bytes, cut });
             out_rows.push(Some(ids));
         }
     }
     for refs in &chunk_refs {
         check_chunk_refs(*refs)?;
     }
-    frames.finish(frame_codec, out)?;
-    let unique_chunks = frames.n_chunks();
-    let frame_entries = std::mem::take(&mut frames.frames);
-    let frame_count = u32::try_from(frame_entries.len()).map_err(|_| StrataError::Unsupported {
-        what: "more than 4 billion frames".to_string(),
-    })?;
-    let all_rows: Vec<&[Option<Vec<u32>>]> = rows.iter().map(Vec::as_slice).collect();
-    let search = if filters {
-        write_search(&mut frames, &frame_entries, &all_rows, codec, out)?
-    } else {
-        Search::none(frame_count)
-    };
+    let (store_seg, store_stats) = store.write(role, codec, out)?;
 
+    let n_rows_u32 = u32::try_from(n_rows).map_err(|_| StrataError::TooManyRows {
+        rows: n_rows as u64,
+    })?;
     let mut results = Vec::with_capacity(rows.len());
     for (c, column_rows) in rows.iter().enumerate() {
         let (ref_pages, ref_bytes) = write_refs(column_rows, codec, out)?;
-        let header = PayloadHeader {
-            n_rows: u32::try_from(n_rows).map_err(|_| StrataError::TooManyRows {
-                rows: n_rows as u64,
-            })?,
-            n_chunks: unique_chunks,
-            filters_offset: search.filters_offset,
-            filters_len: search.filters_len,
-            ref_pages,
-            edge_groups: search.edge_groups.clone(),
-            frames: frame_entries.clone(),
-        };
         let mut body = Out(Vec::new());
-        header.encode(&mut body)?;
+        encode_header(n_rows_u32, &ref_pages, &mut body)?;
         let header_seg = encode_segment(Kind::PayloadHeader, &body.0, Codec::Zstd, codec, out)?;
-        // The shared parts count once, in the first column.
-        let first = c == 0;
-        let shared = |v: u64| if first { v } else { 0 };
+        // The store counts once, in the first column.
+        let shared = |v: u64| if c == 0 { v } else { 0 };
         let stats = PayloadStats {
-            unique_chunks,
-            frames: frame_count,
+            unique_chunks: store_stats.unique_chunks,
+            frames: store_stats.frames,
             chunk_refs: chunk_refs.get(c).copied().unwrap_or(0),
-            bytes: shared(frames.stored_bytes + search.edge_bytes + u64::from(search.filters_len))
-                + ref_bytes
+            bytes: shared(
+                store_stats.frame_bytes + store_stats.index_bytes + store_stats.store_bytes,
+            ) + ref_bytes
                 + u64::from(header_seg.len),
-            frame_bytes: shared(frames.stored_bytes),
+            frame_bytes: shared(store_stats.frame_bytes),
             ref_bytes,
-            filter_bytes: shared(u64::from(search.filters_len)),
-            edge_bytes: shared(search.edge_bytes),
-            frames_without_filter: search.frames_without_filter,
-            rollup: search.rollup,
+            index_bytes: shared(store_stats.index_bytes),
+            store_bytes: shared(store_stats.store_bytes),
+            dict_bytes: shared(store_stats.dict_bytes),
         };
         results.push((header_seg, stats));
     }
-    Ok(results)
+    Ok((store_seg, results))
 }
 
 /// Refuses a column with more chunk references than a read can return.
-fn check_chunk_refs(chunk_refs: u64) -> Result<()> {
+pub(crate) fn check_chunk_refs(chunk_refs: u64) -> Result<()> {
     if chunk_refs > MAX_READ_IDS as u64 {
         return Err(StrataError::Unsupported {
             what: "more than 2^28 chunk references in one column".to_string(),
@@ -219,7 +302,7 @@ fn check_chunk_refs(chunk_refs: u64) -> Result<()> {
 
 /// Writes the refs pages of one column, `REFS_PAGE_ROWS` rows each. Returns the page table
 /// and the bytes written.
-fn write_refs(
+pub(crate) fn write_refs(
     rows: &[Option<Vec<u32>>],
     codec: &mut SegmentCodec,
     out: &mut Out,
@@ -257,132 +340,6 @@ fn write_refs(
         });
     }
     Ok((ref_pages, ref_bytes))
-}
-
-/// The search parts of a chunk store: the edge groups and the filters segment.
-struct Search {
-    filters_offset: u64,
-    /// 0 when the store has no filters: `Contains` then reads every value.
-    filters_len: u32,
-    edge_groups: Vec<EdgeGroup>,
-    edge_bytes: u64,
-    frames_without_filter: u32,
-    rollup: bool,
-}
-
-impl Search {
-    /// No search index: no filters segment and no edge groups.
-    fn none(frames: u32) -> Search {
-        Search {
-            filters_offset: 0,
-            filters_len: 0,
-            edge_groups: Vec::new(),
-            edge_bytes: 0,
-            frames_without_filter: frames,
-            rollup: false,
-        }
-    }
-}
-
-/// Writes the edge groups and the filters segment of a chunk store whose closed frames are
-/// `frame_entries`, from the chunk ids of every row of every column that uses it.
-fn write_search(
-    frames: &mut FrameBuilder,
-    frame_entries: &[FrameEntry],
-    rows: &[&[Option<Vec<u32>>]],
-    codec: &mut SegmentCodec,
-    out: &mut Out,
-) -> Result<Search> {
-    // Boundary trigrams. A needle that crosses from chunk `l` into chunk `r` lies in the window
-    // made of the tail of `l` and the head of `r`, so the window's trigrams go to the filter of
-    // the frame that holds `r`.
-    let mut pairs: HashSet<(u32, u32)> = HashSet::new();
-    for ids in rows.iter().flat_map(|column| column.iter()).flatten() {
-        for pair in ids.windows(2) {
-            if let &[l, r] = pair {
-                pairs.insert((l, r));
-            }
-        }
-    }
-    let pair_corrupt = || StrataError::Corrupt {
-        what: "payload pair",
-        offset: 0,
-    };
-    for &(l, r) in &pairs {
-        let f = frame_of(frame_entries, r).ok_or_else(pair_corrupt)?;
-        let tail = frames.tails.get(l as usize).ok_or_else(pair_corrupt)?;
-        let head = frames.heads.get(r as usize).ok_or_else(pair_corrupt)?;
-        let mut window = Vec::with_capacity(tail.len() + head.len());
-        window.extend_from_slice(tail);
-        window.extend_from_slice(head);
-        let trigrams = frames.frame_trigrams.get_mut(f).ok_or_else(pair_corrupt)?;
-        add_trigrams(&window, trigrams);
-    }
-
-    // One filter per frame, unless the filter would be more than FILTER_MAX_SHARE of the frame.
-    let mut frame_filters: Vec<Option<FrameFilter>> = Vec::with_capacity(frame_entries.len());
-    let mut frames_without_filter = 0u32;
-    for (entry, trigrams) in frame_entries.iter().zip(&frames.frame_trigrams) {
-        let bits = filter_bits(trigrams.len());
-        let stored = u64::from(entry.len).saturating_sub(SEGMENT_HEADER_LEN as u64);
-        if (u64::from(bits) / 8) as f64 > FILTER_MAX_SHARE * stored as f64 {
-            frame_filters.push(None);
-            frames_without_filter += 1;
-        } else {
-            let mut bitmap = vec![0u8; (bits / 8) as usize];
-            for &h in trigrams {
-                set_bit(&mut bitmap, filter_bit(h, bits));
-            }
-            frame_filters.push(Some(FrameFilter { bits, bitmap }));
-        }
-    }
-
-    // The rollup: the trigrams of every frame, one bit each. Dropped when too many bits are set.
-    let mut rollup_bits = vec![0u8; (ROLLUP_BITS / 8) as usize];
-    for trigrams in &frames.frame_trigrams {
-        for &h in trigrams {
-            set_bit(&mut rollup_bits, h & (ROLLUP_BITS - 1));
-        }
-    }
-    let set_bits: u32 = rollup_bits.iter().map(|b| b.count_ones()).sum();
-    let rollup =
-        (f64::from(set_bits) / f64::from(ROLLUP_BITS) <= ROLLUP_MAX_FILL).then_some(rollup_bits);
-    let rollup_kept = rollup.is_some();
-
-    // The edge groups: the tails of the unique chunks, EDGE_GROUP_CHUNKS per segment.
-    let mut edge_groups = Vec::with_capacity(frames.tails.len().div_ceil(EDGE_GROUP_CHUNKS));
-    let mut edge_bytes = 0u64;
-    for (g, group_tails) in frames.tails.chunks(EDGE_GROUP_CHUNKS).enumerate() {
-        let mut body = Vec::new();
-        encode_edge_group(group_tails, &mut body);
-        let seg = encode_segment(Kind::PayloadEdges, &body, Codec::Zstd, codec, out)?;
-        edge_bytes += u64::from(seg.len);
-        let first_chunk =
-            u32::try_from(g * EDGE_GROUP_CHUNKS).map_err(|_| StrataError::Unsupported {
-                what: "more than 4 billion chunks".to_string(),
-            })?;
-        edge_groups.push(EdgeGroup {
-            offset: seg.offset,
-            len: seg.len,
-            first_chunk,
-        });
-    }
-
-    let filters = Filters {
-        rollup,
-        frames: frame_filters,
-    };
-    let mut filter_body = Vec::new();
-    filters.encode(&mut filter_body)?;
-    let filter_seg = encode_segment(Kind::PayloadFilters, &filter_body, Codec::Zstd, codec, out)?;
-    Ok(Search {
-        filters_offset: filter_seg.offset,
-        filters_len: filter_seg.len,
-        edge_groups,
-        edge_bytes,
-        frames_without_filter,
-        rollup: rollup_kept,
-    })
 }
 
 #[cfg(test)]
@@ -531,15 +488,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn contains_without_filters_reads_every_value() {
+    async fn contains_matches_on_prose() {
         let values: Vec<Option<String>> = (0..200)
             .map(|k| (k % 7 != 3).then(|| prose(200, k as u64 + 1)))
             .collect();
         let batch = table(&values);
         let (file, summary) = write_and_open(&batch, Config::default()).await;
         let stats = summary.columns[1].payload.as_ref().unwrap();
-        assert_eq!(stats.filter_bytes, 0);
-        assert_eq!(stats.edge_bytes, 0);
+        assert!(stats.index_bytes > 0);
         for needle in ["w1", "w12345 w", "absent needle", ""] {
             let got = crate::payload::payload_contains(&file, 1, needle.as_bytes())
                 .await
@@ -550,6 +506,71 @@ mod tests {
                 .collect();
             assert_eq!(got.rows, want, "{needle:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn an_own_store_is_indexed_and_searched_exactly() {
+        let values: Vec<Option<String>> = (0..200)
+            .map(|k| (k % 7 != 3).then(|| prose(200, k as u64 + 1)))
+            .collect();
+        let batch = table(&values);
+        let config = Config {
+            own_store_columns: vec!["v".into()],
+            ..Config::default()
+        };
+        let (file, summary) = write_and_open(&batch, config).await;
+        let stats = summary.columns[1].payload.as_ref().unwrap();
+        assert!(stats.index_bytes > 0);
+        for needle in ["w1", "w12345 w", "absent needle", ""] {
+            let got = crate::payload::payload_contains(&file, 1, needle.as_bytes())
+                .await
+                .unwrap();
+            let want: Vec<bool> = values
+                .iter()
+                .map(|v| v.as_deref().is_some_and(|v| v.contains(needle)))
+                .collect();
+            assert_eq!(got.rows, want, "{needle:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn only_a_shared_store_trains_a_dictionary() {
+        // Over `DICT_MIN_RAW` of distinct text: the shared store trains a dictionary, a
+        // column's own store does not.
+        let values: Vec<Option<String>> = (0..150).map(|k| Some(prose(5_000, k + 1))).collect();
+        let batch = table(&values);
+        for (own, trained) in [(vec![], true), (vec!["v".to_string()], false)] {
+            let config = Config {
+                own_store_columns: own,
+                ..Config::default()
+            };
+            let (file, summary) = write_and_open(&batch, config).await;
+            let stats = summary.columns[1].payload.as_ref().unwrap();
+            assert_eq!(stats.dict_bytes > 0, trained);
+            let decoded = read_column(&file, 1).await.unwrap();
+            assert_same(decoded.as_ref(), batch.column(1).as_ref());
+        }
+    }
+
+    #[tokio::test]
+    async fn values_seen_before_reuse_their_chunks() {
+        // Three values in turn: each is cut once, then found by its hash.
+        let distinct: Vec<String> = (0..3).map(|k| prose(2_000, k + 1)).collect();
+        let values: Vec<Option<String>> = (0..90).map(|k| Some(distinct[k % 3].clone())).collect();
+        let batch = table(&values);
+        let (file, summary) = write_and_open(&batch, Config::default()).await;
+        let stats = summary.columns[1].payload.as_ref().unwrap();
+        // Each of the three values appears 30 times with the same chunks; no chunk is stored
+        // beyond those of one appearance of each.
+        assert_eq!(stats.chunk_refs % 30, 0);
+        assert!(
+            u64::from(stats.unique_chunks) <= stats.chunk_refs / 30,
+            "{} unique chunks for {} refs",
+            stats.unique_chunks,
+            stats.chunk_refs
+        );
+        let decoded = read_column(&file, 1).await.unwrap();
+        assert_same(decoded.as_ref(), batch.column(1).as_ref());
     }
 
     #[tokio::test]
@@ -586,11 +607,60 @@ mod tests {
         assert_same(decoded.as_ref(), batch.column(1).as_ref());
     }
 
+    #[tokio::test]
+    async fn grown_conversations_reuse_the_previous_chunks() {
+        // Each value is the previous one with one more message: the chunks of the shared
+        // prefix are reused, so the refs grow by a few ids per row and no chunk is stored twice.
+        let mut messages: Vec<String> = Vec::new();
+        let mut values = Vec::new();
+        for k in 0..40u64 {
+            messages.push(
+                serde_json::json!({"role": "user", "content": prose(150, k + 1)}).to_string(),
+            );
+            values.push(Some(format!("[{}]", messages.join(","))));
+        }
+        let batch = table(&values);
+        let (file, summary) = write_and_open(&batch, Config::default()).await;
+        let stats = summary.columns[1].payload.as_ref().unwrap();
+        let last: Vec<std::ops::Range<usize>> =
+            crate::payload::chunk_value(values[39].as_ref().unwrap().as_bytes());
+        // Every chunk of the last value is unique, and the earlier values add only their tails.
+        assert!(
+            stats.unique_chunks as usize <= last.len() + 80,
+            "{} unique, {} in the last value",
+            stats.unique_chunks,
+            last.len()
+        );
+        let decoded = read_column(&file, 1).await.unwrap();
+        assert_same(decoded.as_ref(), batch.column(1).as_ref());
+    }
+
+    #[test]
+    fn common_prefix_counts_equal_bytes() {
+        assert_eq!(common_prefix(b"", b"abc"), 0);
+        assert_eq!(common_prefix(b"abc", b"abd"), 2);
+        let a = vec![7u8; 1_000];
+        let mut b = a.clone();
+        b[777] = 0;
+        assert_eq!(common_prefix(&a, &b), 777);
+        assert_eq!(common_prefix(&a, &a[..600]), 600);
+    }
+
     #[test]
     fn short_columns_are_narrow() {
         let short = table(&[Some("abc".to_string()), None]);
-        assert!(!is_payload(short.column(1).as_ref(), &Config::default()));
+        assert!(!is_payload(
+            &[Arc::clone(short.column(1))],
+            &Config::default()
+        ));
         let all_null = table(&[None, None]);
-        assert!(!is_payload(all_null.column(1).as_ref(), &Config::default()));
+        assert!(!is_payload(
+            &[Arc::clone(all_null.column(1))],
+            &Config::default()
+        ));
+        // The parts of a column count together.
+        let long = table(&[Some("x".repeat(1_000))]);
+        let parts = [Arc::clone(short.column(1)), Arc::clone(long.column(1))];
+        assert!(is_payload(&parts, &Config::default()));
     }
 }

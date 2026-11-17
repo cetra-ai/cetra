@@ -10,9 +10,9 @@ use arrow::array::{ArrayRef, BinaryBuilder, StringBuilder};
 use arrow::datatypes::{DataType, Field};
 
 use super::MAX_READ_IDS;
-use super::frames::{FrameEntry, decode_fetched_frame, frame_of};
 use super::header::PayloadHeader;
 use super::refs::decode_page;
+use super::store::{FrameEntry, PayloadStore, decode_fetched_frame};
 use crate::error::{Result, StrataError};
 use crate::file::StrataFile;
 use crate::hot::DirectoryRecord;
@@ -30,9 +30,10 @@ pub(crate) fn decode_header(
     file: &StrataFile,
     record: &DirectoryRecord,
     body: &[u8],
+    store: Arc<PayloadStore>,
 ) -> Result<PayloadHeader> {
     let at = record.payload_offset;
-    let header = PayloadHeader::decode(body, at)?;
+    let header = PayloadHeader::decode(body, at, store)?;
     if u64::from(header.n_rows) != file.row_count() {
         return Err(StrataError::Corrupt {
             what: "payload row count",
@@ -98,7 +99,7 @@ pub(crate) fn add_ids(total: usize, added: usize, at: u64) -> Result<usize> {
     total
         .checked_add(added)
         .filter(|sum| *sum <= MAX_READ_IDS)
-        .ok_or(StrataError::Corrupt {
+        .ok_or_else(|| StrataError::Corrupt {
             what: "refs ids",
             offset: at,
         })
@@ -147,10 +148,18 @@ pub(crate) fn ids_of(
         let want = next_first
             .checked_sub(page.first_row)
             .ok_or_else(|| corrupt("payload ref page rows"))?;
+        // The page is decoded up to the last row wanted from it.
+        let limit = rows
+            .get(next..)
+            .unwrap_or_default()
+            .iter()
+            .take_while(|&&row| row < next_first)
+            .last()
+            .map_or(0, |&row| (row - page.first_row) as usize + 1);
         // Page i holds exactly the rows from its first row up to the next page's first row (or
-        // to the end of the column). The decoded page is checked before its rows are used.
-        let mut page_rows = decode_page(body, page.offset)?;
-        if usize::try_from(want).ok() != Some(page_rows.len()) {
+        // to the end of the column). The row count is checked before its rows are used.
+        let (n_rows, mut page_rows) = decode_page(body, page.offset, limit)?;
+        if usize::try_from(want).ok() != Some(n_rows) {
             return Err(corrupt("payload ref page rows"));
         }
         while let Some(&row) = rows.get(next) {
@@ -191,7 +200,7 @@ pub(crate) fn frame_segments_of(
     indexes
         .iter()
         .map(|&index| {
-            let entry: &FrameEntry = header.frames.get(index).ok_or_else(corrupt)?;
+            let entry: &FrameEntry = header.store.frames.get(index).ok_or_else(corrupt)?;
             let segment = SegmentRef {
                 offset: entry.offset,
                 len: entry.len,
@@ -209,10 +218,13 @@ pub(crate) fn frame_segments(
 ) -> Result<(Segments, Vec<usize>)> {
     let mut frames: BTreeSet<usize> = BTreeSet::new();
     for &id in ids.iter().flatten().flatten() {
-        let index = frame_of(&header.frames, id).ok_or_else(|| StrataError::Corrupt {
-            what: "payload chunk id",
-            offset: 0,
-        })?;
+        let index = header
+            .store
+            .frame_of(id)
+            .ok_or_else(|| StrataError::Corrupt {
+                what: "payload chunk id",
+                offset: 0,
+            })?;
         frames.insert(index);
     }
     let frames: Vec<usize> = frames.into_iter().collect();
@@ -220,13 +232,17 @@ pub(crate) fn frame_segments(
     Ok((segments, frames))
 }
 
+/// Decoded frames by the file offset of their segment, which is unique in a file: columns that
+/// share a store share its decoded frames.
+pub(crate) type FrameBodies = HashMap<u64, FrameBody>;
+
 /// Checks and decodes the fetched bodies of the frames `indexes` (in the same order), and
-/// returns each frame's raw body and chunk ranges by frame index.
+/// returns each frame's raw body and chunk ranges by segment offset.
 pub(crate) fn decode_frames(
     header: &PayloadHeader,
     indexes: &[usize],
     bodies: Vec<Vec<u8>>,
-) -> Result<HashMap<usize, FrameBody>> {
+) -> Result<FrameBodies> {
     let corrupt = || StrataError::Corrupt {
         what: "payload frame",
         offset: 0,
@@ -236,8 +252,8 @@ pub(crate) fn decode_frames(
     }
     let mut frames = HashMap::with_capacity(indexes.len());
     for (&index, raw) in indexes.iter().zip(bodies) {
-        let entry = header.frames.get(index).ok_or_else(corrupt)?;
-        frames.insert(index, decode_fetched_frame(entry, raw)?);
+        let entry = header.store.frames.get(index).ok_or_else(corrupt)?;
+        frames.insert(entry.offset, decode_fetched_frame(entry, raw)?);
     }
     Ok(frames)
 }
@@ -246,7 +262,7 @@ pub(crate) fn decode_frames(
 /// frames. `field` gives the output type, Utf8 or Binary. `at` is the header's offset.
 pub(crate) fn build_values(
     header: &PayloadHeader,
-    frames: &HashMap<usize, FrameBody>,
+    frames: &FrameBodies,
     ids: &[Option<Vec<u32>>],
     field: &Field,
     at: u64,
@@ -272,15 +288,21 @@ pub(crate) fn build_values(
         };
         scratch.clear();
         for &id in ids {
-            let f = frame_of(&header.frames, id).ok_or_else(|| corrupt("payload chunk id"))?;
+            let f = header
+                .store
+                .frame_of(id)
+                .ok_or_else(|| corrupt("payload chunk id"))?;
             let entry = header
+                .store
                 .frames
                 .get(f)
                 .ok_or_else(|| corrupt("payload chunk id"))?;
             let local = id
                 .checked_sub(entry.first_chunk)
                 .ok_or_else(|| corrupt("payload chunk id"))?;
-            let (raw, ranges) = frames.get(&f).ok_or_else(|| corrupt("payload chunk id"))?;
+            let (raw, ranges) = frames
+                .get(&entry.offset)
+                .ok_or_else(|| corrupt("payload chunk id"))?;
             let range = ranges
                 .get(local as usize)
                 .ok_or_else(|| corrupt("payload chunk id"))?;
@@ -309,19 +331,6 @@ pub(crate) fn build_values(
     Ok(array)
 }
 
-/// Reads the refs pages of a column for `rows` (sorted, unique) and returns each row's chunk
-/// ids. The pages are one scan wave.
-pub(crate) async fn read_rows(
-    file: &StrataFile,
-    header: &PayloadHeader,
-    at: u64,
-) -> Result<Vec<Option<Vec<u32>>>> {
-    let rows: Vec<u32> = (0..header.n_rows).collect();
-    let (segments, pages) = refs_segments(header, &rows)?;
-    let bodies = file.fetch(&segments, ScanKind::Scan).await?;
-    ids_of(header, &pages, &bodies, &rows, at)
-}
-
 /// Reads every row of payload column `column`. The header is read first (a wave of its own,
 /// unless cached); then the refs pages and every frame are one scan wave. The frames are
 /// decoded and each row's values are rebuilt from its chunk ids.
@@ -337,7 +346,7 @@ pub(crate) async fn read_payload_column(
     let rows: Vec<u32> = (0..header.n_rows).collect();
     let (mut segments, pages) = refs_segments(&header, &rows)?;
     let n_pages = pages.len();
-    let frame_indexes: Vec<usize> = (0..header.frames.len()).collect();
+    let frame_indexes: Vec<usize> = (0..header.store.frames.len()).collect();
     segments.extend(frame_segments_of(&header, &frame_indexes)?);
 
     let mut bodies = file.fetch(&segments, ScanKind::Scan).await?;

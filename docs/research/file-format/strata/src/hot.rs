@@ -156,9 +156,10 @@ pub struct DirectoryRecord {
     pub n_pages: u32,
     /// Number of chunks.
     pub n_chunks: u32,
-    /// Offset of the dictionary segment, 0 for none.
+    /// Offset of the dictionary segment, 0 for none. For a payload column: the offset of its
+    /// payload store segment.
     pub dict_offset: u64,
-    /// Length of the dictionary segment.
+    /// Length of the dictionary (or payload store) segment.
     pub dict_len: u32,
     /// Offset of the payload header segment, 0 unless the layer is payload.
     pub payload_offset: u64,

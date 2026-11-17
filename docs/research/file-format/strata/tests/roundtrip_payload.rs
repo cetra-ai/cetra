@@ -81,13 +81,7 @@ async fn roundtrip_payload() {
         "input: {} frames",
         input_stats.frames
     );
-    assert!(
-        input_stats.frames_without_filter * 5 <= input_stats.frames,
-        "input: frames {}, frames without filter {}, filter bytes {}",
-        input_stats.frames,
-        input_stats.frames_without_filter,
-        input_stats.filter_bytes
-    );
+    assert!(input_stats.index_bytes > 0, "input: no gram index");
 
     let mut expected_columns = Vec::with_capacity(schema.fields().len());
     for (column, field) in schema.fields().iter().enumerate() {
@@ -168,18 +162,18 @@ async fn roundtrip_payload() {
     }
     println!(
         "{:<22} {:>12} {:>12} {:>8} {:>8} {:>8}",
-        "payload column", "filter B", "edge B", "no filt", "frames", "rollup"
+        "payload column", "index B", "store B", "dict B", "frames", "chunks"
     );
     for summary_column in &summary.columns {
         if let Some(stats) = &summary_column.payload {
             println!(
                 "{:<22} {:>12} {:>12} {:>8} {:>8} {:>8}",
                 summary_column.name,
-                stats.filter_bytes,
-                stats.edge_bytes,
-                stats.frames_without_filter,
+                stats.index_bytes,
+                stats.store_bytes,
+                stats.dict_bytes,
                 stats.frames,
-                stats.rollup
+                stats.unique_chunks
             );
         }
     }

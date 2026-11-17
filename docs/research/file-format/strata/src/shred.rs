@@ -4,9 +4,11 @@
 //!
 //! These are pure functions. The writer and the reader call them from M3.2b on.
 
-use std::collections::BTreeMap;
+use std::collections::HashMap;
+
 use std::ops::Range;
 use std::sync::Arc;
+use xxhash_rust::xxh3::Xxh3DefaultBuilder;
 
 use arrow::array::{Array, ArrayRef, MapArray, StringArray, StringBuilder, StructArray};
 use arrow::buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
@@ -97,25 +99,37 @@ struct Occurrence<'a> {
     value: Option<&'a str>,
 }
 
-/// The keys of the entries in `range`, with their occurrences. A null key is corrupt.
+/// The keys of one row's entries.
+type Occurrences<'a> = Vec<(&'a [u8], Occurrence<'a>)>;
+
+/// The keys of the entries in `range`, sorted, with their occurrences: how many entries have
+/// the key, and the value of the last one. A null key is corrupt.
 fn occurrences<'a>(
     keys: &'a StringArray,
     values: &'a StringArray,
     range: Range<usize>,
-) -> Result<BTreeMap<&'a [u8], Occurrence<'a>>> {
-    let mut occ: BTreeMap<&'a [u8], Occurrence<'a>> = BTreeMap::new();
+) -> Result<Occurrences<'a>> {
+    let mut entries: Vec<(&'a [u8], Option<&'a str>)> = Vec::with_capacity(range.len());
     for i in range {
         if keys.is_null(i) {
             return Err(corrupt());
         }
-        let key = keys.value(i).as_bytes();
-        let value = values.is_valid(i).then(|| values.value(i));
-        let entry = occ.entry(key).or_insert(Occurrence {
-            count: 0,
-            value: None,
-        });
-        entry.count = entry.count.saturating_add(1);
-        entry.value = value;
+        entries.push((
+            keys.value(i).as_bytes(),
+            values.is_valid(i).then(|| values.value(i)),
+        ));
+    }
+    // A stable sort keeps the entries of one key in order, so the last one is the last value.
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    let mut occ: Occurrences<'a> = Vec::with_capacity(entries.len());
+    for (key, value) in entries {
+        match occ.last_mut() {
+            Some((last, o)) if *last == key => {
+                o.count = o.count.saturating_add(1);
+                o.value = value;
+            }
+            _ => occ.push((key, Occurrence { count: 1, value })),
+        }
     }
     Ok(occ)
 }
@@ -127,29 +141,27 @@ fn promoted_index(promoted: &[Vec<u8>], key: &[u8]) -> Option<usize> {
 
 /// Whether the entry with `key` in a row with occurrences `occ` moves to its child: the key is
 /// promoted, and it occurs once with a non-null value.
-fn is_moved(occ: &BTreeMap<&[u8], Occurrence<'_>>, key: &[u8], promoted: &[Vec<u8>]) -> bool {
-    occ.get(&key)
-        .is_some_and(|o| o.count == 1 && o.value.is_some())
+fn is_moved(occ: &Occurrences<'_>, key: &[u8], promoted: &[Vec<u8>]) -> bool {
+    occ.binary_search_by(|(k, _)| (*k).cmp(key))
+        .ok()
+        .and_then(|i| occ.get(i))
+        .is_some_and(|(_, o)| o.count == 1 && o.value.is_some())
         && promoted_index(promoted, key).is_some()
 }
 
 /// The promoted keys: keys that occur exactly once with a non-null value in at least 5% of the
 /// rows (rounded up, at least one), of at most `MAX_PROMOTED_KEY_LEN` bytes. The top `MAX_PROMOTED_KEYS`
 /// by count, then by key bytes, sorted bytewise.
-fn promoted_keys(
-    keys: &StringArray,
-    values: &StringArray,
-    rows: &[Option<Range<usize>>],
-) -> Result<Vec<Vec<u8>>> {
-    let mut counts: BTreeMap<&[u8], usize> = BTreeMap::new();
-    for range in rows.iter().flatten() {
-        for (key, occ) in occurrences(keys, values, range.clone())? {
-            if occ.count == 1 && occ.value.is_some() {
-                *counts.entry(key).or_insert(0) += 1;
+fn promoted_keys(occs: &[Option<Occurrences<'_>>]) -> Vec<Vec<u8>> {
+    let mut counts: HashMap<&[u8], usize, Xxh3DefaultBuilder> = HashMap::default();
+    for occ in occs.iter().flatten() {
+        for (key, o) in occ {
+            if o.count == 1 && o.value.is_some() {
+                *counts.entry(*key).or_insert(0) += 1;
             }
         }
     }
-    let threshold = rows.len().saturating_mul(5).div_ceil(100).max(1);
+    let threshold = occs.len().saturating_mul(5).div_ceil(100).max(1);
     let mut ranked: Vec<(&[u8], usize)> = counts
         .into_iter()
         .filter(|(key, count)| *count >= threshold && key.len() <= MAX_PROMOTED_KEY_LEN)
@@ -158,7 +170,7 @@ fn promoted_keys(
     ranked.truncate(MAX_PROMOTED_KEYS);
     let mut promoted: Vec<Vec<u8>> = ranked.into_iter().map(|(key, _)| key.to_vec()).collect();
     promoted.sort();
-    Ok(promoted)
+    promoted
 }
 
 /// The fields of a `Map` type: the entries field, whether the keys are sorted, and the fields
@@ -199,13 +211,16 @@ fn shred_bytes(
     keys: &StringArray,
     values: &StringArray,
     rows: &[Option<Range<usize>>],
+    occs: &[Option<Occurrences<'_>>],
     promoted: &[Vec<u8>],
 ) -> Result<(Vec<u64>, u64, u64)> {
     let mut children = vec![0u64; promoted.len()];
     let mut residual_keys = 0u64;
     let mut residual_values = 0u64;
-    for range in rows.iter().flatten() {
-        let occ = occurrences(keys, values, range.clone())?;
+    for (range, occ) in rows.iter().zip(occs) {
+        let (Some(range), Some(occ)) = (range, occ) else {
+            continue;
+        };
         for i in range.clone() {
             let key = keys.value(i).as_bytes();
             let value_len = if values.is_valid(i) {
@@ -214,7 +229,7 @@ fn shred_bytes(
                 0
             };
             match promoted_index(promoted, key) {
-                Some(p) if is_moved(&occ, key, promoted) => {
+                Some(p) if is_moved(occ, key, promoted) => {
                     if let Some(total) = children.get_mut(p) {
                         *total = total.saturating_add(value_len);
                     }
@@ -236,13 +251,22 @@ fn shred_bytes(
 pub(crate) fn shred(map: &MapArray) -> Result<Shredded> {
     let (keys, values) = entry_columns(map.entries())?;
     let rows = row_ranges(map, keys.len())?;
-    let promoted = promoted_keys(keys, values, &rows)?;
+    // Each row's key occurrences, computed once for the three passes below.
+    let occs: Vec<Option<Occurrences<'_>>> = rows
+        .iter()
+        .map(|r| {
+            r.as_ref()
+                .map(|r| occurrences(keys, values, r.clone()))
+                .transpose()
+        })
+        .collect::<Result<_>>()?;
+    let promoted = promoted_keys(&occs);
 
     let too_big = || StrataError::Unsupported {
         what: "map column larger than 2 GiB".to_string(),
     };
     let (child_bytes, residual_key_bytes, residual_value_bytes) =
-        shred_bytes(keys, values, &rows, &promoted)?;
+        shred_bytes(keys, values, &rows, &occs, &promoted)?;
     for total in child_bytes {
         check_offsets(total, too_big)?;
     }
@@ -258,8 +282,8 @@ pub(crate) fn shred(map: &MapArray) -> Result<Shredded> {
     let mut res_valid = Vec::with_capacity(rows.len());
     let mut res_total: usize = 0;
 
-    for range in &rows {
-        let Some(range) = range else {
+    for (range, occ) in rows.iter().zip(&occs) {
+        let (Some(range), Some(occ)) = (range, occ) else {
             for child in &mut children {
                 child.append_null();
             }
@@ -267,10 +291,9 @@ pub(crate) fn shred(map: &MapArray) -> Result<Shredded> {
             res_offsets.push(offset_of(res_total)?);
             continue;
         };
-        let occ = occurrences(keys, values, range.clone())?;
 
         let mut child_values: Vec<Option<&str>> = vec![None; promoted.len()];
-        for (key, o) in &occ {
+        for (key, o) in occ {
             let Some(p) = promoted_index(&promoted, key) else {
                 continue;
             };
@@ -297,7 +320,7 @@ pub(crate) fn shred(map: &MapArray) -> Result<Shredded> {
         let mut count = 0usize;
         for i in range.clone() {
             let key = keys.value(i);
-            if is_moved(&occ, key.as_bytes(), &promoted) {
+            if is_moved(occ, key.as_bytes(), &promoted) {
                 continue;
             }
             res_keys.append_value(key);

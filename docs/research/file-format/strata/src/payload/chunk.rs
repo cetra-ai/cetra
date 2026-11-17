@@ -9,11 +9,11 @@ use std::ops::Range;
 /// Minimum size of every chunk of a value except its last (S4 step 5).
 pub(crate) const MIN_CHUNK: usize = 256;
 /// A JSON unit at least this long is cut by the gear chunker (S4 step 2).
-pub(crate) const GEAR_UNIT_THRESHOLD: usize = 8192;
-/// Gear chunker parameters (S4 step 2).
-pub(crate) const GEAR_MIN: usize = 512;
-pub(crate) const GEAR_MAX: usize = 8192;
-pub(crate) const GEAR_MASK: u64 = (1 << 11) - 1;
+pub(crate) const GEAR_UNIT_THRESHOLD: usize = 2048;
+/// Gear chunker parameters (S4 step 2): pieces of 256 B to 4 KiB, about 1 KiB on average.
+pub(crate) const GEAR_MIN: usize = 256;
+pub(crate) const GEAR_MAX: usize = 4096;
+pub(crate) const GEAR_MASK: u64 = (1 << 10) - 1;
 const GEAR_SEED: u64 = 0x1234_5678_9abc_def1;
 
 #[allow(clippy::indexing_slicing)] // i < 256 by the loop bound
@@ -64,29 +64,33 @@ fn is_ws(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\n' | b'\r')
 }
 
-/// Returns the cut positions of a JSON array: the absolute indexes where a new
-/// top-level element starts. `None` when `value` is not a JSON array the scanner
-/// accepts.
-fn json_units(value: &[u8]) -> Option<Vec<usize>> {
-    let first = value.iter().position(|&b| !is_ws(b))?;
-    if value.get(first) != Some(&b'[') {
-        return None;
-    }
-    let (mut depth, mut in_string, mut escape) = (1u32, false, false);
-    let mut cuts = Vec::new();
-    for (i, &c) in value.iter().enumerate().skip(first + 1) {
-        if in_string {
-            if escape {
-                escape = false;
-            } else if c == b'\\' {
-                escape = true;
-            } else if c == b'"' {
-                in_string = false;
-            }
-            continue;
-        }
+/// Appends to `cuts` the cut positions of a JSON array from `from` on, where the scanner is at
+/// depth 1 and outside a string: the absolute indexes where a new top-level element starts.
+/// Returns `false` when the rest of `value` is not the rest of a JSON array the scanner accepts.
+/// Strings are skipped with `memchr`, so the scan costs little per byte of text.
+fn json_cuts_from(value: &[u8], from: usize, cuts: &mut Vec<usize>) -> bool {
+    let mut depth = 1u32;
+    let mut i = from;
+    while let Some(&c) = value.get(i) {
         match c {
-            b'"' => in_string = true,
+            b'"' => {
+                // Skip the string: the next unescaped quote ends it.
+                i += 1;
+                loop {
+                    let Some(rest) = value.get(i..) else {
+                        return false;
+                    };
+                    let Some(at) = memchr::memchr2(b'"', b'\\', rest) else {
+                        return false;
+                    };
+                    i += at;
+                    if value.get(i) == Some(&b'\\') {
+                        i += 2;
+                    } else {
+                        break;
+                    }
+                }
+            }
             b'[' | b'{' => depth += 1,
             b']' | b'}' => {
                 depth -= 1; // depth ≥ 1 here, so no underflow
@@ -94,52 +98,109 @@ fn json_units(value: &[u8]) -> Option<Vec<usize>> {
                     let tail_ok = value
                         .get(i + 1..)
                         .is_some_and(|t| t.iter().all(|&b| is_ws(b)));
-                    return (c == b']' && tail_ok).then_some(cuts);
+                    return c == b']' && tail_ok;
                 }
             }
             b',' if depth == 1 => cuts.push(i + 1),
             _ => {}
         }
+        i += 1;
     }
-    None // loop ended with depth > 0 or inside a string
+    false // ended at depth > 0 or inside a string
 }
 
-/// Cuts `value` into chunk ranges. The ranges are contiguous, non-empty, cover
-/// `0..value.len()`, and every range but the last is at least `MIN_CHUNK` bytes.
-pub(crate) fn chunk_value(value: &[u8]) -> Vec<Range<usize>> {
-    if value.is_empty() {
-        return Vec::new();
+/// One chunk of a value: its byte range, and whether it ends at a top-level cut of a JSON
+/// array, where chunking can start again with [`chunk_value_from`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Chunk {
+    pub range: Range<usize>,
+    pub at_cut: bool,
+}
+
+/// Cuts `value[from..]` into chunks, where `from` is 0 or the end of a chunk that ended at a
+/// top-level cut. Returns `None` when `from` is not 0 and the rest is not the rest of a JSON
+/// array. The chunks are contiguous, non-empty, cover `from..value.len()`, and every chunk but
+/// the last is at least `MIN_CHUNK` bytes.
+pub(crate) fn chunk_value_from(value: &[u8], from: usize) -> Option<Vec<Chunk>> {
+    if from >= value.len() {
+        return (from == value.len()).then(Vec::new);
     }
-    let mut pieces: Vec<Range<usize>> = Vec::new();
-    match json_units(value) {
-        Some(cuts) => {
-            let mut unit_start = 0usize;
-            for end in cuts.iter().copied().chain(std::iter::once(value.len())) {
-                let unit = unit_start..end;
-                if unit.len() < GEAR_UNIT_THRESHOLD {
-                    pieces.push(unit.clone());
-                } else {
-                    let data = value.get(unit.clone()).unwrap_or_default();
-                    gear_pieces(data, &mut pieces, unit.start);
-                }
-                unit_start = end;
+    // Pieces, and whether each ends at a top-level cut.
+    let mut pieces: Vec<(Range<usize>, bool)> = Vec::new();
+    let mut cuts = Vec::new();
+    let json = if from == 0 {
+        match value.iter().position(|&b| !is_ws(b)) {
+            Some(first) if value.get(first) == Some(&b'[') => {
+                json_cuts_from(value, first + 1, &mut cuts)
             }
+            _ => false,
         }
-        None => gear_pieces(value, &mut pieces, 0),
+    } else {
+        json_cuts_from(value, from, &mut cuts)
+    };
+    if json {
+        let mut unit_start = from;
+        let n_cuts = cuts.len();
+        for (k, end) in cuts
+            .iter()
+            .copied()
+            .chain(std::iter::once(value.len()))
+            .enumerate()
+        {
+            let at_cut = k < n_cuts;
+            let unit = unit_start..end;
+            if unit.len() < GEAR_UNIT_THRESHOLD {
+                pieces.push((unit, at_cut));
+            } else {
+                let data = value.get(unit.clone()).unwrap_or_default();
+                let mut gear = Vec::new();
+                gear_pieces(data, &mut gear, unit.start);
+                let n = gear.len();
+                pieces.extend(
+                    gear.into_iter()
+                        .enumerate()
+                        .map(|(i, r)| (r, at_cut && i + 1 == n)),
+                );
+            }
+            unit_start = end;
+        }
+    } else if from == 0 {
+        let mut gear = Vec::new();
+        gear_pieces(value, &mut gear, 0);
+        pieces.extend(gear.into_iter().map(|r| (r, false)));
+    } else {
+        return None;
     }
 
     let mut out = Vec::new();
-    let mut chunk_start = 0usize;
-    for p in &pieces {
+    let mut chunk_start = from;
+    for (p, at_cut) in &pieces {
         if p.end - chunk_start >= MIN_CHUNK {
-            out.push(chunk_start..p.end);
+            out.push(Chunk {
+                range: chunk_start..p.end,
+                at_cut: *at_cut,
+            });
             chunk_start = p.end;
         }
     }
     if chunk_start < value.len() {
-        out.push(chunk_start..value.len());
+        out.push(Chunk {
+            range: chunk_start..value.len(),
+            at_cut: false,
+        });
     }
-    out
+    Some(out)
+}
+
+/// Cuts `value` into chunk ranges. The ranges are contiguous, non-empty, cover
+/// `0..value.len()`, and every range but the last is at least `MIN_CHUNK` bytes.
+#[cfg(test)]
+pub(crate) fn chunk_value(value: &[u8]) -> Vec<Range<usize>> {
+    chunk_value_from(value, 0)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|c| c.range)
+        .collect()
 }
 
 #[cfg(test)]
@@ -153,7 +214,7 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    /// Copy of `bench/src/payload.rs::Gear`, the reference chunker.
+    /// The reference chunker: `bench/src/payload.rs::Gear` with the format's gear parameters.
     struct RefGear([u64; 256]);
 
     impl RefGear {
@@ -170,9 +231,9 @@ mod tests {
         }
 
         fn chunks<'a>(&self, data: &'a [u8], out: &mut Vec<&'a [u8]>) {
-            const MIN: usize = 512;
-            const MAX: usize = 8192;
-            const MASK: u64 = (1 << 11) - 1;
+            const MIN: usize = 256;
+            const MAX: usize = 4096;
+            const MASK: u64 = (1 << 10) - 1;
             let mut start = 0;
             while start < data.len() {
                 let rest = &data[start..];
@@ -294,11 +355,11 @@ mod tests {
     fn gear_pieces_match_reference_fixed_cases() {
         let cases: Vec<(Vec<u8>, Vec<usize>)> = vec![
             (vec![], vec![]),
-            (vec![0; 512], vec![512]),
-            (vec![0; 513], vec![513]),
-            (vec![0; 8192], vec![8192]),
-            (vec![0; 8193], vec![8192, 1]),
-            (vec![0; 9000], vec![8192, 808]),
+            (vec![0; 256], vec![256]),
+            (vec![0; 257], vec![257]),
+            (vec![0; 4096], vec![4096]),
+            (vec![0; 4097], vec![4096, 1]),
+            (vec![0; 9000], vec![4096, 4096, 808]),
         ];
         for (data, want) in cases {
             let mut out = Vec::new();
@@ -314,7 +375,66 @@ mod tests {
         let data = vec![0u8; 9000];
         let mut out = Vec::new();
         gear_pieces(&data, &mut out, 1000);
-        assert_eq!(out, vec![1000..9192, 9192..10000]);
+        assert_eq!(out, vec![1000..5096, 5096..9192, 9192..10000]);
+    }
+
+    /// The top-level cut positions of a JSON array, or `None` when it is not one.
+    fn json_units(value: &[u8]) -> Option<Vec<usize>> {
+        let first = value.iter().position(|&b| !is_ws(b))?;
+        if value.get(first) != Some(&b'[') {
+            return None;
+        }
+        let mut cuts = Vec::new();
+        json_cuts_from(value, first + 1, &mut cuts).then_some(cuts)
+    }
+
+    /// A JSON array of `n` messages of 100 to 3,000 bytes; one in 5 is over 8 KiB.
+    fn messages(n: usize, seed: u64) -> Vec<String> {
+        let mut x = seed | 1;
+        (0..n)
+            .map(|i| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                let len = if i % 5 == 4 {
+                    9_000 + (x % 4_000) as usize
+                } else {
+                    100 + (x % 2_900) as usize
+                };
+                let text: String = (0..len)
+                    .map(|j| char::from(b'a' + ((x >> (j % 50)) as u8).wrapping_add(j as u8) % 26))
+                    .collect();
+                format!("{{\"role\":\"user\",\"content\":\"{text} \\\"q\\\" {i}\"}}")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn chunking_from_a_reused_cut_matches_chunking_the_whole_value() {
+        let msgs = messages(40, 7);
+        for split in [3usize, 10, 25] {
+            let prev = format!("[{}]", msgs[..split].join(","));
+            let next = format!("[{}]", msgs.join(","));
+            let prev_chunks = chunk_value_from(prev.as_bytes(), 0).unwrap();
+            let whole = chunk_value_from(next.as_bytes(), 0).unwrap();
+            // The last chunk of `prev` that ends at a cut inside the shared prefix.
+            let lcp = prev
+                .bytes()
+                .zip(next.bytes())
+                .take_while(|(a, b)| a == b)
+                .count();
+            let k = prev_chunks
+                .iter()
+                .rposition(|c| c.at_cut && c.range.end <= lcp)
+                .unwrap();
+            let from = prev_chunks[k].range.end;
+            let mut reused: Vec<Chunk> = prev_chunks[..=k].to_vec();
+            reused.extend(chunk_value_from(next.as_bytes(), from).unwrap());
+            assert_eq!(reused, whole, "split {split}");
+        }
+        // A rest that is not the rest of a JSON array.
+        assert_eq!(chunk_value_from(b"[1,2 x", 3), None);
+        assert_eq!(chunk_value_from(b"[1,2]", 5), Some(Vec::new()));
     }
 
     proptest! {
@@ -394,7 +514,7 @@ mod tests {
         assert!(chunks.len() >= 13);
         for c in chunks.iter().rev().skip(1) {
             assert!(c.len() >= MIN_CHUNK);
-            assert!(c.len() <= GEAR_MAX + 255);
+            assert!(c.len() <= GEAR_MAX + MIN_CHUNK);
         }
         assert_eq!(join(value.as_bytes(), &chunks), value.as_bytes());
     }
