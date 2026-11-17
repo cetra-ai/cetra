@@ -175,6 +175,8 @@ it("deletes the user's data after type-to-confirm, then returns to the data tab"
   await waitFor(() =>
     expect(router.state.location.pathname).toBe("/acme/support-bot/settings/data"),
   );
+  // Let the settings page finish loading, so no transition outlives the test.
+  await waitFor(() => expect(router.state.status).toBe("idle"));
   expect(body).toEqual({ kind: "user", user_id: "user-42" });
 });
 
@@ -189,4 +191,19 @@ it("disables delete user data for members, with the reason", async () => {
   const button = await screen.findByRole("button", { name: "Delete user data…" });
   expect(button).toBeDisabled();
   expect(button.parentElement).toHaveAccessibleDescription("Only project admins can delete data");
+});
+
+it("goes back to the user page from a session opened there", async () => {
+  const { router, user } = await renderApp("/acme/support-bot/users/user-42");
+  expect(await screen.findByText("3 traces")).toBeInTheDocument();
+  await user.click(screen.getByRole("tab", { name: /Sessions/ }));
+  const grid = screen.getByRole("grid", { name: "Sessions" });
+  await user.click(within(grid).getByRole("row", { name: /sess-001/ }));
+  await user.click(await screen.findByRole("link", { name: "Back to Ada Example" }));
+  await waitFor(() => {
+    expect(router.state.location.pathname).toBe("/acme/support-bot/users/user-42");
+  });
+  await waitFor(() => {
+    expect(router.state.status).toBe("idle");
+  });
 });

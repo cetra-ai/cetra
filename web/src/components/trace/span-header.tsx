@@ -12,6 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { environmentClasses } from "@/lib/colors";
 import { formatCost, formatDuration, formatTokens } from "@/lib/format";
+import { useBackState, useOnSessionPage } from "@/lib/list-return";
 
 /**
  * The span detail, or the tree's span summary while the detail loads. The summary has the
@@ -23,6 +24,8 @@ export type HeaderSpan = Schema<"SpanDetail"> | Schema<"SpanSummary">;
 export function SpanHeader({ span, detached }: { span: HeaderSpan; detached: boolean }) {
   const tokens = tokenSummary(span);
   const { org, project } = useProject();
+  const backState = useBackState("Trace");
+  const onSessionPage = useOnSessionPage(span.session_id ?? "");
   const detail = "truncated" in span ? span : undefined;
   const modelsDiffer =
     detail !== undefined &&
@@ -134,6 +137,7 @@ export function SpanHeader({ span, detached }: { span: HeaderSpan; detached: boo
             <Link
               to="/$org/$project/sessions/$sessionId"
               params={{ org, project, sessionId: span.session_id }}
+              state={onSessionPage ? true : backState}
               className="focus-ring rounded-sm underline-offset-2 hover:underline"
             >
               {span.session_id}

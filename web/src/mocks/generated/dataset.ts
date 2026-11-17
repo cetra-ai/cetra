@@ -71,7 +71,12 @@ export type Dataset = {
     includeEval: boolean,
     includeExperiments: boolean,
   ): Schema<"SessionDetail"> | undefined;
-  users(includeEval: boolean, includeExperiments: boolean): UserGroup[];
+  /** Users aggregated over their traces that start in `[window.from, window.to)`, as `user` does. */
+  users(
+    includeEval: boolean,
+    includeExperiments: boolean,
+    window: { from?: number; to?: number },
+  ): UserGroup[];
   /** The user's traces that start in `[window.from, window.to)`; an absent bound is open (UP-1). */
   user(
     userId: string,
@@ -159,8 +164,12 @@ export function createDataset(options: { seed: number; now: number; traces: numb
       }));
       return { session, turns, truncated: rows.length > 1000 };
     },
-    users(includeEval, includeExperiments) {
-      return usersFrom(visibleTraces(traces, includeEval, includeExperiments));
+    users(includeEval, includeExperiments, window) {
+      return usersFrom(
+        visibleTraces(traces, includeEval, includeExperiments).filter((trace) =>
+          startsIn(trace.start_time, window),
+        ),
+      );
     },
     user(userId, includeEval, includeExperiments, window) {
       const rows = visibleTraces(traces, includeEval, includeExperiments).filter(

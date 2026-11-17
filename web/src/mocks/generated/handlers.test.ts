@@ -381,3 +381,20 @@ it("honours from and to on the user detail", async () => {
   const outside = await fetch(`${PROJECT}/users/${userId}?from=946684800000&to=946771200000`);
   expect(outside.status).toBe(404);
 });
+
+it("counts only the traces in the range on the users list, as the user detail does", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 200 });
+  server.use(...largeHandlers(dataset));
+  const window = `from=${new Date(NOW - 2 * DAY_MS).toISOString()}&to=${new Date(NOW).toISOString()}`;
+  const users = (await (
+    await fetch(`${PROJECT}/users?limit=1000&${window}`)
+  ).json()) as Schema<"EndUserPage">;
+  expect(users.data.length).toBeGreaterThan(0);
+  for (const row of users.data) {
+    const response = await fetch(`${PROJECT}/users/${row.user_id}?${window}`);
+    expect(response.status).toBe(200);
+    const detail = (await response.json()) as Schema<"EndUserDetail">;
+    expect(detail.user.trace_count).toBe(row.trace_count);
+    expect(detail.user.session_count).toBe(row.session_count);
+  }
+});

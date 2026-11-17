@@ -1,4 +1,4 @@
-import { type RouterHistory, useLocation } from "@tanstack/react-router";
+import { type RouterHistory, useLocation, useMatch } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { STORAGE_PREFIX } from "@/product";
 
@@ -23,14 +23,22 @@ export type ListRestore = {
 /** The first visible row of a list, and how many px of it are scrolled past. */
 export type RowAnchor = { rowId: string; offset: number };
 
+/** The page a detail page's back link returns to, when it was not opened from its list. */
+export type BackTo = { label: string; href: string };
+
 declare module "@tanstack/react-router" {
   interface HistoryState {
     /** Set by a list when it opens a detail page. */
     listReturn?: ListReturn;
     /** Set by a detail page's back link, read by the list it returns to. */
     listRestore?: ListRestore;
+    /** Set by a page that opens a detail page from somewhere other than its list: the way back. */
+    backTo?: BackTo;
   }
 }
+
+/** The history state of the current location, with the augmented fields. */
+type LocationState = ReturnType<typeof useLocation>["state"];
 
 const HIGHLIGHT_MS = 1500;
 
@@ -124,6 +132,29 @@ export function useListReturn(list: ListName): ListReturn | undefined {
     return fromState;
   }
   return readListReturn(list);
+}
+
+/**
+ * The state a link to a detail page passes: the way back to the current location, labelled
+ * `label`. Use it as the link's `state` prop.
+ */
+export function useBackState(label: string): (current: LocationState) => LocationState {
+  const href = useLocation().href;
+  return (current) => ({ ...current, backTo: { label, href } });
+}
+
+/** The way back a detail page was opened with, if any. */
+export function useBackTo(): BackTo | undefined {
+  return useLocation().state.backTo;
+}
+
+/**
+ * Whether the page shown is `sessionId`'s own session page. A link from that page to itself must
+ * keep the way back it was opened with, not replace it with a link to itself.
+ */
+export function useOnSessionPage(sessionId: string): boolean {
+  const match = useMatch({ from: "/$org/$project/sessions/$sessionId", shouldThrow: false });
+  return match?.params.sessionId === sessionId;
 }
 
 /** Holds the id of the row a list opened for `HIGHLIGHT_MS` after it mounts with that id. */

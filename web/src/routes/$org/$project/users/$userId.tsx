@@ -28,6 +28,7 @@ import { PlanPill, UserChips } from "@/components/user/user-chips";
 import { UserOverview } from "@/components/user/user-overview";
 import { UserTraces } from "@/components/user/user-traces";
 import { invalidateProjectReads } from "@/lib/deletions";
+import { useBackState } from "@/lib/list-return";
 import { atLeast } from "@/lib/roles";
 import {
   parseUserPageSearch,
@@ -77,6 +78,7 @@ function UserPage() {
   const fetched = detail.data?.user.user_id === userId ? detail.data : undefined;
   const problem = detail.isError ? problemOf(detail.error) : undefined;
   const missing = problem?.status === 404;
+  const backState = useBackState(userIdentity(fetched?.user.metadata).name ?? userId);
   if (detail.isError && !missing) {
     throw detail.error;
   }
@@ -183,6 +185,7 @@ function UserPage() {
                   to: "/$org/$project/sessions/$sessionId",
                   params: { org, project, sessionId: row.session_id },
                   search: pageFlags(search),
+                  state: backState,
                 });
               }}
               hasNextPage={false}

@@ -33,7 +33,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { categoryClasses, environmentClasses } from "@/lib/colors";
 import { invalidateProjectReads } from "@/lib/deletions";
 import { formatCost, formatDuration, formatTokens } from "@/lib/format";
-import type { ListReturn } from "@/lib/list-return";
+import { type ListReturn, useBackState, useOnSessionPage } from "@/lib/list-return";
 import { atLeast } from "@/lib/roles";
 import type { TraceMode } from "@/lib/search/traces";
 import type { StreamStatus } from "@/lib/sse";
@@ -86,6 +86,8 @@ export function TraceHeader({
   const fullPageReturn = useRef<ListReturn | undefined>(undefined);
   const deletion = $api.useMutation("post", "/api/v1/projects/{project}/deletions");
   const canDelete = atLeast(data.role, "admin");
+  const backState = useBackState("Trace");
+  const onSessionPage = useOnSessionPage(trace.session_id ?? "");
 
   function deleteTrace() {
     deletion.mutate(
@@ -239,6 +241,7 @@ export function TraceHeader({
               <Link
                 to="/$org/$project/sessions/$sessionId"
                 params={{ org, project, sessionId: trace.session_id }}
+                state={onSessionPage ? true : backState}
                 className="focus-ring rounded-sm text-foreground underline-offset-2 hover:underline"
               >
                 {trace.session_id}

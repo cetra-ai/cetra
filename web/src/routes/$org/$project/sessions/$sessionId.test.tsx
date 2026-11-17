@@ -308,3 +308,17 @@ it("goes back to the sessions list from the header", async () => {
     expect(router.state.location.pathname).toBe("/acme/support-bot/sessions");
   });
 });
+
+it("goes back to the trace the session was opened from", async () => {
+  const { router, user } = await renderApp(`/acme/support-bot/traces?trace=${TRACE}`);
+  const header = await screen.findByRole("region", { name: "Trace" });
+  await user.click(within(header).getByRole("link", { name: "sess-001" }));
+  await user.click(await screen.findByRole("link", { name: "Back to Trace" }));
+  await waitFor(() => {
+    expect(router.state.location.pathname).toBe("/acme/support-bot/traces");
+    expect(router.state.location.search.trace).toBe(TRACE);
+  });
+  await waitFor(() => {
+    expect(router.state.status).toBe("idle");
+  });
+});

@@ -34,5 +34,5 @@ export function ActivityChart({
   if (rows.every((row) => row.count === null)) {
     return <p className="text-muted-foreground">No activity</p>;
   }
-  return <CountBarChart rows={rows} label="Activity" seriesLabel="Traces" />;
+  return <CountBarChart rows={rows} label="Activity" seriesLabel="Traces" maxBarSize={12} />;
 }

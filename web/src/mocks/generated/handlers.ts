@@ -156,10 +156,7 @@ function listUsers(dataset: Dataset, request: Request): Response {
     return parsed;
   }
   const rows = dataset
-    .users(parsed.includeEval, parsed.includeExperiments)
-    .filter((group) =>
-      overlaps(group.user.first_seen, group.user.last_seen, parsed.from, parsed.to),
-    )
+    .users(parsed.includeEval, parsed.includeExperiments, { from: parsed.from, to: parsed.to })
     .sort((left, right) => compareUsers(left.user, right.user, parsed.sort, parsed.order));
   // Activity is filled for the returned page only, as the server does (spec 09).
   const window =
@@ -480,23 +477,6 @@ function inRange(start: string, from: number | undefined, to: number | undefined
     return false;
   }
   if (to !== undefined && time >= to) {
-    return false;
-  }
-  return true;
-}
-
-function overlaps(
-  first: string,
-  last: string,
-  from: number | undefined,
-  to: number | undefined,
-): boolean {
-  const start = Date.parse(first);
-  const end = Date.parse(last);
-  if (from !== undefined && end < from) {
-    return false;
-  }
-  if (to !== undefined && start >= to) {
     return false;
   }
   return true;

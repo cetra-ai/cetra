@@ -1,6 +1,7 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { X } from "lucide-react";
+import { cn } from "cn";
+import { Activity, Gauge, type LucideIcon, MessagesSquare, Tags, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { problemOf } from "@/api/problem";
 import { userQuery } from "@/api/queries";
@@ -14,10 +15,11 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { ActivityChart } from "@/components/user/activity-chart";
 import { PlanPill, UserChips, UserMetadata, UserScores } from "@/components/user/user-chips";
 import { formatCost, formatDuration } from "@/lib/format";
+import { useBackState } from "@/lib/list-return";
 import type { Preset } from "@/lib/time-range";
 import { userIdentity } from "@/lib/user-identity";
 
-const RECENT_SESSIONS = 20;
+const RECENT_SESSIONS = 10;
 
 /**
  * The user drawer beside the users list: header with identity, metric chips, activity, scores,
@@ -52,9 +54,17 @@ export function UserPanel({
   });
   // Placeholder data may belong to the previously selected user: only trust it for this one.
   const fetched = detail.data?.user.user_id === userId ? detail.data : undefined;
+  // The user's all-time detail: Recent sessions and the total session count ignore the range.
+  const allTime = useQuery({
+    ...userQuery(org, project, userId, { includeEval, includeExperiments }),
+    placeholderData: keepPreviousData,
+  });
+  const allTimeFetched = allTime.data?.user.user_id === userId ? allTime.data : undefined;
   const user = row ?? fetched?.user;
   const identity = userIdentity(user?.metadata);
-  const sessions = fetched?.sessions ?? [];
+  const backState = useBackState(identity.name ?? userId);
+  const sessions = allTimeFetched?.sessions ?? [];
+  const shownSessions = sessions.slice(0, RECENT_SESSIONS);
   const pageSearch = {
     ...(range ?? {}),
     ...(includeEval ? { eval: 1 as const } : {}),
@@ -63,7 +73,7 @@ export function UserPanel({
 
   return (
     <section aria-label="User" className="flex h-full min-h-0 flex-col">
-      <header className="flex shrink-0 items-center gap-2 border-b px-3 py-1.5 text-xs">
+      <header className="flex shrink-0 items-center gap-2 border-b px-3 py-1.5 text-[12px]">
         {user && identity.name ? (
           <span className="flex min-w-0 items-baseline gap-1.5">
             <span className="truncate text-[13px] font-semibold">{identity.name}</span>
@@ -89,75 +99,111 @@ export function UserPanel({
           </Button>
         </div>
       </header>
-      <div className="min-h-0 flex-1 overflow-auto p-3 text-xs">
+      <div className="@container min-h-0 flex-1 overflow-auto p-3 text-[12px]">
         {user ? (
-          <div className="flex flex-col gap-4">
+          <div className="flex flex-col gap-3">
             <div className="flex flex-col gap-2">
               {identity.email ? (
                 <p className="text-[12px] text-muted-foreground">{identity.email}</p>
               ) : null}
-              <UserChips user={user} />
+              <UserChips user={user} totalSessions={allTimeFetched?.user.session_count} />
               <p className="text-muted-foreground">
                 <TimeText value={user.first_seen} style="datetime" />
                 <span aria-hidden="true"> → </span>
                 <TimeText value={user.last_seen} style="datetime" />
               </p>
             </div>
-            <Section title="Activity">
+            <Section title="Activity" icon={Activity}>
               <ActivityChart values={user.activity} from={from} to={to} />
             </Section>
-            <Section title="Scores">
-              <UserScores scores={user.scores} />
-            </Section>
-            <Section title="Metadata">
-              <UserMetadata metadata={user.metadata} />
-            </Section>
-            <Section title="Recent sessions">
-              {sessions.length === 0 ? (
+            <div className="grid grid-cols-1 gap-3 @[700px]:grid-cols-2">
+              <Section title="Scores" icon={Gauge}>
+                <UserScores scores={user.scores} />
+              </Section>
+              <Section title="Metadata" icon={Tags}>
+                <UserMetadata metadata={user.metadata} />
+              </Section>
+            </div>
+            <Section title="Recent sessions" icon={MessagesSquare}>
+              {allTimeFetched === undefined && allTime.isError ? (
+                <p className="text-muted-foreground">
+                  {problemOf(allTime.error)?.status === 404
+                    ? "No traces from this user"
+                    : "Could not load the sessions."}
+                </p>
+              ) : allTimeFetched === undefined ? (
+                <Skeleton className="h-10 w-full" />
+              ) : sessions.length === 0 ? (
                 <p className="text-muted-foreground">No sessions</p>
               ) : (
-                <ul className="flex flex-col gap-1">
-                  {sessions.slice(0, RECENT_SESSIONS).map((session) => (
-                    <li key={session.session_id}>
-                      <Link
-                        to="/$org/$project/sessions/$sessionId"
-                        params={{ org, project, sessionId: session.session_id }}
-                        className="focus-ring flex min-w-0 flex-col gap-0.5 rounded-sm underline-offset-2 hover:underline"
-                      >
-                        <span className="flex min-w-0 items-center gap-1.5">
-                          {session.error_trace_count > 0 ? (
+                <>
+                  <ul className="flex flex-col gap-1">
+                    {shownSessions.map((session) => (
+                      <li key={session.session_id}>
+                        <Link
+                          to="/$org/$project/sessions/$sessionId"
+                          params={{ org, project, sessionId: session.session_id }}
+                          state={backState}
+                          className={cn(
+                            "focus-ring flex min-w-0 flex-col gap-0.5 rounded-md border-l-2 px-2 py-1.5 hover:bg-row-hover",
+                            session.error_trace_count > 0
+                              ? "border-status-error"
+                              : "border-transparent",
+                          )}
+                        >
+                          <span className="flex min-w-0 items-center gap-1.5 text-[12px]">
                             <span
                               aria-hidden="true"
-                              title="Has errors"
-                              className="size-1.5 shrink-0 rounded-full bg-status-error"
+                              title={session.error_trace_count > 0 ? "Has errors" : undefined}
+                              className={cn(
+                                "size-1.5 shrink-0 rounded-full",
+                                session.error_trace_count > 0
+                                  ? "bg-status-error"
+                                  : "bg-[var(--chart-1)]",
+                              )}
                             />
-                          ) : null}
-                          {session.first_input_preview ? (
-                            <span className="min-w-0 truncate" title={session.first_input_preview}>
-                              {session.first_input_preview}
-                            </span>
-                          ) : (
-                            <span className="min-w-0 truncate font-mono">{session.session_id}</span>
-                          )}
-                          {session.error_trace_count > 0 ? (
-                            <span className="sr-only"> (has errors)</span>
-                          ) : null}
-                        </span>
-                        <span className="num flex items-center gap-1.5 text-[11px] text-muted-foreground">
-                          <RelativeTime value={session.start_time} />
-                          <span aria-hidden="true">·</span>
-                          <span>
-                            {session.trace_count} {session.trace_count === 1 ? "trace" : "traces"}
+                            {session.first_input_preview ? (
+                              <span
+                                className="min-w-0 truncate"
+                                title={session.first_input_preview}
+                              >
+                                {session.first_input_preview}
+                              </span>
+                            ) : (
+                              <span className="min-w-0 truncate font-mono">
+                                {session.session_id}
+                              </span>
+                            )}
+                            {session.error_trace_count > 0 ? (
+                              <span className="sr-only"> (has errors)</span>
+                            ) : null}
                           </span>
-                          <span aria-hidden="true">·</span>
-                          <span>{formatCost(session.cost_total)}</span>
-                          <span aria-hidden="true">·</span>
-                          <span>{formatDuration(session.duration_ns)}</span>
-                        </span>
-                      </Link>
-                    </li>
-                  ))}
-                </ul>
+                          <span className="num flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                            <RelativeTime value={session.start_time} />
+                            <span aria-hidden="true">·</span>
+                            <span>
+                              {session.trace_count} {session.trace_count === 1 ? "trace" : "traces"}
+                            </span>
+                            <span aria-hidden="true">·</span>
+                            <span>{formatCost(session.cost_total)}</span>
+                            <span aria-hidden="true">·</span>
+                            <span>{formatDuration(session.duration_ns)}</span>
+                          </span>
+                        </Link>
+                      </li>
+                    ))}
+                  </ul>
+                  {allTimeFetched.user.session_count > shownSessions.length ? (
+                    <Link
+                      to="/$org/$project/users/$userId"
+                      params={{ org, project, userId }}
+                      search={{ ...pageSearch, tab: "sessions" as const }}
+                      className="self-start text-[12px] text-muted-foreground hover:text-foreground"
+                    >
+                      All sessions →
+                    </Link>
+                  ) : null}
+                </>
               )}
             </Section>
           </div>
@@ -177,10 +223,23 @@ export function UserPanel({
   );
 }
 
-function Section({ title, children }: { title: string; children: ReactNode }) {
+function Section({
+  title,
+  icon: Icon,
+  children,
+}: {
+  title: string;
+  icon: LucideIcon;
+  children: ReactNode;
+}) {
   return (
-    <section className="flex flex-col gap-1.5">
-      <h3 className="text-[10.5px] text-muted-foreground uppercase">{title}</h3>
+    <section className="flex flex-col gap-2 rounded-md border bg-surface p-3">
+      <div className="flex items-center gap-1.5">
+        <Icon aria-hidden="true" className="size-3.5 text-muted-foreground" />
+        <h3 className="text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
+          {title}
+        </h3>
+      </div>
       {children}
     </section>
   );

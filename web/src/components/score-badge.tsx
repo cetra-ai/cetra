@@ -78,6 +78,16 @@ export function ScoreBadge({
   return <Toned g={g} text={text} {...rest} />;
 }
 
+/** How good a user's average score is, in [0, 1], under its live definition. Undefined when it has no direction or the definition has not loaded. */
+export function useAverageGoodness(
+  name: string,
+  avg: number,
+  dataType: Schema<"ScoreDataType">,
+): number | undefined {
+  const definition = useDefinition(name);
+  return definition ? averageGoodness(avg, dataType, definition) : undefined;
+}
+
 /** A user's average score, coloured by its definition's direction. `text` is what the caller shows today. */
 export function ScoreAverageBadge({
   name,
@@ -91,7 +101,6 @@ export function ScoreAverageBadge({
   dataType: Schema<"ScoreDataType">;
   text: string;
 } & ComponentProps<"span">) {
-  const definition = useDefinition(name);
-  const g = definition ? averageGoodness(avg, dataType, definition) : undefined;
+  const g = useAverageGoodness(name, avg, dataType);
   return <Toned g={g} text={text} {...rest} />;
 }

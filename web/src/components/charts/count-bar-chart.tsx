@@ -12,12 +12,15 @@ export function CountBarChart({
   rows,
   label,
   seriesLabel,
+  maxBarSize = 28,
 }: {
   rows: readonly CountBucket[];
   /** The accessible name of the chart (`role="img"`). */
   label: string;
   /** The tooltip's row label, e.g. "Sessions" or "Traces". */
   seriesLabel: string;
+  /** The widest a bar may be, in px. */
+  maxBarSize?: number;
 }) {
   const zone = useTimeZone();
   const style = axisStyle(rows);
@@ -34,7 +37,7 @@ export function CountBarChart({
         <BarChart
           data={[...rows]}
           barCategoryGap="20%"
-          maxBarSize={28}
+          maxBarSize={maxBarSize}
           margin={{ top: 2, right: 0, bottom: 0, left: 0 }}
           accessibilityLayer={false}
         >
@@ -53,7 +56,12 @@ export function CountBarChart({
             cursor={{ fill: "var(--muted-foreground)", fillOpacity: 0.12 }}
             content={<CountTooltip zone={zone} seriesLabel={seriesLabel} />}
           />
-          <Bar dataKey="count" fill="var(--chart-1)" isAnimationActive={false} />
+          <Bar
+            dataKey="count"
+            fill="var(--chart-1)"
+            radius={[2, 2, 0, 0]}
+            isAnimationActive={false}
+          />
         </BarChart>
       </ChartContainer>
     </div>
