@@ -3,9 +3,14 @@ title: Dashboard
 description: "Read the project dashboard: see what each chart measures, how the time range and grouping work, and how to drill in."
 ---
 
+import { Image } from "astro:assets";
+import dashboard from "../../../../assets/screenshots/dashboard.png";
+
 Use the dashboard to see how your application behaves over time: volume, errors, latency, cost and quality.
 
 Select **Dashboard** in the sidebar. The layout is fixed. A time range, a filter and a grouping at the top apply to every chart.
+
+<Image src={dashboard} alt="The dashboard: summary tiles for traces, error rate, latency, cost and tokens, above charts over time." />
 
 ## Controls
 

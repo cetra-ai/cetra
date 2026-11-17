@@ -3,11 +3,16 @@ title: Experiments
 description: Run your application on a dataset, score every run in your own code and compare experiments side by side.
 ---
 
+import { Image } from "astro:assets";
+import experiments from "../../../../assets/screenshots/experiments.png";
+
 import { Tabs, TabItem } from "@astrojs/starlight/components";
 
 An experiment runs your task on every item of a [dataset](/docs/evaluation/datasets/), scores each result and stores everything in cetra, so you can compare a change against the version you have today.
 
 The experiment runs in your process, so your code, your credentials and your scorers stay with you. cetra stores the results and does not run scorers for experiments.
+
+<Image src={experiments} alt="The experiments page: the list of experiments in the project." />
 
 ## Run an experiment
 

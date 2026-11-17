@@ -3,6 +3,9 @@ title: Sessions
 description: Group the traces of one conversation or workflow into a session, and read it as a transcript in the UI.
 ---
 
+import { Image } from "astro:assets";
+import sessions from "../../../../assets/screenshots/sessions.png";
+
 import { Tabs, TabItem } from "@astrojs/starlight/components";
 
 Set a session ID on your traces to see them together, in order, with their total cost and errors.
@@ -70,6 +73,8 @@ Use the same ID for every trace of the session. A new ID starts a new session.
 ## In the UI
 
 Select **Sessions** in the sidebar. The list shows each session's start, last activity, number of traces, user, cost, errors and scores.
+
+<Image src={sessions} alt="The sessions page: one row per session." />
 
 Open a session to read it as a transcript. cetra rebuilds the conversation from the input and output of each trace's root span, in order. Select a turn to open its trace. Session scores sit at the top, and **Annotate** adds your own.
 

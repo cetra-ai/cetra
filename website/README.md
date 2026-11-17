@@ -32,6 +32,14 @@ Lints, tests the scripts, type-checks, checks terms and descriptions, and builds
 3. Link to other pages with absolute paths and a trailing slash, for example `/docs/tracing/sessions/`. The build fails on a broken link or anchor, and on a relative link.
 4. Run `just check-docs`.
 
+## Screenshots
+
+The UI screenshots under `src/assets/screenshots/` are generated from the web UI running on its mocks, so they are the same on every run (D-W-12). `screenshots.json` lists them.
+
+- Run `just docs-screenshots` in a pull request that changes a screen shown in the docs, and commit the new PNGs. A reviewer checks the PNG diff. Name shots to rewrite only those: `just docs-screenshots trace-view sessions`.
+- The first time, install the browser: `pnpm --dir website exec playwright install chromium`. CI never downloads a browser.
+- To add a shot, add an entry to `screenshots.json` (`name`, `path`, `waitFor`, and optionally `actions` and `waitAfter`), run the recipe, and show the PNG on its page with `<Image>`. `just check-docs` fails when a listed shot has no PNG or a PNG has no entry.
+
 ## Deployment
 
 The site is a Cloudflare Pages project, `cetra-site` (D-W-3).

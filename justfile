@@ -273,6 +273,11 @@ check-ts: js-install
 check-docs: js-install
     pnpm --dir website run check
 
+# Rewrite the docs' UI screenshots from the web UI on its mocks (D-W-12). Needs Chromium:
+# `pnpm --dir website exec playwright install chromium` once. Optional: shot names.
+docs-screenshots *names: js-install
+    cd website && node scripts/screenshots.mjs {{names}}
+
 # Every check (D79); must pass before every commit
 check: check-rust check-web check-py check-ts check-docs
 

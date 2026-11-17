@@ -7,7 +7,7 @@
     "dev": "pnpm gen:openapi && astro dev",
     "build": "pnpm gen:openapi && astro build",
     "test:scripts": "node --test scripts/",
-    "check:content": "node scripts/check-terms.mjs && node scripts/check-samples.mjs && node scripts/check-env-vars.mjs",
+    "check:content": "node scripts/check-terms.mjs && node scripts/check-samples.mjs && node scripts/check-env-vars.mjs && node scripts/check-screenshots.mjs",
     "check": "biome check . && pnpm test:scripts && pnpm gen:openapi && astro check && pnpm check:content && astro build"
   },
   "dependencies": {
@@ -19,6 +19,7 @@
   },
   "devDependencies": {
     "@astrojs/check": "0.9.12",
+    "playwright": "1.65.0",
     "typescript": "5.9.3",
     "wrangler": "4.159.0"
   }
