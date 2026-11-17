@@ -9,16 +9,30 @@ import {
 } from "@/lib/search/common";
 import { PRESETS, type Preset } from "@/lib/time-range";
 
-const USER_SORTS = ["last_seen", "trace_count", "cost_total"] as const;
+const USER_SORTS = [
+  "last_seen",
+  "first_seen",
+  "trace_count",
+  "session_count",
+  "traces_per_session",
+  "total_tokens",
+  "cost_total",
+  "error_count",
+  "error_rate",
+] as const;
 const SORT_ORDERS = ["asc", "desc"] as const;
 
 export const USER_COLUMN_IDS = [
   "user",
+  "activity",
   "traces",
   "sessions",
+  "traces_per_session",
   "tokens",
   "cost",
   "errors",
+  "error_rate",
+  "metadata",
   "first_seen",
   "last_seen",
 ] as const;
@@ -38,6 +52,7 @@ export type UsersSearch = {
   cols?: string;
   filter?: string;
   view?: string;
+  user?: string;
 };
 
 /** Search params of the user page. The list keeps its own URL. */
@@ -47,7 +62,7 @@ export type UserPageSearch = {
 };
 
 export function isUserColumnId(id: string): boolean {
-  return USER_COLUMN_ID_SET.has(id);
+  return USER_COLUMN_ID_SET.has(id) || (id.startsWith("score:") && id.length > "score:".length);
 }
 
 export function parseUsersSearch(search: Record<string, unknown>): UsersSearch {
@@ -62,7 +77,9 @@ export function parseUsersSearch(search: Record<string, unknown>): UsersSearch {
   const cols = parseCols(search.cols);
   const filter = parseString(search.filter, FILTER_MAX);
   const view = parseViewId(search.view);
+  const user = parseString(search.user, 256);
   return {
+    ...(user ? { user } : {}),
     ...(sort ? { sort } : {}),
     ...(order ? { order } : {}),
     ...(range ? { range } : {}),

@@ -15,7 +15,7 @@ use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
 use crate::routes::read::{
-    Deadline, READ_TIMEOUT, attach_session_scores, list_scope, open_query, page_limit, sort_order,
+    Deadline, attach_session_scores, list_scope, open_query, page_limit, sort_order,
 };
 
 /// End-user read routes. All are documented and need project view.
@@ -54,6 +54,7 @@ async fn list_users(
     Extension(access): Extension<ProjectAccess>,
     error::Query(params): error::Query<UserListParams>,
 ) -> Result<error::Json<Page<EndUserSummary>>, ApiError> {
+    let deadline = Deadline::start();
     let scope = list_scope(
         params.from,
         params.to,
@@ -70,12 +71,14 @@ async fn list_users(
             order: sort_order(params.order),
             limit: page_limit(params.limit),
             cursor: params.cursor.as_deref(),
-            timeout: READ_TIMEOUT,
+            timeout: deadline.remaining()?,
         },
     )
     .await?;
+    let mut users = convert::end_user_summaries(&page.batches)?;
+    attach_user_extras(&ctx, &mut users, params.filter.as_deref(), scope, deadline).await?;
     Ok(error::Json(Page {
-        data: convert::end_user_summaries(&page.batches)?,
+        data: users,
         next_cursor: page.next_cursor,
     }))
 }
@@ -97,12 +100,67 @@ async fn get_user(
     )
     .await?
     .ok_or(ApiError::NotFound)?;
-    let user = convert::end_user_summaries(std::slice::from_ref(&data.user))?
+    let mut user = convert::end_user_summaries(std::slice::from_ref(&data.user))?
         .pop()
         .ok_or(ApiError::NotFound)?;
+    let scope = storage::ListScope {
+        window: None,
+        include_eval: params.include_eval,
+        include_experiments: params.include_experiments,
+    };
+    attach_user_extras(&ctx, std::slice::from_mut(&mut user), None, scope, deadline).await?;
     let mut sessions: Vec<SessionSummary> = convert::session_summaries(&data.sessions)?;
     attach_session_scores(&ctx, &mut sessions, deadline).await?;
     Ok(error::Json(EndUserDetail { user, sessions }))
+}
+
+/// Fills `activity`, `scores` and `metadata` of each user (spec 09 § Observability data).
+///
+/// The activity window is the request's, or without one `[first_seen, last_seen]` of the users.
+/// A user without traces in scope gets an empty activity of zeros.
+async fn attach_user_extras(
+    ctx: &storage::QueryContext,
+    users: &mut [EndUserSummary],
+    filter: Option<&str>,
+    scope: storage::ListScope,
+    deadline: Deadline,
+) -> Result<(), ApiError> {
+    let Some(first) = users.iter().map(|user| user.first_seen).min() else {
+        return Ok(());
+    };
+    let last = users
+        .iter()
+        .map(|user| user.last_seen)
+        .max()
+        .unwrap_or(first);
+    let activity = match scope.window {
+        Some(window) => window,
+        None => storage::TimeWindow::new(first, last.saturating_add(1))?,
+    };
+    let ids: Vec<&str> = users.iter().map(|user| user.user_id.as_str()).collect();
+    let extras = storage::user_extras(
+        ctx,
+        storage::UserExtrasRequest {
+            filter,
+            scope,
+            user_ids: &ids,
+            activity,
+            timeout: deadline.remaining()?,
+        },
+    )
+    .await?;
+    let mut by_user = convert::user_extras(&extras)?;
+    for user in users.iter_mut() {
+        let extra = by_user.remove(&user.user_id).unwrap_or_default();
+        user.activity = if extra.activity.is_empty() {
+            vec![0; storage::ACTIVITY_BUCKETS]
+        } else {
+            extra.activity
+        };
+        user.scores = extra.scores;
+        user.metadata = extra.metadata;
+    }
+    Ok(())
 }
 
 fn user_sort(sort: UserSort) -> storage::UserSort {
@@ -110,6 +168,12 @@ fn user_sort(sort: UserSort) -> storage::UserSort {
         UserSort::LastSeen => storage::UserSort::LastSeen,
         UserSort::TraceCount => storage::UserSort::TraceCount,
         UserSort::CostTotal => storage::UserSort::CostTotal,
+        UserSort::SessionCount => storage::UserSort::SessionCount,
+        UserSort::TotalTokens => storage::UserSort::TotalTokens,
+        UserSort::ErrorCount => storage::UserSort::ErrorCount,
+        UserSort::ErrorRate => storage::UserSort::ErrorRate,
+        UserSort::TracesPerSession => storage::UserSort::TracesPerSession,
+        UserSort::FirstSeen => storage::UserSort::FirstSeen,
     }
 }
 
@@ -182,6 +246,63 @@ mod tests {
         assert_eq!(detail.sessions[0].trace_count, 2);
         assert_eq!(detail.sessions[0].scores.len(), 1);
         assert_eq!(detail.sessions[0].scores[0].name, "resolved");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_users_returns_activity_scores_and_metadata() {
+        let (app, seeded) = loaded().await;
+        let (status, body) = get_json(&app, &seeded, "/users").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let page: Page<EndUserSummary> = serde_json::from_value(body).unwrap();
+        let user = page.data.iter().find(|u| u.user_id == "user-42").unwrap();
+        assert_eq!(user.activity.len(), 24);
+        assert_eq!(user.activity.iter().sum::<i64>(), user.trace_count);
+        assert_eq!(user.error_trace_count, 0);
+        assert_eq!(user.metadata["name"], "\"Ada Example\"");
+        assert_eq!(user.metadata["plan"], "\"pro\"");
+        let helpfulness = user
+            .scores
+            .iter()
+            .find(|score| score.name == "helpfulness")
+            .unwrap();
+        assert_eq!(helpfulness.count, 2);
+        assert!((helpfulness.avg - 0.7).abs() < 1e-9, "{}", helpfulness.avg);
+        let thumbs = user
+            .scores
+            .iter()
+            .find(|score| score.name == "thumbs")
+            .unwrap();
+        assert_eq!(thumbs.count, 1);
+        assert!((thumbs.avg - 1.0).abs() < 1e-9, "{}", thumbs.avg);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_sorts_by_error_rate_desc() {
+        let (app, seeded) = loaded().await;
+        let (status, body) = get_json(&app, &seeded, "/users?sort=error_rate&order=desc").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let page: Page<EndUserSummary> = serde_json::from_value(body).unwrap();
+        let mut expected: Vec<(f64, &str)> = page
+            .data
+            .iter()
+            .map(|user| {
+                (
+                    user.error_trace_count as f64 / user.trace_count as f64,
+                    user.user_id.as_str(),
+                )
+            })
+            .collect();
+        expected.sort_by(|left, right| right.0.total_cmp(&left.0).then(right.1.cmp(left.1)));
+        let expected_ids: Vec<&str> = expected.iter().map(|(_, id)| *id).collect();
+        let ids: Vec<&str> = page.data.iter().map(|u| u.user_id.as_str()).collect();
+        assert_eq!(ids, expected_ids);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_accepts_total_tokens_sort() {
+        let (app, seeded) = loaded().await;
+        let (status, body) = get_json(&app, &seeded, "/users?sort=total_tokens&order=asc").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
     }
 
     #[tokio::test(flavor = "multi_thread")]

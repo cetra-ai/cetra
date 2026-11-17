@@ -22,7 +22,9 @@ it("keeps known column ids and drops the rest", () => {
   expect(parseUsersSearch({ cols: "nope, user, last_seen, user" })).toEqual({
     cols: "user,last_seen",
   });
-  expect(parseUsersSearch({ cols: "score:resolved" })).toEqual({});
+  expect(parseUsersSearch({ cols: "score:resolved, score:, activity" })).toEqual({
+    cols: "score:resolved,activity",
+  });
 });
 
 it("keeps the exclusion flags on the user page", () => {
@@ -30,4 +32,9 @@ it("keeps the exclusion flags on the user page", () => {
     eval: 1,
     exp: 1,
   });
+});
+
+it("keeps the open user and drops an empty one", () => {
+  expect(parseUsersSearch({ user: " user-42 " })).toEqual({ user: "user-42" });
+  expect(parseUsersSearch({ user: "   " })).toEqual({});
 });

@@ -282,7 +282,7 @@ export function DataTable<Row extends RowData>({
                     role="separator"
                     aria-orientation="vertical"
                     aria-label={`Resize ${label}`}
-                    className="absolute inset-y-0 right-0 w-1 cursor-col-resize"
+                    className="absolute inset-y-0 -right-1 z-10 w-2 cursor-col-resize after:absolute after:inset-y-1 after:left-1/2 after:w-px after:-translate-x-1/2 after:bg-transparent hover:after:bg-primary active:after:bg-primary"
                     onPointerDown={(event) =>
                       beginResize(event, header.column.id, header.getSize())
                     }

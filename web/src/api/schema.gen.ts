@@ -3826,6 +3826,11 @@ export interface components {
          */
         EndUserSummary: {
             /**
+             * @description Trace counts in 24 equal buckets: the request's `[from, to)`, or without one
+             *     `[first_seen, last_seen]` of the returned rows.
+             */
+            activity: number[];
+            /**
              * Format: double
              * @description Sum of trace costs, USD. Omitted when every trace omitted the field.
              */
@@ -3836,6 +3841,11 @@ export interface components {
              */
             error_count: number;
             /**
+             * Format: int64
+             * @description Traces whose status is `error`.
+             */
+            error_trace_count: number;
+            /**
              * Format: date-time
              * @description Earliest trace start, nanoseconds since the Unix epoch. JSON is RFC 3339.
              */
@@ -3845,6 +3855,12 @@ export interface components {
              * @description Latest trace end, nanoseconds since the Unix epoch. JSON is RFC 3339.
              */
             last_seen: string;
+            /** @description `user.*` keys of the latest trace's metadata, without the prefix. Omitted when empty. */
+            metadata?: {
+                [key: string]: string;
+            };
+            /** @description Average of each numeric and boolean score name over the user's traces. */
+            scores: components["schemas"]["UserScore"][];
             /**
              * Format: int64
              * @description Number of sessions.
@@ -7386,13 +7402,30 @@ export interface components {
             /** @description Display name. Omitted when the user has not set one. */
             name?: string;
         };
+        /** @description Average of one score name over a user's traces (spec 09 § Observability data). */
+        UserScore: {
+            /**
+             * Format: double
+             * @description Mean `value_num`; for booleans the share of `true`.
+             */
+            avg: number;
+            /**
+             * Format: int64
+             * @description Number of scores averaged.
+             */
+            count: number;
+            /** @description `numeric` or `boolean`. */
+            data_type: components["schemas"]["ScoreDataType"];
+            /** @description Score name. */
+            name: string;
+        };
         /**
          * @description Sort key for user lists.
          *
          *     Spec 09 § Observability data.
          * @enum {string}
          */
-        UserSort: "last_seen" | "trace_count" | "cost_total";
+        UserSort: "last_seen" | "trace_count" | "cost_total" | "session_count" | "total_tokens" | "error_count" | "error_rate" | "traces_per_session" | "first_seen";
         /** @description `POST /api/auth/email/verify`. */
         VerifyEmailRequest: {
             /** @description The token from the verification link. */

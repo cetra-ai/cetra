@@ -1,10 +1,4 @@
-import {
-  Maximize2,
-  Minimize2,
-  PanelBottom,
-  PanelRight,
-  PanelTop,
-} from "lucide-react";
+import { Maximize2, Minimize2, PanelBottom, PanelRight, PanelTop } from "lucide-react";
 import type { ComponentType } from "react";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";

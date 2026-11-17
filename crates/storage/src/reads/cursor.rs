@@ -1,8 +1,9 @@
 //! Keyset cursors for list queries.
 //!
 //! A cursor is the lowercase hex of a compact JSON object. Timestamps are
-//! stored as nanoseconds (`Int`). Float sort columns (`cost_total`) are JSON
-//! numbers decoded as `f64`, so an integer-valued cost stays a float. The
+//! stored as nanoseconds (`Int`). Float sort columns (`cost_total`,
+//! `error_rate`, `traces_per_session`) are JSON numbers decoded as `f64`, so an
+//! integer-valued cost stays a float. The
 //! number text is parsed with [`f64::from_str`]: serde_json's default parser
 //! is not a round trip, and one ulp makes the cursor's own row match `>`
 //! again, so a page walk never ends.
@@ -357,7 +358,7 @@ fn is_timestamp_column(column: &str) -> bool {
 }
 
 fn is_float_column(column: &str) -> bool {
-    column == "cost_total"
+    matches!(column, "cost_total" | "error_rate" | "traces_per_session")
 }
 
 fn take_rows(batches: Vec<RecordBatch>, limit: usize) -> Vec<RecordBatch> {

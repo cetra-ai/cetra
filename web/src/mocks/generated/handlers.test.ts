@@ -1,11 +1,71 @@
 import { expect, it } from "vitest";
 import type { Schema } from "@/api/types";
 import { createDataset } from "@/mocks/generated/dataset";
-import { largeHandlers } from "@/mocks/generated/handlers";
+import { compareUsers, largeHandlers } from "@/mocks/generated/handlers";
 import { server } from "@/mocks/node";
 
 const NOW = Date.parse("2026-06-01T00:00:00.000Z");
 const PROJECT = `${location.origin}/api/v1/projects/acme%2Fsupport-bot`;
+
+type User = Omit<Schema<"EndUserSummary">, "activity">;
+
+function user(overrides: Partial<User> & { user_id: string }): User {
+  return {
+    first_seen: "2026-01-01T00:00:00.000000000Z",
+    last_seen: "2026-01-02T00:00:00.000000000Z",
+    trace_count: 1,
+    session_count: 1,
+    error_count: 0,
+    error_trace_count: 0,
+    total_tokens: 0,
+    cost_total: 0,
+    scores: [],
+    metadata: {},
+    ...overrides,
+  };
+}
+
+function sortedIds(users: User[], sort: string, order: "asc" | "desc"): string[] {
+  return [...users]
+    .sort((left, right) => compareUsers(left, right, sort, order))
+    .map((row) => row.user_id);
+}
+
+it("puts null total_tokens last in both directions", () => {
+  const users = [
+    user({ user_id: "user-a", total_tokens: 5 }),
+    user({ user_id: "user-b", total_tokens: undefined }),
+    user({ user_id: "user-c", total_tokens: 2 }),
+  ];
+  expect(sortedIds(users, "total_tokens", "asc")).toEqual(["user-c", "user-a", "user-b"]);
+  expect(sortedIds(users, "total_tokens", "desc")).toEqual(["user-a", "user-c", "user-b"]);
+});
+
+it("breaks ties by user_id in the sort direction, nulls included", () => {
+  const users = [
+    user({ user_id: "user-b", total_tokens: 5 }),
+    user({ user_id: "user-a", total_tokens: 5 }),
+    user({ user_id: "user-y", total_tokens: undefined }),
+    user({ user_id: "user-x", total_tokens: undefined }),
+  ];
+  expect(sortedIds(users, "total_tokens", "asc")).toEqual(["user-a", "user-b", "user-x", "user-y"]);
+  expect(sortedIds(users, "total_tokens", "desc")).toEqual([
+    "user-b",
+    "user-a",
+    "user-y",
+    "user-x",
+  ]);
+});
+
+it("puts traces per session last when a user has no sessions", () => {
+  const users = [
+    user({ user_id: "user-x", trace_count: 4, session_count: 2 }),
+    user({ user_id: "user-y", trace_count: 3, session_count: 0 }),
+    user({ user_id: "user-z", trace_count: 1, session_count: 1 }),
+  ];
+  expect(sortedIds(users, "traces_per_session", "asc")).toEqual(["user-z", "user-x", "user-y"]);
+  expect(sortedIds(users, "traces_per_session", "desc")).toEqual(["user-x", "user-z", "user-y"]);
+});
 
 it("builds the same dataset for a seed, quickly", () => {
   const started = performance.now();
@@ -80,6 +140,16 @@ it("sorts traces by duration ascending", async () => {
   expect(durations).toEqual([...durations].sort((left, right) => left - right));
 });
 
+it("sorts users by error rate descending", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 400 });
+  server.use(...largeHandlers(dataset));
+  const response = await fetch(`${PROJECT}/users?sort=error_rate&order=desc&limit=1000`);
+  const body = (await response.json()) as Schema<"EndUserPage">;
+  const rates = body.data.map((user) => user.error_trace_count / user.trace_count);
+  expect(rates.length).toBeGreaterThan(1);
+  expect(rates).toEqual([...rates].sort((left, right) => right - left));
+});
+
 it("hides evaluation traces until include_eval", async () => {
   const dataset = createDataset({ seed: 1, now: NOW, traces: 400 });
   server.use(...largeHandlers(dataset));
@@ -149,6 +219,24 @@ it("keeps session and user totals equal to their traces", async () => {
     expect(user.cost_total).toBeCloseTo(
       rows.reduce((sum, trace) => sum + (trace.cost_total ?? 0), 0),
     );
+  }
+});
+
+it("gives each listed user 24 activity buckets, error traces and user metadata", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 200 });
+  server.use(...largeHandlers(dataset));
+  const users = (await (
+    await fetch(`${PROJECT}/users?limit=1000`)
+  ).json()) as Schema<"EndUserPage">;
+
+  expect(users.data.length).toBeGreaterThan(0);
+  for (const user of users.data) {
+    expect(user.activity).toHaveLength(24);
+    expect(user.activity.reduce((sum, count) => sum + count, 0)).toBe(user.trace_count);
+    expect(user.error_trace_count).toBeLessThanOrEqual(user.trace_count);
+    // Stored values are JSON-encoded strings (spec 01 § metadata), so the quotes are part of the value.
+    expect(user.metadata).toBeDefined();
+    expect(['"free"', '"pro"', '"team"']).toContain(user.metadata?.plan);
   }
 });
 

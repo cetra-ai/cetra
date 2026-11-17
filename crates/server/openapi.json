@@ -19580,9 +19580,20 @@
           "last_seen",
           "trace_count",
           "session_count",
-          "error_count"
+          "error_count",
+          "error_trace_count",
+          "activity",
+          "scores"
         ],
         "properties": {
+          "activity": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "description": "Trace counts in 24 equal buckets: the request's `[from, to)`, or without one\n`[first_seen, last_seen]` of the returned rows."
+          },
           "cost_total": {
             "type": "number",
             "format": "double",
@@ -19593,6 +19604,11 @@
             "format": "int64",
             "description": "Sum of the traces' `error_count`."
           },
+          "error_trace_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Traces whose status is `error`."
+          },
           "first_seen": {
             "type": "string",
             "format": "date-time",
@@ -19602,6 +19618,23 @@
             "type": "string",
             "format": "date-time",
             "description": "Latest trace end, nanoseconds since the Unix epoch. JSON is RFC 3339."
+          },
+          "metadata": {
+            "type": "object",
+            "description": "`user.*` keys of the latest trace's metadata, without the prefix. Omitted when empty.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "scores": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UserScore"
+            },
+            "description": "Average of each numeric and boolean score name over the user's traces."
           },
           "session_count": {
             "type": "integer",
@@ -26124,13 +26157,49 @@
           }
         }
       },
+      "UserScore": {
+        "type": "object",
+        "description": "Average of one score name over a user's traces (spec 09 § Observability data).",
+        "required": [
+          "name",
+          "data_type",
+          "avg",
+          "count"
+        ],
+        "properties": {
+          "avg": {
+            "type": "number",
+            "format": "double",
+            "description": "Mean `value_num`; for booleans the share of `true`."
+          },
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Number of scores averaged."
+          },
+          "data_type": {
+            "$ref": "#/components/schemas/ScoreDataType",
+            "description": "`numeric` or `boolean`."
+          },
+          "name": {
+            "type": "string",
+            "description": "Score name."
+          }
+        }
+      },
       "UserSort": {
         "type": "string",
         "description": "Sort key for user lists.\n\nSpec 09 § Observability data.",
         "enum": [
           "last_seen",
           "trace_count",
-          "cost_total"
+          "cost_total",
+          "session_count",
+          "total_tokens",
+          "error_count",
+          "error_rate",
+          "traces_per_session",
+          "first_seen"
         ]
       },
       "VerifyEmailRequest": {

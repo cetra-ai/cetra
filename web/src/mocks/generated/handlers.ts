@@ -1,6 +1,11 @@
 import { type HttpHandler, HttpResponse, http } from "msw";
 import type { Schema } from "@/api/types";
-import { type Dataset, visibleTraces } from "@/mocks/generated/dataset";
+import {
+  type Dataset,
+  type UserGroup,
+  userSummaries,
+  visibleTraces,
+} from "@/mocks/generated/dataset";
 import {
   type SpanStreamSource,
   type StreamEmit,
@@ -120,9 +125,19 @@ function listUsers(dataset: Dataset, request: Request): Response {
   }
   const rows = dataset
     .users(parsed.includeEval, parsed.includeExperiments)
-    .filter((user) => overlaps(user.first_seen, user.last_seen, parsed.from, parsed.to))
-    .sort((left, right) => compareUsers(left, right, parsed.sort, parsed.order));
-  return page(rows, parsed, ignoredFilter(parsed));
+    .filter((group) =>
+      overlaps(group.user.first_seen, group.user.last_seen, parsed.from, parsed.to),
+    )
+    .sort((left, right) => compareUsers(left.user, right.user, parsed.sort, parsed.order));
+  // Activity is filled for the returned page only, as the server does (spec 09).
+  const window =
+    parsed.from !== undefined && parsed.to !== undefined
+      ? { from: parsed.from, to: parsed.to }
+      : undefined;
+  const offset = parsed.offset;
+  const next = offset + parsed.limit < rows.length ? encodeCursor(offset + parsed.limit) : null;
+  const data = userSummaries(rows.slice(offset, offset + parsed.limit), window);
+  return HttpResponse.json({ data, next_cursor: next }, { headers: ignoredFilter(parsed) });
 }
 
 function oneUser(
@@ -368,23 +383,48 @@ function compareSessions(
   return (key(left) - key(right)) * direction;
 }
 
-function compareUsers(
-  left: Schema<"EndUserSummary">,
-  right: Schema<"EndUserSummary">,
+/** Nulls sort last in both directions; ties fall back to user_id in the same direction. */
+export function compareUsers(
+  left: UserGroup["user"],
+  right: UserGroup["user"],
   sort: string,
   order: Order,
 ): number {
   const direction = order === "asc" ? 1 : -1;
-  const key = (user: Schema<"EndUserSummary">) => {
-    if (sort === "trace_count") {
+  const leftKey = userSortKey(left, sort);
+  const rightKey = userSortKey(right, sort);
+  if (leftKey === null || rightKey === null) {
+    if (leftKey !== rightKey) {
+      return leftKey === null ? 1 : -1;
+    }
+  } else if (leftKey !== rightKey) {
+    return (leftKey - rightKey) * direction;
+  }
+  const byId = left.user_id < right.user_id ? -1 : left.user_id > right.user_id ? 1 : 0;
+  return byId * direction;
+}
+
+function userSortKey(user: UserGroup["user"], sort: string): number | null {
+  switch (sort) {
+    case "first_seen":
+      return Date.parse(user.first_seen);
+    case "trace_count":
       return user.trace_count;
-    }
-    if (sort === "cost_total") {
-      return user.cost_total ?? 0;
-    }
-    return Date.parse(user.last_seen);
-  };
-  return (key(left) - key(right)) * direction;
+    case "session_count":
+      return user.session_count;
+    case "traces_per_session":
+      return user.session_count > 0 ? user.trace_count / user.session_count : null;
+    case "total_tokens":
+      return user.total_tokens ?? null;
+    case "cost_total":
+      return user.cost_total ?? null;
+    case "error_count":
+      return user.error_count;
+    case "error_rate":
+      return user.trace_count > 0 ? user.error_trace_count / user.trace_count : null;
+    default:
+      return Date.parse(user.last_seen);
+  }
 }
 
 function inRange(start: string, from: number | undefined, to: number | undefined): boolean {

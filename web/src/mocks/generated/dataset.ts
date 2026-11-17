@@ -25,6 +25,8 @@ const MODELS = [
   "gemini-2.5-flash",
 ] as const;
 const TAGS = ["billing", "priority", "voice", "email", "retry"] as const;
+const USER_PLANS = ["free", "pro", "team"] as const;
+const USER_COUNTRIES = ["FR", "US", "DE", "JP"] as const;
 const KINDS = [
   "llm",
   "tool",
@@ -69,7 +71,7 @@ export type Dataset = {
     includeEval: boolean,
     includeExperiments: boolean,
   ): Schema<"SessionDetail"> | undefined;
-  users(includeEval: boolean, includeExperiments: boolean): Schema<"EndUserSummary">[];
+  users(includeEval: boolean, includeExperiments: boolean): UserGroup[];
   user(
     userId: string,
     includeEval: boolean,
@@ -145,7 +147,11 @@ export function createDataset(options: { seed: number; now: number; traces: numb
       const rows = visibleTraces(traces, includeEval, includeExperiments).filter(
         (trace) => trace.user_id === userId,
       );
-      const user = usersFrom(rows).find((item) => item.user_id === userId);
+      const group = usersFrom(rows).find((item) => item.user.user_id === userId);
+      if (!group) {
+        return undefined;
+      }
+      const user = userSummaries([group], undefined)[0];
       if (!user) {
         return undefined;
       }
@@ -204,6 +210,9 @@ function traceSummary(seed: number, index: number, now: number): Schema<"TraceSu
   if (experiment) {
     metadata["cetra.experiment_id"] = `exp-${String(index % 12).padStart(2, "0")}`;
   }
+  if (user) {
+    Object.assign(metadata, userTraceMetadata(user));
+  }
   const traceId = `a${index.toString(16).padStart(31, "0")}`;
   return {
     trace_id: traceId,
@@ -231,6 +240,18 @@ function traceSummary(seed: number, index: number, now: number): Schema<"TraceSu
     scores: index % 2 === 0 ? scoresFor(index) : [],
     ...(session ? { session_id: session } : {}),
     ...(user ? { user_id: user } : {}),
+  };
+}
+
+/** `user.*` metadata of a user's traces, derived from the id `user-NNN` so it is stable. Values are JSON-encoded (spec 01). */
+function userTraceMetadata(userId: string): Record<string, string> {
+  const index = Number.parseInt(userId.slice("user-".length), 10);
+  return {
+    "user.name": JSON.stringify(`User ${userId.slice("user-".length)}`),
+    "user.plan": JSON.stringify(USER_PLANS[index % USER_PLANS.length] ?? USER_PLANS[0]),
+    "user.country": JSON.stringify(
+      USER_COUNTRIES[index % USER_COUNTRIES.length] ?? USER_COUNTRIES[0],
+    ),
   };
 }
 
@@ -505,7 +526,16 @@ function sessionsFrom(traces: readonly Schema<"TraceSummary">[]): Schema<"Sessio
   });
 }
 
-function usersFrom(traces: readonly Schema<"TraceSummary">[]): Schema<"EndUserSummary">[] {
+/** A user summary without `activity`, which depends on the response's window (see `userSummaries`). */
+export type UserGroup = {
+  user: Omit<Schema<"EndUserSummary">, "activity">;
+  traces: Schema<"TraceSummary">[];
+};
+
+const ACTIVITY_BUCKETS = 24;
+const USER_METADATA_LIMIT = 20;
+
+function usersFrom(traces: readonly Schema<"TraceSummary">[]): UserGroup[] {
   const groups = new Map<string, Schema<"TraceSummary">[]>();
   for (const trace of traces) {
     if (!trace.user_id) {
@@ -522,17 +552,122 @@ function usersFrom(traces: readonly Schema<"TraceSummary">[]): Schema<"EndUserSu
     );
     const end = rows.reduce((latest, trace) => Math.max(latest, Date.parse(trace.end_time)), 0);
     const sessions = new Set(rows.flatMap((trace) => (trace.session_id ? [trace.session_id] : [])));
+    const metadata = userMetadata(latestTrace(rows).metadata);
     return {
-      user_id: userId,
-      first_seen: rfc3339(start),
-      last_seen: rfc3339(end),
-      trace_count: rows.length,
-      session_count: sessions.size,
-      error_count: rows.reduce((sum, trace) => sum + trace.error_count, 0),
-      cost_total: rows.reduce((sum, trace) => sum + (trace.cost_total ?? 0), 0),
-      total_tokens: rows.reduce((sum, trace) => sum + (trace.total_tokens ?? 0), 0),
+      user: {
+        user_id: userId,
+        first_seen: rfc3339(start),
+        last_seen: rfc3339(end),
+        trace_count: rows.length,
+        session_count: sessions.size,
+        error_count: rows.reduce((sum, trace) => sum + trace.error_count, 0),
+        error_trace_count: rows.filter((trace) => trace.status === "error").length,
+        cost_total: rows.reduce((sum, trace) => sum + (trace.cost_total ?? 0), 0),
+        total_tokens: rows.reduce((sum, trace) => sum + (trace.total_tokens ?? 0), 0),
+        scores: userScores(rows),
+        ...(metadata ? { metadata } : {}),
+      },
+      traces: rows,
     };
   });
+}
+
+/**
+ * Full user rows for a response. The window is the request's `[from, to)`, or without one
+ * `[min first_seen, max last_seen + 1)` over these groups, as the server does (spec 09).
+ */
+export function userSummaries(
+  groups: readonly UserGroup[],
+  window: { from: number; to: number } | undefined,
+): Schema<"EndUserSummary">[] {
+  if (groups.length === 0) {
+    return [];
+  }
+  const span = window ?? {
+    from: groups.reduce(
+      (earliest, group) => Math.min(earliest, Date.parse(group.user.first_seen)),
+      Infinity,
+    ),
+    to:
+      groups.reduce(
+        (latest, group) => Math.max(latest, Date.parse(group.user.last_seen)),
+        -Infinity,
+      ) + 1,
+  };
+  return groups.map((group) => ({ ...group.user, activity: activityOf(group.traces, span) }));
+}
+
+function activityOf(
+  traces: readonly Schema<"TraceSummary">[],
+  window: { from: number; to: number },
+): number[] {
+  const width = Math.max(1, Math.ceil((window.to - window.from) / ACTIVITY_BUCKETS));
+  const buckets = Array.from({ length: ACTIVITY_BUCKETS }, () => 0);
+  for (const trace of traces) {
+    const slot = Math.min(
+      ACTIVITY_BUCKETS - 1,
+      Math.max(0, Math.floor((Date.parse(trace.start_time) - window.from) / width)),
+    );
+    buckets[slot] = (buckets[slot] ?? 0) + 1;
+  }
+  return buckets;
+}
+
+/** The latest trace: greatest start, ties by greatest trace id. The group is never empty. */
+function latestTrace(rows: readonly Schema<"TraceSummary">[]): Schema<"TraceSummary"> {
+  return rows.reduce((best, trace) => {
+    const order = Date.parse(trace.start_time) - Date.parse(best.start_time);
+    return order > 0 || (order === 0 && trace.trace_id > best.trace_id) ? trace : best;
+  });
+}
+
+function userMetadata(metadata: Record<string, string>): Record<string, string> | undefined {
+  const keys = Object.keys(metadata)
+    .filter((key) => key.startsWith("user."))
+    .sort()
+    .slice(0, USER_METADATA_LIMIT);
+  if (keys.length === 0) {
+    return undefined;
+  }
+  return Object.fromEntries(keys.map((key) => [key.slice("user.".length), metadata[key] ?? ""]));
+}
+
+function userScores(rows: readonly Schema<"TraceSummary">[]): Schema<"UserScore">[] {
+  const groups = new Map<
+    string,
+    { name: string; data_type: "numeric" | "boolean"; sum: number; count: number }
+  >();
+  for (const trace of rows) {
+    for (const score of trace.scores) {
+      const { value } = score;
+      if (value.data_type !== "numeric" && value.data_type !== "boolean") {
+        continue;
+      }
+      const number = value.data_type === "boolean" ? (value.value ? 1 : 0) : value.value;
+      const key = JSON.stringify([score.name, value.data_type]);
+      const group = groups.get(key) ?? {
+        name: score.name,
+        data_type: value.data_type,
+        sum: 0,
+        count: 0,
+      };
+      group.sum += number;
+      group.count += 1;
+      groups.set(key, group);
+    }
+  }
+  return [...groups.values()]
+    .sort((left, right) =>
+      left.name === right.name
+        ? left.data_type.localeCompare(right.data_type)
+        : left.name.localeCompare(right.name),
+    )
+    .map((group) => ({
+      name: group.name,
+      data_type: group.data_type,
+      avg: group.sum / group.count,
+      count: group.count,
+    }));
 }
 
 function metricsFrom(

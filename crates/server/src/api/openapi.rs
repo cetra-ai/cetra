@@ -118,7 +118,7 @@ use super::traces::{
     TraceListParams, TraceSort, TraceStreamParams, TraceSummary,
 };
 use super::usage::{OrgUsage, UsageDay, UsageParams};
-use super::users::{EndUserDetail, EndUserSummary, UserListParams, UserSort};
+use super::users::{EndUserDetail, EndUserSummary, UserListParams, UserScore, UserSort};
 
 const PROJECT: &str = "/api/v1/projects/{project}";
 const COOKIE_NAME: &str = concat!(cetra_core::cetra_name!(), "_session");
@@ -261,6 +261,7 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<SessionDetail>();
     set.insert::<EndUserSummary>();
     set.insert::<EndUserDetail>();
+    set.insert::<UserScore>();
     set.insert::<Score>();
     set.insert::<ScoreCreate>();
     set.insert::<ScoreBatch>();

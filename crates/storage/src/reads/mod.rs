@@ -50,8 +50,9 @@ pub use traces::{
     span_list, span_refresh, trace_detail, trace_list, trace_list_plan, trace_refresh, trace_spans,
 };
 pub use users::{
-    MAX_USER_SESSIONS, USER_COLUMNS, UserDetailData, UserListRequest, UserSort, user_detail,
-    user_list,
+    ACTIVITY_BUCKETS, ERROR_TRACE_COUNT, MAX_USER_METADATA_KEYS, MAX_USER_SESSIONS, USER_COLUMNS,
+    UserDetailData, UserExtras, UserExtrasRequest, UserListRequest, UserSort, user_detail,
+    user_extras, user_list,
 };
 
 /// Sort direction for a list. Nulls are last in both directions.
