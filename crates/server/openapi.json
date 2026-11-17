@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "cetra API",
-    "description": "Observability read API. The rules are in docs/spec/09-api.md.",
+    "description": "The cetra REST API: traces, spans, sessions, users, scores, evaluation, datasets, experiments, alerts and administration. Authenticate with an API key (`sk-cetra-…`) or a personal access token (`pat-cetra-…`) as a bearer token.",
     "version": "0.0.0"
   },
   "paths": {

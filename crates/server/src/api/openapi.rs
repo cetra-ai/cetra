@@ -453,7 +453,7 @@ pub fn openapi() -> OpenApi {
                 .title(concat!(cetra_core::cetra_name!(), " API"))
                 .version(env!("CARGO_PKG_VERSION"))
                 .description(Some(
-                    "Observability read API. The rules are in docs/spec/09-api.md.",
+                    "The cetra REST API: traces, spans, sessions, users, scores, evaluation, datasets, experiments, alerts and administration. Authenticate with an API key (`sk-cetra-…`) or a personal access token (`pat-cetra-…`) as a bearer token.",
                 ))
                 .build(),
         )
