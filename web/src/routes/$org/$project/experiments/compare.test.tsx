@@ -47,22 +47,61 @@ it("shows the scores with deltas", async () => {
   }
 });
 
-it("highlights regressed items", async () => {
+it("marks regressed cells with a down arrow and a red tint", async () => {
   await renderApp(COMPARE_URL);
 
   const table = await screen.findByRole("table", { name: "Items" });
   const regressedRow = within(table)
     .getByText(/Can I export my traces/)
-    .closest("tr");
+    .closest("tr") as HTMLElement;
   const plainRow = within(table)
     .getByText(/Which plans include SSO/)
-    .closest("tr");
-  expect(regressedRow).toHaveAttribute("data-regressed", "true");
-  expect(within(regressedRow as HTMLElement).getByText("Regressed")).toBeInTheDocument();
-  expect(plainRow).not.toHaveAttribute("data-regressed");
+    .closest("tr") as HTMLElement;
+  const marker = within(regressedRow).getByTitle("Regressed");
+  expect(marker).toHaveTextContent("▼");
+  expect(within(marker).getByText("Regressed")).toHaveClass("sr-only");
+  expect(marker.closest("td")).toHaveClass("bg-status-error/10");
+  expect(within(plainRow).queryByTitle("Regressed")).toBeNull();
+  expect(within(plainRow).queryByTitle("Improved")).toBeNull();
 });
 
-it("passes the threshold and the regressions filter", async () => {
+it("marks improved cells with an up arrow and a green tint", async () => {
+  const improvedRow = comparisonFixture.rows[2];
+  const candidate = improvedRow?.cells.find((cell) => cell.experiment_id === CANDIDATE_ID);
+  if (!improvedRow || !candidate) {
+    throw new Error("the comparison fixture has no candidate cell for the third item");
+  }
+  server.use(
+    http.get(COMPARE_PATH, () =>
+      HttpResponse.json({
+        ...comparisonFixture,
+        rows: comparisonFixture.rows.map((row) =>
+          row === improvedRow
+            ? {
+                ...row,
+                cells: row.cells.map((cell) =>
+                  cell === candidate ? { ...cell, improved: true } : cell,
+                ),
+              }
+            : row,
+        ),
+        deltas: comparisonFixture.deltas.map((entry) => ({ ...entry, improved_items: 1 })),
+      }),
+    ),
+  );
+
+  await renderApp(COMPARE_URL);
+
+  const table = await screen.findByRole("table", { name: "Items" });
+  const row = within(table)
+    .getByText(/Which plans include SSO/)
+    .closest("tr") as HTMLElement;
+  const marker = within(row).getByTitle("Improved");
+  expect(marker).toHaveTextContent("▲");
+  expect(marker.closest("td")).toHaveClass("bg-status-ok/10");
+});
+
+it("passes the threshold and the only filter", async () => {
   const user = userEvent.setup();
   const requested: URLSearchParams[] = [];
   server.use(
@@ -77,20 +116,20 @@ it("passes the threshold and the regressions filter", async () => {
   const input = screen.getByRole("spinbutton", { name: "Regression threshold" });
   await user.clear(input);
   await user.type(input, "0.25");
-  await user.click(screen.getByRole("switch", { name: "Regressions only" }));
+  await user.click(screen.getByRole("button", { name: "Regressed" }));
 
   await waitFor(() =>
     expect(
       requested.some(
-        (params) => params.get("threshold") === "0.25" && params.get("regressions_only") === "true",
+        (params) => params.get("threshold") === "0.25" && params.get("only") === "regressed",
       ),
     ).toBe(true),
   );
   await waitFor(() => expect(router.state.location.href).toContain("threshold=0.25"));
-  expect(router.state.location.href).toContain("regressions=1");
+  expect(router.state.location.href).toContain("only=regressed");
 });
 
-it("reads the threshold and the regressions flag the router parses as numbers", async () => {
+it("reads the threshold and the only filter from the URL", async () => {
   const requested: URLSearchParams[] = [];
   server.use(
     http.get(COMPARE_PATH, ({ request }) => {
@@ -99,12 +138,13 @@ it("reads the threshold and the regressions flag the router parses as numbers", 
     }),
   );
 
-  await renderApp(`${COMPARE_URL}&threshold=0.25&regressions=1`);
+  await renderApp(`${COMPARE_URL}&threshold=0.25&only=regressed`);
 
   await screen.findByRole("table", { name: "Items" });
   expect(requested.at(-1)?.get("threshold")).toBe("0.25");
-  expect(requested.at(-1)?.get("regressions_only")).toBe("true");
+  expect(requested.at(-1)?.get("only")).toBe("regressed");
   expect(screen.getByRole("spinbutton", { name: "Regression threshold" })).toHaveValue(0.25);
+  expect(screen.getByRole("button", { name: "Regressed" })).toHaveAttribute("aria-pressed", "true");
 });
 
 it("updates the threshold field when the URL changes", async () => {
@@ -122,14 +162,14 @@ it("updates the threshold field when the URL changes", async () => {
   await waitFor(() => expect(input).toHaveValue(0.4));
 });
 
-it("says so when regressions-only has no rows and no next page", async () => {
+it("says so when the regressed filter has no rows and no next page", async () => {
   server.use(
     http.get(COMPARE_PATH, () =>
       HttpResponse.json({ ...comparisonFixture, rows: [], next_cursor: null }),
     ),
   );
 
-  await renderApp(`${COMPARE_URL}&regressions=1`);
+  await renderApp(`${COMPARE_URL}&only=regressed`);
 
   expect(await screen.findByText("No regressions at this threshold")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
@@ -142,7 +182,7 @@ it("shows Load more instead of the empty message when a page has a cursor", asyn
     ),
   );
 
-  await renderApp(`${COMPARE_URL}&regressions=1`);
+  await renderApp(`${COMPARE_URL}&only=regressed`);
 
   expect(await screen.findByRole("button", { name: "Load more" })).toBeInTheDocument();
   expect(screen.queryByText("No regressions at this threshold")).toBeNull();
@@ -222,8 +262,7 @@ it("matches cells by experiment id", async () => {
     .getByText(/Can I export my traces/)
     .closest("tr") as HTMLElement;
   expect(within(row).getByText("Not run")).toBeInTheDocument();
-  expect(within(row).getByText("No baseline output")).toBeInTheDocument();
-  expect(within(row).getByText(/"answer": "No\./)).toBeInTheDocument();
+  expect(within(row).getByText(/"answer":"No\./)).toBeInTheDocument();
 });
 
 it("explains a refused comparison", async () => {
@@ -277,4 +316,61 @@ it("is not the experiment page", async () => {
   await renderApp(COMPARE_URL);
 
   expect(await screen.findByRole("heading", { name: "Compare experiments" })).toBeInTheDocument();
+});
+
+it("sets the only filter from the improved and regressed counts", async () => {
+  const user = userEvent.setup();
+  const { router } = await renderApp(COMPARE_URL);
+  await screen.findByRole("table", { name: "Items" });
+
+  await user.click(screen.getByRole("button", { name: "1 regressed" }));
+
+  await waitFor(() => expect(router.state.location.href).toContain("only=regressed"));
+  expect(screen.getByRole("button", { name: "Regressed" })).toHaveAttribute("aria-pressed", "true");
+});
+
+it("opens the item from a row click and steps with the arrow keys", async () => {
+  const user = userEvent.setup();
+  const { router } = await renderApp(COMPARE_URL);
+  const table = await screen.findByRole("table", { name: "Items" });
+
+  await user.click(within(table).getByText(/Can I export my traces/));
+
+  const dialog = await screen.findByRole("dialog");
+  expect(within(dialog).getByRole("region", { name: "Input" })).toBeInTheDocument();
+  expect(new URL(router.state.location.href, "http://app.test").searchParams.get("item")).toBe(
+    fixtureRow(1).dataset_item_id,
+  );
+
+  await user.keyboard("{ArrowDown}");
+
+  await waitFor(() =>
+    expect(new URL(router.state.location.href, "http://app.test").searchParams.get("item")).toBe(
+      fixtureRow(2).dataset_item_id,
+    ),
+  );
+});
+
+it("shows the output diff in a candidate column of the item view", async () => {
+  const user = userEvent.setup();
+  await renderApp(`${COMPARE_URL}&item=${fixtureRow(1).dataset_item_id}`);
+
+  const dialog = await screen.findByRole("dialog");
+  const toggle = within(dialog).getAllByRole("button", { name: "Diff vs baseline" })[0];
+  expect(toggle).toHaveAttribute("aria-pressed", "false");
+  await user.click(toggle as HTMLElement);
+  expect(toggle).toHaveAttribute("aria-pressed", "true");
+});
+
+it("closes the item view and drops the item from the URL", async () => {
+  const user = userEvent.setup();
+  const { router } = await renderApp(`${COMPARE_URL}&item=${fixtureRow(0).dataset_item_id}`);
+
+  await screen.findByRole("dialog");
+  await user.keyboard("{Escape}");
+
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(
+    new URL(router.state.location.href, "http://app.test").searchParams.get("item"),
+  ).toBeNull();
 });

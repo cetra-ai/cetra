@@ -28,7 +28,8 @@
           "min": 0.0,
           "max": 1.0,
           "pass_rate": 0.6666666666666666,
-          "labels": {}
+          "labels": {},
+          "histogram": []
         },
         {
           "name": "quality",
@@ -38,7 +39,19 @@
           "median": 0.5,
           "min": 0.5,
           "max": 1.0,
-          "labels": {}
+          "labels": {},
+          "histogram": [
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1
+          ]
         }
       ],
       "result_count": 3,
@@ -76,7 +89,8 @@
           "min": 0.0,
           "max": 1.0,
           "pass_rate": 0.3333333333333333,
-          "labels": {}
+          "labels": {},
+          "histogram": []
         },
         {
           "name": "quality",
@@ -86,7 +100,19 @@
           "median": 0.5,
           "min": 0.0,
           "max": 1.0,
-          "labels": {}
+          "labels": {},
+          "histogram": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            1
+          ]
         }
       ],
       "result_count": 3,
@@ -103,13 +129,19 @@
       "scores": {
         "exact": {
           "delta": -0.3333333333333333,
-          "n_compared": 3
+          "n_compared": 3,
+          "improved": 0,
+          "regressed": 1
         },
         "quality": {
           "delta": -0.16666666666666663,
-          "n_compared": 3
+          "n_compared": 3,
+          "improved": 0,
+          "regressed": 1
         }
-      }
+      },
+      "improved_items": 0,
+      "regressed_items": 1
     }
   ],
   "warnings": [],
@@ -134,7 +166,8 @@
             "exact": 1.0,
             "quality": 1.0
           },
-          "regressed": false
+          "regressed": false,
+          "improved": false
         },
         {
           "experiment_id": "01900000-0000-7000-8000-000000000e02",
@@ -147,7 +180,8 @@
             "exact": 1.0,
             "quality": 1.0
           },
-          "regressed": false
+          "regressed": false,
+          "improved": false
         }
       ]
     },
@@ -171,7 +205,8 @@
             "exact": 1.0,
             "quality": 0.5
           },
-          "regressed": false
+          "regressed": false,
+          "improved": false
         },
         {
           "experiment_id": "01900000-0000-7000-8000-000000000e02",
@@ -184,7 +219,8 @@
             "exact": 0.0,
             "quality": 0.0
           },
-          "regressed": true
+          "regressed": true,
+          "improved": false
         }
       ]
     },
@@ -205,7 +241,8 @@
             "exact": 0.0,
             "quality": 0.5
           },
-          "regressed": false
+          "regressed": false,
+          "improved": false
         },
         {
           "experiment_id": "01900000-0000-7000-8000-000000000e02",
@@ -218,7 +255,8 @@
             "exact": 0.0,
             "quality": 0.5
           },
-          "regressed": false
+          "regressed": false,
+          "improved": false
         }
       ]
     }

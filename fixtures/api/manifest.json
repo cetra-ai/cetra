@@ -169,6 +169,16 @@
     "file": "static/experiment-results.json"
   },
   {
+    "operation_id": "get_experiment_summaries",
+    "path_params": {},
+    "query": {
+      "ids": "01900000-0000-7000-8000-000000000e02,01900000-0000-7000-8000-000000000e01"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/experiment-summaries.json"
+  },
+  {
     "operation_id": "get_invite_preview",
     "path_params": {
       "token": "EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0EXA"

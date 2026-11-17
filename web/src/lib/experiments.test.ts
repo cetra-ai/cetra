@@ -3,15 +3,24 @@ import type { Schema } from "@/api/types";
 import {
   compareBlockReason,
   compareIdList,
+  datasetKey,
   deltaDirection,
   deltaText,
   expectedRuns,
+  headlineText,
+  headlineValue,
   isLiveExperiment,
+  itemKey,
+  itemShortId,
+  metadataTags,
   parseCompareSearch,
   parseExperimentSearch,
   parseExperimentsSearch,
+  parseItemKey,
+  previousRuns,
   scoreSummaryText,
   scoreValueText,
+  summaryChunks,
 } from "./experiments";
 
 const A = "01900000-0000-7000-8000-00000000ea01";
@@ -21,7 +30,7 @@ const D = "01900000-0000-7000-8000-00000000ed04";
 const E = "01900000-0000-7000-8000-00000000ee05";
 
 function summary(partial: Partial<Schema<"ScoreSummary">>): Schema<"ScoreSummary"> {
-  return { name: "score", data_type: "numeric", count: 40, labels: {}, ...partial };
+  return { name: "score", data_type: "numeric", count: 40, labels: {}, histogram: [], ...partial };
 }
 
 describe("parseCompareSearch", () => {
@@ -42,13 +51,23 @@ describe("parseCompareSearch", () => {
     expect(parseCompareSearch({ ids: A, threshold: "1001" }).threshold).toBeUndefined();
   });
 
-  it("reads the regressions flag", () => {
-    expect(parseCompareSearch({ ids: A, regressions: "1" }).regressions).toBe(1);
-    expect(parseCompareSearch({ ids: A }).regressions).toBeUndefined();
+  it("reads the only filter and drops other values", () => {
+    expect(parseCompareSearch({ ids: A, only: "regressed" }).only).toBe("regressed");
+    expect(parseCompareSearch({ ids: A, only: "improved" }).only).toBe("improved");
+    expect(parseCompareSearch({ ids: A, only: "changed" }).only).toBe("changed");
+    expect(parseCompareSearch({ ids: A, only: "all" }).only).toBeUndefined();
+    expect(parseCompareSearch({ ids: A, only: 1 }).only).toBeUndefined();
+    expect(parseCompareSearch({ ids: A }).only).toBeUndefined();
+  });
+
+  it("reads the item only as a UUID", () => {
+    expect(parseCompareSearch({ ids: A, item: B }).item).toBe(B);
+    expect(parseCompareSearch({ ids: A, item: "x" }).item).toBeUndefined();
+    expect(parseCompareSearch({ ids: A }).item).toBeUndefined();
   });
 
   it("reads the router's numeric values (TanStack parses the URL as JSON)", () => {
-    expect(parseCompareSearch({ ids: A, regressions: 1 }).regressions).toBe(1);
+    expect(parseCompareSearch({ ids: A, only: "improved", threshold: 0.5 }).only).toBe("improved");
     expect(parseCompareSearch({ ids: A, threshold: 0.25 }).threshold).toBe(0.25);
     expect(parseCompareSearch({ ids: A, threshold: 0 }).threshold).toBe(0);
     expect(parseCompareSearch({ ids: A, threshold: 1000 }).threshold).toBe(1000);
@@ -79,6 +98,30 @@ describe("parseExperimentsSearch and parseExperimentSearch", () => {
     expect(parseExperimentSearch({ errors: 1 })).toEqual({ errors: 1 });
     expect(parseExperimentSearch({ errors: 0 })).toEqual({});
     expect(parseExperimentSearch({})).toEqual({});
+  });
+
+  it("keeps an item key only when it is a UUID, a colon and a repetition", () => {
+    expect(parseExperimentSearch({ item: `${A}:0` })).toEqual({ item: `${A}:0` });
+    expect(parseExperimentSearch({ item: `${A}:12` })).toEqual({ item: `${A}:12` });
+    expect(parseExperimentSearch({ item: A })).toEqual({});
+    expect(parseExperimentSearch({ item: `${A}:-1` })).toEqual({});
+    expect(parseExperimentSearch({ item: `${A}:01` })).toEqual({});
+    expect(parseExperimentSearch({ item: `faq:0` })).toEqual({});
+  });
+});
+
+describe("itemKey and parseItemKey", () => {
+  it("round-trips an item key", () => {
+    const key = itemKey({ dataset_item_id: A, repetition: 2 });
+    expect(key).toBe(`${A}:2`);
+    expect(parseItemKey(key)).toEqual({ datasetItemId: A, repetition: 2 });
+  });
+
+  it("rejects malformed keys", () => {
+    expect(parseItemKey("")).toBeUndefined();
+    expect(parseItemKey(A)).toBeUndefined();
+    expect(parseItemKey(`${A}:x`)).toBeUndefined();
+    expect(parseItemKey(`${A}:1:2`)).toBeUndefined();
   });
 });
 
@@ -215,5 +258,105 @@ describe("compareBlockReason", () => {
     expect(compareBlockReason([gone, experiment("c")])).toBe(
       "Pick experiments of the same dataset",
     );
+  });
+});
+
+describe("parseExperimentsSearch status and experiment", () => {
+  it("keeps a known status and a UUID experiment, and drops the rest", () => {
+    expect(parseExperimentsSearch({ status: "failed", experiment: A })).toEqual({
+      status: "failed",
+      experiment: A,
+    });
+    expect(parseExperimentsSearch({ status: "done", experiment: "nope" })).toEqual({});
+  });
+});
+
+describe("datasetKey", () => {
+  it("is the dataset id, or the name of a deleted dataset", () => {
+    expect(datasetKey({ dataset_id: A, dataset_name: "faq" } as Schema<"Experiment">)).toBe(A);
+    expect(datasetKey({ dataset_name: "faq" } as Schema<"Experiment">)).toBe("deleted:faq");
+  });
+});
+
+describe("previousRuns", () => {
+  const run = (id: string, extra: Record<string, unknown> = {}) =>
+    ({ id, dataset_id: A, dataset_name: "faq", ...extra }) as Schema<"Experiment">;
+
+  it("maps each run to the next older run of its dataset, newest first", () => {
+    const rows = [run(C), run(B, { dataset_id: D }), run(B.replace("eb02", "eb03")), run(A)];
+    const previous = previousRuns(rows);
+    expect(previous.get(C)).toBe(B.replace("eb02", "eb03"));
+    expect(previous.get(B.replace("eb02", "eb03"))).toBe(A);
+    expect(previous.has(A)).toBe(false);
+    expect(previous.has(B)).toBe(false);
+  });
+
+  it("treats a deleted dataset's runs as one dataset by name", () => {
+    const rows = [run(C, { dataset_id: undefined }), run(B, { dataset_id: undefined })];
+    expect(previousRuns(rows).get(C)).toBe(B);
+  });
+});
+
+describe("headlineValue and headlineText", () => {
+  it("headlines numeric by mean and boolean by pass rate", () => {
+    const numeric = summary({ data_type: "numeric", mean: 0.5 });
+    expect(headlineValue(numeric)).toBe(0.5);
+    expect(headlineText(numeric)).toBe("0.500");
+    const boolean = summary({ data_type: "boolean", pass_rate: 2 / 3 });
+    expect(headlineValue(boolean)).toBeCloseTo(2 / 3);
+    expect(headlineText(boolean)).toBe("66.7 %");
+    expect(headlineText(summary({ data_type: "boolean", pass_rate: 1 }))).toBe("100 %");
+  });
+
+  it("has no headline value for categorical or text scores", () => {
+    expect(headlineValue(summary({ data_type: "categorical" }))).toBeUndefined();
+    expect(headlineText(summary({ data_type: "categorical" }))).toBe("—");
+    expect(headlineText(summary({ data_type: "text", count: 0 }))).toBe("—");
+    expect(headlineText(summary({ data_type: "numeric" }))).toBe("—");
+  });
+
+  it("headlines a categorical score by its top label and a text score by its count", () => {
+    const categorical = summary({
+      data_type: "categorical",
+      labels: { formal: 1, friendly: 2, curt: 2 },
+    });
+    expect(headlineText(categorical)).toBe("curt 40 %");
+    expect(headlineText(summary({ data_type: "text", count: 12 }))).toBe("n 12");
+  });
+});
+
+describe("itemShortId", () => {
+  it("keeps the last 8 characters", () => {
+    expect(itemShortId("01900000-0000-7000-8000-000000000d01")).toBe("00000d01");
+  });
+});
+
+describe("metadataTags", () => {
+  it("keeps strings, numbers and booleans in order, and cuts long strings", () => {
+    expect(
+      metadataTags({
+        model: "gpt",
+        temperature: 0.2,
+        cached: false,
+        nested: { a: 1 },
+        empty: null,
+        prompt: "x".repeat(41),
+      }),
+    ).toEqual([
+      ["model", "gpt"],
+      ["temperature", "0.2"],
+      ["cached", "false"],
+      ["prompt", `${"x".repeat(40)}…`],
+    ]);
+  });
+});
+
+describe("summaryChunks", () => {
+  it("splits the rows into runs of at most 25, in order", () => {
+    const rows = Array.from({ length: 51 }, (_, index) => index);
+    const chunks = summaryChunks(rows);
+    expect(chunks.map((chunk) => chunk.length)).toEqual([25, 25, 1]);
+    expect(chunks.flat()).toEqual(rows);
+    expect(summaryChunks([])).toEqual([]);
   });
 });

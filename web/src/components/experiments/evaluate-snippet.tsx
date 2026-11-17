@@ -47,7 +47,7 @@ export function EvaluateSnippet({ datasetName }: { datasetName?: string }) {
       </TabsList>
       <TabsContent value="python">
         <div className="relative">
-          <pre className="overflow-x-auto rounded-md border bg-muted p-3 text-caption">
+          <pre className="overflow-x-auto rounded-md border bg-muted p-3 text-body">
             <code>{snippets.python}</code>
           </pre>
           <div className="absolute top-2 right-2">
@@ -57,7 +57,7 @@ export function EvaluateSnippet({ datasetName }: { datasetName?: string }) {
       </TabsContent>
       <TabsContent value="typescript">
         <div className="relative">
-          <pre className="overflow-x-auto rounded-md border bg-muted p-3 text-caption">
+          <pre className="overflow-x-auto rounded-md border bg-muted p-3 text-body">
             <code>{snippets.typescript}</code>
           </pre>
           <div className="absolute top-2 right-2">

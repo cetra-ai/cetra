@@ -17,7 +17,8 @@ type SplitName =
   | "session"
   | "users"
   | "alerts"
-  | "online-rules";
+  | "online-rules"
+  | "experiments";
 
 export type SplitMode = "split" | "bottom" | "drawer" | "page";
 
@@ -29,6 +30,7 @@ const PANES = {
   users: { start: "users-list", end: "users-detail", startSize: 40 },
   alerts: { start: "alerts-list", end: "alerts-detail", startSize: 40 },
   "online-rules": { start: "online-rules-list", end: "online-rules-detail", startSize: 40 },
+  experiments: { start: "experiments-list", end: "experiments-detail", startSize: 40 },
 } as const;
 
 type SplitPaneProps = {

@@ -6,6 +6,7 @@ import {
   userSummaries,
   visibleTraces,
 } from "@/mocks/generated/dataset";
+import { experimentHandlers } from "@/mocks/generated/experiments";
 import {
   type SpanStreamSource,
   type StreamEmit,
@@ -44,6 +45,43 @@ const SCORE_DEFINITIONS: Schema<"ScoreDefinition">[] = [
     created_at: DEFINED_AT,
     updated_at: DEFINED_AT,
   },
+  {
+    id: "01900000-0000-7000-8000-000000000613",
+    name: "exact",
+    data_type: "boolean",
+    categories: [],
+    description: "Whether the answer matches the expected output.",
+    direction: "higher",
+    created_at: DEFINED_AT,
+    updated_at: DEFINED_AT,
+  },
+  {
+    id: "01900000-0000-7000-8000-000000000614",
+    name: "quality",
+    data_type: "numeric",
+    categories: [],
+    min_value: 0,
+    max_value: 1,
+    description: "How good the answer is, from 0 to 1.",
+    direction: "higher",
+    created_at: DEFINED_AT,
+    updated_at: DEFINED_AT,
+  },
+  {
+    id: "01900000-0000-7000-8000-000000000615",
+    name: "tone",
+    data_type: "categorical",
+    categories: [
+      { label: "neutral" },
+      { label: "friendly" },
+      { label: "formal" },
+      { label: "curt" },
+    ],
+    description: "The tone of the answer.",
+    direction: "none",
+    created_at: DEFINED_AT,
+    updated_at: DEFINED_AT,
+  },
 ];
 
 export function largeHandlers(dataset: Dataset): HttpHandler[] {
@@ -68,6 +106,7 @@ export function largeHandlers(dataset: Dataset): HttpHandler[] {
     http.get(`${PROJECT}/score-definitions`, () =>
       HttpResponse.json({ data: SCORE_DEFINITIONS, next_cursor: null }),
     ),
+    ...experimentHandlers(),
   ];
 }
 

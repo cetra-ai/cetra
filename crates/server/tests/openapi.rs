@@ -635,6 +635,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "compare_experiments",
     ),
     (
+        "get",
+        "/api/v1/projects/{project}/experiments/summaries",
+        "get_experiment_summaries",
+    ),
+    (
         "delete",
         "/api/v1/projects/{project}/experiments/{id}",
         "delete_experiment",
@@ -739,6 +744,7 @@ const READ_OPERATIONS: &[&str] = &[
     "compare_experiments",
     "get_evaluator_stats",
     "get_online_rule_stats",
+    "get_experiment_summaries",
 ];
 
 const TAGS: &[&str] = &[

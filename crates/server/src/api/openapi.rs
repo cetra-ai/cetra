@@ -70,11 +70,11 @@ use super::evaluators::{
     TestEvaluatorBody, UpdateEvaluatorRequest,
 };
 use super::experiments::{
-    CompareCell, CompareParams, CompareRow, CreateExperimentRequest, CreateExperimentResponse,
-    Experiment, ExperimentComparison, ExperimentListParams, ExperimentResult, ExperimentResults,
-    ExperimentResultsRequest, ExperimentResultsResponse, ExperimentStatus, ExperimentSummary,
-    FinishExperimentRequest, ResultRow, ResultScore, ResultsParams, ScoreDelta, ScoreDeltas,
-    ScoreSummary,
+    CompareCell, CompareOnly, CompareParams, CompareRow, CreateExperimentRequest,
+    CreateExperimentResponse, Experiment, ExperimentComparison, ExperimentListParams,
+    ExperimentResult, ExperimentResults, ExperimentResultsRequest, ExperimentResultsResponse,
+    ExperimentStatus, ExperimentSummaries, ExperimentSummary, FinishExperimentRequest, ResultRow,
+    ResultScore, ResultsParams, ScoreDelta, ScoreDeltas, ScoreSummary, SummariesParams,
 };
 use super::internal::{
     CreateInternalOrgRequest, InternalDrop, InternalDropKind, InternalDropsQuery, InternalMember,
@@ -353,6 +353,8 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<ScoreDelta>();
     set.insert::<ScoreDeltas>();
     set.insert::<ExperimentComparison>();
+    set.insert::<CompareOnly>();
+    set.insert::<ExperimentSummaries>();
     set.insert::<ModelPriceScope>();
     set.insert::<ModelPriceTier>();
     set.insert::<ModelPrice>();
@@ -3427,6 +3429,21 @@ fn experiment_paths(paths: PathsBuilder) -> PathsBuilder {
             READ_ERRORS,
         ))
         .build();
+    let summaries = operation(
+        "get_experiment_summaries",
+        "experiments",
+        "Get experiment summaries",
+    )
+    .description(Some(EXPERIMENT_READ))
+    .parameters(Some(with_query::<SummariesParams>(vec![project_param()])))
+    .responses(responses(
+        "200",
+        json_of::<ExperimentSummaries>(
+            "The summaries of the experiments found, in request order, and the ids too large to summarize.",
+        ),
+        READ_ERRORS,
+    ))
+    .build();
     let finish = operation(
         "post_experiment_finish",
         "experiments",
@@ -3473,6 +3490,10 @@ fn experiment_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/experiments/compare"),
             PathItem::new(HttpMethod::Get, compare),
+        )
+        .path(
+            format!("{PROJECT}/experiments/summaries"),
+            PathItem::new(HttpMethod::Get, summaries),
         )
 }
 

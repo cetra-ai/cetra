@@ -2,6 +2,7 @@
 //! read; `ManageDatasets` writes. A hidden experiment (D-J-14) is 404 on every route but `DELETE`.
 
 use std::collections::{HashMap, HashSet};
+use std::ops::RangeInclusive;
 
 use axum::extract::{DefaultBodyLimit, Extension, State};
 use axum::http::{Method, StatusCode};
@@ -22,9 +23,10 @@ use crate::api::experiments::{
     CLOCK_SKEW_NS, CREATE_ITEMS_PAGE, CompareParams, CreateExperimentRequest,
     CreateExperimentResponse, Experiment, ExperimentComparison, ExperimentListParams,
     ExperimentResult, ExperimentResults, ExperimentResultsRequest, ExperimentResultsResponse,
-    ExperimentStatus, FinishExperimentRequest, MAX_ERROR_CHARS, MAX_EXPERIMENT_ROWS,
-    MAX_METADATA_BYTES, MAX_NAME_CHARS, MAX_OUTPUT_BYTES, MAX_OUTPUTS_PER_REQUEST, MAX_REPETITIONS,
-    MAX_RESULTS_PER_REQUEST, RESULTS_BODY_LIMIT, ResultsParams,
+    ExperimentStatus, ExperimentSummaries, FinishExperimentRequest, MAX_ERROR_CHARS,
+    MAX_EXPERIMENT_ROWS, MAX_METADATA_BYTES, MAX_NAME_CHARS, MAX_OUTPUT_BYTES,
+    MAX_OUTPUTS_PER_REQUEST, MAX_REPETITIONS, MAX_RESULTS_PER_REQUEST, RESULTS_BODY_LIMIT,
+    ResultsParams, SummariesParams,
 };
 use crate::auth::principal::Principal;
 use crate::auth::roles::ProjectPerm;
@@ -132,6 +134,16 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             },
             documented: true,
             handler: get(compare_experiments),
+        },
+        RouteDef {
+            method: Method::GET,
+            path: "/api/v1/projects/{project}/experiments/summaries",
+            access: Access::Project {
+                perm: ProjectPerm::View,
+                session_only: false,
+            },
+            documented: true,
+            handler: get(get_experiment_summaries),
         },
     ]
 }
@@ -790,40 +802,56 @@ const COMPARE_READ_CHUNK: usize = 50;
 const DEFAULT_THRESHOLD: f64 = 0.1;
 /// The largest regression threshold a comparison takes (D-J-13).
 const MAX_THRESHOLD: f64 = 1_000.0;
+/// The experiments of one `GET …/experiments/summaries` (D-J-20).
+const MAX_SUMMARY_IDS: usize = 25;
 
-/// The 400 of an experiment that is too large to summarize. Storage refuses a read with
-/// `InvalidRequest` only past its score or trace cap (D-J-13), and the experiment id is a
-/// formatted UUID, so no other `InvalidRequest` reaches this mapping.
-fn too_large(error: RunError) -> ApiError {
-    match error {
-        RunError::InvalidRequest(_) => ApiError::BadRequest {
-            detail: Some(format!(
-                "the experiment is too large to summarize: it has more than {MAX_EXPERIMENT_SCORES} scores or {MAX_EXPERIMENT_TRACES} traces"
-            )),
-            errors: Vec::new(),
-        },
-        other => ApiError::from(other),
+/// The 400 of an experiment that a route needs summarized and that is too large to summarize.
+fn too_large_error() -> ApiError {
+    ApiError::BadRequest {
+        detail: Some(format!(
+            "the experiment is too large to summarize: it has more than {MAX_EXPERIMENT_SCORES} scores or {MAX_EXPERIMENT_TRACES} traces"
+        )),
+        errors: Vec::new(),
     }
 }
 
 /// Loads one experiment: its result keys, and its scores and traces from storage, read from the
-/// experiment's `created_at` less the clock skew (D-J-13).
+/// experiment's `created_at` less the clock skew (D-J-13). `None` when storage refuses one of the
+/// reads past its cap, which is the experiment being too large to summarize. Storage refuses a
+/// read with `InvalidRequest` only past that cap, and the experiment id is a formatted UUID, so
+/// no other `InvalidRequest` reaches this match.
+async fn load_if_summarizable(
+    state: &AppState,
+    ctx: &QueryContext,
+    row: ExperimentRow,
+    deadline: Deadline,
+) -> Result<Option<Loaded>, ApiError> {
+    let keys = store::result_keys(state.meta.reader(), row.id).await?;
+    let since = row.created_at.saturating_sub(CLOCK_SKEW_NS);
+    let id = row.id.to_string();
+    let scores = match experiment_scores(ctx, &id, since, deadline.remaining()?).await {
+        Ok(scores) => scores,
+        Err(RunError::InvalidRequest(_)) => return Ok(None),
+        Err(error) => return Err(ApiError::from(error)),
+    };
+    let traces = match experiment_traces(ctx, &id, since, deadline.remaining()?).await {
+        Ok(traces) => traces,
+        Err(RunError::InvalidRequest(_)) => return Ok(None),
+        Err(error) => return Err(ApiError::from(error)),
+    };
+    Loaded::new(row, keys, &scores, &traces).map(Some)
+}
+
+/// [`load_if_summarizable`] for a route that answers for the experiment: too large is a 400.
 async fn load(
     state: &AppState,
     ctx: &QueryContext,
     row: ExperimentRow,
     deadline: Deadline,
 ) -> Result<Loaded, ApiError> {
-    let keys = store::result_keys(state.meta.reader(), row.id).await?;
-    let since = row.created_at.saturating_sub(CLOCK_SKEW_NS);
-    let id = row.id.to_string();
-    let scores = experiment_scores(ctx, &id, since, deadline.remaining()?)
-        .await
-        .map_err(too_large)?;
-    let traces = experiment_traces(ctx, &id, since, deadline.remaining()?)
-        .await
-        .map_err(too_large)?;
-    Loaded::new(row, keys, &scores, &traces)
+    load_if_summarizable(state, ctx, row, deadline)
+        .await?
+        .ok_or_else(too_large_error)
 }
 
 async fn get_results(
@@ -873,12 +901,16 @@ async fn get_results(
     }))
 }
 
-/// The ids of a comparison: two to four distinct experiment ids, in request order (400
-/// otherwise).
-fn compare_ids(raw: &str) -> Result<Vec<Uuid>, ApiError> {
+/// Comma-separated experiment ids, in request order: distinct, and a count within `bounds`. Any
+/// other input is a 400 on `ids`, with `message`.
+fn parse_ids(
+    raw: &str,
+    bounds: RangeInclusive<usize>,
+    message: &str,
+) -> Result<Vec<Uuid>, ApiError> {
     let invalid = || ApiError::BadRequest {
         detail: None,
-        errors: vec![field_error("ids", "ids must be 2 to 4 experiment ids")],
+        errors: vec![field_error("ids", message)],
     };
     let ids = raw
         .split(',')
@@ -886,11 +918,48 @@ fn compare_ids(raw: &str) -> Result<Vec<Uuid>, ApiError> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| invalid())?;
     let distinct: HashSet<Uuid> = ids.iter().copied().collect();
-    if (2..=4).contains(&ids.len()) && distinct.len() == ids.len() {
+    if bounds.contains(&ids.len()) && distinct.len() == ids.len() {
         Ok(ids)
     } else {
         Err(invalid())
     }
+}
+
+/// `GET …/experiments/summaries`: the summaries of one to 25 experiments, in request order (D-J-20).
+/// Unknown and hidden experiments are left out; a too-large experiment is listed in `skipped`.
+async fn get_experiment_summaries(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Query(params): error::Query<SummariesParams>,
+) -> Result<error::Json<ExperimentSummaries>, ApiError> {
+    let project = access.project.id;
+    let org = access.project.org_id;
+    let ids = parse_ids(
+        &params.ids,
+        1..=MAX_SUMMARY_IDS,
+        "ids must be 1 to 25 distinct experiment ids",
+    )?;
+    let visible = visible_from(&state, org);
+    let mut found: HashMap<Uuid, ExperimentRow> =
+        store::get_many(state.meta.reader(), project, &ids, visible)
+            .await?
+            .into_iter()
+            .map(|row| (row.id, row))
+            .collect();
+    let ctx = open_query(&state, org, project, None).await?;
+    let deadline = Deadline::start();
+    let mut data = Vec::with_capacity(found.len());
+    let mut skipped = Vec::new();
+    for id in &ids {
+        let Some(row) = found.remove(id) else {
+            continue;
+        };
+        match load_if_summarizable(&state, &ctx, row, deadline).await? {
+            Some(loaded) => data.push(summary(&loaded)?),
+            None => skipped.push(*id),
+        }
+    }
+    Ok(error::Json(ExperimentSummaries { data, skipped }))
 }
 
 async fn compare_experiments(
@@ -900,7 +969,7 @@ async fn compare_experiments(
 ) -> Result<error::Json<ExperimentComparison>, ApiError> {
     let project = access.project.id;
     let org = access.project.org_id;
-    let ids = compare_ids(&params.ids)?;
+    let ids = parse_ids(&params.ids, 2..=4, "ids must be 2 to 4 experiment ids")?;
     let threshold = params.threshold.unwrap_or(DEFAULT_THRESHOLD);
     if !(threshold.is_finite() && (0.0..=MAX_THRESHOLD).contains(&threshold)) {
         return Err(ApiError::BadRequest {
@@ -949,7 +1018,7 @@ async fn compare_experiments(
     let (items, mut next_cursor) = compare_items(
         &loaded,
         threshold,
-        params.regressions_only,
+        params.only,
         limit,
         params.cursor.as_deref(),
     )?;
@@ -1850,10 +1919,7 @@ mod tests {
 
     #[test]
     fn a_storage_cap_is_a_too_large_400() {
-        let error = too_large(RunError::InvalidRequest(
-            "experiment has more than 500000 scores".to_owned(),
-        ));
-        match error {
+        match too_large_error() {
             ApiError::BadRequest {
                 detail: Some(message),
                 ..
@@ -2073,6 +2139,11 @@ mod tests {
         assert_eq!(delta["n_compared"], 3);
         let value = delta["delta"].as_f64().unwrap_or(0.0);
         assert!((value - (-1.0 / 3.0)).abs() < 1e-9, "delta {value}");
+        // Item 2 falls from 1 to 0; the other two items stay.
+        assert_eq!(delta["regressed"], 1);
+        assert_eq!(delta["improved"], 0);
+        assert_eq!(body["deltas"][0]["regressed_items"], 1);
+        assert_eq!(body["deltas"][0]["improved_items"], 0);
         let row = body["rows"].as_array().and_then(|rows| {
             rows.iter()
                 .find(|row| row["dataset_item_id"] == json!(ids[1]))
@@ -2088,6 +2159,153 @@ mod tests {
             cell.map(|cell| cell["regressed"].clone()),
             Some(json!(true))
         );
+    }
+
+    async fn summaries_get(app: &TestApp, seeded: &Seeded, query: &str) -> TestResponse {
+        app.request(Method::GET, &format!("{}/summaries{query}", base(seeded)))
+            .header("cookie", &seeded.cookie)
+            .send()
+            .await
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn summaries_keep_request_order_and_leave_out_unknown() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        dataset_with_items(&app, &seeded, "faq", 1).await;
+        let a = create_ok(&app, &seeded, json!({ "name": "a", "dataset": "faq" }))
+            .await
+            .experiment
+            .id;
+        let b = create_ok(&app, &seeded, json!({ "name": "b", "dataset": "faq" }))
+            .await
+            .experiment
+            .id;
+        let c = create_ok(&app, &seeded, json!({ "name": "c", "dataset": "faq" }))
+            .await
+            .experiment
+            .id;
+        let unknown = Uuid::now_v7();
+
+        let response = summaries_get(&app, &seeded, &format!("?ids={c},{unknown},{a},{b}")).await;
+        assert_eq!(
+            response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let body: Value = response.json();
+        let listed: Vec<Value> = body["data"]
+            .as_array()
+            .expect("the summaries")
+            .iter()
+            .map(|summary| summary["experiment"]["id"].clone())
+            .collect();
+        assert_eq!(listed, vec![json!(c), json!(a), json!(b)]);
+        assert_eq!(body["skipped"], json!([]));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn summaries_validate_the_ids() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        dataset_with_items(&app, &seeded, "faq", 1).await;
+        let first = create_ok(&app, &seeded, json!({ "name": "a", "dataset": "faq" }))
+            .await
+            .experiment
+            .id;
+        let too_many: Vec<String> = (0..26).map(|_| Uuid::now_v7().to_string()).collect();
+        let bad = [
+            String::new(),
+            too_many.join(","),
+            format!("{first},{first}"),
+            format!("{first},nope"),
+        ];
+        for ids in &bad {
+            let response = summaries_get(&app, &seeded, &format!("?ids={ids}")).await;
+            assert_eq!(fields(&response), vec!["ids".to_owned()], "{ids}");
+        }
+        // The bound is 25 ids: 25 unknown ids answer with no data.
+        let bound: Vec<String> = too_many.into_iter().take(25).collect();
+        let answered = summaries_get(&app, &seeded, &format!("?ids={}", bound.join(","))).await;
+        assert_eq!(answered.status, 200);
+        let body: Value = answered.json();
+        assert_eq!(body["data"], json!([]));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn summaries_route_is_not_the_single_experiment_route() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        dataset_with_items(&app, &seeded, "faq", 1).await;
+        let id = create_ok(&app, &seeded, json!({ "name": "a", "dataset": "faq" }))
+            .await
+            .experiment
+            .id;
+        let response = summaries_get(&app, &seeded, &format!("?ids={id}")).await;
+        assert_eq!(response.status, 200);
+        let body: Value = response.json();
+        assert_eq!(body["data"].as_array().map(Vec::len), Some(1));
+        assert!(body.get("skipped").is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn summaries_leave_out_hidden_experiments() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        dataset_with_items(&app, &seeded, "faq", 1).await;
+        let id = create_ok(&app, &seeded, json!({ "name": "a", "dataset": "faq" }))
+            .await
+            .experiment
+            .id;
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-01T00:00:00Z",
+            &json!({ "data_access_days": 30 }),
+        );
+        // The session cookie expires with the clock, so the read after the advance uses a key.
+        let key = format!("Bearer {}", app.write_key(&seeded).await);
+        app.state.clock.advance(Duration::from_secs(31 * 24 * 3600));
+        let response = app
+            .request(
+                Method::GET,
+                &format!("{}/summaries?ids={id}", base(&seeded)),
+            )
+            .header("authorization", &key)
+            .send()
+            .await;
+        assert_eq!(response.status, 200);
+        let body: Value = response.json();
+        assert_eq!(body["data"], json!([]));
+        assert_eq!(body["skipped"], json!([]));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn compare_only_takes_three_values() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        dataset_with_items(&app, &seeded, "faq", 1).await;
+        let first = create_ok(&app, &seeded, json!({ "name": "a", "dataset": "faq" }))
+            .await
+            .experiment
+            .id;
+        let second = create_ok(&app, &seeded, json!({ "name": "b", "dataset": "faq" }))
+            .await
+            .experiment
+            .id;
+        for only in ["regressed", "improved", "changed"] {
+            let response =
+                compare_get(&app, &seeded, &format!("?ids={first},{second}&only={only}")).await;
+            assert_eq!(response.status, 200, "{only}");
+        }
+        let unknown = compare_get(
+            &app,
+            &seeded,
+            &format!("?ids={first},{second}&only=regressions"),
+        )
+        .await;
+        assert_eq!(unknown.status, 400);
     }
 
     #[tokio::test(flavor = "multi_thread")]
