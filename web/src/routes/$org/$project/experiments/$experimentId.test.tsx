@@ -9,11 +9,13 @@ import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
 import experimentFixture from "../../../../../../fixtures/api/static/experiment.json";
 import resultsFixture from "../../../../../../fixtures/api/static/experiment-results.json";
+import experimentsFixture from "../../../../../../fixtures/api/static/experiments.json";
 
 const BASELINE_ID = "01900000-0000-7000-8000-000000000e01";
 const EXPERIMENT_URL = `/acme/support-bot/experiments/${BASELINE_ID}`;
 const EXPERIMENT_PATH = "/api/v1/projects/:project/experiments/:id";
 const RESULTS_PATH = "/api/v1/projects/:project/experiments/:id/results";
+const EXPERIMENTS_PATH = "/api/v1/projects/:project/experiments";
 
 function firstRow() {
   const row = resultsFixture.rows[0];
@@ -109,7 +111,7 @@ it("filters to errors from a deep link with errors=1", async () => {
   expect(screen.getByRole("switch", { name: "Errors only" })).toBeChecked();
 });
 
-it("shows the mean latency when the p95 is absent", async () => {
+it("shows the p50 alone when the p95 is absent", async () => {
   const { latency_p95_ns: _p95, ...summary } = resultsFixture.summary;
   server.use(http.get(RESULTS_PATH, () => HttpResponse.json({ ...resultsFixture, summary })));
 
@@ -119,8 +121,9 @@ it("shows the mean latency when the p95 is absent", async () => {
   const latency = within(list)
     .getAllByRole("listitem")
     .find((card) => within(card).queryByText("Latency"));
-  expect(latency).toHaveTextContent(/^Latency\s*mean /);
+  expect(latency).toHaveTextContent(/^Latencyp50 /);
   expect(latency).not.toHaveTextContent("p95");
+  expect(latency).not.toHaveTextContent("mean");
 });
 
 it("answers not found when the results are not found", async () => {
@@ -190,4 +193,26 @@ it("shows the repetition column for several repetitions", async () => {
   expect(within(table).getByRole("columnheader", { name: "Rep" })).toBeInTheDocument();
   const row = within(table).getAllByRole("row")[1] as HTMLElement;
   expect(within(row).getByText("1")).toBeInTheDocument();
+});
+
+it("compares with the previous run of the same dataset", async () => {
+  const CANDIDATE_ID = "01900000-0000-7000-8000-000000000e02";
+  server.use(
+    http.get(EXPERIMENTS_PATH, () => HttpResponse.json(experimentsFixture)),
+    http.get(EXPERIMENT_PATH, () => HttpResponse.json({ ...experimentFixture, id: CANDIDATE_ID })),
+    http.get(RESULTS_PATH, () => HttpResponse.json(resultsFixture)),
+  );
+  await renderApp(`/acme/support-bot/experiments/${CANDIDATE_ID}`);
+
+  const link = await screen.findByRole("link", { name: "Compare with previous run" });
+  const href = decodeURIComponent(link.getAttribute("href") ?? "");
+  expect(href).toContain(`/experiments/compare`);
+  expect(href).toContain(`ids=${BASELINE_ID},${CANDIDATE_ID}`);
+});
+
+it("hides the previous-run comparison for the oldest run", async () => {
+  await renderApp(EXPERIMENT_URL);
+
+  await screen.findByRole("heading", { name: experimentFixture.name });
+  expect(screen.queryByRole("link", { name: "Compare with previous run" })).toBeNull();
 });

@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { expect, it } from "vitest";
 import { server } from "@/mocks/node";
+import { STORAGE_PREFIX } from "@/product";
 import { renderApp } from "@/test/render";
 import datasetsFixture from "../../../../../../fixtures/api/responses/datasets.json";
 import comparisonFixture from "../../../../../../fixtures/api/static/experiment-comparison.json";
@@ -204,4 +205,127 @@ it("opens the comparison with the picks in order", async () => {
   const href = decodeURIComponent(router.state.location.href);
   expect(href).toContain(`ids=${CANDIDATE_ID},${BASELINE_ID}`);
   await waitFor(() => expect(requested).toContain(`${CANDIDATE_ID},${BASELINE_ID}`));
+});
+
+const DATASET_ID = "01900000-0000-7000-8000-000000000c01";
+const TREND_KEY = `${STORAGE_PREFIX}experiments.trend`;
+
+it("shows score badges with the change against the previous run", async () => {
+  await renderApp("/acme/support-bot/experiments");
+  await screen.findByRole("table", { name: "Experiments" });
+
+  const row = rowOf("candidate");
+  expect(await within(row).findByText("exact 33.3 %")).toBeInTheDocument();
+  expect(within(row).getByText("quality 0.500")).toBeInTheDocument();
+  expect(within(row).getByText("−33.3 pts")).toBeInTheDocument();
+  expect(within(row).getByText("−0.167")).toBeInTheDocument();
+  expect(within(rowOf("baseline")).queryByText("−33.3 pts")).toBeNull();
+});
+
+it("shows the metadata of each experiment as chips", async () => {
+  await renderApp("/acme/support-bot/experiments");
+  await screen.findByRole("table", { name: "Experiments" });
+
+  const row = rowOf("candidate");
+  expect(within(row).getByText("model gpt-5-mini")).toBeInTheDocument();
+  expect(within(row).getByText("prompt v2")).toBeInTheDocument();
+});
+
+it("filters the rows by status from the summary counts", async () => {
+  const user = userEvent.setup();
+  const failed = { ...fixtureExperiment(BASELINE_ID), status: "failed" as const };
+  server.use(
+    http.get(EXPERIMENTS_PATH, () =>
+      HttpResponse.json({ data: [fixtureExperiment(CANDIDATE_ID), failed], next_cursor: null }),
+    ),
+  );
+  const { router } = await renderApp("/acme/support-bot/experiments");
+  const table = await screen.findByRole("table", { name: "Experiments" });
+
+  await user.click(screen.getByRole("button", { name: "Failed 1" }));
+
+  await waitFor(() => expect(router.state.location.href).toContain("status=failed"));
+  expect(within(table).queryByText("candidate")).toBeNull();
+  expect(within(table).getByText("baseline")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Failed 1" })).toHaveAttribute("aria-pressed", "true");
+});
+
+it("opens an experiment from a row click, but not from its link", async () => {
+  const user = userEvent.setup();
+  const { router } = await renderApp("/acme/support-bot/experiments");
+  await screen.findByRole("table", { name: "Experiments" });
+
+  await user.click(within(rowOf("candidate")).getByText(/^\d+ \/ \d+$/));
+
+  await waitFor(() => expect(router.state.location.href).toContain(`experiment=${CANDIDATE_ID}`));
+});
+
+it("shows a trend for one dataset and remembers when it is closed", async () => {
+  const user = userEvent.setup();
+  await renderApp(`/acme/support-bot/experiments?dataset=${DATASET_ID}`);
+  await screen.findByRole("table", { name: "Experiments" });
+
+  const toggle = await screen.findByRole("button", { name: "Trend" });
+  expect(toggle).toHaveAttribute("aria-expanded", "true");
+  await user.click(toggle);
+  expect(toggle).toHaveAttribute("aria-expanded", "false");
+  expect(localStorage.getItem(TREND_KEY)).toBe("closed");
+  localStorage.removeItem(TREND_KEY);
+});
+
+it("hides the trend without a dataset filter", async () => {
+  await renderApp("/acme/support-bot/experiments");
+  await screen.findByRole("table", { name: "Experiments" });
+
+  expect(screen.queryByRole("button", { name: "Trend" })).toBeNull();
+});
+
+it("links the empty state to the datasets", async () => {
+  server.use(http.get(EXPERIMENTS_PATH, () => HttpResponse.json({ data: [], next_cursor: null })));
+  await renderApp("/acme/support-bot/experiments");
+
+  expect(
+    await screen.findByText(/An experiment runs your app on every item of a dataset/),
+  ).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Open datasets" })).toHaveAttribute(
+    "href",
+    "/acme/support-bot/datasets",
+  );
+});
+
+it("opens the panel from ?experiment= with the experiment in full", async () => {
+  await renderApp(`/acme/support-bot/experiments?experiment=${BASELINE_ID}`);
+
+  const panel = await screen.findByRole("region", { name: "Experiment" });
+  expect(await within(panel).findByText("baseline")).toBeInTheDocument();
+  expect(within(panel).getByRole("link", { name: "Open page" })).toHaveAttribute(
+    "href",
+    `/acme/support-bot/experiments/${BASELINE_ID}`,
+  );
+  expect(await within(panel).findByRole("table", { name: "Results" })).toBeInTheDocument();
+});
+
+it("closes the panel with its close button", async () => {
+  const user = userEvent.setup();
+  const { router } = await renderApp(`/acme/support-bot/experiments?experiment=${CANDIDATE_ID}`);
+
+  const panel = await screen.findByRole("region", { name: "Experiment" });
+  await user.click(within(panel).getByRole("button", { name: "Close" }));
+
+  await waitFor(() => expect(router.state.location.href).not.toContain("experiment="));
+});
+
+it("opens the focused row with Enter and steps with the arrows while the panel is open", async () => {
+  const user = userEvent.setup();
+  const { router } = await renderApp("/acme/support-bot/experiments");
+
+  await screen.findByRole("table", { name: "Experiments" });
+  rowOf("candidate").focus();
+  await user.keyboard("{Enter}");
+  await waitFor(() => expect(router.state.location.href).toContain(`experiment=${CANDIDATE_ID}`));
+
+  await screen.findByRole("region", { name: "Experiment" });
+  rowOf("candidate").focus();
+  await user.keyboard("{ArrowDown}");
+  await waitFor(() => expect(router.state.location.href).toContain(`experiment=${BASELINE_ID}`));
 });

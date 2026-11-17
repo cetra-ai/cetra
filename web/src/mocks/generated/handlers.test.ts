@@ -264,6 +264,9 @@ it("defines the generated scores so lists can colour them", async () => {
   expect(body.data.map((item) => [item.name, item.direction])).toEqual([
     ["correctness", "higher"],
     ["relevance", "higher"],
+    ["exact", "higher"],
+    ["quality", "higher"],
+    ["tone", "none"],
   ]);
 });
 

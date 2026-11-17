@@ -1804,6 +1804,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{project}/experiments/summaries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get experiment summaries
+         * @description Any project member, or an API key with `read`.
+         */
+        get: operations["get_experiment_summaries"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{project}/experiments/{id}": {
         parameters: {
             query?: never;
@@ -3210,6 +3230,11 @@ export interface components {
              */
             experiment_id: string;
             /**
+             * @description Whether this cell improved on the baseline's cell of the same item. Always false for the
+             *     baseline.
+             */
+            improved: boolean;
+            /**
              * Format: int64
              * @description The latency of the item's lowest repetition, in nanoseconds. Omitted when unknown.
              */
@@ -3228,6 +3253,11 @@ export interface components {
             /** @description The trace of the item's lowest repetition. Omitted when none. */
             trace_id?: components["schemas"]["TraceId"];
         };
+        /**
+         * @description `only` of `GET …/experiments/compare`: keep the items with a cell of this kind.
+         * @enum {string}
+         */
+        CompareOnly: "regressed" | "improved" | "changed";
         /** @description One dataset item, with each experiment's cell. */
         CompareRow: {
             /**
@@ -4461,6 +4491,16 @@ export interface components {
          * @enum {string}
          */
         ExperimentStatus: "running" | "completed" | "failed";
+        /** @description `GET …/experiments/summaries`: the summaries of the requested experiments. */
+        ExperimentSummaries: {
+            /**
+             * @description One summary per experiment found, in request order. Unknown and hidden experiments are
+             *     left out.
+             */
+            data: components["schemas"]["ExperimentSummary"][];
+            /** @description The experiments too large to summarize (D-J-13), in request order. */
+            skipped: string[];
+        };
         /** @description The results of one experiment, aggregated. */
         ExperimentSummary: {
             /**
@@ -6378,9 +6418,19 @@ export interface components {
             delta: number;
             /**
              * Format: int64
+             * @description The compared items whose candidate value is higher by more than the threshold.
+             */
+            improved: number;
+            /**
+             * Format: int64
              * @description The items that were compared.
              */
             n_compared: number;
+            /**
+             * Format: int64
+             * @description The compared items whose candidate value is lower by more than the threshold.
+             */
+            regressed: number;
         };
         /** @description The deltas of one candidate, per score name. */
         ScoreDeltas: {
@@ -6389,6 +6439,16 @@ export interface components {
              * @description The candidate.
              */
             experiment_id: string;
+            /**
+             * Format: int64
+             * @description The items the baseline also has whose candidate cell improved (see `CompareCell`).
+             */
+            improved_items: number;
+            /**
+             * Format: int64
+             * @description The items the baseline also has whose candidate cell regressed (see `CompareCell`).
+             */
+            regressed_items: number;
             /** @description One delta per score name with at least one compared item. */
             scores: {
                 [key: string]: components["schemas"]["ScoreDelta"];
@@ -6422,6 +6482,11 @@ export interface components {
             count: number;
             /** @description The data type the experiment's scores of this name mostly carry. */
             data_type: components["schemas"]["ScoreDataType"];
+            /**
+             * @description Numeric scores only: the rows per bucket, 10 equal-width buckets from `min` to `max` (one
+             *     bucket when `min` equals `max`); empty for other types.
+             */
+            histogram: number[];
             /** @description Categoricals only: the rows per label. */
             labels: {
                 [key: string]: number;
@@ -16301,8 +16366,8 @@ export interface operations {
                 ids: string;
                 /** @description The regression threshold, absolute, 0 to 1000 (default 0.1). */
                 threshold?: number;
-                /** @description Keep only the items with a regressed cell. */
-                regressions_only?: boolean;
+                /** @description Keep only the items with a regressed, improved or changed cell. Omitted keeps every item. */
+                only?: components["schemas"]["CompareOnly"];
                 /** @description Maximum number of items to return (1–1000, default 50). */
                 limit?: components["schemas"]["Limit"];
                 /** @description Opaque cursor from a previous page. */
@@ -16324,6 +16389,95 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ExperimentComparison"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_experiment_summaries: {
+        parameters: {
+            query: {
+                /** @description One to 25 distinct experiment ids, comma-separated, in the order of the answer. */
+                ids: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The summaries of the experiments found, in request order, and the ids too large to summarize. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExperimentSummaries"];
                 };
             };
             /** @description The request is malformed or a filter is invalid. */

@@ -11322,12 +11322,12 @@
             }
           },
           {
-            "name": "regressions_only",
+            "name": "only",
             "in": "query",
-            "description": "Keep only the items with a regressed cell.",
+            "description": "Keep only the items with a regressed, improved or changed cell. Omitted keeps every item.",
             "required": false,
             "schema": {
-              "type": "boolean"
+              "$ref": "#/components/schemas/CompareOnly"
             }
           },
           {
@@ -11357,6 +11357,118 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ExperimentComparison"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is busy or a dependency is unavailable. Retry later.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/experiments/summaries": {
+      "get": {
+        "tags": [
+          "experiments"
+        ],
+        "summary": "Get experiment summaries",
+        "description": "Any project member, or an API key with `read`.",
+        "operationId": "get_experiment_summaries",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ids",
+            "in": "query",
+            "description": "One to 25 distinct experiment ids, comma-separated, in the order of the answer.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The summaries of the experiments found, in request order, and the ids too large to summarize.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExperimentSummaries"
                 }
               }
             }
@@ -18552,7 +18664,8 @@
         "required": [
           "experiment_id",
           "scores",
-          "regressed"
+          "regressed",
+          "improved"
         ],
         "properties": {
           "error": {
@@ -18563,6 +18676,10 @@
             "type": "string",
             "format": "uuid",
             "description": "The experiment."
+          },
+          "improved": {
+            "type": "boolean",
+            "description": "Whether this cell improved on the baseline's cell of the same item. Always false for the\nbaseline."
           },
           "latency_ns": {
             "type": "integer",
@@ -18592,6 +18709,15 @@
             "description": "The trace of the item's lowest repetition. Omitted when none."
           }
         }
+      },
+      "CompareOnly": {
+        "type": "string",
+        "description": "`only` of `GET …/experiments/compare`: keep the items with a cell of this kind.",
+        "enum": [
+          "regressed",
+          "improved",
+          "changed"
+        ]
       },
       "CompareRow": {
         "type": "object",
@@ -20963,6 +21089,31 @@
           "completed",
           "failed"
         ]
+      },
+      "ExperimentSummaries": {
+        "type": "object",
+        "description": "`GET …/experiments/summaries`: the summaries of the requested experiments.",
+        "required": [
+          "data",
+          "skipped"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExperimentSummary"
+            },
+            "description": "One summary per experiment found, in request order. Unknown and hidden experiments are\nleft out."
+          },
+          "skipped": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The experiments too large to summarize (D-J-13), in request order."
+          }
+        }
       },
       "ExperimentSummary": {
         "type": "object",
@@ -24530,7 +24681,9 @@
         "description": "One score's delta of a candidate to the baseline.",
         "required": [
           "delta",
-          "n_compared"
+          "n_compared",
+          "improved",
+          "regressed"
         ],
         "properties": {
           "delta": {
@@ -24538,10 +24691,20 @@
             "format": "double",
             "description": "The candidate's mean minus the baseline's, over the items both ran without error."
           },
+          "improved": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The compared items whose candidate value is higher by more than the threshold."
+          },
           "n_compared": {
             "type": "integer",
             "format": "int64",
             "description": "The items that were compared."
+          },
+          "regressed": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The compared items whose candidate value is lower by more than the threshold."
           }
         }
       },
@@ -24550,13 +24713,25 @@
         "description": "The deltas of one candidate, per score name.",
         "required": [
           "experiment_id",
-          "scores"
+          "scores",
+          "improved_items",
+          "regressed_items"
         ],
         "properties": {
           "experiment_id": {
             "type": "string",
             "format": "uuid",
             "description": "The candidate."
+          },
+          "improved_items": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The items the baseline also has whose candidate cell improved (see `CompareCell`)."
+          },
+          "regressed_items": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The items the baseline also has whose candidate cell regressed (see `CompareCell`)."
           },
           "scores": {
             "type": "object",
@@ -24623,7 +24798,8 @@
           "name",
           "data_type",
           "count",
-          "labels"
+          "labels",
+          "histogram"
         ],
         "properties": {
           "count": {
@@ -24634,6 +24810,14 @@
           "data_type": {
             "$ref": "#/components/schemas/ScoreDataType",
             "description": "The data type the experiment's scores of this name mostly carry."
+          },
+          "histogram": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "description": "Numeric scores only: the rows per bucket, 10 equal-width buckets from `min` to `max` (one\nbucket when `min` equals `max`); empty for other types."
           },
           "labels": {
             "type": "object",

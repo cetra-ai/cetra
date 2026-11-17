@@ -42,7 +42,7 @@ const EAGER_CHARTS = 4;
 // Height of a chart card (`h-[220px]` in ChartCard), kept by placeholders.
 const CARD_HEIGHT = 220;
 // The top-models card's title and unit, as TopModels renders them.
-const PALETTE = [
+export const PALETTE = [
   "var(--chart-1)",
   "var(--chart-2)",
   "var(--chart-3)",
