@@ -1793,16 +1793,18 @@ fn merge_dict(into: &mut Dict, from: Dict) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
     use std::net::SocketAddr;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
     use bytesize::ByteSize;
     use cetra_storage::config::{ObjectStoreUrl, WalSync};
+    use figment::error::{Actual, Kind};
 
     use super::{
-        ConfigError, IngestConfig, LogFormat, MediaConfig, OrgsConfig, Secret, ServerConfig,
-        SmtpUrl, Tls, issuer_problem, load_from, oidc_env_name,
+        ALIASES, ConfigError, IngestConfig, LogFormat, MediaConfig, OrgsConfig, Secret,
+        ServerConfig, SmtpUrl, Tls, issuer_problem, load_from, oidc_env_name,
     };
     use crate::api::account::SignupPolicy;
 
@@ -3256,5 +3258,185 @@ link_existing_by_email = true
         assert_eq!(config.ingest.max_request_bytes, ByteSize::kib(1));
         assert_eq!(config.media.min_bytes, ByteSize::b(1));
         assert_eq!(config.media.max_bytes, ByteSize::gib(1));
+    }
+
+    /// The configuration reference page (D-W-7): its keys are exactly the keys the loader
+    /// accepts, and its Environment column is exactly `ALIASES`.
+    const REFERENCE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../website/src/content/docs/docs/self-hosting/configuration-reference.md"
+    ));
+
+    /// What a probe found at a table path.
+    enum Probe {
+        /// A table that refuses unknown fields, with the fields it accepts.
+        Table(Vec<String>),
+        /// A field that takes an array of tables.
+        ArrayOfTables,
+        /// Any other field.
+        Leaf,
+    }
+
+    /// The text between the first pair of backticks of a table cell.
+    fn backticked(cell: &str) -> Option<String> {
+        let (_, rest) = cell.split_once('`')?;
+        let (text, _) = rest.split_once('`')?;
+        Some(text.to_owned())
+    }
+
+    /// The keys of the page's tables, each with the name of its Environment cell if it has one.
+    fn documented() -> BTreeMap<String, Option<String>> {
+        let mut keys = BTreeMap::new();
+        for line in REFERENCE.lines().filter(|line| line.starts_with("| `")) {
+            let cells: Vec<&str> = line.split('|').collect();
+            let key = backticked(cells[1]).expect("a row starts with a backticked key");
+            let env = cells.get(2).and_then(|cell| backticked(cell));
+            assert!(
+                keys.insert(key.clone(), env).is_none(),
+                "{key} is listed twice"
+            );
+        }
+        keys
+    }
+
+    /// Loads a document that sets an unknown field in the table at `path` (`a.b[]` is an
+    /// element of the array of tables `a.b`) and says what the loader answered.
+    fn probe(path: &[String]) -> Probe {
+        let mut toml = String::new();
+        let mut dotted = Vec::new();
+        for (index, segment) in path.iter().enumerate() {
+            dotted.push(segment.trim_end_matches("[]"));
+            if segment.ends_with("[]") {
+                toml.push_str(&format!("[[{}]]\n", dotted.join(".")));
+            } else if index + 1 == path.len() {
+                toml.push_str(&format!("[{}]\n", dotted.join(".")));
+            }
+        }
+        toml.push_str("zz_probe = 1\n");
+        let name = path.join(".");
+        let error = match load_from(Some(&toml), &[]) {
+            Ok(_) => panic!("{name} accepts an unknown field: add `#[serde(deny_unknown_fields)]`"),
+            Err(ConfigError::Figment(error)) => error,
+            Err(_) => return Probe::Leaf,
+        };
+        let target: Vec<&str> = path
+            .iter()
+            .map(|segment| segment.trim_end_matches("[]"))
+            .collect();
+        for part in (*error).clone() {
+            let part_path: Vec<&str> = part
+                .path
+                .iter()
+                .map(String::as_str)
+                .filter(|segment| segment.parse::<usize>().is_err())
+                .collect();
+            // Figment's path for an unknown field ends with the field itself.
+            let owner = part_path.strip_suffix(&["zz_probe"]).unwrap_or(&part_path);
+            match &part.kind {
+                Kind::UnknownField(_, expected) if owner == target => {
+                    return Probe::Table(
+                        expected.iter().map(|field| (*field).to_owned()).collect(),
+                    );
+                }
+                Kind::InvalidType(Actual::Map, expected)
+                    if part_path == target && expected.contains("sequence") =>
+                {
+                    return Probe::ArrayOfTables;
+                }
+                _ => {}
+            }
+        }
+        Probe::Leaf
+    }
+
+    /// Every leaf key the loader accepts, found by walking the tables from the top.
+    fn accepted() -> BTreeSet<String> {
+        fn walk(path: &[String], keys: &mut BTreeSet<String>) {
+            let Probe::Table(fields) = probe(path) else {
+                panic!("{} is not a table", path.join("."));
+            };
+            for field in fields {
+                let mut child = path.to_vec();
+                child.push(field);
+                match probe(&child) {
+                    Probe::Table(_) => walk(&child, keys),
+                    Probe::ArrayOfTables => {
+                        if let Some(last) = child.last_mut() {
+                            last.push_str("[]");
+                        }
+                        if matches!(probe(&child), Probe::Table(_)) {
+                            walk(&child, keys);
+                        } else {
+                            // An array of scalars (a `Vec<String>`), not of tables.
+                            if let Some(last) = child.last_mut() {
+                                last.truncate(last.len() - 2);
+                            }
+                            keys.insert(child.join("."));
+                        }
+                    }
+                    Probe::Leaf => {
+                        keys.insert(child.join("."));
+                    }
+                }
+            }
+        }
+        let mut keys = BTreeSet::new();
+        // The top level is the one table without a header.
+        let top = match probe(&[]) {
+            Probe::Table(fields) => fields,
+            _ => panic!("the top level refuses no unknown field"),
+        };
+        for field in top {
+            let child = vec![field];
+            match probe(&child) {
+                Probe::Table(_) => walk(&child, &mut keys),
+                Probe::ArrayOfTables => walk(&[format!("{}[]", child[0])], &mut keys),
+                Probe::Leaf => {
+                    keys.insert(child[0].clone());
+                }
+            }
+        }
+        // The loader copies the top-level `data_dir` into `[storage]` and rejects this one.
+        keys.remove("storage.data_dir");
+        keys
+    }
+
+    #[test]
+    fn the_configuration_reference_matches_the_loader() {
+        let documented = documented();
+        let accepted = accepted();
+        let missing: Vec<_> = accepted
+            .iter()
+            .filter(|key| !documented.contains_key(*key))
+            .collect();
+        let unknown: Vec<_> = documented
+            .keys()
+            .filter(|key| !accepted.contains(*key))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "keys the loader accepts but the reference omits: {missing:?}"
+        );
+        assert!(
+            unknown.is_empty(),
+            "keys the reference lists but the loader refuses: {unknown:?}"
+        );
+        for (alias, key) in ALIASES {
+            assert_eq!(
+                documented.get(*key).and_then(Option::as_deref),
+                Some(*alias),
+                "{key} must list {alias} in the Environment column"
+            );
+        }
+        for (key, env) in &documented {
+            if let Some(env) = env {
+                assert!(
+                    ALIASES
+                        .iter()
+                        .any(|(alias, aliased)| alias == env && aliased == key),
+                    "{key}: {env} is not its alias in ALIASES"
+                );
+            }
+        }
     }
 }

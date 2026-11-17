@@ -28,6 +28,43 @@ export default defineConfig({
             icon: "open-book",
             items: [{ label: "Overview", link: "/docs/" }],
           },
+          {
+            label: "Self-hosting",
+            link: "/docs/self-hosting/",
+            icon: "setting",
+            items: [
+              { label: "Overview", link: "/docs/self-hosting/" },
+              {
+                label: "Install",
+                items: [
+                  { label: "Install", link: "/docs/self-hosting/install/" },
+                  { label: "Docker Compose", link: "/docs/self-hosting/docker-compose/" },
+                  { label: "Kubernetes", link: "/docs/self-hosting/kubernetes/" },
+                ],
+              },
+              {
+                label: "Configure",
+                items: [
+                  { label: "Configuration", link: "/docs/self-hosting/configuration/" },
+                  {
+                    label: "Configuration reference",
+                    link: "/docs/self-hosting/configuration-reference/",
+                  },
+                  { label: "Object storage (S3)", link: "/docs/self-hosting/s3/" },
+                  { label: "Security", link: "/docs/self-hosting/security/" },
+                  { label: "Resources", link: "/docs/self-hosting/resources/" },
+                ],
+              },
+              {
+                label: "Operate",
+                items: [
+                  { label: "Backup and restore", link: "/docs/self-hosting/backup/" },
+                  { label: "Monitoring", link: "/docs/self-hosting/monitoring/" },
+                  { label: "Upgrade", link: "/docs/self-hosting/upgrade/" },
+                ],
+              },
+            ],
+          },
         ]),
       ],
     }),

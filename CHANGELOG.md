@@ -3,7 +3,7 @@
 All notable changes to cetra are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/) (D-N-5). A release that needs action on upgrade starts
-with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
+with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/).
 
 ## [Unreleased]
 
@@ -74,6 +74,7 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Changed
 
+- The self-hosting guides moved from `docs/self-hosting/` to cetra.sh/docs/self-hosting/.
 - The product is renamed from the working name `llmobs` to cetra (cetra.sh, D46): the binary and crates,
   the `CETRA_*` environment variables, the `cetra.*` span attributes, the `sk-cetra-`, `pk-cetra-` and
   `pat-cetra-` key prefixes, the `ghcr.io/cetra-ai/cetra` image, the `cetra` Helm chart, and the

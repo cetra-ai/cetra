@@ -1,6 +1,9 @@
-# docker-compose
+---
+title: "docker-compose"
+description: "Run cetra with Docker Compose, on a local volume or with a local Garage object store."
+---
 
-The files are in [`deploy/compose/`](../../deploy/compose/) of the repository, at the release's tag:
+The files are in [`deploy/compose/`](https://github.com/cetra-ai/cetra/tree/main/deploy/compose/) of the repository, at the release's tag:
 
 | File | Purpose |
 |---|---|
@@ -25,7 +28,7 @@ docker compose logs cetra | grep 'setup required'
 
 Open the setup link to create the first admin. The ports are published on 127.0.0.1 only; set
 `CETRA_BIND=0.0.0.0` in `.env` to publish them on every interface, preferably behind a reverse
-proxy that terminates TLS ([configuration.md](configuration.md#tls)).
+proxy that terminates TLS ([Configuration](/docs/self-hosting/configuration/#tls)).
 
 ## With Garage (S3)
 
@@ -43,7 +46,7 @@ the bucket `cetra` on the volumes `garage-meta` and `garage-data`. Keep the same
 life of the deployment: the access key is imported once.
 
 To use another S3-compatible service instead of the local Garage, do not use `compose.s3.yaml`;
-set the bucket in `cetra.env` as in [s3.md](s3.md).
+set the bucket in `cetra.env` as in [Object storage](/docs/self-hosting/s3/).
 
 ## Operate
 
@@ -53,10 +56,10 @@ set the bucket in `cetra.env` as in [s3.md](s3.md).
 | Logs | `docker compose logs -f cetra` |
 | Stop (drains and flushes; up to 60 s) | `docker compose stop cetra` |
 | Admin commands | `docker compose exec cetra cetra admin list-users` |
-| Upgrade | set `CETRA_IMAGE` in `.env`, then `docker compose up -d` ([upgrade.md](upgrade.md)) |
-| Back up | [backup.md](backup.md#docker-compose) |
+| Upgrade | set `CETRA_IMAGE` in `.env`, then `docker compose up -d` ([Upgrade](/docs/self-hosting/upgrade/)) |
+| Back up | [Backup and restore](/docs/self-hosting/backup/#docker-compose) |
 
-Health checks and the Prometheus metrics port are described in [monitoring.md](monitoring.md).
+Health checks and the Prometheus metrics port are described in [Monitoring](/docs/self-hosting/monitoring/).
 
 The volumes are named `<project>_cetra-data` (the project is `cetra` unless you pass `-p`).
 `docker compose down` keeps them; `docker compose down -v` deletes them and all data.

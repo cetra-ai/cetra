@@ -1,4 +1,7 @@
-# Backup and restore
+---
+title: "Backup and restore"
+description: "Back up a cetra data directory online or cold, restore it, and rehearse a restore in restore mode."
+---
 
 cetra has two ways to back up. Both restore the same way.
 
@@ -289,7 +292,7 @@ and data volume, with the server stopped:
      `missing objects: 0` is required before you go on.
 6. If the backup is from an older version, migrate it, still with the server stopped:
    `cetra admin migrate`. It migrates `meta.db` and `catalog.db` to this version's schema and exits.
-   The server keeps a copy of each file from before the migration (see [upgrade.md](upgrade.md)).
+   The server keeps a copy of each file from before the migration (see [Upgrade](/docs/self-hosting/upgrade/)).
 7. Re-apply the deletions requested after the backup was taken:
    `cetra admin reapply-deletions --from <kept data directory>`. It needs both databases at this
    version's schema, which is why step 6 comes first. It copies every deletion that the restored
@@ -326,7 +329,7 @@ Reads, ingestion, deletions, retention, compaction and backups keep working.
 
 - the startup log has one `warn` line: `restore mode: outbound work is off (alerts, webhooks, judges, email, identity providers)`;
 - `/readyz` answers `{"status":"ready","restore_mode":true}`;
-- the metric `cetra_restore_mode` is `1` ([monitoring.md](monitoring.md)).
+- the metric `cetra_restore_mode` is `1` ([Monitoring](/docs/self-hosting/monitoring/)).
 
 **What does not work in restore mode:**
 

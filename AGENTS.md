@@ -26,7 +26,7 @@ Read these before writing code, and follow them:
 | `docs/roadmap.md` | Phases, waves and tracks: each track's plan, status, PRs and decision IDs |
 | `docs/plans/` | Step-by-step implementation plans; do the sub-phase you were given, nothing more |
 | `docs/research/competitors.md` | Why the decisions were made (competitor features and code-level findings) |
-| `website/` | The user documentation site (cetra.sh/docs): what users read. `website/STYLE.md` is its style guide |
+| `website/` | The user documentation site (cetra.sh/docs), including the self-hosting guides: what users read. `website/STYLE.md` is its style guide |
 
 If the code has to deviate from the spec, update the spec **in the same change**, and add a decision to `docs/mvp-decisions.md` if the change is not a detail. A track's decisions are named `D-<track>-<n>` (e.g. `D-G-1`) and go in that track's section; only the coordinating session adds plain-numbered decisions (`docs/roadmap.md` § Decision IDs). If the spec is ambiguous or contradicts itself, stop and ask instead of guessing.
 
@@ -85,6 +85,7 @@ If the code has to deviate from the spec, update the spec **in the same change**
 - `crates/storage/tests/s3_probe.rs` probes what our S3 code relies on against a real provider. Its tests are `#[ignore]`d and skip without `CETRA_TEST_S3_ENDPOINT`: `cargo test --release -p cetra-storage --all-features --test s3_probe -- --ignored --nocapture` (R M4).
 - `CETRA_TEST_TOXIPROXY` (with `CETRA_TEST_S3_*` and optionally `CETRA_TEST_TOXIPROXY_TOKEN`) runs `just s3-chaos`; `crates/storage/tests/s3_chaos.rs` shows how to start toxiproxy and Versity Gateway.
 - `CETRA_BENCH_CORPUS` overrides the benchmark corpus path. `CETRA_TEST_S3_REGION` and `CETRA_TEST_S3_PATH_STYLE` also configure the benches and the soak. `CETRA_SOAK_*` configure the soak (`crates/storage/tests/soak.rs`).
+- `config::tests::the_configuration_reference_matches_the_loader` checks the site's configuration reference against the loader: a new config key is documented in `website/src/content/docs/docs/self-hosting/configuration-reference.md` in the same PR.
 - Tests cover the current behaviour only.
 - UI tests use the MSW mocks from `fixtures/api/`; a page test overrides an endpoint with `server.use` instead of mocking modules.
 - Captured OTLP fixtures are recorded with `just capture` (tools/capture) and never edited by hand; `just check-capture` before committing one.
