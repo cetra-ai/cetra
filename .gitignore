@@ -22,3 +22,4 @@ core.[0-9]*
 
 website/.astro/
 website/src/generated/
+website/src/content/docs/docs/help/changelog.md

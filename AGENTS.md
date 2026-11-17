@@ -87,6 +87,8 @@ If the code has to deviate from the spec, update the spec **in the same change**
 - `CETRA_TEST_TOXIPROXY` (with `CETRA_TEST_S3_*` and optionally `CETRA_TEST_TOXIPROXY_TOKEN`) runs `just s3-chaos`; `crates/storage/tests/s3_chaos.rs` shows how to start toxiproxy and Versity Gateway.
 - `CETRA_BENCH_CORPUS` overrides the benchmark corpus path. `CETRA_TEST_S3_REGION` and `CETRA_TEST_S3_PATH_STYLE` also configure the benches and the soak. `CETRA_SOAK_*` configure the soak (`crates/storage/tests/soak.rs`).
 - `config::tests::the_configuration_reference_matches_the_loader` checks the site's configuration reference against the loader: a new config key is documented in `website/src/content/docs/docs/self-hosting/configuration-reference.md` in the same PR.
+- The docs checks run in `just check-docs` (`website/scripts/`, plain Node, unit tests by `node --test`): `check-terms.mjs` (banned terms, description length), `check-samples.mjs` (every code block tested or marked untested), `check-env-vars.mjs` (every `CETRA_*` name exists), `check-backing.mjs` (every fixture an integration page cites exists), `check-screenshots.mjs` (shots and PNGs match), and `starlight-links-validator` (internal links and anchors, during the build). The generated pages are the API reference (from `openapi.json`), the changelog (from `CHANGELOG.md`, git-ignored) and, from Rust tests, the CLI and SQL schema references.
+- Python samples of the site run in `sdks/python/tests/test_examples.py` and TypeScript samples in `sdks/typescript/src/examples.test.ts`; the SDK reference pages are checked against the exports by `just check-py` and `just check-ts`.
 - Tests cover the current behaviour only.
 - UI tests use the MSW mocks from `fixtures/api/`; a page test overrides an endpoint with `server.use` instead of mocking modules.
 - Captured OTLP fixtures are recorded with `just capture` (tools/capture) and never edited by hand; `just check-capture` before committing one.
@@ -179,6 +181,9 @@ Run everything through `just`:
 | `just web-dev` | web dev server with the API mocked from `fixtures/api` |
 | `just web-dev-server` | web dev server proxied at the real API |
 | `just docs-dev` | docs site dev server on http://localhost:4321 |
+| `just docs-deploy <branch>` | build the site and upload it to Cloudflare Pages (D-W-3); CI does it |
+| `just docs-screenshots [names]` | rewrite the docs' UI screenshots from the web UI on its mocks (D-W-12); needs Chromium |
+| `just docs-links` | check the docs site's external links with lychee (D-W-13); the weekly `links` job runs it |
 | `just run <args>` | run the `cetra` binary |
 | `just fuzz <target> [secs]` · `just fuzz-all [secs]` | fuzz one target, or every target in turn, growing its committed corpus (track R M3) |
 | `just fuzz-seed` | write the fuzz seed files from the test fixtures (track R M3) |

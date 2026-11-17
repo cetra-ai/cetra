@@ -58,7 +58,13 @@ function readAll(paths) {
 
 export function main(root) {
   const pagePaths = [];
-  walk(join(root, "website/src/content/docs"), (p) => /\.mdx?$/.test(p), pagePaths);
+  // The changelog page is generated from CHANGELOG.md, which also names removed variables.
+  const generated = join(root, "website/src/content/docs/docs/help/changelog.md");
+  walk(
+    join(root, "website/src/content/docs"),
+    (p) => /\.mdx?$/.test(p) && p !== generated,
+    pagePaths,
+  );
   const pages = Object.fromEntries(pagePaths.map((p) => [p, readFileSync(p, "utf8")]));
 
   const codePaths = [];

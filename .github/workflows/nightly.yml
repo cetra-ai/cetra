@@ -1,7 +1,8 @@
 name: Nightly
 
 # Outside ci-ok (track R M3): the fuzz targets run for 10 minutes each. A failed run opens or
-# updates one issue labelled `nightly`.
+# updates one issue labelled `nightly`. The `links` job checks the docs site's external links
+# (track W, D-W-13).
 on:
   schedule:
     - cron: "23 2 * * *" # 02:23 UTC daily; off the hour to avoid the scheduler rush
@@ -62,8 +63,21 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  links:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/js # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: lychee@0.24.2
+      - run: just docs-links
+
   report:
-    needs: [fuzz]
+    needs: [fuzz, links]
     if: failure()
     runs-on: ubuntu-24.04
     timeout-minutes: 5

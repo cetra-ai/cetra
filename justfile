@@ -375,6 +375,11 @@ docs-deploy branch: js-install
     pnpm --dir website run build
     pnpm --dir website exec wrangler pages deploy dist --project-name cetra-site --branch {{branch}} --commit-dirty=true
 
+# Check the docs site's external links (D-W-13); needs lychee 0.24.2 and builds the site first
+docs-links: js-install
+    pnpm --dir website run build
+    lychee --no-progress --max-concurrency 8 --accept 200,206,429 --exclude '^http://localhost' --exclude-path website/dist/docs/reference/api 'website/dist/**/*.html'
+
 # Regenerate crates/server/openapi.json and web/src/api/schema.gen.ts
 openapi: js-install
     CETRA_OPENAPI_WRITE=1 cargo test -p cetra-server --test openapi -- contract_file_is_up_to_date
