@@ -32,6 +32,7 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Added
 
+- Online rules: `GET /online-rules/stats` answers the last 24 hours per rule, with the finished jobs by hour and the score summary with an hourly series (D-I-50), and the reworked Online rules page shows them beside a full-width list with a side panel: status, spend, hourly jobs, score summary and trend, and recent failures.
 - Users: the user page has a time range and Overview, Sessions and Traces tabs; Overview shows the user's scores, metadata, and the dashboard's KPIs and charts for that user, with a link to the dashboard filtered to them. The list shows each user's name and plan from `user.*` metadata, relative first/last seen, KPI changes against the previous period and the top users by cost; the drawer shows metric chips, an activity chart and each recent session's first message. `GET /users/{user_id}` takes `from` and `to`.
 - OTLP: `POST /v1/logs` and `POST /v1/metrics` (HTTP) and the gRPC `LogsService` and `MetricsService` are accepted and dropped instead of answering 404 (D-G-40). GenAI content sent as log events is counted per project; `GET /api/v1/projects/{project}` returns it as `genai_log_events`, and the UI tells the project's users once that the content was dropped. Migration `0018` adds `usage_daily.genai_log_events`.
 - Alerts: a `no_data` event kind, shown in the history, and a "No data" notification on Slack, email and webhooks (`alert.no_data`) (D-K-20).

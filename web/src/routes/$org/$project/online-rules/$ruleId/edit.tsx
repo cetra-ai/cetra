@@ -4,7 +4,7 @@ import { useState } from "react";
 import { $api } from "@/api/client";
 import { problemMessage, problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
-import { onlineRuleQuery, onlineRulesKey } from "@/api/queries-online-rules";
+import { onlineRuleQuery, onlineRuleStatsKey, onlineRulesKey } from "@/api/queries-online-rules";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DisabledReason } from "@/components/disabled-reason";
 import { RuleForm } from "@/components/online-rules/rule-form";
@@ -54,6 +54,7 @@ function EditOnlineRulePage() {
       {
         onSuccess: () => {
           void queryClient.invalidateQueries({ queryKey: onlineRulesKey(org, project) });
+          void queryClient.invalidateQueries({ queryKey: onlineRuleStatsKey(org, project) });
           void navigate({ to: "/$org/$project/online-rules", params: { org, project } });
         },
         onError: (caught) => {

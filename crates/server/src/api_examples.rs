@@ -883,10 +883,25 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
             "application/json",
         ),
         example(
+            "get_online_rule_stats",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "static/online-rule-stats.json",
+            "application/json",
+        ),
+        example(
             "get_online_rule",
             params(&[("id", "01900000-0000-7000-8000-000000000700")]),
             BTreeMap::new(),
             "static/online-rule.json",
+            "application/json",
+        ),
+        // The second rule, so the mocked list can open it in its panel.
+        example(
+            "get_online_rule",
+            params(&[("id", "01900000-0000-7000-8000-000000000701")]),
+            BTreeMap::new(),
+            "static/online-rule-0701.json",
             "application/json",
         ),
         example_created(

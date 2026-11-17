@@ -30,6 +30,10 @@ pub(crate) const DAY_NS: i64 = 86_400_000_000_000;
 pub(crate) const STATS_DAYS: usize = 7;
 /// Start of the stats window: six days before the start of today, in nanoseconds (D-I-48).
 pub(crate) const STATS_BACK_NS: i64 = 6 * DAY_NS;
+/// Nanoseconds in a UTC hour.
+pub(crate) const HOUR_NS: i64 = 3_600_000_000_000;
+/// Hours in the online rule stats window (D-I-50).
+pub(crate) const RULE_STATS_HOURS: usize = 24;
 
 /// The columns `JobRow` reads, in the order `JobRecord` declares them. A macro so that the
 /// queries stay string literals (sqlx takes static SQL only).
@@ -1058,6 +1062,62 @@ pub(crate) async fn finished_stats(
     Ok(stats)
 }
 
+/// Finished jobs of one online rule in one hour of the rule stats window (D-I-50).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct RuleHourJobs {
+    /// Done jobs.
+    pub(crate) done: u64,
+    /// Failed jobs.
+    pub(crate) failed: u64,
+    /// Skipped jobs.
+    pub(crate) skipped: u64,
+}
+
+/// Finished jobs (`done`, `failed`, `skipped`) of `project` finished in `[from, to)`, per online
+/// rule and hour (`[from, to)` is [`RULE_STATS_HOURS`] hours from `from`). Rule and backfill jobs
+/// count; manual jobs have no rule and are left out (D-I-50).
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or a stored value does not decode.
+pub(crate) async fn rule_finished_hourly(
+    pool: &SqlitePool,
+    project: ProjectId,
+    from: i64,
+    to: i64,
+) -> Result<HashMap<Uuid, [RuleHourJobs; RULE_STATS_HOURS]>, MetaError> {
+    let rows: Vec<(String, String, i64, i64)> = sqlx::query_as(
+        "SELECT rule_id, status, (finished_at - ?1) / ?2 AS hour, COUNT(*) FROM eval_jobs \
+         WHERE project_id = ?3 AND rule_id IS NOT NULL \
+         AND status IN ('done', 'failed', 'skipped') \
+         AND finished_at >= ?1 AND finished_at < ?4 \
+         GROUP BY rule_id, status, hour",
+    )
+    .bind(from)
+    .bind(HOUR_NS)
+    .bind(project.to_string())
+    .bind(to)
+    .fetch_all(pool)
+    .await?;
+    let mut stats: HashMap<Uuid, [RuleHourJobs; RULE_STATS_HOURS]> = HashMap::new();
+    for (rule, status, hour, count) in rows {
+        let rule = parse_uuid(&rule, "rule_id")?;
+        let hour = usize::try_from(hour)
+            .ok()
+            .filter(|hour| *hour < RULE_STATS_HOURS)
+            .ok_or_else(|| corrupt("hour"))?;
+        let count = u64::try_from(count).map_err(|_| corrupt("count"))?;
+        let entry = &mut stats.entry(rule).or_default()[hour];
+        match status.as_str() {
+            "done" => entry.done += count,
+            "failed" => entry.failed += count,
+            "skipped" => entry.skipped += count,
+            _ => return Err(corrupt("status")),
+        }
+    }
+    Ok(stats)
+}
+
 /// Latency `(p50, p95)` in milliseconds of the done jobs of `project` finished in `[from, to)`, per
 /// evaluator, by nearest rank (`rank = ceil(n * p / 100)`). Jobs without a latency are ignored.
 ///
@@ -1304,10 +1364,11 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        Candidate, Finish, JobFilter, JobRow, JobUsage, KIND_BACKFILL, KIND_MANUAL, KIND_RULE,
-        NewJob, candidates, claim, counts_since, dedup_key, delete_jobs, finish, finished_stats,
-        get_job, insert_job, insert_rule_job, jobs_for_traces, latency_percentiles, list_jobs,
-        prune, recover, requeue_stale, skip_queued_of_rule, start_attempt, upsert_backfill_job,
+        Candidate, Finish, HOUR_NS, JobFilter, JobRow, JobUsage, KIND_BACKFILL, KIND_MANUAL,
+        KIND_RULE, NewJob, RuleHourJobs, candidates, claim, counts_since, dedup_key, delete_jobs,
+        finish, finished_stats, get_job, insert_job, insert_rule_job, jobs_for_traces,
+        latency_percentiles, list_jobs, prune, recover, requeue_stale, rule_finished_hourly,
+        skip_queued_of_rule, start_attempt, upsert_backfill_job,
     };
     use crate::meta::connections::{ConnectionFields, insert_connection};
     use crate::meta::evaluators::{EvaluatorFields, insert_evaluator};
@@ -2711,6 +2772,172 @@ mod tests {
         assert_eq!(mine.daily, [0, 0, 0, 2, 0, 1, 2]);
         assert_eq!(stats.get(&seeded.webhook).map(|s| s.done), Some(1));
         assert!(!stats.contains_key(&other_evaluator));
+    }
+
+    /// Enqueues `job`, claims it and counts one attempt: `(id, claims)`.
+    async fn running_rule_job(db: &MetaDb, job: NewJob) -> (Uuid, u32) {
+        let id = job.id;
+        assert!(enqueue(db, job, NOW).await);
+        let claims = claim_job(db, id, NOW).await.unwrap();
+        assert_eq!(attempt(db, id, claims, NOW).await, Some(1));
+        (id, claims)
+    }
+
+    #[tokio::test]
+    async fn rule_finished_hourly_counts_rules_by_hour_and_status() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let seeded = seed(&db).await;
+        let (project, judge) = (seeded.project, seeded.judge);
+        // The 24 hours end with the hour of NOW; the window's end is exclusive.
+        let from = NOW - NOW.rem_euclid(HOUR_NS) - 23 * HOUR_NS;
+        let to = NOW + 1;
+        let other = Uuid::now_v7();
+        db.write(move |conn| {
+            Box::pin(async move {
+                insert_rule(
+                    conn,
+                    NewRule {
+                        id: other,
+                        project_id: project,
+                        evaluator_id: judge,
+                        target: "trace".to_owned(),
+                        created_by: None,
+                    },
+                    RuleFields {
+                        name: "other".to_owned(),
+                        filter: None,
+                        variable_mapping: "{}".to_owned(),
+                        sample_rate: 1.0,
+                        budget_usd: None,
+                        budget_period: None,
+                        enabled: true,
+                    },
+                    NOW,
+                )
+                .await?;
+                Ok::<(), MetaError>(())
+            })
+        })
+        .await
+        .unwrap();
+
+        // The seeded rule: done in the current hour, skipped one hour back, and one done job
+        // finished just before the window.
+        let (id, claims) = running_job(&db, &seeded, "a30000000000000000000000000000a1").await;
+        let done = Finish::Done {
+            judge_trace_id: trace("e30000000000000000000000000000a1"),
+            score_id: Uuid::now_v7(),
+            evaluator_version: 1,
+            usage: JobUsage::default(),
+        };
+        assert!(finish_job(&db, id, claims, done, NOW).await);
+        let (id, claims) = running_job(&db, &seeded, "a30000000000000000000000000000a2").await;
+        assert!(
+            finish_job(
+                &db,
+                id,
+                claims,
+                Finish::Skipped { error: "x" },
+                NOW - HOUR_NS
+            )
+            .await
+        );
+        let (id, claims) = running_job(&db, &seeded, "a30000000000000000000000000000a3").await;
+        let early = Finish::Done {
+            judge_trace_id: trace("e30000000000000000000000000000a3"),
+            score_id: Uuid::now_v7(),
+            evaluator_version: 1,
+            usage: JobUsage::default(),
+        };
+        assert!(finish_job(&db, id, claims, early, from - 1).await);
+
+        // The other rule: failed in the current hour, skipped one hour back.
+        let job = NewJob {
+            id: Uuid::now_v7(),
+            project_id: project,
+            kind: KIND_RULE,
+            rule_id: Some(other),
+            evaluator_id: judge,
+            variable_mapping: None,
+            trace_id: trace("a30000000000000000000000000000b1"),
+            span_id: None,
+            trace_start_ns: NOW,
+        };
+        let (id, claims) = running_rule_job(&db, job).await;
+        let failed = Finish::Failed {
+            class: "permanent",
+            error: "x".to_owned(),
+            judge_trace_id: None,
+            evaluator_version: None,
+            usage: JobUsage::default(),
+        };
+        assert!(finish_job(&db, id, claims, failed, NOW).await);
+        let job = NewJob {
+            id: Uuid::now_v7(),
+            project_id: project,
+            kind: KIND_RULE,
+            rule_id: Some(other),
+            evaluator_id: judge,
+            variable_mapping: None,
+            trace_id: trace("a30000000000000000000000000000b2"),
+            span_id: None,
+            trace_start_ns: NOW,
+        };
+        let (id, claims) = running_rule_job(&db, job).await;
+        assert!(
+            finish_job(
+                &db,
+                id,
+                claims,
+                Finish::Skipped { error: "x" },
+                NOW - HOUR_NS
+            )
+            .await
+        );
+
+        // A manual job has no rule and is left out.
+        let (id, claims) =
+            running_manual(&db, &seeded, "a30000000000000000000000000000c1", judge).await;
+        let manual = Finish::Done {
+            judge_trace_id: trace("e30000000000000000000000000000c1"),
+            score_id: Uuid::now_v7(),
+            evaluator_version: 1,
+            usage: JobUsage::default(),
+        };
+        assert!(finish_job(&db, id, claims, manual, NOW).await);
+
+        let rules = rule_finished_hourly(db.reader(), project, from, to)
+            .await
+            .unwrap();
+        assert_eq!(rules.len(), 2, "the manual job has no rule");
+        let mine = rules[&seeded.rule];
+        assert_eq!(
+            mine[23],
+            RuleHourJobs {
+                done: 1,
+                failed: 0,
+                skipped: 0
+            }
+        );
+        assert_eq!(
+            mine[22],
+            RuleHourJobs {
+                done: 0,
+                failed: 0,
+                skipped: 1
+            }
+        );
+        assert_eq!(
+            mine.iter()
+                .map(|hour| hour.done + hour.failed + hour.skipped)
+                .sum::<u64>(),
+            2,
+            "the job finished before the window is left out"
+        );
+        let theirs = rules[&other];
+        assert_eq!(theirs[23].failed, 1);
+        assert_eq!(theirs[22].skipped, 1);
+        assert_eq!(theirs[23].done + theirs[22].done, 0);
     }
 
     #[tokio::test]

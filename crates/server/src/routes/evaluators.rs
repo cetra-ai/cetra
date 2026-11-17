@@ -22,10 +22,10 @@ use uuid::Uuid;
 
 use crate::api::common::{FieldError, Page, PageParams};
 use crate::api::evaluators::{
-    CreateEvaluatorRequest, Evaluator, EvaluatorKind, EvaluatorStats, EvaluatorStatsParams,
-    EvaluatorStatsResponse, EvaluatorTemplateList, EvaluatorTestRequest, EvaluatorTestResult,
-    EvaluatorVersion, ExperimentWithScore, ExperimentsWithScore, OutputScoreBody, StatsWindow,
-    UpdateEvaluatorRequest, builtin_template_list,
+    CreateEvaluatorRequest, Evaluator, EvaluatorKind, EvaluatorScoreStats, EvaluatorStats,
+    EvaluatorStatsParams, EvaluatorStatsResponse, EvaluatorTemplateList, EvaluatorTestRequest,
+    EvaluatorTestResult, EvaluatorVersion, ExperimentWithScore, ExperimentsWithScore,
+    OutputScoreBody, StatsWindow, UpdateEvaluatorRequest, builtin_template_list,
 };
 use crate::api::online_rules::RuleTarget;
 use crate::auth::principal::{self, Principal};
@@ -258,6 +258,7 @@ async fn get_evaluator_stats(
         open_query_windowed(&state, org, project, Some(TimeWindow::new(from, to)?)).await?;
     let aggregates = stats::read_scores(
         &scores_ctx,
+        stats::ScoreGroup::Evaluator,
         from,
         restrict.as_deref(),
         has_categorical,
@@ -323,10 +324,25 @@ async fn get_evaluator_stats(
                 })
                 .collect(),
         };
+        let aggregate = aggregates.get(&row.id);
+        let summary = stats::score_summary(
+            output.data_type,
+            aggregate,
+            from,
+            DAY_NS,
+            stats::ScoreGroup::Evaluator.buckets(),
+        );
         data.push(EvaluatorStats {
             evaluator_id: row.id,
             jobs: stats::job_stats(jobs.get(&row.id), latencies.get(&row.id).copied(), from),
-            scores: stats::score_stats(output.data_type, aggregates.get(&row.id), from),
+            scores: EvaluatorScoreStats {
+                data_type: output.data_type,
+                count: aggregate.map_or(0, |aggregate| aggregate.count),
+                average: summary.average,
+                pass_rate: summary.pass_rate,
+                top_category: summary.top_category,
+                daily: summary.series,
+            },
             experiments_with_score,
         });
     }

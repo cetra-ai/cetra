@@ -2075,6 +2075,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{project}/online-rules/stats": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get online rule stats
+         * @description Any project member can read. Jobs and scores cover the last 24 hours, per hour: the finished jobs (`done`, `failed`, `skipped`) by finished time, and the live scores of each rule read with its evaluator's current output type (D-I-50). One entry per rule, none left out. Not cached.
+         */
+        get: operations["get_online_rule_stats"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{project}/online-rules/{id}": {
         parameters: {
             query?: never;
@@ -5521,6 +5541,28 @@ export interface components {
             /** @description Window end. Default: now. */
             to?: components["schemas"]["TimeParam"];
         };
+        /** @description The stats of one online rule (D-I-50). */
+        OnlineRuleStats: {
+            /** @description Its finished jobs in the window, per hour, 24 points, oldest first. */
+            jobs_hourly: components["schemas"]["RuleJobsHour"][];
+            /**
+             * Format: uuid
+             * @description The rule.
+             */
+            rule_id: string;
+            /** @description Its scores in the window. */
+            scores: components["schemas"]["RuleScoreStats"];
+        };
+        /** @description `GET /api/v1/projects/{project}/online-rules/stats` response (D-I-50). */
+        OnlineRuleStatsResponse: {
+            /**
+             * @description One entry per online rule, ordered like the rule list (by name, then id). Rules without
+             *     jobs or scores are included with zeros.
+             */
+            data: components["schemas"]["OnlineRuleStats"][];
+            /** @description The 24 hours the figures cover. */
+            window: components["schemas"]["StatsWindow"];
+        };
         /** @description `GET /api/v1/orgs/{org}/entitlements` (D-P-15). */
         OrgEntitlements: {
             /** @description Features the org may use now, in a fixed order. */
@@ -6059,6 +6101,59 @@ export interface components {
             value_num?: number;
             /** @description The label of a categorical score or the text of a text score. Omitted when none. */
             value_str?: string;
+        };
+        /** @description The finished jobs of one online rule in one hour. */
+        RuleJobsHour: {
+            /**
+             * Format: int64
+             * @description Done jobs.
+             */
+            done: number;
+            /**
+             * Format: int64
+             * @description Failed jobs.
+             */
+            failed: number;
+            /**
+             * Format: int64
+             * @description Skipped jobs.
+             */
+            skipped: number;
+            /**
+             * Format: date-time
+             * @description Start of the hour. JSON is RFC 3339.
+             */
+            time: string;
+        };
+        /**
+         * @description The scores of one online rule in the window. Read with the rule's evaluator's current output
+         *     type (D-I-48).
+         */
+        RuleScoreStats: {
+            /**
+             * Format: double
+             * @description Mean of the numeric values. Numeric outputs only. Omitted when there is no numeric value.
+             */
+            average?: number;
+            /**
+             * Format: int64
+             * @description Live scores in the window, of any type.
+             */
+            count: number;
+            /** @description The output type of the rule's evaluator. */
+            data_type: components["schemas"]["ScoreDataType"];
+            /**
+             * @description Per hour: the average (numeric) or pass rate (boolean), 24 points, oldest first. An hour
+             *     without a value has no `value`.
+             */
+            hourly: components["schemas"]["MetricPoint"][];
+            /**
+             * Format: double
+             * @description Share of `true` values, 0 to 1. Boolean outputs only. Omitted when there is no value.
+             */
+            pass_rate?: number;
+            /** @description The most frequent label. Categorical outputs only. Omitted when there is none. */
+            top_category?: components["schemas"]["CategoryCount"];
         };
         /** @description Spend of a rule budget in the current period. */
         RuleSpend: {
@@ -17767,6 +17862,92 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["OnlineRulePreview"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_online_rule_stats: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One entry per online rule. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OnlineRuleStatsResponse"];
                 };
             };
             /** @description The request is malformed or a filter is invalid. */

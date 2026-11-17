@@ -95,8 +95,8 @@ use super::model_prices::{
 };
 use super::online_rules::{
     BudgetPeriod, CreateOnlineRuleRequest, JobCounts, OnlineRule, OnlineRulePage,
-    OnlineRulePreview, OnlineRulePreviewRequest, PauseReason, RuleSpend, RuleTarget,
-    UpdateOnlineRuleRequest,
+    OnlineRulePreview, OnlineRulePreviewRequest, OnlineRuleStatsResponse, PauseReason, RuleSpend,
+    RuleTarget, UpdateOnlineRuleRequest,
 };
 use super::org_sso::{
     AddOrgSsoDomain, DomainStatus, JitRole, OrgSso, OrgSsoDomain, OrgSsoProvider, PatchOrgSso,
@@ -393,6 +393,7 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<UpdateOnlineRuleRequest>();
     set.insert::<OnlineRulePreviewRequest>();
     set.insert::<OnlineRulePreview>();
+    set.insert::<OnlineRuleStatsResponse>();
     set.insert::<EvalJobKind>();
     set.insert::<EvalJobStatus>();
     set.insert::<EvalJob>();
@@ -2635,6 +2636,11 @@ fn online_rule_paths(paths: PathsBuilder) -> PathsBuilder {
             QUERY_ERRORS,
         ))
         .build();
+    let stats = operation("get_online_rule_stats", "evaluation", "Get online rule stats")
+        .description(Some("Any project member can read. Jobs and scores cover the last 24 hours, per hour: the finished jobs (`done`, `failed`, `skipped`) by finished time, and the live scores of each rule read with its evaluator's current output type (D-I-50). One entry per rule, none left out. Not cached."))
+        .parameters(Some(vec![project_param()]))
+        .responses(responses("200", json_of::<OnlineRuleStatsResponse>("One entry per online rule."), READ_ERRORS))
+        .build();
     let create = operation("post_online_rule", "evaluation", "Create an online rule")
         .description(Some(
             "Project members and above. API keys cannot call it. 403 `plan_limit` when the org is at its active-rule limit.",
@@ -2714,6 +2720,10 @@ fn online_rule_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/online-rules"),
             PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/online-rules/stats"),
+            PathItem::new(HttpMethod::Get, stats),
         )
         .path(
             format!("{PROJECT}/online-rules"),

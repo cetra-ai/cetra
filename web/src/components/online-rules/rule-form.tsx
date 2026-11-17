@@ -5,7 +5,7 @@ import { $api } from "@/api/client";
 import { problemMessage, problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
 import { evaluatorQuery, evaluatorsInit } from "@/api/queries-evaluation";
-import { onlineRuleKey, onlineRulesKey } from "@/api/queries-online-rules";
+import { onlineRuleKey, onlineRuleStatsKey, onlineRulesKey } from "@/api/queries-online-rules";
 import type { Schema } from "@/api/types";
 import { DisabledReason } from "@/components/disabled-reason";
 import {
@@ -396,6 +396,7 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
         {
           onSuccess: (created) => {
             void queryClient.invalidateQueries({ queryKey: onlineRulesKey(org, project) });
+            void queryClient.invalidateQueries({ queryKey: onlineRuleStatsKey(org, project) });
             void navigate({
               to: "/$org/$project/online-rules/$ruleId",
               params: { org, project, ruleId: created.id },
@@ -422,6 +423,7 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
       {
         onSuccess: () => {
           void queryClient.invalidateQueries({ queryKey: onlineRulesKey(org, project) });
+          void queryClient.invalidateQueries({ queryKey: onlineRuleStatsKey(org, project) });
           void queryClient.invalidateQueries({ queryKey: onlineRuleKey(org, project, rule.id) });
           void navigate({
             to: "/$org/$project/online-rules/$ruleId",

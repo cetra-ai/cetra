@@ -10,7 +10,14 @@ import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/componen
 import { setTraceMaximized, useTraceMaximized } from "@/lib/list-layout";
 import { STORAGE_PREFIX } from "@/product";
 
-type SplitName = "traces" | "trace" | "trace-timeline" | "session" | "users" | "alerts";
+type SplitName =
+  | "traces"
+  | "trace"
+  | "trace-timeline"
+  | "session"
+  | "users"
+  | "alerts"
+  | "online-rules";
 
 export type SplitMode = "split" | "bottom" | "drawer" | "page";
 
@@ -21,6 +28,7 @@ const PANES = {
   session: { start: "session-turns", end: "session-trace", startSize: 55 },
   users: { start: "users-list", end: "users-detail", startSize: 40 },
   alerts: { start: "alerts-list", end: "alerts-detail", startSize: 40 },
+  "online-rules": { start: "online-rules-list", end: "online-rules-detail", startSize: 40 },
 } as const;
 
 type SplitPaneProps = {

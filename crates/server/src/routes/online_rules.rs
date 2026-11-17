@@ -1,14 +1,15 @@
 //! Online rule routes (spec 09 § Evaluation & alerts, spec 06 § Online rules, D-I-19, D-I-30,
 //! D-I-32). Project members and above write; every project reader lists and reads.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Duration;
 
 use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, patch, post};
+use cetra_core::enums::ScoreDataType;
 use cetra_core::ids::{OrgId, ProjectId};
-use cetra_eval::{Adapter, VariableMapping};
+use cetra_eval::{Adapter, OutputScore, VariableMapping};
 use cetra_storage::{MAX_MATCH_COUNT, MatchCountRequest, TimeWindow, ViewName, match_count};
 use serde::Deserialize;
 use serde_json::Value;
@@ -16,16 +17,18 @@ use sqlx::SqliteConnection;
 use uuid::Uuid;
 
 use crate::api::common::{FieldError, PageParams, TimeParam};
+use crate::api::evaluators::StatsWindow;
 use crate::api::online_rules::{
     BudgetPeriod, CreateOnlineRuleRequest, JobCounts as ApiJobCounts, OnlineRule, OnlineRulePage,
-    OnlineRulePreview, OnlineRulePreviewRequest, PauseReason, RuleSpend, RuleTarget,
-    UpdateOnlineRuleRequest,
+    OnlineRulePreview, OnlineRulePreviewRequest, OnlineRuleStats, OnlineRuleStatsResponse,
+    PauseReason, RuleJobsHour, RuleScoreStats, RuleSpend, RuleTarget, UpdateOnlineRuleRequest,
 };
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::ProjectPerm;
 use crate::eval::budget::{self, DAY_NS, day_start};
 use crate::eval::rule_check::{RuleShape, Subject, check_rule, field_error};
 use crate::eval::rule_limit::{self, RuleLimitError};
+use crate::eval::stats::{self, ScoreGroup};
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
@@ -37,7 +40,7 @@ use crate::meta::online_rules::{self as store, NewRule, PAUSE_BUDGET, RuleFields
 use crate::meta::rule_spend;
 
 use super::orgs::page_named;
-use super::read::open_query;
+use super::read::{Deadline, open_query, open_query_windowed};
 
 /// Online rule routes. Reads need project view; writes need
 /// [`ProjectPerm::ManageEvaluation`] (D-I-24). Not session-only.
@@ -52,6 +55,16 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             },
             documented: true,
             handler: get(list_online_rules),
+        },
+        RouteDef {
+            method: axum::http::Method::GET,
+            path: "/api/v1/projects/{project}/online-rules/stats",
+            access: Access::Project {
+                perm: ProjectPerm::View,
+                session_only: false,
+            },
+            documented: true,
+            handler: get(get_online_rule_stats),
         },
         RouteDef {
             method: axum::http::Method::POST,
@@ -222,6 +235,107 @@ async fn list_online_rules(
         next_cursor: page.next_cursor,
         org_enabled_rules,
     }))
+}
+
+/// `GET /online-rules/stats`: the last 24 hours of every online rule of the project (D-I-50).
+/// Not cached: the score statement is narrowed by the rule ids and shares one deadline.
+async fn get_online_rule_stats(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+) -> Result<error::Json<OnlineRuleStatsResponse>, ApiError> {
+    let deadline = Deadline::start();
+    let project = access.project.id;
+    let org = access.project.org_id;
+    let now = state.clock.now_ns();
+    let (from, to) = stats::rule_window(now);
+    let window = StatsWindow { from, to };
+
+    // Rules come in list order. Each rule's evaluator is read for its current output type.
+    let rules = store::list_rules(state.meta.reader(), project).await?;
+    if rules.is_empty() {
+        return Ok(error::Json(OnlineRuleStatsResponse {
+            window,
+            data: Vec::new(),
+        }));
+    }
+    let mut output_types: HashMap<Uuid, ScoreDataType> = HashMap::new();
+    for row in evaluators::list_evaluators(state.meta.reader(), project).await? {
+        let output = serde_json::from_str::<OutputScore>(&row.output_score)
+            .map_err(|_| corrupt_in("evaluators", "output_score"))?;
+        output_types.insert(row.id, output.data_type);
+    }
+    let data_types = rules
+        .iter()
+        .map(|rule| {
+            output_types
+                .get(&rule.evaluator_id)
+                .copied()
+                .ok_or_else(|| corrupt("evaluator_id"))
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+
+    let jobs = eval_jobs::rule_finished_hourly(state.meta.reader(), project, from, to).await?;
+    let scores_ctx =
+        open_query_windowed(&state, org, project, Some(TimeWindow::new(from, to)?)).await?;
+    // At most `MAX_RESTRICT` ids per statement: the placeholders stay under the sandbox's operator
+    // limit and the hourly rows (ids × 24) under its row limit, whatever the number of rules.
+    let mut aggregates = HashMap::new();
+    for (chunk, types) in rules
+        .chunks(stats::MAX_RESTRICT)
+        .zip(data_types.chunks(stats::MAX_RESTRICT))
+    {
+        let ids: Vec<Uuid> = chunk.iter().map(|rule| rule.id).collect();
+        let has_categorical = types.contains(&ScoreDataType::Categorical);
+        aggregates.extend(
+            stats::read_scores(
+                &scores_ctx,
+                ScoreGroup::Rule,
+                from,
+                Some(ids.as_slice()),
+                has_categorical,
+                deadline,
+            )
+            .await?,
+        );
+    }
+
+    let mut data = Vec::with_capacity(rules.len());
+    for (rule, data_type) in rules.iter().zip(data_types) {
+        let hours = jobs
+            .get(&rule.id)
+            .copied()
+            .unwrap_or([eval_jobs::RuleHourJobs::default(); eval_jobs::RULE_STATS_HOURS]);
+        let aggregate = aggregates.get(&rule.id);
+        let summary = stats::score_summary(
+            data_type,
+            aggregate,
+            from,
+            ScoreGroup::Rule.bucket_ns(),
+            ScoreGroup::Rule.buckets(),
+        );
+        data.push(OnlineRuleStats {
+            rule_id: rule.id,
+            jobs_hourly: hours
+                .iter()
+                .enumerate()
+                .map(|(index, hour)| RuleJobsHour {
+                    time: stats::bucket_time(from, eval_jobs::HOUR_NS, index),
+                    done: hour.done,
+                    failed: hour.failed,
+                    skipped: hour.skipped,
+                })
+                .collect(),
+            scores: RuleScoreStats {
+                data_type,
+                count: aggregate.map_or(0, |aggregate| aggregate.count),
+                average: summary.average,
+                pass_rate: summary.pass_rate,
+                top_category: summary.top_category,
+                hourly: summary.series,
+            },
+        });
+    }
+    Ok(error::Json(OnlineRuleStatsResponse { window, data }))
 }
 
 async fn get_online_rule(
@@ -894,8 +1008,12 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+    use crate::api::evaluators::CategoryCount;
+    use crate::api::online_rules::{OnlineRuleStats, OnlineRuleStatsResponse};
     use crate::auth::roles::OrgRole;
     use crate::meta::connections::{ConnectionFields, insert_connection};
+    use crate::meta::eval_jobs::RULE_STATS_HOURS;
+    use crate::meta::eval_jobs::{KIND_RULE, NewJob};
     use crate::meta::evaluators::{EvaluatorFields, insert_evaluator};
     use crate::meta::model_prices;
     use crate::meta::online_rules::{PAUSE_BUDGET, PAUSE_ERRORS, pause_rule};
@@ -903,6 +1021,9 @@ mod tests {
     use crate::test_support::{
         Seeded, TestApp, TestResponse, capture_logs, dataset_span, set_limits,
     };
+    use cetra_core::batch::scores_to_record_batch;
+    use cetra_core::enums::ScoreSource;
+    use cetra_core::score::{Score, ScoreTarget, ScoreValue};
 
     /// The judge's prompt maps `input` and `output`.
     const PROMPT: &str = "Question: {{ input }}\nAnswer: {{ output }}";
@@ -2385,5 +2506,498 @@ mod tests {
         assert_eq!(get.status, 405, "{}", text(&get));
         let post = preview(&app, &seeded, &json!({"target": "trace"})).await;
         assert_eq!(post.status, 200, "{}", text(&post));
+    }
+
+    /// The clock of the stats tests: 2026-01-01T12:00:00Z, an hour boundary (the same instant as
+    /// the evaluator stats tests).
+    const STATS_NOW: i64 = 1_767_268_800_000_000_000;
+    const DAY_NS: i64 = 86_400_000_000_000;
+
+    /// `GET {project}/online-rules/stats` with `seeded`'s cookie.
+    async fn stats_of(app: &TestApp, seeded: &Seeded, project: ProjectId) -> TestResponse {
+        app.request(Method::GET, &format!("{}/stats", path(project)))
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await
+    }
+
+    /// A check evaluator of `project` whose output score is `output` (not run here).
+    async fn output_evaluator(app: &TestApp, project: ProjectId, output: Value) -> Uuid {
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    let id = Uuid::now_v7();
+                    insert_evaluator(
+                        conn,
+                        id,
+                        project,
+                        "check",
+                        EvaluatorFields {
+                            name: format!("output {id}"),
+                            config: json!({"check": "json_valid"}).to_string(),
+                            output_score: output.to_string(),
+                            connection_id: None,
+                            secret_enc: None,
+                            version: 1,
+                        },
+                        None,
+                        now,
+                    )
+                    .await?;
+                    Ok::<Uuid, MetaError>(id)
+                })
+            })
+            .await
+            .unwrap()
+    }
+
+    /// A rule named `name` on `evaluator` in `project`, written straight to the store.
+    async fn rule_in(app: &TestApp, project: ProjectId, evaluator: Uuid, name: &str) -> Uuid {
+        let now = app.state.clock.now_ns();
+        let name = name.to_owned();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    let id = Uuid::now_v7();
+                    store::insert_rule(
+                        conn,
+                        NewRule {
+                            id,
+                            project_id: project,
+                            evaluator_id: evaluator,
+                            target: "trace".to_owned(),
+                            created_by: None,
+                        },
+                        rule_fields(&name, true),
+                        now,
+                    )
+                    .await?;
+                    Ok::<Uuid, MetaError>(id)
+                })
+            })
+            .await
+            .unwrap()
+    }
+
+    /// Appends a score of `name` made by `rule` in `project`, through storage as the ingest path
+    /// does.
+    async fn put_rule_score(
+        app: &TestApp,
+        project: ProjectId,
+        rule: Uuid,
+        name: &str,
+        value: ScoreValue,
+        created_at: i64,
+    ) {
+        let score = Score {
+            project_id: project,
+            score_id: Uuid::now_v7(),
+            target: ScoreTarget::Trace {
+                trace_id: "0102030405060708090a0b0c0d0e0f10".parse().unwrap(),
+            },
+            session_id: None,
+            user_id: None,
+            name: name.to_owned(),
+            value,
+            reason: None,
+            source: ScoreSource::LlmJudge,
+            evaluator_id: None,
+            rule_id: Some(rule),
+            experiment_id: None,
+            dataset_item_id: None,
+            author_user_id: None,
+            metadata: Default::default(),
+            created_at,
+            updated_at: created_at,
+            deleted: false,
+            ingest_time: created_at,
+        };
+        let batch = scores_to_record_batch(&[score]).unwrap();
+        app.state
+            .storage
+            .append_scores(project, batch)
+            .await
+            .unwrap();
+    }
+
+    /// Writes a rule job of `rule` in `project` that finished at `finished_at` with `status`.
+    async fn finished_rule_job(
+        app: &TestApp,
+        project: ProjectId,
+        rule: Uuid,
+        evaluator: Uuid,
+        status: &'static str,
+        finished_at: i64,
+    ) {
+        let id = Uuid::now_v7();
+        let trace_id: TraceId = format!("{:032x}", id.as_u128()).parse().unwrap();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    eval_jobs::insert_job(
+                        conn,
+                        NewJob {
+                            id,
+                            project_id: project,
+                            kind: KIND_RULE,
+                            rule_id: Some(rule),
+                            evaluator_id: evaluator,
+                            variable_mapping: None,
+                            trace_id,
+                            span_id: None,
+                            trace_start_ns: finished_at,
+                        },
+                        finished_at,
+                    )
+                    .await?;
+                    sqlx::query("UPDATE eval_jobs SET status = ?, finished_at = ? WHERE id = ?")
+                        .bind(status)
+                        .bind(finished_at)
+                        .bind(id.to_string())
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok::<(), MetaError>(())
+                })
+            })
+            .await
+            .unwrap();
+    }
+
+    /// The entry of `rule` in a stats answer.
+    fn entry_of(body: &OnlineRuleStatsResponse, rule: Uuid) -> &OnlineRuleStats {
+        body.data
+            .iter()
+            .find(|entry| entry.rule_id == rule)
+            .unwrap_or_else(|| panic!("no entry for {rule}"))
+    }
+
+    #[tokio::test]
+    async fn stats_give_hourly_jobs_and_the_numeric_average() {
+        let app = TestApp::new().await;
+        app.state.clock.set(STATS_NOW);
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let now = app.state.clock.now_ns();
+        let numeric = output_evaluator(
+            &app,
+            project,
+            json!({"name": "relevance", "data_type": "numeric"}),
+        )
+        .await;
+        let beta = rule_in(&app, project, numeric, "Beta").await;
+        let alpha = rule_in(&app, project, numeric, "Alpha").await;
+        // `now - 1` is in the hour before `now` (index 22), two hours earlier is index 20.
+        let last = now - 1;
+        let two_back = now - 1 - 2 * HOUR_NS;
+        for score in [1.0, 0.5, 0.25] {
+            let at = if score == 0.25 { two_back } else { last };
+            put_rule_score(
+                &app,
+                project,
+                beta,
+                "relevance",
+                ScoreValue::Numeric(score),
+                at,
+            )
+            .await;
+        }
+        put_rule_score(
+            &app,
+            project,
+            beta,
+            "relevance",
+            ScoreValue::Numeric(9.0),
+            now - 7 * DAY_NS,
+        )
+        .await;
+        put_rule_score(
+            &app,
+            project,
+            alpha,
+            "relevance",
+            ScoreValue::Numeric(3.0),
+            last,
+        )
+        .await;
+        finished_rule_job(&app, project, beta, numeric, "done", last).await;
+        finished_rule_job(&app, project, beta, numeric, "done", last).await;
+        finished_rule_job(&app, project, beta, numeric, "failed", two_back).await;
+        finished_rule_job(&app, project, beta, numeric, "skipped", now - 9 * HOUR_NS).await;
+
+        let response = stats_of(&app, &seeded, seeded.project.id).await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let body: OnlineRuleStatsResponse = response.json();
+        assert_eq!(
+            body.window.to - body.window.from,
+            23 * HOUR_NS,
+            "the 23 hours before the current hour, and the current one up to now"
+        );
+        assert_eq!(body.data.len(), 2);
+        assert_eq!(body.data[0].rule_id, alpha, "ordered by name");
+        assert_eq!(body.data[1].rule_id, beta);
+
+        let mine = entry_of(&body, beta);
+        assert_eq!(mine.jobs_hourly.len(), RULE_STATS_HOURS);
+        assert_eq!(mine.jobs_hourly[0].time, body.window.from);
+        assert_eq!(mine.jobs_hourly[22].done, 2);
+        assert_eq!(mine.jobs_hourly[20].failed, 1);
+        assert_eq!(mine.jobs_hourly[20].done, 0);
+        assert_eq!(mine.jobs_hourly[14].skipped, 1, "nine hours before now");
+        assert_eq!(mine.scores.data_type, ScoreDataType::Numeric);
+        assert_eq!(
+            mine.scores.count, 3,
+            "the score of another rule and the old one are left out"
+        );
+        assert!((mine.scores.average.unwrap() - 0.5833333333).abs() < 1e-9);
+        assert_eq!(mine.scores.pass_rate, None);
+        assert_eq!(mine.scores.top_category, None);
+        assert_eq!(mine.scores.hourly.len(), RULE_STATS_HOURS);
+        assert_eq!(mine.scores.hourly[22].value, Some(0.75));
+        assert_eq!(mine.scores.hourly[20].value, Some(0.25));
+        assert_eq!(mine.scores.hourly[21].value, None);
+
+        let other = entry_of(&body, alpha);
+        assert_eq!(other.scores.count, 1);
+        assert_eq!(other.scores.average, Some(3.0));
+        assert!(other.jobs_hourly.iter().all(|hour| hour.done == 0));
+    }
+
+    #[tokio::test]
+    async fn stats_read_the_scores_of_many_rules_in_chunks() {
+        let app = TestApp::new().await;
+        app.state.clock.set(STATS_NOW);
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let now = app.state.clock.now_ns();
+        let numeric = output_evaluator(
+            &app,
+            project,
+            json!({"name": "relevance", "data_type": "numeric"}),
+        )
+        .await;
+        // 450 rules scored in each of the 23 full hours give 10 350 hourly rows, more than one
+        // statement may return (SQL_MAX_ROWS): the rules are read in chunks (D-I-50).
+        let mut rules = Vec::new();
+        for index in 0..450 {
+            rules.push(rule_in(&app, project, numeric, &format!("Rule {index:03}")).await);
+        }
+        let (from, _) = stats::rule_window(now);
+        let mut scores = Vec::new();
+        for (index, rule) in rules.iter().enumerate() {
+            for hour in 0..23_i64 {
+                let at = from + hour * HOUR_NS;
+                scores.push(Score {
+                    project_id: project,
+                    score_id: Uuid::now_v7(),
+                    target: ScoreTarget::Trace {
+                        trace_id: "0102030405060708090a0b0c0d0e0f10".parse().unwrap(),
+                    },
+                    session_id: None,
+                    user_id: None,
+                    name: "relevance".to_owned(),
+                    value: ScoreValue::Numeric(if index == 0 { 0.25 } else { 0.75 }),
+                    reason: None,
+                    source: ScoreSource::LlmJudge,
+                    evaluator_id: None,
+                    rule_id: Some(*rule),
+                    experiment_id: None,
+                    dataset_item_id: None,
+                    author_user_id: None,
+                    metadata: Default::default(),
+                    created_at: at,
+                    updated_at: at,
+                    deleted: false,
+                    ingest_time: at,
+                });
+            }
+        }
+        let batch = scores_to_record_batch(&scores).unwrap();
+        app.state
+            .storage
+            .append_scores(project, batch)
+            .await
+            .unwrap();
+
+        let response = stats_of(&app, &seeded, project).await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let body: OnlineRuleStatsResponse = response.json();
+        assert_eq!(body.data.len(), 450);
+        assert_eq!(entry_of(&body, rules[0]).scores.average, Some(0.25));
+        assert_eq!(entry_of(&body, rules[449]).scores.average, Some(0.75));
+        assert_eq!(entry_of(&body, rules[449]).scores.count, 23);
+    }
+
+    #[tokio::test]
+    async fn stats_give_the_pass_rate_and_the_top_label() {
+        let app = TestApp::new().await;
+        app.state.clock.set(STATS_NOW);
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let now = app.state.clock.now_ns();
+        let boolean = output_evaluator(
+            &app,
+            project,
+            json!({"name": "passes", "data_type": "boolean"}),
+        )
+        .await;
+        let categorical = output_evaluator(
+            &app,
+            project,
+            json!({"name": "label", "data_type": "categorical", "categories": ["a", "b"]}),
+        )
+        .await;
+        let check = rule_in(&app, project, boolean, "Passes").await;
+        let labels = rule_in(&app, project, categorical, "Labels").await;
+        let last = now - 1;
+        for value in [true, false] {
+            put_rule_score(
+                &app,
+                project,
+                check,
+                "passes",
+                ScoreValue::Boolean(value),
+                last,
+            )
+            .await;
+        }
+        put_rule_score(
+            &app,
+            project,
+            check,
+            "passes",
+            ScoreValue::Boolean(true),
+            now - 2 * HOUR_NS - 1,
+        )
+        .await;
+        for label in ["b", "a", "a"] {
+            put_rule_score(
+                &app,
+                project,
+                labels,
+                "label",
+                ScoreValue::Categorical {
+                    label: label.to_owned(),
+                    value: None,
+                },
+                last,
+            )
+            .await;
+        }
+
+        let response = stats_of(&app, &seeded, seeded.project.id).await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let body: OnlineRuleStatsResponse = response.json();
+        let passes = entry_of(&body, check);
+        assert_eq!(passes.scores.data_type, ScoreDataType::Boolean);
+        assert!((passes.scores.pass_rate.unwrap() - 2.0 / 3.0).abs() < 1e-9);
+        assert_eq!(passes.scores.average, None);
+        assert_eq!(passes.scores.hourly[22].value, Some(0.5));
+        assert_eq!(passes.scores.hourly[20].value, Some(1.0));
+
+        let label = entry_of(&body, labels);
+        assert_eq!(label.scores.data_type, ScoreDataType::Categorical);
+        assert_eq!(
+            label.scores.top_category,
+            Some(CategoryCount {
+                label: "a".to_owned(),
+                count: 2
+            })
+        );
+        assert!(
+            label
+                .scores
+                .hourly
+                .iter()
+                .all(|point| point.value.is_none())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rule_without_data_has_zero_jobs_and_no_scores() {
+        let app = TestApp::new().await;
+        app.state.clock.set(STATS_NOW);
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let numeric = output_evaluator(
+            &app,
+            project,
+            json!({"name": "relevance", "data_type": "numeric"}),
+        )
+        .await;
+        let quiet = rule_in(&app, project, numeric, "Quiet").await;
+
+        let response = stats_of(&app, &seeded, seeded.project.id).await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let body: OnlineRuleStatsResponse = response.json();
+        let mine = entry_of(&body, quiet);
+        assert_eq!(mine.jobs_hourly.len(), RULE_STATS_HOURS);
+        assert!(
+            mine.jobs_hourly
+                .iter()
+                .all(|hour| hour.done + hour.failed + hour.skipped == 0)
+        );
+        assert_eq!(mine.scores.count, 0);
+        assert_eq!(mine.scores.average, None);
+        assert_eq!(mine.scores.hourly.len(), RULE_STATS_HOURS);
+        assert!(mine.scores.hourly.iter().all(|point| point.value.is_none()));
+    }
+
+    #[tokio::test]
+    async fn stats_do_not_count_other_projects_and_viewers_can_read() {
+        let app = TestApp::new().await;
+        app.state.clock.set(STATS_NOW);
+        let seeded = app.seed().await;
+        let now = app.state.clock.now_ns();
+        let numeric = output_evaluator(
+            &app,
+            seeded.project.id,
+            json!({"name": "relevance", "data_type": "numeric"}),
+        )
+        .await;
+        let mine = rule_in(&app, seeded.project.id, numeric, "Mine").await;
+        let (other, _) = app.add_project(&seeded, "other", None).await;
+        let other_eval = output_evaluator(
+            &app,
+            other.id,
+            json!({"name": "relevance", "data_type": "numeric"}),
+        )
+        .await;
+        let theirs = rule_in(&app, other.id, other_eval, "Theirs").await;
+        put_rule_score(
+            &app,
+            other.id,
+            theirs,
+            "relevance",
+            ScoreValue::Numeric(1.0),
+            now - 1,
+        )
+        .await;
+        finished_rule_job(&app, other.id, theirs, other_eval, "done", now - 1).await;
+
+        let response = stats_of(&app, &seeded, seeded.project.id).await;
+        let body: OnlineRuleStatsResponse = response.json();
+        assert_eq!(body.data.len(), 1);
+        assert_eq!(body.data[0].rule_id, mine);
+        assert_eq!(body.data[0].scores.count, 0);
+        assert!(body.data[0].jobs_hourly.iter().all(|hour| hour.done == 0));
+
+        let viewer = app
+            .add_member(&seeded, "viewer@example.com", OrgRole::Viewer)
+            .await;
+        let response = app
+            .request(Method::GET, &format!("{}/stats", path(seeded.project.id)))
+            .header(header::COOKIE.as_str(), &viewer.cookie)
+            .send()
+            .await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let response = app
+            .request(Method::GET, &format!("{}/stats", path(seeded.project.id)))
+            .send()
+            .await;
+        assert_eq!(response.status, 401, "{}", text(&response));
     }
 }

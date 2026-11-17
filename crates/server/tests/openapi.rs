@@ -450,6 +450,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "list_online_rules",
     ),
     (
+        "get",
+        "/api/v1/projects/{project}/online-rules/stats",
+        "get_online_rule_stats",
+    ),
+    (
         "post",
         "/api/v1/projects/{project}/online-rules",
         "post_online_rule",
@@ -733,6 +738,7 @@ const READ_OPERATIONS: &[&str] = &[
     "get_experiment_results",
     "compare_experiments",
     "get_evaluator_stats",
+    "get_online_rule_stats",
 ];
 
 const TAGS: &[&str] = &[

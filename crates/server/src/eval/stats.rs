@@ -14,7 +14,7 @@ use crate::api::evaluators as api;
 use crate::api::metrics::MetricPoint;
 use crate::http::error::ApiError;
 use crate::meta::MetaError;
-use crate::meta::eval_jobs::{self, DAY_NS, STATS_BACK_NS, STATS_DAYS};
+use crate::meta::eval_jobs::{self, DAY_NS, HOUR_NS, RULE_STATS_HOURS, STATS_BACK_NS, STATS_DAYS};
 use crate::routes::read::Deadline;
 
 /// Days back in which a score with an experiment counts for `experiments_with_score` (D-I-48).
@@ -24,14 +24,64 @@ pub(crate) const RECENT_EXPERIMENTS: usize = 5;
 /// Evaluator ids one request may name.
 pub(crate) const MAX_RESTRICT: usize = 50;
 
-/// The stats window at `now`: from the start of the UTC day six days ago, to `now` (exclusive).
+/// The evaluator stats window at `now`: from the start of the UTC day six days ago, to `now`
+/// (exclusive).
 pub(crate) fn window(now: i64) -> (i64, i64) {
     (now - now.rem_euclid(DAY_NS) - STATS_BACK_NS, now)
 }
 
-/// Start of day `index` of a window that starts at `from`.
-fn day_time(from: i64, index: usize) -> i64 {
-    from + index as i64 * DAY_NS
+/// The online rule stats window at `now` (D-I-50): the last [`RULE_STATS_HOURS`] hours, the
+/// current one included, up to `now` (exclusive).
+pub(crate) fn rule_window(now: i64) -> (i64, i64) {
+    let back = (RULE_STATS_HOURS as i64 - 1) * HOUR_NS;
+    (now - now.rem_euclid(HOUR_NS) - back, now)
+}
+
+/// Start of bucket `index` of a window that starts at `from` and has buckets of `bucket_ns`.
+pub(crate) fn bucket_time(from: i64, bucket_ns: i64, index: usize) -> i64 {
+    from + index as i64 * bucket_ns
+}
+
+/// What a score read groups by: the evaluator (D-I-48, daily buckets) or the online rule (D-I-50,
+/// hourly buckets). Both read the `scores` view through the same statements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScoreGroup {
+    Evaluator,
+    Rule,
+}
+
+impl ScoreGroup {
+    /// The `scores` column that names the group.
+    fn column(self) -> &'static str {
+        match self {
+            Self::Evaluator => "evaluator_id",
+            Self::Rule => "rule_id",
+        }
+    }
+
+    /// The `date_trunc` unit of the buckets.
+    fn unit(self) -> &'static str {
+        match self {
+            Self::Evaluator => "day",
+            Self::Rule => "hour",
+        }
+    }
+
+    /// Nanoseconds per bucket.
+    pub(crate) fn bucket_ns(self) -> i64 {
+        match self {
+            Self::Evaluator => DAY_NS,
+            Self::Rule => HOUR_NS,
+        }
+    }
+
+    /// Buckets in the window.
+    pub(crate) fn buckets(self) -> usize {
+        match self {
+            Self::Evaluator => STATS_DAYS,
+            Self::Rule => RULE_STATS_HOURS,
+        }
+    }
 }
 
 /// A row the statements return that does not have the shape the statement promises.
@@ -55,7 +105,8 @@ fn ensure_complete(truncated: bool) -> Result<(), ApiError> {
     }
 }
 
-/// The live scores of one evaluator in the window, with the numeric and per-day figures.
+/// The live scores of one group (evaluator or rule) in the window, with the numeric and
+/// per-bucket figures.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct ScoreAggregate {
     /// Live scores of any type.
@@ -64,14 +115,14 @@ pub(crate) struct ScoreAggregate {
     pub(crate) numeric_count: u64,
     /// Sum of the numeric values.
     pub(crate) numeric_sum: f64,
-    /// `(numeric count, numeric sum)` per window day.
-    pub(crate) daily: [(u64, f64); STATS_DAYS],
+    /// `(numeric count, numeric sum)` per window bucket, oldest first.
+    pub(crate) buckets: Vec<(u64, f64)>,
     /// The most frequent categorical label and its count (ties to the smaller label).
     pub(crate) top_category: Option<(String, u64)>,
 }
 
-/// `AND evaluator_id IN (..)` with its parameters, or nothing when `ids` is `None`.
-fn restrict_clause(ids: Option<&[Uuid]>) -> (String, Map<String, Value>) {
+/// `AND {column} IN (..)` with its parameters, or nothing when `ids` is `None`.
+fn restrict_clause(column: &str, ids: Option<&[Uuid]>) -> (String, Map<String, Value>) {
     let mut params = Map::new();
     let Some(ids) = ids else {
         return (String::new(), params);
@@ -82,10 +133,7 @@ fn restrict_clause(ids: Option<&[Uuid]>) -> (String, Map<String, Value>) {
         names.push(format!("{{{name}:String}}"));
         params.insert(name, Value::String(id.to_string()));
     }
-    (
-        format!(" AND evaluator_id IN ({})", names.join(", ")),
-        params,
-    )
+    (format!(" AND {column} IN ({})", names.join(", ")), params)
 }
 
 fn field_u64(row: &Map<String, Value>, column: &'static str) -> Result<u64, ApiError> {
@@ -104,9 +152,9 @@ fn field_time(row: &Map<String, Value>, column: &'static str) -> Result<i64, Api
     parse_rfc3339(field_str(row, column)?).map_err(|_| malformed(column))
 }
 
-/// Reads the scores of `ctx` (window `[from, ..)`) per evaluator. `restrict` names the evaluators
-/// when the request did; `with_categories` runs the categorical statement, which only the
-/// categorical evaluators need.
+/// Reads the scores of `ctx` (window `[from, ..)`) per group `group`, in buckets of
+/// `group.bucket_ns()`. `restrict` names the groups when the request did; `with_categories` runs
+/// the categorical statement, which only the categorical groups need.
 ///
 /// # Errors
 ///
@@ -114,6 +162,7 @@ fn field_time(row: &Map<String, Value>, column: &'static str) -> Result<i64, Api
 /// returns a row of the wrong shape.
 pub(crate) async fn read_scores(
     ctx: &QueryContext,
+    group: ScoreGroup,
     from: i64,
     restrict: Option<&[Uuid]>,
     with_categories: bool,
@@ -122,16 +171,20 @@ pub(crate) async fn read_scores(
     if restrict.is_some_and(<[Uuid]>::is_empty) {
         return Ok(HashMap::new());
     }
-    let (clause, params) = restrict_clause(restrict);
-    let daily_query = format!(
-        "SELECT evaluator_id, date_trunc('day', created_at) AS day, count(*) AS n, \
+    let column = group.column();
+    let unit = group.unit();
+    let bucket_ns = group.bucket_ns();
+    let buckets = group.buckets();
+    let (clause, params) = restrict_clause(column, restrict);
+    let bucket_query = format!(
+        "SELECT {column}, date_trunc('{unit}', created_at) AS bucket, count(*) AS n, \
          count(value_num) AS num_n, sum(value_num) AS num_sum FROM scores \
-         WHERE evaluator_id IS NOT NULL AND deleted = false{clause} \
-         GROUP BY evaluator_id, date_trunc('day', created_at)"
+         WHERE {column} IS NOT NULL AND deleted = false{clause} \
+         GROUP BY {column}, date_trunc('{unit}', created_at)"
     );
     let json = ctx
         .sql_json(SqlRequest {
-            query: &daily_query,
+            query: &bucket_query,
             params: &params,
             limit: SQL_MAX_ROWS,
             timeout: deadline.remaining()?,
@@ -140,24 +193,27 @@ pub(crate) async fn read_scores(
         .map_err(ApiError::Query)?;
     ensure_complete(json.truncated)?;
 
+    let fresh = || ScoreAggregate {
+        buckets: vec![(0, 0.0); buckets],
+        ..Default::default()
+    };
     let mut aggregates: HashMap<Uuid, ScoreAggregate> = HashMap::new();
     for row in &json.rows {
-        let evaluator = field_str(row, "evaluator_id")?;
-        let evaluator = evaluator
+        let key = field_str(row, column)?
             .parse::<Uuid>()
-            .map_err(|_| malformed("evaluator_id"))?;
-        let day = field_time(row, "day")?;
-        if day < from {
+            .map_err(|_| malformed(column))?;
+        let bucket = field_time(row, "bucket")?;
+        if bucket < from {
             continue;
         }
-        let Some(index) = usize::try_from((day - from) / DAY_NS)
+        let Some(index) = usize::try_from((bucket - from) / bucket_ns)
             .ok()
-            .filter(|index| *index < STATS_DAYS)
+            .filter(|index| *index < buckets)
         else {
             continue;
         };
         let count = field_u64(row, "n")?;
-        let entry = aggregates.entry(evaluator).or_default();
+        let entry = aggregates.entry(key).or_insert_with(fresh);
         entry.count += count;
         // A null sum means the bucket has no numeric value (NaN encodes as null, sql/encode.rs).
         let sum = row.get("num_sum").ok_or_else(|| malformed("num_sum"))?;
@@ -168,17 +224,17 @@ pub(crate) async fn read_scores(
         let sum = sum.as_f64().ok_or_else(|| malformed("num_sum"))?;
         entry.numeric_count += numeric_count;
         entry.numeric_sum += sum;
-        entry.daily[index].0 += numeric_count;
-        entry.daily[index].1 += sum;
+        entry.buckets[index].0 += numeric_count;
+        entry.buckets[index].1 += sum;
     }
 
     if with_categories {
         let query = format!(
-            "SELECT evaluator_id, value_str, n FROM (SELECT evaluator_id, value_str, n, \
-             row_number() OVER (PARTITION BY evaluator_id ORDER BY n DESC, value_str ASC) AS rn \
-             FROM (SELECT evaluator_id, value_str, count(*) AS n FROM scores \
-             WHERE evaluator_id IS NOT NULL AND deleted = false AND data_type = 'categorical' \
-             AND value_str IS NOT NULL{clause} GROUP BY evaluator_id, value_str)) WHERE rn = 1"
+            "SELECT {column}, value_str, n FROM (SELECT {column}, value_str, n, \
+             row_number() OVER (PARTITION BY {column} ORDER BY n DESC, value_str ASC) AS rn \
+             FROM (SELECT {column}, value_str, count(*) AS n FROM scores \
+             WHERE {column} IS NOT NULL AND deleted = false AND data_type = 'categorical' \
+             AND value_str IS NOT NULL{clause} GROUP BY {column}, value_str)) WHERE rn = 1"
         );
         let json = ctx
             .sql_json(SqlRequest {
@@ -191,13 +247,12 @@ pub(crate) async fn read_scores(
             .map_err(ApiError::Query)?;
         ensure_complete(json.truncated)?;
         for row in &json.rows {
-            let evaluator = field_str(row, "evaluator_id")?;
-            let evaluator = evaluator
+            let key = field_str(row, column)?
                 .parse::<Uuid>()
-                .map_err(|_| malformed("evaluator_id"))?;
+                .map_err(|_| malformed(column))?;
             let label = field_str(row, "value_str")?.to_owned();
             let count = field_u64(row, "n")?;
-            aggregates.entry(evaluator).or_default().top_category = Some((label, count));
+            aggregates.entry(key).or_insert_with(fresh).top_category = Some((label, count));
         }
     }
     Ok(aggregates)
@@ -295,19 +350,35 @@ pub(crate) fn job_stats(
             .iter()
             .enumerate()
             .map(|(index, count)| MetricPoint {
-                time: day_time(from, index),
+                time: bucket_time(from, DAY_NS, index),
                 value: Some(*count as f64),
             })
             .collect(),
     }
 }
 
-/// The score figures of one evaluator, read with its current output type.
-pub(crate) fn score_stats(
+/// The score figures of one group, read with its current output type (D-I-48, D-I-50): the
+/// summary values, and a series of `buckets` points of `bucket_ns`, oldest first. A bucket
+/// without a numeric value has no `value`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ScoreSummary {
+    /// Mean of the numeric values. Numeric outputs only.
+    pub(crate) average: Option<f64>,
+    /// Share of `true` values, 0 to 1. Boolean outputs only.
+    pub(crate) pass_rate: Option<f64>,
+    /// The most frequent label. Categorical outputs only.
+    pub(crate) top_category: Option<api::CategoryCount>,
+    /// The average (numeric) or pass rate (boolean) per bucket.
+    pub(crate) series: Vec<MetricPoint>,
+}
+
+pub(crate) fn score_summary(
     data_type: ScoreDataType,
     aggregate: Option<&ScoreAggregate>,
     from: i64,
-) -> api::EvaluatorScoreStats {
+    bucket_ns: i64,
+    buckets: usize,
+) -> ScoreSummary {
     let empty = ScoreAggregate::default();
     let aggregate = aggregate.unwrap_or(&empty);
     let has_numeric = aggregate.numeric_count > 0;
@@ -317,41 +388,37 @@ pub(crate) fn score_stats(
         ScoreDataType::Boolean => (None, ratio),
         _ => (None, None),
     };
-    let daily = match data_type {
-        ScoreDataType::Numeric | ScoreDataType::Boolean => aggregate
-            .daily
-            .iter()
-            .enumerate()
-            .map(|(index, (numeric_count, sum))| MetricPoint {
-                time: day_time(from, index),
-                value: (*numeric_count > 0).then(|| sum / *numeric_count as f64),
-            })
-            .collect(),
-        _ => (0..STATS_DAYS)
-            .map(|index| MetricPoint {
-                time: day_time(from, index),
-                value: None,
-            })
-            .collect(),
+    let series = (0..buckets)
+        .map(|index| {
+            let time = bucket_time(from, bucket_ns, index);
+            let value = match data_type {
+                ScoreDataType::Numeric | ScoreDataType::Boolean => {
+                    let (numeric_count, sum) =
+                        aggregate.buckets.get(index).copied().unwrap_or((0, 0.0));
+                    (numeric_count > 0).then(|| sum / numeric_count as f64)
+                }
+                _ => None,
+            };
+            MetricPoint { time, value }
+        })
+        .collect();
+    let top_category = match data_type {
+        ScoreDataType::Categorical => {
+            aggregate
+                .top_category
+                .as_ref()
+                .map(|(label, count)| api::CategoryCount {
+                    label: label.clone(),
+                    count: *count,
+                })
+        }
+        _ => None,
     };
-    api::EvaluatorScoreStats {
-        data_type,
-        count: aggregate.count,
+    ScoreSummary {
         average,
         pass_rate,
-        top_category: match data_type {
-            ScoreDataType::Categorical => {
-                aggregate
-                    .top_category
-                    .as_ref()
-                    .map(|(label, count)| api::CategoryCount {
-                        label: label.clone(),
-                        count: *count,
-                    })
-            }
-            _ => None,
-        },
-        daily,
+        top_category,
+        series,
     }
 }
 
@@ -434,29 +501,39 @@ mod tests {
     }
 
     #[test]
-    fn score_stats_numeric_boolean_categorical_text() {
+    fn score_summary_numeric_boolean_categorical_text() {
         let from = ns("2026-01-01T00:00:00Z");
         let mut numeric = ScoreAggregate {
             count: 3,
             numeric_count: 3,
             numeric_sum: 2.4,
+            buckets: vec![(0, 0.0); STATS_DAYS],
             ..Default::default()
         };
-        numeric.daily[0] = (2, 1.6);
-        numeric.daily[2] = (1, 0.8);
-        let stats = score_stats(ScoreDataType::Numeric, Some(&numeric), from);
-        assert_eq!(stats.count, 3);
-        assert!((stats.average.unwrap() - 0.8).abs() < 1e-12);
-        assert_eq!(stats.pass_rate, None);
-        assert_eq!(stats.daily[0].value, Some(0.8));
-        assert_eq!(stats.daily[1].value, None, "a bucket without numeric value");
-        assert!((stats.daily[2].value.unwrap() - 0.8).abs() < 1e-12);
+        numeric.buckets[0] = (2, 1.6);
+        numeric.buckets[2] = (1, 0.8);
+        let summary = score_summary(
+            ScoreDataType::Numeric,
+            Some(&numeric),
+            from,
+            DAY_NS,
+            STATS_DAYS,
+        );
+        assert!((summary.average.unwrap() - 0.8).abs() < 1e-12);
+        assert_eq!(summary.pass_rate, None);
+        assert_eq!(summary.series.len(), STATS_DAYS);
+        assert_eq!(summary.series[0].value, Some(0.8));
+        assert_eq!(
+            summary.series[1].value, None,
+            "a bucket without numeric value"
+        );
+        assert!((summary.series[2].value.unwrap() - 0.8).abs() < 1e-12);
 
         let boolean = ScoreAggregate {
             count: 4,
             numeric_count: 4,
             numeric_sum: 3.0,
-            daily: [
+            buckets: vec![
                 (4, 3.0),
                 (0, 0.0),
                 (0, 0.0),
@@ -467,55 +544,101 @@ mod tests {
             ],
             ..Default::default()
         };
-        let stats = score_stats(ScoreDataType::Boolean, Some(&boolean), from);
-        assert!((stats.pass_rate.unwrap() - 0.75).abs() < 1e-12);
-        assert_eq!(stats.average, None);
-        assert_eq!(stats.daily[0].value, Some(0.75));
+        let summary = score_summary(
+            ScoreDataType::Boolean,
+            Some(&boolean),
+            from,
+            DAY_NS,
+            STATS_DAYS,
+        );
+        assert!((summary.pass_rate.unwrap() - 0.75).abs() < 1e-12);
+        assert_eq!(summary.average, None);
+        assert_eq!(summary.series[0].value, Some(0.75));
 
         let categorical = ScoreAggregate {
             count: 3,
             top_category: Some(("pass".to_owned(), 2)),
             ..Default::default()
         };
-        let stats = score_stats(ScoreDataType::Categorical, Some(&categorical), from);
+        let summary = score_summary(
+            ScoreDataType::Categorical,
+            Some(&categorical),
+            from,
+            DAY_NS,
+            STATS_DAYS,
+        );
         assert_eq!(
-            stats.top_category,
+            summary.top_category,
             Some(api::CategoryCount {
                 label: "pass".to_owned(),
                 count: 2
             })
         );
-        assert!(stats.daily.iter().all(|point| point.value.is_none()));
+        assert!(summary.series.iter().all(|point| point.value.is_none()));
 
-        let stats = score_stats(ScoreDataType::Text, Some(&categorical), from);
-        assert_eq!(stats.count, 3);
-        assert_eq!(stats.top_category, None);
-        assert_eq!(stats.average, None);
-        assert_eq!(stats.pass_rate, None);
+        let summary = score_summary(
+            ScoreDataType::Text,
+            Some(&categorical),
+            from,
+            DAY_NS,
+            STATS_DAYS,
+        );
+        assert_eq!(summary.top_category, None);
+        assert_eq!(summary.average, None);
+        assert_eq!(summary.pass_rate, None);
     }
 
     #[test]
-    fn score_stats_with_no_numeric_rows_has_no_average() {
+    fn score_summary_with_no_numeric_rows_has_no_average() {
         let from = ns("2026-01-01T00:00:00Z");
         let aggregate = ScoreAggregate {
             count: 2,
             ..Default::default()
         };
-        let stats = score_stats(ScoreDataType::Numeric, Some(&aggregate), from);
-        assert_eq!(stats.count, 2);
-        assert_eq!(stats.average, None);
-        let stats = score_stats(ScoreDataType::Boolean, Some(&aggregate), from);
-        assert_eq!(stats.pass_rate, None);
+        let summary = score_summary(
+            ScoreDataType::Numeric,
+            Some(&aggregate),
+            from,
+            DAY_NS,
+            STATS_DAYS,
+        );
+        assert_eq!(summary.average, None);
+        let summary = score_summary(
+            ScoreDataType::Boolean,
+            Some(&aggregate),
+            from,
+            DAY_NS,
+            STATS_DAYS,
+        );
+        assert_eq!(summary.pass_rate, None);
     }
 
     #[test]
-    fn score_stats_without_aggregate_is_empty() {
+    fn score_summary_without_aggregate_is_empty_with_one_point_per_bucket() {
         let from = ns("2026-01-01T00:00:00Z");
-        let stats = score_stats(ScoreDataType::Numeric, None, from);
-        assert_eq!(stats.count, 0);
-        assert_eq!(stats.average, None);
-        assert_eq!(stats.daily.len(), STATS_DAYS);
-        assert!(stats.daily.iter().all(|point| point.value.is_none()));
+        let summary = score_summary(
+            ScoreDataType::Numeric,
+            None,
+            from,
+            HOUR_NS,
+            RULE_STATS_HOURS,
+        );
+        assert_eq!(summary.average, None);
+        assert_eq!(summary.series.len(), RULE_STATS_HOURS);
+        assert!(summary.series.iter().all(|point| point.value.is_none()));
+        assert_eq!(summary.series[1].time, from + HOUR_NS);
+    }
+
+    #[test]
+    fn rule_window_is_24_hours_ending_now() {
+        let now = ns("2026-01-01T11:30:00Z");
+        assert_eq!(
+            rule_window(now),
+            (ns("2025-12-31T12:00:00Z"), now),
+            "the current hour and the 23 before it"
+        );
+        let (from, _) = rule_window(ns("2026-01-01T12:00:00Z"));
+        assert_eq!(from, ns("2025-12-31T13:00:00Z"));
     }
 
     #[test]
@@ -558,11 +681,11 @@ mod tests {
 
     #[test]
     fn restrict_clause_lists_the_ids_as_placeholders() {
-        let (clause, params) = restrict_clause(None);
+        let (clause, params) = restrict_clause("evaluator_id", None);
         assert!(clause.is_empty());
         assert!(params.is_empty());
         let ids = [Uuid::from_u128(1), Uuid::from_u128(2)];
-        let (clause, params) = restrict_clause(Some(&ids));
+        let (clause, params) = restrict_clause("evaluator_id", Some(&ids));
         assert_eq!(clause, " AND evaluator_id IN ({e0:String}, {e1:String})");
         assert_eq!(
             params.get("e1"),
@@ -633,9 +756,16 @@ mod tests {
         )
         .await
         .unwrap();
-        let aggregates = read_scores(&ctx, from, None, false, Deadline::start())
-            .await
-            .unwrap();
+        let aggregates = read_scores(
+            &ctx,
+            ScoreGroup::Evaluator,
+            from,
+            None,
+            false,
+            Deadline::start(),
+        )
+        .await
+        .unwrap();
         let mine = aggregates.get(&evaluator).unwrap();
         assert_eq!(
             mine.count, 3,
@@ -643,9 +773,9 @@ mod tests {
         );
         assert_eq!(mine.numeric_count, 3);
         assert!((mine.numeric_sum - 1.75).abs() < 1e-9);
-        assert_eq!(mine.daily[6].0, 1);
-        assert_eq!(mine.daily[4].0, 2);
-        assert!((mine.daily[4].1 - 0.75).abs() < 1e-9);
+        assert_eq!(mine.buckets[6].0, 1);
+        assert_eq!(mine.buckets[4].0, 2);
+        assert!((mine.buckets[4].1 - 0.75).abs() < 1e-9);
         assert_eq!(aggregates.get(&other).map(|a| a.count), Some(1));
         assert_eq!(
             aggregates.len(),
@@ -689,9 +819,16 @@ mod tests {
         )
         .await
         .unwrap();
-        let aggregates = read_scores(&ctx, from, Some(&[second]), false, Deadline::start())
-            .await
-            .unwrap();
+        let aggregates = read_scores(
+            &ctx,
+            ScoreGroup::Evaluator,
+            from,
+            Some(&[second]),
+            false,
+            Deadline::start(),
+        )
+        .await
+        .unwrap();
         assert_eq!(aggregates.len(), 1);
         assert_eq!(aggregates.get(&second).map(|a| a.count), Some(1));
     }
@@ -733,9 +870,16 @@ mod tests {
         )
         .await
         .unwrap();
-        let aggregates = read_scores(&ctx, from, None, true, Deadline::start())
-            .await
-            .unwrap();
+        let aggregates = read_scores(
+            &ctx,
+            ScoreGroup::Evaluator,
+            from,
+            None,
+            true,
+            Deadline::start(),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             aggregates.get(&first).unwrap().top_category,
             Some(("a".to_owned(), 2))
