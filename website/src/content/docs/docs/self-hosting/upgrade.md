@@ -1,7 +1,10 @@
-# Upgrade
+---
+title: "Upgrade"
+description: "Upgrade cetra to a new release and know what happens to your data."
+---
 
 cetra follows [Semantic Versioning](https://semver.org/). Before 1.0, a minor release (0.x → 0.y)
-may need action; the release notes ([CHANGELOG.md](../../CHANGELOG.md), and each GitHub release)
+may need action; the release notes ([CHANGELOG.md](https://github.com/cetra-ai/cetra/blob/main/CHANGELOG.md), and each GitHub release)
 start with `### Upgrade notes` when it does.
 
 What happens on upgrade:
@@ -32,7 +35,7 @@ What happens on upgrade:
 Procedure:
 
 1. Read the release notes of every version between yours and the new one.
-2. Take a backup: `cetra admin backup` ([backup.md](backup.md)).
+2. Take a backup: `cetra admin backup` ([Backup and restore](/docs/self-hosting/backup/)).
 3. Replace the binary, image or chart version (below) and start it.
 4. Check `/readyz` and the UI.
 

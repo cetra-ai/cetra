@@ -7,4 +7,4 @@ Open the UI:
 Send OTLP to the Service {{ include "cetra.fullname" . }}: port 4318 (HTTP) or 4317 (gRPC), with an
 sk-cetra- key of the project as "Authorization: Bearer <key>".
 
-Back up the volume, and the bucket when s3.enabled, as in docs/self-hosting/backup.md.
+Back up the volume, and the bucket when s3.enabled, as in https://cetra.sh/docs/self-hosting/backup/.

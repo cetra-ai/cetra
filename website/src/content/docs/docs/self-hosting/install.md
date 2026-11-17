@@ -1,4 +1,7 @@
-# Install
+---
+title: "Install"
+description: "Install cetra from a release archive, the install script or the Docker image, and verify the download."
+---
 
 Releases are on GitHub: <https://github.com/cetra-ai/cetra/releases>. Each release has:
 
@@ -49,7 +52,7 @@ and 4318. On the first start it logs a setup link, `setup required: open
 http://localhost:8080/setup?token=…`; open it to create the first admin, organization and project.
 To skip the setup page, set `CETRA_INIT_ADMIN_EMAIL`, `CETRA_INIT_ADMIN_PASSWORD`,
 `CETRA_INIT_ORG` and `CETRA_INIT_PROJECT` (and optionally `CETRA_INIT_SECRET_KEY`) for the first
-start ([configuration.md](configuration.md)).
+start ([Configuration](/docs/self-hosting/configuration/)).
 
 ### systemd
 
@@ -97,7 +100,7 @@ The image (`linux/amd64`, `linux/arm64`) is distroless: no shell, the binary at
 `/usr/local/bin/cetra`, running as uid/gid 65532, data in the volume at `/data`. Its health check
 runs `cetra health`, which asks `/readyz`. Tags: `0.1.0` (exact), `0.1` (latest patch of 0.1) and
 `latest`; pin an exact version in production. For more than a quick try, use
-[docker-compose.md](docker-compose.md).
+[Docker Compose](/docs/self-hosting/docker-compose/).
 
 ## Verify a download
 

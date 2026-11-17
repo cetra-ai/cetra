@@ -529,7 +529,7 @@ async fn incomplete_upload_checks(probe: &Probe) -> Result<(), String> {
 }
 
 /// `lifecycle_rule_present`: prints the bucket's lifecycle configuration. With
-/// `CETRA_TEST_S3_EXPECT_LIFECYCLE=1` it asserts the abort rule exists (`docs/self-hosting/s3.md`).
+/// `CETRA_TEST_S3_EXPECT_LIFECYCLE=1` it asserts the abort rule exists (`https://cetra.sh/docs/self-hosting/s3/`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs CETRA_TEST_S3_ENDPOINT; see the module docs"]
 async fn lifecycle_rule_present() {

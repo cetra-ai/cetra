@@ -1,7 +1,10 @@
-# Monitoring: health checks and Prometheus metrics
+---
+title: "Monitoring"
+description: "Check cetra's health, scrape its Prometheus metrics and set up alerts on them."
+---
 
 cetra has two health endpoints on the HTTP port (8080), and an optional Prometheus endpoint on its
-own port. Both are described here. The design is spec 12 § Process lifecycle and § Self-monitoring.
+own port. Both are described here.
 
 ## Health endpoints
 
@@ -43,7 +46,7 @@ A readiness failure does not restart anything. What it does depends on where cet
 - **Docker and compose.** The container shows `unhealthy` and keeps running.
 
 A healthy server with restore mode on also shows `"restore_mode": true` in its `/readyz` answer (see
-[backup.md](backup.md#restore-mode-restore-drills)).
+[Backup and restore](/docs/self-hosting/backup/#restore-mode-restore-drills)).
 
 ## Prometheus metrics
 

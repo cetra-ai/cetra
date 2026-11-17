@@ -1,4 +1,7 @@
-# Kubernetes (Helm)
+---
+title: "Kubernetes (Helm)"
+description: "Install cetra on Kubernetes with the Helm chart: one pod, one volume, and the values that matter."
+---
 
 The chart runs cetra as a StatefulSet with exactly one pod and one PersistentVolumeClaim mounted at
 `/data`. cetra is a single process that locks its data directory, so there is no replica setting
@@ -13,7 +16,7 @@ kubectl -n cetra logs cetra-0 | grep 'setup required'
 ```
 
 The chart version is the cetra version. The values are listed in the chart's
-[README](../../deploy/helm/cetra/README.md); the main ones:
+[README](https://github.com/cetra-ai/cetra/blob/main/deploy/helm/cetra/README.md); the main ones:
 
 | Value | Default | Purpose |
 |---|---|---|
@@ -23,7 +26,7 @@ The chart version is the cetra version. The values are listed in the chart's
 | `env` | `[]` | extra environment variables |
 | `secret.existingSecret` | `""` | a Secret whose keys become environment variables |
 | `secret.values` | `{}` | variables of a Secret the chart creates |
-| `s3.*` | off | Parquet files and media in a bucket ([s3.md](s3.md)) |
+| `s3.*` | off | Parquet files and media in a bucket ([Object storage](/docs/self-hosting/s3/)) |
 | `ingress.*` | off | an Ingress for the HTTP port |
 
 Secrets (SMTP URL, OAuth client secrets, the licence key, `AWS_*` credentials,
@@ -38,7 +41,7 @@ helm upgrade cetra oci://ghcr.io/cetra-ai/charts/cetra --version 0.1.0 -n cetra 
 ```
 
 Without `CETRA_ENCRYPTION_KEY`, cetra generates `/data/secret.key` on its first start; it lives
-on the volume and must be backed up with it ([backup.md](backup.md)).
+on the volume and must be backed up with it ([Backup and restore](/docs/self-hosting/backup/)).
 
 OTLP: the Service exposes 8080 (HTTP, including `/v1/traces`), 4317 (gRPC) and 4318 (HTTP). The
 Ingress routes 8080 only; expose gRPC through a Service of type `LoadBalancer` or a gRPC-aware
@@ -47,6 +50,6 @@ ingress if you need it from outside the cluster.
 The pod runs as uid/gid 65532 with a read-only root filesystem and no capabilities. Probes:
 startup and liveness on `/healthz` (the startup probe allows 10 minutes for WAL replay), readiness
 on `/readyz`. `terminationGracePeriodSeconds` is 60 so a stop can drain and flush. What each probe checks,
-and the Prometheus metrics (`metrics.enabled`), are in [monitoring.md](monitoring.md).
+and the Prometheus metrics (`metrics.enabled`), are in [Monitoring](/docs/self-hosting/monitoring/).
 
-Upgrades: [upgrade.md](upgrade.md#kubernetes). Backups: [backup.md](backup.md#kubernetes).
+Upgrades: [Upgrade](/docs/self-hosting/upgrade/#kubernetes). Backups: [Backup and restore](/docs/self-hosting/backup/#kubernetes).

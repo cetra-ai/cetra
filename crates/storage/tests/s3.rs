@@ -26,7 +26,7 @@
 //!
 //! A remote provider needs its region and addressing style: `CETRA_TEST_S3_REGION` (default
 //! `us-east-1`) and `CETRA_TEST_S3_PATH_STYLE` (default `true`; `false` for Hetzner, see
-//! `docs/self-hosting/s3.md`).
+//! `https://cetra.sh/docs/self-hosting/s3/`).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 

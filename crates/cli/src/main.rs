@@ -608,7 +608,7 @@ async fn backup_command(to: &Path, meta_only: bool, config: Option<&Path>) -> an
             ) =>
         {
             anyhow::bail!(
-                "no running cetra serve answers on {}; start it, or for a stopped server copy the data directory (docs/self-hosting/backup.md)",
+                "no running cetra serve answers on {}; start it, or for a stopped server copy the data directory (https://cetra.sh/docs/self-hosting/backup/)",
                 socket.display()
             );
         }
@@ -1385,7 +1385,10 @@ mod tests {
         .unwrap_err();
         let text = format!("{error:#}");
         assert!(text.contains("admin.sock"), "{text}");
-        assert!(text.contains("docs/self-hosting/backup.md"), "{text}");
+        assert!(
+            text.contains("https://cetra.sh/docs/self-hosting/backup/"),
+            "{text}"
+        );
     }
 
     #[tokio::test]

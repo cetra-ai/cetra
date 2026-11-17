@@ -66,7 +66,7 @@ TLS: terminated by a reverse proxy in the reference setups; native TLS optional 
 
 ## Packaging
 
-Track N builds, publishes and tests these (`docs/plans/n-packaging/`, D-N-1–D-N-16). User documentation: `docs/self-hosting/`.
+Track N builds, publishes and tests these (`docs/plans/n-packaging/`, D-N-1–D-N-16). User documentation: `website/src/content/docs/docs/self-hosting/`, served at cetra.sh/docs/self-hosting/.
 
 | Artifact | Details |
 |---|---|
@@ -111,7 +111,7 @@ The design is `docs/plans/p-entitlements/00-design.md` (D169–D179, D-P-1–D-P
 ## Self-monitoring
 
 > **Built in N M3 (D-N-28 to D-N-30, D-N-33):**
-> - Prometheus `/metrics` on `metrics_addr`, a separate listener, off by default, with no authentication. The metrics are listed in `docs/self-hosting/monitoring.md`. Labels come from fixed sets only, never a tenant, user, key, model or URL (D-N-29).
+> - Prometheus `/metrics` on `metrics_addr`, a separate listener, off by default, with no authentication. The metrics are listed in `website/src/content/docs/docs/self-hosting/monitoring.md`. Labels come from fixed sets only, never a tenant, user, key, model or URL (D-N-29).
 > - `/readyz` as § Process lifecycle describes it.
 > - Restore mode (`restore_mode`, D-N-25) for restore drills: no outbound work.
 >
@@ -121,7 +121,7 @@ The design is `docs/plans/p-entitlements/00-design.md` (D169–D179, D-P-1–D-P
 
 What to back up: `meta.db` and `catalog.db` (taken together, in the same pause), the object store (`objects/` or the bucket), and `<data_dir>/secret.key` (or keep `CETRA_ENCRYPTION_KEY`) with the data. Without it, LLM connection keys and webhook secrets cannot be read, and the server refuses to start (D-I-1). `cetra admin rotate-encryption-key` replaces the key while the server is stopped (D-I-3). A backup taken before a rotation can only be read with the key that was current then; keep that key with it.
 
-**Cold snapshot (the MVP procedure, D-N-11; `docs/self-hosting/backup.md`):** stop the server (it drains and flushes, at most 60 s); copy the whole data directory (`meta.db`, `catalog.db`, `wal/`, `secret.key`, and `objects/` in local mode; `tmp/` and `LOCK` may be skipped); in S3 mode, copy the bucket prefix during the same stop; start the server.
+**Cold snapshot (the MVP procedure, D-N-11; `website/src/content/docs/docs/self-hosting/backup.md`):** stop the server (it drains and flushes, at most 60 s); copy the whole data directory (`meta.db`, `catalog.db`, `wal/`, `secret.key`, and `objects/` in local mode; `tmp/` and `LOCK` may be skipped); in S3 mode, copy the bucket prefix during the same stop; start the server.
 
 **Restore:** stop the server, keep the current data directory (or a copy of its `meta.db`), put the backed-up data directory in place, in S3 mode make the bucket prefix identical to the backup copy (sync with delete). Then, with the server still stopped, run `cetra admin migrate` if the backup is from an older version, and re-apply deletions (below) before starting the server.
 
@@ -131,7 +131,7 @@ What to back up: `meta.db` and `catalog.db` (taken together, in the same pause),
 
 ## Upgrades
 
-- Semantic versioning (0.x for now). Upgrade: take a backup, replace the binary, image or chart version, restart; SQLite migrations run automatically (forward-only). Release notes (`CHANGELOG.md`) start with `### Upgrade notes` when an upgrade needs action (D-N-5, D-N-12; `docs/self-hosting/upgrade.md`). Before migrating an existing `meta.db` or `catalog.db`, the server keeps a copy named `meta.db.pre-m<N>` / `catalog.db.pre-m<N>` (by `VACUUM INTO`), where N is the highest migration applied before the upgrade, and only the copy from the last upgrade (D-N-22). The copies hold the data: delete them once the upgrade is verified.
+- Semantic versioning (0.x for now). Upgrade: take a backup, replace the binary, image or chart version, restart; SQLite migrations run automatically (forward-only). Release notes (`CHANGELOG.md`) start with `### Upgrade notes` when an upgrade needs action (D-N-5, D-N-12; `website/src/content/docs/docs/self-hosting/upgrade.md`). Before migrating an existing `meta.db` or `catalog.db`, the server keeps a copy named `meta.db.pre-m<N>` / `catalog.db.pre-m<N>` (by `VACUUM INTO`), where N is the highest migration applied before the upgrade, and only the copy from the last upgrade (D-N-22). The copies hold the data: delete them once the upgrade is verified.
 - Parquet schema changes are additive only (03 §3); normalization changes bump `schema_version` without rewriting data.
 - From the first public release tag (D185): a storage format change bumps a format version and migrates at open (D-R-12); the WAL carries a format header in each segment (03 § 12), and a new binary reads the previous format's segments (replays them before writing the new format). Before that tag there is no format constraint.
 - `meta.db`, `secret.key`, the backup manifest and the admin socket follow 04 § Format versions (D-R-33 to D-R-38): a `meta.db` format version beside the migrations, additive migrations, golden backups restored by CI (SF7).
@@ -148,4 +148,5 @@ What to back up: `meta.db` and `catalog.db` (taken together, in the same pause),
 
 ## Documentation deliverables (part of the MVP)
 
-Self-hosting (`docs/self-hosting/`: install by binary, Docker, compose or Helm, configuration, S3, backup/restore, upgrades; track N), quickstart (Docker, binary), OTel recipe per language, SDK guides (Python/TS), Vercel AI SDK guide, attribute reference, filter DSL + SQL schema reference, evaluators & online rules, alerts, auth/SSO setup (GitHub, Google, Okta, Entra ID, Keycloak), SMTP setup, S3 setup, backup/restore, GDPR guide, Helm values reference, API reference (rendered OpenAPI).
+Self-hosting (`website/src/content/docs/docs/self-hosting/`, served at cetra.sh/docs/self-hosting/: install by binary, Docker, compose or Helm, configuration and its reference, S3, backup/restore, upgrades; tracks N and W), quickstart (Docker, binary), OTel recipe per language, SDK guides (Python/TS), Vercel AI SDK guide, attribute reference, filter DSL + SQL schema reference, evaluators & online rules, alerts, auth/SSO setup (GitHub, Google, Okta, Entra ID, Keycloak), SMTP setup, S3 setup, backup/restore, GDPR guide, Helm values reference, API reference (rendered OpenAPI).
+The site and its drift checks are track W (`docs/plans/docs-site/`). The configuration reference page is checked against the loader by `config::tests::the_configuration_reference_matches_the_loader`.

@@ -1,7 +1,7 @@
 # cetra Helm chart
 
 Runs cetra as a StatefulSet with one pod and one PersistentVolumeClaim (`/data`). Guide:
-[docs/self-hosting/kubernetes.md](../../../docs/self-hosting/kubernetes.md).
+[https://cetra.sh/docs/self-hosting/kubernetes/](https://cetra.sh/docs/self-hosting/kubernetes/).
 
 ```bash
 helm install cetra oci://ghcr.io/cetra-ai/charts/cetra --version <version> \
@@ -34,7 +34,7 @@ The chart version is the cetra version.
 | `persistence.storageClassName` | `""` | empty: the default StorageClass |
 | `resources` | `{}` | container resources |
 | `extraVolumes`, `extraVolumeMounts` | `[]`, `[]` | more pod volumes and cetra container mounts, e.g. a backup volume |
-| `metrics.enabled` | `false` | Prometheus `/metrics` on port 9464 (`CETRA_METRICS_ADDR`), a `metrics` container port; no authentication, no Service port ([monitoring.md](../../../docs/self-hosting/monitoring.md)) |
+| `metrics.enabled` | `false` | Prometheus `/metrics` on port 9464 (`CETRA_METRICS_ADDR`), a `metrics` container port; no authentication, no Service port ([Monitoring](https://cetra.sh/docs/self-hosting/monitoring/)) |
 | `metrics.podAnnotations` | `prometheus.io/scrape`, `port` (9464), `path` (`/metrics`) | added to the pod when `metrics.enabled`; `podAnnotations` wins on a shared key |
 | `service.type` | `ClusterIP` | Service type (ports 8080, 4317, 4318) |
 | `service.annotations` | `{}` | |
