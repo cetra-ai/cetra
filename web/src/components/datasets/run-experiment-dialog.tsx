@@ -41,6 +41,8 @@ export function RunExperimentDialog({
           to="/$org/$project/datasets/$datasetId"
           params={{ org, project, datasetId }}
           search={{ tab: "experiments" }}
+          // Keeps the history state, which carries the way back to where the dataset was opened from.
+          state={true}
           className="w-fit text-body underline-offset-4 hover:underline"
         >
           Experiments of this dataset

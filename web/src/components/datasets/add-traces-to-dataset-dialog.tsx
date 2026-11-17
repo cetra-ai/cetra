@@ -27,6 +27,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { shortId } from "@/lib/format";
+import { useBackState } from "@/lib/list-return";
 import { canManageDatasets, type OrgRole } from "@/lib/roles";
 
 /** The most traces one bulk add copies (D-J-25). */
@@ -144,6 +145,7 @@ function AddTracesForm({
   const { org, project } = useProject();
   const ref = projectRef(org, project);
   const queryClient = useQueryClient();
+  const backState = useBackState("Traces");
 
   const [search, setSearch] = useState("");
   const [query, setQuery] = useState("");
@@ -296,6 +298,7 @@ function AddTracesForm({
           <Link
             to="/$org/$project/datasets/$datasetId"
             params={{ org, project, datasetId: result.dataset.id }}
+            state={backState}
             className={buttonVariants({ variant: "default" })}
           >
             Open dataset

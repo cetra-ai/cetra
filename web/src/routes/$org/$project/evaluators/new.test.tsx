@@ -270,3 +270,19 @@ it("returns to the filtered list it was opened from", async () => {
   expect(router.state.location.search).toMatchObject({ q: "rel" });
   await waitFor(() => expect(router.state.status).toBe("idle"));
 });
+
+it("cancels back to the list it was opened from", async () => {
+  const { router, user } = await renderApp("/acme/support-bot/evaluators?q=rel");
+  await user.click(await screen.findByRole("link", { name: "New evaluator" }));
+  await user.click(await screen.findByRole("button", { name: "Cancel" }));
+  await waitFor(() => expect(router.state.location.pathname).toBe("/acme/support-bot/evaluators"));
+  expect(router.state.location.search).toMatchObject({ q: "rel" });
+  await waitFor(() => expect(router.state.status).toBe("idle"));
+});
+
+it("cancels to the evaluators list when opened directly", async () => {
+  const { router, user } = await renderApp("/acme/support-bot/evaluators/new");
+  await user.click(await screen.findByRole("button", { name: "Cancel" }));
+  await waitFor(() => expect(router.state.location.pathname).toBe("/acme/support-bot/evaluators"));
+  await waitFor(() => expect(router.state.status).toBe("idle"));
+});

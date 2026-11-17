@@ -197,7 +197,7 @@ it("shows the first experiments with their status and results, and the run butto
   const link = await within(panel).findByRole("link", { name: "prompt v3" });
   expect(link).toHaveAttribute(
     "href",
-    "/acme/support-bot/experiments/01900000-0000-7000-8000-000000000e01",
+    "/acme/support-bot/experiments?experiment=01900000-0000-7000-8000-000000000e01",
   );
   expect(within(panel).getByText("Completed")).toBeInTheDocument();
   expect(within(panel).getByText("Failed")).toBeInTheDocument();
@@ -279,7 +279,10 @@ it("shows the score trend of the experiments, each point linking to its experime
 
   const panel = await screen.findByRole("region", { name: "Dataset" });
   const link = await within(panel).findByRole("link", { name: "prompt v3: 0.87" });
-  expect(link).toHaveAttribute("href", `/acme/support-bot/experiments/${experiments[0]?.id}`);
+  expect(link).toHaveAttribute(
+    "href",
+    `/acme/support-bot/experiments?experiment=${experiments[0]?.id}`,
+  );
   expect(within(panel).getByText("0.87")).toBeInTheDocument();
   expect(
     within(panel).getByRole("img", { name: "accuracy over the last experiments" }),

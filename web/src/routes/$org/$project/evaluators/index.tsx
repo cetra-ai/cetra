@@ -81,6 +81,11 @@ function usageOf(rules: Rule[]): Usage {
   return usage;
 }
 
+/** A click on a link or a button inside a row belongs to that control, not to the row. */
+function isControl(target: EventTarget | null): boolean {
+  return target instanceof Element && target.closest("a, button, input, [role=button]") !== null;
+}
+
 function UsedByCell({ rules, failed }: { rules?: Rule[]; failed: boolean }) {
   if (failed) {
     return <span className="text-muted-foreground">—</span>;
@@ -269,7 +274,27 @@ function EvaluatorsPage() {
               </TableHeader>
               <TableBody>
                 {visible.map((evaluator) => (
-                  <TableRow key={evaluator.id}>
+                  <TableRow
+                    key={evaluator.id}
+                    className="cursor-pointer"
+                    onClick={(event) => {
+                      // A click on a link or a button in the row belongs to that control.
+                      if (
+                        event.button !== 0 ||
+                        event.metaKey ||
+                        event.ctrlKey ||
+                        event.shiftKey ||
+                        isControl(event.target)
+                      ) {
+                        return;
+                      }
+                      void navigate({
+                        to: "/$org/$project/evaluators/$evaluatorId",
+                        params: { org, project, evaluatorId: evaluator.id },
+                        state: backState,
+                      });
+                    }}
+                  >
                     <TableCell>
                       <div className="flex items-center gap-2">
                         <KindIcon kind={evaluator.kind} />

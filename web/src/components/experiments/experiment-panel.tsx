@@ -1,7 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
 import { X } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import type { ReactNode } from "react";
 import { problemOf } from "@/api/problem";
 import { experimentQuery } from "@/api/queries-experiments";
 import type { Schema } from "@/api/types";
@@ -13,19 +12,27 @@ import { Skeleton } from "@/components/ui/skeleton";
 
 /**
  * The experiment drawer beside the list: a header with the name and status, then the experiment
- * in full (the same as its page). `layout` is the list's layout controls. `row` is the experiment
- * as the list has it, shown until the fetch answers. The errors switch and the open item are
- * kept here, so they reset when another experiment opens.
+ * in full. `layout` is the list's layout controls. `row` is the experiment as the list has it,
+ * shown until the fetch answers. The errors switch and the open item (`errors` and `item` in the
+ * list's URL) are the list's state, passed in with their setters.
  */
 export function ExperimentPanel({
   experimentId,
   row,
   layout,
+  errorsOnly,
+  onErrorsOnlyChange,
+  item,
+  onItemChange,
   onClose,
 }: {
   experimentId: string;
   row?: Schema<"Experiment">;
   layout?: ReactNode;
+  errorsOnly: boolean;
+  onErrorsOnlyChange: (errorsOnly: boolean) => void;
+  item: string | undefined;
+  onItemChange: (item: string | undefined) => void;
   onClose: () => void;
 }) {
   const { org, project } = useProject();
@@ -33,8 +40,6 @@ export function ExperimentPanel({
   // An experiment the list holds shows at once; once the fetch answers, its answer wins.
   const experiment = query.data ?? (query.isPending ? row : undefined);
   const missing = problemOf(query.error)?.status === 404;
-  const [errorsOnly, setErrorsOnly] = useState(false);
-  const [item, setItem] = useState<string | undefined>(undefined);
 
   return (
     <section aria-label="Experiment" className="flex h-full min-h-0 flex-col">
@@ -47,14 +52,6 @@ export function ExperimentPanel({
         ) : null}
         <div className="ml-auto flex shrink-0 items-center gap-1">
           {layout}
-          <Button variant="ghost" size="xs" asChild>
-            <Link
-              to="/$org/$project/experiments/$experimentId"
-              params={{ org, project, experimentId }}
-            >
-              Open page
-            </Link>
-          </Button>
           <Button type="button" variant="ghost" size="icon-xs" aria-label="Close" onClick={onClose}>
             <X />
           </Button>
@@ -67,9 +64,9 @@ export function ExperimentPanel({
             experimentId={experimentId}
             compact
             errorsOnly={errorsOnly}
-            onErrorsOnlyChange={setErrorsOnly}
+            onErrorsOnlyChange={onErrorsOnlyChange}
             item={item}
-            onItemChange={setItem}
+            onItemChange={onItemChange}
           />
         ) : missing ? (
           <p className="text-muted-foreground">This experiment no longer exists.</p>

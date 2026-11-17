@@ -26,20 +26,24 @@ const STATUSES: readonly ExperimentStatus[] = ["running", "completed", "failed"]
 
 /**
  * `?dataset=`, `?status=` and `?experiment=` of the list: a UUID string for the first and last,
- * one of the statuses for `status`; anything else is dropped.
+ * one of the statuses for `status`; anything else is dropped. The open experiment's `?errors=` and
+ * `?item=` (`parseExperimentSearch`) are kept only while `experiment` is present.
  */
 export function parseExperimentsSearch(search: Record<string, unknown>): {
   dataset?: string;
   status?: ExperimentStatus;
   experiment?: string;
+  errors?: 1;
+  item?: string;
 } {
   const dataset = stringParam(search, "dataset");
   const experiment = stringParam(search, "experiment");
   const status = STATUSES.find((candidate) => candidate === stringParam(search, "status"));
+  const open = experiment !== undefined && UUID.test(experiment);
   return {
     ...(dataset && UUID.test(dataset) ? { dataset } : {}),
     ...(status === undefined ? {} : { status }),
-    ...(experiment && UUID.test(experiment) ? { experiment } : {}),
+    ...(open ? { experiment, ...parseExperimentSearch(search) } : {}),
   };
 }
 
@@ -49,7 +53,7 @@ export function compareIdList(ids: string): string[] {
 }
 
 /**
- * `?errors=1` and `?item=<uuid>:<repetition>` of the experiment page. `item` is kept only when it
+ * `?errors=1` and `?item=<uuid>:<repetition>` of an open experiment. `item` is kept only when it
  * is a UUID, a colon and a non-negative integer (`parseItemKey`).
  */
 export function parseExperimentSearch(search: Record<string, unknown>): {

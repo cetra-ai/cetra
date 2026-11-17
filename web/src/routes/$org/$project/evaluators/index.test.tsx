@@ -276,3 +276,44 @@ it("opens after the online rules page, which reads the same evaluator list", asy
   expect(screen.queryByText("Something went wrong")).not.toBeInTheDocument();
   await waitFor(() => expect(router.state.status).toBe("idle"));
 });
+
+it("opens an evaluator when a row's other cells are clicked, with the way back", async () => {
+  const { user, router } = await renderApp("/acme/support-bot/evaluators");
+
+  const table = await screen.findByRole("table", { name: "Evaluators" });
+  await user.click(within(rowOf(table, "Relevance")).getByText("LLM judge"));
+
+  await waitFor(() => {
+    expect(router.state.location.pathname).toBe(
+      "/acme/support-bot/evaluators/01900000-0000-7000-8000-000000000500",
+    );
+  });
+  expect(await screen.findByRole("link", { name: "Back to Evaluators" })).toBeInTheDocument();
+  await waitFor(() => expect(router.state.status).toBe("idle"));
+});
+
+it("returns from a row click to the list with its search", async () => {
+  const { user, router } = await renderApp("/acme/support-bot/evaluators?q=rel");
+
+  const table = await screen.findByRole("table", { name: "Evaluators" });
+  await user.click(within(rowOf(table, "Relevance")).getByText("LLM judge"));
+  await user.click(await screen.findByRole("link", { name: "Back to Evaluators" }));
+
+  await waitFor(() => {
+    expect(router.state.location.pathname).toBe("/acme/support-bot/evaluators");
+    expect(router.state.location.search).toEqual({ q: "rel" });
+  });
+  await waitFor(() => expect(router.state.status).toBe("idle"));
+});
+
+it("ignores a modified click on a row's other cell", async () => {
+  const { user, router } = await renderApp("/acme/support-bot/evaluators");
+
+  const table = await screen.findByRole("table", { name: "Evaluators" });
+  await user.keyboard("{Control>}");
+  await user.click(within(rowOf(table, "Relevance")).getByText("LLM judge"));
+  await user.keyboard("{/Control}");
+
+  expect(router.state.location.pathname).toBe("/acme/support-bot/evaluators");
+  await waitFor(() => expect(router.state.status).toBe("idle"));
+});

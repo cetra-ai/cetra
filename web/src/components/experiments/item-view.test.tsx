@@ -7,7 +7,7 @@ import { renderApp } from "@/test/render";
 import resultsFixture from "../../../../fixtures/api/static/experiment-results.json";
 
 const BASELINE_ID = "01900000-0000-7000-8000-000000000e01";
-const EXPERIMENT_URL = `/acme/support-bot/experiments/${BASELINE_ID}`;
+const EXPERIMENT_URL = `/acme/support-bot/experiments?experiment=${BASELINE_ID}`;
 const RESULTS_PATH = "/api/v1/projects/:project/experiments/:id/results";
 
 function rowAt(index: number) {
@@ -33,7 +33,7 @@ it("renders a text field of the output as Markdown", async () => {
       HttpResponse.json(resultsWith([{ ...rowAt(0), output: { answer: "**Bold** answer" } }])),
     ),
   );
-  await renderApp(`${EXPERIMENT_URL}?item=${keyOf(rowAt(0))}`);
+  await renderApp(`${EXPERIMENT_URL}&item=${keyOf(rowAt(0))}`);
 
   const dialog = await screen.findByRole("dialog");
   const output = within(dialog).getByRole("region", { name: "Output" });
@@ -48,7 +48,7 @@ it("renders an object with several fields as JSON", async () => {
       ),
     ),
   );
-  await renderApp(`${EXPERIMENT_URL}?item=${keyOf(rowAt(0))}`);
+  await renderApp(`${EXPERIMENT_URL}&item=${keyOf(rowAt(0))}`);
 
   const dialog = await screen.findByRole("dialog");
   const output = within(dialog).getByRole("region", { name: "Output" });
@@ -65,7 +65,7 @@ it("renders an object with several fields as JSON", async () => {
 });
 
 it("links the item to its trace", async () => {
-  await renderApp(`${EXPERIMENT_URL}?item=${keyOf(rowAt(0))}`);
+  await renderApp(`${EXPERIMENT_URL}&item=${keyOf(rowAt(0))}`);
 
   const dialog = await screen.findByRole("dialog");
   expect(within(dialog).getByRole("link", { name: "Open trace" })).toHaveAttribute(
@@ -76,7 +76,7 @@ it("links the item to its trace", async () => {
 
 it("steps to the next row with the arrow keys", async () => {
   const user = userEvent.setup();
-  const { router } = await renderApp(`${EXPERIMENT_URL}?item=${keyOf(rowAt(0))}`);
+  const { router } = await renderApp(`${EXPERIMENT_URL}&item=${keyOf(rowAt(0))}`);
 
   const dialog = await screen.findByRole("dialog");
   expect(within(dialog).getByText(rowAt(0).dataset_item_id)).toBeInTheDocument();

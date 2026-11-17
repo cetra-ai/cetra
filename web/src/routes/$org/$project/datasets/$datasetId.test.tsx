@@ -352,3 +352,41 @@ it("writes the typed item search into the q param", async () => {
 
   await waitFor(() => expect(router.state.location.search).toMatchObject({ q: "refund" }));
 });
+
+it("links back to the datasets list with the dataset open after a direct visit", async () => {
+  await renderApp(DATASET_URL);
+
+  const back = await screen.findByRole("link", { name: "Back to datasets" });
+  const target = new URL(back.getAttribute("href") ?? "", "http://localhost");
+  expect(target.pathname).toBe("/acme/support-bot/datasets");
+  expect(target.searchParams.get("dataset")).toBe(DATASET_ID);
+});
+
+it("goes back to the datasets list from a dataset opened there", async () => {
+  const { router, user } = await renderApp(`/acme/support-bot/datasets?dataset=${DATASET_ID}`);
+
+  await user.click(await screen.findByRole("link", { name: "Open page" }));
+  expect(await screen.findByRole("heading", { name: datasetFixture.name })).toBeInTheDocument();
+  await user.click(screen.getByRole("link", { name: "Back to Datasets" }));
+
+  await waitFor(() => expect(router.state.location.pathname).toBe("/acme/support-bot/datasets"));
+  expect(router.state.location.search).toMatchObject({ dataset: DATASET_ID });
+  await waitFor(() => expect(router.state.status).toBe("idle"));
+});
+
+it("keeps the way back to the list after a tab and a version change", async () => {
+  const { router, user } = await renderApp(`/acme/support-bot/datasets?dataset=${DATASET_ID}`);
+
+  await user.click(await screen.findByRole("link", { name: "Open page" }));
+  await screen.findByRole("heading", { name: datasetFixture.name });
+
+  await user.click(screen.getByRole("tab", { name: "Versions" }));
+  await waitFor(() => expect(router.state.location.search).toMatchObject({ tab: "versions" }));
+  expect(screen.getByRole("link", { name: "Back to Datasets" })).toBeInTheDocument();
+
+  await user.click(screen.getByRole("combobox", { name: "Version" }));
+  await user.click(await screen.findByRole("option", { name: "v1 — add 3 items" }));
+  await waitFor(() => expect(router.state.location.href).toContain("version=1"));
+  expect(screen.getByRole("link", { name: "Back to Datasets" })).toBeInTheDocument();
+  await waitFor(() => expect(router.state.status).toBe("idle"));
+});

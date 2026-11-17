@@ -93,7 +93,7 @@ describe("parseExperimentsSearch and parseExperimentSearch", () => {
     expect(parseExperimentsSearch({ dataset: "faq" })).toEqual({});
   });
 
-  it("reads the errors flag of the experiment page", () => {
+  it("reads the errors flag of an open experiment", () => {
     expect(parseExperimentSearch({ errors: "1" })).toEqual({ errors: 1 });
     expect(parseExperimentSearch({ errors: 1 })).toEqual({ errors: 1 });
     expect(parseExperimentSearch({ errors: 0 })).toEqual({});
@@ -268,6 +268,17 @@ describe("parseExperimentsSearch status and experiment", () => {
       experiment: A,
     });
     expect(parseExperimentsSearch({ status: "done", experiment: "nope" })).toEqual({});
+  });
+
+  it("keeps errors and item only with an open experiment", () => {
+    const item = `${A}:2`;
+    expect(parseExperimentsSearch({ experiment: A, errors: "1", item })).toEqual({
+      experiment: A,
+      errors: 1,
+      item,
+    });
+    expect(parseExperimentsSearch({ errors: "1", item })).toEqual({});
+    expect(parseExperimentsSearch({ experiment: "nope", errors: "1", item })).toEqual({});
   });
 });
 

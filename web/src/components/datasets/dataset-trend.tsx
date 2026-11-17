@@ -218,8 +218,9 @@ export function ExperimentTrendChart({
   const errors = errorRatePoints(experiments);
   const renderPoint = (point: TrendPoint, dot: ReactNode) => (
     <Link
-      to="/$org/$project/experiments/$experimentId"
-      params={{ org, project, experimentId: point.id }}
+      to="/$org/$project/experiments"
+      params={{ org, project }}
+      search={{ experiment: point.id }}
       aria-label={point.title}
     >
       {dot}

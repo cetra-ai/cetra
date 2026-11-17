@@ -106,6 +106,7 @@ export function VersionsTable({ datasetId, editable }: { datasetId: string; edit
             to: "/$org/$project/datasets/$datasetId",
             params: { org, project, datasetId },
             search: { tab: "items" },
+            state: true,
           });
         },
       },
@@ -177,6 +178,7 @@ export function VersionsTable({ datasetId, editable }: { datasetId: string; edit
                         to="/$org/$project/datasets/$datasetId"
                         params={{ org, project, datasetId }}
                         search={{ tab: "items", version: version.version }}
+                        state={true}
                       >
                         View
                       </Link>

@@ -2,17 +2,25 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { expect, it } from "vitest";
+import type { Schema } from "@/api/types";
+import { itemKey, scoreSummaryText } from "@/lib/experiments";
 import { server } from "@/mocks/node";
 import { STORAGE_PREFIX } from "@/product";
+import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
 import datasetsFixture from "../../../../../../fixtures/api/responses/datasets.json";
+import experimentFixture from "../../../../../../fixtures/api/static/experiment.json";
 import comparisonFixture from "../../../../../../fixtures/api/static/experiment-comparison.json";
+import resultsFixture from "../../../../../../fixtures/api/static/experiment-results.json";
 import experimentsFixture from "../../../../../../fixtures/api/static/experiments.json";
 
 const BASELINE_ID = "01900000-0000-7000-8000-000000000e01";
 const CANDIDATE_ID = "01900000-0000-7000-8000-000000000e02";
 const EXPERIMENTS_PATH = "/api/v1/projects/:project/experiments";
+const EXPERIMENT_PATH = "/api/v1/projects/:project/experiments/:id";
+const RESULTS_PATH = "/api/v1/projects/:project/experiments/:id/results";
 const COMPARE_PATH = "/api/v1/projects/:project/experiments/compare";
+const PANEL_URL = `/acme/support-bot/experiments?experiment=${BASELINE_ID}`;
 
 function firstDataset() {
   const dataset = datasetsFixture.data[0];
@@ -20,6 +28,36 @@ function firstDataset() {
     throw new Error("the datasets fixture has no dataset");
   }
   return dataset;
+}
+
+/** The experiment's GET with one answer. The list's batch `experiments/summaries` falls through. */
+function experimentRoute(respond: () => Response) {
+  return http.get(EXPERIMENT_PATH, ({ params }) =>
+    String(params.id) === "summaries" ? undefined : respond(),
+  );
+}
+
+function firstRow() {
+  const row = resultsFixture.rows[0];
+  if (!row) {
+    throw new Error("the results fixture has no row");
+  }
+  return row;
+}
+
+/** The results answer with the fixture's summary, its experiment replaced by `experiment`. */
+function resultsWith(
+  experiment: Record<string, unknown>,
+  rows: typeof resultsFixture.rows = resultsFixture.rows,
+) {
+  return {
+    summary: {
+      ...resultsFixture.summary,
+      experiment: { ...resultsFixture.summary.experiment, ...experiment },
+    },
+    rows,
+    next_cursor: null,
+  };
 }
 
 function fixtureExperiment(id: string) {
@@ -47,7 +85,7 @@ it("lists the experiments", async () => {
     const row = rowOf(fixture.name);
     expect(within(row).getByRole("link", { name: fixture.name })).toHaveAttribute(
       "href",
-      `/acme/support-bot/experiments/${fixture.id}`,
+      `/acme/support-bot/experiments?experiment=${fixture.id}`,
     );
     expect(
       within(row).getByText(`${fixture.dataset_name} v${fixture.dataset_version}`),
@@ -294,15 +332,235 @@ it("links the empty state to the datasets", async () => {
 });
 
 it("opens the panel from ?experiment= with the experiment in full", async () => {
-  await renderApp(`/acme/support-bot/experiments?experiment=${BASELINE_ID}`);
+  await renderApp(PANEL_URL);
 
   const panel = await screen.findByRole("region", { name: "Experiment" });
   expect(await within(panel).findByText("baseline")).toBeInTheDocument();
-  expect(within(panel).getByRole("link", { name: "Open page" })).toHaveAttribute(
-    "href",
-    `/acme/support-bot/experiments/${BASELINE_ID}`,
-  );
   expect(await within(panel).findByRole("table", { name: "Results" })).toBeInTheDocument();
+});
+
+it("has no Open page link in the panel", async () => {
+  await renderApp(PANEL_URL);
+
+  const panel = await screen.findByRole("region", { name: "Experiment" });
+  await within(panel).findByRole("table", { name: "Results" });
+  expect(within(panel).queryByRole("link", { name: "Open page" })).toBeNull();
+});
+
+it("drops the errors switch when another experiment opens", async () => {
+  const user = userEvent.setup();
+  const { router } = await renderApp(`${PANEL_URL}&errors=1`);
+  await screen.findByRole("region", { name: "Experiment" });
+  await screen.findByRole("table", { name: "Experiments" });
+
+  await user.click(within(rowOf("candidate")).getByText(/^\d+ \/ \d+$/));
+
+  await waitFor(() => expect(router.state.location.href).toContain(`experiment=${CANDIDATE_ID}`));
+  expect(decodeURIComponent(router.state.location.href)).not.toContain("errors=");
+  await waitFor(() => expect(router.state.status).toBe("idle"));
+});
+
+it("clears the item from the URL when its sheet closes and keeps the errors switch", async () => {
+  const user = userEvent.setup();
+  const { router } = await renderApp(`${PANEL_URL}&errors=1&item=${itemKey(firstRow())}`);
+  await screen.findByRole("dialog");
+
+  await user.keyboard("{Escape}");
+
+  await waitFor(() => expect(router.state.location.href).not.toContain("item="));
+  expect(router.state.location.href).toContain("errors=1");
+  await waitFor(() => expect(router.state.status).toBe("idle"));
+});
+
+it("filters to errors with the switch and keeps it in the URL", async () => {
+  const user = userEvent.setup();
+  const requested: (string | null)[] = [];
+  server.use(
+    http.get(RESULTS_PATH, ({ request }) => {
+      requested.push(new URL(request.url).searchParams.get("errors_only"));
+      return HttpResponse.json(resultsFixture);
+    }),
+  );
+  const { router } = await renderApp(PANEL_URL);
+  const panel = await screen.findByRole("region", { name: "Experiment" });
+  await within(panel).findByRole("table", { name: "Results" });
+
+  await user.click(within(panel).getByRole("switch", { name: "Errors only" }));
+
+  await waitFor(() => expect(requested).toContain("true"));
+  await waitFor(() => expect(router.state.location.href).toContain("errors=1"));
+  await waitFor(() => expect(router.state.status).toBe("idle"));
+});
+
+it("filters to errors from a deep link with errors=1", async () => {
+  const requested: (string | null)[] = [];
+  server.use(
+    http.get(RESULTS_PATH, ({ request }) => {
+      requested.push(new URL(request.url).searchParams.get("errors_only"));
+      return HttpResponse.json(resultsFixture);
+    }),
+  );
+
+  const { router } = await renderApp(`${PANEL_URL}&errors=1`);
+
+  const panel = await screen.findByRole("region", { name: "Experiment" });
+  await within(panel).findByRole("table", { name: "Results" });
+  expect(requested.at(-1)).toBe("true");
+  expect(within(panel).getByRole("switch", { name: "Errors only" })).toBeChecked();
+  await waitFor(() => expect(router.state.status).toBe("idle"));
+});
+
+it("opens an item from a deep link with item=", async () => {
+  const { router } = await renderApp(`${PANEL_URL}&item=${itemKey(firstRow())}`);
+
+  expect(await screen.findByRole("dialog")).toBeInTheDocument();
+  await waitFor(() => expect(router.state.status).toBe("idle"));
+});
+
+it("shows the summary", async () => {
+  await renderApp(PANEL_URL);
+
+  const panel = await screen.findByRole("region", { name: "Experiment" });
+  const list = await within(panel).findByRole("list", { name: "Summary" });
+  const cards = within(list).getAllByRole("listitem");
+  for (const score of resultsFixture.summary.scores) {
+    const card = cards.find((candidate) => within(candidate).queryByText(score.name));
+    expect(card).toBeDefined();
+    expect(card).toHaveTextContent(scoreSummaryText(score as Schema<"ScoreSummary">));
+  }
+  const results = cards.find((card) => within(card).queryByText("Results"));
+  expect(results).toHaveTextContent(
+    `${resultsFixture.summary.result_count} of ${experimentFixture.item_count * experimentFixture.repetitions}`,
+  );
+});
+
+it("lists the results with their scores", async () => {
+  await renderApp(PANEL_URL);
+
+  const panel = await screen.findByRole("region", { name: "Experiment" });
+  const table = await within(panel).findByRole("table", { name: "Results" });
+  const rows = within(table).getAllByRole("row").slice(1);
+  expect(rows).toHaveLength(resultsFixture.rows.length);
+  for (const score of resultsFixture.summary.scores) {
+    expect(within(table).getByRole("columnheader", { name: score.name })).toBeInTheDocument();
+  }
+  for (const [index, fixture] of resultsFixture.rows.entries()) {
+    const row = rows[index] as HTMLElement;
+    if (fixture.trace_id) {
+      expect(within(row).getByRole("link", { name: "trace" })).toHaveAttribute(
+        "href",
+        `/acme/support-bot/traces/${fixture.trace_id}`,
+      );
+    }
+  }
+});
+
+it("shows the p50 alone when the p95 is absent", async () => {
+  const { latency_p95_ns: _p95, ...summary } = resultsFixture.summary;
+  server.use(http.get(RESULTS_PATH, () => HttpResponse.json({ ...resultsFixture, summary })));
+
+  await renderApp(PANEL_URL);
+
+  const panel = await screen.findByRole("region", { name: "Experiment" });
+  const list = await within(panel).findByRole("list", { name: "Summary" });
+  const latency = within(list)
+    .getAllByRole("listitem")
+    .find((card) => within(card).queryByText("Latency"));
+  expect(latency).toHaveTextContent(/^Latencyp50 /);
+  expect(latency).not.toHaveTextContent("p95");
+  expect(latency).not.toHaveTextContent("mean");
+});
+
+it("answers not found when the results are not found", async () => {
+  server.use(
+    http.get(RESULTS_PATH, () => problemResponse(404, "not_found", { detail: "no such results" })),
+  );
+
+  await renderApp(PANEL_URL);
+
+  expect(await screen.findByText("Page not found")).toBeInTheDocument();
+});
+
+it("says so in the panel when the experiment no longer exists", async () => {
+  server.use(
+    experimentRoute(() => problemResponse(404, "not_found", { detail: "no such experiment" })),
+  );
+
+  await renderApp(PANEL_URL);
+
+  expect(await screen.findByText("This experiment no longer exists.")).toBeInTheDocument();
+});
+
+it("shows a failed run", async () => {
+  const failed = { status: "failed" as const, error: "results upload failed" };
+  server.use(
+    experimentRoute(() => HttpResponse.json({ ...experimentFixture, ...failed })),
+    http.get(RESULTS_PATH, () => HttpResponse.json(resultsWith(failed))),
+  );
+
+  await renderApp(PANEL_URL);
+
+  expect(await screen.findByText("The run failed: results upload failed")).toBeInTheDocument();
+});
+
+it("shows the snippet while waiting", async () => {
+  const running = { status: "running" };
+  server.use(
+    experimentRoute(() =>
+      HttpResponse.json({ ...experimentFixture, status: "running", finished_at: undefined }),
+    ),
+    http.get(RESULTS_PATH, () => HttpResponse.json(resultsWith(running, []))),
+  );
+
+  await renderApp(PANEL_URL);
+
+  expect(await screen.findByText("Waiting for results")).toBeInTheDocument();
+  expect(screen.getByText(/cetra\.evaluate\(/, { selector: "code" })).toBeInTheDocument();
+});
+
+it("hides the repetition column for one repetition", async () => {
+  await renderApp(PANEL_URL);
+  const panel = await screen.findByRole("region", { name: "Experiment" });
+  await within(panel).findByRole("table", { name: "Results" });
+  expect(within(panel).queryByRole("columnheader", { name: "Rep" })).toBeNull();
+});
+
+it("shows the repetition column for several repetitions", async () => {
+  server.use(
+    experimentRoute(() => HttpResponse.json({ ...experimentFixture, repetitions: 3 })),
+    http.get(RESULTS_PATH, () => HttpResponse.json(resultsWith({ repetitions: 3 }, [firstRow()]))),
+  );
+
+  await renderApp(PANEL_URL);
+
+  const panel = await screen.findByRole("region", { name: "Experiment" });
+  const table = await within(panel).findByRole("table", { name: "Results" });
+  expect(within(table).getByRole("columnheader", { name: "Rep" })).toBeInTheDocument();
+  const row = within(table).getAllByRole("row")[1] as HTMLElement;
+  expect(within(row).getByText("1")).toBeInTheDocument();
+});
+
+it("compares with the previous run of the same dataset", async () => {
+  server.use(
+    http.get(EXPERIMENTS_PATH, () => HttpResponse.json(experimentsFixture)),
+    experimentRoute(() => HttpResponse.json({ ...experimentFixture, id: CANDIDATE_ID })),
+    http.get(RESULTS_PATH, () => HttpResponse.json(resultsFixture)),
+  );
+  await renderApp(`/acme/support-bot/experiments?experiment=${CANDIDATE_ID}`);
+
+  const panel = await screen.findByRole("region", { name: "Experiment" });
+  const link = await within(panel).findByRole("link", { name: "Compare with previous run" });
+  const href = decodeURIComponent(link.getAttribute("href") ?? "");
+  expect(href).toContain(`/experiments/compare`);
+  expect(href).toContain(`ids=${BASELINE_ID},${CANDIDATE_ID}`);
+});
+
+it("hides the previous-run comparison for the oldest run", async () => {
+  await renderApp(PANEL_URL);
+
+  const panel = await screen.findByRole("region", { name: "Experiment" });
+  await within(panel).findByRole("table", { name: "Results" });
+  expect(within(panel).queryByRole("link", { name: "Compare with previous run" })).toBeNull();
 });
 
 it("closes the panel with its close button", async () => {

@@ -1,12 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link, notFound } from "@tanstack/react-router";
-import { Clock, FlaskConical, History, Loader2, Rows3 } from "lucide-react";
+import { ChevronLeft, Clock, FlaskConical, History, Loader2, Rows3 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { $api } from "@/api/client";
 import { problemOf } from "@/api/problem";
 import { datasetQuery, datasetVersionsInit } from "@/api/queries-datasets";
 import { experimentsInit } from "@/api/queries-experiments";
 import type { Schema } from "@/api/types";
+import { BACK_LINK_CLASS, BackLink } from "@/components/back-link";
 import { useShortcut } from "@/components/command/use-shortcut";
 import { AddItemDialog } from "@/components/datasets/add-item-dialog";
 import { DatasetSettings } from "@/components/datasets/dataset-settings";
@@ -91,6 +92,8 @@ function DatasetPage() {
       to: "/$org/$project/datasets/$datasetId",
       params: { org, project, datasetId },
       search: (prev) => withItem(prev, undefined),
+      // Keeps the history state, which carries the way back to where the dataset was opened from.
+      state: true,
     });
   });
   const latestVersion = detail.data?.current_version;
@@ -104,6 +107,7 @@ function DatasetPage() {
         params: { org, project, datasetId },
         search: (prev) => withVersion(prev, undefined),
         replace: true,
+        state: true,
       });
     }
   }, [redundant, navigate, org, project, datasetId]);
@@ -150,6 +154,7 @@ function DatasetPage() {
       to: "/$org/$project/datasets/$datasetId",
       params: { org, project, datasetId },
       search: (prev) => withVersion(prev, next),
+      state: true,
     });
   }
 
@@ -162,6 +167,7 @@ function DatasetPage() {
       to: "/$org/$project/datasets/$datasetId",
       params: { org, project, datasetId },
       search: (prev) => ({ ...prev, tab: next }),
+      state: true,
     });
   }
 
@@ -169,16 +175,22 @@ function DatasetPage() {
     <div className="flex h-full min-h-0 w-full flex-1 flex-col">
       <header className="flex min-h-9 flex-wrap items-center gap-2 border-b px-3 py-1.5">
         <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5">
-          <Link
-            to="/$org/$project/datasets"
-            params={{ org, project }}
-            search={{ q: undefined, dataset: undefined }}
-            className="rounded-sm text-ui text-muted-foreground underline-offset-4 outline-none hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 focus-visible:outline-solid"
-          >
-            Datasets
-          </Link>
-          <span aria-hidden="true" className="text-ui text-muted-foreground">
-            ›
+          <BackLink
+            fallback={
+              <Link
+                to="/$org/$project/datasets"
+                params={{ org, project }}
+                search={{ q: undefined, dataset: dataset.id }}
+                aria-label="Back to datasets"
+                className={BACK_LINK_CLASS}
+              >
+                <ChevronLeft aria-hidden="true" className="size-3.5" />
+                Datasets
+              </Link>
+            }
+          />
+          <span aria-hidden="true" className="text-muted-foreground/60">
+            /
           </span>
           <h1 className="truncate text-ui font-medium">{dataset.name}</h1>
         </nav>
@@ -303,6 +315,7 @@ function DatasetPage() {
                 to: "/$org/$project/datasets/$datasetId",
                 params: { org, project, datasetId },
                 search: (prev) => withItem(prev, id),
+                state: true,
               });
             }}
             onItemDirtyChange={setItemDirty}
@@ -313,6 +326,7 @@ function DatasetPage() {
                 params: { org, project, datasetId },
                 search: (prev) => withQuery(prev, text),
                 replace: true,
+                state: true,
               });
             }}
             onAddItem={() => {

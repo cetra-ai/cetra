@@ -27,12 +27,13 @@ import {
   metadataTags,
   previousRuns,
 } from "@/lib/experiments";
+import { useBackState } from "@/lib/list-return";
 
 /**
  * One experiment in full: its header, summary, and results, with the item view of an open row.
- * The page and the list's panel both render it. `compact` leaves out the title (the panel's
- * header has it). The errors switch and the open item (`item`, an `itemKey`) belong to the
- * caller, so the page keeps them in the URL and the panel in its own state.
+ * The list's panel renders it. `compact` leaves out the title (the panel's header has it). The
+ * errors switch and the open item (`item`, an `itemKey`) belong to the caller, which keeps them
+ * in the list's URL.
  */
 export function ExperimentDetail({
   experimentId,
@@ -50,6 +51,7 @@ export function ExperimentDetail({
   onItemChange: (item: string | undefined) => void;
 }) {
   const { org, project } = useProject();
+  const backState = useBackState("Experiments");
   // A running experiment is polled until it finishes (or is a day old).
   const experimentData = useQuery({
     ...experimentQuery(org, project, experimentId),
@@ -135,6 +137,7 @@ export function ExperimentDetail({
               to="/$org/$project/datasets/$datasetId"
               params={{ org, project, datasetId: experiment.dataset_id }}
               search={{ version: experiment.dataset_version }}
+              state={backState}
               className="rounded-sm underline-offset-4 outline-none hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 focus-visible:outline-solid"
             >
               {datasetLabel}

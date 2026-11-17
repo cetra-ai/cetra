@@ -32,8 +32,9 @@ export function ExperimentColumnHeader({
   return (
     <span className="flex flex-col items-start gap-1">
       <Link
-        to="/$org/$project/experiments/$experimentId"
-        params={{ org, project, experimentId: experiment.id }}
+        to="/$org/$project/experiments"
+        params={{ org, project }}
+        search={{ experiment: experiment.id }}
         className="rounded-sm underline-offset-4 outline-none hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 focus-visible:outline-solid"
       >
         {experiment.name}

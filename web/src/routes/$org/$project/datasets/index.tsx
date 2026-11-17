@@ -23,6 +23,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { getTraceMaximized, setTraceMaximized, useListLayout } from "@/lib/list-layout";
+import { useBackState } from "@/lib/list-return";
 import { canManageDatasets } from "@/lib/roles";
 
 export const Route = createFileRoute("/$org/$project/datasets/")({
@@ -40,6 +41,7 @@ function DatasetsPage() {
   const search = Route.useSearch();
   const { q, dataset: openId } = search;
   const navigate = Route.useNavigate();
+  const backState = useBackState("Datasets");
   const layout = useListLayout();
   const canManage = canManageDatasets(data.role);
   const [creating, setCreating] = useState(false);
@@ -254,6 +256,7 @@ function DatasetsPage() {
           void navigate({
             to: "/$org/$project/datasets/$datasetId",
             params: { org, project, datasetId: saved.id },
+            state: backState,
           });
         }}
       />

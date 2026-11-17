@@ -49,6 +49,7 @@ import {
   previousRuns,
 } from "@/lib/experiments";
 import { formatCost, formatDuration, formatRelative } from "@/lib/format";
+import { useBackState } from "@/lib/list-return";
 import { canManageDatasets } from "@/lib/roles";
 
 /** Experiments that can be picked for one comparison (D-J-13). */
@@ -83,6 +84,7 @@ export function ExperimentsTable(props: {
 }) {
   const { rows, status, selected, onSelectedChange, hideDataset, onOpen, openId } = props;
   const { org, project, data } = useProject();
+  const backState = useBackState("Experiments");
   const queryClient = useQueryClient();
   const canManage = canManageDatasets(data.role);
   const [deleting, setDeleting] = useState<Schema<"Experiment"> | undefined>();
@@ -214,8 +216,9 @@ export function ExperimentsTable(props: {
                 <TableCell>
                   <div className="flex flex-col gap-1">
                     <Link
-                      to="/$org/$project/experiments/$experimentId"
-                      params={{ org, project, experimentId: row.id }}
+                      to="/$org/$project/experiments"
+                      params={{ org, project }}
+                      search={{ experiment: row.id }}
                       className="w-fit rounded-sm underline-offset-4 outline-none hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 focus-visible:outline-solid"
                     >
                       {row.name}
@@ -229,6 +232,7 @@ export function ExperimentsTable(props: {
                       <Link
                         to="/$org/$project/datasets/$datasetId"
                         params={{ org, project, datasetId: row.dataset_id }}
+                        state={backState}
                         className="rounded-sm underline-offset-4 outline-none hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 focus-visible:outline-solid"
                       >
                         {`${row.dataset_name} v${row.dataset_version}`}

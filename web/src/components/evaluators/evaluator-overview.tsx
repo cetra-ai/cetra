@@ -285,8 +285,9 @@ function ExperimentsWithScore({
         {experiments.recent.map((row) => (
           <li key={row.id} className="flex items-center gap-3 text-ui">
             <Link
-              to="/$org/$project/experiments/$experimentId"
-              params={{ org, project, experimentId: row.id }}
+              to="/$org/$project/experiments"
+              params={{ org, project }}
+              search={{ experiment: row.id }}
               className="underline-offset-4 hover:underline"
             >
               {row.name}

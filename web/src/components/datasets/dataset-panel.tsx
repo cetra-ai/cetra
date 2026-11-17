@@ -18,6 +18,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { previewFields } from "@/lib/datasets";
+import { useBackState } from "@/lib/list-return";
 
 const PREVIEW_ROWS = 5;
 
@@ -38,6 +39,7 @@ export function DatasetPanel({
   onClose: () => void;
 }) {
   const { org, project } = useProject();
+  const backState = useBackState("Datasets");
   const path = { project: projectRef(org, project), dataset: datasetId };
   const query = useQuery(datasetQuery(org, project, datasetId));
   // A dataset the list holds shows at once; once the fetch answers, its answer wins.
@@ -68,7 +70,11 @@ export function DatasetPanel({
         <div className="ml-auto flex shrink-0 items-center gap-1">
           {layout}
           <Button variant="ghost" size="xs" asChild>
-            <Link to="/$org/$project/datasets/$datasetId" params={{ org, project, datasetId }}>
+            <Link
+              to="/$org/$project/datasets/$datasetId"
+              params={{ org, project, datasetId }}
+              state={backState}
+            >
               Open page
             </Link>
           </Button>
@@ -111,6 +117,7 @@ export function DatasetPanel({
                             to="/$org/$project/datasets/$datasetId"
                             params={{ org, project, datasetId }}
                             search={{ item: item.id }}
+                            state={backState}
                             className="hover:underline"
                           >
                             {previewFields(item.input)}
@@ -127,6 +134,7 @@ export function DatasetPanel({
                     to="/$org/$project/datasets/$datasetId"
                     params={{ org, project, datasetId }}
                     search={{ tab: "items" }}
+                    state={backState}
                     className="self-start text-body text-muted-foreground hover:text-foreground"
                   >
                     View all {dataset.item_count} items
@@ -143,8 +151,9 @@ export function DatasetPanel({
                         <li key={experiment.id} className="flex min-w-0 flex-col gap-0.5">
                           <span className="flex min-w-0 items-center gap-1.5">
                             <Link
-                              to="/$org/$project/experiments/$experimentId"
-                              params={{ org, project, experimentId: experiment.id }}
+                              to="/$org/$project/experiments"
+                              params={{ org, project }}
+                              search={{ experiment: experiment.id }}
                               className="truncate underline-offset-4 hover:underline"
                             >
                               {experiment.name}
@@ -172,6 +181,7 @@ export function DatasetPanel({
                       to="/$org/$project/datasets/$datasetId"
                       params={{ org, project, datasetId }}
                       search={{ tab: "experiments" }}
+                      state={backState}
                       className="text-body text-muted-foreground hover:text-foreground"
                     >
                       View all {dataset.experiment_count} experiments

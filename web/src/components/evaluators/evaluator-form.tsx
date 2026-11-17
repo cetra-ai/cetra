@@ -391,6 +391,7 @@ export function EvaluatorForm({
   evaluator,
   initialTemplateId,
   onSaved,
+  onCancel,
 }: {
   org: string;
   project: string;
@@ -398,6 +399,8 @@ export function EvaluatorForm({
   /** A template to start from, as picked on the list page. An id that is not a template is ignored. */
   initialTemplateId?: string;
   onSaved: (saved: Schema<"Evaluator">) => void;
+  /** Shows a Cancel button beside the submit button. */
+  onCancel?: () => void;
 }) {
   const { data: projectData } = useProject();
   const queryClient = useQueryClient();
@@ -696,7 +699,7 @@ export function EvaluatorForm({
                 <Label htmlFor="evaluator-prompt">Prompt</Label>
                 <Textarea
                   id="evaluator-prompt"
-                  className="font-mono"
+                  className="min-h-60 font-mono"
                   rows={16}
                   value={values.prompt}
                   aria-invalid={errors.prompt ? true : undefined}
@@ -972,7 +975,12 @@ export function EvaluatorForm({
 
           <FormError message={formError} />
           <RuleConflicts org={org} project={project} problem={conflict} />
-          <div className="flex justify-end">
+          <div className="flex justify-end gap-2">
+            {onCancel ? (
+              <Button type="button" variant="outline" onClick={onCancel}>
+                Cancel
+              </Button>
+            ) : null}
             <DisabledReason reason={canEdit ? undefined : NO_PERMISSION}>
               <SubmitButton pending={pending}>{saved ? "Save" : "Create evaluator"}</SubmitButton>
             </DisabledReason>

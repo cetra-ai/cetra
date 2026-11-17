@@ -144,11 +144,11 @@ it("lists the experiments with the evaluator's score", async () => {
   ).toBeInTheDocument();
   expect(await within(section).findByRole("link", { name: "candidate" })).toHaveAttribute(
     "href",
-    "/acme/support-bot/experiments/01900000-0000-7000-8000-000000000e02",
+    "/acme/support-bot/experiments?experiment=01900000-0000-7000-8000-000000000e02",
   );
   expect(within(section).getByRole("link", { name: "baseline" })).toHaveAttribute(
     "href",
-    "/acme/support-bot/experiments/01900000-0000-7000-8000-000000000e01",
+    "/acme/support-bot/experiments?experiment=01900000-0000-7000-8000-000000000e01",
   );
   expect(within(section).queryByText(/more$/)).toBeNull();
 });

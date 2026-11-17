@@ -62,7 +62,7 @@ function filmstripStatus(status: ExperimentStatus): Schema<"SpanStatus"> {
 
 function ExperimentsPage() {
   const { org, project } = useProject();
-  const { dataset, status, experiment } = Route.useSearch();
+  const { dataset, status, experiment, errors, item } = Route.useSearch();
   const navigate = useNavigate();
   const layout = useListLayout();
   // Picked ids in the order they were picked; the first is the baseline.
@@ -144,7 +144,10 @@ function ExperimentsPage() {
     closeExperiment();
   });
 
-  /** Keeps the list's filters and opens one experiment in the panel (`?experiment=`). */
+  /**
+   * Keeps the list's filters and opens one experiment in the panel (`?experiment=`). The errors
+   * switch and the open item belong to the experiment, so they stay only when it is the same one.
+   */
   function openExperiment(id: string, replace = false) {
     void navigate({
       to: "/$org/$project/experiments",
@@ -153,8 +156,28 @@ function ExperimentsPage() {
         ...(dataset === undefined ? {} : { dataset }),
         ...(status === undefined ? {} : { status }),
         experiment: id,
+        ...(id === experiment ? { errors, item } : {}),
       },
       replace,
+    });
+  }
+
+  /** Writes the open experiment's errors switch and item to the URL, replacing the entry. */
+  function setPanelState(
+    experimentId: string,
+    next: { errors: 1 | undefined; item: string | undefined },
+  ) {
+    void navigate({
+      to: "/$org/$project/experiments",
+      params: { org, project },
+      search: {
+        ...(dataset === undefined ? {} : { dataset }),
+        ...(status === undefined ? {} : { status }),
+        experiment: experimentId,
+        ...(next.errors === undefined ? {} : { errors: next.errors }),
+        ...(next.item === undefined ? {} : { item: next.item }),
+      },
+      replace: true,
     });
   }
 
@@ -352,6 +375,14 @@ function ExperimentsPage() {
                 experimentId={experiment}
                 row={openRow}
                 layout={<TraceLayoutControls />}
+                errorsOnly={errors === 1}
+                onErrorsOnlyChange={(checked) => {
+                  setPanelState(experiment, { errors: checked ? 1 : undefined, item });
+                }}
+                item={item}
+                onItemChange={(next) => {
+                  setPanelState(experiment, { errors: errors === 1 ? 1 : undefined, item: next });
+                }}
                 onClose={closeExperiment}
               />
             )

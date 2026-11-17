@@ -111,6 +111,7 @@ function ChangeRow({
           to="/$org/$project/datasets/$datasetId"
           params={{ org, project, datasetId }}
           search={datasetSearch}
+          state={true}
           title={change.item_id}
           className="rounded-sm font-mono underline-offset-4 outline-none hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 focus-visible:outline-solid"
         >
