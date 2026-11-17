@@ -141,6 +141,14 @@
     "file": "static/evaluator.json"
   },
   {
+    "operation_id": "get_evaluator_stats",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/evaluator-stats.json"
+  },
+  {
     "operation_id": "get_experiment",
     "path_params": {
       "id": "01900000-0000-7000-8000-000000000e01"
@@ -706,6 +714,16 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/evaluator-templates.json"
+  },
+  {
+    "operation_id": "list_evaluator_versions",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000500"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/evaluator-versions.json"
   },
   {
     "operation_id": "list_evaluators",

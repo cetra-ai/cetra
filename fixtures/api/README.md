@@ -12,6 +12,7 @@ Synthetic data for UI mocks, the OpenAPI examples, and later storage and API tes
 | `responses/` | `just api-examples`: the real read handlers over `dataset/` |
 | `manifest.json` | `just api-examples` |
 | `static/sql-result.json` | `just api-examples`: the real `run_sql` handler's answer to `requests/sql-query.json` |
+| `static/evaluator-stats.json` | hand-made from a draft by a throw-away test, so that the file is canonical JSON (the test was removed) |
 | `requests/*.json` | hand | example request bodies, checked against their types and `openapi.json` |
 
 Do not edit `responses/`, `manifest.json` or `static/sql-result.json` by hand. Regenerate them with `just api-examples`.
@@ -34,7 +35,9 @@ Do not edit `responses/`, `manifest.json` or `static/sql-result.json` by hand. R
 | Invitation | `01900000-0000-7000-8000-000000000300` for `guest@example.com`. `invite-created.json` uses the synthetic accept token `EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0EXA`. It is not a live invitation |
 | LLM connection | `01900000-0000-7000-8000-000000000400`, `OpenAI`. `requests/llm-connection-create.json` holds a synthetic key; it is not a live key |
 | Deletions | `01900000-0000-7000-8000-000000000900` (`trace_ids`), `…0901` (`filter`), `…0902` (`user`), `…0903` (`project`), `…0904` (`org`), `…0905` (`user`, `resolving`, the `202` answer of `create_deletion`). `deletions.json`, `deletion.json`, `deletion-project.json`, `deletion-org.json` and `deletion-resolving.json` use them. They are not live deletions |
-| Evaluator | `01900000-0000-7000-8000-000000000500`, `Relevance`, an LLM judge on connection `…0400`, score `relevance` |
+| Evaluator | `01900000-0000-7000-8000-000000000500`, `Relevance`, an LLM judge on connection `…0400`, score `relevance`. `static/evaluator-versions.json` is its version history: one item, version 1, equal to `evaluator.json` | `static/evaluator-stats.json` covers `…0500`, `…0501` and `…0502`.
+| Check evaluator | `01900000-0000-7000-8000-000000000501`, `Answer is JSON`, a `json_valid` check, score `answer_is_json` (boolean). `static/evaluators.json` uses it |
+| Webhook evaluator | `01900000-0000-7000-8000-000000000502`, `Toxicity webhook`, a webhook on host `moderation.example.com`, score `toxicity` (numeric), with a signing secret. `static/evaluators.json` uses it |
 | Score definition | `01900000-0000-7000-8000-000000000600`, `relevance`, numeric from 0 to 1 |
 | Online rule | `01900000-0000-7000-8000-000000000700`, `Relevance on answers`, a trace rule on evaluator `…0500`, filter `status = 'ok'`, budget 5 USD a day, enabled. `online-rule.json`, `online-rules.json` and `requests/online-rule-create.json` use it |
 | Second online rule | `01900000-0000-7000-8000-000000000701`, `Relevance on spans`, a span rule on `…0500`, enabled and paused (`errors`). `online-rules.json` uses it |
@@ -43,7 +46,7 @@ Do not edit `responses/`, `manifest.json` or `static/sql-result.json` by hand. R
 | Dataset | `01900000-0000-7000-8000-000000000c01`, `faq`, at version 2 with 3 live items. `datasets.json` and `datasets/…c01.json` use it. `requests/dataset-create.json` has the same name and schema |
 | Dataset items | `01900000-0000-7000-8000-000000000d01`, `…0d02`, `…0d03`, and `…0d04` (added from a trace in version 4, `static/dataset-item-from-trace.json`) |
 | Dataset revisions | `01900000-0000-7000-8000-000000000d11` (item `…0d01`, version 1), `…0d12` (`…0d02`, version 1, closed at version 2), `…0d13` (`…0d03`, version 1), `…0d14` (`…0d02`, version 2), `…0d15` (`…0d04`, version 4, from trace `a100…0001`) |
-| Experiments | `01900000-0000-7000-8000-000000000e01` (`baseline`, completed, pinned to `faq` version 2), `…0e02` (`candidate`, completed in `experiments.json`, running in `experiment-created.json`). `experiment.json`, `experiments.json`, `experiment-created.json`, `experiment-results.json`, `experiment-comparison.json` and `requests/experiment-results.json` use them. They are not live experiments |
+| Experiments | `01900000-0000-7000-8000-000000000e01` (`baseline`, completed, pinned to `faq` version 2), `…0e02` (`candidate`, completed in `experiments.json`, running in `experiment-created.json`). `experiment.json`, `experiments.json`, `experiment-created.json`, `experiment-results.json`, `experiment-comparison.json` and `requests/experiment-results.json` use them. They are not live experiments | `static/evaluator-stats.json` uses `…0e01` and `…0e02` as experiments with the relevance score.
 | Model prices | `01900000-0000-7000-8000-000000000c00`, an org row `Llama 3.1 8B (local)` for `llama3\.1:8b`, any provider, 0 USD; `…0c01`, a project row `gpt-4o (negotiated)` for `gpt\-4o`, provider `openai`, from `2026-01-01T00:00:00.000000000Z`, input 2.0, output 8.0, cache read 1.0. `model-prices.json`, `model-price.json` and `model-price-resolution.json` use them, and `requests/model-price-create.json` is the body of the create |
 | Judge trace (test result example) | `e1000000000000000000000000000001`; it is not in the dataset |
 | Created account | `01900000-0000-7000-8000-000000000102`, `new@example.com`. `admin-user-created.json` reuses that synthetic token in the reset link. It is not a live reset |

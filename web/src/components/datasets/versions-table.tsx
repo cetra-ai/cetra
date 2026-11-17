@@ -3,8 +3,8 @@ import { Link } from "@tanstack/react-router";
 import { History, Loader2 } from "lucide-react";
 import { $api } from "@/api/client";
 import { datasetQuery, datasetVersionsInit } from "@/api/queries-datasets";
+import { CreatedBy } from "@/components/created-by";
 import { EmptyState } from "@/components/empty-state";
-import { IdText } from "@/components/id-text";
 import { useProject } from "@/components/shell/project-context";
 import { TimeText } from "@/components/time-text";
 import { Button } from "@/components/ui/button";
@@ -107,15 +107,4 @@ export function VersionsTable({ datasetId }: { datasetId: string }) {
       ) : null}
     </div>
   );
-}
-
-/** A user id, "API key" for a key (`key:<id>`), or a dash when the version has no author. */
-function CreatedBy({ createdBy }: { createdBy: string | undefined }) {
-  if (createdBy === undefined) {
-    return "—";
-  }
-  if (createdBy.startsWith("key:")) {
-    return "API key";
-  }
-  return <IdText value={createdBy} kind="user" />;
 }

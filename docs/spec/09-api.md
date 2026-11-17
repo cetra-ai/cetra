@@ -127,7 +127,9 @@ Track J ([`plans/j-datasets/00-design.md`](../plans/j-datasets/00-design.md) § 
 | Method & path | Notes |
 |---|---|
 | `GET/POST /evaluators` · `GET/PATCH/DELETE /evaluators/{id}` | `kind` is immutable, webhook values are write-only (D-I-19); a PATCH that replaces a webhook's `config` must also send `webhook_secret`, so a saved secret never signs requests to a new URL; a `DELETE`, or a PATCH that would break a rule, is `409` with the rules in `errors` (D-I-19) |
+| `GET /evaluators/{id}/versions` | The evaluator's versions newest first (`version`, `name`, `kind`, `config`, `output_score`, `created_by`, `created_at`), any project reader; the cursor is on `version`. It shows what `GET /evaluators/{id}` shows and never a sealed value. A version is kept until the evaluator is deleted (D-I-49) |
 | `GET /evaluator-templates` | built-in judge templates with their default mapping; the UI pre-fills the editor from one (D-I-20) |
+| `GET /evaluators/stats?evaluator_ids=` | One entry per evaluator of the project, or of the named ones (1 to 50 distinct comma-separated ids; `400` otherwise), with no evaluator left out for lack of jobs: the last 7 UTC days' finished jobs by status, judge cost, latency p50 and p95, a daily runs series, the score summary and `experiments_with_score`. Answer `{window, data}`; any project reader; not cached (D-I-48) |
 | `POST /evaluators/test` | `{evaluator_id?, evaluator?, trace_id?, span_id?, trace_start?, variable_mapping?, variables?}`; runs once, writes the judge trace and usage, no score (D-I-21) |
 | `GET/POST /online-rules` · `GET/PATCH/DELETE /online-rules/{id}` | the list answers `org_enabled_rules` (the plan's active count, D-I-32); a project has at most 500 rules, the 501st is a `409` |
 | `POST /online-rules/preview` | `{target, filter?, from?, to?}` → `{matched, capped, from, to}`: what the filter matches in the window (D-I-9) |

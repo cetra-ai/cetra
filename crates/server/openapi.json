@@ -10344,6 +10344,118 @@
         }
       }
     },
+    "/api/v1/projects/{project}/evaluators/stats": {
+      "get": {
+        "tags": [
+          "evaluation"
+        ],
+        "summary": "Get evaluator stats",
+        "description": "Any project member can read. Jobs, costs, latencies and scores cover the last 7 UTC days (finished jobs are kept 7 days). `experiments_with_score` lists experiments that have a score named like the evaluator's output score in the last 30 days (D-I-48). Not cached.",
+        "operationId": "get_evaluator_stats",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "evaluator_ids",
+            "in": "query",
+            "description": "Comma-separated evaluator ids, 1 to 50. Default: every evaluator of the project.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One entry per evaluator.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvaluatorStatsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is busy or a dependency is unavailable. Retry later.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{project}/evaluators/test": {
       "post": {
         "tags": [
@@ -10791,6 +10903,118 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/EvalJob"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/evaluators/{id}/versions": {
+      "get": {
+        "tags": [
+          "evaluation"
+        ],
+        "summary": "List evaluator versions",
+        "description": "Any project member can read. Newest first. The config is shown as `get_evaluator` shows it: sealed webhook values are never included. A version is kept until the evaluator is deleted.",
+        "operationId": "list_evaluator_versions",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Evaluator id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of items to return (1–1000, default 50).",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Limit",
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque cursor from a previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of versions, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvaluatorVersionPage"
                 }
               }
             }
@@ -18159,6 +18383,26 @@
           "month"
         ]
       },
+      "CategoryCount": {
+        "type": "object",
+        "description": "A categorical label and how many scores carry it.",
+        "required": [
+          "label",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Scores with the label in the window.",
+            "minimum": 0
+          },
+          "label": {
+            "type": "string",
+            "description": "The label."
+          }
+        }
+      },
       "ChangePasswordRequest": {
         "type": "object",
         "description": "`POST /api/v1/me/password`.",
@@ -19995,6 +20239,66 @@
           }
         }
       },
+      "EvaluatorJobStats": {
+        "type": "object",
+        "description": "Finished jobs of one evaluator in the window. A job counts when it finished in the window.\nIts errors are `failed / (done + failed)`, which clients compute.",
+        "required": [
+          "done",
+          "failed",
+          "skipped",
+          "cost_usd_total",
+          "runs_daily"
+        ],
+        "properties": {
+          "cost_usd_avg": {
+            "type": "number",
+            "format": "double",
+            "description": "Average cost per job that has a cost, USD. Omitted when no job has a cost."
+          },
+          "cost_usd_total": {
+            "type": "number",
+            "format": "double",
+            "description": "Judge cost of the jobs in the window, USD. 0 when no job has a cost."
+          },
+          "done": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Done jobs.",
+            "minimum": 0
+          },
+          "failed": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Failed jobs.",
+            "minimum": 0
+          },
+          "latency_p50_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Median latency of the done jobs, milliseconds (nearest rank). Omitted when none.",
+            "minimum": 0
+          },
+          "latency_p95_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "95th percentile latency of the done jobs, milliseconds (nearest rank). Omitted when none.",
+            "minimum": 0
+          },
+          "runs_daily": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MetricPoint"
+            },
+            "description": "Finished jobs per day, seven points, oldest first."
+          },
+          "skipped": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Skipped jobs, including ones whose target trace was deleted.",
+            "minimum": 0
+          }
+        }
+      },
       "EvaluatorKind": {
         "type": "string",
         "description": "What an evaluator does. Stored as `evaluators.kind`; `kind` cannot change.",
@@ -20025,6 +20329,98 @@
               "null"
             ],
             "description": "Opaque cursor for the next page, or null when this is the last page."
+          }
+        }
+      },
+      "EvaluatorScoreStats": {
+        "type": "object",
+        "description": "The scores of one evaluator in the window. Read with the evaluator's current output type.",
+        "required": [
+          "data_type",
+          "count",
+          "daily"
+        ],
+        "properties": {
+          "average": {
+            "type": "number",
+            "format": "double",
+            "description": "Mean of the numeric values. Numeric outputs only. Omitted when there is no numeric value."
+          },
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Live scores in the window, of any type.",
+            "minimum": 0
+          },
+          "daily": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MetricPoint"
+            },
+            "description": "Daily average (numeric) or pass rate (boolean), seven points, oldest first. A day without a\nvalue has no `value`."
+          },
+          "data_type": {
+            "$ref": "#/components/schemas/ScoreDataType",
+            "description": "The output type of the evaluator."
+          },
+          "pass_rate": {
+            "type": "number",
+            "format": "double",
+            "description": "Share of `true` values, 0 to 1. Boolean outputs only. Omitted when there is no value."
+          },
+          "top_category": {
+            "$ref": "#/components/schemas/CategoryCount",
+            "description": "The most frequent label. Categorical outputs only. Omitted when there is none."
+          }
+        }
+      },
+      "EvaluatorStats": {
+        "type": "object",
+        "description": "The stats of one evaluator (D-I-48).",
+        "required": [
+          "evaluator_id",
+          "jobs",
+          "scores",
+          "experiments_with_score"
+        ],
+        "properties": {
+          "evaluator_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The evaluator."
+          },
+          "experiments_with_score": {
+            "$ref": "#/components/schemas/ExperimentsWithScore",
+            "description": "Experiments with a score named like the evaluator's output score in the last 30 days."
+          },
+          "jobs": {
+            "$ref": "#/components/schemas/EvaluatorJobStats",
+            "description": "Its finished jobs in the window."
+          },
+          "scores": {
+            "$ref": "#/components/schemas/EvaluatorScoreStats",
+            "description": "Its scores in the window."
+          }
+        }
+      },
+      "EvaluatorStatsResponse": {
+        "type": "object",
+        "description": "`GET /api/v1/projects/{project}/evaluators/stats` response (D-I-48).",
+        "required": [
+          "window",
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EvaluatorStats"
+            },
+            "description": "One entry per evaluator, ordered by name then id. Evaluators without jobs or scores are\nincluded with zeros."
+          },
+          "window": {
+            "$ref": "#/components/schemas/StatsWindow",
+            "description": "The seven UTC days the figures cover."
           }
         }
       },
@@ -20230,6 +20626,75 @@
             "format": "int64",
             "description": "Output tokens the provider counted. Omitted when unknown.",
             "minimum": 0
+          }
+        }
+      },
+      "EvaluatorVersion": {
+        "type": "object",
+        "description": "One stored version of an evaluator. Holds what `Evaluator` shows, never a sealed value.",
+        "required": [
+          "version",
+          "name",
+          "kind",
+          "config",
+          "output_score",
+          "created_at"
+        ],
+        "properties": {
+          "config": {
+            "type": "object",
+            "description": "The kind-specific configuration of this version, as `Evaluator.config` shows it."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When this version was made. JSON is RFC 3339."
+          },
+          "created_by": {
+            "type": "string",
+            "format": "uuid",
+            "description": "User who made this version. Omitted when that user is unknown."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/EvaluatorKind",
+            "description": "What the evaluator does."
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name when this version was made."
+          },
+          "output_score": {
+            "$ref": "#/components/schemas/OutputScoreBody",
+            "description": "The score this version writes."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Version number, starting at 1."
+          }
+        }
+      },
+      "EvaluatorVersionPage": {
+        "type": "object",
+        "description": "One page of results. `next_cursor` is null when there is no next page.",
+        "required": [
+          "data",
+          "next_cursor"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EvaluatorVersion"
+            },
+            "description": "Items in this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor for the next page, or null when this is the last page."
           }
         }
       },
@@ -20549,6 +21014,54 @@
               "$ref": "#/components/schemas/ScoreSummary"
             },
             "description": "One entry per score name, sorted by name."
+          }
+        }
+      },
+      "ExperimentWithScore": {
+        "type": "object",
+        "description": "An experiment listed in `experiments_with_score`.",
+        "required": [
+          "id",
+          "name",
+          "last_scored_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The experiment."
+          },
+          "last_scored_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the experiment last got such a score. JSON is RFC 3339."
+          },
+          "name": {
+            "type": "string",
+            "description": "The experiment's name."
+          }
+        }
+      },
+      "ExperimentsWithScore": {
+        "type": "object",
+        "description": "Experiments that have a score named like the evaluator's output score (D-I-48).",
+        "required": [
+          "total",
+          "recent"
+        ],
+        "properties": {
+          "recent": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExperimentWithScore"
+            },
+            "description": "The five with the latest score, newest first."
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Experiments with such a score in the last 30 days, that still exist and are visible.",
+            "minimum": 0
           }
         }
       },
@@ -25330,6 +25843,26 @@
           "sso": {
             "type": "boolean",
             "description": "True when the domain's org has an enabled provider."
+          }
+        }
+      },
+      "StatsWindow": {
+        "type": "object",
+        "description": "The window of the stats: the start of the UTC day six days ago, up to the request time.",
+        "required": [
+          "from",
+          "to"
+        ],
+        "properties": {
+          "from": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Window start. JSON is RFC 3339."
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Window end, exclusive. JSON is RFC 3339."
           }
         }
       },

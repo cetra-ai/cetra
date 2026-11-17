@@ -264,6 +264,19 @@ CREATE INDEX eval_jobs_ready ON eval_jobs(status, priority, not_before)
 index eval_jobs_rule
 CREATE INDEX eval_jobs_rule ON eval_jobs(rule_id, created_at)
 
+table evaluator_versions
+CREATE TABLE evaluator_versions (
+  evaluator_id TEXT NOT NULL REFERENCES evaluators(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  config TEXT NOT NULL,               -- as evaluators.config: no sealed value
+  output_score TEXT NOT NULL,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (evaluator_id, version)
+)
+
 table evaluators
 CREATE TABLE evaluators (
   id TEXT PRIMARY KEY,
@@ -696,6 +709,8 @@ index sqlite_autoindex_email_verifications_1
 index sqlite_autoindex_eval_jobs_1
 
 index sqlite_autoindex_eval_jobs_2
+
+index sqlite_autoindex_evaluator_versions_1
 
 index sqlite_autoindex_evaluators_1
 

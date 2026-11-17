@@ -72,16 +72,17 @@ function numericBins(numbers: number[]): { label: string; count: number }[] {
   }));
 }
 
+/** The distribution of the scores that match `filters`: one rule's, or one evaluator's. */
 export function ScoreDistribution({
   org,
   project,
-  ruleId,
+  filters,
 }: {
   org: string;
   project: string;
-  ruleId: string;
+  filters: { rule_id?: string; evaluator_id?: string };
 }) {
-  const query = useQuery(scoresQuery(org, project, { rule_id: ruleId, limit: 1000 }));
+  const query = useQuery(scoresQuery(org, project, { ...filters, limit: 1000 }));
   if (query.isPending) {
     return <Skeleton className="h-24 w-full" />;
   }

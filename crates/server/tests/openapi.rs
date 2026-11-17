@@ -411,8 +411,18 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ),
     (
         "get",
+        "/api/v1/projects/{project}/evaluators/stats",
+        "get_evaluator_stats",
+    ),
+    (
+        "get",
         "/api/v1/projects/{project}/evaluators/{id}",
         "get_evaluator",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/evaluators/{id}/versions",
+        "list_evaluator_versions",
     ),
     (
         "patch",
@@ -690,6 +700,7 @@ const QUERY_OR_BODY: &[&str] = &[
     "get_deletion",
     "list_org_deletions",
     "list_evaluators",
+    "list_evaluator_versions",
     "list_score_definitions",
     "list_datasets",
     "list_dataset_versions",
@@ -721,6 +732,7 @@ const READ_OPERATIONS: &[&str] = &[
     "get_metrics",
     "get_experiment_results",
     "compare_experiments",
+    "get_evaluator_stats",
 ];
 
 const TAGS: &[&str] = &[
@@ -1135,6 +1147,7 @@ fn document_lint() {
         ("LlmConnectionPage", "LlmConnection"),
         ("DeletionPage", "Deletion"),
         ("EvaluatorPage", "Evaluator"),
+        ("EvaluatorVersionPage", "EvaluatorVersion"),
         ("ScoreDefinitionPage", "ScoreDefinition"),
         ("DatasetPage", "Dataset"),
         ("DatasetVersionPage", "DatasetVersion"),
@@ -1417,6 +1430,7 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "LlmConnectionPage",
         "DeletionPage",
         "EvaluatorPage",
+        "EvaluatorVersionPage",
         "ScoreDefinitionPage",
         "DatasetPage",
         "DatasetVersionPage",

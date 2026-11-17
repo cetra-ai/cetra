@@ -368,6 +368,18 @@ CREATE TABLE evaluators (
 );
 CREATE INDEX evaluators_connection ON evaluators(connection_id) WHERE connection_id IS NOT NULL;
 
+CREATE TABLE evaluator_versions (
+  evaluator_id TEXT NOT NULL REFERENCES evaluators(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  config TEXT NOT NULL,               -- as evaluators.config: no sealed value
+  output_score TEXT NOT NULL,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (evaluator_id, version)
+);
+
 CREATE TABLE online_rules (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -461,6 +473,8 @@ CREATE TABLE backfills (
 CREATE UNIQUE INDEX backfills_running ON backfills(rule_id) WHERE status = 'running';
 CREATE INDEX backfills_rule ON backfills(rule_id, created_at);
 ```
+
+Every create, and every update that changes `version`, writes one `evaluator_versions` row in the same transaction, copied from the stored row: name, kind, the redacted config, the output score, the author and the time. It holds no sealed value. A rename alone does not change `version`, so it writes no row. The history lives as long as the evaluator and is deleted with it (cascade); it has no retention cap and no per-version delete, so text removed from a prompt stays readable in it until the evaluator is deleted (D-I-49).
 
 `pending_traces` is the persisted copy of the trigger's in-memory map (spec 06 § Online rules › Triggering, D-I-8): the flusher writes the changed entries every 5 s and at shutdown, and startup loads them. `first_seen` and `last_seen` are ingest times; `min_start` is the earliest span `start_time` seen.
 

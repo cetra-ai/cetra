@@ -64,9 +64,10 @@ use super::eval_jobs::{
     EvalJob, EvalJobKind, EvalJobListParams, EvalJobStatus, RunEvaluatorRequest,
 };
 use super::evaluators::{
-    CreateEvaluatorRequest, Evaluator, EvaluatorKind, EvaluatorTemplate, EvaluatorTemplateList,
-    EvaluatorTestError, EvaluatorTestRequest, EvaluatorTestResult, EvaluatorTestUsage,
-    OutputScoreBody, TemplateMapping, TestEvaluatorBody, UpdateEvaluatorRequest,
+    CreateEvaluatorRequest, Evaluator, EvaluatorKind, EvaluatorStatsParams, EvaluatorStatsResponse,
+    EvaluatorTemplate, EvaluatorTemplateList, EvaluatorTestError, EvaluatorTestRequest,
+    EvaluatorTestResult, EvaluatorTestUsage, EvaluatorVersion, OutputScoreBody, TemplateMapping,
+    TestEvaluatorBody, UpdateEvaluatorRequest,
 };
 use super::experiments::{
     CompareCell, CompareParams, CompareRow, CreateExperimentRequest, CreateExperimentResponse,
@@ -304,7 +305,9 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<EvaluatorTestError>();
     set.insert::<EvaluatorTestUsage>();
     set.insert::<EvaluatorTestResult>();
+    set.insert::<EvaluatorStatsResponse>();
     set.insert_page::<Evaluator>("EvaluatorPage");
+    set.insert_page::<EvaluatorVersion>("EvaluatorVersionPage");
     set.insert::<ScoreDefinitionCategory>();
     set.insert::<ScoreDirection>();
     set.insert::<ScoreDefinition>();
@@ -2516,6 +2519,15 @@ fn evaluator_paths(paths: PathsBuilder) -> PathsBuilder {
             &[400, 401, 403, 404, 429],
         ))
         .build();
+    let versions = operation("list_evaluator_versions", "evaluation", "List evaluator versions")
+        .description(Some("Any project member can read. Newest first. The config is shown as `get_evaluator` shows it: sealed webhook values are never included. A version is kept until the evaluator is deleted."))
+        .parameters(Some(with_query::<PageParams>(vec![project_param(), id.clone()])))
+        .responses(responses(
+            "200",
+            json_named("EvaluatorVersionPage", "One page of versions, newest first."),
+            QUERY_ERRORS,
+        ))
+        .build();
     let patch = operation("patch_evaluator", "evaluation", "Update an evaluator")
         .description(Some("Project members and above. API keys cannot call it."))
         .parameters(Some(vec![project_param(), id.clone()]))
@@ -2566,10 +2578,19 @@ fn evaluator_paths(paths: PathsBuilder) -> PathsBuilder {
             &[400, 401, 403, 404, 429, 503],
         ))
         .build();
+    let stats = operation("get_evaluator_stats", "evaluation", "Get evaluator stats")
+        .description(Some("Any project member can read. Jobs, costs, latencies and scores cover the last 7 UTC days (finished jobs are kept 7 days). `experiments_with_score` lists experiments that have a score named like the evaluator's output score in the last 30 days (D-I-48). Not cached."))
+        .parameters(Some(with_query::<EvaluatorStatsParams>(vec![project_param()])))
+        .responses(responses("200", json_of::<EvaluatorStatsResponse>("One entry per evaluator."), READ_ERRORS))
+        .build();
     paths
         .path(
             format!("{PROJECT}/evaluators"),
             PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/evaluators/stats"),
+            PathItem::new(HttpMethod::Get, stats),
         )
         .path(
             format!("{PROJECT}/evaluators"),
@@ -2578,6 +2599,10 @@ fn evaluator_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/evaluators/{{id}}"),
             PathItem::new(HttpMethod::Get, get),
+        )
+        .path(
+            format!("{PROJECT}/evaluators/{{id}}/versions"),
+            PathItem::new(HttpMethod::Get, versions),
         )
         .path(
             format!("{PROJECT}/evaluators/{{id}}"),

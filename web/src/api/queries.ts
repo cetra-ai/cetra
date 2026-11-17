@@ -144,6 +144,7 @@ export function scoresQuery(
     span_id?: string;
     session_id?: string;
     rule_id?: string;
+    evaluator_id?: string;
     target?: Schema<"ScoreTargetKind">;
     limit?: number;
   },

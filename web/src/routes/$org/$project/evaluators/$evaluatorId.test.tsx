@@ -8,6 +8,7 @@ import evaluatorFixture from "../../../../../../fixtures/api/static/evaluator.js
 import projectFixture from "../../../../../../fixtures/api/static/project.json";
 
 const EVALUATOR_URL = "/acme/support-bot/evaluators/01900000-0000-7000-8000-000000000500";
+const CONFIG_URL = `${EVALUATOR_URL}?tab=config`;
 
 const WEBHOOK = {
   ...evaluatorFixture,
@@ -38,9 +39,49 @@ function projectAs(role: string) {
   );
 }
 
+it("opens on the overview tab and switches tabs in the URL", async () => {
+  const { user, router } = await renderApp(EVALUATOR_URL);
+
+  expect(await screen.findByRole("tab", { name: "Overview" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  expect(await screen.findByLabelText("Prompt")).not.toBeVisible();
+
+  await user.click(screen.getByRole("tab", { name: "Configuration" }));
+  await waitFor(() => expect(screen.getByLabelText("Prompt")).toBeVisible());
+  expect(router.state.location.search).toEqual({ tab: "config" });
+
+  await user.click(screen.getByRole("tab", { name: "Overview" }));
+  await waitFor(() => expect(screen.getByLabelText("Prompt")).not.toBeVisible());
+  expect(router.state.location.search).toEqual({ tab: "overview" });
+});
+
+it("keeps unsaved edits when switching tabs", async () => {
+  const { user } = await renderApp(CONFIG_URL);
+
+  const prompt = await screen.findByLabelText("Prompt");
+  await user.clear(prompt);
+  await user.type(prompt, "Unsaved draft");
+  await user.click(screen.getByRole("tab", { name: "Overview" }));
+  await user.click(screen.getByRole("tab", { name: "Configuration" }));
+
+  expect(screen.getByLabelText("Prompt")).toHaveValue("Unsaved draft");
+});
+
+it("opens the configuration tab named in the URL", async () => {
+  await renderApp(CONFIG_URL);
+
+  expect(await screen.findByRole("tab", { name: "Configuration" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  expect(await screen.findByLabelText("Prompt")).toBeInTheDocument();
+});
+
 it("sends the whole config when the prompt changes", async () => {
   const patched = capturePatch((body) => ({ ...evaluatorFixture, ...body }));
-  const { user } = await renderApp(EVALUATOR_URL);
+  const { user } = await renderApp(CONFIG_URL);
 
   const prompt = await screen.findByLabelText("Prompt");
   await user.clear(prompt);
@@ -64,7 +105,7 @@ it("sends the whole config when the prompt changes", async () => {
 
 it("renames only when just the name changes", async () => {
   const patched = capturePatch((body) => ({ ...evaluatorFixture, ...body }));
-  const { user } = await renderApp(EVALUATOR_URL);
+  const { user } = await renderApp(CONFIG_URL);
 
   const name = await screen.findByLabelText("Name");
   await user.clear(name);
@@ -79,7 +120,7 @@ it("sends no webhook settings or secret unless they are replaced", async () => {
     http.get("/api/v1/projects/:project/evaluators/:id", () => HttpResponse.json(WEBHOOK)),
   );
   const patched = capturePatch((body) => ({ ...WEBHOOK, ...body }));
-  const { user } = await renderApp(`/acme/support-bot/evaluators/${WEBHOOK.id}`);
+  const { user } = await renderApp(`/acme/support-bot/evaluators/${WEBHOOK.id}?tab=config`);
 
   expect(await screen.findByText("Endpoint host: hooks.example.com")).toBeInTheDocument();
   const score = screen.getByLabelText("Score name");
@@ -99,7 +140,7 @@ it("replaces the webhook settings and the secret together", async () => {
     http.get("/api/v1/projects/:project/evaluators/:id", () => HttpResponse.json(WEBHOOK)),
   );
   const patched = capturePatch((body) => ({ ...WEBHOOK, ...body }));
-  const { user } = await renderApp(`/acme/support-bot/evaluators/${WEBHOOK.id}`);
+  const { user } = await renderApp(`/acme/support-bot/evaluators/${WEBHOOK.id}?tab=config`);
 
   await user.click(await screen.findByRole("checkbox", { name: "Replace webhook settings" }));
   await user.type(screen.getByLabelText("URL"), "https://hooks.example.com/v2");
@@ -139,7 +180,7 @@ it("deletes after confirming and returns to the list", async () => {
 
 it("shows a viewer a read-only form", async () => {
   server.use(projectAs("viewer"));
-  await renderApp(EVALUATOR_URL);
+  await renderApp(CONFIG_URL);
 
   expect(await screen.findByLabelText("Name")).toBeDisabled();
   expect(screen.getByLabelText("Prompt")).toBeDisabled();
@@ -191,7 +232,7 @@ it("lists the rules that refuse a save", async () => {
       problemResponse(409, "conflict", CONFLICT),
     ),
   );
-  const { user } = await renderApp(EVALUATOR_URL);
+  const { user } = await renderApp(CONFIG_URL);
 
   const name = await screen.findByLabelText("Name");
   await user.clear(name);
@@ -203,4 +244,18 @@ it("lists the rules that refuse a save", async () => {
     "href",
     `/acme/support-bot/online-rules/${CONFLICT_RULE}`,
   );
+});
+
+it("opens the history tab from the URL", async () => {
+  await renderApp(`${EVALUATOR_URL}?tab=history`);
+
+  expect(await screen.findByRole("button", { name: /^v1/ })).toBeInTheDocument();
+});
+
+it("opens the history tab from the tab list", async () => {
+  const { user, router } = await renderApp(EVALUATOR_URL);
+
+  await user.click(await screen.findByRole("tab", { name: "History" }));
+  expect(await screen.findByRole("button", { name: /^v1/ })).toBeInTheDocument();
+  expect(router.state.location.search).toEqual({ tab: "history" });
 });

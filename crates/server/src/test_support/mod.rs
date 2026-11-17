@@ -22,9 +22,10 @@ use axum::extract::ConnectInfo;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode};
 use bytesize::ByteSize;
 use cetra_core::batch::{scores_to_record_batch, spans_to_record_batch};
+use cetra_core::enums::ScoreSource;
 use cetra_core::ids::{OrgId, ProjectId, SpanId, TraceId};
 use cetra_core::names::PRODUCT;
-use cetra_core::score::Score;
+use cetra_core::score::{Score, ScoreTarget, ScoreValue};
 use cetra_core::span::Span;
 use cetra_storage::config::{
     AnchorConfig, FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
@@ -1592,4 +1593,52 @@ pub(crate) fn config(data_dir: &std::path::Path) -> ServerConfig {
         init: InitConfig::default(),
         log: LogConfig::default(),
     }
+}
+
+/// A score for [`put_score`]. It is on a fixed trace.
+pub(crate) struct TestScore {
+    pub(crate) name: &'static str,
+    pub(crate) value: ScoreValue,
+    pub(crate) evaluator_id: Option<Uuid>,
+    pub(crate) experiment_id: Option<Uuid>,
+    pub(crate) created_at: i64,
+    pub(crate) deleted: bool,
+    /// Scores with the same id replace each other by `(updated_at, ingest_time)`; `None` for a
+    /// new id.
+    pub(crate) score_id: Option<Uuid>,
+    /// Write time of the version. `None` takes `created_at`.
+    pub(crate) updated_at: Option<i64>,
+}
+
+/// Appends `score` to `project` through storage, as the ingest path does.
+pub(crate) async fn put_score(app: &TestApp, project: ProjectId, score: TestScore) {
+    let score = Score {
+        project_id: project,
+        score_id: score.score_id.unwrap_or_else(Uuid::now_v7),
+        target: ScoreTarget::Trace {
+            trace_id: "0102030405060708090a0b0c0d0e0f10".parse().unwrap(),
+        },
+        session_id: None,
+        user_id: None,
+        name: score.name.to_owned(),
+        value: score.value,
+        reason: None,
+        source: ScoreSource::LlmJudge,
+        evaluator_id: score.evaluator_id,
+        rule_id: None,
+        experiment_id: score.experiment_id,
+        dataset_item_id: score.experiment_id.map(|_| Uuid::now_v7()),
+        author_user_id: None,
+        metadata: Default::default(),
+        created_at: score.created_at,
+        updated_at: score.updated_at.unwrap_or(score.created_at),
+        deleted: score.deleted,
+        ingest_time: score.created_at,
+    };
+    let batch = scores_to_record_batch(&[score]).unwrap();
+    app.state
+        .storage
+        .append_scores(project, batch)
+        .await
+        .unwrap();
 }

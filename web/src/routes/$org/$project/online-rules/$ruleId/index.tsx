@@ -260,7 +260,7 @@ function OnlineRulePage() {
       </section>
 
       <section aria-label="Score distribution">
-        <ScoreDistribution org={org} project={project} ruleId={rule.id} />
+        <ScoreDistribution org={org} project={project} filters={{ rule_id: rule.id }} />
       </section>
 
       <section aria-label="Jobs" className="flex flex-col gap-3">

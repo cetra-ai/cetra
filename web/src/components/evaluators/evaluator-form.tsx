@@ -1,7 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { X } from "lucide-react";
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 import { $api } from "@/api/client";
 import { fieldErrors, type Problem, problemMessage, problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
@@ -389,11 +389,14 @@ export function EvaluatorForm({
   org,
   project,
   evaluator,
+  initialTemplateId,
   onSaved,
 }: {
   org: string;
   project: string;
   evaluator?: Schema<"Evaluator">;
+  /** A template to start from, as picked on the list page. An id that is not a template is ignored. */
+  initialTemplateId?: string;
   onSaved: (saved: Schema<"Evaluator">) => void;
 }) {
   const { data: projectData } = useProject();
@@ -421,6 +424,18 @@ export function EvaluatorForm({
     evaluatorTemplatesInit(org, project),
     { enabled: !saved },
   );
+  // Applies `initialTemplateId` once, through the same path as picking it in the select.
+  const appliedInitialTemplate = useRef(false);
+  useEffect(() => {
+    if (appliedInitialTemplate.current || saved || initialTemplateId === undefined) {
+      return;
+    }
+    const template = templates.data?.data.find((item) => item.id === initialTemplateId);
+    if (template !== undefined) {
+      appliedInitialTemplate.current = true;
+      pickTemplate(template);
+    }
+  });
   const connections = $api.useQuery(
     "get",
     "/api/v1/orgs/{org}/llm-connections",
