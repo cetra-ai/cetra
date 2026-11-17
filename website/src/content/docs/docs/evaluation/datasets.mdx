@@ -3,9 +3,14 @@ title: Datasets
 description: Keep versioned sets of inputs and expected outputs, import them from files or traces, and read them from code.
 ---
 
+import { Image } from "astro:assets";
+import datasets from "../../../../assets/screenshots/datasets.png";
+
 import { Tabs, TabItem } from "@astrojs/starlight/components";
 
 A dataset is a versioned collection of inputs, with an expected output when you have one, that you run [experiments](/docs/evaluation/experiments/) on.
+
+<Image src={datasets} alt="The datasets page: the list of datasets in the project." />
 
 ## Items
 

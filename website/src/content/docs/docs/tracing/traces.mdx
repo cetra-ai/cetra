@@ -3,6 +3,10 @@ title: Traces
 description: Browse traces in the UI, read a trace as a tree and a timeline, and inspect the input, output and attributes of each span.
 ---
 
+import { Image } from "astro:assets";
+import traceList from "../../../../assets/screenshots/trace-list.png";
+import traceView from "../../../../assets/screenshots/trace-view.png";
+
 import { Tabs, TabItem } from "@astrojs/starlight/components";
 
 Use the trace list to find a request, and the trace view to see what happened inside it.
@@ -22,17 +26,14 @@ import cetra
 
 cetra.init()
 
-
 @cetra.observe(kind="tool", name="search_docs")
 def search_docs(query: str) -> list[str]:
     return ["doc-1", "doc-2"]
-
 
 @cetra.observe(name="answer")
 def answer(question: str) -> str:
     docs = search_docs(question)
     return f"It is in {docs[0]}."
-
 
 answer("why?")
 
@@ -68,6 +69,8 @@ Any OpenTelemetry instrumentation works. Nested spans form the tree. See [Send O
 
 ## The trace list
 
+<Image src={traceList} alt="The trace list: one row per trace with its start time, name, input, output, duration, tokens and cost." />
+
 Select **Traces** in the sidebar. The list shows the traces of the last 24 hours, newest first. Each row shows:
 
 - the status, start time and name of the trace;
@@ -87,6 +90,8 @@ A project with no traces shows setup snippets until the first trace arrives.
 ## The trace view
 
 The left side shows the spans as a tree and a timeline in one grid. Each row has the span's name, kind and status, its duration, tokens and cost, and a bar on a shared time axis. Spans with an error are red. You can collapse a branch and search within the tree.
+
+<Image src={traceView} alt="The trace view: the span tree and timeline in the middle, and the selected span's model, tokens, input and output on the right." />
 
 **Transcript** shows the model and tool spans in order as one conversation. Each model turn shows only the messages that are new since the previous call.
 

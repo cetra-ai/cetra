@@ -3,7 +3,12 @@ title: Alerts
 description: Watch error rate, cost, latency and scores per project, and get notified through Slack, a signed webhook or email.
 ---
 
+import { Image } from "astro:assets";
+import alerts from "../../../../assets/screenshots/alerts.png";
+
 Alert rules watch a metric of a project over a sliding window and notify you when it crosses a threshold. Rules belong to a project. Members and above manage them.
+
+<Image src={alerts} alt="The alerts page: the project's alert rules." />
 
 ## What a rule watches
 

@@ -3,6 +3,9 @@ title: Users
 description: Attach a user ID to your traces to see each user's activity, cost and sessions.
 ---
 
+import { Image } from "astro:assets";
+import users from "../../../../assets/screenshots/users.png";
+
 import { Tabs, TabItem } from "@astrojs/starlight/components";
 
 Set a user ID on your traces to see what each of your users does and costs.
@@ -70,6 +73,8 @@ Use an ID that is stable for a person and that is not their email address or nam
 ## In the UI
 
 Select **Users** in the sidebar. The list shows each user's traces, sessions, cost, last activity and errors. Open a user to see their sessions and totals.
+
+<Image src={users} alt="The users page: one row per user ID." />
 
 ## Filter by user
 
