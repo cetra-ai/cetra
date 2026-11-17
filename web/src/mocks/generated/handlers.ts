@@ -691,31 +691,53 @@ function updateLiveTrace(
   return trace;
 }
 
+const LIVE_SPAN_MS = 150;
+
 function addChildSpan(
   dataset: Dataset,
   trace: Schema<"TraceSummary">,
   now: number,
 ): Schema<"SpanSummary"> {
-  const time = rfc3339(now);
+  const detail = extraDetail(dataset, trace.trace_id) ?? dataset.traceDetail(trace.trace_id);
+  const window = liveSpanWindow(detail, now);
   const span: Schema<"SpanSummary"> = {
     span_id: liveSpanId(),
     trace_id: trace.trace_id,
     ...(trace.root_span_id ? { parent_span_id: trace.root_span_id } : {}),
     span_kind: "span",
     name: "live span",
-    start_time: time,
-    end_time: time,
-    duration_ns: 0,
+    start_time: rfc3339(window.start),
+    end_time: rfc3339(window.start + window.duration),
+    duration_ns: window.duration * 1_000_000,
     status: "ok",
     metadata: {},
     tags: [],
   };
-  const detail = extraDetail(dataset, trace.trace_id) ?? dataset.traceDetail(trace.trace_id);
   if (detail) {
     detail.spans.push({ depth: 1, detached: false, span });
     detail.trace.span_count += 1;
   }
   return span;
+}
+
+/**
+ * Where a live span lands: inside the root span's window, so the timeline axis keeps its extent.
+ * A trace whose root has no extent yet (one created live) grows from now.
+ */
+function liveSpanWindow(
+  detail: Schema<"TraceDetail"> | undefined,
+  now: number,
+): { start: number; duration: number } {
+  const root = detail?.spans.find((row) => row.span.parent_span_id === undefined)?.span;
+  const rootStart = root ? Date.parse(root.start_time) : Number.NaN;
+  const rootMs = root ? root.duration_ns / 1_000_000 : 0;
+  if (!Number.isFinite(rootStart) || rootMs <= 0) {
+    return { start: now, duration: 0 };
+  }
+  const duration = Math.min(LIVE_SPAN_MS, rootMs);
+  const live = detail?.spans.filter((row) => row.span.name === "live span").length ?? 0;
+  const fraction = (live * 0.381966) % 1;
+  return { start: Math.floor(rootStart + (rootMs - duration) * fraction), duration };
 }
 
 function rootSpan(trace: Schema<"TraceSummary">, now: number): Schema<"SpanSummary"> {
