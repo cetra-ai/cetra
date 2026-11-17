@@ -1,0 +1,37 @@
+---
+title: Organizations, projects and roles
+description: How organizations, projects, members and roles fit together, and what each role may do.
+---
+
+An organization (org) holds your members and your projects. A project holds the data: traces, scores, datasets and settings.
+
+## Organizations and projects
+
+Any signed-in member can create an org and becomes its owner. An org has projects, and each project has its own API keys, retention setting, evaluators and alert rules. API keys belong to one project.
+
+## Members and invites
+
+Admins and owners invite people by email. The invitation link is valid for 7 days, and it admits only the email it was sent to. Without [SMTP](/docs/self-hosting/email/), the UI shows the link so you can send it yourself.
+
+Each member has an org role. For a project, an admin can give a member or viewer a different role on that project, from `none` (the project is hidden from them) to `admin`. Setting such an override needs the Teams add-on; removing one never does. Owners and admins are never overridden.
+
+Nobody can grant a role above their own, only owners grant or change `owner`, and an org always keeps at least one owner.
+
+## Roles
+
+| Action | viewer | member | admin | owner |
+|---|:-:|:-:|:-:|:-:|
+| View traces, sessions, dashboards, datasets, experiments and the SQL console | yes | yes | yes | yes |
+| Annotate, add to and edit datasets, run SQL exports, share saved views | | yes | yes | yes |
+| Manage evaluators, online rules, alert rules, channels and score definitions | | yes | yes | yes |
+| Manage API keys, LLM connections, project settings (retention) and GDPR deletions | | | yes | yes |
+| Create and delete projects, manage members and invites | | | yes | yes |
+| Delete the org, transfer ownership, change owners | | | | yes |
+
+A member changes or deletes only their own human scores. A project admin can change anyone's.
+
+If something is outside your reach, cetra answers as if it does not exist. If you can see it but your role is too low, you get a permission error.
+
+## Instance admins
+
+On a self-hosted instance, the first member to sign up is an instance admin. Instance admins manage the instance, such as users and settings, but they do not see an org's data unless they are a member of it. They can always sign in with a password at `/login?password=1`, even when [password login is off](/docs/self-hosting/authentication/).
