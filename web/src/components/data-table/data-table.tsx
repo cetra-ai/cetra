@@ -11,13 +11,24 @@ import {
   flexRender,
   type RowData,
   rowSortingFeature,
+  type Row as TableRow,
   tableFeatures,
   useTable,
 } from "@tanstack/react-table";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn } from "cn";
 import { ArrowDown, ArrowUp, Loader2, type LucideIcon } from "lucide-react";
-import { type KeyboardEvent, type ReactNode, useEffect, useRef, useState } from "react";
+import {
+  type KeyboardEvent,
+  memo,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
+import { moveColumn } from "@/components/data-table/column-layout";
 import {
   columnSizesAfterReset,
   columnSizesAfterResize,
@@ -35,8 +46,19 @@ const features = tableFeatures({
 export type DataTableColumn<Row extends RowData> = ColumnDef<typeof features, Row>;
 
 export const ROW_HEIGHT = 28;
-const OVERSCAN = 12;
+const OVERSCAN = 14;
 const FETCH_AHEAD = 20;
+/** Pointer travel, in px, that turns a press on a header into a column drag. */
+const DRAG_START_PX = 4;
+const EDGE_PX = 40;
+const EDGE_STEP_PX = 12;
+const NO_LOCKED: ReadonlySet<string> = new Set();
+
+interface ReorderDrag {
+  id: string;
+  /** Left edge of the drop indicator, relative to the header. */
+  left: number;
+}
 
 export interface DataTableProps<Row extends RowData> {
   tableId: string;
@@ -59,6 +81,10 @@ export interface DataTableProps<Row extends RowData> {
   notice?: ReactNode;
   /** Marks a row, e.g. `"error"` draws a red edge. A selected row keeps its selected style. */
   rowTone?: (row: Row) => "error" | undefined;
+  /** Receives the new order of the column ids after a column is dragged to a new place. */
+  onReorder?: (ids: string[]) => void;
+  /** Columns that cannot be moved, and that columns cannot be dropped before. */
+  lockedColumnIds?: ReadonlySet<string>;
 }
 
 export function DataTable<Row extends RowData>({
@@ -79,12 +105,17 @@ export function DataTable<Row extends RowData>({
   highlightedRowIds,
   notice,
   rowTone,
+  onReorder,
+  lockedColumnIds = NO_LOCKED,
 }: DataTableProps<Row>) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const headerRef = useRef<HTMLDivElement>(null);
   const [columnSizing, setColumnSizing] = useState(() => readColumnSizes(tableId));
   const [focusedIndex, setFocusedIndex] = useState<number | null>(null);
+  const [reorderDrag, setReorderDrag] = useState<ReorderDrag | null>(null);
   const stopDrag = useRef<(() => void) | null>(null);
+  // Set by a drag's release so the click that follows does not sort the column.
+  const suppressClick = useRef(false);
 
   useEffect(() => () => stopDrag.current?.(), []);
 
@@ -109,6 +140,16 @@ export function DataTable<Row extends RowData>({
       commit(next);
     },
   });
+
+  // Keeps the row click callback's identity stable, so memoised rows skip re-rendering on scroll.
+  const onActivateRef = useRef(onActivate);
+  useLayoutEffect(() => {
+    onActivateRef.current = onActivate;
+  }, [onActivate]);
+  const onRowClick = useCallback((index: number, row: TableRow<typeof features, Row>) => {
+    setFocusedIndex(index);
+    onActivateRef.current(row.original);
+  }, []);
 
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -201,6 +242,136 @@ export function DataTable<Row extends RowData>({
     window.addEventListener("pointerup", stop);
   }
 
+  /**
+   * Press a header and drag it to a new place. The drag starts once the pointer has
+   * moved DRAG_START_PX; a press released before that is a click, so sorting still works.
+   */
+  function beginReorder(event: React.PointerEvent<HTMLDivElement>, id: string) {
+    if (!onReorder || event.button !== 0 || lockedColumnIds.has(id)) {
+      return;
+    }
+    const reorder: (ids: string[]) => void = onReorder;
+    const ids = table.getHeaderGroups()[0]?.headers.map((header) => header.column.id) ?? [];
+    const startX = event.clientX;
+    const startY = event.clientY;
+    let dragging = false;
+    let cancelled = false;
+    let lastX = startX;
+    let target: number | undefined;
+    let shownLeft: number | undefined;
+    let frame: number | undefined;
+
+    // Places the indicator at the boundary of the drop slot under `clientX`.
+    function updateDrop(clientX: number) {
+      const header = headerRef.current;
+      if (!header) {
+        return;
+      }
+      const others = Array.from(header.querySelectorAll<HTMLElement>("[data-column-id]")).filter(
+        (cell) => cell.dataset.columnId !== id,
+      );
+      const boxes = others.map((cell) => cell.getBoundingClientRect());
+      const index = boxes.filter((box) => box.left + box.width / 2 < clientX).length;
+      const boundary = index < boxes.length ? boxes[index]?.left : boxes.at(-1)?.right;
+      if (boundary === undefined) {
+        return;
+      }
+      const left = boundary - header.getBoundingClientRect().left;
+      if (index !== target || left !== shownLeft) {
+        target = index;
+        shownLeft = left;
+        setReorderDrag({ id, left });
+      }
+    }
+
+    // Scrolls the body while the pointer is near its left or right edge.
+    function tick() {
+      frame = window.requestAnimationFrame(tick);
+      const scroller = scrollRef.current;
+      if (!scroller) {
+        return;
+      }
+      const box = scroller.getBoundingClientRect();
+      if (lastX - box.left < EDGE_PX) {
+        scroller.scrollLeft -= EDGE_STEP_PX;
+      } else if (box.right - lastX < EDGE_PX) {
+        scroller.scrollLeft += EDGE_STEP_PX;
+      }
+      if (headerRef.current) {
+        headerRef.current.scrollLeft = scroller.scrollLeft;
+      }
+      updateDrop(lastX);
+    }
+
+    function startDrag() {
+      dragging = true;
+      document.body.style.cursor = "grabbing";
+      window.addEventListener("keydown", onKey);
+      frame = window.requestAnimationFrame(tick);
+      updateDrop(lastX);
+    }
+
+    // Ends the drag's motion and visuals; the release listener stays until pointerup.
+    function leaveDrag() {
+      if (frame !== undefined) {
+        window.cancelAnimationFrame(frame);
+        frame = undefined;
+      }
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("keydown", onKey);
+      document.body.style.cursor = "";
+      setReorderDrag(null);
+    }
+
+    function stop() {
+      leaveDrag();
+      window.removeEventListener("pointerup", onUp);
+      if (stopDrag.current === stop) {
+        stopDrag.current = null;
+      }
+    }
+
+    function onMove(ev: globalThis.PointerEvent) {
+      lastX = ev.clientX;
+      if (dragging) {
+        updateDrop(lastX);
+        return;
+      }
+      if (Math.hypot(ev.clientX - startX, ev.clientY - startY) > DRAG_START_PX) {
+        startDrag();
+      }
+    }
+
+    function onKey(ev: globalThis.KeyboardEvent) {
+      if (ev.key === "Escape") {
+        cancelled = true;
+        leaveDrag();
+      }
+    }
+
+    function onUp() {
+      if (dragging) {
+        suppressClick.current = true;
+        window.setTimeout(() => {
+          suppressClick.current = false;
+        }, 0);
+        const next =
+          cancelled || target === undefined
+            ? undefined
+            : moveColumn(ids, id, target, lockedColumnIds);
+        if (next) {
+          reorder(next);
+        }
+      }
+      stop();
+    }
+
+    stopDrag.current?.();
+    stopDrag.current = stop;
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }
+
   const headerGroup = table.getHeaderGroups()[0];
   const template = headerGroup
     ? headerGroup.headers.map((header) => `${header.getSize()}px`).join(" ")
@@ -221,11 +392,21 @@ export function DataTable<Row extends RowData>({
       onKeyDown={onKeyDown}
     >
       {headerGroup ? (
-        <div ref={headerRef} className="flex shrink-0 overflow-hidden [scrollbar-gutter:stable]">
+        <div
+          ref={headerRef}
+          className="relative flex shrink-0 overflow-hidden [scrollbar-gutter:stable]"
+        >
+          {reorderDrag ? (
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-y-0 z-20 w-0.5 bg-primary"
+              style={{ left: reorderDrag.left }}
+            />
+          ) : null}
           <div
             role="row"
             aria-rowindex={1}
-            className="grid h-row shrink-0 items-center border-b bg-surface text-[11px] font-medium tracking-wide text-muted-foreground uppercase"
+            className="grid h-row shrink-0 items-center border-b bg-surface select-none text-[11px] font-medium tracking-wide text-muted-foreground uppercase"
             style={{ gridTemplateColumns: template, minWidth: totalWidth }}
           >
             {headerGroup.headers.map((header) => {
@@ -240,6 +421,8 @@ export function DataTable<Row extends RowData>({
                 <div
                   key={header.id}
                   role="columnheader"
+                  data-column-id={header.column.id}
+                  onPointerDown={(event) => beginReorder(event, header.column.id)}
                   aria-labelledby={`${tableId}-${header.id}-label`}
                   aria-sort={
                     canSort
@@ -253,6 +436,7 @@ export function DataTable<Row extends RowData>({
                   className={cn(
                     "relative flex h-full min-w-0 items-center px-2",
                     header.column.columnDef.meta?.align === "right" && "justify-end",
+                    reorderDrag?.id === header.column.id && "bg-muted",
                   )}
                 >
                   {canSort && onSortingChange ? (
@@ -261,6 +445,10 @@ export function DataTable<Row extends RowData>({
                       id={`${tableId}-${header.id}-label`}
                       className="inline-flex min-w-0 items-center gap-1 uppercase hover:text-foreground"
                       onClick={() => {
+                        if (suppressClick.current) {
+                          suppressClick.current = false;
+                          return;
+                        }
                         if (sorting?.id !== header.column.id) {
                           onSortingChange({ id: header.column.id, desc: true });
                           return;
@@ -336,7 +524,13 @@ export function DataTable<Row extends RowData>({
         ) : (
           <div
             className="relative"
-            style={{ height: virtualizer.getTotalSize() + (isFetchingNextPage ? ROW_HEIGHT : 0) }}
+            style={{
+              height: virtualizer.getTotalSize() + (isFetchingNextPage ? ROW_HEIGHT : 0),
+              // Faint row lines show where rows are not rendered yet, so blank space looks like empty rows.
+              backgroundImage:
+                "linear-gradient(to bottom, transparent calc(var(--row-height) - 1px), color-mix(in oklab, var(--border) 60%, transparent) 0)",
+              backgroundSize: "100% var(--row-height)",
+            }}
           >
             {virtualRows.map((item) => {
               const row = model[item.index];
@@ -344,49 +538,20 @@ export function DataTable<Row extends RowData>({
                 return null;
               }
               const selected = row.id === selectedRowId;
-              const focused = focusedIndex === item.index;
-              const errorTone = !selected && rowTone?.(row.original) === "error";
               return (
-                <div
+                <BodyRow
                   key={row.id}
-                  role="row"
-                  aria-rowindex={item.index + 2}
-                  aria-selected={selected}
-                  data-focused={focused ? "" : undefined}
-                  className={cn(
-                    "absolute top-0 grid w-full items-center border-b border-border/60",
-                    selected
-                      ? "bg-selection shadow-[inset_2px_0_0_var(--primary)]"
-                      : "hover:bg-row-hover",
-                    focused && !selected && "bg-row-hover",
-                    errorTone && "shadow-[inset_2px_0_0_var(--status-error)]",
-                    highlightedRowIds?.has(row.id) && "live-row",
-                  )}
-                  style={{
-                    height: ROW_HEIGHT,
-                    transform: `translateY(${item.start}px)`,
-                    gridTemplateColumns: template,
-                    minWidth: totalWidth,
-                  }}
-                  onClick={() => {
-                    setFocusedIndex(item.index);
-                    onActivate(row.original);
-                  }}
-                >
-                  {row.getAllCells().map((cell) => (
-                    <div
-                      key={cell.id}
-                      role="gridcell"
-                      className={cn(
-                        "min-w-0 truncate px-2",
-                        cell.column.columnDef.meta?.align === "right" && "text-right",
-                        cell.column.columnDef.meta?.mono && "font-mono",
-                      )}
-                    >
-                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                    </div>
-                  ))}
-                </div>
+                  row={row}
+                  index={item.index}
+                  start={item.start}
+                  selected={selected}
+                  focused={focusedIndex === item.index}
+                  highlighted={highlightedRowIds?.has(row.id) ?? false}
+                  tone={!selected && rowTone?.(row.original) === "error" ? "error" : undefined}
+                  template={template}
+                  totalWidth={totalWidth}
+                  onRowClick={onRowClick}
+                />
               );
             })}
             {isFetchingNextPage ? (
@@ -406,6 +571,73 @@ export function DataTable<Row extends RowData>({
     </div>
   );
 }
+
+interface BodyRowProps<TData extends RowData> {
+  row: TableRow<typeof features, TData>;
+  index: number;
+  start: number;
+  selected: boolean;
+  focused: boolean;
+  highlighted: boolean;
+  tone: "error" | undefined;
+  template: string | undefined;
+  totalWidth: number | undefined;
+  onRowClick: (index: number, row: TableRow<typeof features, TData>) => void;
+}
+
+// One virtual body row. Every prop is a primitive or a stable reference, so a scroll
+// that only changes the visible range re-renders only the rows that newly appear.
+function BodyRowView<TData extends RowData>({
+  row,
+  index,
+  start,
+  selected,
+  focused,
+  highlighted,
+  tone,
+  template,
+  totalWidth,
+  onRowClick,
+}: BodyRowProps<TData>) {
+  return (
+    <div
+      role="row"
+      aria-rowindex={index + 2}
+      aria-selected={selected}
+      data-focused={focused ? "" : undefined}
+      className={cn(
+        "absolute top-0 grid w-full items-center border-b border-border/60",
+        selected ? "bg-selection shadow-[inset_2px_0_0_var(--primary)]" : "hover:bg-row-hover",
+        focused && !selected && "bg-row-hover",
+        tone === "error" && "shadow-[inset_2px_0_0_var(--status-error)]",
+        highlighted && "live-row",
+      )}
+      style={{
+        height: ROW_HEIGHT,
+        transform: `translateY(${start}px)`,
+        gridTemplateColumns: template,
+        minWidth: totalWidth,
+      }}
+      onClick={() => onRowClick(index, row)}
+    >
+      {row.getAllCells().map((cell) => (
+        <div
+          key={cell.id}
+          role="gridcell"
+          className={cn(
+            "min-w-0 truncate px-2",
+            cell.column.columnDef.meta?.align === "right" && "text-right",
+            cell.column.columnDef.meta?.mono && "font-mono",
+          )}
+        >
+          {flexRender(cell.column.columnDef.cell, cell.getContext())}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+const BodyRow = memo(BodyRowView) as typeof BodyRowView;
 
 function SortArrow({ direction }: { direction: false | "asc" | "desc" }) {
   if (direction === "asc") {

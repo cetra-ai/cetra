@@ -61,7 +61,9 @@ it("reads a past version read-only", async () => {
   expect(
     await screen.findByText("You are viewing version 1. Items are read-only."),
   ).toBeInTheDocument();
-  expect(requested).toContain("1");
+  await waitFor(() => {
+    expect(requested).toContain("1");
+  });
   expect(screen.getByRole("button", { name: "Add item" })).toBeDisabled();
 });
 

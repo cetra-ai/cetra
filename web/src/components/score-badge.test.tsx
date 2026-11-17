@@ -5,7 +5,7 @@ import { expect, it } from "vitest";
 import { liveScoreDefinitionsQuery } from "@/api/queries-evaluation";
 import type { Schema } from "@/api/types";
 import { DataTable } from "@/components/data-table/data-table";
-import { ScoreAverageBadge, ScoreBadge } from "@/components/score-badge";
+import { ScoreAverageBadge, ScoreBadge, ScoreDefinitionsProvider } from "@/components/score-badge";
 import { ProjectProvider } from "@/components/shell/project-context";
 import { orderedTraceColumns } from "@/components/trace-columns";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -50,7 +50,7 @@ async function renderBadge(node: React.ReactNode) {
           data: projectFixture as Schema<"Project">,
         }}
       >
-        {node}
+        <ScoreDefinitionsProvider>{node}</ScoreDefinitionsProvider>
       </ProjectProvider>
     </QueryClientProvider>,
   );
@@ -132,20 +132,22 @@ async function renderTraceScore(value: Schema<"ScoreValue">) {
           data: projectFixture as Schema<"Project">,
         }}
       >
-        <TooltipProvider>
-          <DataTable
-            tableId="traces-score-test"
-            ariaLabel="Traces"
-            columns={orderedTraceColumns([row], ["score:helpfulness"])}
-            rows={[row]}
-            getRowId={(item) => item.trace_id}
-            onActivate={() => undefined}
-            hasNextPage={false}
-            isFetchingNextPage={false}
-            fetchNextPage={() => undefined}
-            emptyState={null}
-          />
-        </TooltipProvider>
+        <ScoreDefinitionsProvider>
+          <TooltipProvider>
+            <DataTable
+              tableId="traces-score-test"
+              ariaLabel="Traces"
+              columns={orderedTraceColumns([row], ["score:helpfulness"])}
+              rows={[row]}
+              getRowId={(item) => item.trace_id}
+              onActivate={() => undefined}
+              hasNextPage={false}
+              isFetchingNextPage={false}
+              fetchNextPage={() => undefined}
+              emptyState={null}
+            />
+          </TooltipProvider>
+        </ScoreDefinitionsProvider>
       </ProjectProvider>
     </QueryClientProvider>,
   );

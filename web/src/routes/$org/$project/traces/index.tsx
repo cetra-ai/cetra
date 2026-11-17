@@ -8,6 +8,7 @@ import type { Schema } from "@/api/types";
 import { useShortcut } from "@/components/command/use-shortcut";
 import { ColumnChooser } from "@/components/data-table/column-chooser";
 import {
+  lockedColumnIds,
   readColumnChoice,
   sameColumnIds,
   visibleColumnIds,
@@ -150,6 +151,7 @@ function TracesPage() {
   }, [list.fetchNextPage]);
   const rows = useMemo(() => list.data?.pages.flatMap((page) => page.data) ?? [], [list.data]);
   const specs = useMemo(() => traceColumnSpecs(scoreNames(rows)), [rows]);
+  const lockedIds = useMemo(() => lockedColumnIds(specs), [specs]);
   const defaults = useMemo(() => visibleColumnIds(specs, undefined), [specs]);
   const visible = useMemo(() => {
     const fromUrl = search.cols?.split(",");
@@ -443,6 +445,8 @@ function TracesPage() {
                       tableId="traces"
                       ariaLabel="Traces"
                       rowTone={traceRowTone}
+                      onReorder={onColumns}
+                      lockedColumnIds={lockedIds}
                       columns={tableColumns}
                       rows={rows}
                       getRowId={(row) => row.trace_id}

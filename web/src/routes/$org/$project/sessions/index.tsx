@@ -7,6 +7,7 @@ import { sessionListOptions } from "@/api/queries";
 import type { Schema } from "@/api/types";
 import { ColumnChooser } from "@/components/data-table/column-chooser";
 import {
+  lockedColumnIds,
   readColumnChoice,
   sameColumnIds,
   visibleColumnIds,
@@ -105,6 +106,7 @@ function SessionsPage() {
   }, [list.fetchNextPage]);
   const rows = useMemo(() => list.data?.pages.flatMap((page) => page.data) ?? [], [list.data]);
   const specs = useMemo(() => sessionColumnSpecs(sessionScoreNames(rows)), [rows]);
+  const lockedIds = useMemo(() => lockedColumnIds(specs), [specs]);
   const defaults = useMemo(() => visibleColumnIds(specs, undefined), [specs]);
   const visible = useMemo(() => {
     const fromUrl = search.cols?.split(",");
@@ -188,6 +190,8 @@ function SessionsPage() {
           <DataTable
             tableId="sessions"
             ariaLabel="Sessions"
+            onReorder={onColumns}
+            lockedColumnIds={lockedIds}
             columns={tableColumns}
             rows={rows}
             getRowId={(row) => row.session_id}

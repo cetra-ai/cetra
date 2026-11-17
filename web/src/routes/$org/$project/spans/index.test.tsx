@@ -1,10 +1,63 @@
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { server } from "@/mocks/node";
 import { renderApp } from "@/test/render";
 
 const TRACE = "a1000000000000000000000000000006";
 const SPAN = "b100000000000061";
+
+function slotRect(left: number, width: number): DOMRect {
+  return {
+    x: left,
+    y: 0,
+    left,
+    right: left + width,
+    top: 0,
+    bottom: 28,
+    width,
+    height: 28,
+    toJSON: () => ({}),
+  };
+}
+
+// Each header is 100 px wide, so the drop index follows the column order.
+function stubHeaderSlots(grid: HTMLElement) {
+  within(grid)
+    .getAllByRole("columnheader")
+    .forEach((header, index) => {
+      header.getBoundingClientRect = () => slotRect(index * 100, 100);
+    });
+  const scroller = grid.querySelector<HTMLElement>("[data-scroll-container]");
+  if (scroller) {
+    scroller.getBoundingClientRect = () => slotRect(0, 1000);
+  }
+}
+
+it("saves a column dragged to a new place as cols", async () => {
+  const { router } = await renderApp("/acme/support-bot/spans");
+  const grid = await screen.findByRole("grid", { name: "Spans" });
+  stubHeaderSlots(grid);
+  vi.useFakeTimers();
+  try {
+    // Kind is the second unlocked column; drop it on the Start slot.
+    fireEvent.pointerDown(screen.getByRole("columnheader", { name: "Kind" }), {
+      button: 0,
+      clientX: 350,
+      clientY: 10,
+    });
+    fireEvent.pointerMove(window, { clientX: 120, clientY: 10 });
+    fireEvent.pointerUp(window, { clientX: 120, clientY: 10 });
+  } finally {
+    vi.useRealTimers();
+  }
+  await waitFor(() => {
+    expect(
+      String(router.state.location.search.cols ?? "")
+        .split(",")
+        .slice(0, 4),
+    ).toEqual(["status", "kind", "start", "name"]);
+  });
+});
 
 it("renders the fixture spans in the default columns", async () => {
   await renderApp("/acme/support-bot/spans");

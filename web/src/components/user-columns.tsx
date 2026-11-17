@@ -14,9 +14,9 @@ import {
 import type { Schema } from "@/api/types";
 import type { ColumnSpec } from "@/components/data-table/column-layout";
 import type { DataTableColumn } from "@/components/data-table/data-table";
+import { LazyTooltip } from "@/components/lazy-tooltip";
 import { ScoreAverageBadge } from "@/components/score-badge";
 import { TimeText } from "@/components/time-text";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { BarCell } from "@/components/user/bar-cell";
 import { Sparkline } from "@/components/user/sparkline";
 import { formatCost, formatTokens } from "@/lib/format";
@@ -257,18 +257,15 @@ function ScoreCell({ user, name }: { user: Schema<"EndUserSummary">; name: strin
   }
   const text = scoreText(score);
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <ScoreAverageBadge
-          name={name}
-          avg={score.avg}
-          dataType={score.data_type}
-          text={text}
-          className="num"
-        />
-      </TooltipTrigger>
-      <TooltipContent>{`${score.count} scores`}</TooltipContent>
-    </Tooltip>
+    <LazyTooltip content={`${score.count} scores`}>
+      <ScoreAverageBadge
+        name={name}
+        avg={score.avg}
+        dataType={score.data_type}
+        text={text}
+        className="num"
+      />
+    </LazyTooltip>
   );
 }
 

@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { cn } from "cn";
-import type { ComponentProps } from "react";
+import { type ComponentProps, createContext, type ReactNode, useContext, useMemo } from "react";
 import { liveScoreDefinitionsQuery } from "@/api/queries-evaluation";
 import type { Schema } from "@/api/types";
 import { useProject } from "@/components/shell/project-context";
@@ -12,13 +12,41 @@ const TONE_CLASSES: Record<ScoreTone, string> = {
   bad: "tone-bad",
 };
 
-/** The live definition of `name` in the current project, if it has loaded. */
-function useDefinition(name: string): Schema<"ScoreDefinition"> | undefined {
+type Definitions = ReadonlyMap<string, Schema<"ScoreDefinition">>;
+
+const ScoreDefinitionsContext = createContext<Definitions | null>(null);
+
+/**
+ * Loads the live score definitions of the current project once and provides them by name to
+ * every score badge below it. While loading, or when loading failed, the map is empty.
+ */
+export function ScoreDefinitionsProvider({ children }: { children: ReactNode }) {
   const { org, project } = useProject();
   const definitions = useQuery(liveScoreDefinitionsQuery(org, project));
-  return definitions.data?.data.find((definition) => definition.name === name);
+  const byName = useMemo<Definitions>(() => {
+    const map = new Map<string, Schema<"ScoreDefinition">>();
+    if (definitions.isSuccess) {
+      for (const definition of definitions.data.data) {
+        if (!map.has(definition.name)) {
+          map.set(definition.name, definition);
+        }
+      }
+    }
+    return map;
+  }, [definitions.isSuccess, definitions.data]);
+  return (
+    <ScoreDefinitionsContext.Provider value={byName}>{children}</ScoreDefinitionsContext.Provider>
+  );
 }
 
+/** The live definition of `name` in the current project, if it has loaded. */
+function useDefinition(name: string): Schema<"ScoreDefinition"> | undefined {
+  const definitions = useContext(ScoreDefinitionsContext);
+  if (!definitions) {
+    throw new Error("Score badges must be used within a ScoreDefinitionsProvider");
+  }
+  return definitions.get(name);
+}
 /** The text in a pill of its tone, or plain when the score is neutral or not loaded yet. */
 function Toned({
   g,

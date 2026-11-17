@@ -8,6 +8,7 @@ import type { Schema } from "@/api/types";
 import { useShortcut } from "@/components/command/use-shortcut";
 import { ColumnChooser } from "@/components/data-table/column-chooser";
 import {
+  lockedColumnIds,
   readColumnChoice,
   sameColumnIds,
   visibleColumnIds,
@@ -132,6 +133,7 @@ function UsersPage() {
   }, [list.fetchNextPage]);
   const rows = useMemo(() => list.data?.pages.flatMap((page) => page.data) ?? [], [list.data]);
   const specs = useMemo(() => userColumnSpecs(userScoreNames(rows)), [rows]);
+  const lockedIds = useMemo(() => lockedColumnIds(specs), [specs]);
   const defaults = useMemo(() => visibleColumnIds(specs, undefined), [specs]);
   const visible = useMemo(() => {
     const fromUrl = search.cols?.split(",");
@@ -291,6 +293,8 @@ function UsersPage() {
                     <DataTable
                       tableId="users"
                       ariaLabel="Users"
+                      onReorder={onColumns}
+                      lockedColumnIds={lockedIds}
                       columns={tableColumns}
                       rows={rows}
                       getRowId={(row) => row.user_id}

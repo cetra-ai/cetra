@@ -21,11 +21,11 @@ import type { Schema } from "@/api/types";
 import type { ColumnSpec } from "@/components/data-table/column-layout";
 import type { DataTableColumn } from "@/components/data-table/data-table";
 import { stringContains, stringEquals } from "@/components/filter-bar/logic";
+import { LazyTooltip } from "@/components/lazy-tooltip";
 import { ScoreBadge } from "@/components/score-badge";
 import { StatusDot } from "@/components/status-dot";
 import { TimeText } from "@/components/time-text";
 import { Badge } from "@/components/ui/badge";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { categoryClasses, environmentClasses, providerClasses } from "@/lib/colors";
 import { formatCost, formatDuration, formatTokens } from "@/lib/format";
 import { TRACE_COLUMN_IDS, type TraceColumnId } from "@/lib/search/traces";
@@ -349,17 +349,14 @@ function ScoreCell({ trace, name }: { trace: Schema<"TraceSummary">; name: strin
   }
   const numeric = score.value.data_type === "numeric" || score.value.data_type === "boolean";
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <ScoreBadge
-          name={name}
-          value={score.value}
-          text={formatScore(score.value)}
-          className={numeric ? "num" : "block truncate"}
-        />
-      </TooltipTrigger>
-      <TooltipContent>{SOURCE_LABEL[score.source]}</TooltipContent>
-    </Tooltip>
+    <LazyTooltip content={SOURCE_LABEL[score.source]}>
+      <ScoreBadge
+        name={name}
+        value={score.value}
+        text={formatScore(score.value)}
+        className={numeric ? "num" : "block truncate"}
+      />
+    </LazyTooltip>
   );
 }
 
@@ -368,33 +365,31 @@ function Preview({ text, failed = false }: { text?: string; failed?: boolean }) 
     return <span className="text-muted-foreground">—</span>;
   }
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span
-          className={cn("block truncate", failed ? "text-status-error" : "text-muted-foreground")}
-        >
-          {text}
-        </span>
-      </TooltipTrigger>
-      <TooltipContent>{text}</TooltipContent>
-    </Tooltip>
+    <LazyTooltip content={text}>
+      <span
+        className={cn("block truncate", failed ? "text-status-error" : "text-muted-foreground")}
+      >
+        {text}
+      </span>
+    </LazyTooltip>
   );
 }
 
 function TokenCount({ trace }: { trace: Schema<"TraceSummary"> }) {
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span className="num">{formatTokens(trace.total_tokens)}</span>
-      </TooltipTrigger>
-      <TooltipContent className="flex-col items-start">
-        <span>Input {formatTokens(trace.input_tokens)}</span>
-        <span>Output {formatTokens(trace.output_tokens)}</span>
-        <span>Cache read {formatTokens(trace.cache_read_tokens)}</span>
-        <span>Cache write {formatTokens(trace.cache_write_tokens)}</span>
-        <span>Reasoning {formatTokens(trace.reasoning_tokens)}</span>
-      </TooltipContent>
-    </Tooltip>
+    <LazyTooltip
+      content={
+        <span className="flex flex-col items-start">
+          <span>Input {formatTokens(trace.input_tokens)}</span>
+          <span>Output {formatTokens(trace.output_tokens)}</span>
+          <span>Cache read {formatTokens(trace.cache_read_tokens)}</span>
+          <span>Cache write {formatTokens(trace.cache_write_tokens)}</span>
+          <span>Reasoning {formatTokens(trace.reasoning_tokens)}</span>
+        </span>
+      }
+    >
+      <span className="num">{formatTokens(trace.total_tokens)}</span>
+    </LazyTooltip>
   );
 }
 

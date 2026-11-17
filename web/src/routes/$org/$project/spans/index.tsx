@@ -8,6 +8,7 @@ import type { Schema } from "@/api/types";
 import { useShortcut } from "@/components/command/use-shortcut";
 import { ColumnChooser } from "@/components/data-table/column-chooser";
 import {
+  lockedColumnIds,
   readColumnChoice,
   sameColumnIds,
   visibleColumnIds,
@@ -109,6 +110,7 @@ function SpansPage() {
   }, [list.fetchNextPage]);
   const rows = useMemo(() => list.data?.pages.flatMap((page) => page.data) ?? [], [list.data]);
   const specs = useMemo(() => spanColumnSpecs(), []);
+  const lockedIds = useMemo(() => lockedColumnIds(specs), [specs]);
   const defaults = useMemo(() => visibleColumnIds(specs, undefined), [specs]);
   const visible = useMemo(() => {
     const fromUrl = search.cols?.split(",");
@@ -291,6 +293,8 @@ function SpansPage() {
                     getRowId={(row) => `${row.trace_id}:${row.span_id}`}
                     selectedRowId={selectedRowId}
                     rowTone={spanRowTone}
+                    onReorder={onColumns}
+                    lockedColumnIds={lockedIds}
                     onActivate={(row) => {
                       void navigate({
                         to: "/$org/$project/spans",

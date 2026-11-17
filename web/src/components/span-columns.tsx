@@ -16,10 +16,10 @@ import type { Schema } from "@/api/types";
 import type { ColumnSpec } from "@/components/data-table/column-layout";
 import type { DataTableColumn } from "@/components/data-table/data-table";
 import { KindIcon } from "@/components/kind-icon";
+import { LazyTooltip } from "@/components/lazy-tooltip";
 import { StatusDot } from "@/components/status-dot";
 import { TimeText } from "@/components/time-text";
 import { Badge } from "@/components/ui/badge";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { categoryClasses, environmentClasses, providerClasses } from "@/lib/colors";
 import { formatCost, formatDuration, formatTokens } from "@/lib/format";
 import { SPAN_COLUMN_IDS, type SpanColumnId } from "@/lib/search/spans";
@@ -301,29 +301,27 @@ function Preview({ text }: { text?: string }) {
     return <span className="text-muted-foreground">—</span>;
   }
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span className="block truncate text-muted-foreground">{text}</span>
-      </TooltipTrigger>
-      <TooltipContent>{text}</TooltipContent>
-    </Tooltip>
+    <LazyTooltip content={text}>
+      <span className="block truncate text-muted-foreground">{text}</span>
+    </LazyTooltip>
   );
 }
 
 function TokenCount({ span }: { span: Schema<"SpanSummary"> }) {
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span className="num">{formatTokens(span.total_tokens)}</span>
-      </TooltipTrigger>
-      <TooltipContent className="flex-col items-start">
-        <span>Input {formatTokens(span.input_tokens)}</span>
-        <span>Output {formatTokens(span.output_tokens)}</span>
-        <span>Cache read {formatTokens(span.cache_read_tokens)}</span>
-        <span>Cache write {formatTokens(span.cache_write_tokens)}</span>
-        <span>Reasoning {formatTokens(span.reasoning_tokens)}</span>
-      </TooltipContent>
-    </Tooltip>
+    <LazyTooltip
+      content={
+        <span className="flex flex-col items-start">
+          <span>Input {formatTokens(span.input_tokens)}</span>
+          <span>Output {formatTokens(span.output_tokens)}</span>
+          <span>Cache read {formatTokens(span.cache_read_tokens)}</span>
+          <span>Cache write {formatTokens(span.cache_write_tokens)}</span>
+          <span>Reasoning {formatTokens(span.reasoning_tokens)}</span>
+        </span>
+      }
+    >
+      <span className="num">{formatTokens(span.total_tokens)}</span>
+    </LazyTooltip>
   );
 }
 

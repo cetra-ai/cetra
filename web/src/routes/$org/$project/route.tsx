@@ -6,6 +6,7 @@ import { problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
 import { projectInit, projectQuery, traceDetailQuery } from "@/api/queries";
 import { openTraceId, rememberTrace } from "@/components/command/recent-traces";
+import { ScoreDefinitionsProvider } from "@/components/score-badge";
 import { isProjectSettingsPath } from "@/components/settings/settings-nav";
 import { SettingsSidebar } from "@/components/settings/settings-sidebar";
 import { ProjectProvider, useProject } from "@/components/shell/project-context";
@@ -58,16 +59,18 @@ function ProjectLayout() {
 
   return (
     <ProjectProvider value={{ org, project, ref: projectRef(org, project), data }}>
-      <RememberOpenTrace />
-      {inSettings ? (
-        <SettingsSidebar org={org} project={{ slug: project, role: data.role }}>
-          <Outlet />
-        </SettingsSidebar>
-      ) : (
-        <ProjectSidebar>
-          <Outlet />
-        </ProjectSidebar>
-      )}
+      <ScoreDefinitionsProvider>
+        <RememberOpenTrace />
+        {inSettings ? (
+          <SettingsSidebar org={org} project={{ slug: project, role: data.role }}>
+            <Outlet />
+          </SettingsSidebar>
+        ) : (
+          <ProjectSidebar>
+            <Outlet />
+          </ProjectSidebar>
+        )}
+      </ScoreDefinitionsProvider>
     </ProjectProvider>
   );
 }

@@ -14,11 +14,11 @@ import {
 import type { Schema } from "@/api/types";
 import type { ColumnSpec } from "@/components/data-table/column-layout";
 import type { DataTableColumn } from "@/components/data-table/data-table";
+import { LazyTooltip } from "@/components/lazy-tooltip";
 import { ScoreBadge } from "@/components/score-badge";
 import { TimeText } from "@/components/time-text";
 import { formatScore } from "@/components/trace-columns";
 import { Badge } from "@/components/ui/badge";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { formatCost, formatDuration, formatTokens } from "@/lib/format";
 import { SESSION_COLUMN_IDS, type SessionColumnId } from "@/lib/search/sessions";
 
@@ -201,17 +201,14 @@ function ScoreCell({ session, name }: { session: Schema<"SessionSummary">; name:
   }
   const numeric = score.value.data_type === "numeric" || score.value.data_type === "boolean";
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <ScoreBadge
-          name={name}
-          value={score.value}
-          text={formatScore(score.value)}
-          className={numeric ? "num" : "block truncate"}
-        />
-      </TooltipTrigger>
-      <TooltipContent>{SOURCE_LABEL[score.source]}</TooltipContent>
-    </Tooltip>
+    <LazyTooltip content={SOURCE_LABEL[score.source]}>
+      <ScoreBadge
+        name={name}
+        value={score.value}
+        text={formatScore(score.value)}
+        className={numeric ? "num" : "block truncate"}
+      />
+    </LazyTooltip>
   );
 }
 

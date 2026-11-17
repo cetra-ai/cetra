@@ -3,6 +3,7 @@ import { render, screen, within } from "@testing-library/react";
 import { expect, it } from "vitest";
 import type { Schema } from "@/api/types";
 import { DataTable } from "@/components/data-table/data-table";
+import { ScoreDefinitionsProvider } from "@/components/score-badge";
 import { ProjectProvider } from "@/components/shell/project-context";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { orderedUserColumns, userColumnSpecs, userScoreNames } from "@/components/user-columns";
@@ -44,20 +45,22 @@ function renderColumns(rows: Schema<"EndUserSummary">[], visible: string[]) {
           data: projectFixture as Schema<"Project">,
         }}
       >
-        <TooltipProvider>
-          <DataTable
-            tableId="users-test"
-            ariaLabel="Users"
-            columns={orderedUserColumns(rows, visible)}
-            rows={rows}
-            getRowId={(row) => row.user_id}
-            onActivate={() => undefined}
-            hasNextPage={false}
-            isFetchingNextPage={false}
-            fetchNextPage={() => undefined}
-            emptyState={null}
-          />
-        </TooltipProvider>
+        <ScoreDefinitionsProvider>
+          <TooltipProvider>
+            <DataTable
+              tableId="users-test"
+              ariaLabel="Users"
+              columns={orderedUserColumns(rows, visible)}
+              rows={rows}
+              getRowId={(row) => row.user_id}
+              onActivate={() => undefined}
+              hasNextPage={false}
+              isFetchingNextPage={false}
+              fetchNextPage={() => undefined}
+              emptyState={null}
+            />
+          </TooltipProvider>
+        </ScoreDefinitionsProvider>
       </ProjectProvider>
     </QueryClientProvider>,
   );
