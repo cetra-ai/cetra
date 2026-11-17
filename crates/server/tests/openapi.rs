@@ -365,6 +365,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/projects/{project}/alert-rules/{id}/events",
         "list_alert_events",
     ),
+    (
+        "get",
+        "/api/v1/projects/{project}/alert-events",
+        "list_project_alert_events",
+    ),
     ("get", "/api/v1/projects/{project}/metrics", "get_metrics"),
     (
         "get",
@@ -661,6 +666,7 @@ const QUERY_OR_BODY: &[&str] = &[
     "post_internal_membership_lookup",
     "list_internal_org_members",
     "list_alert_events",
+    "list_project_alert_events",
     "list_org_members",
     "list_org_invites",
     "list_llm_connections",

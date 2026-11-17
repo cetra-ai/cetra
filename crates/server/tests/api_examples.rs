@@ -630,6 +630,7 @@ fn generated_files_roundtrip() {
             | "list_alert_rules"
             | "get_alert_rule"
             | "list_alert_events"
+            | "list_project_alert_events"
             | "post_setup"
             | "post_login"
             | "post_signup"

@@ -629,6 +629,13 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
             "static/alert-events.json",
             "application/json",
         ),
+        example(
+            "list_project_alert_events",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "static/project-alert-events.json",
+            "application/json",
+        ),
         example_status("post_api_key", "static/api-key-created.json", 201),
         example(
             "list_org_model_prices",

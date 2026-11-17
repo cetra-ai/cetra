@@ -11,6 +11,15 @@ export function channelKindLabel(kind: Schema<"ChannelKind">): string {
   return KIND_LABELS[kind];
 }
 
+/** The buckets of the alert list, in display order. */
+export const ALERT_BUCKETS = ["firing", "no_data", "ok", "disabled"] as const;
+export type AlertBucket = (typeof ALERT_BUCKETS)[number];
+
+/** The bucket a rule is listed under: a disabled rule is Disabled whatever its state. */
+export function alertBucket(rule: Pick<Schema<"AlertRule">, "enabled" | "state">): AlertBucket {
+  return rule.enabled ? rule.state : "disabled";
+}
+
 type Condition = Schema<"AlertCondition">;
 
 const COMPARATOR_SYMBOLS: Record<Schema<"Comparator">, string> = {

@@ -11,6 +11,7 @@ import {
   channelsQuery,
 } from "@/api/queries-alerts";
 import type { Schema } from "@/api/types";
+import { EventKindBadge } from "@/components/alerts/event-kind-badge";
 import { StateBadge } from "@/components/alerts/state-badge";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DisabledReason } from "@/components/disabled-reason";
@@ -263,7 +264,7 @@ function AlertRulePage() {
                         <TimeText value={event.created_at} style="datetime" />
                       </TableCell>
                       <TableCell>
-                        <EventBadge kind={event.kind} />
+                        <EventKindBadge kind={event.kind} />
                       </TableCell>
                       <TableCell className="tabular-nums">
                         {event.value === undefined ? (
@@ -379,19 +380,6 @@ function channelNames(ids: string[], loaded: Schema<"NotificationChannel">[] | u
   return ids
     .map((id) => loaded.find((channel) => channel.id === id)?.name ?? "Deleted channel")
     .join(", ");
-}
-
-function EventBadge({ kind }: { kind: Schema<"AlertEventKind"> }) {
-  switch (kind) {
-    case "fired":
-      return <Badge variant="destructive">Fired</Badge>;
-    case "resolved":
-      return <Badge variant="secondary">Resolved</Badge>;
-    case "no_data":
-      return <Badge variant="outline">No data</Badge>;
-    case "reminder":
-      return <Badge variant="outline">Reminder</Badge>;
-  }
 }
 
 function DeliveryBadge({ status }: { status: Schema<"DeliveryStatus"> }) {

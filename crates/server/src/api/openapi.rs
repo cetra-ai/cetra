@@ -3834,6 +3834,24 @@ fn alert_rule_paths(paths: PathsBuilder) -> PathsBuilder {
             QUERY_ERRORS,
         ))
         .build();
+    let project_events = operation(
+        "list_project_alert_events",
+        "alerts",
+        "List the project's alert events",
+    )
+    .description(Some(
+        "Events of every rule of the project, newest first, with their deliveries.",
+    ))
+    .parameters(Some(with_query::<PageParams>(vec![project_param()])))
+    .responses(responses(
+        "200",
+        json_named(
+            "AlertEventPage",
+            "Events of all the project's rules, newest first, with their deliveries.",
+        ),
+        QUERY_ERRORS,
+    ))
+    .build();
     paths
         .path(
             format!("{PROJECT}/alert-rules"),
@@ -3858,6 +3876,10 @@ fn alert_rule_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/alert-rules/{{id}}/events"),
             PathItem::new(HttpMethod::Get, events),
+        )
+        .path(
+            format!("{PROJECT}/alert-events"),
+            PathItem::new(HttpMethod::Get, project_events),
         )
 }
 

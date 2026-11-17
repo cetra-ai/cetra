@@ -28,3 +28,7 @@ export function alertRuleQuery(org: string, project: string, id: string) {
 export function alertEventsInit(org: string, project: string, id: string) {
   return { params: { path: { project: projectRef(org, project), id }, query: { limit: 50 } } };
 }
+
+export function projectAlertEventsInit(org: string, project: string) {
+  return { params: { path: { project: projectRef(org, project) }, query: { limit: 20 } } };
+}

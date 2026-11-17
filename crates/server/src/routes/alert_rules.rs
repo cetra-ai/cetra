@@ -10,6 +10,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use cetra_core::ids::OrgId;
 use serde::{Deserialize, Serialize};
+use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::alerts::condition::normalize_condition;
@@ -24,7 +25,7 @@ use crate::auth::roles::ProjectPerm;
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
-use crate::meta::alerts::{self, NewRule, RulePatch, RuleRow};
+use crate::meta::alerts::{self, EventRow, NewRule, RulePatch, RuleRow};
 use crate::routes::read::open_query;
 
 const MIN_COOLDOWN_S: i64 = 300;
@@ -93,6 +94,16 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             },
             documented: true,
             handler: get(list_events),
+        },
+        RouteDef {
+            method: Method::GET,
+            path: "/api/v1/projects/{project}/alert-events",
+            access: Access::Project {
+                perm: ProjectPerm::View,
+                session_only: false,
+            },
+            documented: true,
+            handler: get(list_project_events),
         },
     ]
 }
@@ -270,10 +281,48 @@ async fn list_events(
     {
         return Err(ApiError::NotFound);
     }
-    let before = params.cursor.as_deref().map(decode_cursor).transpose()?;
-    let limit = usize::try_from(params.limit.get()).unwrap_or(usize::MAX);
-    let fetch = i64::from(params.limit.get()) + 1;
-    let mut rows = alerts::list_events(reader, id, before, fetch).await?;
+    let query = EventsQuery::new(&params)?;
+    let rows = alerts::list_events(reader, id, query.before, query.fetch).await?;
+    event_page(reader, rows, query.limit).await
+}
+
+/// Events of every rule of the project, newest first, with their deliveries.
+async fn list_project_events(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Query(params): error::Query<PageParams>,
+) -> Result<error::Json<Page<AlertEvent>>, ApiError> {
+    let reader = state.meta.reader();
+    let query = EventsQuery::new(&params)?;
+    let rows =
+        alerts::list_project_events(reader, access.project.id, query.before, query.fetch).await?;
+    event_page(reader, rows, query.limit).await
+}
+
+/// The cursor and sizes of an events page. `fetch` is one more than `limit`, so a next page
+/// is known to exist when it comes back.
+struct EventsQuery {
+    before: Option<(i64, Uuid)>,
+    limit: usize,
+    fetch: i64,
+}
+
+impl EventsQuery {
+    fn new(params: &PageParams) -> Result<Self, ApiError> {
+        Ok(Self {
+            before: params.cursor.as_deref().map(decode_cursor).transpose()?,
+            limit: usize::try_from(params.limit.get()).unwrap_or(usize::MAX),
+            fetch: i64::from(params.limit.get()) + 1,
+        })
+    }
+}
+
+/// The page of `rows` (at most `limit` of them) with the deliveries of each event.
+async fn event_page(
+    reader: &SqlitePool,
+    mut rows: Vec<EventRow>,
+    limit: usize,
+) -> Result<error::Json<Page<AlertEvent>>, ApiError> {
     let more = rows.len() > limit;
     rows.truncate(limit);
     let next_cursor = match (more, rows.last()) {
@@ -1171,6 +1220,92 @@ mod tests {
         )
         .await;
         assert_eq!(foreign_events.status, 404);
+    }
+
+    #[tokio::test]
+    async fn project_events_interleave_rules_newest_first() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let first = create_ok(&app, &seeded, rule_body("First")).await;
+        let second = create_ok(&app, &seeded, rule_body("Second")).await;
+        let first_old = insert_event(&app, first.id, 10).await;
+        let second_old = insert_event(&app, second.id, 20).await;
+        let first_new = insert_event(&app, first.id, 30).await;
+        let second_new = insert_event(&app, second.id, 40).await;
+
+        let (other, _) = app.add_project(&seeded, "other", None).await;
+        let other_rules = format!("/api/v1/projects/{}/alert-rules", other.id);
+        let foreign = send(
+            &app,
+            Method::POST,
+            &other_rules,
+            &seeded.cookie,
+            Some(rule_body("Foreign")),
+        )
+        .await;
+        assert_eq!(foreign.status, 201);
+        let foreign: AlertRule = foreign.json();
+        insert_event(&app, foreign.id, 50).await;
+
+        let base = format!("/api/v1/projects/{}/alert-events", seeded.project.id);
+        let first_page = send(
+            &app,
+            Method::GET,
+            &format!("{base}?limit=3"),
+            &seeded.cookie,
+            None,
+        )
+        .await;
+        assert_eq!(first_page.status, 200);
+        let first_page: Page<AlertEvent> = first_page.json();
+        let ids: Vec<Uuid> = first_page.data.iter().map(|event| event.id).collect();
+        assert_eq!(ids, [second_new, first_new, second_old]);
+        let rule_ids: Vec<Uuid> = first_page.data.iter().map(|event| event.rule_id).collect();
+        assert_eq!(rule_ids, [second.id, first.id, second.id]);
+        let cursor = first_page.next_cursor.expect("a second page exists");
+
+        let second_page = send(
+            &app,
+            Method::GET,
+            &format!("{base}?limit=3&cursor={cursor}"),
+            &seeded.cookie,
+            None,
+        )
+        .await;
+        assert_eq!(second_page.status, 200);
+        let second_page: Page<AlertEvent> = second_page.json();
+        let ids: Vec<Uuid> = second_page.data.iter().map(|event| event.id).collect();
+        assert_eq!(ids, [first_old]);
+        assert!(second_page.next_cursor.is_none());
+
+        let garbage = send(
+            &app,
+            Method::GET,
+            &format!("{base}?cursor=garbage"),
+            &seeded.cookie,
+            None,
+        )
+        .await;
+        assert_eq!(garbage.status, 400);
+        assert_eq!(problem_of(&garbage), pairs(&[("cursor", "invalid cursor")]));
+    }
+
+    #[tokio::test]
+    async fn project_events_are_readable_by_viewers() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let rule = create_ok(&app, &seeded, rule_body("Readable")).await;
+        let event = insert_event(&app, rule.id, 10).await;
+        let viewer = app
+            .add_member(&seeded, "viewer@example.com", OrgRole::Viewer)
+            .await;
+        let base = format!("/api/v1/projects/{}/alert-events", seeded.project.id);
+
+        let response = send(&app, Method::GET, &base, &viewer.cookie, None).await;
+        assert_eq!(response.status, 200);
+        let page: Page<AlertEvent> = response.json();
+        let ids: Vec<Uuid> = page.data.iter().map(|event| event.id).collect();
+        assert_eq!(ids, [event]);
     }
 
     #[tokio::test]
