@@ -1,0 +1,20 @@
+---
+title: Context (TypeScript)
+description: Attach sessions, users, tags and metadata to every span and send them downstream as baggage.
+---
+
+Use `withContext` to group traces by session and user.
+
+## Context and baggage
+
+{/* example:with-context */}
+```ts
+const turn = observe(({ question }: { question: string }) => `answered: ${question}`, {
+  name: "turn",
+});
+withContext({ sessionId: "chat-42", userId: "u-17", tags: ["beta"] }, () =>
+  turn({ question: "why?" }),
+);
+```
+
+The values live in the OpenTelemetry context, so they follow `AsyncLocalStorage` into promises and concurrent flows; nested blocks merge (inner session and user win, tags union, metadata merges by key). They are stamped on every span of the SDK's provider: session and user ids, tags, metadata, `environment` and `release`. Metadata is recorded to be read back by the server: keep personal data out of it, or mask it (see [Masking](/docs/reference/typescript/opentelemetry/#masking-and-capturecontent)). `propagate: true` also sets the session and user ids as W3C baggage entries for downstream services.

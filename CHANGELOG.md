@@ -74,6 +74,8 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Changed
 
+- The SDK guides moved from the package READMEs to cetra.sh/docs/reference/python/ and
+  cetra.sh/docs/reference/typescript/; the READMEs keep install and the quick start.
 - The product is renamed from the working name `llmobs` to cetra (cetra.sh, D46): the binary and crates,
   the `CETRA_*` environment variables, the `cetra.*` span attributes, the `sk-cetra-`, `pk-cetra-` and
   `pat-cetra-` key prefixes, the `ghcr.io/cetra-ai/cetra` image, the `cetra` Helm chart, and the

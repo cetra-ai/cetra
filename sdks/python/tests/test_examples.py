@@ -114,7 +114,7 @@ def test_sdk_block(
         {"cetra": sdk, "__name__": f"example_{slug.replace('-', '_')}"},
     )
     assert exporter.get_finished_spans(), "the example exported no spans"
-    if slug == "readme-scores":
+    if slug == "scores-datasets-experiments-scores":
         # The score example must deliver through the recorder, never the network.
         assert any(
             method == "POST" and path == "/api/v1/scores"
@@ -145,9 +145,11 @@ def test_required_examples_are_marked() -> None:
     slugs = {slug for _, slug, _ in BLOCKS}
     assert {
         "readme-quick-start",
-        "readme-manual-spans-and-llm-span",
-        "readme-context-and-baggage",
-        "readme-scores",
+        "tracing-manual-spans-and-llm-span",
+        "tracing-manual-spans-and-llm-span-2",
+        "context-context-and-baggage",
+        "context-threads",
+        "scores-datasets-experiments-scores",
     } <= slugs
     if SITE.is_dir():
         assert {"quickstart-send-a-trace", "opentelemetry-python"} <= slugs

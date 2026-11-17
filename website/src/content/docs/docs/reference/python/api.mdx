@@ -1,0 +1,306 @@
+---
+title: API (Python)
+description: Every public name of the cetra Python SDK with its signature.
+---
+
+Use this page to look up the signature of every public name in `cetra.__all__`; each entry links to the guide section that explains it.
+
+### `ApiError`
+
+{/* untested: signature */}
+```python
+class ApiError(Exception):
+    status: int
+    code: str | None
+    detail: str | None
+    errors: Sequence[Mapping[str, object]]
+```
+
+Raised by `Client`, `evaluate` and `aevaluate` when the API answers with an error. `status`, `code` and `detail` come from the server's problem document, and `errors` holds the field errors of a refused dataset item. See [Errors](/docs/reference/python/scores-datasets-experiments/#errors).
+
+### `Client`
+
+{/* untested: signature */}
+```python
+class Client:
+    def __init__(self, *, api_key: str | None = None, base_url: str | None = None) -> None: ...
+    datasets: Datasets
+```
+
+The REST client for datasets and experiments. It reads the key and the base URL the way `init()` does and raises `ConfigError` without a key. See [Datasets and experiments](/docs/reference/python/scores-datasets-experiments/#datasets-and-experiments).
+
+### `ConfigError`
+
+{/* untested: signature */}
+```python
+class ConfigError(ValueError): ...
+```
+
+Raised for a missing or invalid configuration value. The message names the option or environment variable, never its value. See [Configuration](/docs/reference/python/#configuration).
+
+### `Dataset`
+
+{/* untested: signature */}
+```python
+class Dataset:
+    id: str
+    name: str
+    description: str | None
+    version: int
+    items: tuple[DatasetItem, ...]
+
+    def add_items(self, items: Iterable[Mapping[str, Any]]) -> Dataset: ...
+```
+
+A dataset at one version, with its items. `add_items` sends the items in batches of 1,000 and returns the dataset at its latest version. See [Datasets](/docs/reference/python/scores-datasets-experiments/#datasets).
+
+### `DatasetInfo`
+
+{/* untested: signature */}
+```python
+class DatasetInfo:
+    id: str
+    name: str
+    description: str | None
+    current_version: int
+    item_count: int
+```
+
+One entry of `client.datasets.list()`: a dataset without its items. See [Datasets](/docs/reference/python/scores-datasets-experiments/#datasets).
+
+### `DatasetItem`
+
+{/* untested: signature */}
+```python
+class DatasetItem:
+    id: str
+    input: Any
+    expected_output: Any
+    metadata: Mapping[str, Any]
+    version: int
+    source_trace_id: str | None
+    source_span_id: str | None
+```
+
+One item of a dataset version, as the server returns it. See [Datasets](/docs/reference/python/scores-datasets-experiments/#datasets).
+
+### `ExperimentResult`
+
+{/* untested: signature */}
+```python
+class ExperimentResult:
+    experiment_id: str
+    experiment_name: str
+    dataset_id: str
+    dataset_version: int
+    runs: tuple[Run, ...]
+    scorer_errors: Mapping[str, int]
+    error_count: int  # property
+
+    def summary(self) -> str: ...
+    def assert_min(self, name: str, threshold: float) -> None: ...
+```
+
+What `evaluate` returns: one `Run` per item and repetition, in item order. `summary()` prints the means and counts; `assert_min` raises `AssertionError` when a scorer's mean is below the threshold, which gates CI. See [Experiments](/docs/reference/python/scores-datasets-experiments/#experiments).
+
+### `LlmSpan`
+
+{/* untested: signature */}
+```python
+class LlmSpan(Span):
+    def set_input_messages(self, messages: Sequence[object]) -> None: ...
+    def set_output_messages(self, messages: Sequence[object]) -> None: ...
+    def set_response_model(self, model: str) -> None: ...
+    def set_usage(self, *, input_tokens: int | None = None, output_tokens: int | None = None, cache_read_tokens: int | None = None, cache_write_tokens: int | None = None, reasoning_tokens: int | None = None) -> None: ...
+    def set_cost(self, total_usd: float) -> None: ...
+    def record_first_token(self) -> None: ...
+```
+
+The handle `llm_span` yields. It writes the GenAI attributes of a chat call. See [Manual spans and llm_span](/docs/reference/python/tracing/#manual-spans-and-llm_span).
+
+### `Run`
+
+{/* untested: signature */}
+```python
+class Run:
+    dataset_item_id: str
+    repetition: int
+    input: Any
+    expected_output: Any
+    output: Any
+    error: str | None
+    trace_id: str | None
+    latency_ns: int
+    scores: Mapping[str, Score]
+```
+
+The outcome of the task on one item and one repetition, with the scores it received. See [Experiments](/docs/reference/python/scores-datasets-experiments/#experiments).
+
+### `Score`
+
+{/* untested: signature */}
+```python
+class Score:
+    def __init__(self, *, value: bool | int | float | str, reason: str | None = None, data_type: Literal["numeric", "boolean", "categorical", "text"] | None = None, metadata: Mapping[str, object] | None = None) -> None: ...
+```
+
+What a scorer returns when it has a reason or metadata to add to the value. See [Experiments](/docs/reference/python/scores-datasets-experiments/#experiments).
+
+### `Span`
+
+{/* untested: signature */}
+```python
+class Span:
+    trace_id: str | None  # property
+    span_id: str | None  # property
+
+    def set_input(self, value: object) -> None: ...
+    def set_output(self, value: object) -> None: ...
+    def set_metadata(self, **values: object) -> None: ...
+```
+
+The handle `span` yields. Every method is a no-op after the span ended and never raises. See [Manual spans and llm_span](/docs/reference/python/tracing/#manual-spans-and-llm_span).
+
+### `__version__`
+
+{/* untested: signature */}
+```python
+__version__: str
+```
+
+The installed version of the SDK. See [Install](/docs/reference/python/#install).
+
+### `aevaluate`
+
+{/* untested: signature */}
+```python
+async def aevaluate(*, dataset: str | Dataset, task: Callable[..., Any], scorers: Sequence[Callable[..., Any]] = (), experiment_name: str | None = None, description: str | None = None, metadata: Mapping[str, object] | None = None, dataset_version: int | None = None, concurrency: int = 8, repetitions: int = 1, client: Client | None = None) -> ExperimentResult: ...
+```
+
+The async form of `evaluate`, for async tasks. See [Experiments](/docs/reference/python/scores-datasets-experiments/#experiments).
+
+### `context`
+
+{/* untested: signature */}
+```python
+def context(*, session_id: str | None = None, user_id: str | None = None, tags: Sequence[str] | None = None, metadata: Mapping[str, object] | None = None, propagate: bool = False) -> ContextManager: ...
+```
+
+A sync and async context manager that stamps the session, user, tags and metadata on every span started inside it. `propagate=True` also writes the ids to W3C baggage. See [Context and baggage](/docs/reference/python/context/#context-and-baggage).
+
+### `current_span_id`
+
+{/* untested: signature */}
+```python
+def current_span_id() -> str | None: ...
+```
+
+The id of the running span as 16 lowercase hex characters, or `None` outside a span. See [Scores](/docs/reference/python/scores-datasets-experiments/#scores).
+
+### `current_trace_id`
+
+{/* untested: signature */}
+```python
+def current_trace_id() -> str | None: ...
+```
+
+The id of the running trace as 32 lowercase hex characters, or `None` outside a span. See [Scores](/docs/reference/python/scores-datasets-experiments/#scores).
+
+### `evaluate`
+
+{/* untested: signature */}
+```python
+def evaluate(*, dataset: str | Dataset, task: Callable[..., Any], scorers: Sequence[Callable[..., Any]] = (), experiment_name: str | None = None, description: str | None = None, metadata: Mapping[str, object] | None = None, dataset_version: int | None = None, concurrency: int = 8, repetitions: int = 1, client: Client | None = None) -> ExperimentResult: ...
+```
+
+Runs your task on every item of a dataset version, scores each run and stores the results on the server. It needs `init()` first. See [Experiments](/docs/reference/python/scores-datasets-experiments/#experiments).
+
+### `flush`
+
+{/* untested: signature */}
+```python
+def flush() -> None: ...
+```
+
+Blocks until the pending spans and scores are exported. Call it at the end of every serverless invocation. See [Serverless](/docs/reference/python/opentelemetry/#serverless).
+
+### `init`
+
+{/* untested: signature */}
+```python
+def init(*, api_key: str | None = None, base_url: str | None = None, environment: str | None = None, release: str | None = None, capture_content: bool | None = None, sample_rate: float | None = None, instrument: Sequence[str] | None = None, mask: Callable[[Any], Any] | None = None, use_global_provider: bool | None = None, export_filter: Callable[[ReadableSpan], bool] | None = None, enabled: bool | None = None) -> None: ...
+```
+
+Starts the SDK. It is called once per process; later calls are ignored. See [Configuration](/docs/reference/python/#configuration).
+
+### `llm_span`
+
+{/* untested: signature */}
+```python
+def llm_span(name: str, *, provider: str, model: str, input_messages: Sequence[object] | None = None, system_instructions: str | Sequence[object] | None = None, params: Mapping[str, object] | None = None, metadata: Mapping[str, object] | None = None) -> ContextManager[LlmSpan]: ...
+```
+
+A sync and async context manager that writes the GenAI attributes of a chat call, for providers without an instrumentor. See [Manual spans and llm_span](/docs/reference/python/tracing/#manual-spans-and-llm_span).
+
+### `observe`
+
+{/* untested: signature */}
+```python
+def observe(func=None, /, *, name: str | None = None, kind: str = "chain", capture_input: bool = True, capture_output: bool = True, reduce_output: Callable[[list[object]], object] | None = None): ...
+```
+
+Traces a function, coroutine function, generator function or async generator function as one span. It works with and without arguments. See [Decorator rules](/docs/reference/python/tracing/#decorator-rules).
+
+### `score`
+
+{/* untested: signature */}
+```python
+def score(*, name: str, value: bool | int | float | str, trace_id: str | None = None, span_id: str | None = None, session_id: str | None = None, reason: str | None = None, data_type: Literal["numeric", "boolean", "categorical", "text"] | None = None, metadata: Mapping[str, object] | None = None, user_id: str | None = None, score_id: str | None = None) -> str | None: ...
+```
+
+Attaches a score to a trace, a span or a session. It returns the score id, or `None` when nothing was queued. See [Scores](/docs/reference/python/scores-datasets-experiments/#scores).
+
+### `shutdown`
+
+{/* untested: signature */}
+```python
+def shutdown() -> None: ...
+```
+
+Flushes, then stops the SDK and uninstruments what it enabled. `init()` registers it with `atexit`. See [Initialize](/docs/reference/python/#initialize).
+
+### `span`
+
+{/* untested: signature */}
+```python
+def span(name: str, *, kind: str = "chain", input: object = ..., metadata: Mapping[str, object] | None = None) -> ContextManager[Span]: ...
+```
+
+A sync and async context manager that runs its body inside one span. The handle's setters record the input, the output and the metadata. See [Manual spans and llm_span](/docs/reference/python/tracing/#manual-spans-and-llm_span).
+
+### `span_processor`
+
+{/* untested: signature */}
+```python
+def span_processor() -> SpanProcessor | None: ...
+```
+
+Returns the span processor of the SDK, for apps that build their own OpenTelemetry pipeline. See [Existing OpenTelemetry setups](/docs/reference/python/opentelemetry/#existing-opentelemetry-setups).
+
+### `tracer_provider`
+
+{/* untested: signature */}
+```python
+def tracer_provider() -> TracerProvider: ...
+```
+
+Returns the tracer provider in use: a no-op provider before `init()`, when disabled or after `shutdown()`. See [Existing OpenTelemetry setups](/docs/reference/python/opentelemetry/#existing-opentelemetry-setups).
+
+### `uuid7`
+
+{/* untested: signature */}
+```python
+def uuid7() -> str: ...
+```
+
+Returns a new UUIDv7, the kind of id `score()` mints. Use it when you need your own idempotent score ids. See [Scores](/docs/reference/python/scores-datasets-experiments/#scores).
