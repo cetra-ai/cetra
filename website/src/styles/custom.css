@@ -4,6 +4,13 @@
   --sl-color-accent: #0f766e;
   --sl-color-accent-high: #ccfbf1;
 }
+/* Starlight's 45rem text column leaves half of a wide screen's spare width to "On this page"
+   and clips the reference tables; 60rem fits a four-column table. */
+@media (min-width: 72rem) {
+  :root {
+    --sl-content-width: 60rem;
+  }
+}
 :root[data-theme="light"] {
   --sl-color-accent-low: #ccfbf1;
   --sl-color-accent: #0f766e;
