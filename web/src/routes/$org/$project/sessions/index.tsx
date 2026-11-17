@@ -1,5 +1,5 @@
 import { useInfiniteQuery } from "@tanstack/react-query";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useLocation } from "@tanstack/react-router";
 import { MessagesSquare } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { problemOf } from "@/api/problem";
@@ -20,6 +20,8 @@ import { filterMessage } from "@/components/filter-bar/logic";
 import { ListToolbar } from "@/components/list-toolbar";
 import { useDefaultSavedView } from "@/components/saved-views/default-view";
 import { SavedViewsMenu } from "@/components/saved-views/saved-views-menu";
+import { SessionsStartedChart } from "@/components/session/sessions-started-chart";
+import { SessionsSummary } from "@/components/session/sessions-summary";
 import {
   orderedSessionColumns,
   sessionColumnSpecs,
@@ -27,6 +29,13 @@ import {
 } from "@/components/session-columns";
 import { useProject } from "@/components/shell/project-context";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import {
+  anchorOf,
+  listReturnFor,
+  type RowAnchor,
+  rememberListReturn,
+  useRestoredHighlight,
+} from "@/lib/list-return";
 import { parseSessionsSearch, type SessionsSearch } from "@/lib/search/sessions";
 import { type RangeState, rangeFromSearch, resolveRange } from "@/lib/time-range";
 
@@ -77,6 +86,13 @@ function SessionsPage() {
     [navigate, org, project],
   );
   const { hold } = useDefaultSavedView("sessions", search, applyDefault);
+  const listRestore = useLocation().state.listRestore;
+  const restoreAnchor = useMemo(() => anchorOf(listRestore), [listRestore]);
+  const restoredHighlight = useRestoredHighlight(listRestore?.openedId);
+  const lastAnchor = useRef<RowAnchor | undefined>(undefined);
+  const onScrollAnchor = useCallback((anchor: RowAnchor) => {
+    lastAnchor.current = anchor;
+  }, []);
   const range = rangeFromSearch(search);
   const rangeKey = range.kind === "preset" ? range.preset : `${range.from}\n${range.to}`;
   const [anchor, setAnchor] = useState(() => Date.now());
@@ -187,38 +203,54 @@ function SessionsPage() {
             <p className="text-sm text-destructive">{filterMessage(filterError)}</p>
           </div>
         ) : !hold && list.data ? (
-          <DataTable
-            tableId="sessions"
-            ariaLabel="Sessions"
-            onReorder={onColumns}
-            lockedColumnIds={lockedIds}
-            columns={tableColumns}
-            rows={rows}
-            getRowId={(row) => row.session_id}
-            onActivate={(row) => {
-              void navigate({
-                to: "/$org/$project/sessions/$sessionId",
-                params: { org, project, sessionId: row.session_id },
-                search: pageFlags(search),
-                state: (current) => ({ ...current, sessionsSearch: search }),
-              });
-            }}
-            hasNextPage={list.hasNextPage}
-            isFetchingNextPage={list.isFetchingNextPage}
-            fetchNextPage={fetchNextPage}
-            sorting={{
-              id: SORT_COLUMN[search.sort ?? "start_time"],
-              desc: (search.order ?? "desc") === "desc",
-            }}
-            onSortingChange={(next) => {
-              void navigate({
-                to: "/$org/$project/sessions",
-                params: { org, project },
-                search: (prev) => withSort(prev, next),
-              });
-            }}
-            emptyState={<EmptyState icon={MessagesSquare} title="No sessions" />}
-          />
+          <>
+            <SessionsSummary sessions={rows} more={list.hasNextPage} />
+            <div className="border-b px-3 py-2">
+              <SessionsStartedChart sessions={rows} from={resolved.from} to={resolved.to} />
+            </div>
+            <DataTable
+              tableId="sessions"
+              ariaLabel="Sessions"
+              onReorder={onColumns}
+              lockedColumnIds={lockedIds}
+              columns={tableColumns}
+              rows={rows}
+              getRowId={(row) => row.session_id}
+              onScrollAnchor={onScrollAnchor}
+              restoreAnchor={restoreAnchor}
+              highlightedRowIds={restoredHighlight}
+              onActivate={(row) => {
+                const listReturn = listReturnFor(
+                  "sessions",
+                  search,
+                  lastAnchor.current,
+                  row.session_id,
+                );
+                rememberListReturn(listReturn);
+                void navigate({
+                  to: "/$org/$project/sessions/$sessionId",
+                  params: { org, project, sessionId: row.session_id },
+                  search: pageFlags(search),
+                  state: (current) => ({ ...current, listReturn }),
+                });
+              }}
+              hasNextPage={list.hasNextPage}
+              isFetchingNextPage={list.isFetchingNextPage}
+              fetchNextPage={fetchNextPage}
+              sorting={{
+                id: SORT_COLUMN[search.sort ?? "start_time"],
+                desc: (search.order ?? "desc") === "desc",
+              }}
+              onSortingChange={(next) => {
+                void navigate({
+                  to: "/$org/$project/sessions",
+                  params: { org, project },
+                  search: (prev) => withSort(prev, next),
+                });
+              }}
+              emptyState={<EmptyState icon={MessagesSquare} title="No sessions" />}
+            />
+          </>
         ) : null}
       </TooltipProvider>
     </div>

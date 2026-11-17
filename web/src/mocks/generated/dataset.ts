@@ -87,11 +87,21 @@ export type Dataset = {
 };
 
 export function createDataset(options: { seed: number; now: number; traces: number }): Dataset {
-  const traces: Schema<"TraceSummary">[] = [];
-  const indexById = new Map<string, number>();
+  const bases: Schema<"TraceSummary">[] = [];
   for (let index = 0; index < options.traces; index += 1) {
-    const trace = traceSummary(options.seed, index, options.now);
-    traces.push(trace);
+    bases.push(traceSummary(options.seed, index, options.now));
+  }
+  // A session's turns are spread out in time first: the session's turns depend on each other.
+  const timed = spreadSessionTurns(bases, options.seed, options.now);
+  // A trace's turn depends on its session's other traces, so the previews are set once all are known.
+  const slots = sessionSlots(timed);
+  const turnAt = (index: number): TraceTurn => {
+    const slot = slots.get(index);
+    return turnOf(slot?.topic ?? index, slot?.turn ?? 1);
+  };
+  const traces = timed.map((trace, index) => withPreviews(trace, turnAt(index)));
+  const indexById = new Map<string, number>();
+  for (const [index, trace] of traces.entries()) {
     indexById.set(trace.trace_id, index);
   }
   const details = new Map<string, Schema<"TraceDetail">>();
@@ -120,9 +130,11 @@ export function createDataset(options: { seed: number; now: number; traces: numb
       if (!detail || !row) {
         return undefined;
       }
+      const index = indexById.get(traceId) ?? 0;
       return spanFromSummary(row.span, {
-        traceIndex: indexById.get(traceId) ?? 0,
+        traceIndex: index,
         errored: detail.trace.error_count > 0,
+        turn: turnAt(index),
       });
     },
     sessions(includeEval, includeExperiments) {
@@ -230,10 +242,6 @@ function traceSummary(seed: number, index: number, now: number): Schema<"TraceSu
     release: index % 2 === 0 ? "v1.5.0" : "v1.4.0",
     tags,
     metadata,
-    input_preview: pick(SUPPORT_TURNS, index).question,
-    output_preview: firstLine(
-      errorCount > 0 ? FAILED_ANSWER : shortAnswer(pick(SUPPORT_TURNS, index)),
-    ),
     span_count: spanCount,
     error_count: errorCount,
     llm_count: llmCount(spanCount),
@@ -414,16 +422,24 @@ function treeSpan(
   return { depth: span.depth, detached: span.detached, span: summary };
 }
 
-type SpanContext = { traceIndex: number; errored: boolean };
-
-type SupportTurn = {
+/** A question with its short Markdown answer: a topic's own, or one of its follow-ups. */
+type Exchange = {
   question: string;
-  heading: string;
   summary: string;
   steps: readonly string[];
+};
+
+type SupportTurn = Exchange & {
+  heading: string;
   snippets: { python: string; ts: string };
   docs: readonly [string, string, string];
+  followUps: readonly [Exchange, Exchange, ...Exchange[]];
 };
+
+/** The question a trace answers: turn 1 of a session is the topic's question, later turns its follow-ups. */
+type TraceTurn = { topic: SupportTurn; exchange: Exchange; main: boolean };
+
+type SpanContext = { traceIndex: number; errored: boolean; turn: TraceTurn };
 
 const FENCE = "```";
 const FAILED_ANSWER =
@@ -432,7 +448,7 @@ const TOOL_NAMES = ["lookup_ticket", "get_customer", "search_orders"] as const;
 const RETRIEVER_SCORES = [0.92, 0.81, 0.67] as const;
 const RERANK_SCORES = [0.52, 0.91, 0.84] as const;
 
-const SUPPORT_TURNS: readonly [SupportTurn, ...SupportTurn[]] = [
+export const SUPPORT_TURNS: readonly [SupportTurn, ...SupportTurn[]] = [
   {
     question: "How do I get a refund for a duplicate charge?",
     heading: "Refunds for duplicate charges",
@@ -451,6 +467,26 @@ const SUPPORT_TURNS: readonly [SupportTurn, ...SupportTurn[]] = [
       "Refunds are issued to the original payment method.",
       "Duplicate charges are reversed within 14 days.",
       "Partial refunds are supported on invoices.",
+    ],
+    followUps: [
+      {
+        question: "Does the refund go back to the same card?",
+        summary: "Yes. A refund returns to the payment method that paid the invoice.",
+        steps: [
+          "Check the payment method on the invoice",
+          "Refunds never go to a different card",
+          "Ask support if the original card has expired",
+        ],
+      },
+      {
+        question: "Can I refund only one line of a large invoice?",
+        summary: "Yes. Partial refunds are supported on any invoice.",
+        steps: [
+          "Open the invoice and choose Partial refund",
+          "Enter the amount to return",
+          "Check the refund status once you confirm",
+        ],
+      },
     ],
   },
   {
@@ -471,6 +507,26 @@ const SUPPORT_TURNS: readonly [SupportTurn, ...SupportTurn[]] = [
       "Reset emails come from the no-reply address.",
       "Accounts with SSO reset their password at the identity provider.",
     ],
+    followUps: [
+      {
+        question: "The reset email never arrived. What should I do?",
+        summary: "Check your spam folder first, then ask for a new link.",
+        steps: [
+          "Look in the spam or junk folder",
+          "Make sure you typed the right email address",
+          "Request a new link from the sign-in page",
+        ],
+      },
+      {
+        question: "Can I change my password without the email?",
+        summary: "Yes. Signed-in users can change it from their profile.",
+        steps: [
+          "Open Profile and then Security",
+          "Choose Change password",
+          "Enter your current password and the new one",
+        ],
+      },
+    ],
   },
   {
     question: "Why am I getting 429 errors from the API?",
@@ -489,6 +545,26 @@ const SUPPORT_TURNS: readonly [SupportTurn, ...SupportTurn[]] = [
       "The default limit is 600 requests per minute per project.",
       "Retry-After gives the number of seconds to wait.",
       "Limits are shared by every key in a project.",
+    ],
+    followUps: [
+      {
+        question: "How can I see how many requests I have sent?",
+        summary: "The Usage page shows requests per minute for each project.",
+        steps: [
+          "Open Settings and then Usage",
+          "Select the project and the time range",
+          "Compare the peak with the per-minute limit",
+        ],
+      },
+      {
+        question: "Do all my API keys share the same limit?",
+        summary: "Yes. The limit applies to the whole project, not to each key.",
+        steps: [
+          "Count the requests from every key in the project",
+          "Move heavy batch jobs to a separate project",
+          "Spread batch jobs out to smooth the peaks",
+        ],
+      },
     ],
   },
   {
@@ -510,6 +586,26 @@ const SUPPORT_TURNS: readonly [SupportTurn, ...SupportTurn[]] = [
       "CSV exports are limited to 100,000 rows.",
       "Exports are kept for 7 days.",
     ],
+    followUps: [
+      {
+        question: "How long can I download an export?",
+        summary: "Exports are kept for 7 days, then they are removed.",
+        steps: [
+          "Download the file within 7 days",
+          "Request a new export after that",
+          "Use the API to script regular exports",
+        ],
+      },
+      {
+        question: "What if my export has more rows than the CSV limit?",
+        summary: "Split the date range into smaller parts and export each one.",
+        steps: [
+          "Pick a shorter date range",
+          "Export each range separately",
+          "Combine the files in your data tool",
+        ],
+      },
+    ],
   },
   {
     question: "How do I set up a webhook for new tickets?",
@@ -530,6 +626,26 @@ const SUPPORT_TURNS: readonly [SupportTurn, ...SupportTurn[]] = [
       "Each request carries an HMAC signature header.",
       "Only HTTPS endpoints are accepted.",
     ],
+    followUps: [
+      {
+        question: "Why are my webhook requests failing?",
+        summary: "Check that the endpoint is public and returns a success status.",
+        steps: [
+          "Open the delivery log for the webhook",
+          "Confirm the URL uses HTTPS",
+          "Return a success status code from the endpoint",
+        ],
+      },
+      {
+        question: "How do I test a webhook before going live?",
+        summary: "Send a test event from the webhook page to your endpoint.",
+        steps: [
+          "Open the webhook and choose Send test event",
+          "Check the signature header in your handler",
+          "Read the delivery log for the response",
+        ],
+      },
+    ],
   },
   {
     question: "Why was my plan price changed this month?",
@@ -549,6 +665,26 @@ const SUPPORT_TURNS: readonly [SupportTurn, ...SupportTurn[]] = [
       "Invoices list the price used for each cycle.",
       "Credits appear on the following invoice.",
     ],
+    followUps: [
+      {
+        question: "Where can I see my past invoices?",
+        summary: "Every invoice is listed under Billing, with the price used for each cycle.",
+        steps: [
+          "Open Billing and then Invoices",
+          "Select the invoice for the month you need",
+          "Keep a copy for your records",
+        ],
+      },
+      {
+        question: "Can I switch back to my old plan?",
+        summary: "Yes. A plan change applies from the next billing date.",
+        steps: [
+          "Open Billing and choose Change plan",
+          "Select the previous plan",
+          "The switch takes effect on the next invoice",
+        ],
+      },
+    ],
   },
 ];
 
@@ -558,11 +694,114 @@ function pick<T>(items: readonly [T, ...T[]], index: number): T {
   return items[index % items.length] ?? first;
 }
 
+const TURN_GAP_MIN_MS = 30_000;
+const TURN_GAP_MAX_MS = 480_000;
+const TURN_GAP_SALT = 0x6a09e667;
+/** The youngest trace is a minute old (see `ageOf`); a session's last turn never starts later than that. */
+const MIN_TRACE_AGE_MS = 60_000;
+
+/**
+ * Spreads each session's turns in time (SL-6): the session keeps its earliest trace's start, and each later
+ * turn (in start-time order) starts 30 s to 8 min after the previous one. A session whose last turn would
+ * start after `now` moves earlier as a whole. Traces keep their own durations.
+ */
+function spreadSessionTurns(
+  traces: readonly Schema<"TraceSummary">[],
+  seed: number,
+  now: number,
+): Schema<"TraceSummary">[] {
+  const groups = new Map<string, number[]>();
+  traces.forEach((trace, index) => {
+    if (trace.session_id) {
+      groups.set(trace.session_id, [...(groups.get(trace.session_id) ?? []), index]);
+    }
+  });
+  const starts = traces.map((trace) => Date.parse(trace.start_time));
+  const timed = [...traces];
+  for (const indices of groups.values()) {
+    // Start-time order, ties by index: the same order `sessionSlots` numbers the turns in.
+    const ordered = [...indices].sort(
+      (left, right) => (starts[left] ?? 0) - (starts[right] ?? 0) || left - right,
+    );
+    const [first, ...later] = ordered;
+    if (first === undefined) {
+      continue;
+    }
+    const chain = new Map<number, number>([[first, starts[first] ?? 0]]);
+    let previous = starts[first] ?? 0;
+    for (const index of later) {
+      const random = mulberry32(mix(seed ^ TURN_GAP_SALT, index));
+      previous += TURN_GAP_MIN_MS + Math.floor(random() * (TURN_GAP_MAX_MS - TURN_GAP_MIN_MS + 1));
+      chain.set(index, previous);
+    }
+    const shift = Math.max(0, previous - (now - MIN_TRACE_AGE_MS));
+    for (const [index, start] of chain) {
+      const trace = traces[index];
+      if (!trace) {
+        continue;
+      }
+      const moved = start - shift;
+      timed[index] = {
+        ...trace,
+        start_time: rfc3339(moved),
+        end_time: rfc3339(moved + trace.duration_ns / 1_000_000),
+      };
+    }
+  }
+  return timed;
+}
+
+/** Each trace's place in its session: the topic index (the session's first trace's index) and its turn from 1. */
+function sessionSlots(
+  traces: readonly Schema<"TraceSummary">[],
+): Map<number, { topic: number; turn: number }> {
+  const groups = new Map<string, number[]>();
+  traces.forEach((trace, index) => {
+    if (trace.session_id) {
+      const rows = groups.get(trace.session_id) ?? [];
+      rows.push(index);
+      groups.set(trace.session_id, rows);
+    }
+  });
+  const slots = new Map<number, { topic: number; turn: number }>();
+  for (const indices of groups.values()) {
+    const topic = indices[0] ?? 0;
+    // Start-time order, ties by index: the same order the session page lists its traces in.
+    const ordered = [...indices].sort((left, right) => {
+      const byStart = (traces[left]?.start_time ?? "").localeCompare(
+        traces[right]?.start_time ?? "",
+      );
+      return byStart !== 0 ? byStart : left - right;
+    });
+    for (const [position, index] of ordered.entries()) {
+      slots.set(index, { topic, turn: position + 1 });
+    }
+  }
+  return slots;
+}
+
+/** Turn 1 is the topic's own question; turn k (k >= 2) is its follow-up `(k - 2) mod count`. */
+function turnOf(topicIndex: number, turn: number): TraceTurn {
+  const topic = pick(SUPPORT_TURNS, topicIndex);
+  if (turn <= 1) {
+    return { topic, exchange: topic, main: true };
+  }
+  return { topic, exchange: pick(topic.followUps, turn - 2), main: false };
+}
+
+function withPreviews(trace: Schema<"TraceSummary">, turn: TraceTurn): Schema<"TraceSummary"> {
+  return {
+    ...trace,
+    input_preview: turn.exchange.question,
+    output_preview: firstLine(trace.error_count > 0 ? FAILED_ANSWER : shortAnswer(turn.exchange)),
+  };
+}
+
 function firstLine(text: string): string {
   return text.split("\n")[0] ?? "";
 }
 
-function shortAnswer(turn: SupportTurn): string {
+function shortAnswer(turn: Exchange): string {
   return [turn.summary, "", ...turn.steps.map((step) => `- ${step}`)].join("\n");
 }
 
@@ -589,8 +828,9 @@ function scoredDocs(
 
 function spanFromSummary(span: Schema<"SpanSummary">, context: SpanContext): Schema<"SpanDetail"> {
   const index = spanIndex(span.span_id);
-  // Every span of a trace shares the trace's topic, the same one its preview and root use.
-  const turn = pick(SUPPORT_TURNS, context.traceIndex);
+  // Every span of a trace shares the trace's turn, the same one its preview and root use.
+  const turn = context.turn.topic;
+  const exchange = context.turn.exchange;
   const truncated = spanIndex(span.span_id) % 17 === 0 ? ["input"] : [];
   const detail: Schema<"SpanDetail"> = {
     ...span,
@@ -630,7 +870,7 @@ function spanFromSummary(span: Schema<"SpanSummary">, context: SpanContext): Sch
             },
           ],
         },
-        { role: "user", parts: [{ type: "text", content: turn.question }] },
+        { role: "user", parts: [{ type: "text", content: exchange.question }] },
       ],
     };
     detail.output = {
@@ -638,7 +878,13 @@ function spanFromSummary(span: Schema<"SpanSummary">, context: SpanContext): Sch
       value: [
         {
           role: "assistant",
-          parts: [{ type: "text", content: llmAnswer(turn, language) }],
+          parts: [
+            {
+              type: "text",
+              // Only the main answer carries a code block; follow-ups are a paragraph and a list.
+              content: context.turn.main ? llmAnswer(turn, language) : shortAnswer(exchange),
+            },
+          ],
         },
       ],
     };
@@ -653,20 +899,20 @@ function spanFromSummary(span: Schema<"SpanSummary">, context: SpanContext): Sch
       value: { ticket_id: `T-${1000 + context.traceIndex}`, status: "open", assignee: "queue-2" },
     };
   } else if (span.span_kind === "retriever") {
-    detail.input = { format: "text", value: turn.question };
+    detail.input = { format: "text", value: exchange.question };
     detail.output = {
       format: "json",
       value: { documents: scoredDocs(turn, RETRIEVER_SCORES) },
     };
   } else if (span.span_kind === "embedding") {
-    detail.input = { format: "text", value: turn.question };
+    detail.input = { format: "text", value: exchange.question };
     detail.output = {
       format: "json",
       value: { dimensions: 1536, model: "text-embedding-3-small" },
     };
   } else if (span.span_kind === "guardrail") {
     const passed = index % 5 !== 4;
-    detail.input = { format: "text", value: turn.question };
+    detail.input = { format: "text", value: exchange.question };
     detail.output = {
       format: "json",
       value: {
@@ -678,7 +924,7 @@ function spanFromSummary(span: Schema<"SpanSummary">, context: SpanContext): Sch
     };
   } else if (span.span_kind === "evaluator") {
     const score = (index % 10) / 10;
-    detail.input = { format: "text", value: turn.question };
+    detail.input = { format: "text", value: exchange.question };
     detail.output = {
       format: "json",
       value: {
@@ -692,7 +938,7 @@ function spanFromSummary(span: Schema<"SpanSummary">, context: SpanContext): Sch
   } else if (span.span_kind === "reranker") {
     detail.input = {
       format: "json",
-      value: { query: turn.question, documents: turn.docs.map((_doc, i) => `doc-${i + 1}`) },
+      value: { query: exchange.question, documents: turn.docs.map((_doc, i) => `doc-${i + 1}`) },
     };
     detail.output = {
       format: "json",
@@ -701,15 +947,15 @@ function spanFromSummary(span: Schema<"SpanSummary">, context: SpanContext): Sch
       },
     };
   } else if (span.span_kind === "span") {
-    detail.input = { format: "text", value: turn.question };
+    detail.input = { format: "text", value: exchange.question };
     detail.output = { format: "text", value: `Answered with **${turn.heading}**.` };
   } else {
     // agent (the root span) and chain: the user's question and a short Markdown answer.
     const failed = index === 0 && context.errored;
-    detail.input = { format: "text", value: turn.question };
+    detail.input = { format: "text", value: exchange.question };
     detail.output = {
       format: "text",
-      value: failed ? FAILED_ANSWER : shortAnswer(turn),
+      value: failed ? FAILED_ANSWER : shortAnswer(exchange),
     };
   }
   return detail;
@@ -726,8 +972,11 @@ function sessionsFrom(traces: readonly Schema<"TraceSummary">[]): Schema<"Sessio
     groups.set(trace.session_id, rows);
   }
   return [...groups.entries()].map(([sessionId, rows]) => {
-    const ordered = [...rows].sort((left, right) =>
-      left.start_time.localeCompare(right.start_time),
+    // Start-time order, ties by trace id (SL-1): the first and last turns are the earliest and latest.
+    const ordered = [...rows].sort(
+      (left, right) =>
+        left.start_time.localeCompare(right.start_time) ||
+        left.trace_id.localeCompare(right.trace_id),
     );
     const start = Date.parse(ordered[0]?.start_time ?? "");
     const end = ordered.reduce(
@@ -737,11 +986,15 @@ function sessionsFrom(traces: readonly Schema<"TraceSummary">[]): Schema<"Sessio
     const scores = new Map<string, Schema<"ScoreBrief">>();
     const tags = new Set<string>();
     let errors = 0;
+    let errorTraces = 0;
     let cost = 0;
     let tokens = 0;
     let userId: string | undefined;
     for (const trace of ordered) {
       errors += trace.error_count;
+      if (trace.status === "error") {
+        errorTraces += 1;
+      }
       cost += trace.cost_total ?? 0;
       tokens += trace.total_tokens ?? 0;
       userId = trace.user_id ?? userId;
@@ -752,12 +1005,17 @@ function sessionsFrom(traces: readonly Schema<"TraceSummary">[]): Schema<"Sessio
         scores.set(score.name, score);
       }
     }
+    const firstInput = ordered[0]?.input_preview;
+    const lastOutput = ordered[ordered.length - 1]?.output_preview;
     return {
       session_id: sessionId,
       start_time: rfc3339(start),
       end_time: rfc3339(end),
       duration_ns: Math.max(0, end - start) * 1_000_000,
       error_count: errors,
+      error_trace_count: errorTraces,
+      ...(firstInput === undefined ? {} : { first_input_preview: firstInput }),
+      ...(lastOutput === undefined ? {} : { last_output_preview: lastOutput }),
       trace_count: ordered.length,
       cost_total: cost,
       total_tokens: tokens,

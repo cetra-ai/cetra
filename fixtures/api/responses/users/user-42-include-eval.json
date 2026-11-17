@@ -80,7 +80,8 @@
           },
           "source": "human"
         }
-      ]
+      ],
+      "error_trace_count": 0
     }
   ]
 }

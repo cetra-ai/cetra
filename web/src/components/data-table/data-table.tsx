@@ -35,12 +35,19 @@ import {
   readColumnSizes,
   writeColumnSizes,
 } from "@/components/data-table/column-size";
+import type { RowAnchor } from "@/lib/list-return";
 import { matchesBinding } from "@/lib/shortcuts";
 
 const features = tableFeatures({
   columnSizingFeature,
   rowSortingFeature,
-  columnMeta: {} as { align?: "left" | "right"; mono?: boolean; icon?: LucideIcon },
+  columnMeta: {} as {
+    align?: "left" | "right";
+    mono?: boolean;
+    icon?: LucideIcon;
+    /** Takes the row's remaining width. `size` is its minimum. */
+    grow?: boolean;
+  },
 });
 
 export type DataTableColumn<Row extends RowData> = ColumnDef<typeof features, Row>;
@@ -55,6 +62,10 @@ const EDGE_STEP_PX = 12;
 /** How long the pointer must rest on a body row before `onRowHover` fires. */
 const ROW_HOVER_MS = 100;
 const NO_LOCKED: ReadonlySet<string> = new Set();
+/** Quiet time, in ms, after the last scroll before the first visible row is reported. */
+const ANCHOR_SETTLE_MS = 150;
+/** Pages fetched, at most, while looking for the row a restore scrolls to. */
+const RESTORE_MAX_PAGES = 5;
 
 interface ReorderDrag {
   id: string;
@@ -89,6 +100,10 @@ export interface DataTableProps<Row extends RowData> {
   lockedColumnIds?: ReadonlySet<string>;
   /** Called once the pointer has rested on a body row for ROW_HOVER_MS. */
   onRowHover?: (row: Row) => void;
+  /** Reports the first visible row and its offset, once scrolling has settled. */
+  onScrollAnchor?: (anchor: RowAnchor) => void;
+  /** Scrolls to this row once after mount, fetching pages until it is loaded. */
+  restoreAnchor?: RowAnchor;
 }
 
 export function DataTable<Row extends RowData>({
@@ -112,6 +127,8 @@ export function DataTable<Row extends RowData>({
   onReorder,
   lockedColumnIds = NO_LOCKED,
   onRowHover,
+  onScrollAnchor,
+  restoreAnchor,
 }: DataTableProps<Row>) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const headerRef = useRef<HTMLDivElement>(null);
@@ -123,6 +140,69 @@ export function DataTable<Row extends RowData>({
   const suppressClick = useRef(false);
 
   useEffect(() => () => stopDrag.current?.(), []);
+
+  // The latest rows and callbacks, read by the settle timer, which outlives a render.
+  const anchorSource = useRef({ rows, getRowId, onScrollAnchor });
+  useLayoutEffect(() => {
+    anchorSource.current = { rows, getRowId, onScrollAnchor };
+  });
+  const anchorTimer = useRef<number | undefined>(undefined);
+  const reportAnchor = useCallback(() => {
+    window.clearTimeout(anchorTimer.current);
+    anchorTimer.current = undefined;
+    const scroller = scrollRef.current;
+    const source = anchorSource.current;
+    if (!scroller || !source.onScrollAnchor) {
+      return;
+    }
+    const index = Math.floor(scroller.scrollTop / ROW_HEIGHT);
+    const row = source.rows[index];
+    if (row === undefined) {
+      return;
+    }
+    source.onScrollAnchor({
+      rowId: source.getRowId(row),
+      offset: scroller.scrollTop - index * ROW_HEIGHT,
+    });
+  }, []);
+  // A row opened before the timer fires still reports the position it was opened from.
+  const flushAnchor = useCallback(() => {
+    if (anchorTimer.current !== undefined) {
+      reportAnchor();
+    }
+  }, [reportAnchor]);
+  function onScrollSettle() {
+    window.clearTimeout(anchorTimer.current);
+    anchorTimer.current = window.setTimeout(reportAnchor, ANCHOR_SETTLE_MS);
+  }
+  useEffect(() => () => window.clearTimeout(anchorTimer.current), []);
+
+  const restoreDone = useRef(false);
+  const restoreFetches = useRef(0);
+  useEffect(() => {
+    if (!restoreAnchor || restoreDone.current) {
+      return;
+    }
+    const index = rows.findIndex((row) => getRowId(row) === restoreAnchor.rowId);
+    if (index >= 0) {
+      restoreDone.current = true;
+      const scroller = scrollRef.current;
+      if (scroller) {
+        scroller.scrollTop = index * ROW_HEIGHT + restoreAnchor.offset;
+        scroller.dispatchEvent(new Event("scroll"));
+      }
+      return;
+    }
+    if (!hasNextPage || restoreFetches.current >= RESTORE_MAX_PAGES) {
+      restoreDone.current = true;
+      return;
+    }
+    if (isFetchingNextPage) {
+      return;
+    }
+    restoreFetches.current += 1;
+    fetchNextPage();
+  }, [restoreAnchor, rows, getRowId, hasNextPage, isFetchingNextPage, fetchNextPage]);
 
   function commit(next: Record<string, number>) {
     setColumnSizing(next);
@@ -151,10 +231,14 @@ export function DataTable<Row extends RowData>({
   useLayoutEffect(() => {
     onActivateRef.current = onActivate;
   }, [onActivate]);
-  const onRowClick = useCallback((index: number, row: TableRow<typeof features, Row>) => {
-    setFocusedIndex(index);
-    onActivateRef.current(row.original);
-  }, []);
+  const onRowClick = useCallback(
+    (index: number, row: TableRow<typeof features, Row>) => {
+      setFocusedIndex(index);
+      flushAnchor();
+      onActivateRef.current(row.original);
+    },
+    [flushAnchor],
+  );
 
   // One timer is enough: the pointer rests on one row at a time.
   const onRowHoverRef = useRef(onRowHover);
@@ -248,6 +332,7 @@ export function DataTable<Row extends RowData>({
       event.preventDefault();
       const row = rows[focusedIndex];
       if (row) {
+        flushAnchor();
         onActivate(row);
       }
     }
@@ -405,7 +490,13 @@ export function DataTable<Row extends RowData>({
 
   const headerGroup = table.getHeaderGroups()[0];
   const template = headerGroup
-    ? headerGroup.headers.map((header) => `${header.getSize()}px`).join(" ")
+    ? headerGroup.headers
+        .map((header) =>
+          header.column.columnDef.meta?.grow
+            ? `minmax(${header.getSize()}px, 1fr)`
+            : `${header.getSize()}px`,
+        )
+        .join(" ")
     : undefined;
   const totalWidth = headerGroup
     ? headerGroup.headers.reduce((sum, header) => sum + header.getSize(), 0)
@@ -422,6 +513,7 @@ export function DataTable<Row extends RowData>({
       className="flex min-h-0 flex-1 flex-col outline-none focus-visible:outline-2 focus-visible:outline-ring focus-visible:-outline-offset-2 focus-visible:outline-solid"
       onKeyDown={onKeyDown}
     >
+      {/* The highlight keyframes, for `highlightedRowIds`, on a page without the live toggle. */}
       {headerGroup ? (
         <div
           ref={headerRef}
@@ -543,6 +635,7 @@ export function DataTable<Row extends RowData>({
           if (headerRef.current) {
             headerRef.current.scrollLeft = event.currentTarget.scrollLeft;
           }
+          onScrollSettle();
         }}
       >
         {notice ? (

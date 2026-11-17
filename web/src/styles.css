@@ -666,6 +666,20 @@
   pointer-events: none;
 }
 
+/* A row that just arrived (live) or that the user came back to flashes once. */
+@keyframes live-row {
+  from {
+    box-shadow: inset 0 0 0 999px color-mix(in oklch, var(--primary) 28%, transparent);
+  }
+  to {
+    box-shadow: inset 0 0 0 999px transparent;
+  }
+}
+
+.live-row {
+  animation: live-row 1.5s ease-out;
+}
+
 /* A newly loaded trace fades in. */
 @keyframes trace-fade-in {
   from {
@@ -727,6 +741,7 @@
 
   .slide-up-in,
   .slide-down-out,
+  .live-row,
   .page-in,
   .page-out,
   .trace-swap {

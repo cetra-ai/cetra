@@ -26,7 +26,8 @@ expression: snap(&detail)
         },
         "source": "human"
       }
-    ]
+    ],
+    "error_trace_count": 0
   },
   "turns": [
     {

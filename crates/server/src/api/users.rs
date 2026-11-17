@@ -199,6 +199,9 @@ mod tests {
                     value: ScoreValue::Boolean(true),
                     source: ScoreSource::Human,
                 }],
+                error_trace_count: 0,
+                first_input_preview: None,
+                last_output_preview: None,
             }],
         };
 

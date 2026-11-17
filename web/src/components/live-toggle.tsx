@@ -4,17 +4,6 @@ import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { StreamStatus } from "@/lib/sse";
 
-const LIVE_ROW_CSS = `
-@keyframes live-row {
-  from { box-shadow: inset 0 0 0 999px color-mix(in oklch, var(--primary) 28%, transparent); }
-  to { box-shadow: inset 0 0 0 999px transparent; }
-}
-.live-row { animation: live-row 1.5s ease-out; }
-@media (prefers-reduced-motion: reduce) {
-  .live-row { animation: none; }
-}
-`;
-
 const DOT: Record<Exclude<StreamStatus, "closed">, string> = {
   connecting: "bg-muted-foreground",
   open: "bg-status-ok",
@@ -51,7 +40,6 @@ export function LiveToggle({
   );
   return (
     <>
-      <style>{LIVE_ROW_CSS}</style>
       {reason ? (
         <Tooltip>
           <TooltipTrigger asChild>

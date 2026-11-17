@@ -10,12 +10,15 @@ use std::time::Duration;
 use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
 use cetra_core::schema::{spans, traces};
+use datafusion::common::ScalarValue;
 use datafusion::error::DataFusionError;
-use datafusion::logical_expr::{col, lit};
+use datafusion::functions_aggregate::expr_fn::{max, sum};
+use datafusion::functions_window::expr_fn::row_number;
+use datafusion::logical_expr::{Expr, ExprFunctionExt, col, lit, when};
 use datafusion::prelude::DataFrame;
 
 use super::cursor::{after, assemble, decode, order_by};
-use super::{ListScope, Page, SortOrder, present, scoped_traces};
+use super::{ListScope, MAX_PAGE, Page, SortOrder, present, scoped_traces};
 use crate::filter::FilterView;
 use crate::query_error::{RunError, classify};
 use crate::views::{QueryContext, sessions_from_traces};
@@ -23,6 +26,15 @@ use crate::views::{QueryContext, sessions_from_traces};
 const LIST: &str = "sessions";
 const TRACE_COUNT: &str = "trace_count";
 const TIES: &[&str] = &[traces::SESSION_ID];
+const RANK_FIRST: &str = "first_rank";
+const RANK_LAST: &str = "last_rank";
+
+/// Output column of [`session_extras`]: traces of the session whose status is `error`.
+pub const SESSION_ERROR_TRACE_COUNT: &str = "error_trace_count";
+/// Output column of [`session_extras`]: `input_preview` of the session's earliest-starting trace.
+pub const SESSION_FIRST_INPUT_PREVIEW: &str = "first_input_preview";
+/// Output column of [`session_extras`]: `output_preview` of the session's latest-starting trace.
+pub const SESSION_LAST_OUTPUT_PREVIEW: &str = "last_output_preview";
 
 /// Most turns `session_detail` returns.
 pub const MAX_SESSION_TURNS: usize = 1000;
@@ -100,7 +112,7 @@ pub async fn session_list(
     ctx: &QueryContext,
     request: SessionListRequest<'_>,
 ) -> Result<Page, RunError> {
-    if !(1..=super::MAX_PAGE).contains(&request.limit) {
+    if !(1..=MAX_PAGE).contains(&request.limit) {
         return Err(RunError::InvalidRequest(
             "limit must be between 1 and 1000".to_owned(),
         ));
@@ -134,6 +146,110 @@ pub async fn session_detail(
         Err(_) => Err(RunError::Timeout),
         Ok(result) => result,
     }
+}
+
+/// Inputs of [`session_extras`].
+#[derive(Debug, Clone)]
+pub struct SessionExtrasRequest<'a> {
+    /// Same scope as the list request: the window and the default exclusions.
+    pub scope: ListScope,
+    /// Sessions to compute, at most [`MAX_PAGE`]. Empty runs no query.
+    pub session_ids: &'a [&'a str],
+    /// Time allowed for the query.
+    pub timeout: Duration,
+}
+
+/// Per-session extras of a page of sessions: [`SESSION_ERROR_TRACE_COUNT`],
+/// [`SESSION_FIRST_INPUT_PREVIEW`] and [`SESSION_LAST_OUTPUT_PREVIEW`].
+///
+/// Traces are scoped as the session list scopes them (window and default
+/// exclusions, no filter: the list's filter applies to sessions), restricted to
+/// `session_ids`. The earliest trace is the least `start_time`, then the least
+/// `trace_id`; the latest is the greatest of both. A session without traces in
+/// scope has no row.
+///
+/// # Errors
+///
+/// [`RunError::InvalidRequest`] for more than [`MAX_PAGE`] sessions.
+/// [`RunError::Timeout`] when the query exceeds `timeout`.
+pub async fn session_extras(
+    ctx: &QueryContext,
+    request: SessionExtrasRequest<'_>,
+) -> Result<Vec<RecordBatch>, RunError> {
+    if request.session_ids.len() > MAX_PAGE {
+        return Err(RunError::InvalidRequest("too many sessions".to_owned()));
+    }
+    if request.session_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    match tokio::time::timeout(request.timeout, extras(ctx, &request)).await {
+        Err(_) => Err(RunError::Timeout),
+        Ok(result) => result,
+    }
+}
+
+async fn extras(
+    ctx: &QueryContext,
+    request: &SessionExtrasRequest<'_>,
+) -> Result<Vec<RecordBatch>, RunError> {
+    let ids: Vec<Expr> = request.session_ids.iter().map(|id| lit(*id)).collect();
+    let first = row_number()
+        .partition_by(vec![col(traces::SESSION_ID)])
+        .order_by(vec![
+            col(traces::START_TIME).sort(true, false),
+            col(traces::TRACE_ID).sort(true, false),
+        ])
+        .build()
+        .map_err(classify)?
+        .alias(RANK_FIRST);
+    let last = row_number()
+        .partition_by(vec![col(traces::SESSION_ID)])
+        .order_by(vec![
+            col(traces::START_TIME).sort(false, true),
+            col(traces::TRACE_ID).sort(false, true),
+        ])
+        .build()
+        .map_err(classify)?
+        .alias(RANK_LAST);
+    let frame = scoped_traces(ctx, request.scope, false)
+        .await?
+        .filter(col(traces::SESSION_ID).in_list(ids, false))
+        .map_err(classify)?
+        // One window stage per sort order: DataFusion needs the expressions of a stage to share sort keys.
+        .window(vec![first])
+        .map_err(classify)?
+        .window(vec![last])
+        .map_err(classify)?
+        .aggregate(
+            vec![col(traces::SESSION_ID)],
+            vec![
+                sum(error_trace_flag()?).alias(SESSION_ERROR_TRACE_COUNT),
+                ranked_value(RANK_FIRST, traces::INPUT_PREVIEW)?.alias(SESSION_FIRST_INPUT_PREVIEW),
+                ranked_value(RANK_LAST, traces::OUTPUT_PREVIEW)?.alias(SESSION_LAST_OUTPUT_PREVIEW),
+            ],
+        )
+        .map_err(classify)?;
+    let batches = frame.collect().await.map_err(|error| ctx.fail(error))?;
+    Ok(batches
+        .into_iter()
+        .filter(|batch| batch.num_rows() > 0)
+        .collect())
+}
+
+/// 1 for a trace whose status is `error`, else 0.
+fn error_trace_flag() -> Result<Expr, RunError> {
+    when(col(traces::STATUS).eq(lit("error")), lit(1_i64))
+        .otherwise(lit(0_i64))
+        .map_err(classify)
+}
+
+/// `column` of the one row per group whose `rank` is 1, null elsewhere. Each group has
+/// exactly one such row, so the maximum is that row's value (null when it is null).
+fn ranked_value(rank: &str, column: &str) -> Result<Expr, RunError> {
+    let value = when(col(rank).eq(lit(ScalarValue::UInt64(Some(1)))), col(column))
+        .otherwise(lit(ScalarValue::Utf8(None)))
+        .map_err(classify)?;
+    Ok(max(value))
 }
 
 async fn list(ctx: &QueryContext, request: &SessionListRequest<'_>) -> Result<Page, RunError> {
@@ -331,11 +447,17 @@ mod tests {
     use cetra_core::time_serde::parse_rfc3339;
     use serde_json::Value;
 
+    use cetra_core::enums::SpanStatus;
     use cetra_core::names::environment;
     use cetra_core::span::Span;
 
-    use super::{SessionListRequest, SessionSort, session_detail, session_list};
-    use crate::reads::{ListScope, Page, SortOrder};
+    use super::{
+        SESSION_ERROR_TRACE_COUNT, SESSION_FIRST_INPUT_PREVIEW, SESSION_LAST_OUTPUT_PREVIEW,
+        SessionExtrasRequest, SessionListRequest, SessionSort, session_detail, session_extras,
+        session_list,
+    };
+    use crate::query_error::RunError;
+    use crate::reads::{ListScope, MAX_PAGE, Page, SortOrder};
     use crate::test_support::{example_query, span_row, spans_table, traces_table};
     use crate::views::{QueryContext, TimeWindow};
 
@@ -451,7 +573,11 @@ mod tests {
         assert_eq!(actual.len(), expected.len());
         for (row, fixture) in actual.iter().zip(expected) {
             for (key, value) in fixture.as_object().expect("object") {
-                if key == "scores" {
+                // Scores and the per-session extras are added by the server, not this view.
+                if matches!(
+                    key.as_str(),
+                    "scores" | "error_trace_count" | "first_input_preview" | "last_output_preview"
+                ) {
                     continue;
                 }
                 assert!(
@@ -637,5 +763,118 @@ mod tests {
             .await
             .expect("eval");
         assert!(shown.is_some());
+    }
+
+    /// A span that is the root of its trace, in `session`, with the given previews.
+    fn turn(trace: u16, start: i64, session: &str, previews: Option<(&str, &str)>) -> Span {
+        let mut span = span_row(trace, 0, start, start);
+        span.session_id = Some(session.to_owned());
+        if let Some((input, output)) = previews {
+            span.input_preview = Some(input.to_owned());
+            span.output_preview = Some(output.to_owned());
+        }
+        span
+    }
+
+    fn extras_scope(window: Option<TimeWindow>) -> ListScope {
+        ListScope {
+            window,
+            include_eval: false,
+            include_experiments: false,
+        }
+    }
+
+    async fn extras_of(
+        ctx: &QueryContext,
+        window: Option<TimeWindow>,
+        session_ids: &[&str],
+    ) -> Vec<Value> {
+        let batches = session_extras(
+            ctx,
+            SessionExtrasRequest {
+                scope: extras_scope(window),
+                session_ids,
+                timeout: TIMEOUT,
+            },
+        )
+        .await
+        .expect("extras");
+        json_rows(&batches)
+    }
+
+    fn row_of<'a>(rows: &'a [Value], session: &str) -> &'a Value {
+        rows.iter()
+            .find(|row| row["session_id"] == session)
+            .unwrap_or_else(|| panic!("no extras row for {session}"))
+    }
+
+    #[tokio::test]
+    async fn session_extras_counts_errors_and_takes_the_first_and_last_previews() {
+        let mut failed = turn(1, 1_000, "s", Some(("first", "out-1")));
+        failed.status = SpanStatus::Error;
+        let spans = [
+            failed,
+            // Same start as trace 1 with a larger trace_id: not the earliest.
+            turn(5, 1_000, "s", Some(("tie-first", "out-5"))),
+            turn(2, 2_000, "s", Some(("second", "out-2"))),
+            turn(3, 3_000, "s", Some(("third", "out-3"))),
+            // Same start as trace 3 with a larger trace_id: the latest.
+            turn(4, 3_000, "s", Some(("fourth", "out-4"))),
+            turn(6, 1_000, "quiet", None),
+        ];
+        let ctx = context_of(&spans);
+        let rows = extras_of(&ctx, None, &["s", "quiet", "missing"]).await;
+        assert_eq!(rows.len(), 2, "{rows:?}");
+
+        let s = row_of(&rows, "s");
+        assert_eq!(s[SESSION_ERROR_TRACE_COUNT], 1);
+        assert_eq!(s[SESSION_FIRST_INPUT_PREVIEW], "first");
+        assert_eq!(s[SESSION_LAST_OUTPUT_PREVIEW], "out-4");
+
+        let quiet = row_of(&rows, "quiet");
+        assert_eq!(quiet[SESSION_ERROR_TRACE_COUNT], 0);
+        assert!(quiet[SESSION_FIRST_INPUT_PREVIEW].is_null(), "{quiet}");
+        assert!(quiet[SESSION_LAST_OUTPUT_PREVIEW].is_null(), "{quiet}");
+    }
+
+    #[tokio::test]
+    async fn session_extras_ignores_traces_outside_the_window() {
+        let spans = [
+            turn(1, 1_000, "s", Some(("in", "in-out"))),
+            turn(2, 9_000, "s", Some(("late", "late-out"))),
+        ];
+        let ctx = context_of(&spans);
+        let window = TimeWindow::new(0, 5_000).expect("window");
+        let rows = extras_of(&ctx, Some(window), &["s"]).await;
+        let s = row_of(&rows, "s");
+        assert_eq!(s[SESSION_FIRST_INPUT_PREVIEW], "in");
+        assert_eq!(s[SESSION_LAST_OUTPUT_PREVIEW], "in-out");
+        assert_eq!(s[SESSION_ERROR_TRACE_COUNT], 0);
+    }
+
+    #[tokio::test]
+    async fn session_extras_of_unknown_or_no_sessions_is_empty() {
+        let spans = [turn(1, 1_000, "s", Some(("in", "out")))];
+        let ctx = context_of(&spans);
+        assert!(extras_of(&ctx, None, &["missing"]).await.is_empty());
+        assert!(extras_of(&ctx, None, &[]).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn session_extras_rejects_more_than_a_page_of_sessions() {
+        let ids: Vec<&str> = vec!["s"; MAX_PAGE + 1];
+        let result = session_extras(
+            &context(),
+            SessionExtrasRequest {
+                scope: extras_scope(None),
+                session_ids: &ids,
+                timeout: TIMEOUT,
+            },
+        )
+        .await;
+        assert!(
+            matches!(result, Err(RunError::InvalidRequest(_))),
+            "{result:?}"
+        );
     }
 }

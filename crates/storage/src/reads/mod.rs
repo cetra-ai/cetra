@@ -39,8 +39,9 @@ pub use scores::{
     LATEST_SCORE_COLUMNS, ScoreListRequest, ScoreTargets, latest_scores, score_list, scores_by_id,
 };
 pub use sessions::{
-    MAX_SESSION_TURNS, SessionDetailData, SessionListRequest, SessionSort, session_detail,
-    session_list,
+    MAX_SESSION_TURNS, SESSION_ERROR_TRACE_COUNT, SESSION_FIRST_INPUT_PREVIEW,
+    SESSION_LAST_OUTPUT_PREVIEW, SessionDetailData, SessionExtrasRequest, SessionListRequest,
+    SessionSort, session_detail, session_extras, session_list,
 };
 pub use traces::{
     MAX_MATCH_COUNT, MAX_REFRESH_IDS, MAX_REFRESH_SPANS_PER_TRACE, MAX_TRACE_SPANS,

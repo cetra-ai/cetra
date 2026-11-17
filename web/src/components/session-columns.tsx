@@ -17,15 +17,24 @@ import type { DataTableColumn } from "@/components/data-table/data-table";
 import { LazyTooltip } from "@/components/lazy-tooltip";
 import { ScoreBadge } from "@/components/score-badge";
 import { TimeText } from "@/components/time-text";
-import { formatScore } from "@/components/trace-columns";
+import { formatScore, Preview } from "@/components/trace-columns";
 import { Badge } from "@/components/ui/badge";
-import { formatCost, formatDuration, formatTokens } from "@/lib/format";
+import { BarCell } from "@/components/user/bar-cell";
+import {
+  formatCost,
+  formatDuration,
+  formatRelative,
+  formatTimestamp,
+  formatTokens,
+} from "@/lib/format";
 import { SESSION_COLUMN_IDS, type SessionColumnId } from "@/lib/search/sessions";
+import { useTimeZone } from "@/lib/settings";
 
-const HIDDEN = new Set<SessionColumnId>(["tags"]);
+const HIDDEN = new Set<SessionColumnId>(["tags", "last_answer"]);
 
 const LABELS: Record<SessionColumnId, string> = {
   session: "Session",
+  first_message: "First message",
   start: "Start",
   last: "Last activity",
   traces: "Traces",
@@ -34,6 +43,8 @@ const LABELS: Record<SessionColumnId, string> = {
   tokens: "Tokens",
   cost: "Cost",
   errors: "Errors",
+  error_rate: "Error rate",
+  last_answer: "Last answer",
   tags: "Tags",
 };
 
@@ -77,16 +88,23 @@ export function orderedSessionColumns(
   rows: readonly Schema<"SessionSummary">[],
   visible: readonly string[],
 ): DataTableColumn<Schema<"SessionSummary">>[] {
-  const byId = new Map(
-    sessionColumnDefs(sessionScoreNames(rows)).map((column) => [column.id, column]),
-  );
+  const byId = new Map(sessionColumnDefs(rows).map((column) => [column.id, column]));
   return visible.flatMap((id) => {
     const column = byId.get(id);
     return column ? [column] : [];
   });
 }
 
-function sessionColumnDefs(names: readonly string[]): DataTableColumn<Schema<"SessionSummary">>[] {
+function maxOf(values: readonly number[]): number {
+  return values.reduce((max, value) => Math.max(max, value), 0);
+}
+
+function sessionColumnDefs(
+  rows: readonly Schema<"SessionSummary">[],
+): DataTableColumn<Schema<"SessionSummary">>[] {
+  const maxTraces = maxOf(rows.map((row) => row.trace_count));
+  const maxTokens = maxOf(rows.map((row) => row.total_tokens ?? 0));
+  const maxCost = maxOf(rows.map((row) => row.cost_total ?? 0));
   const fixed: DataTableColumn<Schema<"SessionSummary">>[] = [
     {
       id: "session",
@@ -95,6 +113,14 @@ function sessionColumnDefs(names: readonly string[]): DataTableColumn<Schema<"Se
       enableSorting: false,
       meta: { mono: true, icon: MessagesSquare },
       cell: ({ row }) => row.original.session_id,
+    },
+    {
+      id: "first_message",
+      size: 360,
+      header: "First message",
+      enableSorting: false,
+      meta: { grow: true, icon: MessagesSquare },
+      cell: ({ row }) => <Preview text={row.original.first_input_preview} />,
     },
     {
       id: "start",
@@ -112,7 +138,7 @@ function sessionColumnDefs(names: readonly string[]): DataTableColumn<Schema<"Se
       header: "Last activity",
       meta: { icon: Clock },
       enableSorting: true,
-      cell: ({ row }) => <TimeText value={row.original.end_time} style="datetime" />,
+      cell: ({ row }) => <RelativeTime value={row.original.end_time} />,
     },
     {
       id: "traces",
@@ -121,7 +147,11 @@ function sessionColumnDefs(names: readonly string[]): DataTableColumn<Schema<"Se
       header: "Traces",
       enableSorting: true,
       meta: { align: "right", icon: ListTree },
-      cell: ({ row }) => <span className="num">{row.original.trace_count}</span>,
+      cell: ({ row }) => (
+        <BarCell value={row.original.trace_count} max={maxTraces}>
+          <span className="num">{row.original.trace_count}</span>
+        </BarCell>
+      ),
     },
     {
       id: "user",
@@ -147,7 +177,11 @@ function sessionColumnDefs(names: readonly string[]): DataTableColumn<Schema<"Se
       header: "Tokens",
       enableSorting: false,
       meta: { align: "right", icon: Coins },
-      cell: ({ row }) => <span className="num">{formatTokens(row.original.total_tokens)}</span>,
+      cell: ({ row }) => (
+        <BarCell value={row.original.total_tokens} max={maxTokens}>
+          <span className="num">{formatTokens(row.original.total_tokens)}</span>
+        </BarCell>
+      ),
     },
     {
       id: "cost",
@@ -156,7 +190,11 @@ function sessionColumnDefs(names: readonly string[]): DataTableColumn<Schema<"Se
       header: "Cost",
       enableSorting: true,
       meta: { align: "right", icon: DollarSign },
-      cell: ({ row }) => <span className="num">{formatCost(row.original.cost_total)}</span>,
+      cell: ({ row }) => (
+        <BarCell value={row.original.cost_total} max={maxCost}>
+          <span className="num">{formatCost(row.original.cost_total)}</span>
+        </BarCell>
+      ),
     },
     {
       id: "errors",
@@ -172,6 +210,30 @@ function sessionColumnDefs(names: readonly string[]): DataTableColumn<Schema<"Se
       ),
     },
     {
+      id: "error_rate",
+      accessorFn: (row) => (row.trace_count > 0 ? row.error_trace_count / row.trace_count : null),
+      size: 88,
+      header: "Error rate",
+      enableSorting: false,
+      meta: { align: "right", icon: TriangleAlert },
+      cell: ({ row }) => {
+        const { trace_count: traces, error_trace_count: errors } = row.original;
+        return (
+          <span className={cn("num", errors > 0 && "text-destructive")}>
+            {traces > 0 ? `${Math.round((errors / traces) * 100)}%` : "—"}
+          </span>
+        );
+      },
+    },
+    {
+      id: "last_answer",
+      size: 360,
+      header: "Last answer",
+      enableSorting: false,
+      meta: { icon: MessagesSquare },
+      cell: ({ row }) => <Preview text={row.original.last_output_preview} />,
+    },
+    {
       id: "tags",
       size: 140,
       header: "Tags",
@@ -180,7 +242,23 @@ function sessionColumnDefs(names: readonly string[]): DataTableColumn<Schema<"Se
       cell: ({ row }) => <Tags tags={row.original.tags} />,
     },
   ];
+  const names = sessionScoreNames(rows);
   return [...fixed, ...names.map((name) => scoreColumn(name))];
+}
+
+/** A preview on one line; the full text shows on hover. */
+/** Relative time; the exact time in the user's zone is the tooltip. */
+function RelativeTime({ value }: { value: string }) {
+  const zone = useTimeZone();
+  return (
+    <time
+      dateTime={value}
+      title={formatTimestamp(value, zone, "datetime")}
+      className="tabular-nums"
+    >
+      {formatRelative(value, Date.now())}
+    </time>
+  );
 }
 
 function scoreColumn(name: string): DataTableColumn<Schema<"SessionSummary">> {

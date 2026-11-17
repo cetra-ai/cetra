@@ -360,7 +360,8 @@ function ScoreCell({ trace, name }: { trace: Schema<"TraceSummary">; name: strin
   );
 }
 
-function Preview({ text, failed = false }: { text?: string; failed?: boolean }) {
+/** A one-line, truncated text preview with the full text in a tooltip. */
+export function Preview({ text, failed = false }: { text?: string; failed?: boolean }) {
   if (!text) {
     return <span className="text-muted-foreground">—</span>;
   }

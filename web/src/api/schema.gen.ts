@@ -6358,6 +6358,15 @@ export interface components {
              * @description Sum of the traces' `error_count`.
              */
             error_count: number;
+            /**
+             * Format: int64
+             * @description Number of the session's traces whose status is `error`.
+             */
+            error_trace_count: number;
+            /** @description `input_preview` of the session's earliest-starting trace. Omitted when there is none. */
+            first_input_preview?: string;
+            /** @description `output_preview` of the session's latest-starting trace. Omitted when there is none. */
+            last_output_preview?: string;
             /** @description Latest score of each name attached to this session. */
             scores: components["schemas"]["ScoreBrief"][];
             /** @description Session id. */

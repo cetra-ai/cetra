@@ -52,7 +52,7 @@ it("saves a column dragged to a new place as cols", async () => {
       String(router.state.location.search.cols ?? "")
         .split(",")
         .slice(0, 3),
-    ).toEqual(["start", "session", "last"]);
+    ).toEqual(["start", "session", "first_message"]);
   });
 });
 
@@ -115,4 +115,35 @@ it("sorts by cost with sort=cost_total", async () => {
   } finally {
     server.events.removeListener("request:start", onStart);
   }
+});
+
+it("shows the summary strip and the sessions-started chart above the table", async () => {
+  await renderApp("/acme/support-bot/sessions");
+  const grid = await screen.findByRole("grid", { name: "Sessions" });
+  const summary = screen.getByRole("region", { name: "Summary" });
+  const chart = screen.getByRole("img", { name: "Sessions started" });
+  const sessionRows = within(grid)
+    .getAllByRole("row")
+    .filter((row) => /sess-/.test(row.textContent ?? ""));
+  expect(within(summary).getByText(String(sessionRows.length))).toBeInTheDocument();
+  expect(summary.compareDocumentPosition(grid) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(chart.compareDocumentPosition(grid) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});
+
+it("returns from a session to the same list search, with the opened row highlighted", async () => {
+  const { router, user } = await renderApp("/acme/support-bot/sessions?sort=cost_total&order=asc");
+  const grid = await screen.findByRole("grid", { name: "Sessions" });
+  fireEvent.click(within(grid).getByRole("row", { name: /sess-002/ }));
+  await waitFor(() => {
+    expect(router.state.location.pathname).toBe("/acme/support-bot/sessions/sess-002");
+  });
+  await user.click(await screen.findByRole("link", { name: "Back to sessions" }));
+  await waitFor(() => {
+    expect(router.state.location.pathname).toBe("/acme/support-bot/sessions");
+  });
+  expect(router.state.location.search).toMatchObject({ sort: "cost_total", order: "asc" });
+  const restored = await screen.findByRole("grid", { name: "Sessions" });
+  await waitFor(() => {
+    expect(within(restored).getByRole("row", { name: /sess-002/ })).toHaveClass("live-row");
+  });
 });

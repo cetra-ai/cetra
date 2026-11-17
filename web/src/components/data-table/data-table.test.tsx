@@ -50,6 +50,47 @@ function renderTable(options: {
   );
 }
 
+it("lets a grow column take the remaining width, with its size as the minimum", () => {
+  const growing: DataTableColumn<Item>[] = [
+    { id: "name", size: 200, header: "Name", accessorFn: (row) => row.name, cell: () => "" },
+    {
+      id: "text",
+      size: 360,
+      header: "Text",
+      accessorFn: (row) => row.name,
+      meta: { grow: true },
+      cell: () => "",
+    },
+  ];
+  render(
+    <DataTable
+      tableId="grow-test"
+      ariaLabel="Grow"
+      columns={growing}
+      rows={ITEMS}
+      getRowId={(row) => row.id}
+      onActivate={() => undefined}
+      hasNextPage={false}
+      isFetchingNextPage={false}
+      fetchNextPage={() => undefined}
+      emptyState={null}
+    />,
+  );
+  const header = screen
+    .getByRole("grid", { name: "Grow" })
+    .querySelector<HTMLElement>('[aria-rowindex="1"]');
+  expect(header?.style.gridTemplateColumns).toBe("200px minmax(360px, 1fr)");
+  expect(header?.style.minWidth).toBe("560px");
+});
+
+it("keeps fixed pixel widths when no column grows", () => {
+  renderTable({});
+  const header = screen
+    .getByRole("grid", { name: "Items" })
+    .querySelector<HTMLElement>('[aria-rowindex="1"]');
+  expect(header?.style.gridTemplateColumns).toBe("200px");
+});
+
 function rowOf(text: string): HTMLElement {
   const row = screen.getByText(text).closest('[role="row"]');
   if (!(row instanceof HTMLElement)) {
@@ -457,4 +498,103 @@ it("cancels a pending hover when the table unmounts", () => {
     vi.advanceTimersByTime(200);
   });
   expect(onRowHover).not.toHaveBeenCalled();
+});
+
+function manyRows(count: number): Item[] {
+  return Array.from({ length: count }, (_, index) => ({
+    id: `r${index}`,
+    name: `row ${index}`,
+    failed: false,
+  }));
+}
+
+function scrollerOf(grid: HTMLElement): HTMLElement {
+  const scroller = grid.querySelector<HTMLElement>("[data-scroll-container]");
+  if (!(scroller instanceof HTMLElement)) {
+    throw new Error("missing scroll container");
+  }
+  return scroller;
+}
+
+it("reports the first visible row and its offset once scrolling settles", () => {
+  vi.useFakeTimers();
+  try {
+    const onScrollAnchor = vi.fn();
+    render(
+      <DataTable
+        tableId="anchor-test"
+        ariaLabel="Anchor"
+        columns={columns}
+        rows={manyRows(200)}
+        getRowId={(row) => row.id}
+        onActivate={() => undefined}
+        hasNextPage={false}
+        isFetchingNextPage={false}
+        fetchNextPage={() => undefined}
+        emptyState={null}
+        onScrollAnchor={onScrollAnchor}
+      />,
+    );
+    const scroller = scrollerOf(screen.getByRole("grid", { name: "Anchor" }));
+    scroller.scrollTop = ROW_HEIGHT * 3 + 10;
+    fireEvent.scroll(scroller);
+    act(() => {
+      vi.advanceTimersByTime(149);
+    });
+    expect(onScrollAnchor).not.toHaveBeenCalled();
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(onScrollAnchor).toHaveBeenCalledTimes(1);
+    expect(onScrollAnchor).toHaveBeenCalledWith({ rowId: "r3", offset: 10 });
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("scrolls to the restore row at its index times the row height plus the offset", () => {
+  render(
+    <DataTable
+      tableId="restore-test"
+      ariaLabel="Restore"
+      columns={columns}
+      rows={manyRows(200)}
+      getRowId={(row) => row.id}
+      onActivate={() => undefined}
+      hasNextPage={false}
+      isFetchingNextPage={false}
+      fetchNextPage={() => undefined}
+      emptyState={null}
+      restoreAnchor={{ rowId: "r50", offset: 5 }}
+    />,
+  );
+  expect(scrollerOf(screen.getByRole("grid", { name: "Restore" })).scrollTop).toBe(
+    50 * ROW_HEIGHT + 5,
+  );
+});
+
+it("fetches at most five more pages for the restore row, then stops at the top", () => {
+  const fetchNextPage = vi.fn();
+  const table = (rows: Item[]) => (
+    <DataTable
+      tableId="restore-pages-test"
+      ariaLabel="Pages"
+      columns={columns}
+      rows={rows}
+      getRowId={(row) => row.id}
+      onActivate={() => undefined}
+      hasNextPage
+      isFetchingNextPage={false}
+      fetchNextPage={fetchNextPage}
+      emptyState={null}
+      restoreAnchor={{ rowId: "r999", offset: 0 }}
+    />
+  );
+  const view = render(table(manyRows(100)));
+  expect(fetchNextPage).toHaveBeenCalledTimes(1);
+  for (let page = 2; page <= 6; page += 1) {
+    view.rerender(table(manyRows(100 * page)));
+  }
+  expect(fetchNextPage).toHaveBeenCalledTimes(5);
+  expect(scrollerOf(screen.getByRole("grid", { name: "Pages" })).scrollTop).toBe(0);
 });

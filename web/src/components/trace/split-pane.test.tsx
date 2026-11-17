@@ -433,3 +433,25 @@ describe("switching layouts with a trace open", () => {
     expect(screen.getByText("list body")).toBeInTheDocument();
   });
 });
+
+it("opens a still bottom split at once, without the slide", () => {
+  render(
+    <SplitPane
+      name="trace"
+      mode="bottom"
+      still
+      start={<div>tree body</div>}
+      end={<div>detail body</div>}
+    />,
+  );
+  // No slide: the layout is open on the first render, at the default ratio, stacked.
+  expect(size("trace-tree")).toBe("40");
+  expect(separatorOrientation("trace-tree")).toBe("horizontal");
+  expect(screen.getByText("detail body")).toBeInTheDocument();
+});
+
+it("stacks the session's trace: tree on top, span detail below", async () => {
+  await renderApp("/acme/support-bot/sessions/sess-001?trace=a1000000000000000000000000000001");
+  await screen.findByRole("grid", { name: "Trace" });
+  expect(separatorOrientation("trace-tree")).toBe("horizontal");
+});

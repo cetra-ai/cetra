@@ -30,6 +30,8 @@ type SplitPaneProps = {
   end: ReactNode;
   /** Shown above the trace in page mode. */
   filmstrip?: ReactNode;
+  /** Bottom mode without the slide-in, for a split that is always open (the session's trace). */
+  still?: boolean;
 };
 
 export function SplitPane({ mode = "split", ...props }: SplitPaneProps) {
@@ -99,15 +101,15 @@ function SplitGroup({
   start,
   end,
   filmstrip,
+  still = false,
   fast = false,
 }: SplitPaneProps & { mode: SplitMode; fast?: boolean }) {
   const panes = PANES[name];
+  const slides = mode === "bottom" && !still;
   const groupRef = useGroupRef();
   // Bottom opens closed and slides the trace in, also when it mounts open (a layout switch).
   const [initial] = useState(() =>
-    open && mode !== "bottom"
-      ? (readSplit(name, mode) ?? fallback(name, mode))
-      : closedLayout(name),
+    open && !slides ? (readSplit(name, mode) ?? fallback(name, mode)) : closedLayout(name),
   );
 
   // In bottom mode the trace slides over the list before the layout opens, and slides back down
@@ -121,14 +123,14 @@ function SplitGroup({
     </>
   );
   const exit = useExit(open, mode === "page" ? pageTree : end, fast);
-  const [sliding, setSliding] = useState(open && mode === "bottom");
+  const [sliding, setSliding] = useState(open && slides);
   // The slide waits two frames, so a heavy mount (a layout switch) cannot use up its 200ms before
   // the first paint; until then the trace waits just below the list.
   const [armed, setArmed] = useState(false);
   const [seenOpen, setSeenOpen] = useState(open);
   if (seenOpen !== open) {
     setSeenOpen(open);
-    setSliding(open && mode === "bottom");
+    setSliding(open && slides);
     setArmed(false);
   }
   useEffect(() => {
@@ -157,8 +159,8 @@ function SplitGroup({
       window.clearTimeout(timer);
     };
   }, [sliding, armed, fast]);
-  const layoutOpen = mode === "bottom" ? open && !sliding : open;
-  const overlay = mode === "bottom" && (sliding || exit.closing);
+  const layoutOpen = slides ? open && !sliding : open;
+  const overlay = slides && (sliding || exit.closing);
 
   useEffect(() => {
     if (mode === "drawer" || mode === "page") {

@@ -8,7 +8,9 @@
     "error_count": 2,
     "user_id": "user-7",
     "tags": [],
-    "scores": []
+    "scores": [],
+    "error_trace_count": 1,
+    "first_input_preview": "What is your refund policy?"
   },
   "turns": [
     {

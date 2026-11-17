@@ -24311,7 +24311,8 @@
           "trace_count",
           "error_count",
           "tags",
-          "scores"
+          "scores",
+          "error_trace_count"
         ],
         "properties": {
           "cost_total": {
@@ -24333,6 +24334,19 @@
             "type": "integer",
             "format": "int64",
             "description": "Sum of the traces' `error_count`."
+          },
+          "error_trace_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Number of the session's traces whose status is `error`."
+          },
+          "first_input_preview": {
+            "type": "string",
+            "description": "`input_preview` of the session's earliest-starting trace. Omitted when there is none."
+          },
+          "last_output_preview": {
+            "type": "string",
+            "description": "`output_preview` of the session's latest-starting trace. Omitted when there is none."
           },
           "scores": {
             "type": "array",

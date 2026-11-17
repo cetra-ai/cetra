@@ -774,7 +774,49 @@ fn session_batch(batch: &RecordBatch) -> Result<Vec<SessionSummary>, ConvertErro
             user_id: opt_string(&user_id, row),
             tags: list_strings(&tags, row, traces::TAGS)?,
             scores: Vec::new(),
+            // Filled by `session_extras` in the route, which has the extra batches.
+            error_trace_count: 0,
+            first_input_preview: None,
+            last_output_preview: None,
         });
+    }
+    Ok(out)
+}
+
+/// The extras of one session, from [`cetra_storage::session_extras`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SessionExtra {
+    /// Traces of the session whose status is `error`.
+    pub(crate) error_trace_count: i64,
+    /// `input_preview` of the earliest-starting trace.
+    pub(crate) first_input_preview: Option<String>,
+    /// `output_preview` of the latest-starting trace.
+    pub(crate) last_output_preview: Option<String>,
+}
+
+/// Session extras keyed by session id. A session without a row is absent.
+pub(crate) fn session_extras(
+    batches: &[RecordBatch],
+) -> Result<HashMap<String, SessionExtra>, ConvertError> {
+    let mut out = HashMap::new();
+    for batch in batches {
+        let session_id = strings(batch, traces::SESSION_ID)?;
+        let error_trace_count = ints(batch, cetra_storage::SESSION_ERROR_TRACE_COUNT)?;
+        let first_input_preview = strings(batch, cetra_storage::SESSION_FIRST_INPUT_PREVIEW)?;
+        let last_output_preview = strings(batch, cetra_storage::SESSION_LAST_OUTPUT_PREVIEW)?;
+        for row in 0..batch.num_rows() {
+            let id = req_string(&session_id, row, traces::SESSION_ID)?;
+            let extra = SessionExtra {
+                error_trace_count: req_i64(
+                    &error_trace_count,
+                    row,
+                    cetra_storage::SESSION_ERROR_TRACE_COUNT,
+                )?,
+                first_input_preview: opt_string(&first_input_preview, row),
+                last_output_preview: opt_string(&last_output_preview, row),
+            };
+            out.insert(id, extra);
+        }
     }
     Ok(out)
 }

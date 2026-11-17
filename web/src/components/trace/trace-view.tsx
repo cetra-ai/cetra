@@ -20,6 +20,7 @@ import { TreeGrid } from "@/components/trace/tree-grid";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { instantNs, nsBetween } from "@/lib/format";
+import type { ListReturn } from "@/lib/list-return";
 import type { TraceMode } from "@/lib/search/traces";
 import { useStream } from "@/lib/sse";
 import { insertSpan } from "@/lib/tree";
@@ -52,6 +53,9 @@ export function TraceView({
   onPrevious,
   onNext,
   layout,
+  backLink,
+  fullPageListReturn,
+  stacked = false,
 }: {
   traceId: string;
   spanId?: string;
@@ -65,6 +69,12 @@ export function TraceView({
   onPrevious?: () => void;
   onNext?: () => void;
   layout?: ReactNode;
+  /** Shown before the trace name in the header. */
+  backLink?: ReactNode;
+  /** The list return the full-page link carries. See `TraceHeader`. */
+  fullPageListReturn?: () => ListReturn | undefined;
+  /** Tree on top and span detail below, for a narrow pane (the session page). */
+  stacked?: boolean;
 }) {
   const { org, project } = useProject();
   const detailOptions = traceDetailQuery(org, project, traceId);
@@ -241,6 +251,8 @@ export function TraceView({
         onPrevious={onPrevious}
         onNext={onNext}
         layout={layout}
+        backLink={backLink}
+        fullPageListReturn={fullPageListReturn}
         live={follow ? { status, onStop: () => setStoppedId(traceId) } : undefined}
         actions={
           <>
@@ -267,6 +279,8 @@ export function TraceView({
         <div className="absolute inset-0">
           <SplitPane
             name={active === "timeline" ? "trace-timeline" : "trace"}
+            mode={stacked ? "bottom" : "split"}
+            still={stacked}
             start={
               active === "transcript" ? (
                 <TranscriptView

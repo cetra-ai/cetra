@@ -54,16 +54,6 @@ import { STORAGE_PREFIX } from "@/product";
 const ROW_HEIGHT = 28;
 /** A row must rest under the pointer this long before its span detail is prefetched. */
 const HOVER_PREFETCH_MS = 100;
-const LIVE_ROW_CSS = `
-@keyframes live-row {
-  from { box-shadow: inset 0 0 0 999px color-mix(in oklch, var(--primary) 28%, transparent); }
-  to { box-shadow: inset 0 0 0 999px transparent; }
-}
-.live-row { animation: live-row 1.5s ease-out; }
-@media (prefers-reduced-motion: reduce) {
-  .live-row { animation: none; }
-}
-`;
 const OVERSCAN = 12;
 // Duration, Tokens, Cost and Timeline; the Name column is sized apart (auto or dragged).
 const METRIC_COLUMNS = "72px 64px 72px";
@@ -509,7 +499,6 @@ export function TreeGrid({
           onPointerMove={onPointerMove}
           onPointerLeave={() => setNeedle(null)}
         >
-          <style>{LIVE_ROW_CSS}</style>
           {shownNeedle ? (
             <div
               className="pointer-events-none absolute top-0 bottom-0 z-10 w-px bg-foreground/70"

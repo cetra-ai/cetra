@@ -42,7 +42,10 @@ export function useDefaultSavedView(
   const views = useQuery(savedViewsQuery(org, project, kind));
   const me = useQuery(meQuery);
   const empty = Object.keys(search).length === 0;
-  const entered = entryKey === mountKey.current || location.state.applyDefaultView === true;
+  // A return from a detail page restores the list's own search, so the default view does not apply.
+  const restoring = location.state.listRestore !== undefined;
+  const entered =
+    !restoring && (entryKey === mountKey.current || location.state.applyDefaultView === true);
   const pending = empty && entered && appliedKey.current !== entryKey;
   const settled = views.isFetched && me.isFetched;
   const match =

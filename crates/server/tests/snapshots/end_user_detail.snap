@@ -76,7 +76,8 @@ expression: "serde_json::to_string_pretty(&detail).unwrap()"
           },
           "source": "human"
         }
-      ]
+      ],
+      "error_trace_count": 0
     }
   ]
 }

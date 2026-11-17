@@ -1523,3 +1523,35 @@ it("prefetches the neighbours of an open trace once", async () => {
     server.events.removeListener("request:start", onStart);
   }
 });
+
+it("returns from the full trace page to the same list search", async () => {
+  const { router, user } = await renderApp("/acme/support-bot/traces?sort=duration&order=asc");
+  const grid = await screen.findByRole("grid", { name: "Traces" });
+  const firstRow = grid.querySelector<HTMLElement>('[role="row"][aria-rowindex="2"]');
+  if (!firstRow) {
+    throw new Error("no first trace row");
+  }
+  fireEvent.click(firstRow);
+  await user.click(await screen.findByRole("link", { name: "Open full page" }));
+  await waitFor(() => {
+    expect(router.state.location.pathname).toMatch(/\/traces\/[0-9a-f]{32}$/);
+  });
+  await user.click(await screen.findByRole("link", { name: "Back to traces" }));
+  await waitFor(() => {
+    expect(router.state.location.pathname).toBe("/acme/support-bot/traces");
+  });
+  expect(router.state.location.search).toMatchObject({ sort: "duration", order: "asc" });
+});
+
+it("does not apply the default view on a return from a detail page", async () => {
+  const { router } = await renderApp("/acme/support-bot/sessions");
+  await screen.findByRole("grid", { name: "Sessions" });
+  await router.navigate({
+    to: "/$org/$project/traces",
+    params: { org: "acme", project: "support-bot" },
+    state: { listRestore: {} },
+  });
+  const traces = await screen.findByRole("grid", { name: "Traces" });
+  expect(within(traces).getAllByRole("row").length).toBeGreaterThan(1);
+  expect(router.state.location.search).toEqual({});
+});

@@ -1,5 +1,5 @@
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useLocation } from "@tanstack/react-router";
 import { Trash2, Waypoints } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { problemOf } from "@/api/problem";
@@ -46,6 +46,14 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { formatDuration } from "@/lib/format";
 import { getTraceMaximized, setTraceMaximized, useListLayout } from "@/lib/list-layout";
+import {
+  anchorOf,
+  type ListReturn,
+  listReturnFor,
+  type RowAnchor,
+  rememberListReturn,
+  useRestoredHighlight,
+} from "@/lib/list-return";
 import { atLeast } from "@/lib/roles";
 import {
   parseTracesSearch,
@@ -194,6 +202,22 @@ function TracesPage() {
     });
   }
   const layout = useListLayout();
+  const listRestore = useLocation().state.listRestore;
+  const restoreAnchor = useMemo(() => anchorOf(listRestore), [listRestore]);
+  const restoredHighlight = useRestoredHighlight(listRestore?.openedId);
+  const lastAnchor = useRef<RowAnchor | undefined>(undefined);
+  const onScrollAnchor = useCallback((anchor: RowAnchor) => {
+    lastAnchor.current = anchor;
+  }, []);
+  // The full-page link reads this when it is followed, so the list's position is current.
+  function captureFullPageReturn(): ListReturn | undefined {
+    if (search.trace === undefined) {
+      return undefined;
+    }
+    const ret = listReturnFor("traces", search, lastAnchor.current, search.trace);
+    rememberListReturn(ret);
+    return ret;
+  }
   const traceOpen = search.trace !== undefined;
   const listScroll = useRef(0);
   const wasOpen = useRef(traceOpen);
@@ -298,6 +322,13 @@ function TracesPage() {
     selectedId: search.trace,
     ready: !hold && list.data !== undefined && !filterError && !onboarding && !probing,
   });
+  const highlighted = useMemo(
+    () =>
+      restoredHighlight.size === 0
+        ? live.highlighted
+        : new Set([...live.highlighted, ...restoredHighlight]),
+    [live.highlighted, restoredHighlight],
+  );
   useEffect(() => {
     if (search.live !== 1 || reason === undefined) {
       return;
@@ -501,6 +532,8 @@ function TracesPage() {
                         });
                       }}
                       onRowHover={prefetchTrace}
+                      onScrollAnchor={onScrollAnchor}
+                      restoreAnchor={restoreAnchor}
                       onSelectionMove={(row) => {
                         void navigate({
                           to: "/$org/$project/traces",
@@ -526,7 +559,7 @@ function TracesPage() {
                           },
                         });
                       }}
-                      highlightedRowIds={live.highlighted}
+                      highlightedRowIds={highlighted}
                       notice={
                         live.pending > 0 ? (
                           <Button type="button" size="xs" variant="secondary" onClick={live.reveal}>
@@ -576,6 +609,7 @@ function TracesPage() {
                   });
                 }}
                 onAddFilter={onFilter}
+                fullPageListReturn={captureFullPageReturn}
                 onPrevious={previousRow ? () => openTrace(previousRow.trace_id) : undefined}
                 onNext={nextRow ? () => openTrace(nextRow.trace_id) : undefined}
                 layout={<TraceLayoutControls />}

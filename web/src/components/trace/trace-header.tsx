@@ -33,6 +33,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { categoryClasses, environmentClasses } from "@/lib/colors";
 import { invalidateProjectReads } from "@/lib/deletions";
 import { formatCost, formatDuration, formatTokens } from "@/lib/format";
+import type { ListReturn } from "@/lib/list-return";
 import { atLeast } from "@/lib/roles";
 import type { TraceMode } from "@/lib/search/traces";
 import type { StreamStatus } from "@/lib/sse";
@@ -54,6 +55,8 @@ export function TraceHeader({
   live,
   actions,
   layout,
+  backLink,
+  fullPageListReturn,
 }: {
   trace: Schema<"TraceSummary">;
   spanId?: string;
@@ -68,6 +71,10 @@ export function TraceHeader({
   actions?: ReactNode;
   /** Layout switcher, shown when the trace is open beside a list. */
   layout?: ReactNode;
+  /** Shown before the trace name, e.g. the link back to the list on the full page. */
+  backLink?: ReactNode;
+  /** The list return the full-page link carries, read when the link is followed. */
+  fullPageListReturn?: () => ListReturn | undefined;
 }) {
   const { org, project, ref, data } = useProject();
   const search = pageSearch(spanId, mode);
@@ -108,6 +115,7 @@ export function TraceHeader({
     <TooltipProvider>
       <section aria-label="Trace" className="flex shrink-0 flex-col gap-2 border-b px-4 py-3">
         <div className="flex min-w-0 items-center gap-2">
+          {backLink}
           <span className="min-w-0 truncate text-[15px] font-semibold select-text">
             {trace.name}
           </span>
@@ -161,6 +169,7 @@ export function TraceHeader({
                 to="/$org/$project/traces/$traceId"
                 params={{ org, project, traceId: trace.trace_id }}
                 search={search}
+                state={(current) => ({ ...current, listReturn: fullPageListReturn?.() })}
                 aria-label="Open full page"
                 className={cn(buttonVariants({ variant: "ghost", size: "icon-xs" }))}
               >
