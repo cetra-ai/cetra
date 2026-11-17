@@ -43,7 +43,7 @@ use cetra_server::api::metrics::MetricsResponse;
 use cetra_server::api::model_prices::{ModelPrice, ModelPriceInput, ModelPriceResolution};
 use cetra_server::api::online_rules::{
     CreateOnlineRuleRequest, OnlineRule, OnlineRulePage, OnlineRulePreview,
-    OnlineRulePreviewRequest, UpdateOnlineRuleRequest,
+    OnlineRulePreviewRequest, OnlineRuleStatsResponse, UpdateOnlineRuleRequest,
 };
 use cetra_server::api::openapi::openapi;
 use cetra_server::api::org_sso::OrgSso;
@@ -437,6 +437,7 @@ fn static_files_match_their_types() {
     roundtrip::<ModelPrice>("static/model-price.json");
     roundtrip::<ModelPriceResolution>("static/model-price-resolution.json");
     roundtrip::<OnlineRulePage>("static/online-rules.json");
+    roundtrip::<OnlineRuleStatsResponse>("static/online-rule-stats.json");
     roundtrip::<OnlineRule>("static/online-rule.json");
     roundtrip::<OnlineRule>("static/online-rule-resumed.json");
     roundtrip::<OnlineRulePreview>("static/online-rule-preview.json");
@@ -660,6 +661,7 @@ fn generated_files_roundtrip() {
             "resolve_model_price" => roundtrip::<ModelPriceResolution>(&example.file),
             "post_model_price" => roundtrip::<ModelPrice>(&example.file),
             "list_online_rules" => roundtrip::<OnlineRulePage>(&example.file),
+            "get_online_rule_stats" => roundtrip::<OnlineRuleStatsResponse>(&example.file),
             "get_online_rule" | "post_online_rule" | "post_online_rule_resume" => {
                 roundtrip::<OnlineRule>(&example.file);
             }

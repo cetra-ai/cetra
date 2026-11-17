@@ -218,12 +218,30 @@
   {
     "operation_id": "get_online_rule",
     "path_params": {
+      "id": "01900000-0000-7000-8000-000000000701"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/online-rule-0701.json"
+  },
+  {
+    "operation_id": "get_online_rule",
+    "path_params": {
       "id": "01900000-0000-7000-8000-000000000700"
     },
     "query": {},
     "status": 200,
     "content_type": "application/json",
     "file": "static/online-rule.json"
+  },
+  {
+    "operation_id": "get_online_rule_stats",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/online-rule-stats.json"
   },
   {
     "operation_id": "get_org",

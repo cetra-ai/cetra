@@ -13425,6 +13425,109 @@
         }
       }
     },
+    "/api/v1/projects/{project}/online-rules/stats": {
+      "get": {
+        "tags": [
+          "evaluation"
+        ],
+        "summary": "Get online rule stats",
+        "description": "Any project member can read. Jobs and scores cover the last 24 hours, per hour: the finished jobs (`done`, `failed`, `skipped`) by finished time, and the live scores of each rule read with its evaluator's current output type (D-I-50). One entry per rule, none left out. Not cached.",
+        "operationId": "get_online_rule_stats",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One entry per online rule.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OnlineRuleStatsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is busy or a dependency is unavailable. Retry later.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{project}/online-rules/{id}": {
       "get": {
         "tags": [
@@ -22915,6 +23018,54 @@
         },
         "additionalProperties": false
       },
+      "OnlineRuleStats": {
+        "type": "object",
+        "description": "The stats of one online rule (D-I-50).",
+        "required": [
+          "rule_id",
+          "jobs_hourly",
+          "scores"
+        ],
+        "properties": {
+          "jobs_hourly": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RuleJobsHour"
+            },
+            "description": "Its finished jobs in the window, per hour, 24 points, oldest first."
+          },
+          "rule_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The rule."
+          },
+          "scores": {
+            "$ref": "#/components/schemas/RuleScoreStats",
+            "description": "Its scores in the window."
+          }
+        }
+      },
+      "OnlineRuleStatsResponse": {
+        "type": "object",
+        "description": "`GET /api/v1/projects/{project}/online-rules/stats` response (D-I-50).",
+        "required": [
+          "window",
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OnlineRuleStats"
+            },
+            "description": "One entry per online rule, ordered like the rule list (by name, then id). Rules without\njobs or scores are included with zeros."
+          },
+          "window": {
+            "$ref": "#/components/schemas/StatsWindow",
+            "description": "The 24 hours the figures cover."
+          }
+        }
+      },
       "OrgEntitlements": {
         "type": "object",
         "description": "`GET /api/v1/orgs/{org}/entitlements` (D-P-15).",
@@ -23991,6 +24142,83 @@
           "value_str": {
             "type": "string",
             "description": "The label of a categorical score or the text of a text score. Omitted when none."
+          }
+        }
+      },
+      "RuleJobsHour": {
+        "type": "object",
+        "description": "The finished jobs of one online rule in one hour.",
+        "required": [
+          "time",
+          "done",
+          "failed",
+          "skipped"
+        ],
+        "properties": {
+          "done": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Done jobs.",
+            "minimum": 0
+          },
+          "failed": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Failed jobs.",
+            "minimum": 0
+          },
+          "skipped": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Skipped jobs.",
+            "minimum": 0
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Start of the hour. JSON is RFC 3339."
+          }
+        }
+      },
+      "RuleScoreStats": {
+        "type": "object",
+        "description": "The scores of one online rule in the window. Read with the rule's evaluator's current output\ntype (D-I-48).",
+        "required": [
+          "data_type",
+          "count",
+          "hourly"
+        ],
+        "properties": {
+          "average": {
+            "type": "number",
+            "format": "double",
+            "description": "Mean of the numeric values. Numeric outputs only. Omitted when there is no numeric value."
+          },
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Live scores in the window, of any type.",
+            "minimum": 0
+          },
+          "data_type": {
+            "$ref": "#/components/schemas/ScoreDataType",
+            "description": "The output type of the rule's evaluator."
+          },
+          "hourly": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MetricPoint"
+            },
+            "description": "Per hour: the average (numeric) or pass rate (boolean), 24 points, oldest first. An hour\nwithout a value has no `value`."
+          },
+          "pass_rate": {
+            "type": "number",
+            "format": "double",
+            "description": "Share of `true` values, 0 to 1. Boolean outputs only. Omitted when there is no value."
+          },
+          "top_category": {
+            "$ref": "#/components/schemas/CategoryCount",
+            "description": "The most frequent label. Categorical outputs only. Omitted when there is none."
           }
         }
       },

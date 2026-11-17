@@ -7,6 +7,7 @@ import { renderApp } from "@/test/render";
 import scoresFixture from "../../../../../../../fixtures/api/responses/scores.json";
 import backfillsFixture from "../../../../../../../fixtures/api/static/backfills.json";
 import ruleFixture from "../../../../../../../fixtures/api/static/online-rule.json";
+import onlineRuleStatsFixture from "../../../../../../../fixtures/api/static/online-rule-stats.json";
 import projectFixture from "../../../../../../../fixtures/api/static/project.json";
 
 const RULE_ID = "01900000-0000-7000-8000-000000000700";
@@ -14,6 +15,11 @@ const SPAN_RULE_ID = "01900000-0000-7000-8000-000000000701";
 const RULE_URL = `/acme/support-bot/online-rules/${RULE_ID}`;
 const SPAN_RULE_URL = `/acme/support-bot/online-rules/${SPAN_RULE_ID}`;
 const NOW = "2026-01-01T11:00:00.000000000Z";
+
+// Single-rule overrides below also match the stats path, so every one of them answers stats first.
+const STATS = http.get("/api/v1/projects/:project/online-rules/stats", () =>
+  HttpResponse.json(onlineRuleStatsFixture),
+);
 
 /** The rule fixture with the second rule's pause: the span rule paused for errors. */
 function pausedRule(overrides: Record<string, unknown>) {
@@ -41,7 +47,8 @@ it("shows the rule, its spend and its counts", async () => {
 
   expect(await screen.findByRole("heading", { name: "Relevance on answers" })).toBeInTheDocument();
   expect(screen.getByText("Active")).toBeInTheDocument();
-  expect(screen.getByText("$0.42 spent of $5.00 today")).toBeInTheDocument();
+  expect(screen.getByText("$0.42 / $5.00 today")).toBeInTheDocument();
+  expect(screen.getByText("Traces · status = 'ok' · 25 %")).toBeInTheDocument();
   expect(screen.getByText("+$0.01 reserved")).toBeInTheDocument();
   expect(screen.getByRole("progressbar", { name: "Spend" })).toHaveAttribute("aria-valuenow", "8");
 
@@ -60,6 +67,7 @@ it("shows the rule, its spend and its counts", async () => {
 it("shows the errors banner and resumes the rule", async () => {
   let resumed = false;
   server.use(
+    STATS,
     http.get("/api/v1/projects/:project/online-rules/:id", () =>
       HttpResponse.json(resumed ? pausedRule({ paused_reason: undefined }) : pausedRule({})),
     ),
@@ -83,6 +91,7 @@ it("shows the errors banner and resumes the rule", async () => {
 
 it("names the connection in the connection banner", async () => {
   server.use(
+    STATS,
     http.get("/api/v1/projects/:project/online-rules/:id", () =>
       HttpResponse.json(
         pausedRule({
@@ -108,6 +117,7 @@ it("names the connection in the connection banner", async () => {
 
 it("says when a budget pause ends", async () => {
   server.use(
+    STATS,
     http.get("/api/v1/projects/:project/online-rules/:id", () =>
       HttpResponse.json(
         pausedRule({
@@ -162,6 +172,7 @@ it("shows the score distribution of the rule's scores", async () => {
 it("shows neither edit nor resume to a viewer", async () => {
   server.use(
     projectAs("viewer"),
+    STATS,
     http.get("/api/v1/projects/:project/online-rules/:id", () => HttpResponse.json(pausedRule({}))),
   );
   await renderApp(SPAN_RULE_URL);
@@ -173,6 +184,7 @@ it("shows neither edit nor resume to a viewer", async () => {
 
 it("shows not found for an unknown rule", async () => {
   server.use(
+    STATS,
     http.get("/api/v1/projects/:project/online-rules/:id", () => problemResponse(404, "not_found")),
   );
   await renderApp(RULE_URL);
@@ -182,6 +194,7 @@ it("shows not found for an unknown rule", async () => {
 
 it("keeps the page when the evaluator query fails", async () => {
   server.use(
+    STATS,
     http.get("/api/v1/projects/:project/online-rules/:id", () => HttpResponse.json(pausedRule({}))),
     http.get("/api/v1/projects/:project/evaluators/:id", () => problemResponse(500, "internal")),
   );
@@ -194,6 +207,7 @@ it("keeps the page when the evaluator query fails", async () => {
 
 it("keeps the page and shows an alert when the scores query fails", async () => {
   server.use(
+    STATS,
     http.get("/api/v1/projects/:project/online-rules/:id", () => HttpResponse.json(pausedRule({}))),
     http.get("/api/v1/projects/:project/scores", () => problemResponse(500, "internal")),
   );
@@ -207,6 +221,7 @@ it("keeps the page and shows an alert when the scores query fails", async () => 
 
 it("keeps the page and shows an alert when the eval jobs query fails", async () => {
   server.use(
+    STATS,
     http.get("/api/v1/projects/:project/online-rules/:id", () => HttpResponse.json(pausedRule({}))),
     http.get("/api/v1/projects/:project/eval-jobs", () => problemResponse(500, "internal")),
   );
@@ -222,6 +237,7 @@ it("reloads the eval jobs after a resume", async () => {
   let jobReads = 0;
   let resumed = false;
   server.use(
+    STATS,
     http.get("/api/v1/projects/:project/online-rules/:id", () =>
       HttpResponse.json(resumed ? pausedRule({ paused_reason: undefined }) : pausedRule({})),
     ),
@@ -253,6 +269,7 @@ it("lets a viewer see the backfills without the button", async () => {
 
 it("does not backfill a disabled rule", async () => {
   server.use(
+    STATS,
     http.get("/api/v1/projects/:project/online-rules/:id", () =>
       HttpResponse.json({ ...ruleFixture, enabled: false }),
     ),
@@ -265,6 +282,7 @@ it("does not backfill a disabled rule", async () => {
 
 it("does not backfill a paused rule", async () => {
   server.use(
+    STATS,
     http.get("/api/v1/projects/:project/online-rules/:id", () =>
       HttpResponse.json({
         ...ruleFixture,
@@ -297,4 +315,20 @@ it("does not start a backfill while one runs", async () => {
     expect(screen.getByRole("button", { name: "Run on existing data" })).toBeDisabled(),
   );
   expect(screen.getByText("A backfill of this rule is running.")).toBeInTheDocument();
+});
+
+it("shows the rule's score trend and its hourly jobs for the last 24 hours", async () => {
+  await renderApp(RULE_URL);
+
+  const scores = await screen.findByRole("region", { name: "Scores, last 24 hours" });
+  expect(await within(scores).findByText("0.83")).toBeInTheDocument();
+  expect(within(scores).getByText("36 scores · 24 h")).toBeInTheDocument();
+  expect(
+    within(scores).getByRole("img", { name: "Average score per hour, last 24 h" }),
+  ).toBeInTheDocument();
+
+  const counts = screen.getByRole("region", { name: "Last 24 hours" });
+  expect(
+    await within(counts).findByRole("img", { name: "Finished jobs per hour, last 24 h" }),
+  ).toBeInTheDocument();
 });
