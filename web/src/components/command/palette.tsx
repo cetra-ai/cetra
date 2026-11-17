@@ -7,6 +7,7 @@ import { readRecent } from "@/components/command/recent-traces";
 import { ShortcutsHelp } from "@/components/command/shortcuts-help";
 import { projectNav } from "@/components/shell/nav";
 import { useTheme } from "@/components/theme-provider";
+import { PALETTE_OPTIONS } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import {
   Command,
@@ -51,7 +52,7 @@ export function CommandPalette() {
   const navigate = useNavigate();
   const { org } = useParams({ from: "/$org" });
   const project = useMatch({ from: "/$org/$project", shouldThrow: false })?.params.project;
-  const { theme, setTheme } = useTheme();
+  const { theme, setTheme, palette: colours, setPalette: setColours } = useTheme();
   const zone = useTimeZone();
   const projects = $api.useInfiniteQuery(
     "get",
@@ -283,6 +284,21 @@ export function CommandPalette() {
                   data-checked={theme === option.value}
                   onSelect={() => {
                     setTheme(option.value);
+                    closePalette();
+                  }}
+                >
+                  {option.label}
+                </CommandItem>
+              ))}
+            </CommandGroup>
+            <CommandGroup heading="Palette">
+              {PALETTE_OPTIONS.map((option) => (
+                <CommandItem
+                  key={option.value}
+                  value={`${option.label} palette`}
+                  data-checked={colours === option.value}
+                  onSelect={() => {
+                    setColours(option.value);
                     closePalette();
                   }}
                 >

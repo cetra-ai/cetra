@@ -67,13 +67,13 @@ const BAD = { data_type: "numeric", value: 0.1 } as const;
 it("colours a value good when its definition is higher-is-better", async () => {
   serve([definition({})]);
   await renderBadge(<ScoreBadge name="helpfulness" value={GOOD} text="0.90" />);
-  expect(screen.getByText("0.90")).toHaveClass("bg-status-ok/15", "text-status-ok", "px-1");
+  expect(screen.getByText("0.90")).toHaveClass("tone-good", "px-1");
 });
 
 it("colours a low value bad", async () => {
   serve([definition({})]);
   await renderBadge(<ScoreBadge name="helpfulness" value={BAD} text="0.10" />);
-  expect(screen.getByText("0.10")).toHaveClass("bg-status-error/15", "text-status-error");
+  expect(screen.getByText("0.10")).toHaveClass("tone-bad");
 });
 
 it("shows plain text when there is no definition or it has no direction", async () => {
@@ -99,7 +99,7 @@ it("colours a user's boolean average from the share of true", async () => {
     }),
   ]);
   await renderBadge(<ScoreAverageBadge name="thumbs" avg={0.2} dataType="boolean" text="20%" />);
-  expect(screen.getByText("20%")).toHaveClass("bg-status-error/15");
+  expect(screen.getByText("20%")).toHaveClass("tone-bad");
 });
 
 function traceRow(value: Schema<"ScoreValue">): Schema<"TraceSummary"> {
@@ -158,13 +158,13 @@ async function renderTraceScore(value: Schema<"ScoreValue">) {
 it("colours a trace list score cell by its definition", async () => {
   serve([definition({})]);
   await renderTraceScore({ data_type: "numeric", value: 0.9 });
-  expect(screen.getByText("0.90")).toHaveClass("bg-status-ok/15", "text-status-ok");
+  expect(screen.getByText("0.90")).toHaveClass("tone-good");
 });
 
 it("colours a low trace list score cell bad", async () => {
   serve([definition({})]);
   await renderTraceScore({ data_type: "numeric", value: 0.1 });
-  expect(screen.getByText("0.10")).toHaveClass("bg-status-error/15", "text-status-error");
+  expect(screen.getByText("0.10")).toHaveClass("tone-bad");
 });
 
 it("shows a trace list score cell without a pill when there is no definition", async () => {

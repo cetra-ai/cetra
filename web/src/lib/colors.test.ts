@@ -3,6 +3,7 @@ import {
   CATEGORY_CLASSES,
   categoryClasses,
   categoryIndex,
+  environmentClasses,
   modelProvider,
   providerClasses,
 } from "@/lib/colors";
@@ -12,12 +13,12 @@ it("gives every category its own full class names", () => {
   expect(CATEGORY_CLASSES[0]).toEqual({
     text: "text-cat-1",
     dot: "bg-cat-1",
-    pill: "bg-cat-1/12 text-cat-1 border-cat-1/30",
+    pill: "pill [--pill:var(--cat-1)]",
   });
   expect(CATEGORY_CLASSES[7]).toEqual({
     text: "text-cat-8",
     dot: "bg-cat-8",
-    pill: "bg-cat-8/12 text-cat-8 border-cat-8/30",
+    pill: "pill [--pill:var(--cat-8)]",
   });
 });
 
@@ -67,4 +68,12 @@ it("gives the fixed providers their fixed colours", () => {
 it("falls back to the hash for an unknown provider", () => {
   expect(providerClasses("qwen-7b")).toBe(categoryClasses("qwen"));
   expect(providerClasses("qwen-7b")).toBe(CATEGORY_CLASSES[categoryIndex("qwen")]);
+});
+
+it("gives production the first colour and keeps it from every other environment", () => {
+  expect(environmentClasses("production")).toBe(CATEGORY_CLASSES[0]);
+  expect(environmentClasses("Prod")).toBe(CATEGORY_CLASSES[0]);
+  for (const name of ["staging", "dev", "qa", "local", "preview", "eu-west"]) {
+    expect(environmentClasses(name)).not.toBe(CATEGORY_CLASSES[0]);
+  }
 });

@@ -8,14 +8,14 @@ export interface CategoryClasses {
 }
 
 export const CATEGORY_CLASSES: readonly CategoryClasses[] = [
-  { text: "text-cat-1", dot: "bg-cat-1", pill: "bg-cat-1/12 text-cat-1 border-cat-1/30" },
-  { text: "text-cat-2", dot: "bg-cat-2", pill: "bg-cat-2/12 text-cat-2 border-cat-2/30" },
-  { text: "text-cat-3", dot: "bg-cat-3", pill: "bg-cat-3/12 text-cat-3 border-cat-3/30" },
-  { text: "text-cat-4", dot: "bg-cat-4", pill: "bg-cat-4/12 text-cat-4 border-cat-4/30" },
-  { text: "text-cat-5", dot: "bg-cat-5", pill: "bg-cat-5/12 text-cat-5 border-cat-5/30" },
-  { text: "text-cat-6", dot: "bg-cat-6", pill: "bg-cat-6/12 text-cat-6 border-cat-6/30" },
-  { text: "text-cat-7", dot: "bg-cat-7", pill: "bg-cat-7/12 text-cat-7 border-cat-7/30" },
-  { text: "text-cat-8", dot: "bg-cat-8", pill: "bg-cat-8/12 text-cat-8 border-cat-8/30" },
+  { text: "text-cat-1", dot: "bg-cat-1", pill: "pill [--pill:var(--cat-1)]" },
+  { text: "text-cat-2", dot: "bg-cat-2", pill: "pill [--pill:var(--cat-2)]" },
+  { text: "text-cat-3", dot: "bg-cat-3", pill: "pill [--pill:var(--cat-3)]" },
+  { text: "text-cat-4", dot: "bg-cat-4", pill: "pill [--pill:var(--cat-4)]" },
+  { text: "text-cat-5", dot: "bg-cat-5", pill: "pill [--pill:var(--cat-5)]" },
+  { text: "text-cat-6", dot: "bg-cat-6", pill: "pill [--pill:var(--cat-6)]" },
+  { text: "text-cat-7", dot: "bg-cat-7", pill: "pill [--pill:var(--cat-7)]" },
+  { text: "text-cat-8", dot: "bg-cat-8", pill: "pill [--pill:var(--cat-8)]" },
 ];
 
 const FNV_OFFSET_BASIS = 0x811c9dc5;
@@ -33,6 +33,19 @@ export function categoryIndex(name: string): number {
 
 export function categoryClasses(name: string): CategoryClasses {
   return CATEGORY_CLASSES[categoryIndex(name)] as CategoryClasses;
+}
+
+/**
+ * Colours of an environment: production is always the first category colour (the
+ * dashboard's blue), and other environments never take it.
+ */
+export function environmentClasses(environment: string): CategoryClasses {
+  const name = environment.toLowerCase();
+  if (name === "production" || name === "prod") {
+    return CATEGORY_CLASSES[0] as CategoryClasses;
+  }
+  const index = categoryIndex(environment);
+  return CATEGORY_CLASSES[index === 0 ? 1 : index] as CategoryClasses;
 }
 
 /** The provider of a model name, from its well-known prefixes or the text before the first `-` or `/`. */

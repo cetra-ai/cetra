@@ -24,8 +24,8 @@ type Props = {
 export type HistogramRow = { time: number; ok: number; errors: number };
 
 const CONFIG = {
-  ok: { label: "OK", color: "var(--status-ok)" },
-  errors: { label: "Errors", color: "var(--status-error)" },
+  ok: { label: "OK", color: "var(--chart-ok)" },
+  errors: { label: "Errors", color: "var(--chart-error)" },
 } satisfies ChartConfig;
 
 /**
@@ -88,7 +88,7 @@ export function TracesHistogram({
     return null;
   }
   if (!query.data) {
-    return <div role="img" aria-label="Traces over time" className="h-16 w-full" />;
+    return <div role="img" aria-label="Traces over time" className="h-20 w-full" />;
   }
 
   const bucketNs = query.data.bucket_ns;
@@ -120,11 +120,11 @@ export function TracesHistogram({
   }
 
   return (
-    <div role="img" aria-label="Traces over time" className="h-16 w-full select-none">
+    <div role="img" aria-label="Traces over time" className="h-20 w-full select-none">
       <ChartContainer
         config={CONFIG}
-        initialDimension={{ width: 640, height: 64 }}
-        className="aspect-auto h-16 w-full"
+        initialDimension={{ width: 640, height: 80 }}
+        className="aspect-auto h-20 w-full"
       >
         <BarChart
           data={rows}
@@ -152,7 +152,8 @@ export function TracesHistogram({
             tick={{ fontSize: 10, fill: "var(--muted-foreground)" }}
             tickFormatter={(value) => formatTick(value, zone, tickStyle)}
             minTickGap={40}
-            height={14}
+            height={20}
+            tickMargin={4}
             axisLine={false}
             tickLine={false}
           />
@@ -161,17 +162,11 @@ export function TracesHistogram({
             cursor={{ fill: "var(--muted-foreground)", fillOpacity: 0.12 }}
             content={<HistogramTooltip zone={zone} />}
           />
-          <Bar
-            dataKey="ok"
-            stackId="traces"
-            fill="var(--status-ok)"
-            fillOpacity={0.7}
-            isAnimationActive={false}
-          />
+          <Bar dataKey="ok" stackId="traces" fill="var(--chart-ok)" isAnimationActive={false} />
           <Bar
             dataKey="errors"
             stackId="traces"
-            fill="var(--status-error)"
+            fill="var(--chart-error)"
             isAnimationActive={false}
           />
           {low !== undefined && high !== undefined && rows[low] && rows[high] ? (

@@ -26,7 +26,7 @@ import { StatusDot } from "@/components/status-dot";
 import { TimeText } from "@/components/time-text";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { categoryClasses, providerClasses } from "@/lib/colors";
+import { categoryClasses, environmentClasses, providerClasses } from "@/lib/colors";
 import { formatCost, formatDuration, formatTokens } from "@/lib/format";
 import { TRACE_COLUMN_IDS, type TraceColumnId } from "@/lib/search/traces";
 
@@ -333,7 +333,7 @@ function envPill(env: string | undefined, onFilter?: (conjunct: string) => void)
       <span
         className={cn(
           "inline-flex rounded-sm border px-1.5 text-[11px]",
-          categoryClasses(env).pill,
+          environmentClasses(env).pill,
         )}
       >
         {env}

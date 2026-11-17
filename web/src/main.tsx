@@ -6,7 +6,9 @@ import "@fontsource-variable/inter";
 import "@fontsource-variable/jetbrains-mono";
 import { createAppQueryClient } from "@/api/client";
 import {
+  applyPalette,
   applyResolvedTheme,
+  readStoredPalette,
   readStoredTheme,
   resolveTheme,
   ThemeProvider,
@@ -16,6 +18,7 @@ import "./styles.css";
 
 async function main(): Promise<void> {
   applyResolvedTheme(resolveTheme(readStoredTheme()));
+  applyPalette(readStoredPalette());
 
   if (import.meta.env.DEV && import.meta.env.MODE !== "server") {
     const { isCommonAssetRequest } = await import("msw");

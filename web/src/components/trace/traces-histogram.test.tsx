@@ -103,7 +103,7 @@ it("renders the chart from the metrics response", async () => {
   });
 });
 
-it("renders an empty 64px box while loading", () => {
+it("renders an empty 80px box while loading", () => {
   server.use(
     http.get("*/metrics", async () => {
       await new Promise(() => undefined);
@@ -112,7 +112,7 @@ it("renders an empty 64px box while loading", () => {
   );
   renderChart();
   const chart = screen.getByRole("img", { name: "Traces over time" });
-  expect(chart).toHaveClass("h-16");
+  expect(chart).toHaveClass("h-20");
   expect(chart).toBeEmptyDOMElement();
 });
 

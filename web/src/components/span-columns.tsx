@@ -20,7 +20,7 @@ import { StatusDot } from "@/components/status-dot";
 import { TimeText } from "@/components/time-text";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { categoryClasses, providerClasses } from "@/lib/colors";
+import { categoryClasses, environmentClasses, providerClasses } from "@/lib/colors";
 import { formatCost, formatDuration, formatTokens } from "@/lib/format";
 import { SPAN_COLUMN_IDS, type SpanColumnId } from "@/lib/search/spans";
 
@@ -232,7 +232,7 @@ function spanColumnDefs(): DataTableColumn<Schema<"SpanSummary">>[] {
           <span
             className={cn(
               "inline-flex rounded-sm border px-1.5 text-[11px]",
-              categoryClasses(env).pill,
+              environmentClasses(env).pill,
             )}
           >
             {env}

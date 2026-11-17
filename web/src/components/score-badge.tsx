@@ -7,9 +7,9 @@ import { useProject } from "@/components/shell/project-context";
 import { averageGoodness, goodness, type ScoreTone, toneOf } from "@/lib/score-tone";
 
 const TONE_CLASSES: Record<ScoreTone, string> = {
-  good: "bg-status-ok/15 text-status-ok",
-  mid: "bg-status-warn/15 text-status-warn",
-  bad: "bg-status-error/15 text-status-error",
+  good: "tone-good",
+  mid: "tone-mid",
+  bad: "tone-bad",
 };
 
 /** The live definition of `name` in the current project, if it has loaded. */
