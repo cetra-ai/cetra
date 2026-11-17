@@ -1,17 +1,14 @@
 // SPDX-License-Identifier: Elastic-2.0
 import { useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, useState } from "react";
+import { useState } from "react";
 import { $api } from "@/api/client";
 import { fieldErrors, problemMessage } from "@/api/problem";
 import type { Schema } from "@/api/types";
-import { ConfirmDialog } from "@/components/confirm-dialog";
-import { CopyButton } from "@/components/copy-button";
-import { DisabledReason } from "@/components/disabled-reason";
-import { FormError } from "@/components/form/form-error";
-import { FormSuccess } from "@/components/form/form-success";
-import { SubmitButton } from "@/components/form/submit-button";
+import { DangerZone } from "@/components/deletions/danger-zone";
 import { TextField } from "@/components/form/text-field";
-import { Button } from "@/components/ui/button";
+import { ReadOnlyCodeField } from "@/components/settings/read-only-code-field";
+import { SettingsCard, SettingsFormCard } from "@/components/settings/settings-card";
+import { TypeToConfirmDialog } from "@/components/type-to-confirm-dialog";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -29,7 +26,12 @@ const JIT_ROLE_LABELS: Record<Schema<"JitRole">, string> = {
 };
 const LOCKED_REASON = "Needs the Teams add-on or an enterprise licence";
 
-/** The org's identity provider: its settings, the callback URL and removal (D-P-52). */
+type Field = "issuer" | "clientId" | "clientSecret";
+
+/**
+ * The org's identity provider: its settings and the callback URL (D-P-52). Removal is in
+ * `ProviderRemoval`. The parent remounts this form when the provider is created or removed.
+ */
 export function ProviderSection({
   org,
   sso,
@@ -47,9 +49,27 @@ export function ProviderSection({
   const [clientSecret, setClientSecret] = useState("");
   const [jitRole, setJitRole] = useState<Schema<"JitRole">>(provider?.jit_role ?? "viewer");
   const [saved, setSaved] = useState(false);
-  const [removeOpen, setRemoveOpen] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
+  const [touched, setTouched] = useState<Partial<Record<Field, true>>>({});
   const save = $api.useMutation("put", "/api/v1/orgs/{org}/sso/provider");
-  const remove = $api.useMutation("delete", "/api/v1/orgs/{org}/sso/provider");
+
+  // Required fields: the issuer and client id always, the secret only when creating.
+  const required: Partial<Record<Field, string>> = {
+    ...(issuer.trim() === "" ? { issuer: "Enter the issuer URL." } : {}),
+    ...(clientId.trim() === "" ? { clientId: "Enter a client ID." } : {}),
+    ...(provider === undefined && clientSecret === ""
+      ? { clientSecret: "Enter a client secret." }
+      : {}),
+  };
+  const invalid = Object.keys(required).length > 0;
+  const shownRequired = (field: Field) =>
+    submitted || touched[field] === true ? required[field] : undefined;
+  const dirty =
+    clientSecret.length > 0 ||
+    displayName.trim() !== (provider?.display_name ?? "") ||
+    issuer.trim() !== (provider?.issuer ?? "") ||
+    clientId.trim() !== (provider?.client_id ?? "") ||
+    jitRole !== (provider?.jit_role ?? "viewer");
 
   const fields = fieldErrors(save.error);
   const saveError =
@@ -57,10 +77,13 @@ export function ProviderSection({
       ? problemMessage(save.error, "Could not save the identity provider.")
       : undefined;
 
-  function onSubmit(event: FormEvent) {
-    event.preventDefault();
+  function onSubmit() {
     setSaved(false);
+    setSubmitted(true);
     save.reset();
+    if (invalid) {
+      return;
+    }
     save.mutate(
       {
         params: { path: { org } },
@@ -83,50 +106,25 @@ export function ProviderSection({
     );
   }
 
-  function confirmRemove() {
-    remove.mutate(
-      { params: { path: { org } } },
-      {
-        onSuccess: () => {
-          setRemoveOpen(false);
-          setDisplayName("");
-          setIssuer("");
-          setClientId("");
-          setClientSecret("");
-          setJitRole("viewer");
-          storeOrgSso(queryClient, org, undefined);
-        },
-      },
-    );
-  }
-
-  const removeError = remove.error
-    ? problemMessage(remove.error, "Could not remove the identity provider.")
-    : undefined;
-  const formDisabled = locked || save.isPending;
-
   return (
-    <section aria-labelledby="sso-provider-heading" className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 id="sso-provider-heading" className="text-ui font-medium">
-          Identity provider
-        </h2>
-        <p className="text-body text-muted-foreground">
-          One OpenID Connect provider for this organization.
-        </p>
-      </div>
-      <form
-        noValidate
-        aria-label="Identity provider"
-        className="flex max-w-md flex-col gap-4"
+    <>
+      <SettingsFormCard
+        title="Identity provider"
+        description="One OpenID Connect provider for this organization."
         onSubmit={onSubmit}
+        dirty={dirty}
+        invalid={invalid}
+        pending={save.isPending}
+        saved={saved}
+        error={saveError}
+        disabledReason={locked ? LOCKED_REASON : undefined}
       >
         <TextField
           id="sso-display-name"
           label="Display name"
           value={displayName}
           maxLength={100}
-          disabled={formDisabled}
+          disabled={locked || save.isPending}
           error={fields.display_name}
           onChange={(value) => {
             setDisplayName(value);
@@ -137,10 +135,11 @@ export function ProviderSection({
           id="sso-issuer"
           label="Issuer URL"
           value={issuer}
-          disabled={formDisabled}
-          error={fields.issuer}
+          disabled={locked || save.isPending}
+          error={fields.issuer ?? shownRequired("issuer")}
           onChange={(value) => {
             setIssuer(value);
+            setTouched((current) => ({ ...current, issuer: true }));
             setSaved(false);
           }}
         />
@@ -149,10 +148,11 @@ export function ProviderSection({
           label="Client ID"
           value={clientId}
           maxLength={255}
-          disabled={formDisabled}
-          error={fields.client_id}
+          disabled={locked || save.isPending}
+          error={fields.client_id ?? shownRequired("clientId")}
           onChange={(value) => {
             setClientId(value);
+            setTouched((current) => ({ ...current, clientId: true }));
             setSaved(false);
           }}
         />
@@ -162,11 +162,12 @@ export function ProviderSection({
           type="password"
           autoComplete="new-password"
           value={clientSecret}
-          disabled={formDisabled}
-          error={fields.client_secret}
+          disabled={locked || save.isPending}
+          error={fields.client_secret ?? shownRequired("clientSecret")}
           placeholder={provider ? "Stored; leave blank to keep it" : undefined}
           onChange={(value) => {
             setClientSecret(value);
+            setTouched((current) => ({ ...current, clientSecret: true }));
             setSaved(false);
           }}
         />
@@ -181,7 +182,7 @@ export function ProviderSection({
                 setSaved(false);
               }
             }}
-            disabled={formDisabled}
+            disabled={locked || save.isPending}
           >
             <SelectTrigger id="sso-jit-role" aria-label="Role for new members" className="w-fit">
               <SelectValue />
@@ -205,51 +206,58 @@ export function ProviderSection({
             Save the provider, then register its callback URL below.
           </p>
         )}
-        <FormError message={saveError} />
-        <FormSuccess message={saved ? "Saved" : undefined} />
-        <DisabledReason reason={locked ? LOCKED_REASON : undefined}>
-          <SubmitButton pending={save.isPending} disabled={locked}>
-            Save
-          </SubmitButton>
-        </DisabledReason>
-      </form>
-      <div className="flex flex-col gap-2">
-        <p className="text-body font-medium">Callback URL</p>
-        <div className="flex items-center gap-2">
-          <code className="break-all rounded bg-muted px-2 py-1 text-caption">
-            {sso.callback_url}
-          </code>
-          <CopyButton value={sso.callback_url} label="callback URL" />
-        </div>
-        <p className="text-caption text-muted-foreground">
-          Register this redirect URI at your identity provider.
-        </p>
-      </div>
-      {provider ? (
-        <div>
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => {
-              remove.reset();
-              setRemoveOpen(true);
-            }}
-          >
-            Remove provider
-          </Button>
-          <ConfirmDialog
-            open={removeOpen}
-            onOpenChange={setRemoveOpen}
-            title="Remove the identity provider?"
-            description="Sign-in through this provider stops and the identities linked to it are deleted. Turn enforcement off first."
-            confirmLabel="Remove provider"
-            destructive
-            pending={remove.isPending}
-            error={removeError}
-            onConfirm={confirmRemove}
-          />
-        </div>
-      ) : null}
-    </section>
+      </SettingsFormCard>
+      <SettingsCard
+        title="Callback URL"
+        description="Register this redirect URI at your identity provider."
+      >
+        <ReadOnlyCodeField id="sso-callback-url" label="Callback URL" value={sso.callback_url} />
+      </SettingsCard>
+    </>
+  );
+}
+
+/** Removes the org's identity provider, after the issuer is typed (D-P-52). */
+export function ProviderRemoval({ org, issuer }: { org: string; issuer: string }) {
+  const queryClient = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const remove = $api.useMutation("delete", "/api/v1/orgs/{org}/sso/provider");
+  const removeError = remove.error
+    ? problemMessage(remove.error, "Could not remove the identity provider.")
+    : undefined;
+
+  return (
+    <DangerZone
+      title="Remove the identity provider"
+      description="Sign-in through this provider stops and the identities linked to it are deleted."
+      buttonLabel="Remove provider…"
+      onOpen={() => {
+        remove.reset();
+        setOpen(true);
+      }}
+    >
+      <TypeToConfirmDialog
+        open={open}
+        onOpenChange={setOpen}
+        title="Remove the identity provider?"
+        description="Sign-in through this provider stops and the identities linked to it are deleted. Turn enforcement off first."
+        expected={issuer}
+        inputLabel={`Type "${issuer}" to confirm`}
+        confirmLabel="Remove provider"
+        pending={remove.isPending}
+        error={removeError}
+        onConfirm={() => {
+          remove.mutate(
+            { params: { path: { org } } },
+            {
+              onSuccess: () => {
+                setOpen(false);
+                storeOrgSso(queryClient, org, undefined);
+              },
+            },
+          );
+        }}
+      />
+    </DangerZone>
   );
 }

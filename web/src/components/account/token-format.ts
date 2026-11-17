@@ -1,4 +1,5 @@
 import type { Schema } from "@/api/types";
+import type { PillTone } from "@/components/settings/status-pill";
 
 export type TokenAccess = "read" | "read-write";
 export type TokenExpiry = "never" | "30" | "90" | "365";
@@ -25,4 +26,24 @@ export function expiresAt(expiry: TokenExpiry, now: number): string | undefined 
     return undefined;
   }
   return new Date(now + Number(expiry) * 86_400_000).toISOString();
+}
+
+const EXPIRES_SOON_MS = 7 * 86_400_000;
+
+/** A token's state at `now` (ms since epoch): expired, expiring within a week, or active. */
+export function tokenStatus(
+  expiresAt: string | undefined,
+  now: number,
+): { tone: PillTone; label: string } {
+  if (expiresAt === undefined) {
+    return { tone: "ok", label: "Active" };
+  }
+  const left = Date.parse(expiresAt) - now;
+  if (left <= 0) {
+    return { tone: "error", label: "Expired" };
+  }
+  if (left <= EXPIRES_SOON_MS) {
+    return { tone: "warn", label: "Expires soon" };
+  }
+  return { tone: "ok", label: "Active" };
 }

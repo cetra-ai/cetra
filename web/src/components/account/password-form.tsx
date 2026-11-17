@@ -1,4 +1,4 @@
-import { type FormEvent, useState } from "react";
+import { useState } from "react";
 import { $api } from "@/api/client";
 import { fieldErrors, problemMessage, problemOf } from "@/api/problem";
 import { RATE_LIMITED } from "@/components/auth/messages";
@@ -7,10 +7,9 @@ import {
   type PasswordProblems,
   passwordProblems,
 } from "@/components/auth/password-fields";
-import { FormError } from "@/components/form/form-error";
 import { FormSuccess } from "@/components/form/form-success";
-import { SubmitButton } from "@/components/form/submit-button";
 import { TextField } from "@/components/form/text-field";
+import { SettingsFormCard } from "@/components/settings/settings-card";
 
 export function PasswordForm() {
   // gcTime 0: the request carries the current password, so its variables must leave
@@ -19,8 +18,19 @@ export function PasswordForm() {
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
   const [confirm, setConfirm] = useState("");
-  const [clientErrors, setClientErrors] = useState<PasswordProblems>({});
+  // A client error shows once its field was typed in or a submit was tried, and then follows the values.
+  const [nextTouched, setNextTouched] = useState(false);
+  const [confirmTouched, setConfirmTouched] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
   const [done, setDone] = useState(false);
+
+  const problems: PasswordProblems = passwordProblems(next, confirm);
+  const invalid = problems.password !== undefined || problems.confirm !== undefined;
+  const dirty = current.length > 0 || next.length > 0 || confirm.length > 0;
+  const clientErrors: PasswordProblems = {
+    password: submitted || nextTouched ? problems.password : undefined,
+    confirm: submitted || confirmTouched ? problems.confirm : undefined,
+  };
 
   const problem = problemOf(change.error);
   const serverFields = fieldErrors(change.error);
@@ -34,14 +44,12 @@ export function PasswordForm() {
         : problemMessage(change.error, "Could not change your password. Try again.")
       : undefined;
 
-  function onSubmit(event: FormEvent) {
-    event.preventDefault();
+  function onSubmit() {
     setDone(false);
     // A stale server error must not sit next to a new client error.
     change.reset();
-    const problems = passwordProblems(next, confirm);
-    setClientErrors(problems);
-    if (problems.password || problems.confirm) {
+    setSubmitted(true);
+    if (invalid) {
       return;
     }
     change.mutate(
@@ -60,6 +68,9 @@ export function PasswordForm() {
           setCurrent("");
           setNext("");
           setConfirm("");
+          setNextTouched(false);
+          setConfirmTouched(false);
+          setSubmitted(false);
           setDone(true);
         },
       },
@@ -67,11 +78,15 @@ export function PasswordForm() {
   }
 
   return (
-    <form
-      noValidate
+    <SettingsFormCard
+      title="Password"
+      description="Changing it signs out your other sessions and personal access tokens."
       onSubmit={onSubmit}
-      className="flex max-w-md flex-col gap-4"
-      aria-labelledby="password-heading"
+      dirty={dirty}
+      invalid={invalid}
+      pending={change.isPending}
+      error={formError}
+      saveLabel="Change password"
     >
       <TextField
         id="password-current"
@@ -84,7 +99,6 @@ export function PasswordForm() {
         disabled={change.isPending}
         onChange={(value) => {
           setCurrent(value);
-          setClientErrors({});
           setDone(false);
         }}
       />
@@ -93,12 +107,12 @@ export function PasswordForm() {
         confirm={confirm}
         onPasswordChange={(value) => {
           setNext(value);
-          setClientErrors({});
+          setNextTouched(true);
           setDone(false);
         }}
         onConfirmChange={(value) => {
           setConfirm(value);
-          setClientErrors({});
+          setConfirmTouched(true);
           setDone(false);
         }}
         passwordLabel="New password"
@@ -106,7 +120,6 @@ export function PasswordForm() {
         confirmError={clientErrors.confirm}
         disabled={change.isPending}
       />
-      <FormError message={formError} />
       <FormSuccess
         message={
           done
@@ -114,9 +127,6 @@ export function PasswordForm() {
             : undefined
         }
       />
-      <div>
-        <SubmitButton pending={change.isPending}>Change password</SubmitButton>
-      </div>
-    </form>
+    </SettingsFormCard>
   );
 }

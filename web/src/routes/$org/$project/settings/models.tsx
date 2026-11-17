@@ -1,67 +1,73 @@
-import { useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { Coins, Loader2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { Coins } from "lucide-react";
+import { type ReactNode, useEffect, useState } from "react";
 import { $api } from "@/api/client";
-import { problemMessage } from "@/api/problem";
-import {
-  PROJECT_PRICES_PREFIX,
-  PROJECT_RESOLVE_PREFIX,
-  projectPricesInit,
-} from "@/api/queries-prices";
-import type { Schema } from "@/api/types";
-import { ConfirmDialog } from "@/components/confirm-dialog";
+import { projectPricesInit } from "@/api/queries-prices";
 import { DisabledReason } from "@/components/disabled-reason";
 import { EmptyState } from "@/components/empty-state";
-import { PriceDialog, type PriceScope } from "@/components/prices/price-dialog";
+import { PriceFormPanel, type PriceScope } from "@/components/prices/price-form";
 import { PriceResolver } from "@/components/prices/price-resolver";
 import { PriceTable } from "@/components/prices/price-table";
+import { useSearchText } from "@/components/prices/use-search-text";
+import { SettingsCard } from "@/components/settings/settings-card";
+import {
+  SettingsListLayout,
+  SettingsListToolbar,
+  SettingsPanel,
+} from "@/components/settings/settings-list";
 import { SettingsPage } from "@/components/settings/settings-page";
 import { useProject } from "@/components/shell/project-context";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
-import { blockedByRules } from "@/lib/prices";
 import { atLeast } from "@/lib/roles";
+import { parseSettingsListSearch } from "@/lib/search/settings-list";
 
 export const Route = createFileRoute("/$org/$project/settings/models")({
+  validateSearch: (search) => parseSettingsListSearch(search, []),
   component: ProjectPricesPage,
 });
 
 const NO_PERMISSION = "Only project admins can change prices";
+/** The `open` value that opens the panel to add a price. */
+const NEW = "new";
 
 function ProjectPricesPage() {
-  const { org, project, ref, data } = useProject();
+  const { org, project, data } = useProject();
   const canManage = atLeast(data.role, "admin");
-  const queryClient = useQueryClient();
+  const { q, open } = Route.useSearch();
+  const navigate = Route.useNavigate();
   const scope: PriceScope = { kind: "project", org, project };
-  const [adding, setAdding] = useState(false);
-  // Never cleared on close, so the dialog does not blank while it animates out.
-  const [editing, setEditing] = useState<Schema<"ModelPrice"> | undefined>();
-  const [editOpen, setEditOpen] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState<Schema<"ModelPrice"> | undefined>();
-  const [deleteOpen, setDeleteOpen] = useState(false);
-  const [search, setSearch] = useState("");
-  const [term, setTerm] = useState("");
-  const remove = $api.useMutation("delete", "/api/v1/projects/{project}/models/{id}");
+
+  const [text, setText] = useSearchText(q, (next) => {
+    void navigate({
+      to: "/$org/$project/settings/models",
+      params: { org, project },
+      search: (prev) => ({ ...prev, q: next }),
+      replace: true,
+    });
+  });
+  const [builtinText, setBuiltinText] = useState("");
+  const [builtinTerm, setBuiltinTerm] = useState("");
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      setTerm(search.trim());
+      setBuiltinTerm(builtinText.trim());
     }, 250);
     return () => {
       clearTimeout(timer);
     };
-  }, [search]);
+  }, [builtinText]);
 
   const own = $api.useInfiniteQuery(
     "get",
     "/api/v1/projects/{project}/models",
-    projectPricesInit(org, project, "project", ""),
+    projectPricesInit(org, project, "project", q ?? ""),
     {
       pageParamName: "cursor",
       initialPageParam: null,
       getNextPageParam: (page) => page.next_cursor ?? undefined,
+      placeholderData: keepPreviousData,
     },
   );
   const inherited = $api.useInfiniteQuery(
@@ -77,12 +83,12 @@ function ProjectPricesPage() {
   const builtin = $api.useInfiniteQuery(
     "get",
     "/api/v1/projects/{project}/models",
-    projectPricesInit(org, project, "builtin", term),
+    projectPricesInit(org, project, "builtin", builtinTerm),
     {
       pageParamName: "cursor",
       initialPageParam: null,
       getNextPageParam: (page) => page.next_cursor ?? undefined,
-      enabled: term.length >= 2,
+      enabled: builtinTerm.length >= 2,
     },
   );
 
@@ -100,197 +106,140 @@ function ProjectPricesPage() {
   const orgRows = inherited.data?.pages.flatMap((page) => page.data) ?? [];
   const builtinRows = builtin.data?.pages.flatMap((page) => page.data) ?? [];
 
-  function refresh() {
-    void queryClient.invalidateQueries({ queryKey: [...PROJECT_PRICES_PREFIX] });
-    void queryClient.invalidateQueries({ queryKey: [...PROJECT_RESOLVE_PREFIX] });
+  function setOpen(next: string | undefined, ignoreBlocker = false) {
+    void navigate({
+      to: "/$org/$project/settings/models",
+      params: { org, project },
+      search: (prev) => ({ ...prev, open: next }),
+      ignoreBlocker,
+    });
+  }
+
+  const close = () => {
+    setOpen(undefined);
+  };
+
+  function panel(): ReactNode {
+    if (open === undefined) {
+      return null;
+    }
+    const row = open === NEW ? undefined : ownRows.find((item) => item.id === open);
+    if (open === NEW || row !== undefined) {
+      return (
+        <PriceFormPanel
+          key={open}
+          scope={scope}
+          row={row}
+          readOnlyReason={canManage ? undefined : NO_PERMISSION}
+          onClose={close}
+          onDone={() => {
+            setOpen(undefined, true);
+          }}
+        />
+      );
+    }
+    return (
+      <SettingsPanel title="Edit model price" onClose={close}>
+        {own.isPending ? (
+          <Skeleton className="h-8 w-full" />
+        ) : (
+          <p className="text-body text-muted-foreground">Price not found.</p>
+        )}
+      </SettingsPanel>
+    );
   }
 
   return (
-    <SettingsPage
-      title="Model prices"
-      description="What costs are computed with in this project. A project price beats an organization price, which beats the built-in LiteLLM prices. New prices apply to spans received from now on; stored costs are not recomputed."
-      actions={
-        <DisabledReason reason={canManage ? undefined : NO_PERMISSION}>
-          <Button
-            type="button"
-            disabled={!canManage}
-            onClick={() => {
-              setAdding(true);
-            }}
-          >
-            Add price
-          </Button>
-        </DisabledReason>
-      }
-    >
-      <section aria-labelledby="price-resolver-heading" className="flex flex-col gap-3">
-        <h2 id="price-resolver-heading" className="text-ui font-medium">
-          Which price applies?
-        </h2>
-        <PriceResolver org={org} project={project} />
-      </section>
-
-      <section aria-labelledby="project-prices-heading" className="flex flex-col gap-3">
-        <h2 id="project-prices-heading" className="text-ui font-medium">
-          Project prices
-        </h2>
-        {own.isPending ? (
-          <>
-            <Skeleton className="h-8 w-full" />
-            <Skeleton className="h-8 w-full" />
-          </>
-        ) : ownRows.length === 0 ? (
-          <EmptyState
-            icon={Coins}
-            title="No project prices"
-            description="Organization and built-in prices apply."
-          />
-        ) : (
-          <PriceTable
-            label="Project prices"
-            rows={ownRows}
-            actions={
-              canManage
-                ? (row) => (
-                    <div className="flex items-center justify-end gap-1">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => {
-                          setEditing(row);
-                          setEditOpen(true);
-                        }}
-                      >
-                        Edit
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => {
-                          setDeleteTarget(row);
-                          setDeleteOpen(true);
-                        }}
-                      >
-                        Delete
-                      </Button>
-                    </div>
-                  )
-                : undefined
-            }
-          />
-        )}
-        {own.hasNextPage ? (
-          <Button
-            type="button"
-            variant="outline"
-            className="w-fit"
-            disabled={own.isFetchingNextPage}
-            onClick={() => {
-              void own.fetchNextPage();
-            }}
-          >
-            {own.isFetchingNextPage ? <Loader2 className="animate-spin" /> : null}
-            Load more
-          </Button>
-        ) : null}
-      </section>
-
-      <section aria-labelledby="org-prices-heading" className="flex flex-col gap-3">
-        <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <h2 id="org-prices-heading" className="text-ui font-medium">
-            Organization prices
-          </h2>
-          <Link to="/$org/settings/models" params={{ org }} className="text-body underline">
-            Manage organization prices
-          </Link>
-        </div>
-        {inherited.isPending ? (
-          <Skeleton className="h-8 w-full" />
-        ) : orgRows.length === 0 ? (
-          <p className="text-body text-muted-foreground">No organization prices.</p>
-        ) : (
-          <PriceTable label="Organization prices" rows={orgRows} />
-        )}
-      </section>
-
-      <section aria-labelledby="builtin-prices-heading" className="flex flex-col gap-3">
-        <h2 id="builtin-prices-heading" className="text-ui font-medium">
-          Built-in prices
-        </h2>
-        <Input
-          aria-label="Search built-in prices"
-          placeholder="Search by model, e.g. gpt-4o"
-          value={search}
-          onChange={(event) => {
-            setSearch(event.target.value);
-          }}
-        />
-        {term.length < 2 ? (
-          <p className="text-body text-muted-foreground">
-            Search the built-in prices from LiteLLM.
-          </p>
-        ) : builtin.isPending ? (
-          <Skeleton className="h-8 w-full" />
-        ) : builtinRows.length === 0 ? (
-          <p className="text-body text-muted-foreground">No built-in prices match.</p>
-        ) : (
-          <PriceTable label="Built-in prices" rows={builtinRows} />
-        )}
-        {term.length >= 2 && builtin.hasNextPage ? (
-          <Button
-            type="button"
-            variant="outline"
-            className="w-fit"
-            disabled={builtin.isFetchingNextPage}
-            onClick={() => {
-              void builtin.fetchNextPage();
-            }}
-          >
-            {builtin.isFetchingNextPage ? <Loader2 className="animate-spin" /> : null}
-            Load more
-          </Button>
-        ) : null}
-      </section>
-
-      <PriceDialog scope={scope} open={adding} onOpenChange={setAdding} />
-      <PriceDialog scope={scope} row={editing} open={editOpen} onOpenChange={setEditOpen} />
-      <ConfirmDialog
-        open={deleteOpen}
-        onOpenChange={(open) => {
-          if (!open) {
-            setDeleteOpen(false);
-            remove.reset();
-          }
-        }}
-        title="Delete this price?"
-        description="Spans received after this use the next matching price. Stored costs do not change."
-        confirmLabel="Delete"
-        destructive
-        pending={remove.isPending}
-        error={
-          remove.error
-            ? (blockedByRules(remove.error) ??
-              problemMessage(remove.error, "Could not delete the price."))
-            : undefined
+    <SettingsListLayout open={open !== undefined} onClose={close} panel={panel()}>
+      <SettingsPage
+        title="Model prices"
+        description="What costs are computed with in this project. A project price beats an organization price, which beats the built-in LiteLLM prices. New prices apply to spans received from now on; stored costs are not recomputed."
+        actions={
+          <DisabledReason reason={canManage ? undefined : NO_PERMISSION}>
+            <Button
+              type="button"
+              disabled={!canManage}
+              onClick={() => {
+                setOpen(NEW);
+              }}
+            >
+              Add price
+            </Button>
+          </DisabledReason>
         }
-        onConfirm={() => {
-          if (!deleteTarget?.id) {
-            return;
+      >
+        <SettingsCard title="Project prices">
+          <SettingsListToolbar label="project prices" query={text} onQueryChange={setText} />
+          {own.isPending ? (
+            <>
+              <Skeleton className="h-8 w-full" />
+              <Skeleton className="h-8 w-full" />
+            </>
+          ) : ownRows.length === 0 ? (
+            q === undefined ? (
+              <EmptyState
+                icon={Coins}
+                title="No project prices"
+                description="Organization and built-in prices apply."
+              />
+            ) : (
+              <p className="text-body text-muted-foreground">No project prices match.</p>
+            )
+          ) : (
+            <PriceTable
+              label="Project prices"
+              rows={ownRows}
+              selectedRowId={open}
+              onActivate={(row) => {
+                if (row.id !== undefined) {
+                  setOpen(row.id);
+                }
+              }}
+              more={own}
+            />
+          )}
+        </SettingsCard>
+
+        <SettingsCard
+          title="Organization prices"
+          actions={
+            <Link to="/$org/settings/models" params={{ org }} className="text-body underline">
+              Manage organization prices
+            </Link>
           }
-          remove.mutate(
-            { params: { path: { project: ref, id: deleteTarget.id } } },
-            {
-              onSuccess: () => {
-                setDeleteOpen(false);
-                remove.reset();
-                refresh();
-              },
-            },
-          );
-        }}
-      />
-    </SettingsPage>
+        >
+          {inherited.isPending ? (
+            <Skeleton className="h-8 w-full" />
+          ) : orgRows.length === 0 ? (
+            <p className="text-body text-muted-foreground">No organization prices.</p>
+          ) : (
+            <PriceTable label="Organization prices" rows={orgRows} more={inherited} />
+          )}
+        </SettingsCard>
+
+        <SettingsCard title="Built-in prices">
+          <SettingsListToolbar
+            label="built-in prices"
+            query={builtinText}
+            onQueryChange={setBuiltinText}
+          />
+          {builtinTerm.length < 2 ? (
+            <p className="text-body text-muted-foreground">
+              Search the built-in prices from LiteLLM.
+            </p>
+          ) : builtin.isPending ? (
+            <Skeleton className="h-8 w-full" />
+          ) : builtinRows.length === 0 ? (
+            <p className="text-body text-muted-foreground">No built-in prices match.</p>
+          ) : (
+            <PriceTable label="Built-in prices" rows={builtinRows} more={builtin} />
+          )}
+        </SettingsCard>
+
+        <SettingsCard title="Which price applies?">
+          <PriceResolver org={org} project={project} />
+        </SettingsCard>
+      </SettingsPage>
+    </SettingsListLayout>
   );
 }

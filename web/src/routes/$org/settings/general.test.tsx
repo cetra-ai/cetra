@@ -10,23 +10,25 @@ import meFixture from "../../../../../fixtures/api/static/me.json";
 
 const orgNav = () => within(screen.getByRole("list", { name: "Organization settings" }));
 
-it("redirects /acme/settings to general and marks it active", async () => {
-  const { router } = await renderApp("/acme/settings");
+it("opens General and marks it active in the sidebar", async () => {
+  await renderApp("/acme/settings/general");
 
   await screen.findByRole("heading", { name: "General", level: 1 });
-  expect(router.state.location.pathname).toBe("/acme/settings/general");
   expect(orgNav().getByRole("link", { name: "General" })).toHaveAttribute("aria-current", "page");
-  expect(screen.getByLabelText("Slug")).toHaveValue("acme");
-  expect(screen.getByLabelText("Slug")).toHaveAttribute("readonly");
+  expect(screen.getByText("acme", { selector: "code" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Copy slug" })).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "Back to projects" })).toHaveAttribute("href", "/acme");
 });
 
 it("renames the organization", async () => {
   let body: unknown;
+  let current = { id: ORG_ID, slug: "acme", name: "Acme", role: "owner" };
   server.use(
+    http.get("/api/v1/orgs/:org", () => HttpResponse.json(current)),
     http.patch("/api/v1/orgs/:org", async ({ request }) => {
       body = await request.json();
-      return HttpResponse.json({ id: ORG_ID, slug: "acme", name: "Acme Corp", role: "owner" });
+      current = { ...current, name: "Acme Corp" };
+      return HttpResponse.json(current);
     }),
   );
 
@@ -40,13 +42,22 @@ it("renames the organization", async () => {
   expect(await screen.findByRole("status")).toHaveTextContent("Saved");
 });
 
-it("refuses an empty name without calling the server", async () => {
+it("shows an empty name as you type and keeps Save disabled", async () => {
+  let calls = 0;
+  server.use(
+    http.patch("/api/v1/orgs/:org", () => {
+      calls += 1;
+      return HttpResponse.json({ id: ORG_ID, slug: "acme", name: "Acme", role: "owner" });
+    }),
+  );
+
   const { user } = await renderApp("/acme/settings/general");
   const name = await screen.findByLabelText("Name");
   await user.clear(name);
-  await user.click(screen.getByRole("button", { name: "Save" }));
 
   expect(await screen.findByText("Enter a name.")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+  expect(calls).toBe(0);
 });
 
 it("shows the server's field error", async () => {
@@ -59,7 +70,8 @@ it("shows the server's field error", async () => {
   );
 
   const { user } = await renderApp("/acme/settings/general");
-  await screen.findByLabelText("Name");
+  const name = await screen.findByLabelText("Name");
+  await user.type(name, " Corp");
   await user.click(screen.getByRole("button", { name: "Save" }));
 
   expect(await screen.findByText("name is too long")).toBeInTheDocument();

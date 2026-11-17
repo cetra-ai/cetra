@@ -20,7 +20,13 @@ type SplitName =
   | "online-rules"
   | "experiments"
   | "datasets"
-  | "dataset-items";
+  | "dataset-items"
+  | "settings";
+
+/** The accessible name of the detail side: every list opens a trace-like detail, settings open a row panel. */
+function paneLabel(name: SplitName): string {
+  return name === "settings" ? "Details" : "Trace";
+}
 
 export type SplitMode = "split" | "bottom" | "drawer" | "page";
 
@@ -35,6 +41,7 @@ const PANES = {
   experiments: { start: "experiments-list", end: "experiments-detail", startSize: 40 },
   datasets: { start: "datasets-list", end: "datasets-detail", startSize: 40 },
   "dataset-items": { start: "dataset-items-list", end: "dataset-items-detail", startSize: 50 },
+  settings: { start: "settings-list", end: "settings-detail", startSize: 40 },
 } as const;
 
 type SplitPaneProps = {
@@ -402,7 +409,7 @@ function Drawer({
   return (
     <aside
       ref={asideRef}
-      aria-label="Trace"
+      aria-label={paneLabel(name)}
       style={{ width: `${width}%` }}
       className={`${closing ? "drawer-out" : "drawer-in"} absolute inset-y-0 right-0 z-20 flex min-w-[480px] max-w-full flex-col border-l bg-background shadow-xl`}
     >
@@ -410,7 +417,7 @@ function Drawer({
       <div
         role="separator"
         aria-orientation="vertical"
-        aria-label="Resize trace"
+        aria-label={`Resize ${paneLabel(name).toLowerCase()}`}
         aria-valuemin={DRAWER_MIN}
         aria-valuemax={DRAWER_MAX}
         aria-valuenow={Math.round(width)}

@@ -171,14 +171,12 @@ function InvitePage() {
         </>
       }
     >
-      <>
-        {signedOutHere && signedOut && only !== undefined ? (
-          <p className="text-body text-muted-foreground">
-            {`You're signed out here. If ${only.display_name} signs you back in as the other account, sign out there first.`}
-          </p>
-        ) : null}
-        {children}
-      </>
+      {signedOutHere && signedOut && only !== undefined ? (
+        <p className="text-body text-muted-foreground">
+          {`You're signed out here. If ${only.display_name} signs you back in as the other account, sign out there first.`}
+        </p>
+      ) : null}
+      {children}
     </AuthLayout>
   );
 }

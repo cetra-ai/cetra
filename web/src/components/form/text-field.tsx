@@ -1,4 +1,5 @@
 import { Input } from "@/components/ui/input";
+import { InputGroup, InputGroupAddon, InputGroupText } from "@/components/ui/input-group";
 import { Label } from "@/components/ui/label";
 
 export function TextField({
@@ -15,6 +16,11 @@ export function TextField({
   readOnly,
   maxLength,
   placeholder,
+  unit,
+  inputMode,
+  min,
+  max,
+  step,
 }: {
   id: string;
   label: string;
@@ -29,30 +35,52 @@ export function TextField({
   readOnly?: boolean;
   maxLength?: number;
   placeholder?: string;
+  /** Shown after the input, for example `days` or `USD per 1M tokens`. */
+  unit?: string;
+  inputMode?: "numeric" | "decimal" | "text";
+  min?: number;
+  max?: number;
+  step?: number;
 }) {
   const describedBy = [description ? `${id}-description` : null, error ? `${id}-error` : null]
     .filter((item): item is string => item !== null)
     .join(" ");
+  const input = (
+    <Input
+      id={id}
+      name={id}
+      type={type}
+      value={value}
+      onChange={(event) => {
+        onChange(event.target.value);
+      }}
+      aria-invalid={error ? true : undefined}
+      aria-describedby={describedBy.length > 0 ? describedBy : undefined}
+      autoComplete={autoComplete}
+      required={required}
+      disabled={disabled}
+      readOnly={readOnly}
+      maxLength={maxLength}
+      placeholder={placeholder}
+      inputMode={inputMode}
+      min={min}
+      max={max}
+      step={step}
+    />
+  );
   return (
     <div className="flex flex-col gap-1.5">
       <Label htmlFor={id}>{label}</Label>
-      <Input
-        id={id}
-        name={id}
-        type={type}
-        value={value}
-        onChange={(event) => {
-          onChange(event.target.value);
-        }}
-        aria-invalid={error ? true : undefined}
-        aria-describedby={describedBy.length > 0 ? describedBy : undefined}
-        autoComplete={autoComplete}
-        required={required}
-        disabled={disabled}
-        readOnly={readOnly}
-        maxLength={maxLength}
-        placeholder={placeholder}
-      />
+      {unit === undefined ? (
+        input
+      ) : (
+        <InputGroup>
+          {input}
+          <InputGroupAddon align="inline-end">
+            <InputGroupText>{unit}</InputGroupText>
+          </InputGroupAddon>
+        </InputGroup>
+      )}
       {description ? (
         <p id={`${id}-description`} className="text-caption text-muted-foreground">
           {description}
