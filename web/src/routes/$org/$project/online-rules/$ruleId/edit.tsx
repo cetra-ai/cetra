@@ -1,10 +1,12 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { createFileRoute, notFound, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, Link, notFound, useNavigate } from "@tanstack/react-router";
+import { ChevronLeft } from "lucide-react";
 import { useState } from "react";
 import { $api } from "@/api/client";
 import { problemMessage, problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
 import { onlineRuleQuery, onlineRuleStatsKey, onlineRulesKey } from "@/api/queries-online-rules";
+import { BACK_LINK_CLASS, BackLink } from "@/components/back-link";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DisabledReason } from "@/components/disabled-reason";
 import { RuleForm } from "@/components/online-rules/rule-form";
@@ -67,7 +69,26 @@ function EditOnlineRulePage() {
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-6 overflow-auto px-4 py-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
-        <h1 className="text-title font-medium">{rule.name}</h1>
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <BackLink
+            fallback={
+              <Link
+                to="/$org/$project/online-rules"
+                params={{ org, project }}
+                search={{ rule: rule.id }}
+                aria-label="Back to online rules"
+                className={BACK_LINK_CLASS}
+              >
+                <ChevronLeft aria-hidden="true" className="size-3.5" />
+                Online rules
+              </Link>
+            }
+          />
+          <span aria-hidden="true" className="text-muted-foreground/60">
+            /
+          </span>
+          <h1 className="text-title font-medium">{rule.name}</h1>
+        </div>
         <DisabledReason reason={canManage ? undefined : "Only members can edit online rules"}>
           <Button
             type="button"

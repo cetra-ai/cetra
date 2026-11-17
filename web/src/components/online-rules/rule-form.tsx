@@ -397,8 +397,9 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
             void queryClient.invalidateQueries({ queryKey: onlineRulesKey(org, project) });
             void queryClient.invalidateQueries({ queryKey: onlineRuleStatsKey(org, project) });
             void navigate({
-              to: "/$org/$project/online-rules/$ruleId",
-              params: { org, project, ruleId: created.id },
+              to: "/$org/$project/online-rules",
+              params: { org, project },
+              search: { rule: created.id },
             });
           },
           onError,
@@ -409,8 +410,9 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
     const body = patchBodyOf(values, rule, judge, sample);
     if (Object.keys(body).length === 0) {
       void navigate({
-        to: "/$org/$project/online-rules/$ruleId",
-        params: { org, project, ruleId: rule.id },
+        to: "/$org/$project/online-rules",
+        params: { org, project },
+        search: { rule: rule.id },
       });
       return;
     }
@@ -425,8 +427,9 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
           void queryClient.invalidateQueries({ queryKey: onlineRuleStatsKey(org, project) });
           void queryClient.invalidateQueries({ queryKey: onlineRuleKey(org, project, rule.id) });
           void navigate({
-            to: "/$org/$project/online-rules/$ruleId",
-            params: { org, project, ruleId: rule.id },
+            to: "/$org/$project/online-rules",
+            params: { org, project },
+            search: { rule: rule.id },
           });
         },
         onError,
@@ -659,8 +662,9 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
           {saved ? (
             <Button asChild variant="outline">
               <Link
-                to="/$org/$project/online-rules/$ruleId"
-                params={{ org, project, ruleId: rule.id }}
+                to="/$org/$project/online-rules"
+                params={{ org, project }}
+                search={{ rule: rule.id }}
               >
                 Cancel
               </Link>

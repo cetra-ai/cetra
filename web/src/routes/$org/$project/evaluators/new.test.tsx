@@ -252,3 +252,21 @@ it("puts server field errors under their controls", async () => {
     await screen.findByText("data_type must be numeric for this evaluator"),
   ).toBeInTheDocument();
 });
+
+it("links back to the evaluators list when opened directly", async () => {
+  const { router } = await renderApp("/acme/support-bot/evaluators/new");
+  expect(await screen.findByRole("link", { name: "Back to evaluators" })).toHaveAttribute(
+    "href",
+    "/acme/support-bot/evaluators",
+  );
+  await waitFor(() => expect(router.state.status).toBe("idle"));
+});
+
+it("returns to the filtered list it was opened from", async () => {
+  const { router, user } = await renderApp("/acme/support-bot/evaluators?q=rel");
+  await user.click(await screen.findByRole("link", { name: "New evaluator" }));
+  await user.click(await screen.findByRole("link", { name: "Back to Evaluators" }));
+  await waitFor(() => expect(router.state.location.pathname).toBe("/acme/support-bot/evaluators"));
+  expect(router.state.location.search).toMatchObject({ q: "rel" });
+  await waitFor(() => expect(router.state.status).toBe("idle"));
+});

@@ -28,7 +28,7 @@ it("lists the rules that use the evaluator, with totals in the tiles", async () 
   for (const rule of onlineRulesFixture.data) {
     expect(within(table).getByRole("link", { name: rule.name })).toHaveAttribute(
       "href",
-      `/acme/support-bot/online-rules/${rule.id}`,
+      `/acme/support-bot/online-rules?rule=${rule.id}`,
     );
   }
 

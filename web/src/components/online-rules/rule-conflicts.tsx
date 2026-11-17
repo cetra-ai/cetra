@@ -25,8 +25,9 @@ export function RuleConflicts({
       {conflicts.map((item) => (
         <li key={item.field}>
           <Link
-            to="/$org/$project/online-rules/$ruleId"
-            params={{ org, project, ruleId: item.field.slice("rules.".length) }}
+            to="/$org/$project/online-rules"
+            params={{ org, project }}
+            search={{ rule: item.field.slice("rules.".length) }}
             className="underline-offset-4 hover:underline"
           >
             {item.message}

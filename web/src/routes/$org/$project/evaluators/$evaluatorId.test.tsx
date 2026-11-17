@@ -222,7 +222,7 @@ it("lists the rules that refuse a delete", async () => {
   expect(await within(dialog).findByText("online rules use this evaluator")).toBeInTheDocument();
   expect(within(dialog).getByRole("link", { name: CONFLICT_MESSAGE })).toHaveAttribute(
     "href",
-    `/acme/support-bot/online-rules/${CONFLICT_RULE}`,
+    `/acme/support-bot/online-rules?rule=${CONFLICT_RULE}`,
   );
 });
 
@@ -242,7 +242,7 @@ it("lists the rules that refuse a save", async () => {
   // The save's message is the rule's message (no detail): it is the form error, and the link to the rule.
   expect(await screen.findByRole("link", { name: CONFLICT_MESSAGE })).toHaveAttribute(
     "href",
-    `/acme/support-bot/online-rules/${CONFLICT_RULE}`,
+    `/acme/support-bot/online-rules?rule=${CONFLICT_RULE}`,
   );
 });
 
@@ -294,9 +294,10 @@ it("returns to the online rule it was opened from", async () => {
   await user.click(await screen.findByRole("link", { name: "Back to Relevance on answers" }));
 
   await waitFor(() => {
-    expect(router.state.location.pathname).toBe(
-      "/acme/support-bot/online-rules/01900000-0000-7000-8000-000000000700",
-    );
+    expect(router.state.location.pathname).toBe("/acme/support-bot/online-rules");
+  });
+  expect(router.state.location.search).toMatchObject({
+    rule: "01900000-0000-7000-8000-000000000700",
   });
   await waitFor(() => {
     expect(router.state.status).toBe("idle");

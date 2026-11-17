@@ -59,6 +59,7 @@ import {
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { formatCost } from "@/lib/format";
 import { getTraceMaximized, setTraceMaximized, useListLayout } from "@/lib/list-layout";
+import { useBackState } from "@/lib/list-return";
 import { canManageEvaluation } from "@/lib/roles";
 import {
   type OnlineRulesSearch,
@@ -114,6 +115,8 @@ function OnlineRulesPage() {
   const stats = useQuery(onlineRuleStatsQuery(org, project));
   const [text, setText] = useState(search.q ?? "");
 
+  // The new rule's back link returns to this list, as it is now.
+  const newBackState = useBackState("Online rules");
   const ruleOpen = search.rule !== undefined;
   const bodyRef = useRef<HTMLDivElement>(null);
   const listScroll = useRef(0);
@@ -177,7 +180,7 @@ function OnlineRulesPage() {
     <DisabledReason reason={canManage ? undefined : "Only members can create online rules"}>
       {canManage ? (
         <Button asChild>
-          <Link to="/$org/$project/online-rules/new" params={{ org, project }}>
+          <Link to="/$org/$project/online-rules/new" params={{ org, project }} state={newBackState}>
             <Plus />
             New rule
           </Link>
@@ -377,7 +380,11 @@ function OnlineRulesPage() {
                           {noEvaluators && canManage ? (
                             <>
                               <Button asChild>
-                                <Link to="/$org/$project/evaluators/new" params={{ org, project }}>
+                                <Link
+                                  to="/$org/$project/evaluators/new"
+                                  params={{ org, project }}
+                                  state={newBackState}
+                                >
                                   Create an evaluator
                                 </Link>
                               </Button>

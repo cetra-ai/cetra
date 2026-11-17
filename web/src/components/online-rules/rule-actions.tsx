@@ -18,12 +18,13 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { useBackState } from "@/lib/list-return";
 
 type Rule = Schema<"OnlineRule">;
 
 /**
- * The row's actions: open, edit, run on existing data and delete. Management items show for
- * members only. `onDeleted` runs after the rule is deleted, so the list can close its panel.
+ * The row's management actions: edit, run on existing data and delete. Viewers have none of them,
+ * so they get no menu. `onDeleted` runs after the rule is deleted, so the list can close its panel.
  */
 export function RuleActions({
   rule,
@@ -41,6 +42,12 @@ export function RuleActions({
   const remove = $api.useMutation("delete", "/api/v1/projects/{project}/online-rules/{id}");
   // The list does not load the backfills, so a running one is refused by the server instead.
   const reason = backfillReason(rule, false);
+  // The editor's back link returns to the list, with this rule's panel open.
+  const backState = useBackState("Online rules");
+
+  if (!canManage) {
+    return null;
+  }
 
   return (
     <>
@@ -53,76 +60,61 @@ export function RuleActions({
         <DropdownMenuContent align="end">
           <DropdownMenuItem asChild>
             <Link
-              to="/$org/$project/online-rules/$ruleId"
+              to="/$org/$project/online-rules/$ruleId/edit"
               params={{ org, project, ruleId: rule.id }}
+              state={backState}
             >
-              Open page
+              Edit
             </Link>
           </DropdownMenuItem>
-          {canManage ? (
-            <>
-              <DropdownMenuItem asChild>
-                <Link
-                  to="/$org/$project/online-rules/$ruleId/edit"
-                  params={{ org, project, ruleId: rule.id }}
-                >
-                  Edit
-                </Link>
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                disabled={reason !== undefined}
-                title={reason}
-                onSelect={() => {
-                  setBackfillOpen(true);
-                }}
-              >
-                Run on existing data
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                className="text-destructive"
-                onSelect={() => {
-                  setDeleteOpen(true);
-                }}
-              >
-                Delete…
-              </DropdownMenuItem>
-            </>
-          ) : null}
+          <DropdownMenuItem
+            disabled={reason !== undefined}
+            title={reason}
+            onSelect={() => {
+              setBackfillOpen(true);
+            }}
+          >
+            Run on existing data
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            className="text-destructive"
+            onSelect={() => {
+              setDeleteOpen(true);
+            }}
+          >
+            Delete…
+          </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
-      {canManage ? (
-        <>
-          <BackfillDialog open={backfillOpen} onOpenChange={setBackfillOpen} rule={rule} />
-          <ConfirmDialog
-            open={deleteOpen}
-            onOpenChange={setDeleteOpen}
-            title="Delete online rule?"
-            description="Its jobs and spend history are deleted too."
-            confirmLabel="Delete"
-            destructive
-            pending={remove.isPending}
-            error={
-              remove.error ? problemMessage(remove.error, "Could not delete the rule.") : undefined
-            }
-            onConfirm={() => {
-              remove.mutate(
-                { params: { path: { project: projectRef(org, project), id: rule.id } } },
-                {
-                  onSuccess: () => {
-                    setDeleteOpen(false);
-                    remove.reset();
-                    void queryClient.invalidateQueries({ queryKey: onlineRulesKey(org, project) });
-                    void queryClient.invalidateQueries({
-                      queryKey: onlineRuleStatsKey(org, project),
-                    });
-                    onDeleted();
-                  },
-                },
-              );
-            }}
-          />
-        </>
-      ) : null}
+      <BackfillDialog open={backfillOpen} onOpenChange={setBackfillOpen} rule={rule} />
+      <ConfirmDialog
+        open={deleteOpen}
+        onOpenChange={setDeleteOpen}
+        title="Delete online rule?"
+        description="Its jobs and spend history are deleted too."
+        confirmLabel="Delete"
+        destructive
+        pending={remove.isPending}
+        error={
+          remove.error ? problemMessage(remove.error, "Could not delete the rule.") : undefined
+        }
+        onConfirm={() => {
+          remove.mutate(
+            { params: { path: { project: projectRef(org, project), id: rule.id } } },
+            {
+              onSuccess: () => {
+                setDeleteOpen(false);
+                remove.reset();
+                void queryClient.invalidateQueries({ queryKey: onlineRulesKey(org, project) });
+                void queryClient.invalidateQueries({
+                  queryKey: onlineRuleStatsKey(org, project),
+                });
+                onDeleted();
+              },
+            },
+          );
+        }}
+      />
     </>
   );
 }

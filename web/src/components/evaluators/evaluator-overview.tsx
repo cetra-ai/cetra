@@ -23,6 +23,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { formatCost, formatDuration } from "@/lib/format";
+import { useBackState } from "@/lib/list-return";
 import { canManageEvaluation } from "@/lib/roles";
 
 type Evaluator = Schema<"Evaluator">;
@@ -63,6 +64,8 @@ export function EvaluatorOverview({
 }) {
   const { data } = useProject();
   const canManage = canManageEvaluation(data.role);
+  // The new rule's back link returns to this evaluator.
+  const backState = useBackState(evaluator.name);
   const rulesQuery = $api.useInfiniteQuery(
     "get",
     "/api/v1/projects/{project}/online-rules",
@@ -168,7 +171,11 @@ export function EvaluatorOverview({
             </p>
             {canManage ? (
               <Button asChild variant="outline" size="sm">
-                <Link to="/$org/$project/online-rules/new" params={{ org, project }}>
+                <Link
+                  to="/$org/$project/online-rules/new"
+                  params={{ org, project }}
+                  state={backState}
+                >
                   Create a rule
                 </Link>
               </Button>
@@ -191,8 +198,9 @@ export function EvaluatorOverview({
                 <TableRow key={rule.id}>
                   <TableCell>
                     <Link
-                      to="/$org/$project/online-rules/$ruleId"
-                      params={{ org, project, ruleId: rule.id }}
+                      to="/$org/$project/online-rules"
+                      params={{ org, project }}
+                      search={{ rule: rule.id }}
                       className="rounded-sm underline-offset-4 outline-none hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 focus-visible:outline-solid"
                     >
                       {rule.name}

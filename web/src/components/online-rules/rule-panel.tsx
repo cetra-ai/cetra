@@ -11,12 +11,13 @@ import { ruleSummary } from "@/components/online-rules/rule-summary";
 import { useProject } from "@/components/shell/project-context";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useBackState } from "@/lib/list-return";
 import { canManageEvaluation } from "@/lib/roles";
 
 /**
  * The online rule drawer beside the rules list: header with the name and status, then the rule's
- * content (the same as the rule page). `layout` is the list's layout controls. `row` is the rule as
- * the list has it, shown until the fetch answers.
+ * content. `layout` is the list's layout controls. `row` is the rule as the list has it, shown until
+ * the fetch answers.
  */
 export function RulePanel({
   ruleId,
@@ -35,6 +36,9 @@ export function RulePanel({
   const rule = query.data ?? (query.isPending ? row : undefined);
   const missing = problemOf(query.error)?.status === 404;
   const canManage = canManageEvaluation(data.role);
+  // The editor's back link returns here, with this rule's panel open. Its title is already the
+  // rule's name, so the link names the list.
+  const backState = useBackState("Online rules");
 
   return (
     <section aria-label="Online rule" className="flex h-full min-h-0 flex-col">
@@ -52,16 +56,15 @@ export function RulePanel({
           ) : null}
           {canManage ? (
             <Button variant="ghost" size="xs" asChild>
-              <Link to="/$org/$project/online-rules/$ruleId/edit" params={{ org, project, ruleId }}>
+              <Link
+                to="/$org/$project/online-rules/$ruleId/edit"
+                params={{ org, project, ruleId }}
+                state={backState}
+              >
                 Edit
               </Link>
             </Button>
           ) : null}
-          <Button variant="ghost" size="xs" asChild>
-            <Link to="/$org/$project/online-rules/$ruleId" params={{ org, project, ruleId }}>
-              Open page
-            </Link>
-          </Button>
           <Button type="button" variant="ghost" size="icon-xs" aria-label="Close" onClick={onClose}>
             <X />
           </Button>

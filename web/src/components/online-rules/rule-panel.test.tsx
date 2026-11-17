@@ -69,10 +69,7 @@ it("shows the rule's name, status, summary and content", async () => {
   const header = panel.querySelector("header") as HTMLElement;
   expect(within(header).getByText("Active")).toBeInTheDocument();
   expect(within(header).getByText("Layout controls")).toBeInTheDocument();
-  expect(within(header).getByRole("link", { name: "Open page" })).toHaveAttribute(
-    "href",
-    `/acme/support-bot/online-rules/${RULE_ID}`,
-  );
+  expect(within(header).queryByRole("link", { name: "Open page" })).toBeNull();
   expect(within(panel).getByText("Traces · status = 'ok' · 25 %")).toBeInTheDocument();
   expect(within(panel).getByRole("region", { name: "Last 24 hours" })).toBeInTheDocument();
 });

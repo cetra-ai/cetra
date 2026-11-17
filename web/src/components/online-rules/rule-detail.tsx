@@ -105,7 +105,7 @@ export function ResumeButton({
   );
 }
 
-/** A rule's content: the pause banner, details, spend, the last 24 hours, backfills, scores and jobs. Shared by the rule page and the rule panel. */
+/** A rule's content: the pause banner, details, spend, the last 24 hours, backfills, scores and jobs. Shown by the list's rule panel. */
 export function RuleDetail({ rule }: { rule: Rule }) {
   const { org, project, data } = useProject();
   // The evaluator page's back link returns here, wherever the rule is shown.

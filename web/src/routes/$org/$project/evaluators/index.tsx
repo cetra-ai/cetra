@@ -188,7 +188,7 @@ function EvaluatorsPage() {
         <DisabledReason reason={canManage ? undefined : "Only members can create evaluators"}>
           {canManage ? (
             <Button asChild>
-              <Link to="/$org/$project/evaluators/new" params={{ org, project }}>
+              <Link to="/$org/$project/evaluators/new" params={{ org, project }} state={backState}>
                 New evaluator
               </Link>
             </Button>

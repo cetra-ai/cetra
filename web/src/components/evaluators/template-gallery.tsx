@@ -3,6 +3,7 @@ import { $api } from "@/api/client";
 import { evaluatorTemplatesInit } from "@/api/queries-evaluation";
 import type { Schema } from "@/api/types";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useBackState } from "@/lib/list-return";
 
 type Template = Schema<"EvaluatorTemplate">;
 
@@ -14,6 +15,8 @@ function outputTypeOf(template: Template): string {
 
 /** "Start from a template": one card per template, each opening the new-evaluator form with it. */
 export function TemplateGallery({ org, project }: { org: string; project: string }) {
+  // The new evaluator page's back link returns to the list the gallery is on.
+  const backState = useBackState("Evaluators");
   const templates = $api.useQuery(
     "get",
     "/api/v1/projects/{project}/evaluator-templates",
@@ -40,6 +43,7 @@ export function TemplateGallery({ org, project }: { org: string; project: string
             to="/$org/$project/evaluators/new"
             params={{ org, project }}
             search={{ template: template.id }}
+            state={backState}
             className="flex flex-col gap-1 rounded-md border bg-card p-3 text-card-foreground outline-none hover:bg-muted/50 focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 focus-visible:outline-solid"
           >
             <span className="flex items-center justify-between gap-2">

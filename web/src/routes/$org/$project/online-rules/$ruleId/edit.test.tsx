@@ -8,7 +8,7 @@ import projectFixture from "../../../../../../../fixtures/api/static/project.jso
 
 const RULE_ID = "01900000-0000-7000-8000-000000000700";
 const EDIT_URL = `/acme/support-bot/online-rules/${RULE_ID}/edit`;
-const RULE_URL = `/acme/support-bot/online-rules/${RULE_ID}`;
+const LIST_URL = "/acme/support-bot/online-rules";
 
 /** Records the body of the next PATCH of the rule and answers it with the fixture rule. */
 function capturePatch(): { body: () => unknown; calls: () => number } {
@@ -34,7 +34,9 @@ it("sends only the changed fields", async () => {
   await user.click(screen.getByRole("button", { name: "Save" }));
 
   await waitFor(() => expect(patched.body()).toEqual({ name: "Relevance on answers v2" }));
-  await waitFor(() => expect(router.state.location.pathname).toBe(RULE_URL));
+  await waitFor(() => expect(router.state.location.pathname).toBe(LIST_URL));
+  expect(router.state.location.search).toMatchObject({ rule: RULE_ID });
+  await waitFor(() => expect(router.state.status).toBe("idle"));
 });
 
 it("sends clear_budget when the spend limit is unchecked", async () => {
@@ -104,7 +106,7 @@ it("shows a viewer no match counter", async () => {
   expect(screen.queryByText(/matched in the last 24 hours/)).toBeNull();
 });
 
-it("cancels back to the rule page without saving", async () => {
+it("cancels back to the list's rule panel without saving", async () => {
   const patched = capturePatch();
   const { user, router } = await renderApp(EDIT_URL);
 
@@ -112,19 +114,44 @@ it("cancels back to the rule page without saving", async () => {
   await user.type(name, " draft");
   await user.click(screen.getByRole("link", { name: "Cancel" }));
 
-  await waitFor(() => expect(router.state.location.pathname).toBe(RULE_URL));
+  await waitFor(() => expect(router.state.location.pathname).toBe(LIST_URL));
+  expect(router.state.location.search).toMatchObject({ rule: RULE_ID });
+  await waitFor(() => expect(router.state.status).toBe("idle"));
   expect(patched.calls()).toBe(0);
 });
 
-it("saves an unchanged rule without a PATCH and opens its rule page", async () => {
+it("saves an unchanged rule without a PATCH and opens its rule in the list's panel", async () => {
   const patched = capturePatch();
   const { user, router } = await renderApp(EDIT_URL);
 
   await screen.findByLabelText("Name");
   await user.click(screen.getByRole("button", { name: "Save" }));
 
-  await waitFor(() => expect(router.state.location.pathname).toBe(RULE_URL));
+  await waitFor(() => expect(router.state.location.pathname).toBe(LIST_URL));
+  expect(router.state.location.search).toMatchObject({ rule: RULE_ID });
+  await waitFor(() => expect(router.state.status).toBe("idle"));
   expect(patched.calls()).toBe(0);
+});
+
+it("links back to the list's rule panel from a direct visit", async () => {
+  const { router } = await renderApp(EDIT_URL);
+
+  const back = await screen.findByRole("link", { name: "Back to online rules" });
+  expect(back).toHaveAttribute("href", `${LIST_URL}?rule=${RULE_ID}`);
+  await waitFor(() => expect(router.state.status).toBe("idle"));
+});
+
+it("goes back to the rule's panel when the editor was opened from the panel", async () => {
+  const { user, router } = await renderApp(`${LIST_URL}?rule=${RULE_ID}`);
+
+  const panel = await screen.findByRole("region", { name: "Online rule" });
+  await user.click(await within(panel).findByRole("link", { name: "Edit" }));
+  await user.click(await screen.findByRole("link", { name: "Back to Online rules" }));
+
+  await waitFor(() => expect(router.state.location.pathname).toBe(LIST_URL));
+  expect(router.state.location.search).toMatchObject({ rule: RULE_ID });
+  expect(await screen.findByRole("region", { name: "Online rule" })).toBeInTheDocument();
+  await waitFor(() => expect(router.state.status).toBe("idle"));
 });
 
 it("edits a rule whose evaluator is missing from the list", async () => {

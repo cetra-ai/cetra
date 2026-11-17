@@ -1,4 +1,6 @@
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { ChevronLeft } from "lucide-react";
+import { BACK_LINK_CLASS, BackLink } from "@/components/back-link";
 import { EvaluatorForm } from "@/components/evaluators/evaluator-form";
 import { useProject } from "@/components/shell/project-context";
 import { parseString } from "@/lib/search/common";
@@ -19,7 +21,25 @@ function NewEvaluatorPage() {
   const search = Route.useSearch();
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-6 overflow-auto px-4 py-6">
-      <h1 className="text-title font-medium">New evaluator</h1>
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <BackLink
+          fallback={
+            <Link
+              to="/$org/$project/evaluators"
+              params={{ org, project }}
+              aria-label="Back to evaluators"
+              className={BACK_LINK_CLASS}
+            >
+              <ChevronLeft aria-hidden="true" className="size-3.5" />
+              Evaluators
+            </Link>
+          }
+        />
+        <span aria-hidden="true" className="text-muted-foreground/60">
+          /
+        </span>
+        <h1 className="text-title font-medium">New evaluator</h1>
+      </div>
       <EvaluatorForm
         org={org}
         project={project}
