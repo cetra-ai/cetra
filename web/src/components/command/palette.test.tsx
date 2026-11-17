@@ -81,14 +81,14 @@ it("opens the shortcut help for every shortcut", async () => {
   }
 });
 
-it("goes to spans with g then s and sessions with g then e", async () => {
+it("goes to spans with g then p and sessions with g then s", async () => {
   const { router, user } = await renderApp("/acme/support-bot/traces");
   await screen.findByRole("grid", { name: "Traces" });
-  await user.keyboard("gs");
+  await user.keyboard("gp");
   await waitFor(() => {
     expect(router.state.location.pathname).toBe("/acme/support-bot/spans");
   });
-  await user.keyboard("ge");
+  await user.keyboard("gs");
   await waitFor(() => {
     expect(router.state.location.pathname).toBe("/acme/support-bot/sessions");
   });

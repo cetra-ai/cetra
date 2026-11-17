@@ -245,7 +245,7 @@ it("shows the session header and selects the first failed turn from the errors c
   serveErrorSession();
   const { router, user } = await renderApp("/acme/support-bot/sessions/sess-errors");
   const conversation = await screen.findByRole("region", { name: "Conversation" });
-  expect(screen.getByText("sess-errors")).toBeInTheDocument();
+  expect(within(screen.getByRole("main")).getByText("sess-errors")).toBeInTheDocument();
   expect(screen.getByText("3 turns")).toBeInTheDocument();
   expect(screen.getByText("billing")).toBeInTheDocument();
   expect(screen.getByText(scoreBadge("resolved ✓"))).toBeInTheDocument();

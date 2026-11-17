@@ -1,6 +1,7 @@
-import { Link, useMatch } from "@tanstack/react-router";
+import { Link, useMatch, useRouterState } from "@tanstack/react-router";
 import { CommandPalette } from "@/components/command/palette";
 import { OrgSwitcher } from "@/components/org-switcher";
+import { isProjectSettingsPath } from "@/components/settings/settings-nav";
 import { ProjectSwitcher } from "@/components/shell/project-switcher";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { UserMenu } from "@/components/user-menu";
@@ -8,6 +9,12 @@ import { PRODUCT_NAME } from "@/product";
 
 export function TopBar() {
   const inOrg = useMatch({ from: "/$org", shouldThrow: false }) !== undefined;
+  const project = useMatch({ from: "/$org/$project", shouldThrow: false });
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  // The project sidebar carries the theme and account menus, except on project settings pages.
+  const sidebarHasAccount =
+    project !== undefined &&
+    !isProjectSettingsPath(pathname, project.params.org, project.params.project);
   return (
     <header className="flex h-[40px] shrink-0 items-center gap-2 border-b px-3">
       <Link
@@ -27,8 +34,12 @@ export function TopBar() {
       ) : null}
       <div className="flex-1" />
       {inOrg ? <CommandPalette /> : null}
-      <ThemeToggle />
-      <UserMenu />
+      {sidebarHasAccount ? null : (
+        <>
+          <ThemeToggle />
+          <UserMenu />
+        </>
+      )}
     </header>
   );
 }
