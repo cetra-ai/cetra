@@ -72,6 +72,19 @@ export default defineConfig({
                     },
                   ],
                 },
+                {
+                  label: "Evaluation",
+                  items: [
+                    { label: "Overview", link: "/docs/evaluation/" },
+                    { label: "Scores", link: "/docs/evaluation/scores/" },
+                    { label: "Human annotation", link: "/docs/evaluation/annotation/" },
+                    { label: "Evaluators and LLM judges", link: "/docs/evaluation/evaluators/" },
+                    { label: "LLM connections", link: "/docs/evaluation/llm-connections/" },
+                    { label: "Online rules", link: "/docs/evaluation/online-rules/" },
+                    { label: "Datasets", link: "/docs/evaluation/datasets/" },
+                    { label: "Experiments", link: "/docs/evaluation/experiments/" },
+                  ],
+                },
               ],
             },
             {

@@ -1,0 +1,148 @@
+---
+title: Scores
+description: Attach a numeric, boolean or categorical score to a trace, a span or a session, from code, the API or a browser.
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+A score is a named value that you attach to a trace, a span or a session, so you can filter, chart and compare traces by quality.
+
+## What a score is
+
+A score has a name, a value, an optional reason, and a target.
+
+| Part | Values |
+|---|---|
+| Name | A string of 1 to 255 bytes, for example `correct` or `helpfulness`. |
+| Value | Numeric (a finite number), boolean, categorical (a label) or text. |
+| Target | A trace, a span of a trace, or a session. |
+| Source | `sdk`, `api`, `human` (annotation), `end_user` (browser feedback), or `llm_judge`, `check` and `webhook` (evaluators). cetra sets the source from how the score arrived. |
+
+You can also attach a reason, a user ID and string metadata.
+
+## Write a score from your code
+
+Both SDKs queue scores and send them in the background. `flush` waits for the pending ones. The call returns the score ID, which you keep if you want to update the score later. It never raises: invalid input logs one warning and nothing is queued.
+
+The SDKs read the API key from `CETRA_API_KEY`. The key needs the `ingest` scope.
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* test */}
+```python
+import cetra
+
+cetra.init(api_key="sk-cetra-test")
+
+with cetra.span("answer", input="why?") as s:
+    s.set_output("It is 42.")
+    score_id = cetra.score(
+        trace_id=cetra.current_trace_id(),
+        name="correct",
+        value=True,
+        reason="matches the reference answer",
+    )
+
+cetra.flush()  # also waits for pending scores
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+The target is a `traceId` and `spanId` pair, a `traceId`, or a `sessionId`. `currentTraceId()` and `currentSpanId()` give the IDs of the running span. A boolean is a boolean score, a number is numeric, and a string is a categorical label (or text with `dataType: "text"`).
+
+{/* example:score */}
+```ts
+// The returned id is yours to keep: pass it back as `scoreId` to update.
+const id = score({ name: "helpful", value: 0.8, sessionId: "chat-42", reason: "human review" });
+return id;
+```
+
+  </TabItem>
+</Tabs>
+
+In Python the target is one of `trace_id` with `span_id` (a span), `trace_id` alone (a trace) or `session_id` (a session). The value is `True` or `False` for a boolean, a number for numeric, and a string for a categorical label. Pass `data_type="text"` for free text.
+
+## Write a score from the API
+
+`POST /api/v1/scores` takes a batch of up to 1,000 scores. Use an API key (`sk-cetra-…`) with the `ingest` scope.
+
+```bash
+curl -X POST http://localhost:8080/api/v1/scores \
+  -H "Authorization: Bearer <API_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "scores": [
+      {
+        "target": { "type": "trace", "trace_id": "<TRACE_ID>" },
+        "name": "correct",
+        "value": { "data_type": "boolean", "value": true },
+        "reason": "matches the reference answer"
+      }
+    ]
+  }'
+```
+
+The answer lists one score ID per score, in order. A batch is all or nothing: if one score is invalid, none is stored.
+
+The target is `{"type": "span", "trace_id": …, "span_id": …}`, `{"type": "trace", "trace_id": …}` or `{"type": "session", "session_id": …}`. A numeric value is `{"data_type": "numeric", "value": 0.8}` and a categorical one is `{"data_type": "categorical", "value": {"label": "good"}}`.
+
+## Write a score from a browser
+
+To collect feedback from your own users, post it from their browser with a public key (`pk-cetra-…`). A public key is safe to ship in a web page, and it can only write feedback.
+
+{/* untested: needs a browser and a running server */}
+```ts
+import { feedback } from "@cetra-ai/sdk/browser";
+
+const { ok } = await feedback({
+  baseUrl: "https://cetra.example.org",
+  publicKey: "pk-cetra-…",
+  traceId, // 32 hex chars, from traceparent or your app
+  value: 1,
+});
+```
+
+`feedback` never throws. It returns `{ ok }`. The score is named `user_feedback` unless you pass a `name`. A number is numeric, a boolean is boolean and a string is a categorical label. A second answer from the same key for the same trace and name replaces the first. The trace does not have to exist yet, so you can send feedback before the trace is flushed.
+
+Without the SDK, call the endpoint yourself:
+
+```bash
+curl -X POST http://localhost:8080/api/public/feedback \
+  -H "Authorization: Bearer pk-cetra-…" \
+  -H "Content-Type: application/json" \
+  -d '{ "trace_id": "<TRACE_ID>", "value": true, "comment": "helpful" }'
+```
+
+The endpoint accepts requests from any origin, limits each key and IP address to 10 requests per second, and accepts bodies up to 4 KiB.
+
+## Update a score
+
+Every score has an ID. Send a score with the ID of an existing score and cetra stores the new version in its place. The SDKs mint an ID for every call and let you pass it back: `score_id` in Python, `scoreId` in TypeScript. This also makes retries safe.
+
+If you send no ID, cetra derives one from the target, the name, the source and the author, so repeating the same call replaces the score instead of adding a duplicate. Two people who score the same trace keep two scores.
+
+To delete a score, call `DELETE /api/v1/projects/{project}/scores/{score_id}`.
+
+## Score definitions
+
+A score definition tells cetra what a name means in a project: its type, its allowed range or categories, and a description. Definitions are optional. When one exists for a name, cetra checks every new score against it and refuses a value outside the range or an unknown category. Without a definition, any valid value is accepted.
+
+Members create definitions under **Project settings → Score definitions**, or with `POST /api/v1/projects/{project}/score-definitions`. The type of a definition cannot change after you create it. Deleting a definition archives it, and the name is free to reuse. The [annotation form](/docs/evaluation/annotation/) shows one control per definition.
+
+## Where scores show and how to filter on them
+
+Scores appear on the trace and span detail pages (name, value, source, reason and author), as columns in the trace list, on the sessions list and the session page, and on the experiment pages. A score written by an evaluator links to the judge's own trace with **View judge trace**.
+
+The filter bar understands three score functions, each with the score name as a string:
+
+```sql
+score('correct') >= 0.5
+score_label('tone') = 'friendly'
+has_score('hallucination')
+```
+
+`score` is the numeric value (a boolean counts as 1 or 0), `score_label` is the label of a categorical score, and `has_score` is true when the score exists. When a target has several scores with one name, cetra uses the latest. A filter can use up to 8 different score names. The dashboard charts the average of a score over time.
+
+Scores are durable as soon as the write is acknowledged, and they appear in the UI within a few seconds.

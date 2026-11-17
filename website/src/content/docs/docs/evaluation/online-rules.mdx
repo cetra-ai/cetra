@@ -1,0 +1,68 @@
+---
+title: Online rules
+description: Run an evaluator on live traces that match a filter, with sampling and a spending cap.
+---
+
+An online rule runs an evaluator automatically on the traces or spans that match a filter, and stores the scores.
+
+## What a rule is
+
+A rule is made of:
+
+- an **evaluator**, which cannot change after you create the rule;
+- a **target**: a trace or a span, which cannot change either;
+- a **filter** that picks what to evaluate, written like the filter in the trace list;
+- a **variable mapping** that fills the evaluator's variables from the trace, prefilled from the evaluator;
+- a **sample rate**;
+- an optional **budget** for judges.
+
+Members of a project create rules under **Online rules**. Saving checks the filter, that the mapping fills every variable, and the budget.
+
+## When a rule runs
+
+A trace rule runs when the trace is complete: its root span has ended and no new span has arrived for 5 seconds. A trace that never ends is treated as complete after the project's trace completion timeout, 60 seconds by default, which you can set between 10 and 3,600 seconds in the project settings. A span rule runs on the matching spans of each completed trace.
+
+A rule only evaluates traces that complete while it is enabled and not paused. To cover older traces, use a [backfill](#run-a-rule-on-past-traces).
+
+Evaluation and experiment traces are never selected, whatever the filter says.
+
+## Sampling
+
+The sample rate is a percentage of the matches to evaluate. The choice is deterministic: the same trace always gives the same answer for the same rule, so re-processing never evaluates a trace twice. At 100% every match is evaluated. A span rule evaluates at most the 50 earliest sampled spans of a trace.
+
+A rule queues at most 10,000 evaluations per hour. The rule page shows the ones dropped by that limit as `dropped_last_hour`.
+
+## Preview a filter
+
+While you type the filter, the editor shows how many traces or spans it matched in the last 24 hours and how many the sample rate would keep. Use it to check a filter before you enable the rule.
+
+## Cost caps
+
+For an LLM judge, you can set a budget in US dollars for a period. Before each judge call, cetra estimates the cost from the prompt length and the maximum output tokens, at the model's price. If the rule's spending plus the estimate would go over the budget, cetra pauses the rule, skips its queued evaluations, and shows a banner on the rule page. The rule resumes by itself at the start of the next period, or when you select **Resume**.
+
+A budget needs a price for the model. If the model has none, add one under **Model prices** in the project settings.
+
+## Pauses and errors
+
+A rule also pauses when the provider reports a problem that will not fix itself (a bad key, no credit, an unknown model), or when at least half of its last 50 evaluations failed. The rule page shows the reason. A connection problem pauses every rule that uses the connection, and a successful connection test resumes them.
+
+Failed evaluations retry with a growing delay, up to 6 attempts.
+
+## Run a rule on past traces
+
+**Run on existing data** on the rule page evaluates stored traces.
+
+1. Choose a window: the last 24 hours, 7 days or 30 days. It must end at least 5 minutes ago.
+2. Set a cap on the number of targets and, if you want, a different sample rate.
+3. Read the estimate: how many targets match, how many the sample keeps and, for a judge, the tokens and cost.
+4. Start the run.
+
+Targets the rule already scored are skipped, so you can run a backfill again safely. Backfill jobs run after live evaluations, and the rule's budget applies to them. A rule runs one backfill at a time. If you disable the rule or change its filter, mapping, sample rate or evaluator during a run, the run fails.
+
+## Run one evaluator on one trace
+
+To score a single trace without a rule, use **Run evaluator** on the trace page. See [Evaluators and LLM judges](/docs/evaluation/evaluators/#test-a-judge-on-a-trace).
+
+## Plan limits
+
+Your plan may limit how many rules an organization can have enabled. A paused rule still counts. Past the limit, creating or enabling a rule fails and the editor shows the limit.
