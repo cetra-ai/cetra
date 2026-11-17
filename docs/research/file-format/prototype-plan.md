@@ -121,7 +121,7 @@ What these add:
 - Every offset stored in the file is an **absolute byte offset from the start of the file**, unless stated otherwise.
 - Any length or offset read from a file is bounds-checked. A violation returns `StrataError::Corrupt { what, offset }` and never panics.
 - Limits: a file holds fewer than 2³² rows, and a merge has at most 255 inputs. Exceeding either is an error.
-- **Limits (decoder bounds).** These are format rules, and a file that breaks one is corrupt; the reader checks each one before it allocates. `MAX_SEGMENT_RAW` (256 MiB) bounds the raw body of a segment. `MAX_CHUNK_ROWS` (65,535) bounds the rows of a narrow chunk. `MAX_CHUNK_ELEMENTS` (2²⁰) bounds the list or map elements of one chunk. `MAX_CHUNK_OUTPUT` (256 MiB) bounds the value bytes a chunk may decode to. `MAX_PAGE_ENTRIES` (4,096) bounds the block-table entries of one page. `MAX_DICT_VALUES` (2²⁰) bounds the values of one dictionary. `MAX_PROMOTED_KEYS` (64) bounds the promoted keys of one shredded map. `MAX_ROWS` (2³² − 1) bounds the rows of a file. A refs page holds exactly 4,096 rows, the last one fewer, so a column has one refs page per started block of 4,096 rows. `MAX_PAGE_IDS` (2²⁴) bounds the chunk ids of one refs page after tail sharing is expanded. The writer keeps every chunk and page within them.
+- **Limits (decoder bounds).** These are format rules, and a file that breaks one is corrupt; the reader checks each one before it allocates. `MAX_SEGMENT_RAW` (256 MiB) bounds the raw body of a segment. `MAX_CHUNK_ROWS` (65,535) bounds the rows of a narrow chunk. `MAX_CHUNK_ELEMENTS` (2²⁰) bounds the list or map elements of one chunk. `MAX_CHUNK_OUTPUT` (256 MiB) bounds the value bytes a chunk may decode to. `MAX_PAGE_ENTRIES` (4,096) bounds the block-table entries of one page. `MAX_DICT_VALUES` (2²⁰) bounds the values of one dictionary. `MAX_PROMOTED_KEYS` (64) bounds the promoted keys of one shredded map. `MAX_ROWS` (2³² − 1) bounds the rows of a file. A refs page holds exactly 1,024 rows (4,096 in v0; smaller pages cut the refs a lookup reads by four), the last one fewer, so a column has one refs page per started block of 1,024 rows. `MAX_PAGE_IDS` (2²⁴) bounds the chunk ids of one refs page after tail sharing is expanded. The writer keeps every chunk and page within them.
 
 **Limits of the reader (scan, M4F).** These bound the work and memory one request may cause; they are not format rules.
 - `MAX_PREDICATE_DEPTH` (64) and `MAX_PREDICATE_NODES` (4,096) bound a predicate: each `In` literal counts as one node. A larger predicate fails with `Unsupported` before any recursion.
@@ -148,7 +148,7 @@ bytes[stored_len]
 ```
 
 - Every reference to a segment stores its offset (the header's offset) and its length (`16 + stored_len`), so the reader fetches the header and the body in one range.
-- `codec`: 0 = raw, 1 = zstd. Level `config.zstd_level` (default 3) for narrow, frame and table segments; level 3 for payload frames.
+- `codec`: 0 = raw, 1 = zstd. Level `config.zstd_level` (default 3) for narrow, frame and table segments; level 9 for payload frames (3 in v0; 9 makes `swe` payloads 10% smaller).
 - The writer stores a segment raw when zstd does not make it smaller (a#12).
 
 | `kind` | Content |
@@ -195,7 +195,7 @@ Field sizes: 8 + 4 + 4 + 8 + 4 + 2 + 2 + 4 + 24 + 4 = 64. `sort_key_column` is t
 - the version and flags equal the header's.
 
 **Open.**
-- `StrataFile::open(store, path, hot_len_hint)` issues one `store.get_opts(path, GetOptions { range: Some(GetRange::Suffix(n)), .. })`, where `n: u64 = hint + 64`, or 256 KiB with no hint. All object-store offsets are `u64` (`get_range` takes `Range<u64>` in object_store 0.13.2).
+- `StrataFile::open(store, path, hot_len_hint)` issues one `store.get_opts(path, GetOptions { range: Some(GetRange::Suffix(n)), .. })`, where `n: u64 = hint + 64`, or 64 KiB with no hint (256 KiB in v0; the hot tails measured 12–110 KiB). All object-store offsets are `u64` (`get_range` takes `Range<u64>` in object_store 0.13.2).
 - `GetRange::Suffix` saturates at the object length, and the `GetResult` reports the object size, so no HEAD request is needed.
 - If the hot tail is longer than what was read, one more ranged read fetches the rest.
 
@@ -320,7 +320,9 @@ Field sizes: 4 + 4 + 8 + 4 + 1 + 1 + 2 + 16 + 16 = 56. `const_len` is the byte l
 - **Invariant:** the chunks of one frame have consecutive ids, and frames are numbered in id order.
 - The writer assigns ids in order of first appearance. A merge assigns them frame by frame (S10).
 
-**Frames** (kind 2, zstd level 3):
+**One chunk store per file** (M8, after v0): all payload columns of a file share one frame builder. Rows are walked in order and, within a row, the payload columns in schema order, so a value and its near copy in a later column of the same trace (an answer, then the next call's input that repeats it) are written close together and zstd matches them; an identical chunk is stored once whatever its column. Each column keeps its own refs pages and header, and every header lists the same frames. Columns named in `config.own_store_columns` (default `input_preview`, `output_preview`) get a store of their own: previews are near copies of the payloads' first bytes and would fill the shared store, and as narrow columns their long values make chunks of a few dozen rows, which a lookup reads by the hundred. Search filters and edge groups are written only with `config.payload_filters` (default off, since they cost about 20% of the payload); without them `Contains` reads and searches every value, and a header without filters has no edge groups.
+
+**Frames** (kind 2, zstd level 9):
 - New chunks are appended to the current frame.
 - A frame is closed when its raw size reaches 64 KiB, or when its estimated compressed size reaches 16 KiB (a#10). The estimate is raw size ÷ the column's running compression ratio, which starts at 4.0 and is updated after each frame.
 - **Raw frame layout:** `u32 n_chunks` · `u32 end_offset[n_chunks]` (relative to the data start) · chunk bytes. Chunk *k* of the frame is `[end_offset[k−1] or 0, end_offset[k])`.
@@ -493,7 +495,7 @@ Waves with nothing to fetch are skipped. Without `Contains`, a cold scan therefo
 
 **I/O.**
 - Strata does its own coalescing, then issues one `store.get_range(path, range)` per merged range, all concurrently (`futures::future::try_join_all`). It does not use `get_ranges`, whose built-in 1 MiB coalescing would undo the point-lookup policy.
-- `ScanKind::Point` merges ranges whose gap is < 64 KiB; `ScanKind::Scan` merges gaps < 1 MiB, with merged ranges capped at 16 MiB.
+- `ScanKind::Point` merges ranges whose gap is < 4 KiB (64 KiB in v0, which doubled the bytes of a lookup); `ScanKind::Scan` merges gaps < 1 MiB, with merged ranges capped at 16 MiB.
 - `StrataFile` caches the hot tail, block tables, dictionaries, payload headers and key filters after first use.
 
 **Dependent waves.** A wave is one batch of concurrent requests that needs the results of the previous batch. Cold (nothing cached), a single-trace all-columns lookup is:

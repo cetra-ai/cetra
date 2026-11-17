@@ -22,10 +22,18 @@ pub struct Config {
     /// A Utf8 or Binary column whose average non-null value is at least this many bytes is
     /// stored with the payload layer. Default 256.
     pub payload_min_avg: usize,
+    /// Payload columns that get a chunk store of their own instead of the file's shared one:
+    /// short texts such as previews, which would fill the shared store with near copies of the
+    /// payloads. Default `["input_preview", "output_preview"]`.
+    pub own_store_columns: Vec<String>,
     /// Columns, besides the first sort-key column, that get a key filter. Names absent from the
     /// schema, or of an unsupported type, are ignored. Default `["user_id", "session_id"]`.
     pub key_filter_columns: Vec<String>,
-    /// Suffix read length when no hot-tail length hint is given. Default 256 KiB.
+    /// Whether payload columns get trigram filters and edge groups for `Contains`. Default
+    /// `false`: they cost about 20% of the payload bytes, and `Contains` then reads every value.
+    pub payload_filters: bool,
+    /// Suffix read length when no hot-tail length hint is given. Default 64 KiB; a longer hot
+    /// tail costs one more read.
     pub open_default_suffix: u64,
 }
 
@@ -39,8 +47,10 @@ impl Default for Config {
             dict_max_values: 65_535,
             dict_max_bytes: 1024 * 1024,
             payload_min_avg: 256,
+            own_store_columns: vec!["input_preview".into(), "output_preview".into()],
             key_filter_columns: vec!["user_id".into(), "session_id".into()],
-            open_default_suffix: 256 * 1024,
+            payload_filters: false,
+            open_default_suffix: 64 * 1024,
         }
     }
 }

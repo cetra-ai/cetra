@@ -15,18 +15,15 @@ mod write;
 
 #[cfg(test)]
 pub(crate) use chunk::chunk_value;
-pub(crate) use frames::decode_fetched_frame;
 pub(crate) use header::PayloadHeader;
 pub(crate) use read::{
-    build_values, decode_frames, decode_header, frame_segments, frame_segments_of, ids_of,
-    read_header, read_payload_column, read_rows, refs_segments,
+    build_values, decode_frames, decode_header, frame_segments, ids_of, read_header,
+    read_payload_column, refs_segments,
 };
 pub use scope::{DedupScope, ScopeColumn, ScopeReport};
 pub(crate) use search::payload_contains;
 pub use write::PayloadStats;
-pub(crate) use write::{
-    CopiedFrame, PayloadCopy, SourceColumn, is_payload, write_payload_column, write_payload_merged,
-};
+pub(crate) use write::{is_payload, write_payload_columns};
 
 /// Format constants of version 0.
 ///
@@ -37,9 +34,9 @@ pub(crate) const FRAME_MAX_EST: f64 = 16.0 * 1024.0;
 /// Compression ratio assumed for the first frame.
 pub(crate) const FRAME_INITIAL_RATIO: f64 = 4.0;
 /// zstd level of payload frames.
-pub(crate) const FRAME_ZSTD_LEVEL: i32 = 3;
+pub(crate) const FRAME_ZSTD_LEVEL: i32 = 9;
 /// Rows per refs page.
-pub(crate) const REFS_PAGE_ROWS: usize = 4096;
+pub(crate) const REFS_PAGE_ROWS: usize = 1024;
 /// Largest total number of chunk ids over the rows of one refs page, after tail sharing is
 /// expanded. Bounds the memory a crafted page can make the reader allocate.
 pub(crate) const MAX_PAGE_IDS: usize = 1 << 24;

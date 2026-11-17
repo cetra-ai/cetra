@@ -13,7 +13,7 @@ use memchr::memmem::Finder;
 
 use super::frames::{decode_fetched_frame, frame_of};
 use super::header::PayloadHeader;
-use super::read::{read_header, read_rows};
+use super::read::{read_header, read_payload_column, read_rows};
 use super::trigram::{add_trigrams, filter_bit, get_bit};
 use super::{EDGE, EDGE_ENTRY_LEN, EDGE_GROUP_CHUNKS, FILTER_MIN_BITS, MAX_NEEDLE, ROLLUP_BITS};
 use crate::error::{Result, StrataError};
@@ -242,9 +242,29 @@ pub(crate) async fn payload_contains(
 
     let header = read_header(file, column).await?;
     if header.filters_len == 0 {
-        return Err(StrataError::Corrupt {
-            what: "payload filters",
-            offset: at,
+        // No search index: every value is read and searched.
+        let field = file.field_of(column)?;
+        let values = read_payload_column(file, column, record, &field).await?;
+        let finder = Finder::new(needle);
+        let bytes_at = |i: usize| -> Option<&[u8]> {
+            if values.is_null(i) {
+                return None;
+            }
+            if let Some(strings) = values.as_any().downcast_ref::<arrow::array::StringArray>() {
+                return Some(strings.value(i).as_bytes());
+            }
+            values
+                .as_any()
+                .downcast_ref::<arrow::array::BinaryArray>()
+                .map(|binaries| binaries.value(i))
+        };
+        let rows = (0..values.len())
+            .map(|i| bytes_at(i).is_some_and(|v| finder.find(v).is_some()))
+            .collect();
+        return Ok(ContainsResult {
+            rows,
+            frames_read: u32::try_from(header.frames.len()).unwrap_or(u32::MAX),
+            edge_groups_read: 0,
         });
     }
     let filters_ref = SegmentRef {
@@ -613,10 +633,19 @@ mod tests {
         payload_contains(file, 1, needle).await.unwrap()
     }
 
-    /// Config that stores every Utf8 or Binary column with the payload layer.
+    /// Config that stores every Utf8 or Binary column with the payload layer, with filters.
     fn payload_config() -> Config {
         Config {
             payload_min_avg: 0,
+            payload_filters: true,
+            ..Config::default()
+        }
+    }
+
+    /// The default config with filters: the search tests exercise the filters.
+    fn filtered() -> Config {
+        Config {
+            payload_filters: true,
             ..Config::default()
         }
     }
@@ -1020,7 +1049,7 @@ mod tests {
     async fn unfiltered_frame_is_always_scanned() {
         let column = vec![Some("abc".repeat(100))];
         let batch = table(&column);
-        let (file, summary) = write_and_open(&batch, Config::default()).await;
+        let (file, summary) = write_and_open(&batch, filtered()).await;
         let stats = stats_of(&summary);
         assert_eq!(stats.frames_without_filter, 1);
         let bytes = as_bytes(&column);
@@ -1083,7 +1112,7 @@ mod tests {
             .map(|_| Some(String::from_utf8(rng.bytes(1_000, LOWER)).unwrap()))
             .collect();
         let batch = table(&column);
-        let (file, _) = write_and_open(&batch, Config::default()).await;
+        let (file, _) = write_and_open(&batch, filtered()).await;
         let record = &file.directory()[1];
         assert_eq!(record.layer, Layer::Payload);
         let header = read_header(&file, 1).await.unwrap();

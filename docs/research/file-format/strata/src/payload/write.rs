@@ -2,15 +2,12 @@
 //! builder, each row's chunk ids go into refs pages, and the header ties the parts together.
 
 use std::collections::HashSet;
-use std::ops::Range;
-use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, BinaryArray, StringArray};
+use arrow::array::{Array, BinaryArray, StringArray};
 use arrow::datatypes::DataType;
-use xxhash_rust::xxh3::xxh3_128;
 
 use super::chunk::chunk_value;
-use super::frames::{FrameBuilder, frame_of};
+use super::frames::{FrameBuilder, FrameEntry, frame_of};
 use super::header::{EdgeGroup, PayloadHeader, RefPage};
 use super::refs::{RowRefs, encode_page};
 use super::search::{Filters, FrameFilter, encode_edge_group};
@@ -104,34 +101,110 @@ fn value_bytes(array: &dyn Array) -> Result<Vec<Option<&[u8]>>> {
     }
 }
 
-/// Writes one payload column. The segments are written in this order: frames, refs pages,
-/// edge groups, filters, header. So all of a column's segments are contiguous in the file.
-/// Returns the header's reference and the statistics.
-pub(crate) fn write_payload_column(
-    array: &dyn Array,
-    _config: &Config,
+/// Writes the payload columns of a file with one chunk store shared by all of them (S4).
+///
+/// Rows are walked in order and, within a row, the columns in the given order, so a value and
+/// a near copy of it in a later column of the same trace land in the same frames, where zstd
+/// matches them; an identical chunk is stored once whatever its column. Each column then gets
+/// its own refs pages and header; every header lists the same frames (and the same filters and
+/// edge groups when `filters` is set).
+///
+/// Segments are written in this order: the shared frames, the shared edge groups and filters,
+/// then per column its refs pages and its header. Returns, per column, the header's reference
+/// and the statistics. The shared frames, filters and edges count in the first column's bytes.
+pub(crate) fn write_payload_columns(
+    arrays: &[&dyn Array],
+    filters: bool,
     codec: &mut SegmentCodec,
     frame_codec: &mut SegmentCodec,
     out: &mut Out,
-) -> Result<(SegmentRef, PayloadStats)> {
-    let mut frames = FrameBuilder::new();
-    let mut rows: Vec<Option<Vec<u32>>> = Vec::with_capacity(array.len());
-    let mut chunk_refs = 0u64;
-    for value in value_bytes(array)? {
-        let Some(bytes) = value else {
-            rows.push(None);
-            continue;
-        };
-        let mut ids = Vec::new();
-        for range in chunk_value(bytes) {
-            let chunk = bytes.get(range).unwrap_or_default();
-            ids.push(frames.add(chunk, frame_codec, out)?);
-        }
-        chunk_refs += ids.len() as u64;
-        rows.push(Some(ids));
+) -> Result<Vec<(SegmentRef, PayloadStats)>> {
+    let values: Vec<Vec<Option<&[u8]>>> = arrays
+        .iter()
+        .map(|array| value_bytes(*array))
+        .collect::<Result<_>>()?;
+    let n_rows = values.first().map_or(0, Vec::len);
+    if values.iter().any(|column| column.len() != n_rows) {
+        return Err(StrataError::Schema {
+            reason: "payload columns of different lengths".to_string(),
+        });
     }
-    check_chunk_refs(chunk_refs)?;
-    finish_payload_column(frames, rows, chunk_refs, codec, frame_codec, out)
+    let mut frames = FrameBuilder::new();
+    let mut rows: Vec<Vec<Option<Vec<u32>>>> =
+        values.iter().map(|_| Vec::with_capacity(n_rows)).collect();
+    let mut chunk_refs = vec![0u64; values.len()];
+    for row in 0..n_rows {
+        for (c, column) in values.iter().enumerate() {
+            let value = column.get(row).copied().flatten();
+            let (Some(out_rows), Some(refs)) = (rows.get_mut(c), chunk_refs.get_mut(c)) else {
+                continue;
+            };
+            let Some(bytes) = value else {
+                out_rows.push(None);
+                continue;
+            };
+            let mut ids = Vec::new();
+            for range in chunk_value(bytes) {
+                let chunk = bytes.get(range).unwrap_or_default();
+                ids.push(frames.add(chunk, frame_codec, out)?);
+            }
+            *refs += ids.len() as u64;
+            out_rows.push(Some(ids));
+        }
+    }
+    for refs in &chunk_refs {
+        check_chunk_refs(*refs)?;
+    }
+    frames.finish(frame_codec, out)?;
+    let unique_chunks = frames.n_chunks();
+    let frame_entries = std::mem::take(&mut frames.frames);
+    let frame_count = u32::try_from(frame_entries.len()).map_err(|_| StrataError::Unsupported {
+        what: "more than 4 billion frames".to_string(),
+    })?;
+    let all_rows: Vec<&[Option<Vec<u32>>]> = rows.iter().map(Vec::as_slice).collect();
+    let search = if filters {
+        write_search(&mut frames, &frame_entries, &all_rows, codec, out)?
+    } else {
+        Search::none(frame_count)
+    };
+
+    let mut results = Vec::with_capacity(rows.len());
+    for (c, column_rows) in rows.iter().enumerate() {
+        let (ref_pages, ref_bytes) = write_refs(column_rows, codec, out)?;
+        let header = PayloadHeader {
+            n_rows: u32::try_from(n_rows).map_err(|_| StrataError::TooManyRows {
+                rows: n_rows as u64,
+            })?,
+            n_chunks: unique_chunks,
+            filters_offset: search.filters_offset,
+            filters_len: search.filters_len,
+            ref_pages,
+            edge_groups: search.edge_groups.clone(),
+            frames: frame_entries.clone(),
+        };
+        let mut body = Out(Vec::new());
+        header.encode(&mut body)?;
+        let header_seg = encode_segment(Kind::PayloadHeader, &body.0, Codec::Zstd, codec, out)?;
+        // The shared parts count once, in the first column.
+        let first = c == 0;
+        let shared = |v: u64| if first { v } else { 0 };
+        let stats = PayloadStats {
+            unique_chunks,
+            frames: frame_count,
+            chunk_refs: chunk_refs.get(c).copied().unwrap_or(0),
+            bytes: shared(frames.stored_bytes + search.edge_bytes + u64::from(search.filters_len))
+                + ref_bytes
+                + u64::from(header_seg.len),
+            frame_bytes: shared(frames.stored_bytes),
+            ref_bytes,
+            filter_bytes: shared(u64::from(search.filters_len)),
+            edge_bytes: shared(search.edge_bytes),
+            frames_without_filter: search.frames_without_filter,
+            rollup: search.rollup,
+        };
+        results.push((header_seg, stats));
+    }
+    Ok(results)
 }
 
 /// Refuses a column with more chunk references than a read can return.
@@ -144,19 +217,13 @@ fn check_chunk_refs(chunk_refs: u64) -> Result<()> {
     Ok(())
 }
 
-/// Writes the parts of a payload column after its chunks are known: the open frame, then the
-/// refs pages, edge groups, filters and header. `rows` holds each row's chunk ids, `chunk_refs`
-/// their total.
-pub(crate) fn finish_payload_column(
-    mut frames: FrameBuilder,
-    rows: Vec<Option<Vec<u32>>>,
-    chunk_refs: u64,
+/// Writes the refs pages of one column, `REFS_PAGE_ROWS` rows each. Returns the page table
+/// and the bytes written.
+fn write_refs(
+    rows: &[Option<Vec<u32>>],
     codec: &mut SegmentCodec,
-    frame_codec: &mut SegmentCodec,
     out: &mut Out,
-) -> Result<(SegmentRef, PayloadStats)> {
-    frames.finish(frame_codec, out)?;
-
+) -> Result<(Vec<RefPage>, u64)> {
     let mut ref_pages = Vec::with_capacity(rows.len().div_ceil(REFS_PAGE_ROWS));
     let mut ref_bytes = 0u64;
     for (group_index, group) in rows.chunks(REFS_PAGE_ROWS).enumerate() {
@@ -189,21 +256,48 @@ pub(crate) fn finish_payload_column(
             first_row,
         });
     }
+    Ok((ref_pages, ref_bytes))
+}
 
-    let n_rows = u32::try_from(rows.len()).map_err(|_| StrataError::TooManyRows {
-        rows: rows.len() as u64,
-    })?;
-    let unique_chunks = frames.n_chunks();
-    let frame_entries = std::mem::take(&mut frames.frames);
-    let frame_count = u32::try_from(frame_entries.len()).map_err(|_| StrataError::Unsupported {
-        what: "more than 4 billion frames".to_string(),
-    })?;
+/// The search parts of a chunk store: the edge groups and the filters segment.
+struct Search {
+    filters_offset: u64,
+    /// 0 when the store has no filters: `Contains` then reads every value.
+    filters_len: u32,
+    edge_groups: Vec<EdgeGroup>,
+    edge_bytes: u64,
+    frames_without_filter: u32,
+    rollup: bool,
+}
 
+impl Search {
+    /// No search index: no filters segment and no edge groups.
+    fn none(frames: u32) -> Search {
+        Search {
+            filters_offset: 0,
+            filters_len: 0,
+            edge_groups: Vec::new(),
+            edge_bytes: 0,
+            frames_without_filter: frames,
+            rollup: false,
+        }
+    }
+}
+
+/// Writes the edge groups and the filters segment of a chunk store whose closed frames are
+/// `frame_entries`, from the chunk ids of every row of every column that uses it.
+fn write_search(
+    frames: &mut FrameBuilder,
+    frame_entries: &[FrameEntry],
+    rows: &[&[Option<Vec<u32>>]],
+    codec: &mut SegmentCodec,
+    out: &mut Out,
+) -> Result<Search> {
     // Boundary trigrams. A needle that crosses from chunk `l` into chunk `r` lies in the window
     // made of the tail of `l` and the head of `r`, so the window's trigrams go to the filter of
     // the frame that holds `r`.
     let mut pairs: HashSet<(u32, u32)> = HashSet::new();
-    for ids in rows.iter().flatten() {
+    for ids in rows.iter().flat_map(|column| column.iter()).flatten() {
         for pair in ids.windows(2) {
             if let &[l, r] = pair {
                 pairs.insert((l, r));
@@ -215,7 +309,7 @@ pub(crate) fn finish_payload_column(
         offset: 0,
     };
     for &(l, r) in &pairs {
-        let f = frame_of(&frame_entries, r).ok_or_else(pair_corrupt)?;
+        let f = frame_of(frame_entries, r).ok_or_else(pair_corrupt)?;
         let tail = frames.tails.get(l as usize).ok_or_else(pair_corrupt)?;
         let head = frames.heads.get(r as usize).ok_or_else(pair_corrupt)?;
         let mut window = Vec::with_capacity(tail.len() + head.len());
@@ -281,148 +375,14 @@ pub(crate) fn finish_payload_column(
     let mut filter_body = Vec::new();
     filters.encode(&mut filter_body)?;
     let filter_seg = encode_segment(Kind::PayloadFilters, &filter_body, Codec::Zstd, codec, out)?;
-
-    let header = PayloadHeader {
-        n_rows,
-        n_chunks: unique_chunks,
+    Ok(Search {
         filters_offset: filter_seg.offset,
         filters_len: filter_seg.len,
-        ref_pages,
         edge_groups,
-        frames: frame_entries,
-    };
-    let mut body = Out(Vec::new());
-    header.encode(&mut body)?;
-    let header_seg = encode_segment(Kind::PayloadHeader, &body.0, Codec::Zstd, codec, out)?;
-
-    let stats = PayloadStats {
-        unique_chunks,
-        frames: frame_count,
-        chunk_refs,
-        bytes: frames.stored_bytes
-            + ref_bytes
-            + edge_bytes
-            + u64::from(filter_seg.len)
-            + u64::from(header_seg.len),
-        frame_bytes: frames.stored_bytes,
-        ref_bytes,
-        filter_bytes: u64::from(filter_seg.len),
         edge_bytes,
         frames_without_filter,
         rollup: rollup_kept,
-    };
-    Ok((header_seg, stats))
-}
-
-/// One input frame kept for copying during a merge.
-pub(crate) struct CopiedFrame {
-    /// The whole frame segment as stored in its input, header included.
-    pub stored: Vec<u8>,
-    /// The frame's raw body.
-    pub raw: Vec<u8>,
-    /// The ranges of the frame's chunks in `raw`, in id order.
-    pub ranges: Vec<Range<usize>>,
-    /// Id of the frame's first chunk in its input.
-    pub first_chunk: u32,
-}
-
-/// The inputs of a merged payload column.
-pub(crate) struct PayloadCopy {
-    /// Per input: its frames, in frame order.
-    pub frames: Vec<Vec<CopiedFrame>>,
-    /// Per input: each row's chunk ids in that input (`None` for a null row).
-    pub rows: Vec<Vec<Option<Vec<u32>>>>,
-    /// The (input, row) source of each output row.
-    pub sources: Arc<Vec<(usize, usize)>>,
-}
-
-/// A column handed to the file writer: its values, and for a merged payload column also the
-/// inputs' frames, so that they can be copied.
-pub(crate) enum SourceColumn {
-    /// A column to encode from its values.
-    Array(ArrayRef),
-    /// A merged payload column: its values, plus the inputs' frames.
-    Payload(ArrayRef, PayloadCopy),
-}
-
-/// Writes a merged payload column (S10 step 4). An input frame whose chunks are all new to the
-/// output, and not repeated within the frame, is copied byte for byte. Every other chunk is
-/// added one by one, and its bytes are taken from the input frame's raw body.
-///
-/// The chunks come from the input frames, so the input values are not decoded. The header,
-/// refs pages and frames were read once for `read_column` and once for the merge: an accepted
-/// cost of the prototype.
-pub(crate) fn write_payload_merged(
-    copy: PayloadCopy,
-    codec: &mut SegmentCodec,
-    frame_codec: &mut SegmentCodec,
-    out: &mut Out,
-) -> Result<(SegmentRef, PayloadStats)> {
-    let merge_corrupt = || StrataError::Corrupt {
-        what: "merge chunk id",
-        offset: 0,
-    };
-    let PayloadCopy {
-        frames: inputs,
-        rows: input_rows,
-        sources,
-    } = copy;
-    let mut frames = FrameBuilder::new();
-    // Per input: the output id of each of its chunk ids, indexed by the input id.
-    let mut remap: Vec<Vec<u32>> = inputs.iter().map(|_| Vec::new()).collect();
-    for (input_frames, map) in inputs.iter().zip(remap.iter_mut()) {
-        for frame in input_frames {
-            if frame.first_chunk as usize != map.len() {
-                return Err(merge_corrupt());
-            }
-            let chunks: Vec<&[u8]> = frame
-                .ranges
-                .iter()
-                .map(|range| frame.raw.get(range.clone()).ok_or_else(merge_corrupt))
-                .collect::<Result<_>>()?;
-            let mut seen = HashSet::new();
-            let fresh = chunks.iter().all(|chunk| {
-                let hash = xxh3_128(chunk);
-                !frames.has(hash) && seen.insert(hash)
-            });
-            if fresh {
-                let ids = frames.copy_frame(
-                    &frame.stored,
-                    &frame.raw,
-                    &frame.ranges,
-                    frame_codec,
-                    out,
-                )?;
-                map.extend(ids);
-            } else {
-                for chunk in chunks {
-                    map.push(frames.add(chunk, frame_codec, out)?);
-                }
-            }
-        }
-    }
-
-    let mut chunk_refs = 0u64;
-    let mut rows: Vec<Option<Vec<u32>>> = Vec::with_capacity(sources.len());
-    for &(input, row) in sources.iter() {
-        let ids = input_rows
-            .get(input)
-            .and_then(|input_rows| input_rows.get(row))
-            .ok_or_else(merge_corrupt)?;
-        let Some(ids) = ids else {
-            rows.push(None);
-            continue;
-        };
-        let map = remap.get(input).ok_or_else(merge_corrupt)?;
-        let mapped = ids
-            .iter()
-            .map(|&id| map.get(id as usize).copied().ok_or_else(merge_corrupt))
-            .collect::<Result<Vec<u32>>>()?;
-        chunk_refs += mapped.len() as u64;
-        rows.push(Some(mapped));
-    }
-    check_chunk_refs(chunk_refs)?;
-    finish_payload_column(frames, rows, chunk_refs, codec, frame_codec, out)
+    })
 }
 
 #[cfg(test)]
@@ -497,6 +457,99 @@ mod tests {
         assert_eq!(file.directory()[1].layer, Layer::Payload);
         let decoded = read_column(&file, 1).await.unwrap();
         assert_same(decoded.as_ref(), batch.column(1).as_ref());
+    }
+
+    /// Non-repeating text of `words` words from `seed`.
+    fn prose(words: usize, seed: u64) -> String {
+        let mut x = seed.max(1);
+        (0..words)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                format!("w{} ", x % 100_000)
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn payload_columns_share_one_chunk_store() {
+        // `input` of row k repeats `output` of row k - 1 inside a larger JSON array.
+        let n = 60usize;
+        let answers: Vec<String> = (0..n).map(|k| prose(3_000, k as u64 + 1)).collect();
+        let outputs: Vec<Option<String>> = answers
+            .iter()
+            .map(|a| Some(serde_json::json!([{"role": "assistant", "content": a}]).to_string()))
+            .collect();
+        let inputs: Vec<Option<String>> = (0..n)
+            .map(|k| {
+                let mut messages =
+                    vec![serde_json::json!({"role": "user", "content": format!("q{k}")})];
+                if k > 0 {
+                    messages
+                        .push(serde_json::json!({"role": "assistant", "content": answers[k - 1]}));
+                }
+                Some(serde_json::Value::Array(messages).to_string())
+            })
+            .collect();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("trace_id", DataType::FixedSizeBinary(16), false),
+            Field::new("input", DataType::Utf8, true),
+            Field::new("output", DataType::Utf8, true),
+        ]));
+        let ids =
+            FixedSizeBinaryArray::try_new(16, Buffer::from_vec(vec![0u8; 16 * n]), None).unwrap();
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(ids),
+                Arc::new(arrow::array::StringArray::from(inputs)),
+                Arc::new(arrow::array::StringArray::from(outputs)),
+            ],
+        )
+        .unwrap();
+        let (file, summary) = write_and_open(&batch, Config::default()).await;
+        for c in [1, 2] {
+            assert_eq!(file.directory()[c].layer, Layer::Payload);
+            let decoded = read_column(&file, c).await.unwrap();
+            assert_same(decoded.as_ref(), batch.column(c).as_ref());
+        }
+        let input = summary.columns[1].payload.as_ref().unwrap();
+        let output = summary.columns[2].payload.as_ref().unwrap();
+        // One store: the same chunk count and frames in both columns, counted once.
+        assert_eq!(input.unique_chunks, output.unique_chunks);
+        assert_eq!(input.frames, output.frames);
+        assert!(input.frame_bytes > 0);
+        assert_eq!(output.frame_bytes, 0);
+        // The answers are stored about once, though each appears twice.
+        let raw_answers: u64 = answers.iter().map(|a| a.len() as u64).sum();
+        assert!(
+            input.frame_bytes < raw_answers,
+            "{} frame bytes for {raw_answers} bytes of answers",
+            input.frame_bytes
+        );
+    }
+
+    #[tokio::test]
+    async fn contains_without_filters_reads_every_value() {
+        let values: Vec<Option<String>> = (0..200)
+            .map(|k| (k % 7 != 3).then(|| prose(200, k as u64 + 1)))
+            .collect();
+        let batch = table(&values);
+        let (file, summary) = write_and_open(&batch, Config::default()).await;
+        let stats = summary.columns[1].payload.as_ref().unwrap();
+        assert_eq!(stats.filter_bytes, 0);
+        assert_eq!(stats.edge_bytes, 0);
+        for needle in ["w1", "w12345 w", "absent needle", ""] {
+            let got = crate::payload::payload_contains(&file, 1, needle.as_bytes())
+                .await
+                .unwrap();
+            let want: Vec<bool> = values
+                .iter()
+                .map(|v| v.as_deref().is_some_and(|v| v.contains(needle)))
+                .collect();
+            assert_eq!(got.rows, want, "{needle:?}");
+        }
     }
 
     #[tokio::test]

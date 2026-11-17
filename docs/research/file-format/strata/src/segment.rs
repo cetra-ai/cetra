@@ -123,15 +123,11 @@ pub(crate) fn encode_segment(
         });
     }
     let compressed = match prefer {
-        Codec::Zstd => codec
-            .compressor
-            .compress(body)
-            .ok()
-            .filter(|c| match kind {
-                // A narrow chunk is decompressed on every scan: zstd must save at least 15%.
-                Kind::NarrowChunk => c.len() * 100 <= body.len() * 85,
-                _ => c.len() < body.len(),
-            }),
+        Codec::Zstd => codec.compressor.compress(body).ok().filter(|c| match kind {
+            // A narrow chunk is decompressed on every scan: zstd must save at least 15%.
+            Kind::NarrowChunk => c.len() * 100 <= body.len() * 85,
+            _ => c.len() < body.len(),
+        }),
         Codec::Raw => None,
     };
     let (codec, stored) = match &compressed {

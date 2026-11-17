@@ -200,6 +200,8 @@ pub struct StrataFile {
     bytes: AtomicU64,
     /// Waves run by `fetch`.
     waves: AtomicU64,
+    /// Segment bytes fetched, by segment kind (index `Kind as usize`); gaps are not counted.
+    kind_bytes: [AtomicU64; 10],
 }
 
 impl StrataFile {
@@ -395,6 +397,7 @@ impl StrataFile {
             requests: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             waves: AtomicU64::new(0),
+            kind_bytes: Default::default(),
         })
     }
 
@@ -481,19 +484,6 @@ impl StrataFile {
         .await
     }
 
-    /// Like `fetch`, but also returns each segment's stored bytes as in the file (header
-    /// included), next to its decoded body.
-    pub(crate) async fn fetch_stored(
-        &self,
-        segments: &[(SegmentRef, Kind)],
-        kind: ScanKind,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        self.fetch_with(segments, kind, |slice, r, k| {
-            Ok((slice.to_vec(), decode_segment(slice, r.offset, k)?))
-        })
-        .await
-    }
-
     /// The body of `fetch`, with the decoding step given by `f`. `f` gets the slice of the
     /// whole segment, header included, and is called once per segment, in input order.
     async fn fetch_with<T>(
@@ -540,6 +530,9 @@ impl StrataFile {
             let slice = part
                 .get(at..at.checked_add(len).ok_or_else(corrupt)?)
                 .ok_or_else(corrupt)?;
+            if let Some(counter) = self.kind_bytes.get(*segment_kind as usize) {
+                counter.fetch_add(u64::from(r.len), Ordering::Relaxed);
+            }
             bodies.push(f(slice, r, *segment_kind)?);
         }
 
@@ -562,6 +555,11 @@ impl StrataFile {
             requests: self.requests.load(Ordering::Relaxed),
             bytes: self.bytes.load(Ordering::Relaxed),
             waves: self.waves.load(Ordering::Relaxed),
+            by_kind: std::array::from_fn(|k| {
+                self.kind_bytes
+                    .get(k)
+                    .map_or(0, |c| c.load(Ordering::Relaxed))
+            }),
         }
     }
 
@@ -570,6 +568,9 @@ impl StrataFile {
         self.requests.store(0, Ordering::Relaxed);
         self.bytes.store(0, Ordering::Relaxed);
         self.waves.store(0, Ordering::Relaxed);
+        for counter in &self.kind_bytes {
+            counter.store(0, Ordering::Relaxed);
+        }
     }
 
     /// The block-table entries of column `column`, in row order. They are read on first use,

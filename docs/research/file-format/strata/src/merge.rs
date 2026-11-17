@@ -14,12 +14,6 @@ use crate::config::Config;
 use crate::error::{Result, StrataError};
 use crate::file::StrataFile;
 use crate::format::MAX_ROWS;
-use crate::hot::Layer;
-use crate::io::ScanKind;
-use crate::payload::{
-    CopiedFrame, PayloadCopy, SourceColumn, decode_fetched_frame, frame_segments_of, is_payload,
-    read_header, read_rows,
-};
 use crate::reader::read_column;
 use crate::writer::{FileSummary, StrataWriter, sort_key_indexes, write_file};
 
@@ -65,9 +59,7 @@ pub async fn merge(
         .collect();
     if kept.is_empty() {
         return write_file(&schema, &key_indexes, &config, 0, |i| {
-            std::future::ready(Ok(SourceColumn::Array(new_empty_array(
-                schema.field(i).data_type(),
-            ))))
+            std::future::ready(Ok(new_empty_array(schema.field(i).data_type())))
         })
         .await;
     }
@@ -123,64 +115,10 @@ pub async fn merge(
                 interleave(&refs, &sources)?
             };
             drop(arrays);
-            // Frames are copied only when every input stores the column as a payload column and
-            // the merged column is one too (S10 step 4).
-            let stored_as_payload = live.iter().all(|file| {
-                file.directory()
-                    .get(i)
-                    .is_some_and(|record| record.layer == Layer::Payload)
-            });
-            if !stored_as_payload || !is_payload(array.as_ref(), config_ref) {
-                return Ok(SourceColumn::Array(array));
-            }
-            let (frames, rows): (Vec<_>, Vec<_>) =
-                try_join_all(live.iter().map(|file| read_payload_input(file, i)))
-                    .await?
-                    .into_iter()
-                    .unzip();
-            Ok(SourceColumn::Payload(
-                array,
-                PayloadCopy {
-                    frames,
-                    rows,
-                    sources,
-                },
-            ))
+            Ok(array)
         }
     })
     .await
-}
-
-/// Reads the frames of payload column `column` of one input, each with its stored bytes, and
-/// the rows' chunk ids. The header is cached after `read_column`, and the refs and frames are
-/// read again here: an accepted cost of the prototype.
-async fn read_payload_input(
-    file: &StrataFile,
-    column: usize,
-) -> Result<(Vec<CopiedFrame>, Vec<Option<Vec<u32>>>)> {
-    let header = read_header(file, column).await?;
-    let indexes: Vec<usize> = (0..header.frames.len()).collect();
-    let segments = frame_segments_of(&header, &indexes)?;
-    let stored = file.fetch_stored(&segments, ScanKind::Scan).await?;
-    let mut frames = Vec::with_capacity(stored.len());
-    for (entry, (stored, raw)) in header.frames.iter().zip(stored) {
-        let (raw, ranges) = decode_fetched_frame(entry, raw)?;
-        frames.push(CopiedFrame {
-            stored,
-            raw,
-            ranges,
-            first_chunk: entry.first_chunk,
-        });
-    }
-    let at = file
-        .directory()
-        .get(column)
-        .map(|record| record.payload_offset)
-        .ok_or_else(|| StrataError::Schema {
-            reason: format!("column {column} is not a payload column"),
-        })?;
-    let rows = read_rows(file, &header, at).await?;
-    Ok((frames, rows))
 }
 
 /// A schema-level input error with the given reason.
@@ -207,8 +145,8 @@ fn row_count_error() -> StrataError {
 )]
 mod tests {
     use super::*;
-    use crate::payload::{chunk_value, frame_segments_of, payload_contains, read_header};
-    use crate::segment::{Kind, decode_segment};
+    use crate::hot::Layer;
+    use crate::payload::{chunk_value, payload_contains};
     use crate::testgen::{assert_same, batch, wide_batch};
     use arrow::array::{FixedSizeBinaryArray, RecordBatch, StringArray, UInt32Array};
     use arrow::buffer::Buffer;
@@ -446,14 +384,6 @@ mod tests {
         (a, b)
     }
 
-    /// The stored bytes and decoded body of every frame of payload column `column`.
-    async fn stored_frames(file: &StrataFile, column: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
-        let header = read_header(file, column).await.unwrap();
-        let indexes: Vec<usize> = (0..header.frames.len()).collect();
-        let segments = frame_segments_of(&header, &indexes).unwrap();
-        file.fetch_stored(&segments, ScanKind::Scan).await.unwrap()
-    }
-
     /// The decoded `body` column, one string per row.
     async fn body_rows(file: &StrataFile) -> Vec<String> {
         let column = read_column(file, 1).await.unwrap();
@@ -469,40 +399,6 @@ mod tests {
             .zip(b)
             .flat_map(|(x, y)| [x.clone(), y.clone()])
             .collect()
-    }
-
-    #[tokio::test]
-    async fn merged_frames_are_copied_byte_for_byte() {
-        let config = Config::default();
-        let a_values = random_values(300, 2_000, SEED_A);
-        let b_values = random_values(300, 2_000, SEED_B);
-        let (a, b) = two_inputs(&a_values, &b_values, &config).await;
-        let frames_a = stored_frames(&a, 1).await;
-        let frames_b = stored_frames(&b, 1).await;
-        assert!(frames_a.len() >= 10, "{} frames in A", frames_a.len());
-        assert!(frames_b.len() >= 10, "{} frames in B", frames_b.len());
-
-        let (bytes, _) = merge(&[Arc::clone(&a), Arc::clone(&b)], &["trace_id"], config)
-            .await
-            .unwrap();
-        let merged = open(bytes).await;
-        let got = stored_frames(&merged, 1).await;
-        // Every input frame is copied: the output's frames are A's, then B's, unchanged.
-        let want: Vec<&Vec<u8>> = frames_a
-            .iter()
-            .chain(&frames_b)
-            .map(|(stored, _)| stored)
-            .collect();
-        assert_eq!(got.len(), want.len(), "frames of the merged column");
-        for ((stored, body), want) in got.iter().zip(&want) {
-            assert_eq!(stored, *want);
-            assert_eq!(
-                &decode_segment(stored, 0, Kind::PayloadFrame).unwrap(),
-                body
-            );
-        }
-        println!("copied frames: {} of {}", got.len(), want.len());
-        assert_eq!(body_rows(&merged).await, interleaved(&a_values, &b_values));
     }
 
     #[tokio::test]
@@ -524,8 +420,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn needles_across_copied_chunks_are_found() {
-        let config = Config::default();
+    async fn needles_across_chunks_are_found_after_a_merge() {
+        let config = Config {
+            payload_filters: true,
+            ..Config::default()
+        };
         let a_values = random_values(40, 30_000, SEED_A);
         let b_values = random_values(40, 30_000, SEED_B);
         let (a, b) = two_inputs(&a_values, &b_values, &config).await;

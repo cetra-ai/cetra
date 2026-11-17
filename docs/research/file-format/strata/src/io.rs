@@ -8,7 +8,7 @@ use std::ops::Range;
 /// How reads are coalesced (design S7 § I/O).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScanKind {
-    /// Point lookups: merge ranges whose gap is below 64 KiB.
+    /// Point lookups: merge ranges whose gap is below 4 KiB.
     Point,
     /// Scans: merge ranges whose gap is below 1 MiB, without growing a merged range past 16 MiB.
     Scan,
@@ -23,10 +23,13 @@ pub struct IoStats {
     pub bytes: u64,
     /// Waves: sets of requests issued together, each waiting on the previous one.
     pub waves: u64,
+    /// Segment bytes fetched, by segment kind (index: the kind number of the design's segment
+    /// table); gaps merged into requests are not counted.
+    pub by_kind: [u64; 10],
 }
 
 /// Largest gap merged for [`ScanKind::Point`].
-pub(crate) const POINT_GAP: u64 = 64 * 1024;
+pub(crate) const POINT_GAP: u64 = 4 * 1024;
 /// Largest gap merged for [`ScanKind::Scan`].
 pub(crate) const SCAN_GAP: u64 = 1024 * 1024;
 /// Largest merged range for [`ScanKind::Scan`], unless a single input is larger.

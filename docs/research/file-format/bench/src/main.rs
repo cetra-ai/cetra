@@ -99,6 +99,7 @@ async fn main() -> R<()> {
         }
         Some("merge") => merge_cmd(&args[2]).await,
         Some("dedup") => dedup_cmd(Path::new(args.get(2).ok_or(USAGE)?)),
+        Some("lookupcols") => lookup_cols(args.get(2).ok_or(USAGE)?).await,
         Some("restrata") => restrata_cmd(Path::new(args.get(2).ok_or(USAGE)?), args.get(3).map_or("st", String::as_str)),
         Some("swe") => {
             let budget: usize = args[2].parse()?;
@@ -772,6 +773,17 @@ fn reset_io(loc: &Location, r: &Runner) {
 fn read_io(loc: &Location, r: &Runner, per: f64) -> Io {
     let (reqs, bytes) = loc.store.stats();
     let waves: Vec<u64> = strata_files(r).iter().map(|f| f.io_stats().waves).collect();
+    if std::env::var("FMT_KINDS").is_ok() && !strata_files(r).is_empty() {
+        const NAMES: [&str; 10] = ["-", "narrow", "frame", "refs", "header", "filters", "edges", "blocks", "dict", "keyfilter"];
+        let mut by_kind = [0u64; 10];
+        for f in strata_files(r) {
+            for (k, b) in f.io_stats().by_kind.iter().enumerate() {
+                by_kind[k] += b;
+            }
+        }
+        let parts: Vec<String> = NAMES.iter().zip(by_kind).filter(|(_, b)| *b > 0).map(|(n, b)| format!("{n} {:.1}", b as f64 / 1024.0 / per)).collect();
+        println!("    KiB by segment kind: {}", parts.join(", "));
+    }
     Io {
         reqs: reqs as f64 / per,
         kib: bytes as f64 / 1024.0 / per,
@@ -1033,8 +1045,9 @@ async fn trace_lookup_cold(loc: &Location, ids: &[[u8; 16]], runs: usize) -> R<(
     plan.push(("st".into(), "st".into()));
     plan.push(("st_fast".into(), "st".into()));
     plan.extend(PQ_VARIANTS.iter().map(|v| (format!("pq_fast/{v}"), v.to_string())));
+    let wanted: Option<Vec<String>> = std::env::var("FMT_VARIANTS").ok().map(|v| v.split(',').map(str::to_owned).collect());
     for (label, dir) in &plan {
-        if !has_files(loc, dir).await? {
+        if wanted.as_ref().is_some_and(|w| !w.iter().any(|x| x == label)) || !has_files(loc, dir).await? {
             continue;
         }
         let (mut ms, mut kib, mut reqs, mut waves, mut rows) = (0.0, 0.0, 0.0, None::<u64>, 0usize);
@@ -1107,6 +1120,46 @@ fn print_profile(report: &pprof::Report) {
     show("inclusive, strata/arrow/datafusion/zstd", incl, 60, true);
 }
 
+// ------------------------------------------------------------------ lookupcols
+
+/// The narrow chunk bytes a lookup of each of the 20 trace ids reads, by column (mean per id).
+async fn lookup_cols(dir: &str) -> R<()> {
+    let loc = location(dir)?;
+    let ids: Vec<[u8; 16]> = read_text(&loc, "trace_ids.txt").await?.ok_or("no trace_ids.txt")?.lines().take(20).map(parse_id).collect::<R<_>>()?;
+    let files = open_strata(&loc, "st").await?;
+    let mut by_column: std::collections::BTreeMap<String, (u64, u64)> = std::collections::BTreeMap::new();
+    for file in &files {
+        let names: Vec<String> = (0..file.directory().len())
+            .map(|c| file.schema().fields().get(c).map_or_else(|| format!("#{c}"), |f| f.name().clone()))
+            .collect();
+        for id in &ids {
+            let ranges = file.lookup(id).await?;
+            if ranges.is_empty() {
+                continue;
+            }
+            for (c, name) in names.iter().enumerate() {
+                let entries = file.block_entries(c).await?;
+                for e in entries.iter() {
+                    let end = e.first_row + e.n_rows;
+                    if ranges.iter().any(|r| r.start < end && e.first_row < r.end) {
+                        let slot = by_column.entry(name.clone()).or_default();
+                        slot.0 += u64::from(e.segment_len);
+                        slot.1 += u64::from(e.n_rows);
+                    }
+                }
+            }
+        }
+    }
+    let mut v: Vec<_> = by_column.into_iter().collect();
+    v.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+    let total: u64 = v.iter().map(|(_, (b, _))| b).sum();
+    println!("narrow bytes per lookup: {:.1} KiB", total as f64 / 1024.0 / ids.len() as f64);
+    for (name, (bytes, rows)) in v.iter().take(25) {
+        println!("  {name:24} {:>8.1} KiB  {:>8.0} rows/chunk-read", *bytes as f64 / 1024.0 / ids.len() as f64, *rows as f64 / ids.len() as f64);
+    }
+    Ok(())
+}
+
 // ------------------------------------------------------------------ restrata
 
 /// Rewrites the Strata files of a dataset from its `pq_default` files, which hold the same
@@ -1140,6 +1193,23 @@ fn restrata_cmd(dir: &Path, out: &str) -> R<()> {
         summaries.push(summary);
     }
     println!("{out:12} {:>6} MiB  write {:>8.2?}  ({:.0} MiB/s of arrow)", bytes >> 20, write_time, raw as f64 / 1048576.0 / write_time.as_secs_f64());
+    let mut payload_columns: Vec<(String, u64, u64)> = Vec::new();
+    for s in &summaries {
+        for c in &s.columns {
+            if let Some(p) = &c.payload {
+                match payload_columns.iter_mut().find(|(n, _, _)| *n == c.name) {
+                    Some(entry) => {
+                        entry.1 += c.bytes;
+                        entry.2 += p.frame_bytes;
+                    }
+                    None => payload_columns.push((c.name.clone(), c.bytes, p.frame_bytes)),
+                }
+            }
+        }
+    }
+    let total: u64 = payload_columns.iter().map(|(_, b, _)| b).sum();
+    println!("payload-layer columns (KiB total, of which shared frames): {}; all {} KiB",
+        payload_columns.iter().map(|(n, b, f)| format!("{n} {} ({})", b >> 10, f >> 10)).collect::<Vec<_>>().join(", "), total >> 10);
     payload_table(dir, &summaries)?;
     Ok(())
 }

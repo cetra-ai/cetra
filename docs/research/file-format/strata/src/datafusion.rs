@@ -640,7 +640,8 @@ impl TableProvider for StrataTable {
 
         // Prune the files where no row can match: their partitions would read nothing, and
         // the remaining files get the partitions instead.
-        if !kept.is_empty() {
+        // A key lookup is already pruned by the key filter above.
+        if !kept.is_empty() && key.is_none() {
             let predicate = match kept.len() {
                 1 => kept.first().cloned(),
                 _ => Some(Predicate::And(kept.clone())),

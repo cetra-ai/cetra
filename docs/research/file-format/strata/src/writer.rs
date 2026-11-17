@@ -1,6 +1,7 @@
 //! The writer: it checks and keeps batches in memory, then writes the whole file in
 //! [`StrataWriter::finish`].
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 
@@ -22,7 +23,7 @@ use crate::narrow::{
     BlockEntry, Class, EncodedChunk, chunk_ranges, encode_chunk, for_column, is_utf8_map,
     numeric_of,
 };
-use crate::payload::{self, FRAME_ZSTD_LEVEL, PayloadStats, SourceColumn};
+use crate::payload::{self, FRAME_ZSTD_LEVEL, PayloadStats};
 use crate::postings::ChunkPostings;
 use crate::segment::{Codec, Kind, SegmentCodec, SegmentRef, encode_segment};
 use crate::shred::{Shredded, shred};
@@ -174,7 +175,7 @@ impl StrataWriter {
             &self.sort_key,
             &self.config,
             self.rows,
-            |i| std::future::ready(self.column(i).map(SourceColumn::Array)),
+            |i| std::future::ready(self.column(i)),
         ))
     }
 
@@ -246,8 +247,9 @@ fn chunk_postings(
 }
 
 /// Writes a file of `rows` rows whose column `i` is `column(i).await`. The rows must already
-/// be sorted by `sort_key` (schema indexes); this is not checked here. A payload column that
-/// comes with its inputs' frames has them copied where possible (S10 step 4).
+/// be sorted by `sort_key` (schema indexes); this is not checked here. Columns are asked for
+/// in schema order, except that the first payload column makes the writer ask for every later
+/// Utf8 or Binary column at once, to write all payload columns with one chunk store.
 pub(crate) async fn write_file<F, Fut>(
     schema: &SchemaRef,
     sort_key: &[usize],
@@ -257,7 +259,7 @@ pub(crate) async fn write_file<F, Fut>(
 ) -> Result<(Vec<u8>, FileSummary)>
 where
     F: FnMut(usize) -> Fut,
-    Fut: Future<Output = Result<SourceColumn>>,
+    Fut: Future<Output = Result<ArrayRef>>,
 {
     let mut out = Out(Vec::new());
     write_file_header(&mut out);
@@ -272,27 +274,62 @@ where
     let mut key_filters: Vec<(u32, SegmentRef)> = Vec::new();
     let mut pending_maps: Vec<PendingMap> = Vec::new();
     let first_sort_column = sort_key.first().copied();
+    // Columns fetched ahead of their turn, and the written payload columns: all the payload
+    // columns are written together, with one chunk store, when the first one is reached.
+    let mut fetched: HashMap<usize, ArrayRef> = HashMap::new();
+    let mut payloads: HashMap<usize, (SegmentRef, PayloadStats)> = HashMap::new();
+    let mut payloads_written = false;
     for (index, field) in schema.fields().iter().enumerate() {
-        let (array, copy) = match column(index).await? {
-            SourceColumn::Array(array) => (array, None),
-            SourceColumn::Payload(array, copy) => (array, Some(copy)),
+        let array = match fetched.remove(&index) {
+            Some(array) => array,
+            None => column(index).await?,
         };
         let column_id = u32::try_from(index).map_err(|_| StrataError::Unsupported {
             what: "more than 4 billion columns".to_string(),
         })?;
-        if payload::is_payload(array.as_ref(), config) {
-            let (header, stats) = match copy {
-                Some(copy) => {
-                    payload::write_payload_merged(copy, &mut codec, &mut frame_codec, &mut out)?
+        if !payloads_written && payload::is_payload(array.as_ref(), config) {
+            payloads_written = true;
+            // This and every later payload column: one shared store, except the columns that
+            // get a store of their own.
+            let mut group: Vec<(usize, ArrayRef)> = vec![(index, Arc::clone(&array))];
+            for (later, later_field) in schema.fields().iter().enumerate().skip(index + 1) {
+                if !matches!(later_field.data_type(), DataType::Utf8 | DataType::Binary) {
+                    continue;
                 }
-                None => payload::write_payload_column(
-                    array.as_ref(),
-                    config,
+                let later_array = column(later).await?;
+                if payload::is_payload(later_array.as_ref(), config) {
+                    group.push((later, Arc::clone(&later_array)));
+                }
+                fetched.insert(later, later_array);
+            }
+            let own_store = |i: usize| {
+                schema
+                    .fields()
+                    .get(i)
+                    .is_some_and(|f| config.own_store_columns.iter().any(|n| n == f.name()))
+            };
+            let mut stores: Vec<Vec<(usize, ArrayRef)>> = Vec::new();
+            let (own, shared): (Vec<_>, Vec<_>) =
+                group.into_iter().partition(|(i, _)| own_store(*i));
+            if !shared.is_empty() {
+                stores.push(shared);
+            }
+            stores.extend(own.into_iter().map(|column| vec![column]));
+            for store in stores {
+                let refs: Vec<&dyn Array> = store.iter().map(|(_, a)| a.as_ref()).collect();
+                let written = payload::write_payload_columns(
+                    &refs,
+                    config.payload_filters,
                     &mut codec,
                     &mut frame_codec,
                     &mut out,
-                )?,
-            };
+                )?;
+                for ((i, _), result) in store.iter().zip(written) {
+                    payloads.insert(*i, result);
+                }
+            }
+        }
+        if let Some((header, stats)) = payloads.remove(&index) {
             let pages_offset =
                 u32::try_from(pages.len()).map_err(|_| StrataError::Unsupported {
                     what: "more than 4 GiB of block-table page references".to_string(),

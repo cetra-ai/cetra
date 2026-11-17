@@ -424,11 +424,11 @@ mod tests {
     #[test]
     fn ids_of_over_two_pages_matches_the_whole_column() {
         runtime().block_on(async {
-            // 9,000 rows make three refs pages (REFS_PAGE_ROWS is 4,096).
-            let (file, column) = blob_file(9_000).await;
+            // 2,200 rows make three refs pages (REFS_PAGE_ROWS is 1,024).
+            let (file, column) = blob_file(2_200).await;
             let whole = crate::reader::read_column(&file, column).await.unwrap();
             // Rows on both sides of each page boundary, and the last row.
-            let rows: Vec<u32> = vec![0, 4_095, 4_096, 4_097, 8_191, 8_192, 8_999];
+            let rows: Vec<u32> = vec![0, 1_023, 1_024, 1_025, 2_047, 2_048, 2_199];
             let header = read_header(&file, column).await.unwrap();
             assert!(header.ref_pages.len() >= 3);
             let (segments, pages) = refs_segments(&header, &rows).unwrap();

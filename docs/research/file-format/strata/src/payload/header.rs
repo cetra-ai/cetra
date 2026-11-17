@@ -162,8 +162,14 @@ impl PayloadHeader {
             return Err(corrupt("payload chunk count"));
         }
 
-        // One edge group per EDGE_GROUP_CHUNKS chunks, each starting at its own multiple.
-        if edge_groups.len() != (n_chunks as usize).div_ceil(EDGE_GROUP_CHUNKS) {
+        // One edge group per EDGE_GROUP_CHUNKS chunks, each starting at its own multiple; none
+        // when the column has no filters (no search index).
+        let groups_needed = if filters_len == 0 {
+            0
+        } else {
+            (n_chunks as usize).div_ceil(EDGE_GROUP_CHUNKS)
+        };
+        if edge_groups.len() != groups_needed {
             return Err(corrupt("payload edge groups"));
         }
         for (i, group) in edge_groups.iter().enumerate() {
@@ -211,10 +217,10 @@ mod tests {
 
     fn sample() -> PayloadHeader {
         PayloadHeader {
-            n_rows: 5000,
+            n_rows: 1_500,
             n_chunks: 3,
-            filters_offset: 0,
-            filters_len: 0,
+            filters_offset: 100,
+            filters_len: 50,
             ref_pages: vec![
                 RefPage {
                     offset: 166,
@@ -224,7 +230,7 @@ mod tests {
                 RefPage {
                     offset: 206,
                     len: 30,
-                    first_row: 4096,
+                    first_row: 1024,
                 },
             ],
             edge_groups: vec![EdgeGroup {
@@ -277,8 +283,8 @@ mod tests {
         PayloadHeader {
             n_rows: 0,
             n_chunks,
-            filters_offset: 0,
-            filters_len: 0,
+            filters_offset: 100,
+            filters_len: 50,
             ref_pages: Vec::new(),
             edge_groups: (0..groups)
                 .map(|i| EdgeGroup {
@@ -370,7 +376,7 @@ mod tests {
     }
 
     #[test]
-    fn ref_pages_are_one_per_4096_rows() {
+    fn ref_pages_are_one_per_1024_rows() {
         let page = |first_row: u32| RefPage {
             offset: 166,
             len: 40,
@@ -385,17 +391,17 @@ mod tests {
             edge_groups: Vec::new(),
             frames: Vec::new(),
         };
-        // 4,097 rows need two pages, at rows 0 and 4,096.
+        // 1,025 rows need two pages, at rows 0 and 1,024.
         assert!(is_corrupt(PayloadHeader::decode(
-            &encoded(&with_pages(4_097, vec![page(0)])),
+            &encoded(&with_pages(1_025, vec![page(0)])),
             0
         )));
         assert!(
-            PayloadHeader::decode(&encoded(&with_pages(4_097, vec![page(0), page(4_096)])), 0)
+            PayloadHeader::decode(&encoded(&with_pages(1_025, vec![page(0), page(1_024)])), 0)
                 .is_ok()
         );
         assert!(is_corrupt(PayloadHeader::decode(
-            &encoded(&with_pages(4_097, vec![page(0), page(4_000)])),
+            &encoded(&with_pages(1_025, vec![page(0), page(1_000)])),
             0
         )));
     }
