@@ -62,6 +62,7 @@ export default defineConfig({
                   ],
                 },
                 { label: "OTLP endpoint", link: "/docs/reference/otlp/" },
+                { label: "CLI", link: "/docs/reference/cli/" },
               ],
             },
           ],
