@@ -1,6 +1,14 @@
 import { expect, it } from "vitest";
 import type { Schema } from "@/api/types";
-import { CHART_MAX_POINTS, type ChartSpec, chartLabel, chartSpec } from "@/lib/sql/chart";
+import {
+  autoChartConfig,
+  buildChart,
+  CHART_MAX_POINTS,
+  type ChartSpec,
+  chartColumns,
+  chartLabel,
+  chartSpec,
+} from "@/lib/sql/chart";
 
 const TS = 'Timestamp(Nanosecond, Some("UTC"))';
 
@@ -300,4 +308,176 @@ it("keeps odd names as series keys and drops unsafe ones", () => {
   );
   expect(nullPivot.series).toEqual(["NULL"]);
   expect(nullPivot.data).toEqual([{ __x: "2026-01-01T00:00:00.000000000Z", NULL: 1 }]);
+});
+
+const MODEL_ROWS = [
+  { day: "2026-01-01T00:00:00.000000000Z", model: "a", cost: 1, traces: 4 },
+  { day: "2026-01-02T00:00:00.000000000Z", model: "b", cost: 2, traces: 5 },
+];
+const MODEL_COLUMNS = [
+  { name: "day", type: TS },
+  { name: "model", type: "Utf8" },
+  { name: "cost", type: "Float64" },
+  { name: "traces", type: "Int64" },
+];
+
+it("autoChartConfig is the automatic choice: line over time, pivot when one measure", () => {
+  expect(
+    autoChartConfig(
+      result(
+        [
+          { name: "day", type: TS },
+          { name: "model", type: "Utf8" },
+          { name: "cost", type: "Float64" },
+        ],
+        MODEL_ROWS,
+      ),
+    ),
+  ).toEqual({ kind: "line", x: "day", y: ["cost"], splitBy: "model" });
+  expect(
+    autoChartConfig(
+      result(
+        [
+          { name: "day", type: TS },
+          { name: "cost", type: "Float64" },
+          { name: "traces", type: "Int64" },
+        ],
+        [{ day: "2026-01-01T00:00:00.000000000Z", cost: 1, traces: 2 }],
+      ),
+    ),
+  ).toEqual({ kind: "line", x: "day", y: ["cost", "traces"], splitBy: null });
+  expect(
+    autoChartConfig(
+      result(
+        [
+          { name: "name", type: "Utf8" },
+          { name: "n", type: "Int64" },
+        ],
+        [],
+      ),
+    ),
+  ).toEqual({ kind: "bar", x: "name", y: ["n"], splitBy: null });
+});
+
+it("autoChartConfig is null without an x or a safe numeric column", () => {
+  expect(autoChartConfig(result([{ name: "a", type: "Utf8" }], []))).toBeNull();
+  expect(autoChartConfig(result([{ name: "n", type: "Int64" }], []))).toBeNull();
+});
+
+it("buildChart draws a bar chart over time in row order", () => {
+  const spec = buildChart(result(MODEL_COLUMNS, [...MODEL_ROWS].reverse()), {
+    kind: "bar",
+    x: "day",
+    y: ["cost"],
+    splitBy: null,
+  });
+  expect(spec).toEqual({
+    kind: "bar",
+    x: { name: "day", kind: "timestamp" },
+    series: ["cost"],
+    data: [
+      { __x: "2026-01-02T00:00:00.000000000Z", cost: 2 },
+      { __x: "2026-01-01T00:00:00.000000000Z", cost: 1 },
+    ],
+    clipped: false,
+  });
+});
+
+it("buildChart sorts a line over a numeric x by value, nulls last", () => {
+  const spec = buildChart(
+    result(
+      [
+        { name: "n", type: "Int64" },
+        { name: "cost", type: "Float64" },
+      ],
+      [
+        { n: 10, cost: 3 },
+        { n: null, cost: 9 },
+        { n: 2, cost: 1 },
+      ],
+    ),
+    { kind: "line", x: "n", y: ["cost"], splitBy: null },
+  );
+  expect(spec?.x).toEqual({ name: "n", kind: "number" });
+  expect(spec?.data).toEqual([
+    { __x: 2, cost: 1 },
+    { __x: 10, cost: 3 },
+    { __x: null, cost: 9 },
+  ]);
+});
+
+it("buildChart keeps row order for a line over a text x", () => {
+  const spec = buildChart(
+    result(
+      [
+        { name: "name", type: "Utf8" },
+        { name: "cost", type: "Float64" },
+      ],
+      [
+        { name: "b", cost: 2 },
+        { name: "a", cost: 1 },
+      ],
+    ),
+    { kind: "line", x: "name", y: ["cost"], splitBy: null },
+  );
+  expect(spec?.data.map((point) => point.__x)).toEqual(["b", "a"]);
+});
+
+it("buildChart pivots a bar chart by a text column with one y", () => {
+  const spec = buildChart(result(MODEL_COLUMNS, MODEL_ROWS), {
+    kind: "bar",
+    x: "day",
+    y: ["cost"],
+    splitBy: "model",
+  });
+  if (spec === null) {
+    throw new Error("expected a chart");
+  }
+  expect(spec.kind).toBe("bar");
+  expect(spec.pivot).toEqual({ column: "model", measure: "cost" });
+  expect(spec.series).toEqual(["a", "b"]);
+  expect(chartLabel(spec)).toBe("Bar chart of cost by day, one series per model");
+});
+
+it("buildChart ignores splitBy when there are several y", () => {
+  const spec = buildChart(result(MODEL_COLUMNS, MODEL_ROWS), {
+    kind: "line",
+    x: "day",
+    y: ["cost", "traces"],
+    splitBy: "model",
+  });
+  expect(spec?.pivot).toBeUndefined();
+  expect(spec?.series).toEqual(["cost", "traces"]);
+  expect(spec?.data).toEqual([
+    { __x: "2026-01-01T00:00:00.000000000Z", cost: 1, traces: 4 },
+    { __x: "2026-01-02T00:00:00.000000000Z", cost: 2, traces: 5 },
+  ]);
+});
+
+it("buildChart is null for a missing x, no y, a non-numeric y, or a bad splitBy", () => {
+  const base = { kind: "line" as const, x: "day", y: ["cost"], splitBy: null };
+  expect(buildChart(result(MODEL_COLUMNS, MODEL_ROWS), { ...base, x: "missing" })).toBeNull();
+  expect(buildChart(result(MODEL_COLUMNS, MODEL_ROWS), { ...base, y: [] })).toBeNull();
+  expect(buildChart(result(MODEL_COLUMNS, MODEL_ROWS), { ...base, y: ["model"] })).toBeNull();
+  expect(buildChart(result(MODEL_COLUMNS, MODEL_ROWS), { ...base, splitBy: "cost" })).toBeNull();
+});
+
+it("chartColumns lists x, y and split-by candidates", () => {
+  expect(
+    chartColumns(
+      result(
+        [
+          ...MODEL_COLUMNS,
+          { name: "d", type: "Date32" },
+          { name: "__proto__", type: "Float64" },
+          { name: "flag", type: "Boolean" },
+        ],
+        [],
+      ),
+    ),
+  ).toEqual({
+    x: ["day", "model", "cost", "traces", "d", "__proto__"],
+    y: ["cost", "traces"],
+    splitBy: ["model"],
+  });
 });
