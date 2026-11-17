@@ -29,6 +29,21 @@ export function evaluatorKey(org: string, project: string, evaluatorId: string) 
   return evaluatorQuery(org, project, evaluatorId).queryKey;
 }
 
+export function evaluatorVersionsInit(org: string, project: string, evaluatorId: string) {
+  return { params: { path: { project: projectRef(org, project), id: evaluatorId } } };
+}
+
+/** Per-evaluator 7-day stats of the project, or of the evaluators named by `evaluatorIds`. */
+export function evaluatorStatsQuery(org: string, project: string, evaluatorIds?: string[]) {
+  return $api.queryOptions("get", "/api/v1/projects/{project}/evaluators/stats", {
+    params: {
+      path: { project: projectRef(org, project) },
+      query:
+        evaluatorIds && evaluatorIds.length > 0 ? { evaluator_ids: evaluatorIds.join(",") } : {},
+    },
+  });
+}
+
 export function evaluatorTemplatesInit(org: string, project: string) {
   return { params: { path: { project: projectRef(org, project) } } };
 }

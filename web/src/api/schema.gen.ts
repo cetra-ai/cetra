@@ -1632,6 +1632,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{project}/evaluators/stats": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get evaluator stats
+         * @description Any project member can read. Jobs, costs, latencies and scores cover the last 7 UTC days (finished jobs are kept 7 days). `experiments_with_score` lists experiments that have a score named like the evaluator's output score in the last 30 days (D-I-48). Not cached.
+         */
+        get: operations["get_evaluator_stats"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{project}/evaluators/test": {
         parameters: {
             query?: never;
@@ -1694,6 +1714,26 @@ export interface paths {
          * @description Project members and above. API keys cannot call it. Queues one run at the highest priority and answers the job; poll `GET /eval-jobs/{id}`. Shares the 10 per minute per user limit with test runs.
          */
         post: operations["post_evaluator_run"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/evaluators/{id}/versions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List evaluator versions
+         * @description Any project member can read. Newest first. The config is shown as `get_evaluator` shows it: sealed webhook values are never included. A version is kept until the evaluator is deleted.
+         */
+        get: operations["list_evaluator_versions"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -3065,6 +3105,16 @@ export interface components {
          * @enum {string}
          */
         BudgetPeriod: "day" | "month";
+        /** @description A categorical label and how many scores carry it. */
+        CategoryCount: {
+            /**
+             * Format: int64
+             * @description Scores with the label in the window.
+             */
+            count: number;
+            /** @description The label. */
+            label: string;
+        };
         /** @description `POST /api/v1/me/password`. */
         ChangePasswordRequest: {
             /** @description The current password. Required when the account has one, and absent when it does not. */
@@ -4017,6 +4067,49 @@ export interface components {
             version: number;
         };
         /**
+         * @description Finished jobs of one evaluator in the window. A job counts when it finished in the window.
+         *     Its errors are `failed / (done + failed)`, which clients compute.
+         */
+        EvaluatorJobStats: {
+            /**
+             * Format: double
+             * @description Average cost per job that has a cost, USD. Omitted when no job has a cost.
+             */
+            cost_usd_avg?: number;
+            /**
+             * Format: double
+             * @description Judge cost of the jobs in the window, USD. 0 when no job has a cost.
+             */
+            cost_usd_total: number;
+            /**
+             * Format: int64
+             * @description Done jobs.
+             */
+            done: number;
+            /**
+             * Format: int64
+             * @description Failed jobs.
+             */
+            failed: number;
+            /**
+             * Format: int64
+             * @description Median latency of the done jobs, milliseconds (nearest rank). Omitted when none.
+             */
+            latency_p50_ms?: number;
+            /**
+             * Format: int64
+             * @description 95th percentile latency of the done jobs, milliseconds (nearest rank). Omitted when none.
+             */
+            latency_p95_ms?: number;
+            /** @description Finished jobs per day, seven points, oldest first. */
+            runs_daily: components["schemas"]["MetricPoint"][];
+            /**
+             * Format: int64
+             * @description Skipped jobs, including ones whose target trace was deleted.
+             */
+            skipped: number;
+        };
+        /**
          * @description What an evaluator does. Stored as `evaluators.kind`; `kind` cannot change.
          * @enum {string}
          */
@@ -4027,6 +4120,57 @@ export interface components {
             data: components["schemas"]["Evaluator"][];
             /** @description Opaque cursor for the next page, or null when this is the last page. */
             next_cursor: string | null;
+        };
+        /** @description The scores of one evaluator in the window. Read with the evaluator's current output type. */
+        EvaluatorScoreStats: {
+            /**
+             * Format: double
+             * @description Mean of the numeric values. Numeric outputs only. Omitted when there is no numeric value.
+             */
+            average?: number;
+            /**
+             * Format: int64
+             * @description Live scores in the window, of any type.
+             */
+            count: number;
+            /**
+             * @description Daily average (numeric) or pass rate (boolean), seven points, oldest first. A day without a
+             *     value has no `value`.
+             */
+            daily: components["schemas"]["MetricPoint"][];
+            /** @description The output type of the evaluator. */
+            data_type: components["schemas"]["ScoreDataType"];
+            /**
+             * Format: double
+             * @description Share of `true` values, 0 to 1. Boolean outputs only. Omitted when there is no value.
+             */
+            pass_rate?: number;
+            /** @description The most frequent label. Categorical outputs only. Omitted when there is none. */
+            top_category?: components["schemas"]["CategoryCount"];
+        };
+        /** @description The stats of one evaluator (D-I-48). */
+        EvaluatorStats: {
+            /**
+             * Format: uuid
+             * @description The evaluator.
+             */
+            evaluator_id: string;
+            /** @description Experiments with a score named like the evaluator's output score in the last 30 days. */
+            experiments_with_score: components["schemas"]["ExperimentsWithScore"];
+            /** @description Its finished jobs in the window. */
+            jobs: components["schemas"]["EvaluatorJobStats"];
+            /** @description Its scores in the window. */
+            scores: components["schemas"]["EvaluatorScoreStats"];
+        };
+        /** @description `GET /api/v1/projects/{project}/evaluators/stats` response (D-I-48). */
+        EvaluatorStatsResponse: {
+            /**
+             * @description One entry per evaluator, ordered by name then id. Evaluators without jobs or scores are
+             *     included with zeros.
+             */
+            data: components["schemas"]["EvaluatorStats"][];
+            /** @description The seven UTC days the figures cover. */
+            window: components["schemas"]["StatsWindow"];
         };
         /** @description A built-in judge template. The UI copies it into the editor; the server does not create evaluators from it. */
         EvaluatorTemplate: {
@@ -4129,6 +4273,39 @@ export interface components {
              * @description Output tokens the provider counted. Omitted when unknown.
              */
             output_tokens?: number;
+        };
+        /** @description One stored version of an evaluator. Holds what `Evaluator` shows, never a sealed value. */
+        EvaluatorVersion: {
+            /** @description The kind-specific configuration of this version, as `Evaluator.config` shows it. */
+            config: Record<string, never>;
+            /**
+             * Format: date-time
+             * @description When this version was made. JSON is RFC 3339.
+             */
+            created_at: string;
+            /**
+             * Format: uuid
+             * @description User who made this version. Omitted when that user is unknown.
+             */
+            created_by?: string;
+            /** @description What the evaluator does. */
+            kind: components["schemas"]["EvaluatorKind"];
+            /** @description Display name when this version was made. */
+            name: string;
+            /** @description The score this version writes. */
+            output_score: components["schemas"]["OutputScoreBody"];
+            /**
+             * Format: int64
+             * @description Version number, starting at 1.
+             */
+            version: number;
+        };
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        EvaluatorVersionPage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["EvaluatorVersion"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
         };
         /** @description One experiment: a run of a task over a pinned dataset version. */
         Experiment: {
@@ -4300,6 +4477,31 @@ export interface components {
             result_count: number;
             /** @description One entry per score name, sorted by name. */
             scores: components["schemas"]["ScoreSummary"][];
+        };
+        /** @description An experiment listed in `experiments_with_score`. */
+        ExperimentWithScore: {
+            /**
+             * Format: uuid
+             * @description The experiment.
+             */
+            id: string;
+            /**
+             * Format: date-time
+             * @description When the experiment last got such a score. JSON is RFC 3339.
+             */
+            last_scored_at: string;
+            /** @description The experiment's name. */
+            name: string;
+        };
+        /** @description Experiments that have a score named like the evaluator's output score (D-I-48). */
+        ExperimentsWithScore: {
+            /** @description The five with the latest score, newest first. */
+            recent: components["schemas"]["ExperimentWithScore"][];
+            /**
+             * Format: int64
+             * @description Experiments with such a score in the last 30 days, that still exist and are visible.
+             */
+            total: number;
         };
         /**
          * @description The format of an export (D-J-7).
@@ -6858,6 +7060,19 @@ export interface components {
         SsoDiscovery: {
             /** @description True when the domain's org has an enabled provider. */
             sso: boolean;
+        };
+        /** @description The window of the stats: the start of the UTC day six days ago, up to the request time. */
+        StatsWindow: {
+            /**
+             * Format: date-time
+             * @description Window start. JSON is RFC 3339.
+             */
+            from: string;
+            /**
+             * Format: date-time
+             * @description Window end, exclusive. JSON is RFC 3339.
+             */
+            to: string;
         };
         /**
          * @description How the provider is asked to fill the answer schema.
@@ -15281,6 +15496,95 @@ export interface operations {
             };
         };
     };
+    get_evaluator_stats: {
+        parameters: {
+            query?: {
+                /** @description Comma-separated evaluator ids, 1 to 50. Default: every evaluator of the project. */
+                evaluator_ids?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One entry per evaluator. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvaluatorStatsResponse"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     post_evaluator_test: {
         parameters: {
             query?: never;
@@ -15617,6 +15921,81 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["EvalJob"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_evaluator_versions: {
+        parameters: {
+            query?: {
+                /** @description Maximum number of items to return (1–1000, default 50). */
+                limit?: components["schemas"]["Limit"];
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Evaluator id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of versions, newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvaluatorVersionPage"];
                 };
             };
             /** @description The request is malformed or a filter is invalid. */

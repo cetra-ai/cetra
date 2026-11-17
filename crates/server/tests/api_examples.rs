@@ -29,8 +29,8 @@ use cetra_server::api::deletions::{Deletion, DeletionPreview};
 use cetra_server::api::entitlements::OrgEntitlements;
 use cetra_server::api::eval_jobs::{EvalJob, RunEvaluatorRequest};
 use cetra_server::api::evaluators::{
-    CreateEvaluatorRequest, Evaluator, EvaluatorTemplateList, EvaluatorTestRequest,
-    EvaluatorTestResult,
+    CreateEvaluatorRequest, Evaluator, EvaluatorStatsResponse, EvaluatorTemplateList,
+    EvaluatorTestRequest, EvaluatorTestResult, EvaluatorVersion,
 };
 use cetra_server::api::experiments::{
     CreateExperimentResponse, Experiment, ExperimentComparison, ExperimentResults,
@@ -421,7 +421,9 @@ fn static_files_match_their_types() {
     roundtrip::<Deletion>("static/deletion-org.json");
     roundtrip::<Page<Evaluator>>("static/evaluators.json");
     roundtrip::<Evaluator>("static/evaluator.json");
+    roundtrip::<Page<EvaluatorVersion>>("static/evaluator-versions.json");
     roundtrip::<EvaluatorTemplateList>("static/evaluator-templates.json");
+    roundtrip::<EvaluatorStatsResponse>("static/evaluator-stats.json");
     roundtrip::<EvaluatorTestResult>("static/evaluator-test-result.json");
     roundtrip::<Page<Experiment>>("static/experiments.json");
     roundtrip::<Experiment>("static/experiment.json");
@@ -645,7 +647,9 @@ fn generated_files_roundtrip() {
             "post_llm_connection_test" => roundtrip::<LlmConnectionTestResult>(&example.file),
             "list_evaluators" => roundtrip::<Page<Evaluator>>(&example.file),
             "get_evaluator" | "post_evaluator" => roundtrip::<Evaluator>(&example.file),
+            "list_evaluator_versions" => roundtrip::<Page<EvaluatorVersion>>(&example.file),
             "list_evaluator_templates" => roundtrip::<EvaluatorTemplateList>(&example.file),
+            "get_evaluator_stats" => roundtrip::<EvaluatorStatsResponse>(&example.file),
             "post_evaluator_test" => roundtrip::<EvaluatorTestResult>(&example.file),
             "get_saved_view" => roundtrip::<SavedView>(&example.file),
             "list_score_definitions" => roundtrip::<Page<ScoreDefinition>>(&example.file),

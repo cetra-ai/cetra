@@ -14,6 +14,7 @@ pub(crate) mod retry;
 pub(crate) mod rule_check;
 pub(crate) mod rule_limit;
 pub(crate) mod sampling;
+pub(crate) mod stats;
 pub(crate) mod test_run;
 pub(crate) mod trace_load;
 pub(crate) mod trigger;

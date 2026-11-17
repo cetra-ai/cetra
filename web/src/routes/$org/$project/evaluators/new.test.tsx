@@ -80,6 +80,27 @@ function mappingRows(): [string, string][] {
     ]);
 }
 
+it("starts from the template named in the URL", async () => {
+  const hallucination = templatesFixture.data.find((template) => template.id === "hallucination");
+  if (!hallucination) {
+    throw new Error("the hallucination template is missing from the fixtures");
+  }
+  await renderApp("/acme/support-bot/evaluators/new?template=hallucination");
+
+  await waitFor(() => expect(screen.getByLabelText("Name")).toHaveValue("Hallucination"));
+  expect(screen.getByLabelText("Prompt")).toHaveValue(hallucination.prompt);
+  expect(screen.getByRole("combobox", { name: "Start from a template" })).toHaveTextContent(
+    "Hallucination",
+  );
+});
+
+it("ignores a template id that is not in the list", async () => {
+  await renderApp("/acme/support-bot/evaluators/new?template=nope");
+
+  await screen.findByRole("combobox", { name: "Start from a template" });
+  expect(screen.getByLabelText("Name")).toHaveValue("");
+});
+
 it("seeds the test panel's mapping from the picked template", async () => {
   const hallucination = templatesFixture.data.find((template) => template.id === "hallucination");
   if (!hallucination) {

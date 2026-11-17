@@ -685,10 +685,24 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
         ),
         example_created("post_evaluator", BTreeMap::new(), "static/evaluator.json"),
         example(
+            "list_evaluator_versions",
+            params(&[("id", "01900000-0000-7000-8000-000000000500")]),
+            BTreeMap::new(),
+            "static/evaluator-versions.json",
+            "application/json",
+        ),
+        example(
             "list_evaluator_templates",
             BTreeMap::new(),
             BTreeMap::new(),
             "static/evaluator-templates.json",
+            "application/json",
+        ),
+        example(
+            "get_evaluator_stats",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "static/evaluator-stats.json",
             "application/json",
         ),
         example(

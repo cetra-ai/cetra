@@ -24,8 +24,12 @@ const STATUSES: [&str; 5] = ["queued", "running", "done", "failed", "skipped"];
 
 /// Interruptions a job may take before it fails (D-I-12).
 const MAX_INTERRUPTIONS: i64 = 3;
-/// A pruned or expired job's age limit for queued non-backfill jobs (D-I-28).
-const DAY_NS: i64 = 86_400_000_000_000;
+/// Nanoseconds in a UTC day.
+pub(crate) const DAY_NS: i64 = 86_400_000_000_000;
+/// Days in the evaluator stats window (D-I-48).
+pub(crate) const STATS_DAYS: usize = 7;
+/// Start of the stats window: six days before the start of today, in nanoseconds (D-I-48).
+pub(crate) const STATS_BACK_NS: i64 = 6 * DAY_NS;
 
 /// The columns `JobRow` reads, in the order `JobRecord` declares them. A macro so that the
 /// queries stay string literals (sqlx takes static SQL only).
@@ -990,6 +994,108 @@ pub(crate) async fn counts_since(
     Ok(counts)
 }
 
+/// Per-evaluator job figures of one stats window (D-I-48).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct EvaluatorJobStats {
+    /// Done jobs.
+    pub(crate) done: u64,
+    /// Failed jobs.
+    pub(crate) failed: u64,
+    /// Skipped jobs, deleted-target skips included.
+    pub(crate) skipped: u64,
+    /// Sum of the costs of the jobs that have one.
+    pub(crate) cost_total: f64,
+    /// Jobs that have a cost.
+    pub(crate) cost_jobs: u64,
+    /// Finished jobs per window day.
+    pub(crate) daily: [u64; STATS_DAYS],
+}
+
+/// Finished jobs (`done`, `failed`, `skipped`) of `project` finished in `[from, to)`, per evaluator.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or a stored value does not decode.
+pub(crate) async fn finished_stats(
+    pool: &SqlitePool,
+    project: ProjectId,
+    from: i64,
+    to: i64,
+) -> Result<HashMap<Uuid, EvaluatorJobStats>, MetaError> {
+    let rows: Vec<(String, String, i64, i64, f64, i64)> = sqlx::query_as(
+        "SELECT evaluator_id, status, (finished_at - ?1) / ?2 AS day, COUNT(*), \
+         COALESCE(SUM(cost_usd), 0.0), COUNT(cost_usd) FROM eval_jobs \
+         WHERE project_id = ?3 AND status IN ('done', 'failed', 'skipped') \
+         AND finished_at >= ?1 AND finished_at < ?4 \
+         GROUP BY evaluator_id, status, day",
+    )
+    .bind(from)
+    .bind(DAY_NS)
+    .bind(project.to_string())
+    .bind(to)
+    .fetch_all(pool)
+    .await?;
+    let mut stats: HashMap<Uuid, EvaluatorJobStats> = HashMap::new();
+    for (evaluator, status, day, count, cost_total, cost_jobs) in rows {
+        let evaluator = parse_uuid(&evaluator, "evaluator_id")?;
+        let day = usize::try_from(day)
+            .ok()
+            .filter(|day| *day < STATS_DAYS)
+            .ok_or_else(|| corrupt("day"))?;
+        let count = u64::try_from(count).map_err(|_| corrupt("count"))?;
+        let cost_jobs = u64::try_from(cost_jobs).map_err(|_| corrupt("count"))?;
+        let entry = stats.entry(evaluator).or_default();
+        match status.as_str() {
+            "done" => entry.done += count,
+            "failed" => entry.failed += count,
+            "skipped" => entry.skipped += count,
+            _ => return Err(corrupt("status")),
+        }
+        entry.daily[day] += count;
+        entry.cost_total += cost_total;
+        entry.cost_jobs += cost_jobs;
+    }
+    Ok(stats)
+}
+
+/// Latency `(p50, p95)` in milliseconds of the done jobs of `project` finished in `[from, to)`, per
+/// evaluator, by nearest rank (`rank = ceil(n * p / 100)`). Jobs without a latency are ignored.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or a stored value does not decode.
+pub(crate) async fn latency_percentiles(
+    pool: &SqlitePool,
+    project: ProjectId,
+    from: i64,
+    to: i64,
+) -> Result<HashMap<Uuid, (u64, u64)>, MetaError> {
+    let rows: Vec<(String, i64, i64)> = sqlx::query_as(
+        "WITH ranked AS (SELECT evaluator_id, latency_ms, \
+           ROW_NUMBER() OVER (PARTITION BY evaluator_id ORDER BY latency_ms) AS rn, \
+           COUNT(*) OVER (PARTITION BY evaluator_id) AS cnt \
+         FROM eval_jobs WHERE project_id = ? AND status = 'done' AND latency_ms IS NOT NULL \
+           AND finished_at >= ? AND finished_at < ?) \
+         SELECT evaluator_id, \
+           MAX(CASE WHEN rn = (cnt * 50 + 99) / 100 THEN latency_ms END), \
+           MAX(CASE WHEN rn = (cnt * 95 + 99) / 100 THEN latency_ms END) \
+         FROM ranked GROUP BY evaluator_id",
+    )
+    .bind(project.to_string())
+    .bind(from)
+    .bind(to)
+    .fetch_all(pool)
+    .await?;
+    let mut latencies = HashMap::new();
+    for (evaluator, p50, p95) in rows {
+        let evaluator = parse_uuid(&evaluator, "evaluator_id")?;
+        let p50 = u64::try_from(p50).map_err(|_| corrupt("latency_ms"))?;
+        let p95 = u64::try_from(p95).map_err(|_| corrupt("latency_ms"))?;
+        latencies.insert(evaluator, (p50, p95));
+    }
+    Ok(latencies)
+}
+
 /// Open jobs across all projects, `[queued, running]`, for the `/metrics` queue gauge (N M3).
 ///
 /// # Errors
@@ -1199,9 +1305,9 @@ mod tests {
 
     use super::{
         Candidate, Finish, JobFilter, JobRow, JobUsage, KIND_BACKFILL, KIND_MANUAL, KIND_RULE,
-        NewJob, candidates, claim, counts_since, dedup_key, delete_jobs, finish, get_job,
-        insert_job, insert_rule_job, jobs_for_traces, list_jobs, prune, recover, requeue_stale,
-        skip_queued_of_rule, start_attempt, upsert_backfill_job,
+        NewJob, candidates, claim, counts_since, dedup_key, delete_jobs, finish, finished_stats,
+        get_job, insert_job, insert_rule_job, jobs_for_traces, latency_percentiles, list_jobs,
+        prune, recover, requeue_stale, skip_queued_of_rule, start_attempt, upsert_backfill_job,
     };
     use crate::meta::connections::{ConnectionFields, insert_connection};
     use crate::meta::evaluators::{EvaluatorFields, insert_evaluator};
@@ -1621,6 +1727,16 @@ mod tests {
     /// Enqueues a rule job, claims it and counts one attempt: `(id, claims)`.
     async fn running_job(db: &MetaDb, seeded: &Seed, hex: &str) -> (Uuid, u32) {
         let job = rule_job(seeded, trace(hex), None);
+        let id = job.id;
+        assert!(enqueue(db, job, NOW).await);
+        let claims = claim_job(db, id, NOW).await.unwrap();
+        assert_eq!(attempt(db, id, claims, NOW).await, Some(1));
+        (id, claims)
+    }
+
+    /// Enqueues a manual job of `evaluator`, claims it and counts one attempt: `(id, claims)`.
+    async fn running_manual(db: &MetaDb, seeded: &Seed, hex: &str, evaluator: Uuid) -> (Uuid, u32) {
+        let job = manual_job(seeded, trace(hex), evaluator);
         let id = job.id;
         assert!(enqueue(db, job, NOW).await);
         let claims = claim_job(db, id, NOW).await.unwrap();
@@ -2457,6 +2573,216 @@ mod tests {
         assert_eq!(mine.skipped, 1);
         assert_eq!(mine.running, 0);
         assert_eq!(counts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn finished_stats_counts_statuses_costs_and_days() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let seeded = seed(&db).await;
+        let judge = seeded.judge;
+        let from = NOW - 6 * DAY;
+        let to = NOW + 1;
+        // Two done jobs at NOW (day 6), costs 0.02 and 0.04.
+        for (i, cost) in [(1u64, 0.02), (2, 0.04)] {
+            let (id, claims) = running_manual(&db, &seeded, &format!("a2{i:030x}"), judge).await;
+            let how = Finish::Done {
+                judge_trace_id: trace(&format!("e2{i:030x}")),
+                score_id: Uuid::now_v7(),
+                evaluator_version: 1,
+                usage: JobUsage {
+                    cost_usd: Some(cost),
+                    latency_ms: Some(100),
+                    ..Default::default()
+                },
+            };
+            assert!(finish_job(&db, id, claims, how, NOW).await);
+        }
+        // A failed job at NOW - DAY (day 5).
+        let (id, claims) = running_manual(&db, &seeded, &format!("a2{:030x}", 3), judge).await;
+        let failed = Finish::Failed {
+            class: "permanent",
+            error: "x".to_owned(),
+            judge_trace_id: None,
+            evaluator_version: None,
+            usage: JobUsage::default(),
+        };
+        assert!(finish_job(&db, id, claims, failed, NOW - DAY).await);
+        // A skipped and a deleted job at NOW - 3 DAY (day 3); the deleted one has a cost.
+        let (id, claims) = running_manual(&db, &seeded, &format!("a2{:030x}", 4), judge).await;
+        assert!(
+            finish_job(
+                &db,
+                id,
+                claims,
+                Finish::Skipped { error: "x" },
+                NOW - 3 * DAY
+            )
+            .await
+        );
+        let (id, claims) = running_manual(&db, &seeded, &format!("a2{:030x}", 5), judge).await;
+        let deleted = Finish::Deleted {
+            usage: JobUsage {
+                cost_usd: Some(0.01),
+                ..Default::default()
+            },
+        };
+        assert!(finish_job(&db, id, claims, deleted, NOW - 3 * DAY).await);
+        // Outside the window: a done job finished 7 days ago, and a queued job.
+        let (id, claims) = running_manual(&db, &seeded, &format!("a2{:030x}", 6), judge).await;
+        let old = Finish::Done {
+            judge_trace_id: trace(&format!("e2{:030x}", 6)),
+            score_id: Uuid::now_v7(),
+            evaluator_version: 1,
+            usage: JobUsage::default(),
+        };
+        assert!(finish_job(&db, id, claims, old, NOW - 7 * DAY).await);
+        enqueue(
+            &db,
+            manual_job(&seeded, trace(&format!("a2{:030x}", 7)), judge),
+            NOW,
+        )
+        .await;
+        // The webhook has one done job at NOW.
+        let (id, claims) =
+            running_manual(&db, &seeded, &format!("a2{:030x}", 8), seeded.webhook).await;
+        let hook_done = Finish::Done {
+            judge_trace_id: trace(&format!("e2{:030x}", 8)),
+            score_id: Uuid::now_v7(),
+            evaluator_version: 1,
+            usage: JobUsage::default(),
+        };
+        assert!(finish_job(&db, id, claims, hook_done, NOW).await);
+
+        // An evaluator of another project, with one done job at NOW.
+        let (other_project, other_evaluator) = db
+            .write(move |conn| {
+                Box::pin(async move {
+                    let other = insert_project(conn, seeded.org, "Other", "other", None, NOW)
+                        .await?
+                        .id;
+                    let evaluator = Uuid::now_v7();
+                    insert_evaluator(
+                        conn,
+                        evaluator,
+                        other,
+                        "check",
+                        evaluator_fields("x", None),
+                        None,
+                        NOW,
+                    )
+                    .await?;
+                    Ok::<(ProjectId, Uuid), MetaError>((other, evaluator))
+                })
+            })
+            .await
+            .unwrap();
+        let other_job = NewJob {
+            id: Uuid::now_v7(),
+            project_id: other_project,
+            kind: KIND_MANUAL,
+            rule_id: None,
+            evaluator_id: other_evaluator,
+            variable_mapping: Some("{}".to_owned()),
+            trace_id: trace(&format!("a2{:030x}", 9)),
+            span_id: None,
+            trace_start_ns: NOW,
+        };
+        let other_id = other_job.id;
+        assert!(enqueue(&db, other_job, NOW).await);
+        let claims = claim_job(&db, other_id, NOW).await.unwrap();
+        assert_eq!(attempt(&db, other_id, claims, NOW).await, Some(1));
+        let other_done = Finish::Done {
+            judge_trace_id: trace(&format!("e2{:030x}", 9)),
+            score_id: Uuid::now_v7(),
+            evaluator_version: 1,
+            usage: JobUsage::default(),
+        };
+        assert!(finish_job(&db, other_id, claims, other_done, NOW).await);
+
+        let stats = finished_stats(db.reader(), seeded.project, from, to)
+            .await
+            .unwrap();
+        let mine = stats.get(&judge).copied().unwrap();
+        assert_eq!(mine.done, 2);
+        assert_eq!(mine.failed, 1);
+        assert_eq!(mine.skipped, 2);
+        assert_eq!(mine.cost_jobs, 3);
+        assert!((mine.cost_total - 0.07).abs() < 1e-12);
+        assert_eq!(mine.daily, [0, 0, 0, 2, 0, 1, 2]);
+        assert_eq!(stats.get(&seeded.webhook).map(|s| s.done), Some(1));
+        assert!(!stats.contains_key(&other_evaluator));
+    }
+
+    #[tokio::test]
+    async fn finished_stats_of_an_evaluator_without_jobs_is_absent() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let seeded = seed(&db).await;
+        let stats = finished_stats(db.reader(), seeded.project, NOW - 6 * DAY, NOW + 1)
+            .await
+            .unwrap();
+        assert!(stats.is_empty());
+    }
+
+    #[tokio::test]
+    async fn latency_percentiles_use_nearest_rank() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let seeded = seed(&db).await;
+        for i in 1..=10u64 {
+            let (id, claims) =
+                running_manual(&db, &seeded, &format!("a2{i:030x}"), seeded.judge).await;
+            let how = Finish::Done {
+                judge_trace_id: trace(&format!("e2{i:030x}")),
+                score_id: Uuid::now_v7(),
+                evaluator_version: 1,
+                usage: JobUsage {
+                    latency_ms: Some(i * 100),
+                    ..Default::default()
+                },
+            };
+            assert!(finish_job(&db, id, claims, how, NOW).await);
+        }
+        // A failed job's latency does not count.
+        let (id, claims) =
+            running_manual(&db, &seeded, &format!("a2{:030x}", 99), seeded.judge).await;
+        let failed = Finish::Failed {
+            class: "permanent",
+            error: "x".to_owned(),
+            judge_trace_id: None,
+            evaluator_version: None,
+            usage: JobUsage {
+                latency_ms: Some(5000),
+                ..Default::default()
+            },
+        };
+        assert!(finish_job(&db, id, claims, failed, NOW).await);
+        // The webhook: one done job with latency 70, one without a latency.
+        let (id, claims) =
+            running_manual(&db, &seeded, &format!("a3{:030x}", 1), seeded.webhook).await;
+        let hook = Finish::Done {
+            judge_trace_id: trace(&format!("e3{:030x}", 1)),
+            score_id: Uuid::now_v7(),
+            evaluator_version: 1,
+            usage: JobUsage {
+                latency_ms: Some(70),
+                ..Default::default()
+            },
+        };
+        assert!(finish_job(&db, id, claims, hook, NOW).await);
+        let (id, claims) =
+            running_manual(&db, &seeded, &format!("a3{:030x}", 2), seeded.webhook).await;
+        let no_latency = Finish::Done {
+            judge_trace_id: trace(&format!("e3{:030x}", 2)),
+            score_id: Uuid::now_v7(),
+            evaluator_version: 1,
+            usage: JobUsage::default(),
+        };
+        assert!(finish_job(&db, id, claims, no_latency, NOW).await);
+
+        let latencies = latency_percentiles(db.reader(), seeded.project, NOW - 6 * DAY, NOW + 1)
+            .await
+            .unwrap();
+        assert_eq!(latencies.get(&seeded.judge), Some(&(500, 1000)));
+        assert_eq!(latencies.get(&seeded.webhook), Some(&(70, 70)));
     }
 
     #[tokio::test]
