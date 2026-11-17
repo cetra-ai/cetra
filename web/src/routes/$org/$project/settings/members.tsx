@@ -176,6 +176,7 @@ function ProjectMembersPage() {
       }
     >
       <SettingsPage
+        width="wide"
         title="Members"
         description="Org members and their access to this project. Org owners and admins always have admin access."
       >

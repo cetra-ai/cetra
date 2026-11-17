@@ -120,7 +120,7 @@ export function UserDeletionForm() {
       <form
         noValidate
         aria-label="Delete a user's data"
-        className="flex flex-col gap-4"
+        className="flex max-w-xl flex-col gap-4"
         onSubmit={onSubmit}
       >
         <TextField

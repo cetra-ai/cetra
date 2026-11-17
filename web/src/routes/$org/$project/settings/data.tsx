@@ -19,6 +19,7 @@ function ProjectDataPage() {
 
   return (
     <SettingsPage
+      width="wide"
       title="Data"
       description="Delete end-user data and follow deletion requests. Retention is under General."
     >

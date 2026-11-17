@@ -71,6 +71,7 @@ function OrgMembersPage() {
   return (
     <SettingsListLayout open={openId !== undefined} onClose={() => closePanel()} panel={panel}>
       <SettingsPage
+        width="wide"
         title="Members"
         description="People in this organization and their roles."
         actions={

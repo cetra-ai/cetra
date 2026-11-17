@@ -256,6 +256,7 @@ function ScoreDefinitionsPage() {
       }
     >
       <SettingsPage
+        width="wide"
         title="Score definitions"
         description="Named score shapes. Annotations and evaluators must fit them."
         actions={

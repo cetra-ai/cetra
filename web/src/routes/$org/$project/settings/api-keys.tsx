@@ -244,6 +244,7 @@ function ApiKeysList({
       }
     >
       <SettingsPage
+        width="wide"
         title="API keys"
         description="Keys let SDKs and OpenTelemetry exporters send data to this project."
         actions={

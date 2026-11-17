@@ -152,6 +152,7 @@ function ProjectPricesPage() {
   return (
     <SettingsListLayout open={open !== undefined} onClose={close} panel={panel()}>
       <SettingsPage
+        width="wide"
         title="Model prices"
         description="What costs are computed with in this project. A project price beats an organization price, which beats the built-in LiteLLM prices. New prices apply to spans received from now on; stored costs are not recomputed."
         actions={

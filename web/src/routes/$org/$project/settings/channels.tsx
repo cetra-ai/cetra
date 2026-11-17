@@ -234,6 +234,7 @@ function ChannelsPage() {
       }
     >
       <SettingsPage
+        width="wide"
         title="Notification channels"
         description="Where alert rules send their notifications."
         actions={

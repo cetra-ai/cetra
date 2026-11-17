@@ -196,6 +196,7 @@ function LlmConnectionsPage() {
     <>
       <SettingsListLayout open={openId !== undefined} onClose={() => closePanel()} panel={panel}>
         <SettingsPage
+          width="wide"
           title="LLM connections"
           description="Provider keys that evaluators use. Keys are stored encrypted and never shown again."
           actions={
