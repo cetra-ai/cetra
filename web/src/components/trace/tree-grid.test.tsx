@@ -1,6 +1,8 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it } from "vitest";
 import type { Schema } from "@/api/types";
+import { ProjectProvider } from "@/components/shell/project-context";
 import { TreeGrid } from "@/components/trace/tree-grid";
 
 const TRACE = {
@@ -27,17 +29,28 @@ const SPANS = [
   },
 ] as unknown as Schema<"TreeSpan">[];
 
-function renderGrid() {
-  render(
-    <TreeGrid
-      spans={SPANS}
-      trace={TRACE}
-      selectedSpanId="s1"
-      onSelectSpan={() => {}}
-      mode="tree"
-      onMode={() => {}}
-    />,
+function gridElement(timeline: boolean) {
+  return (
+    <QueryClientProvider client={new QueryClient()}>
+      <ProjectProvider
+        value={{ org: "acme", project: "support-bot", ref: "p1", data: {} as Schema<"Project"> }}
+      >
+        <TreeGrid
+          spans={SPANS}
+          trace={TRACE}
+          selectedSpanId="s1"
+          onSelectSpan={() => {}}
+          mode={timeline ? "timeline" : "tree"}
+          onMode={() => {}}
+          timeline={timeline}
+        />
+      </ProjectProvider>
+    </QueryClientProvider>
   );
+}
+
+function renderGrid() {
+  render(gridElement(true));
   return screen.getByRole("separator", { name: "Resize Name column" });
 }
 
@@ -74,6 +87,19 @@ it("restores a stored width, ignores an invalid one, and double-click resets", (
   fireEvent.doubleClick(handle);
   expect(handle).toHaveAttribute("aria-valuenow", "220");
   expect(localStorage.getItem("cetra.tree.name_width")).toBeNull();
+});
+
+it("tree mode has no time axis, and timeline mode adds it back", () => {
+  const { rerender } = render(gridElement(false));
+  expect(screen.queryByRole("columnheader", { name: "Timeline" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Timeline root" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("separator", { name: "Resize Name column" })).not.toBeInTheDocument();
+  expect(screen.getByRole("grid", { name: "Trace" })).toHaveAttribute("aria-colcount", "4");
+
+  rerender(gridElement(true));
+  expect(screen.getByRole("columnheader", { name: "Timeline" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Timeline root" })).toBeInTheDocument();
+  expect(screen.getByRole("grid", { name: "Trace" })).toHaveAttribute("aria-colcount", "5");
 });
 
 it("falls back to the content-fitted width for an invalid stored width", () => {

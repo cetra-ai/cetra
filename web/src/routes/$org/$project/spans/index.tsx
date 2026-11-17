@@ -360,6 +360,14 @@ function SpansPage() {
                     replace: true,
                   });
                 }}
+                onShowSummary={() => {
+                  void navigate({
+                    to: "/$org/$project/spans",
+                    params: { org, project },
+                    search: (prev) => withoutSpanParam(prev),
+                    replace: true,
+                  });
+                }}
               />
             ) : null
           }
@@ -409,6 +417,11 @@ function withSort(search: SpansSearch, next: { id: string; desc: boolean } | nul
     return rest;
   }
   return { ...rest, sort, order: next.desc ? "desc" : "asc" };
+}
+
+function withoutSpanParam(search: SpansSearch): SpansSearch {
+  const { span: _span, ...rest } = search;
+  return rest;
 }
 
 function withoutTrace(search: SpansSearch): SpansSearch {

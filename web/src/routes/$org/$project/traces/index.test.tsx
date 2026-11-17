@@ -260,6 +260,40 @@ it("moves up from the open trace after a deep link", async () => {
   });
 });
 
+it("opens the neighbouring loaded traces from the header buttons", async () => {
+  const { router } = await renderApp(
+    "/acme/support-bot/traces?range=1h&trace=a1000000000000000000000000000003",
+  );
+  await screen.findByRole("grid", { name: "Trace" });
+  fireEvent.click(screen.getByRole("button", { name: "Next trace" }));
+  await waitFor(() => {
+    expect(router.state.location.search.trace).toBe("a1000000000000000000000000000002");
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Previous trace" }));
+  await waitFor(() => {
+    expect(router.state.location.search.trace).toBe("a1000000000000000000000000000003");
+  });
+});
+
+it("hides Next at the last loaded trace", async () => {
+  const { router } = await renderApp(
+    "/acme/support-bot/traces?range=1h&trace=a1000000000000000000000000000003",
+  );
+  await screen.findByRole("grid", { name: "Trace" });
+  let steps = 0;
+  while (screen.queryByRole("button", { name: "Next trace" }) && steps < 50) {
+    const before = router.state.location.search.trace;
+    fireEvent.click(screen.getByRole("button", { name: "Next trace" }));
+    await waitFor(() => {
+      expect(router.state.location.search.trace).not.toBe(before);
+    });
+    steps += 1;
+  }
+  expect(steps).toBeGreaterThan(0);
+  expect(screen.queryByRole("button", { name: "Next trace" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Previous trace" })).toBeInTheDocument();
+});
+
 it("persists a column width and restores the default on double-click", async () => {
   await renderApp("/acme/support-bot/traces");
   const handle = await screen.findByRole("separator", { name: "Resize Name" });
@@ -277,6 +311,8 @@ it("persists a column width and restores the default on double-click", async () 
 const TRACE_1 = "a1000000000000000000000000000001";
 const TOOL_SPAN = "b100000000000013";
 const NEXT = "a1000000000000000000000000000004";
+const NEXT_OF_3 = "a1000000000000000000000000000002";
+const PREVIOUS_OF_3 = "a1000000000000000000000000000004";
 const LARGE = "a0000000000000000000000000000000";
 
 it("opens a trace beside the list and follows span, escape, and j", async () => {
@@ -334,6 +370,38 @@ it("opens a trace beside the list and follows span, escape, and j", async () => 
     expect(router.state.location.search).toMatchObject({ trace: NEXT });
   });
   expect(router.state.location.search.span).toBeUndefined();
+});
+
+it("shows the trace summary in transcript mode until a block is picked, and goes back to it", async () => {
+  const { router, user } = await renderApp(
+    `/acme/support-bot/traces?trace=${TRACE_1}&mode=transcript`,
+  );
+  expect(await screen.findByRole("region", { name: "Trace summary" })).toBeInTheDocument();
+
+  const transcript = await screen.findByRole("region", { name: "Transcript" });
+  await user.click(within(transcript).getByRole("button", { name: /get_order_status/ }));
+  await waitFor(() => {
+    expect(router.state.location.search).toMatchObject({ span: TOOL_SPAN, mode: "transcript" });
+  });
+  expect(screen.queryByRole("region", { name: "Trace summary" })).not.toBeInTheDocument();
+  const panel = await screen.findByRole("region", { name: "Span" });
+  expect(within(panel).getByText("get_order_status")).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "Trace summary" }));
+  await waitFor(() => {
+    expect(router.state.location.search.span).toBeUndefined();
+  });
+  expect(router.state.location.search).toMatchObject({ trace: TRACE_1, mode: "transcript" });
+  expect(await screen.findByRole("region", { name: "Trace summary" })).toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "Span" })).not.toBeInTheDocument();
+});
+
+it("shows the root span's detail in tree mode, not the summary", async () => {
+  await renderApp(`/acme/support-bot/traces?trace=${TRACE_1}`);
+  const tree = await screen.findByRole("grid", { name: "Trace" });
+  expect(within(tree).getByRole("row", { selected: true })).toHaveTextContent("support-agent");
+  expect(await screen.findByRole("region", { name: "Span" })).toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "Trace summary" })).not.toBeInTheDocument();
 });
 
 it("virtualizes a 10 000 span trace and reveals children when a node expands", async () => {
@@ -1397,4 +1465,61 @@ it("shows the trace in a drawer over the list, and Escape closes it", async () =
     expect(screen.queryByRole("complementary", { name: "Trace" })).not.toBeInTheDocument();
   });
   expect(screen.getByRole("grid", { name: "Traces" })).toBeInTheDocument();
+});
+
+it("prefetches the trace detail and its root span when the pointer rests on a row", async () => {
+  const detailRequests: string[] = [];
+  const rootRequests: string[] = [];
+  const onStart = ({ request }: { request: Request }) => {
+    const url = new URL(request.url);
+    if (url.pathname.endsWith(`/traces/${TRACE_1}`)) {
+      detailRequests.push(url.pathname);
+    }
+    if (url.pathname.includes(`/traces/${TRACE_1}/spans/`)) {
+      rootRequests.push(url.pathname);
+    }
+  };
+  server.events.on("request:start", onStart);
+  try {
+    await renderApp("/acme/support-bot/traces");
+    const list = await screen.findByRole("grid", { name: "Traces" });
+    const scroller = list.querySelector("[data-scroll-container]");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("missing scroll container");
+    }
+    scroller.scrollTop = 240;
+    fireEvent.scroll(scroller);
+    const row = within(list).getByRole("row", { name: /4\.20s/ });
+    fireEvent.pointerEnter(row);
+    await waitFor(() => expect(detailRequests).toHaveLength(1));
+    await waitFor(() => expect(rootRequests).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(detailRequests).toHaveLength(1);
+    expect(rootRequests).toHaveLength(1);
+  } finally {
+    server.events.removeListener("request:start", onStart);
+  }
+});
+
+it("prefetches the neighbours of an open trace once", async () => {
+  const requested: string[] = [];
+  const onStart = ({ request }: { request: Request }) => {
+    const url = new URL(request.url);
+    if (url.pathname.includes("/traces/a1000000000000000000000000000")) {
+      requested.push(url.pathname.split("/").at(-1) ?? "");
+    }
+  };
+  server.events.on("request:start", onStart);
+  try {
+    await renderApp("/acme/support-bot/traces?range=1h&trace=a1000000000000000000000000000003");
+    await screen.findByRole("grid", { name: "Trace" });
+    await waitFor(() => {
+      expect(requested).toEqual(expect.arrayContaining([NEXT_OF_3, PREVIOUS_OF_3]));
+    });
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(requested.filter((id) => id === NEXT_OF_3)).toHaveLength(1);
+    expect(requested.filter((id) => id === PREVIOUS_OF_3)).toHaveLength(1);
+  } finally {
+    server.events.removeListener("request:start", onStart);
+  }
 });

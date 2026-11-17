@@ -106,6 +106,7 @@ export function SessionView({
                   traceId={traceId}
                   spanId={spanId}
                   onSelectSpan={(next) => setSpan({ traceId, spanId: next })}
+                  onShowSummary={() => setSpan({ traceId })}
                   onClose={() => {
                     return navigate({
                       to: "/$org/$project/sessions/$sessionId",

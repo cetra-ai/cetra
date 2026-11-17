@@ -1,11 +1,12 @@
 import { cn } from "cn";
-import { type ReactNode, useState } from "react";
+import { Bot, MessageSquare, Settings2, User, Wrench } from "lucide-react";
+import type { ReactNode } from "react";
 import type { Schema } from "@/api/types";
 import { PartView, type ToolLinks } from "@/components/payload/part-view";
+import { ShowMore } from "@/components/payload/show-more";
 import { Badge } from "@/components/ui/badge";
 
-const LINE_LIMIT = 40;
-
+/** One chat message as a card: a role header, then its parts. Long messages are clipped. */
 export function MessageView({
   message,
   projectRef,
@@ -15,32 +16,24 @@ export function MessageView({
   projectRef?: string;
   links: ToolLinks;
 }) {
-  const [expanded, setExpanded] = useState(false);
-  const total = textLineCount(message);
-  const hidden = total - LINE_LIMIT;
   const role = message.role.length > 0 ? message.role : "other";
+  const Icon = roleIcon(role);
   return (
-    <article className={cn("border-l-2 pl-2", roleBorder(role))}>
-      <header className="flex flex-wrap items-center gap-2 text-[10.5px]">
-        <span className="font-medium">{role}</span>
+    <article className={cn("rounded-md border border-l-2 bg-card", roleBorder(role))}>
+      <header className="flex flex-wrap items-center gap-2 border-b px-3 py-1.5 text-[12px]">
+        <Icon className="size-3.5 text-muted-foreground" aria-hidden />
+        <span className="font-medium">{capitalise(role)}</span>
         {message.name ? <span className="text-muted-foreground">{message.name}</span> : null}
         {message.finish_reason ? (
-          <Badge variant="outline" className="text-muted-foreground">
+          <Badge variant="outline" className="text-[11px] text-muted-foreground">
             {message.finish_reason}
           </Badge>
         ) : null}
       </header>
-      <div className="flex flex-col gap-1">
-        {partsOf(message, expanded, projectRef, links)}
-        {!expanded && hidden > 0 ? (
-          <button
-            type="button"
-            className="self-start text-[10.5px]"
-            onClick={() => setExpanded(true)}
-          >
-            Show {hidden} more lines
-          </button>
-        ) : null}
+      <div className="px-3 py-2">
+        <ShowMore>
+          <div className="flex flex-col gap-1">{partsOf(message, projectRef, links)}</div>
+        </ShowMore>
       </div>
     </article>
   );
@@ -48,43 +41,13 @@ export function MessageView({
 
 function partsOf(
   message: Schema<"Message">,
-  expanded: boolean,
   projectRef: string | undefined,
   links: ToolLinks,
 ): ReactNode[] {
-  const nodes: ReactNode[] = [];
-  let budget = expanded ? Number.POSITIVE_INFINITY : LINE_LIMIT;
   const seen = new Map<string, number>();
-  for (const part of message.parts) {
-    const key = partKey(part, seen);
-    if (part.type === "text" && typeof part.content === "string") {
-      if (budget <= 0) continue;
-      const lines = part.content.split("\n");
-      const shown = lines.slice(0, budget).join("\n");
-      budget -= lines.length;
-      nodes.push(
-        <PartView
-          key={key}
-          part={{ type: "text", content: shown }}
-          projectRef={projectRef}
-          links={links}
-        />,
-      );
-      continue;
-    }
-    nodes.push(<PartView key={key} part={part} projectRef={projectRef} links={links} />);
-  }
-  return nodes;
-}
-
-function textLineCount(message: Schema<"Message">): number {
-  let count = 0;
-  for (const part of message.parts) {
-    if (part.type === "text" && typeof part.content === "string") {
-      count += part.content.split("\n").length;
-    }
-  }
-  return count;
+  return message.parts.map((part) => (
+    <PartView key={partKey(part, seen)} part={part} projectRef={projectRef} links={links} />
+  ));
 }
 
 function partKey(part: Schema<"Part">, seen: Map<string, number>): string {
@@ -97,10 +60,22 @@ function partKey(part: Schema<"Part">, seen: Map<string, number>): string {
   return `${base}\0${n}`;
 }
 
+function capitalise(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+function roleIcon(role: string) {
+  if (role === "user") return User;
+  if (role === "assistant") return Bot;
+  if (role === "system") return Settings2;
+  if (role === "tool") return Wrench;
+  return MessageSquare;
+}
+
 function roleBorder(role: string): string {
-  if (role === "system") return "border-muted-foreground";
-  if (role === "user") return "border-kind-span";
-  if (role === "assistant") return "border-kind-llm";
-  if (role === "tool") return "border-kind-tool";
-  return "border-kind-agent";
+  if (role === "system") return "border-l-muted-foreground";
+  if (role === "user") return "border-l-kind-span";
+  if (role === "assistant") return "border-l-kind-llm";
+  if (role === "tool") return "border-l-kind-tool";
+  return "border-l-kind-agent";
 }

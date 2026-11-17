@@ -52,6 +52,8 @@ const FETCH_AHEAD = 20;
 const DRAG_START_PX = 4;
 const EDGE_PX = 40;
 const EDGE_STEP_PX = 12;
+/** How long the pointer must rest on a body row before `onRowHover` fires. */
+const ROW_HOVER_MS = 100;
 const NO_LOCKED: ReadonlySet<string> = new Set();
 
 interface ReorderDrag {
@@ -85,6 +87,8 @@ export interface DataTableProps<Row extends RowData> {
   onReorder?: (ids: string[]) => void;
   /** Columns that cannot be moved, and that columns cannot be dropped before. */
   lockedColumnIds?: ReadonlySet<string>;
+  /** Called once the pointer has rested on a body row for ROW_HOVER_MS. */
+  onRowHover?: (row: Row) => void;
 }
 
 export function DataTable<Row extends RowData>({
@@ -107,6 +111,7 @@ export function DataTable<Row extends RowData>({
   rowTone,
   onReorder,
   lockedColumnIds = NO_LOCKED,
+  onRowHover,
 }: DataTableProps<Row>) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const headerRef = useRef<HTMLDivElement>(null);
@@ -150,6 +155,32 @@ export function DataTable<Row extends RowData>({
     setFocusedIndex(index);
     onActivateRef.current(row.original);
   }, []);
+
+  // One timer is enough: the pointer rests on one row at a time.
+  const onRowHoverRef = useRef(onRowHover);
+  useLayoutEffect(() => {
+    onRowHoverRef.current = onRowHover;
+  }, [onRowHover]);
+  const hoverTimer = useRef<number | undefined>(undefined);
+  const cancelRowHover = useCallback(() => {
+    window.clearTimeout(hoverTimer.current);
+    hoverTimer.current = undefined;
+  }, []);
+  useEffect(() => cancelRowHover, [cancelRowHover]);
+  const onRowEnter = useCallback(
+    (row: TableRow<typeof features, Row>) => {
+      cancelRowHover();
+      if (!onRowHoverRef.current) {
+        return;
+      }
+      const data = row.original;
+      hoverTimer.current = window.setTimeout(() => {
+        hoverTimer.current = undefined;
+        onRowHoverRef.current?.(data);
+      }, ROW_HOVER_MS);
+    },
+    [cancelRowHover],
+  );
 
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -551,6 +582,8 @@ export function DataTable<Row extends RowData>({
                   template={template}
                   totalWidth={totalWidth}
                   onRowClick={onRowClick}
+                  onRowEnter={onRowEnter}
+                  onRowLeave={cancelRowHover}
                 />
               );
             })}
@@ -583,6 +616,8 @@ interface BodyRowProps<TData extends RowData> {
   template: string | undefined;
   totalWidth: number | undefined;
   onRowClick: (index: number, row: TableRow<typeof features, TData>) => void;
+  onRowEnter: (row: TableRow<typeof features, TData>) => void;
+  onRowLeave: () => void;
 }
 
 // One virtual body row. Every prop is a primitive or a stable reference, so a scroll
@@ -598,6 +633,8 @@ function BodyRowView<TData extends RowData>({
   template,
   totalWidth,
   onRowClick,
+  onRowEnter,
+  onRowLeave,
 }: BodyRowProps<TData>) {
   return (
     <div
@@ -619,6 +656,8 @@ function BodyRowView<TData extends RowData>({
         minWidth: totalWidth,
       }}
       onClick={() => onRowClick(index, row)}
+      onPointerEnter={() => onRowEnter(row)}
+      onPointerLeave={onRowLeave}
     >
       {row.getAllCells().map((cell) => (
         <div

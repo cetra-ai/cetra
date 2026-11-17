@@ -14,8 +14,9 @@ type TreeControls = {
   onErrorsOnly: (on: boolean) => void;
   onExpandAll: () => void;
   onCollapseDepth: () => void;
-  onFit: () => void;
-  zoomLabel: string;
+  /** Timeline only: the zoom controls are left out when these are not given. */
+  onFit?: () => void;
+  zoomLabel?: string;
 };
 
 export function TreeToolbar({
@@ -47,6 +48,16 @@ function ModeToggle({ mode, onMode }: { mode: TraceMode; onMode: (mode: TraceMod
         onClick={() => onMode("tree")}
       >
         Tree
+      </Button>
+      <Button
+        type="button"
+        role="radio"
+        size="xs"
+        variant={mode === "timeline" ? "secondary" : "ghost"}
+        aria-checked={mode === "timeline"}
+        onClick={() => onMode("timeline")}
+      >
+        Timeline
       </Button>
       <Button
         type="button"
@@ -121,10 +132,16 @@ function TreeControls({ controls }: { controls: TreeControls }) {
       >
         Collapse
       </Button>
-      <span className="num shrink-0 text-[11px] text-muted-foreground">{controls.zoomLabel}</span>
-      <Button type="button" variant="outline" size="xs" onClick={controls.onFit}>
-        Fit
-      </Button>
+      {controls.zoomLabel !== undefined && controls.onFit ? (
+        <>
+          <span className="num shrink-0 text-[11px] text-muted-foreground">
+            {controls.zoomLabel}
+          </span>
+          <Button type="button" variant="outline" size="xs" onClick={controls.onFit}>
+            Fit
+          </Button>
+        </>
+      ) : null}
     </>
   );
 }
@@ -139,9 +156,7 @@ function treeControls(props: Partial<TreeControls>): TreeControls | undefined {
     props.errorsOnly === undefined ||
     !props.onErrorsOnly ||
     !props.onExpandAll ||
-    !props.onCollapseDepth ||
-    !props.onFit ||
-    props.zoomLabel === undefined
+    !props.onCollapseDepth
   ) {
     return undefined;
   }

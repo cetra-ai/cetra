@@ -373,3 +373,88 @@ it("draws faint row lines behind the virtual rows on the sizing container", () =
   expect(sizer?.style.backgroundSize).toBe("100% var(--row-height)");
   expect(sizer?.style.backgroundImage).toContain("linear-gradient");
 });
+
+it("calls onRowHover with the row once the pointer has rested on it for 100 ms", () => {
+  vi.useFakeTimers();
+  const onRowHover = vi.fn();
+  render(
+    <DataTable
+      tableId="hover-test"
+      ariaLabel="Hover"
+      columns={columns}
+      rows={ITEMS}
+      getRowId={(row) => row.id}
+      onActivate={() => undefined}
+      hasNextPage={false}
+      isFetchingNextPage={false}
+      fetchNextPage={() => undefined}
+      emptyState={null}
+      onRowHover={onRowHover}
+    />,
+  );
+  fireEvent.pointerEnter(rowOf("broken"));
+  act(() => {
+    vi.advanceTimersByTime(99);
+  });
+  expect(onRowHover).not.toHaveBeenCalled();
+  act(() => {
+    vi.advanceTimersByTime(1);
+  });
+  expect(onRowHover).toHaveBeenCalledTimes(1);
+  expect(onRowHover).toHaveBeenCalledWith(ITEMS[1]);
+});
+
+it("does not call onRowHover when the pointer leaves before 100 ms", () => {
+  vi.useFakeTimers();
+  const onRowHover = vi.fn();
+  render(
+    <DataTable
+      tableId="hover-leave-test"
+      ariaLabel="Hover"
+      columns={columns}
+      rows={ITEMS}
+      getRowId={(row) => row.id}
+      onActivate={() => undefined}
+      hasNextPage={false}
+      isFetchingNextPage={false}
+      fetchNextPage={() => undefined}
+      emptyState={null}
+      onRowHover={onRowHover}
+    />,
+  );
+  fireEvent.pointerEnter(rowOf("fine"));
+  act(() => {
+    vi.advanceTimersByTime(50);
+  });
+  fireEvent.pointerLeave(rowOf("fine"));
+  act(() => {
+    vi.advanceTimersByTime(200);
+  });
+  expect(onRowHover).not.toHaveBeenCalled();
+});
+
+it("cancels a pending hover when the table unmounts", () => {
+  vi.useFakeTimers();
+  const onRowHover = vi.fn();
+  const view = render(
+    <DataTable
+      tableId="hover-unmount-test"
+      ariaLabel="Hover"
+      columns={columns}
+      rows={ITEMS}
+      getRowId={(row) => row.id}
+      onActivate={() => undefined}
+      hasNextPage={false}
+      isFetchingNextPage={false}
+      fetchNextPage={() => undefined}
+      emptyState={null}
+      onRowHover={onRowHover}
+    />,
+  );
+  fireEvent.pointerEnter(rowOf("fine"));
+  view.unmount();
+  act(() => {
+    vi.advanceTimersByTime(200);
+  });
+  expect(onRowHover).not.toHaveBeenCalled();
+});

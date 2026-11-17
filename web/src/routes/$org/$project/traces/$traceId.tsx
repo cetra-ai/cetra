@@ -46,10 +46,22 @@ function TracePage() {
               replace: true,
             });
           }}
+          onShowSummary={() => {
+            void navigate({
+              to: "/$org/$project/traces/$traceId",
+              search: (prev) => withoutSpan(prev),
+              replace: true,
+            });
+          }}
         />
       </div>
     </div>
   );
+}
+
+function withoutSpan(search: TracePageSearch): TracePageSearch {
+  const { span: _span, ...rest } = search;
+  return rest;
 }
 
 function withMode(search: TracePageSearch, mode: TraceMode): TracePageSearch {

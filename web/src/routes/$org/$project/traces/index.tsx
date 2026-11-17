@@ -4,6 +4,7 @@ import { Trash2, Waypoints } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
+import { spanDetailQuery, traceDetailQuery } from "@/api/queries";
 import type { Schema } from "@/api/types";
 import { useShortcut } from "@/components/command/use-shortcut";
 import { ColumnChooser } from "@/components/data-table/column-chooser";
@@ -227,6 +228,47 @@ function TracesPage() {
       search: (prev) => withoutTrace(prev),
     });
   });
+
+  // Previous and next follow the loaded rows in display order; no button at either end of the loaded list.
+  const openIndex = search.trace ? rows.findIndex((row) => row.trace_id === search.trace) : -1;
+  const previousRow = openIndex > 0 ? rows[openIndex - 1] : undefined;
+  const nextRow = openIndex >= 0 && openIndex < rows.length - 1 ? rows[openIndex + 1] : undefined;
+  function openTrace(traceId: string) {
+    void navigate({
+      to: "/$org/$project/traces",
+      params: { org, project },
+      search: (prev) => ({ ...withoutSpan(prev), trace: traceId }),
+    });
+  }
+  // Warms a trace and its root span, which the panel opens on, so opening it shows no loading state.
+  const prefetchTrace = useCallback(
+    (row: Schema<"TraceSummary">) => {
+      void queryClient.prefetchQuery(traceDetailQuery(org, project, row.trace_id));
+      if (row.root_span_id) {
+        void queryClient.prefetchQuery(
+          spanDetailQuery(org, project, row.trace_id, row.root_span_id),
+        );
+      }
+    },
+    [org, project, queryClient],
+  );
+  // Warms the open trace's neighbours once per open trace, so Previous and Next open at once.
+  const prefetchedFor = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!search.trace) {
+      prefetchedFor.current = undefined;
+      return;
+    }
+    if (openIndex < 0 || prefetchedFor.current === search.trace) {
+      return;
+    }
+    prefetchedFor.current = search.trace;
+    for (const row of [previousRow, nextRow]) {
+      if (row !== undefined) {
+        prefetchTrace(row);
+      }
+    }
+  }, [search.trace, openIndex, previousRow, nextRow, prefetchTrace]);
 
   const problem = list.isError ? problemOf(list.error) : undefined;
   const filterError = problem?.code === "invalid_filter" ? problem : undefined;
@@ -458,6 +500,7 @@ function TracesPage() {
                           search: (prev) => ({ ...withoutSpan(prev), trace: row.trace_id }),
                         });
                       }}
+                      onRowHover={prefetchTrace}
                       onSelectionMove={(row) => {
                         void navigate({
                           to: "/$org/$project/traces",
@@ -533,6 +576,8 @@ function TracesPage() {
                   });
                 }}
                 onAddFilter={onFilter}
+                onPrevious={previousRow ? () => openTrace(previousRow.trace_id) : undefined}
+                onNext={nextRow ? () => openTrace(nextRow.trace_id) : undefined}
                 layout={<TraceLayoutControls />}
                 onClose={() => {
                   return navigate({
@@ -546,6 +591,14 @@ function TracesPage() {
                     to: "/$org/$project/traces",
                     params: { org, project },
                     search: (prev) => ({ ...prev, span: spanId }),
+                    replace: true,
+                  });
+                }}
+                onShowSummary={() => {
+                  void navigate({
+                    to: "/$org/$project/traces",
+                    params: { org, project },
+                    search: (prev) => withoutSpan(prev),
                     replace: true,
                   });
                 }}

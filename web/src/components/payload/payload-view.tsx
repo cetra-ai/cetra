@@ -1,8 +1,12 @@
 import { useState } from "react";
 import type { Schema } from "@/api/types";
 import { CopyButton } from "@/components/copy-button";
+import { toolLinks } from "@/components/payload/chat-view";
 import { FormatSwitch, usePayloadFormat } from "@/components/payload/format-switch";
 import { JsonView } from "@/components/payload/json-view";
+import { Markdown } from "@/components/payload/markdown";
+import { MessageView } from "@/components/payload/message-view";
+import { ShowMore } from "@/components/payload/show-more";
 import { Badge } from "@/components/ui/badge";
 
 /** Pretty rendering stops here until the user asks for it. Serialized characters, not bytes. */
@@ -25,8 +29,8 @@ export function PayloadView({
   if (!payload) {
     return (
       <section className="flex min-w-0 flex-col gap-1">
-        <h3 className="text-[10.5px] font-medium">{label}</h3>
-        <p className="text-[10.5px] text-muted-foreground">—</p>
+        <h3 className="text-[12px] font-medium">{label}</h3>
+        <p className="text-[12px] text-muted-foreground">—</p>
       </section>
     );
   }
@@ -36,23 +40,29 @@ export function PayloadView({
   return (
     <section className="flex min-w-0 flex-col gap-1">
       <div className="flex flex-wrap items-center gap-2">
-        <h3 className="text-[10.5px] font-medium">{label}</h3>
-        <Badge variant="outline" className="h-4 px-1.5 text-[10.5px] text-muted-foreground">
+        <h3 className="text-[12px] font-medium">{label}</h3>
+        <Badge variant="outline" className="h-4 px-1.5 text-[11px] text-muted-foreground">
           {payload.format}
         </Badge>
-        <span className="text-[10.5px] text-muted-foreground">{serialized.chars} chars</span>
+        <span className="text-[11px] text-muted-foreground">{serialized.chars} chars</span>
         <CopyButton value={serialized.raw} label={label} />
         <FormatSwitch value={mode} onChange={setMode} />
       </div>
       {capped ? (
-        <div className="flex flex-wrap items-center gap-2 text-[10.5px]">
+        <div className="flex flex-wrap items-center gap-2 text-[12px]">
           <p>Large payload ({megabytes(serialized.chars)} MB)</p>
           <button type="button" className="underline" onClick={() => setForce(true)}>
             Render anyway
           </button>
         </div>
-      ) : (
+      ) : payload.format === "messages" && mode === "pretty" ? (
+        // Messages bring their own cards, one per role.
         <PayloadBody payload={payload} mode={mode} serialized={serialized} />
+      ) : (
+        // Text and JSON sit in the same card as a message, without a role header.
+        <div className="rounded-md border border-l-2 border-l-muted-foreground/40 bg-card px-3 py-2">
+          <PayloadBody payload={payload} mode={mode} serialized={serialized} />
+        </div>
       )}
     </section>
   );
@@ -68,10 +78,20 @@ function PayloadBody({
   serialized: Serialized;
 }) {
   if (payload.format === "text") {
+    // Only Pretty renders Markdown. JSON and Raw both show the plain text.
+    if (mode === "pretty") {
+      return (
+        <ShowMore>
+          <Markdown text={payload.value} />
+        </ShowMore>
+      );
+    }
     return (
-      <pre className="overflow-auto font-mono text-[10.5px] whitespace-pre-wrap">
-        {payload.value}
-      </pre>
+      <ShowMore>
+        <pre className="overflow-auto font-mono text-[12px] whitespace-pre-wrap">
+          {payload.value}
+        </pre>
+      </ShowMore>
     );
   }
   if (payload.format === "messages" && mode === "pretty") {
@@ -79,31 +99,42 @@ function PayloadBody({
   }
   if (mode === "raw") {
     return (
-      <pre className="overflow-auto font-mono text-[10.5px] whitespace-pre-wrap">
-        {serialized.raw}
-      </pre>
+      <ShowMore>
+        <pre className="overflow-auto font-mono text-[12px] whitespace-pre-wrap">
+          {serialized.raw}
+        </pre>
+      </ShowMore>
     );
   }
   if (payload.format === "json" && mode === "json") {
     return (
-      <pre className="overflow-auto font-mono text-[10.5px] whitespace-pre-wrap">
-        {serialized.pretty}
-      </pre>
+      <ShowMore>
+        <pre className="overflow-auto font-mono text-[12px] whitespace-pre-wrap">
+          {serialized.pretty}
+        </pre>
+      </ShowMore>
     );
   }
-  return <JsonView value={payload.value} />;
+  return (
+    <ShowMore>
+      <JsonView value={payload.value} />
+    </ShowMore>
+  );
 }
 
+/** Each message is the same card the Chat tab shows, so Input/Output and Chat look alike. */
 function MessageList({ messages }: { messages: readonly Schema<"Message">[] }) {
+  const links = toolLinks(messages);
+  const seen = new Map<string, number>();
   return (
-    <ul className="flex flex-col gap-2">
-      {messages.map((message) => (
-        <li key={messageKey(message)} className="text-[10.5px]">
-          <span className="font-medium">{message.role}</span>
-          <p className="whitespace-pre-wrap">{messageText(message)}</p>
-        </li>
-      ))}
-    </ul>
+    <div className="flex flex-col gap-2">
+      {messages.map((message) => {
+        const base = messageKey(message);
+        const n = seen.get(base) ?? 0;
+        seen.set(base, n + 1);
+        return <MessageView key={`${base}\0${n}`} message={message} links={links} />;
+      })}
+    </div>
   );
 }
 

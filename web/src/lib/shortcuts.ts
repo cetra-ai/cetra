@@ -69,7 +69,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
   },
   {
     keys: "t",
-    description: "Toggle Tree / Transcript",
+    description: "Cycle Tree / Timeline / Transcript",
     scope: "trace view",
     bindings: [{ id: "toggle-mode", key: "t" }],
   },

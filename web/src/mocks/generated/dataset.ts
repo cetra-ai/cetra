@@ -120,7 +120,10 @@ export function createDataset(options: { seed: number; now: number; traces: numb
       if (!detail || !row) {
         return undefined;
       }
-      return spanFromSummary(row.span);
+      return spanFromSummary(row.span, {
+        traceIndex: indexById.get(traceId) ?? 0,
+        errored: detail.trace.error_count > 0,
+      });
     },
     sessions(includeEval, includeExperiments) {
       return sessionsFrom(visibleTraces(traces, includeEval, includeExperiments));
@@ -227,8 +230,10 @@ function traceSummary(seed: number, index: number, now: number): Schema<"TraceSu
     release: index % 2 === 0 ? "v1.5.0" : "v1.4.0",
     tags,
     metadata,
-    input_preview: `Ask ${name} about ticket ${index}`,
-    output_preview: errorCount > 0 ? "The tool failed." : `Done with ticket ${index}.`,
+    input_preview: pick(SUPPORT_TURNS, index).question,
+    output_preview: firstLine(
+      errorCount > 0 ? FAILED_ANSWER : shortAnswer(pick(SUPPORT_TURNS, index)),
+    ),
     span_count: spanCount,
     error_count: errorCount,
     llm_count: llmCount(spanCount),
@@ -409,7 +414,183 @@ function treeSpan(
   return { depth: span.depth, detached: span.detached, span: summary };
 }
 
-function spanFromSummary(span: Schema<"SpanSummary">): Schema<"SpanDetail"> {
+type SpanContext = { traceIndex: number; errored: boolean };
+
+type SupportTurn = {
+  question: string;
+  heading: string;
+  summary: string;
+  steps: readonly string[];
+  snippets: { python: string; ts: string };
+  docs: readonly [string, string, string];
+};
+
+const FENCE = "```";
+const FAILED_ANSWER =
+  "I could not finish.\n\n- The lookup tool failed\n- Escalate to a human agent";
+const TOOL_NAMES = ["lookup_ticket", "get_customer", "search_orders"] as const;
+const RETRIEVER_SCORES = [0.92, 0.81, 0.67] as const;
+const RERANK_SCORES = [0.52, 0.91, 0.84] as const;
+
+const SUPPORT_TURNS: readonly [SupportTurn, ...SupportTurn[]] = [
+  {
+    question: "How do I get a refund for a duplicate charge?",
+    heading: "Refunds for duplicate charges",
+    summary: "A duplicate charge can be refunded from the billing page within 14 days.",
+    steps: [
+      "Open Billing and select the duplicate invoice",
+      "Choose Refund and confirm the amount",
+      "The money returns in 3 to 5 business days",
+    ],
+    snippets: {
+      python:
+        'refund = client.billing.refund(invoice_id="inv_1042", reason="duplicate")\nprint(refund.status)',
+      ts: 'const refund = await client.billing.refund({ invoiceId: "inv_1042", reason: "duplicate" });\nconsole.log(refund.status);',
+    },
+    docs: [
+      "Refunds are issued to the original payment method.",
+      "Duplicate charges are reversed within 14 days.",
+      "Partial refunds are supported on invoices.",
+    ],
+  },
+  {
+    question: "I forgot my password. How do I reset it?",
+    heading: "Resetting a password",
+    summary: "Use the reset link on the sign-in page. The link expires after 30 minutes.",
+    steps: [
+      "Click Forgot password on the sign-in page",
+      "Open the email link within 30 minutes",
+      "Choose a new password of at least 12 characters",
+    ],
+    snippets: {
+      python: 'client.auth.request_password_reset(email="user@example.com")',
+      ts: 'await client.auth.requestPasswordReset({ email: "user@example.com" });',
+    },
+    docs: [
+      "Password reset links expire after 30 minutes.",
+      "Reset emails come from the no-reply address.",
+      "Accounts with SSO reset their password at the identity provider.",
+    ],
+  },
+  {
+    question: "Why am I getting 429 errors from the API?",
+    heading: "API rate limits",
+    summary: "A 429 response means the project passed its per-minute request limit.",
+    steps: [
+      "Read the Retry-After header",
+      "Back off with an exponential delay",
+      "Ask for a higher limit if traffic is steady",
+    ],
+    snippets: {
+      python: 'time.sleep(float(response.headers["Retry-After"]))',
+      ts: 'await sleep(Number(response.headers.get("Retry-After")) * 1000);',
+    },
+    docs: [
+      "The default limit is 600 requests per minute per project.",
+      "Retry-After gives the number of seconds to wait.",
+      "Limits are shared by every key in a project.",
+    ],
+  },
+  {
+    question: "How can I export my traces to a CSV file?",
+    heading: "Exporting traces",
+    summary: "Export from the Traces page, or call the export endpoint for large ranges.",
+    steps: [
+      "Filter the traces you need",
+      "Choose Export and then CSV",
+      "Use the API for ranges over 100,000 traces",
+    ],
+    snippets: {
+      python:
+        'export = client.traces.export(format="csv", since="2026-11-01")\nexport.save("traces.csv")',
+      ts: 'const file = await client.traces.export({ format: "csv", since: "2026-11-01" });\nawait file.save("traces.csv");',
+    },
+    docs: [
+      "Exports include every filtered column.",
+      "CSV exports are limited to 100,000 rows.",
+      "Exports are kept for 7 days.",
+    ],
+  },
+  {
+    question: "How do I set up a webhook for new tickets?",
+    heading: "Webhook setup",
+    summary: "Register an HTTPS endpoint and subscribe it to the ticket.created event.",
+    steps: [
+      "Open Settings and then Webhooks",
+      "Add an HTTPS URL",
+      "Verify the signature header on each request",
+    ],
+    snippets: {
+      python:
+        'hook = client.webhooks.create(url="https://example.com/hooks", events=["ticket.created"])',
+      ts: 'const hook = await client.webhooks.create({ url: "https://example.com/hooks", events: ["ticket.created"] });',
+    },
+    docs: [
+      "Webhooks retry failed deliveries three times.",
+      "Each request carries an HMAC signature header.",
+      "Only HTTPS endpoints are accepted.",
+    ],
+  },
+  {
+    question: "Why was my plan price changed this month?",
+    heading: "Plan price changes",
+    summary: "Prices change at the start of a billing cycle, not in the middle.",
+    steps: [
+      "Check the plan history in Billing",
+      "Changes apply on the next invoice",
+      "Contact support to request a credit",
+    ],
+    snippets: {
+      python: "plan = client.billing.current_plan()\nprint(plan.name, plan.price_cents)",
+      ts: "const plan = await client.billing.currentPlan();\nconsole.log(plan.name, plan.priceCents);",
+    },
+    docs: [
+      "Plan changes take effect on the next billing date.",
+      "Invoices list the price used for each cycle.",
+      "Credits appear on the following invoice.",
+    ],
+  },
+];
+
+/** Picks an item cycling by index; the list is never empty, so the first item is the fallback. */
+function pick<T>(items: readonly [T, ...T[]], index: number): T {
+  const [first] = items;
+  return items[index % items.length] ?? first;
+}
+
+function firstLine(text: string): string {
+  return text.split("\n")[0] ?? "";
+}
+
+function shortAnswer(turn: SupportTurn): string {
+  return [turn.summary, "", ...turn.steps.map((step) => `- ${step}`)].join("\n");
+}
+
+function llmAnswer(turn: SupportTurn, language: "python" | "ts"): string {
+  return [
+    `## ${turn.heading}`,
+    "",
+    turn.summary,
+    "",
+    ...turn.steps.map((step) => `- ${step}`),
+    "",
+    `${FENCE}${language}`,
+    turn.snippets[language],
+    FENCE,
+  ].join("\n");
+}
+
+function scoredDocs(
+  turn: SupportTurn,
+  scores: readonly [number, number, number],
+): { id: string; score: number; text: string }[] {
+  return turn.docs.map((text, i) => ({ id: `doc-${i + 1}`, score: scores[i] ?? 0, text }));
+}
+
+function spanFromSummary(span: Schema<"SpanSummary">, context: SpanContext): Schema<"SpanDetail"> {
+  const index = spanIndex(span.span_id);
+  // Every span of a trace shares the trace's topic, the same one its preview and root use.
+  const turn = pick(SUPPORT_TURNS, context.traceIndex);
   const truncated = spanIndex(span.span_id) % 17 === 0 ? ["input"] : [];
   const detail: Schema<"SpanDetail"> = {
     ...span,
@@ -436,22 +617,20 @@ function spanFromSummary(span: Schema<"SpanSummary">): Schema<"SpanDetail"> {
     scope_name: "cetra",
   };
   if (span.span_kind === "llm") {
+    const language = index % 2 === 0 ? "python" : "ts";
     detail.input = {
       format: "messages",
       value: [
-        { role: "system", parts: [{ type: "text", content: "You are a support agent." }] },
         {
-          role: "user",
-          parts: [{ type: "text", content: span.input_preview ?? "Hello" }],
+          role: "system",
+          parts: [
+            {
+              type: "text",
+              content: "You are a concise support agent. Answer in Markdown.",
+            },
+          ],
         },
-        {
-          role: "assistant",
-          parts: [{ type: "tool_call", id: "call-1", name: "lookup", arguments: { ticket: "1" } }],
-        },
-        {
-          role: "tool",
-          parts: [{ type: "tool_call_response", id: "call-1", response: { status: "open" } }],
-        },
+        { role: "user", parts: [{ type: "text", content: turn.question }] },
       ],
     };
     detail.output = {
@@ -459,16 +638,79 @@ function spanFromSummary(span: Schema<"SpanSummary">): Schema<"SpanDetail"> {
       value: [
         {
           role: "assistant",
-          parts: [{ type: "text", content: span.output_preview ?? "Done." }],
+          parts: [{ type: "text", content: llmAnswer(turn, language) }],
         },
       ],
     };
   } else if (span.span_kind === "tool") {
-    detail.input = { format: "json", value: { ticket: "1" } };
-    detail.output = { format: "json", value: { status: "open" } };
+    const name = pick(TOOL_NAMES, index);
+    detail.input = {
+      format: "json",
+      value: { name, arguments: { ticket_id: `T-${1000 + context.traceIndex}` } },
+    };
+    detail.output = {
+      format: "json",
+      value: { ticket_id: `T-${1000 + context.traceIndex}`, status: "open", assignee: "queue-2" },
+    };
+  } else if (span.span_kind === "retriever") {
+    detail.input = { format: "text", value: turn.question };
+    detail.output = {
+      format: "json",
+      value: { documents: scoredDocs(turn, RETRIEVER_SCORES) },
+    };
+  } else if (span.span_kind === "embedding") {
+    detail.input = { format: "text", value: turn.question };
+    detail.output = {
+      format: "json",
+      value: { dimensions: 1536, model: "text-embedding-3-small" },
+    };
+  } else if (span.span_kind === "guardrail") {
+    const passed = index % 5 !== 4;
+    detail.input = { format: "text", value: turn.question };
+    detail.output = {
+      format: "json",
+      value: {
+        passed,
+        reasons: passed
+          ? []
+          : [`The answer does not follow the policy for ${turn.heading.toLowerCase()}.`],
+      },
+    };
+  } else if (span.span_kind === "evaluator") {
+    const score = (index % 10) / 10;
+    detail.input = { format: "text", value: turn.question };
+    detail.output = {
+      format: "json",
+      value: {
+        score,
+        reasoning:
+          score >= 0.5
+            ? "The answer cites the policy and stays on topic."
+            : "The answer leaves out a required step.",
+      },
+    };
+  } else if (span.span_kind === "reranker") {
+    detail.input = {
+      format: "json",
+      value: { query: turn.question, documents: turn.docs.map((_doc, i) => `doc-${i + 1}`) },
+    };
+    detail.output = {
+      format: "json",
+      value: {
+        documents: scoredDocs(turn, RERANK_SCORES).sort((left, right) => right.score - left.score),
+      },
+    };
+  } else if (span.span_kind === "span") {
+    detail.input = { format: "text", value: turn.question };
+    detail.output = { format: "text", value: `Answered with **${turn.heading}**.` };
   } else {
-    detail.input = { format: "text", value: span.input_preview ?? span.name };
-    detail.output = { format: "text", value: span.output_preview ?? "ok" };
+    // agent (the root span) and chain: the user's question and a short Markdown answer.
+    const failed = index === 0 && context.errored;
+    detail.input = { format: "text", value: turn.question };
+    detail.output = {
+      format: "text",
+      value: failed ? FAILED_ANSWER : shortAnswer(turn),
+    };
   }
   return detail;
 }

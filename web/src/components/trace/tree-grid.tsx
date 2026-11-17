@@ -4,6 +4,7 @@
 // biome-ignore-all lint/a11y/useFocusableInteractive: one tab stop on the grid
 // biome-ignore-all lint/a11y/useKeyWithClickEvents: arrows on the grid move the selection
 
+import { useQueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn } from "cn";
 import { ChevronDown, ChevronRight } from "lucide-react";
@@ -17,8 +18,10 @@ import {
   useRef,
   useState,
 } from "react";
+import { spanDetailQuery } from "@/api/queries";
 import type { Schema } from "@/api/types";
 import { KindIcon } from "@/components/kind-icon";
+import { useProject } from "@/components/shell/project-context";
 import { StatusDot } from "@/components/status-dot";
 import { SpanBar } from "@/components/trace/span-bar";
 import { TreeToolbar } from "@/components/trace/tree-toolbar";
@@ -49,6 +52,8 @@ import {
 import { STORAGE_PREFIX } from "@/product";
 
 const ROW_HEIGHT = 28;
+/** A row must rest under the pointer this long before its span detail is prefetched. */
+const HOVER_PREFETCH_MS = 100;
 const LIVE_ROW_CSS = `
 @keyframes live-row {
   from { box-shadow: inset 0 0 0 999px color-mix(in oklch, var(--primary) 28%, transparent); }
@@ -61,8 +66,11 @@ const LIVE_ROW_CSS = `
 `;
 const OVERSCAN = 12;
 // Duration, Tokens, Cost and Timeline; the Name column is sized apart (auto or dragged).
-const OTHER_COLUMNS = "72px 64px 72px minmax(160px, 1fr)";
+const METRIC_COLUMNS = "72px 64px 72px";
+const OTHER_COLUMNS = `${METRIC_COLUMNS} minmax(160px, 1fr)`;
 const OTHER_COLUMNS_MIN_PX = 72 + 64 + 72 + 160;
+// Tree mode has no time axis: the Name column takes the room the timeline would.
+const TREE_COLUMNS = `minmax(160px, 1fr) ${METRIC_COLUMNS}`;
 const NAME_MIN_PX = 140;
 const NAME_MAX_PX = 640;
 const NAME_KEY_STEP_PX = 16;
@@ -111,6 +119,7 @@ export function TreeGrid({
   onSelectSpan,
   mode,
   onMode,
+  timeline,
   highlightedSpanIds,
 }: {
   spans: readonly Schema<"TreeSpan">[];
@@ -119,6 +128,8 @@ export function TreeGrid({
   onSelectSpan: (spanId: string) => void;
   mode: TraceMode;
   onMode: (mode: TraceMode) => void;
+  /** The time-axis column, its zoom and drag-zoom. Off in Tree mode. */
+  timeline: boolean;
   highlightedSpanIds?: ReadonlySet<string>;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -132,6 +143,29 @@ export function TreeGrid({
   const [needle, setNeedle] = useState<{ x: number; label: string } | null>(null);
   const [drag, setDrag] = useState<{ startPct: number; endPct: number } | null>(null);
   const dragRef = useRef<{ startPct: number; endPct: number } | null>(null);
+  const { org, project } = useProject();
+  const queryClient = useQueryClient();
+  const hoverTimer = useRef<number | undefined>(undefined);
+
+  useEffect(() => () => window.clearTimeout(hoverTimer.current), []);
+
+  // Live-highlighted rows are skipped: their detail is still changing as spans arrive.
+  function prefetchSpan(spanId: string) {
+    if (highlightedSpanIds?.has(spanId)) {
+      return;
+    }
+    void queryClient.prefetchQuery(spanDetailQuery(org, project, trace.trace_id, spanId));
+  }
+
+  function prefetchNeighbors(visiblePos: number) {
+    for (const pos of [visiblePos - 1, visiblePos + 1]) {
+      const index = rows[pos];
+      const id = index === undefined ? undefined : spans[index]?.span.span_id;
+      if (id !== undefined) {
+        prefetchSpan(id);
+      }
+    }
+  }
 
   useEffect(() => {
     const index = spans.findIndex((row) => row.span.span_id === selectedSpanId);
@@ -143,7 +177,7 @@ export function TreeGrid({
 
   useLayoutEffect(() => {
     const node = timelineRef.current;
-    if (!node) {
+    if (!timeline || !node) {
       return;
     }
     const update = () => {
@@ -155,7 +189,7 @@ export function TreeGrid({
     const observer = new ResizeObserver(update);
     observer.observe(node);
     return () => observer.disconnect();
-  }, []);
+  }, [timeline]);
 
   const ends = useMemo(() => subtreeEnds(spans), [spans]);
   const timeWindow = useMemo(() => traceWindow(trace, spans), [trace, spans]);
@@ -207,7 +241,7 @@ export function TreeGrid({
   const [userNameWidth, setUserNameWidth] = useState<number | null>(readNameWidth);
   const autoWidth = useMemo(() => autoNameWidth(spans, rows), [spans, rows]);
   const nameWidth = userNameWidth ?? autoWidth;
-  const template = `${nameWidth}px ${OTHER_COLUMNS}`;
+  const template = timeline ? `${nameWidth}px ${OTHER_COLUMNS}` : TREE_COLUMNS;
 
   function clampName(width: number): number {
     const gridWidth = gridRef.current?.clientWidth;
@@ -265,7 +299,7 @@ export function TreeGrid({
 
   useEffect(() => {
     const node = gridRef.current;
-    if (!node) {
+    if (!node || !timeline) {
       return;
     }
     function onWheel(event: WheelEvent) {
@@ -286,7 +320,7 @@ export function TreeGrid({
     }
     node.addEventListener("wheel", onWheel, { passive: false });
     return () => node.removeEventListener("wheel", onWheel);
-  }, [timeWindow]);
+  }, [timeWindow, timeline]);
 
   function toggle(spanId: string) {
     setCollapsed((current) => {
@@ -326,7 +360,7 @@ export function TreeGrid({
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
-    if (matchesBinding(event, "fit")) {
+    if (timeline && matchesBinding(event, "fit")) {
       event.preventDefault();
       setView(null);
       return;
@@ -337,10 +371,14 @@ export function TreeGrid({
     const visiblePos = Math.max(0, rows.indexOf(selectedIndex));
     if (matchesBinding(event, "row-next")) {
       event.preventDefault();
-      selectAt(rows[Math.min(rows.length - 1, visiblePos + 1)] ?? 0);
+      const next = Math.min(rows.length - 1, visiblePos + 1);
+      selectAt(rows[next] ?? 0);
+      prefetchNeighbors(next);
     } else if (matchesBinding(event, "row-prev")) {
       event.preventDefault();
-      selectAt(rows[Math.max(0, visiblePos - 1)] ?? 0);
+      const prev = Math.max(0, visiblePos - 1);
+      selectAt(rows[prev] ?? 0);
+      prefetchNeighbors(prev);
     } else if (event.key === "ArrowRight") {
       event.preventDefault();
       const id = spans[selectedIndex]?.span.span_id;
@@ -368,6 +406,9 @@ export function TreeGrid({
   }
 
   function onPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!timeline) {
+      return;
+    }
     const pct = timelinePercent(timelineRef.current, event.clientX);
     const host = gridRef.current?.getBoundingClientRect();
     if (pct === undefined || !host) {
@@ -436,6 +477,7 @@ export function TreeGrid({
   const virtualRows = virtualizer.getVirtualItems();
   const matchPos = matchIndexes.indexOf(selectedIndex);
   const zoomLabel = `${formatDuration(zoom.startNs - timeWindow.startNs)}–${formatDuration(zoom.endNs - timeWindow.startNs)}`;
+  const shownNeedle = timeline ? needle : null;
 
   return (
     <TooltipProvider>
@@ -452,15 +494,15 @@ export function TreeGrid({
           onErrorsOnly={setErrorsOnly}
           onExpandAll={() => setCollapsed(new Set())}
           onCollapseDepth={() => setCollapsed(collapsedToDepth(spans, ends))}
-          onFit={() => setView(null)}
-          zoomLabel={zoomLabel}
+          onFit={timeline ? () => setView(null) : undefined}
+          zoomLabel={timeline ? zoomLabel : undefined}
         />
         <div
           ref={gridRef}
           role="grid"
           aria-label="Trace"
           aria-rowcount={rows.length + 1}
-          aria-colcount={5}
+          aria-colcount={timeline ? 5 : 4}
           tabIndex={0}
           className="relative flex min-h-0 flex-1 flex-col outline-none focus-visible:outline-2 focus-visible:outline-ring focus-visible:-outline-offset-2 focus-visible:outline-solid"
           onKeyDown={onKeyDown}
@@ -468,13 +510,13 @@ export function TreeGrid({
           onPointerLeave={() => setNeedle(null)}
         >
           <style>{LIVE_ROW_CSS}</style>
-          {needle ? (
+          {shownNeedle ? (
             <div
               className="pointer-events-none absolute top-0 bottom-0 z-10 w-px bg-foreground/70"
-              style={{ left: needle.x }}
+              style={{ left: shownNeedle.x }}
             >
               <span className="absolute top-0.5 left-1 text-[10px] whitespace-nowrap text-foreground normal-case">
-                {needle.label}
+                {shownNeedle.label}
               </span>
             </div>
           ) : null}
@@ -486,26 +528,28 @@ export function TreeGrid({
           >
             <div role="columnheader" className="relative min-w-0 truncate px-2">
               Name
-              <div
-                role="separator"
-                aria-orientation="vertical"
-                aria-label="Resize Name column"
-                aria-valuemin={NAME_MIN_PX}
-                aria-valuemax={NAME_MAX_PX}
-                aria-valuenow={Math.round(nameWidth)}
-                tabIndex={0}
-                title="Drag to resize, double-click to reset"
-                onPointerDown={onNameResizeDown}
-                onKeyDown={onNameResizeKey}
-                onClick={(event) => {
-                  event.stopPropagation();
-                }}
-                onDoubleClick={() => {
-                  setUserNameWidth(null);
-                  writeNameWidth(null);
-                }}
-                className="absolute inset-y-0 -right-1 z-20 w-2 cursor-col-resize touch-none hover:bg-ring/40 focus-visible:bg-ring/60 focus-visible:outline-hidden"
-              />
+              {timeline ? (
+                <div
+                  role="separator"
+                  aria-orientation="vertical"
+                  aria-label="Resize Name column"
+                  aria-valuemin={NAME_MIN_PX}
+                  aria-valuemax={NAME_MAX_PX}
+                  aria-valuenow={Math.round(nameWidth)}
+                  tabIndex={0}
+                  title="Drag to resize, double-click to reset"
+                  onPointerDown={onNameResizeDown}
+                  onKeyDown={onNameResizeKey}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                  }}
+                  onDoubleClick={() => {
+                    setUserNameWidth(null);
+                    writeNameWidth(null);
+                  }}
+                  className="absolute inset-y-0 -right-1 z-20 w-2 cursor-col-resize touch-none hover:bg-ring/40 focus-visible:bg-ring/60 focus-visible:outline-hidden"
+                />
+              ) : null}
             </div>
             <div role="columnheader" className="px-2 text-right">
               Duration
@@ -516,38 +560,40 @@ export function TreeGrid({
             <div role="columnheader" className="px-2 text-right">
               Cost
             </div>
-            <div
-              role="columnheader"
-              aria-label="Timeline"
-              className="relative h-full"
-              ref={timelineRef}
-              onPointerDown={onHeaderDown}
-              onPointerMove={onHeaderMove}
-              onPointerUp={onHeaderUp}
-            >
-              <span className="sr-only">Timeline</span>
-              {drag ? (
-                <span
-                  className="absolute top-0 h-full bg-primary/20"
-                  style={{
-                    left: `${Math.min(drag.startPct, drag.endPct)}%`,
-                    width: `${Math.abs(drag.endPct - drag.startPct)}%`,
-                  }}
-                />
-              ) : null}
-              {marks.map((mark) => (
-                <span
-                  key={mark.ns}
-                  aria-hidden="true"
-                  className="absolute top-1/2 -translate-y-1/2 text-[10px] normal-case"
-                  style={{
-                    left: `${((mark.ns - zoom.startNs) / (zoom.endNs - zoom.startNs)) * 100}%`,
-                  }}
-                >
-                  {mark.label}
-                </span>
-              ))}
-            </div>
+            {timeline ? (
+              <div
+                role="columnheader"
+                aria-label="Timeline"
+                className="relative h-full"
+                ref={timelineRef}
+                onPointerDown={onHeaderDown}
+                onPointerMove={onHeaderMove}
+                onPointerUp={onHeaderUp}
+              >
+                <span className="sr-only">Timeline</span>
+                {drag ? (
+                  <span
+                    className="absolute top-0 h-full bg-primary/20"
+                    style={{
+                      left: `${Math.min(drag.startPct, drag.endPct)}%`,
+                      width: `${Math.abs(drag.endPct - drag.startPct)}%`,
+                    }}
+                  />
+                ) : null}
+                {marks.map((mark) => (
+                  <span
+                    key={mark.ns}
+                    aria-hidden="true"
+                    className="absolute top-1/2 -translate-y-1/2 text-[10px] normal-case"
+                    style={{
+                      left: `${((mark.ns - zoom.startNs) / (zoom.endNs - zoom.startNs)) * 100}%`,
+                    }}
+                  >
+                    {mark.label}
+                  </span>
+                ))}
+              </div>
+            ) : null}
           </div>
           <div
             ref={scrollRef}
@@ -565,7 +611,7 @@ export function TreeGrid({
                 const selected = span.span_id === selectedSpanId;
                 const expandable = hasChildren(ends, spanIndex);
                 const isCollapsed = displayCollapsed.has(span.span_id);
-                const bar = barGeometry(span, zoom);
+                const bar = timeline ? barGeometry(span, zoom) : undefined;
                 const showTokens = span.span_kind === "llm" || span.span_kind === "embedding";
                 const isMatch = matchSet.has(spanIndex);
                 const dim = needleQuery.length > 0 && !isMatch;
@@ -593,6 +639,16 @@ export function TreeGrid({
                     onClick={() => {
                       gridRef.current?.focus();
                       onSelectSpan(span.span_id);
+                    }}
+                    onPointerEnter={() => {
+                      window.clearTimeout(hoverTimer.current);
+                      hoverTimer.current = window.setTimeout(
+                        () => prefetchSpan(span.span_id),
+                        HOVER_PREFETCH_MS,
+                      );
+                    }}
+                    onPointerLeave={() => {
+                      window.clearTimeout(hoverTimer.current);
                     }}
                   >
                     <div role="gridcell" className="min-w-0">
@@ -640,20 +696,22 @@ export function TreeGrid({
                     <div role="gridcell" className="num truncate px-2 text-xs">
                       {span.cost_total === undefined ? "" : formatCost(span.cost_total)}
                     </div>
-                    <div role="gridcell" className="relative h-full">
-                      {bar ? (
-                        <SpanBar
-                          span={span}
-                          bar={bar}
-                          colorClass={BAR[span.span_kind]}
-                          timelineWidth={timelineWidth}
-                          traceStartNs={timeWindow.startNs}
-                          onDoubleClick={() => {
-                            setView(zoomToSpan(timeWindow, span));
-                          }}
-                        />
-                      ) : null}
-                    </div>
+                    {timeline ? (
+                      <div role="gridcell" className="relative h-full">
+                        {bar ? (
+                          <SpanBar
+                            span={span}
+                            bar={bar}
+                            colorClass={BAR[span.span_kind]}
+                            timelineWidth={timelineWidth}
+                            traceStartNs={timeWindow.startNs}
+                            onDoubleClick={() => {
+                              setView(zoomToSpan(timeWindow, span));
+                            }}
+                          />
+                        ) : null}
+                      </div>
+                    ) : null}
                   </div>
                 );
               })}

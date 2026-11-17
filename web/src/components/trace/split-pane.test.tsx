@@ -29,7 +29,13 @@ function renderTracesSplit(mode?: "split" | "bottom") {
 it("opens the trace view's inner split at its default ratio", async () => {
   await renderApp(URL_WITH_TRACE);
   await screen.findByRole("grid", { name: "Trace" });
-  expect(size("trace-tree")).toBe("55");
+  expect(size("trace-tree")).toBe("40");
+});
+
+it("opens the timeline's inner split at its own default ratio", async () => {
+  await renderApp(`${URL_WITH_TRACE}&mode=timeline`);
+  await screen.findByRole("grid", { name: "Trace" });
+  expect(size("trace-timeline-tree")).toBe("60");
 });
 
 it("opens the split at its default ratio and restores a stored one", () => {

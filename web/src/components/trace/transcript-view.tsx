@@ -24,6 +24,8 @@ import {
 
 const PAGE = 50;
 const CONCURRENCY = 4;
+/** A block must rest under the pointer this long before its span detail is prefetched. */
+const HOVER_PREFETCH_MS = 100;
 const OVERSCAN = 6;
 
 function rowEstimate(row: Row | undefined): number {
@@ -84,6 +86,18 @@ export function TranscriptView({
     ),
   ];
   useDetailLoader(traceId, visibleIds);
+  const selectedIndex = useMemo(
+    () =>
+      selectedSpanId === undefined
+        ? -1
+        : rows.findIndex(
+            (row) => row.kind === "turn" && row.item.span.span.span_id === selectedSpanId,
+          ),
+    [rows, selectedSpanId],
+  );
+  useEffect(() => {
+    if (selectedIndex >= 0) virtualizer.scrollToIndex(selectedIndex, { align: "auto" });
+  }, [selectedIndex, virtualizer]);
 
   return (
     <section aria-label="Transcript" className="flex min-h-0 flex-1 flex-col">
@@ -186,6 +200,9 @@ function TurnRow({
   onSelect: () => void;
 }) {
   const { org, project, ref } = useProject();
+  const client = useQueryClient();
+  const hoverTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(hoverTimer.current), []);
   const span = item.span.span;
   const detail = useQuery({
     ...spanDetailQuery(org, project, traceId, span.span_id),
@@ -197,11 +214,35 @@ function TurnRow({
   });
   const loaded = detail.data;
   return (
+    // The whole turn selects its span; the header button is the keyboard path. Clicks on
+    // controls inside the turn, and clicks that end a text selection, are left alone.
+    // biome-ignore lint/a11y/noStaticElementInteractions: the header button is the keyboard equivalent.
+    // biome-ignore lint/a11y/useKeyWithClickEvents: the header button is the keyboard equivalent.
     <div
+      aria-current={selected ? "true" : undefined}
       className={cn(
-        "flex flex-col gap-1 border-b px-2 py-1",
+        "flex cursor-pointer flex-col gap-1 border-b px-2 py-1",
         selected ? "bg-selection shadow-[inset_2px_0_0_var(--primary)]" : "hover:bg-muted",
       )}
+      onClick={(event) => {
+        const target = event.target as HTMLElement;
+        if (target.closest("button, a, input, textarea, select, [role='button'], [role='tab']")) {
+          return;
+        }
+        if ((window.getSelection()?.toString() ?? "").length > 0) {
+          return;
+        }
+        onSelect();
+      }}
+      onPointerEnter={() => {
+        window.clearTimeout(hoverTimer.current);
+        hoverTimer.current = window.setTimeout(() => {
+          void client.prefetchQuery(spanDetailQuery(org, project, traceId, span.span_id));
+        }, HOVER_PREFETCH_MS);
+      }}
+      onPointerLeave={() => {
+        window.clearTimeout(hoverTimer.current);
+      }}
     >
       <button
         type="button"

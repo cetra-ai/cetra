@@ -1,3 +1,5 @@
+import { cn } from "cn";
+import { ChevronRight } from "lucide-react";
 import { useState } from "react";
 import type { Schema } from "@/api/types";
 import { JsonView } from "@/components/payload/json-view";
@@ -5,7 +7,7 @@ import { PayloadView } from "@/components/payload/payload-view";
 
 export function IoTab({ span }: { span: Schema<"SpanDetail"> }) {
   return (
-    <div className="flex flex-col gap-3">
+    <div className="flex flex-col gap-4">
       {span.system_instructions !== undefined ? (
         <JsonSection label="System instructions" value={span.system_instructions} />
       ) : null}
@@ -24,10 +26,14 @@ function JsonSection({ label, value }: { label: string; value: unknown }) {
     <section className="flex flex-col gap-1">
       <button
         type="button"
-        className="self-start text-[10.5px] font-medium"
+        className="flex items-center gap-1 self-start text-[12px] font-medium"
         aria-expanded={open}
         onClick={() => setOpen((current) => !current)}
       >
+        <ChevronRight
+          aria-hidden="true"
+          className={cn("size-3.5 transition-transform", open && "rotate-90")}
+        />
         {label}
       </button>
       {open ? <JsonView value={jsonValue(value)} /> : null}

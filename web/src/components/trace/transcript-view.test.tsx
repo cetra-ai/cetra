@@ -48,6 +48,20 @@ describe("transcript", () => {
     expect(screen.getByRole("grid", { name: "Trace" })).toBeInTheDocument();
   });
 
+  it("offers Tree, Timeline and Transcript, and writes the chosen one", async () => {
+    const { router, user } = await renderApp(`/acme/support-bot/traces?trace=${TRACE_1}`);
+    const group = await screen.findByRole("radiogroup", { name: "Trace view" });
+    const radios = within(group).getAllByRole("radio");
+    expect(radios.map((radio) => radio.textContent)).toEqual(["Tree", "Timeline", "Transcript"]);
+
+    await user.click(screen.getByRole("radio", { name: "Timeline" }));
+    await waitFor(() => {
+      expect(router.state.location.search).toMatchObject({ mode: "timeline" });
+    });
+    expect(screen.getByRole("radio", { name: "Timeline" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("columnheader", { name: "Timeline" })).toBeInTheDocument();
+  });
+
   it("loads at most 50 spans, four at a time, until Load more", async () => {
     const started = new Set<string>();
     let inFlight = 0;
@@ -117,6 +131,79 @@ describe("transcript", () => {
       expect(started.size).toBeGreaterThan(50);
     });
     expect(started.size).toBeLessThanOrEqual(BULK_COUNT);
+  });
+
+  it("marks only the selected turn with aria-current and the selection style", async () => {
+    const { router, user } = await renderApp(
+      `/acme/support-bot/traces?trace=${TRACE_1}&span=${TOOL}&mode=transcript`,
+    );
+    const transcript = await screen.findByRole("region", { name: "Transcript" });
+    const toolBlock = within(transcript).getByRole("button", {
+      name: /get_order_status/,
+    }).parentElement;
+    const llmBlock = within(transcript).getAllByRole("button", { name: /claude-sonnet-4-5/ })[0]
+      ?.parentElement;
+    expect(toolBlock).toHaveAttribute("aria-current", "true");
+    expect(toolBlock).toHaveClass("bg-selection", "shadow-[inset_2px_0_0_var(--primary)]");
+    expect(llmBlock).not.toHaveAttribute("aria-current");
+    expect(llmBlock).not.toHaveClass("bg-selection");
+
+    const llmButton = within(transcript).getAllByRole("button", { name: /claude-sonnet-4-5/ })[0];
+    expect(llmButton).toBeDefined();
+    await user.click(llmButton as HTMLElement);
+    await waitFor(() => {
+      expect(router.state.location.search).toMatchObject({ span: "b100000000000012" });
+    });
+    expect(llmBlock).toHaveAttribute("aria-current", "true");
+    expect(llmBlock).toHaveClass("bg-selection");
+    expect(toolBlock).not.toHaveAttribute("aria-current");
+    expect(toolBlock).not.toHaveClass("bg-selection");
+  });
+
+  it("selects a turn when its content is clicked, not only its header", async () => {
+    const { router, user } = await renderApp(
+      `/acme/support-bot/traces?trace=${TRACE_1}&span=${TOOL}&mode=transcript`,
+    );
+    const transcript = await screen.findByRole("region", { name: "Transcript" });
+    const llmBlock = within(transcript).getAllByRole("button", { name: /claude-sonnet-4-5/ })[0]
+      ?.parentElement as HTMLElement;
+    const body = llmBlock.lastElementChild as HTMLElement;
+    await waitFor(() => expect(body.textContent?.length ?? 0).toBeGreaterThan(0));
+    await user.click(body);
+    await waitFor(() => {
+      expect(router.state.location.search).toMatchObject({ span: "b100000000000012" });
+    });
+  });
+
+  it("scrolls the selected turn into view when the selection is far off screen", async () => {
+    const target = bulkId(40);
+    server.use(
+      http.get("/api/v1/projects/:project/traces/:trace_id", ({ params }) => {
+        if (params.trace_id !== BULK) return passthrough();
+        return HttpResponse.json(bulkTrace());
+      }),
+      http.get("/api/v1/projects/:project/traces/:trace_id/spans/:span_id", ({ params }) => {
+        if (params.trace_id !== BULK) return passthrough();
+        return HttpResponse.json(bulkSpan(String(params.span_id), "llm"));
+      }),
+    );
+    const scrollTo = HTMLElement.prototype.scrollTo;
+    HTMLElement.prototype.scrollTo = function scrollToTop(options?: ScrollToOptions | number) {
+      if (typeof options === "object" && options !== null && options.top !== undefined) {
+        this.scrollTop = options.top;
+      }
+    };
+    try {
+      await renderApp(`/acme/support-bot/traces?trace=${BULK}&span=${target}&mode=transcript`);
+      await screen.findByRole("region", { name: "Transcript" });
+      const scroller = document.querySelector("[aria-label='Transcript'] [data-scroll-container]");
+      expect(scroller).toBeInstanceOf(HTMLElement);
+      await waitFor(() => {
+        expect(scroller instanceof HTMLElement ? scroller.scrollTop : 0).toBeGreaterThan(0);
+      });
+    } finally {
+      HTMLElement.prototype.scrollTo = scrollTo;
+    }
   });
 
   it("waits for the previous call before showing a turn", async () => {

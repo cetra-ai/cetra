@@ -1,6 +1,7 @@
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouterState } from "@tanstack/react-router";
 import { cn } from "cn";
+import { ArrowLeft } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
@@ -13,17 +14,25 @@ import { RunEvaluatorButton } from "@/components/trace/run-evaluator-dialog";
 import { SpanDetail } from "@/components/trace/span-detail";
 import { SplitPane } from "@/components/trace/split-pane";
 import { TraceHeader } from "@/components/trace/trace-header";
+import { TraceSummary } from "@/components/trace/trace-summary";
 import { TranscriptView } from "@/components/trace/transcript-view";
 import { TreeGrid } from "@/components/trace/tree-grid";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { instantNs, nsBetween } from "@/lib/format";
 import type { TraceMode } from "@/lib/search/traces";
 import { useStream } from "@/lib/sse";
 import { insertSpan } from "@/lib/tree";
+import { useDelayedFlag } from "@/lib/use-delayed-flag";
 
 const RECENT_MS = 10 * 60 * 1000;
 const HIGHLIGHT_MS = 1_500;
 const EMPTY_HIGHLIGHTS: ReadonlySet<string> = new Set();
+const NEXT_MODE: Record<TraceMode, TraceMode> = {
+  tree: "timeline",
+  timeline: "transcript",
+  transcript: "tree",
+};
 
 /** A trace that ended within the last 10 minutes still receives live spans. */
 export function traceIsRecent(endTime: string, now: number): boolean {
@@ -37,8 +46,11 @@ export function TraceView({
   mode,
   onModeChange,
   onSelectSpan,
+  onShowSummary,
   onAddFilter,
   onClose,
+  onPrevious,
+  onNext,
   layout,
 }: {
   traceId: string;
@@ -46,8 +58,12 @@ export function TraceView({
   mode?: TraceMode;
   onModeChange?: (mode: TraceMode) => void;
   onSelectSpan: (spanId: string) => void;
+  /** Goes back to the trace summary from a selected span in Transcript mode. The bar is hidden when missing. */
+  onShowSummary?: () => void;
   onAddFilter?: (conjunct: string) => void;
   onClose?: () => void | Promise<void>;
+  onPrevious?: () => void;
+  onNext?: () => void;
   layout?: ReactNode;
 }) {
   const { org, project } = useProject();
@@ -55,6 +71,10 @@ export function TraceView({
   // The previous trace stays on screen, dimmed, while the next one loads, so switching does not flash.
   const trace = useQuery({ ...detailOptions, placeholderData: keepPreviousData });
   const previous = trace.isPlaceholderData;
+  // The dim shows only for a slow switch. A fast or cached switch shows the new trace at once.
+  const dimmed = useDelayedFlag(previous);
+  // The trace whose switch was dimmed. Its arrival fades in; any other switch clears it.
+  const [slowTraceId, setSlowTraceId] = useState<string | null>(null);
   const queryClient = useQueryClient();
   const listLive = useRouterState({
     select: (state) => {
@@ -76,6 +96,16 @@ export function TraceView({
     if (onModeChange) onModeChange(next);
     else setStoredMode(next);
   }
+
+  useEffect(() => {
+    setSlowTraceId((current) => (current === traceId ? current : null));
+  }, [traceId]);
+
+  useEffect(() => {
+    if (dimmed) {
+      setSlowTraceId(traceId);
+    }
+  }, [dimmed, traceId]);
 
   useEffect(() => {
     return () => {
@@ -149,7 +179,7 @@ export function TraceView({
   );
 
   useShortcut("toggle-mode", () => {
-    chooseMode(active === "transcript" ? "tree" : "transcript");
+    chooseMode(NEXT_MODE[active]);
   });
 
   if (trace.isPending) {
@@ -168,23 +198,39 @@ export function TraceView({
   }
 
   const loaded = trace.data;
-  const selected = previous
-    ? loaded.spans[0]?.span.span_id
-    : (spanId ?? loaded.spans[0]?.span.span_id);
+  // Transcript mode shows the trace summary until a span is picked; the other modes always have a span.
+  const summaryShown = active === "transcript" && spanId === undefined;
+  const selected = summaryShown
+    ? undefined
+    : previous
+      ? loaded.spans[0]?.span.span_id
+      : (spanId ?? loaded.spans[0]?.span.span_id);
   const selectedRow = loaded.spans.find((row) => row.span.span_id === selected);
   const detached = selectedRow?.detached ?? false;
   const rootSpanId = loaded.spans.find((row) => row.span.parent_span_id === undefined)?.span
     .span_id;
   const selectedIsRoot = selectedRow !== undefined && selectedRow.span.parent_span_id === undefined;
+  const showBar = active === "transcript" && onShowSummary !== undefined;
+  const spanDetail = selected ? (
+    <SpanDetail
+      traceId={loaded.trace.trace_id}
+      spanId={selected}
+      summary={selectedRow?.span}
+      detached={detached}
+      onAddFilter={onAddFilter}
+    />
+  ) : null;
 
   return (
-    // Keyed by the loaded trace so a switch fades the new one in over the dimmed previous one.
+    // Keyed by the loaded trace. A slow switch fades the new one in over the dimmed previous one.
     <div
       key={loaded.trace.trace_id}
       aria-busy={previous}
       className={cn(
-        "trace-swap flex min-h-0 flex-1 flex-col transition-opacity",
-        previous && "pointer-events-none opacity-60",
+        "flex min-h-0 flex-1 flex-col transition-opacity",
+        slowTraceId === loaded.trace.trace_id && "trace-swap",
+        previous && "pointer-events-none",
+        dimmed && "opacity-60",
       )}
     >
       <TraceHeader
@@ -192,6 +238,8 @@ export function TraceView({
         spanId={selected}
         mode={active === "transcript" ? active : undefined}
         onClose={onClose}
+        onPrevious={onPrevious}
+        onNext={onNext}
         layout={layout}
         live={follow ? { status, onStop: () => setStoppedId(traceId) } : undefined}
         actions={
@@ -218,7 +266,7 @@ export function TraceView({
       <div className="relative min-h-0 flex-1">
         <div className="absolute inset-0">
           <SplitPane
-            name="trace"
+            name={active === "timeline" ? "trace-timeline" : "trace"}
             start={
               active === "transcript" ? (
                 <TranscriptView
@@ -239,19 +287,37 @@ export function TraceView({
                   onSelectSpan={onSelectSpan}
                   mode={active}
                   onMode={chooseMode}
+                  timeline={active === "timeline"}
                   highlightedSpanIds={highlighted}
                 />
               )
             }
             end={
-              selected ? (
-                <SpanDetail
-                  traceId={loaded.trace.trace_id}
-                  spanId={selected}
-                  detached={detached}
-                  onAddFilter={onAddFilter}
+              summaryShown ? (
+                <TraceSummary
+                  trace={loaded.trace}
+                  spans={loaded.spans}
+                  onSelectSpan={onSelectSpan}
                 />
-              ) : null
+              ) : showBar ? (
+                <div className="flex min-h-0 flex-1 flex-col">
+                  <div className="flex items-center border-b px-4 py-1.5">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="xs"
+                      className="text-[12px]"
+                      onClick={onShowSummary}
+                    >
+                      <ArrowLeft />
+                      Trace summary
+                    </Button>
+                  </div>
+                  {spanDetail}
+                </div>
+              ) : (
+                spanDetail
+              )
             }
           />
         </div>

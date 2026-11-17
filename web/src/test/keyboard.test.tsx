@@ -89,6 +89,11 @@ it("opens a trace, switches mode, and reaches the palette, filter, and time pick
   tree.focus();
   await user.keyboard("j");
   await user.keyboard("t");
+  expect(await screen.findByRole("radio", { name: "Timeline" })).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
+  await user.keyboard("t");
   expect(await screen.findByRole("region", { name: "Transcript" })).toBeInTheDocument();
   const attributes = screen.getByRole("tab", { name: "Attributes" });
   attributes.focus();

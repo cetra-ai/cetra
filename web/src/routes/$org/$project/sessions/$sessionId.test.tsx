@@ -52,6 +52,21 @@ it("renders sess-001 turns in order and opens the selected trace", async () => {
   expect(await screen.findByRole("region", { name: "Trace" })).toBeInTheDocument();
 });
 
+it("returns from a picked transcript block to the trace summary", async () => {
+  const { user } = await renderApp(`/acme/support-bot/sessions/sess-001?trace=${TRACE}`);
+  await user.click(await screen.findByRole("radio", { name: "Transcript" }));
+  const transcript = await screen.findByRole("region", { name: "Transcript" });
+  expect(await screen.findByRole("region", { name: "Trace summary" })).toBeInTheDocument();
+
+  await user.click(within(transcript).getByRole("button", { name: /get_order_status/ }));
+  expect(await screen.findByRole("region", { name: "Span" })).toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "Trace summary" })).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "Trace summary" }));
+  expect(await screen.findByRole("region", { name: "Trace summary" })).toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "Span" })).not.toBeInTheDocument();
+});
+
 it("follows the session link from a trace header", async () => {
   const { router, user } = await renderApp(`/acme/support-bot/traces?trace=${TRACE}`);
   const header = await screen.findByRole("region", { name: "Trace" });

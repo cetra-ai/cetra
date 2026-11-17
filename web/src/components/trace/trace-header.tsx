@@ -1,7 +1,18 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { cn } from "cn";
-import { SquareArrowOutUpRight, Trash2, X } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronUp,
+  Clock,
+  Coins,
+  DollarSign,
+  ListTree,
+  SquareArrowOutUpRight,
+  Timer,
+  Trash2,
+  X,
+} from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { $api } from "@/api/client";
 import { problemMessage } from "@/api/problem";
@@ -14,11 +25,12 @@ import { DisabledReason } from "@/components/disabled-reason";
 import { IdText } from "@/components/id-text";
 import { ScoreBadge } from "@/components/score-badge";
 import { useProject } from "@/components/shell/project-context";
-import { StatusDot } from "@/components/status-dot";
 import { TimeText } from "@/components/time-text";
+import { MetricChip } from "@/components/trace/metric-chip";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { categoryClasses, environmentClasses } from "@/lib/colors";
 import { invalidateProjectReads } from "@/lib/deletions";
 import { formatCost, formatDuration, formatTokens } from "@/lib/format";
 import { atLeast } from "@/lib/roles";
@@ -37,6 +49,8 @@ export function TraceHeader({
   spanId,
   mode,
   onClose,
+  onPrevious,
+  onNext,
   live,
   actions,
   layout,
@@ -45,6 +59,10 @@ export function TraceHeader({
   spanId?: string;
   mode?: TraceMode;
   onClose?: () => void | Promise<void>;
+  /** Opens the previous trace. The button is hidden when this is missing. */
+  onPrevious?: () => void;
+  /** Opens the next trace. The button is hidden when this is missing. */
+  onNext?: () => void;
   live?: { status: StreamStatus; onStop: () => void };
   /** Buttons placed before the copy button. */
   actions?: ReactNode;
@@ -88,15 +106,18 @@ export function TraceHeader({
 
   return (
     <TooltipProvider>
-      <section
-        aria-label="Trace"
-        className="flex shrink-0 flex-col gap-1 border-b px-3 py-1.5 text-xs"
-      >
+      <section aria-label="Trace" className="flex shrink-0 flex-col gap-2 border-b px-4 py-3">
         <div className="flex min-w-0 items-center gap-2">
-          <StatusDot status={trace.status} />
-          <span className="min-w-0 truncate font-medium">{trace.name}</span>
+          <span className="min-w-0 truncate text-[15px] font-semibold select-text">
+            {trace.name}
+          </span>
+          {trace.status === "ok" ? (
+            <StatusPill className="bg-status-ok/12 text-status-ok">OK</StatusPill>
+          ) : null}
+          {trace.status === "error" ? (
+            <StatusPill className="bg-status-error/12 text-status-error">Error</StatusPill>
+          ) : null}
           <IdText value={trace.trace_id} kind="trace" />
-          <TimeText value={trace.start_time} style="datetime" />
           <div className="ml-auto flex shrink-0 items-center gap-1">
             {live ? (
               <span className="inline-flex items-center gap-1">
@@ -146,6 +167,28 @@ export function TraceHeader({
                 <SquareArrowOutUpRight />
               </Link>
             ) : null}
+            {onPrevious ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                aria-label="Previous trace"
+                onClick={onPrevious}
+              >
+                <ChevronUp />
+              </Button>
+            ) : null}
+            {onNext ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                aria-label="Next trace"
+                onClick={onNext}
+              >
+                <ChevronDown />
+              </Button>
+            ) : null}
             {onClose ? (
               <Button
                 type="button"
@@ -159,14 +202,23 @@ export function TraceHeader({
             ) : null}
           </div>
         </div>
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-muted-foreground">
-          <span className="text-foreground">{formatDuration(trace.duration_ns)}</span>
-          <span>{trace.span_count} spans</span>
-          <span>{trace.llm_count} LLM calls</span>
+        <div className="flex flex-wrap items-center gap-2 text-[12px] text-muted-foreground">
+          <MetricChip icon={Clock} label="Start time">
+            <TimeText value={trace.start_time} style="datetime" />
+          </MetricChip>
+          <MetricChip icon={Timer} label="Duration">
+            {formatDuration(trace.duration_ns)}
+          </MetricChip>
           <Tokens trace={trace} />
           {trace.cost_total !== undefined ? (
-            <span className="num text-foreground">{formatCost(trace.cost_total)}</span>
+            <MetricChip icon={DollarSign} label="Cost">
+              {formatCost(trace.cost_total)}
+            </MetricChip>
           ) : null}
+          <MetricChip icon={ListTree} label="Spans">
+            {trace.span_count} spans
+          </MetricChip>
+          <span>{trace.llm_count} LLM calls</span>
           {trace.session_id ? (
             <span>
               session{" "}
@@ -191,12 +243,27 @@ export function TraceHeader({
               </Link>
             </span>
           ) : null}
-          {trace.environment ? <span>{trace.environment}</span> : null}
+          {trace.environment ? (
+            <span
+              className={cn(
+                "inline-flex rounded-sm border px-1.5 text-[11px]",
+                environmentClasses(trace.environment).pill,
+              )}
+            >
+              {trace.environment}
+            </span>
+          ) : null}
           {trace.release ? <span>{trace.release}</span> : null}
           {trace.tags.map((tag) => (
-            <Badge key={tag} variant="outline" className="h-4 px-1.5 text-[10px]">
+            <span
+              key={tag}
+              className={cn(
+                "inline-flex rounded-sm border px-1.5 text-[11px]",
+                categoryClasses(tag).pill,
+              )}
+            >
               {tag}
-            </Badge>
+            </span>
           ))}
           {scoreBadges(trace.scores).map((score) => (
             <Badge key={score.score_id} variant="secondary" className="h-4 px-1.5 text-[10px]">
@@ -223,12 +290,22 @@ export function TraceHeader({
   );
 }
 
+function StatusPill({ className, children }: { className: string; children: ReactNode }) {
+  return (
+    <span className={cn("rounded px-1.5 text-[11px] font-medium", className)}>{children}</span>
+  );
+}
+
 function Tokens({ trace }: { trace: Schema<"TraceSummary"> }) {
   if (trace.total_tokens === undefined) {
     return null;
   }
   const breakdown = tokenBreakdown(trace);
-  const total = <span className="text-foreground">{formatTokens(trace.total_tokens)}</span>;
+  const total = (
+    <MetricChip icon={Coins} label="Tokens">
+      {formatTokens(trace.total_tokens)}
+    </MetricChip>
+  );
   if (!breakdown) {
     return total;
   }
@@ -291,7 +368,8 @@ function scoreBadges(scores: Schema<"ScoreBrief">[]): Schema<"ScoreBrief">[] {
   return [...scores].sort((left, right) => left.name.localeCompare(right.name));
 }
 
-function badgeValue(value: Schema<"ScoreValue">): string {
+/** The score's value as its badge shows it. */
+export function badgeValue(value: Schema<"ScoreValue">): string {
   if (value.data_type === "numeric") {
     return value.value.toFixed(3).replace(/\.?0+$/, "");
   }
