@@ -45,7 +45,7 @@ const PAGES: { url: string; name: string; ready: () => Promise<HTMLElement> }[] 
     ready: () => screen.findByRole("region", { name: "Conversation" }),
   },
   {
-    url: "/acme/support-bot/users/user-42",
+    url: "/acme/support-bot/users/user-42?tab=sessions",
     name: "user",
     ready: () => screen.findByRole("grid", { name: "Sessions" }),
   },

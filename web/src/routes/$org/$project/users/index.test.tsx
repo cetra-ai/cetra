@@ -1,7 +1,30 @@
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { HttpResponse, http } from "msw";
 import { expect, it, vi } from "vitest";
+import type { Schema } from "@/api/types";
+import { formatCost } from "@/lib/format";
 import { server } from "@/mocks/node";
 import { renderApp } from "@/test/render";
+
+function topUser(
+  userId: string,
+  costTotal: number,
+  metadata?: Record<string, string>,
+): Schema<"EndUserSummary"> {
+  return {
+    user_id: userId,
+    first_seen: "2026-01-01T10:00:00.000000000Z",
+    last_seen: "2026-01-01T10:20:03.000000000Z",
+    trace_count: 4,
+    session_count: 1,
+    error_count: 0,
+    error_trace_count: 0,
+    cost_total: costTotal,
+    activity: Array.from({ length: 24 }, () => 0),
+    scores: [],
+    metadata,
+  };
+}
 
 function slotRect(left: number, width: number): DOMRect {
   return {
@@ -79,7 +102,12 @@ it("renders the user fixture sorted by last seen", async () => {
       "Filter traces, e.g. environment = 'production'",
     );
     expect(screen.queryByRole("searchbox", { name: "Search" })).not.toBeInTheDocument();
-    expect(urls.some((url) => url.searchParams.has("sort"))).toBe(false);
+    // The top-users row (UP-7) always sorts by cost; the list itself sends no sort.
+    expect(
+      urls.some(
+        (url) => url.searchParams.has("sort") && url.searchParams.get("sort") !== "cost_total",
+      ),
+    ).toBe(false);
   } finally {
     server.events.removeListener("request:start", onStart);
   }
@@ -170,4 +198,68 @@ it("opens the user panel when a row is clicked, and Escape closes it", async () 
   await waitFor(() => {
     expect(screen.queryByRole("region", { name: "User" })).not.toBeInTheDocument();
   });
+});
+
+it("shows the top users by cost under the summary, and opens the drawer on a click", async () => {
+  const top = [topUser("user-top-a", 2, { name: '"Grace Test"' }), topUser("user-top-b", 1)];
+  server.use(
+    http.get("/api/v1/projects/:project/users", ({ request }) => {
+      if (new URL(request.url).searchParams.get("sort") !== "cost_total") {
+        return undefined;
+      }
+      return HttpResponse.json({ data: top, next_cursor: null });
+    }),
+  );
+  const { router, user } = await renderApp("/acme/support-bot/users");
+  const section = await screen.findByRole("region", { name: "Top users by cost" });
+  expect(
+    within(section)
+      .getAllByRole("button")
+      .map((button) => button.getAttribute("aria-label")),
+  ).toEqual([`Grace Test: ${formatCost(2)}`, `user-top-b: ${formatCost(1)}`]);
+  await user.click(within(section).getByRole("button", { name: `user-top-b: ${formatCost(1)}` }));
+  await waitFor(() => {
+    expect(router.state.location.search.user).toBe("user-top-b");
+  });
+});
+
+it("sends the top-users request with the list's range, filter and flags", async () => {
+  const listUrls: URL[] = [];
+  const topUrls: URL[] = [];
+  const onStart = ({ request }: { request: Request }) => {
+    const url = new URL(request.url);
+    if (url.pathname.endsWith("/users")) {
+      listUrls.push(url);
+    }
+  };
+  server.use(
+    http.get("/api/v1/projects/:project/users", ({ request }) => {
+      if (new URL(request.url).searchParams.get("sort") === "cost_total") {
+        topUrls.push(new URL(request.url));
+      }
+      return undefined;
+    }),
+  );
+  server.events.on("request:start", onStart);
+  try {
+    const filter = "status = 'ok'";
+    await renderApp(
+      `/acme/support-bot/users?range=7d&eval=1&exp=1&filter=${encodeURIComponent(filter)}`,
+    );
+    await screen.findByRole("grid", { name: "Users" });
+    await waitFor(() => {
+      expect(topUrls.length).toBeGreaterThan(0);
+    });
+    const list = listUrls.find((url) => !url.searchParams.has("sort"));
+    const top = topUrls[0];
+    expect(list).toBeDefined();
+    expect(top?.searchParams.get("from")).toBe(list?.searchParams.get("from"));
+    expect(top?.searchParams.get("to")).toBe(list?.searchParams.get("to"));
+    expect(top?.searchParams.get("filter")).toBe(filter);
+    expect(top?.searchParams.get("include_eval")).toBe("true");
+    expect(top?.searchParams.get("include_experiments")).toBe("true");
+    expect(top?.searchParams.get("limit")).toBe("5");
+  } finally {
+    server.events.removeListener("request:start", onStart);
+  }
 });

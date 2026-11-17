@@ -273,16 +273,48 @@ export function userListOptions(
   };
 }
 
+/** The users with the highest cost in a list's scope (UP-7). */
+export function topUsersQuery(
+  org: string,
+  project: string,
+  query: {
+    from: string;
+    to: string;
+    filter?: string;
+    includeEval?: boolean;
+    includeExperiments?: boolean;
+    limit: number;
+  },
+) {
+  return $api.queryOptions("get", "/api/v1/projects/{project}/users", {
+    params: {
+      path: { project: projectRef(org, project) },
+      query: {
+        limit: query.limit,
+        from: query.from,
+        to: query.to,
+        sort: "cost_total",
+        order: "desc",
+        ...(query.filter ? { filter: query.filter } : {}),
+        ...(query.includeEval ? { include_eval: true } : {}),
+        ...(query.includeExperiments ? { include_experiments: true } : {}),
+      },
+    },
+  });
+}
+
 export function userQuery(
   org: string,
   project: string,
   userId: string,
-  flags: { includeEval?: boolean; includeExperiments?: boolean },
+  flags: { from?: string; to?: string; includeEval?: boolean; includeExperiments?: boolean },
 ) {
   return $api.queryOptions("get", "/api/v1/projects/{project}/users/{user_id}", {
     params: {
       path: { project: projectRef(org, project), user_id: userId },
       query: {
+        ...(flags.from ? { from: flags.from } : {}),
+        ...(flags.to ? { to: flags.to } : {}),
         ...(flags.includeEval ? { include_eval: true } : {}),
         ...(flags.includeExperiments ? { include_experiments: true } : {}),
       },

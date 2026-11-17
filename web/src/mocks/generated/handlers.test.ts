@@ -1,11 +1,12 @@
 import { expect, it } from "vitest";
 import type { Schema } from "@/api/types";
-import { createDataset } from "@/mocks/generated/dataset";
-import { compareUsers, largeHandlers } from "@/mocks/generated/handlers";
+import { createDataset, type Dataset } from "@/mocks/generated/dataset";
+import { compareUsers, largeHandlers, userIdOfFilter } from "@/mocks/generated/handlers";
 import { server } from "@/mocks/node";
 
 const NOW = Date.parse("2026-06-01T00:00:00.000Z");
 const PROJECT = `${location.origin}/api/v1/projects/acme%2Fsupport-bot`;
+const DAY_MS = 86_400_000;
 
 type User = Omit<Schema<"EndUserSummary">, "activity">;
 
@@ -264,4 +265,119 @@ it("defines the generated scores so lists can colour them", async () => {
     ["correctness", "higher"],
     ["relevance", "higher"],
   ]);
+});
+
+/** A trace the default lists show: no evaluation and no experiment trace. */
+function isVisible(trace: Schema<"TraceSummary">): boolean {
+  return trace.environment !== "cetra-eval" && trace.metadata["cetra.experiment_id"] === undefined;
+}
+
+/** The visible trace of the user with the most visible traces. */
+function busiestUser(dataset: Dataset): string {
+  const counts = new Map<string, number>();
+  for (const trace of dataset.traces) {
+    if (trace.user_id && isVisible(trace)) {
+      counts.set(trace.user_id, (counts.get(trace.user_id) ?? 0) + 1);
+    }
+  }
+  const [userId] = [...counts.entries()].sort((left, right) => right[1] - left[1])[0] ?? [];
+  if (!userId) {
+    throw new Error("the dataset has a user with visible traces");
+  }
+  return userId;
+}
+
+it("reads the user id of a user_id filter only when it has exactly that form", () => {
+  expect(userIdOfFilter("user_id = 'o''brien'")).toBe("o'brien");
+  expect(userIdOfFilter("  user_id='user-007' ")).toBe("user-007");
+  expect(userIdOfFilter("user_id = 'a' and name = 'b'")).toBeUndefined();
+  expect(userIdOfFilter("name = 'user-007'")).toBeUndefined();
+  expect(userIdOfFilter(undefined)).toBeUndefined();
+});
+
+it("lists only one user's traces for a user_id filter, and flags other filters as ignored", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 400 });
+  server.use(...largeHandlers(dataset));
+  const userId = busiestUser(dataset);
+  const expected = dataset.traces
+    .filter((trace) => trace.user_id === userId && isVisible(trace))
+    .map((trace) => trace.trace_id)
+    .sort();
+
+  const url = new URL(`${PROJECT}/traces`);
+  url.searchParams.set("filter", `user_id = '${userId}'`);
+  url.searchParams.set("limit", "1000");
+  const response = await fetch(url);
+  const body = (await response.json()) as Schema<"TracePage">;
+  expect(response.headers.get("X-Mock-Filter-Ignored")).toBeNull();
+  expect(body.data.map((trace) => trace.trace_id).sort()).toEqual(expected);
+
+  const other = new URL(`${PROJECT}/traces`);
+  other.searchParams.set("filter", "user_id = 'a' and name = 'b'");
+  const flagged = await fetch(other);
+  expect(flagged.headers.get("X-Mock-Filter-Ignored")).toBe("1");
+});
+
+it("lists only the spans of one user's traces for a user_id filter, without the ignored flag", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 400 });
+  server.use(...largeHandlers(dataset));
+  const userId = busiestUser(dataset);
+  const expected = dataset.traces
+    .filter((trace) => trace.user_id === userId && isVisible(trace))
+    .flatMap((trace) => dataset.traceDetail(trace.trace_id)?.spans ?? [])
+    .map((row) => row.span.span_id)
+    .sort();
+
+  /** Every page of a spans list for the user's filter, and whether any page was flagged. */
+  async function allSpans(sort: string | undefined) {
+    const ids: string[] = [];
+    let flagged = false;
+    let cursor: string | null = null;
+    do {
+      const url = new URL(`${PROJECT}/spans`);
+      url.searchParams.set("filter", `user_id = '${userId}'`);
+      url.searchParams.set("limit", "1000");
+      if (sort) {
+        url.searchParams.set("sort", sort);
+      }
+      if (cursor) {
+        url.searchParams.set("cursor", cursor);
+      }
+      const response = await fetch(url);
+      flagged ||= response.headers.get("X-Mock-Filter-Ignored") !== null;
+      const body = (await response.json()) as Schema<"SpanPage">;
+      ids.push(...body.data.map((span) => span.span_id));
+      cursor = body.next_cursor ?? null;
+    } while (cursor);
+    return { ids: ids.sort(), flagged };
+  }
+
+  const byStart = await allSpans(undefined);
+  expect(byStart.flagged).toBe(false);
+  expect(byStart.ids).toEqual(expected);
+
+  const byDuration = await allSpans("duration");
+  expect(byDuration.flagged).toBe(false);
+  expect(byDuration.ids).toEqual(expected);
+});
+
+it("honours from and to on the user detail", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 400 });
+  server.use(...largeHandlers(dataset));
+  const userId = busiestUser(dataset);
+  const mine = dataset.traces.filter((trace) => trace.user_id === userId && isVisible(trace));
+  const latest = Math.max(...mine.map((trace) => Date.parse(trace.start_time)));
+  const day = Math.floor(latest / DAY_MS) * DAY_MS;
+  const inDay = mine.filter((trace) => {
+    const start = Date.parse(trace.start_time);
+    return start >= day && start < day + DAY_MS;
+  });
+
+  const response = await fetch(`${PROJECT}/users/${userId}?from=${day}&to=${day + DAY_MS}`);
+  const body = (await response.json()) as Schema<"EndUserDetail">;
+  expect(response.status).toBe(200);
+  expect(body.user.trace_count).toBe(inDay.length);
+
+  const outside = await fetch(`${PROJECT}/users/${userId}?from=946684800000&to=946771200000`);
+  expect(outside.status).toBe(404);
 });

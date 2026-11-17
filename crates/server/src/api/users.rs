@@ -141,6 +141,26 @@ pub struct UserListParams {
     pub include_experiments: bool,
 }
 
+/// Query parameters of `GET /api/v1/projects/{project}/users/{user_id}`.
+///
+/// Spec 09 § Observability data.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+pub struct UserDetailParams {
+    /// Inclusive range start. RFC 3339 or epoch milliseconds.
+    #[serde(default)]
+    pub from: Option<TimeParam>,
+    /// Exclusive range end. RFC 3339 or epoch milliseconds.
+    #[serde(default)]
+    pub to: Option<TimeParam>,
+    /// Include traces from the evaluation environment. Default false. Spec 05 § Default exclusions.
+    #[serde(default)]
+    pub include_eval: bool,
+    /// Include experiment traces. Default false. Spec 05 § Default exclusions.
+    #[serde(default)]
+    pub include_experiments: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;

@@ -347,7 +347,7 @@ pub struct PageParams {
     pub cursor: Option<String>,
 }
 
-/// Query parameters of the session and user detail endpoints. Spec 05 § Default exclusions.
+/// Query parameters of the session detail endpoint. Spec 05 § Default exclusions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct ExclusionParams {

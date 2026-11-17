@@ -5,12 +5,21 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { formatKpi, type KpiDirection, type KpiMetric, kpiDelta } from "@/lib/metrics";
 
+/** Whether a rise in the metric is bad news: the tile's delta colour flips. */
+export const KPI_ADVERSE: Record<KpiMetric, boolean> = {
+  traces: false,
+  error_rate: true,
+  latency_p95: true,
+  cost_total: true,
+  total_tokens: false,
+};
+
 const TILES: { metric: KpiMetric; label: string; adverse: boolean }[] = [
-  { metric: "traces", label: "Traces", adverse: false },
-  { metric: "error_rate", label: "Error rate", adverse: true },
-  { metric: "latency_p95", label: "p95 latency", adverse: true },
-  { metric: "cost_total", label: "Cost", adverse: true },
-  { metric: "total_tokens", label: "Tokens", adverse: false },
+  { metric: "traces", label: "Traces", adverse: KPI_ADVERSE.traces },
+  { metric: "error_rate", label: "Error rate", adverse: KPI_ADVERSE.error_rate },
+  { metric: "latency_p95", label: "p95 latency", adverse: KPI_ADVERSE.latency_p95 },
+  { metric: "cost_total", label: "Cost", adverse: KPI_ADVERSE.cost_total },
+  { metric: "total_tokens", label: "Tokens", adverse: KPI_ADVERSE.total_tokens },
 ];
 
 export function KpiRow({ kpis }: { kpis: readonly Schema<"Kpi">[] }) {
@@ -64,7 +73,7 @@ function KpiTile({ tile, kpi }: { tile: (typeof TILES)[number]; kpi?: Schema<"Kp
   );
 }
 
-function Delta({
+export function Delta({
   adverse,
   direction,
   changePct,

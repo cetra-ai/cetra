@@ -19945,9 +19945,13 @@ export interface operations {
     get_user: {
         parameters: {
             query?: {
-                /** @description Include traces from the evaluation environment. Default false. */
+                /** @description Inclusive range start. RFC 3339 or epoch milliseconds. */
+                from?: components["schemas"]["TimeParam"];
+                /** @description Exclusive range end. RFC 3339 or epoch milliseconds. */
+                to?: components["schemas"]["TimeParam"];
+                /** @description Include traces from the evaluation environment. Default false. Spec 05 § Default exclusions. */
                 include_eval?: boolean;
-                /** @description Include experiment traces. Default false. */
+                /** @description Include experiment traces. Default false. Spec 05 § Default exclusions. */
                 include_experiments?: boolean;
             };
             header?: never;

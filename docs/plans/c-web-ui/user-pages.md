@@ -7,7 +7,8 @@ It builds on the Sessions-list work that is uncommitted in this checkout (`docs/
 ## Conventions (every phase)
 
 - **Never guess.** If something in your phase is unclear, contradicts the code, or a step fails in a way the phase does not explain, STOP. Make no further edits. Your final message must start with `QUESTION:` followed by the question and what you found (file, line, error text). You will be resumed with an answer.
-- Work directly in `/home/sebastien/travaux/llm-observer` on `main`. Do not create branches or worktrees. Do not commit, stash, reset, checkout or switch branches. Other files in the tree have uncommitted changes from other work: leave them alone.
+- Work in the worktree `/home/sebastien/travaux/llm-observer/.claude/worktrees/user-pages` (branch `claude/user-pages`), never in `/home/sebastien/travaux/llm-observer` itself. Every path in this plan is relative to the worktree. Do not create branches or worktrees. Do not commit, stash, reset, checkout or switch branches.
+- Cargo commands run with `export CARGO_TARGET_DIR=/home/sebastien/travaux/llm-observer/target` (shares built dependencies with the main checkout).
 - Edit only the files your phase lists. Other phases run at the same time on other files. If you need a change in another file, STOP and ask.
 - Before any node command: `export PATH=$HOME/.local/share/nvm/v26.13.0/bin:$PATH`.
 - Web checks, from `web/`: `./node_modules/.bin/vitest run <paths>`, `npx tsc -b` (no errors). Biome from the repo root: `node_modules/.bin/biome check --write <paths>` (a "schema version does not match" line is informational). Delete `web/.vitest/` if a run creates it.
@@ -43,7 +44,7 @@ It builds on the Sessions-list work that is uncommitted in this checkout (`docs/
 
 ## UP1 — Server: a time window on the user detail
 
-**Edit only:** `crates/storage/src/reads/users.rs`, `crates/server/src/api/users.rs`, `crates/server/src/routes/users.rs`, `docs/spec/09-api.md`; plus what `just openapi` regenerates (`crates/server/openapi.json`, `web/src/api/schema.gen.ts`) and what `just api-examples` regenerates under `fixtures/api/` (expected: nothing; if it changes files, list them in your report).
+**Edit only:** `crates/storage/src/reads/users.rs`, `crates/server/src/api/users.rs`, `crates/server/src/routes/users.rs`, `crates/server/src/api/openapi.rs`, `crates/server/src/api/common.rs` (one doc comment), `docs/spec/09-api.md`; plus what `just openapi` regenerates (`crates/server/openapi.json`, `web/src/api/schema.gen.ts`) and what `just api-examples` regenerates under `fixtures/api/` (expected: nothing; if it changes files, list them in your report).
 
 Steps:
 
@@ -51,8 +52,8 @@ Steps:
    - Change `pub async fn user_detail(ctx: &QueryContext, user_id: &str, include_eval: bool, include_experiments: bool, timeout: Duration)` to `pub async fn user_detail(ctx: &QueryContext, user_id: &str, scope: ListScope, timeout: Duration) -> Result<Option<UserDetailData>, RunError>`.
    - Change the private `async fn load(ctx, user_id, include_eval, include_experiments)` to `async fn load(ctx: &QueryContext, user_id: &str, scope: ListScope)`, and use the given `scope` instead of building `ListScope { window: None, … }`. Everything else in `load` stays: `scoped_traces(ctx, scope, false)` already applies the window, so the user row and the sessions plan (built from `excluded_plan`) follow it.
    - Update the doc comment of `user_detail` to say the scope's window and exclusions select the traces (spec 09 § Observability data, UP-1).
-   - Update every existing test call (`user_detail(&ctx, user_id, include_eval, false, TIMEOUT)` and the others near lines 770–975) to pass `ListScope { window: None, include_eval: …, include_experiments: … }`.
-   - New test `user_detail_follows_the_window`: build a context (with the helpers the neighbouring tests use) holding traces of one user at three different times, two of them in one session and one in another session; call `user_detail` with a `TimeWindow` covering only the first two traces and check `trace_count == 2`, `first_seen`/`last_seen` from those two traces, and exactly one session row whose trace count is 2. Then a window that covers no trace of the user → `Ok(None)`.
+   - Update every existing test call to pass `ListScope { window: None, include_eval: …, include_experiments: … }`: grep `user_detail(` in that file (calls near lines 773, 791, 957, 961, 972, maybe more). The only non-test caller is `crates/server/src/routes/users.rs` (step 3).
+   - New test `user_detail_follows_the_window`: use the file's test helpers `context_of(&spans)`, `user_span(trace, start, user)` and `window_of(from, to)` (near lines 995–1015). Build spans of one user at three different times (one span = one trace); set `span.session_id = Some(…)` so two of them share one session and the third has another session (`user_span` sets no session); call `user_detail` with a `TimeWindow` covering only the first two traces and check `trace_count == 2`, `first_seen`/`last_seen` from those two traces, and exactly one session row whose trace count is 2. Then a window that covers no trace of the user → `Ok(None)`.
 2. Server types, `crates/server/src/api/users.rs`: add
 
    ```rust
@@ -77,15 +78,16 @@ Steps:
    }
    ```
 
-   If `TimeParam` does not derive `Eq` or `Default`, derive only what compiles and say so in the report (do not add derives to `TimeParam`).
+   This derive line compiles as written: `TimeParam` is `Debug, Clone, Copy, PartialEq, Eq` (`api/common.rs:289`) and `Option` gives `Default`. The struct is not `Copy` (unlike `ExclusionParams`); that is fine.
 3. Route, `crates/server/src/routes/users.rs`, `get_user`:
-   - Take `error::Query(params): error::Query<UserDetailParams>` instead of `ExclusionParams` (remove `ExclusionParams` from this file's imports if it is no longer used here; it stays in `api/common.rs` because `sessions.rs` uses it — check with grep, and if nothing else uses it, STOP and ask).
+   - Take `error::Query(params): error::Query<UserDetailParams>` instead of `ExclusionParams`; add `UserDetailParams` to the `crate::api::users::{…}` import (line 12) and remove `ExclusionParams` from this file's `crate::api::common::{…}` import if nothing else in the file uses it. `ExclusionParams` itself stays: `routes/sessions.rs` and `get_session` use it.
    - Build `let scope = list_scope(params.from, params.to, params.include_eval, params.include_experiments)?;` once, pass it to `storage::user_detail(&ctx, &path.user_id, scope, deadline.remaining()?)`, and pass the same `scope` to `attach_user_extras` (replace the hand-built `ListScope { window: None, … }`).
-   - Find the `#[utoipa::path]` (or equivalent) documentation of `get_user` and point its `params` at `UserDetailParams` instead of `ExclusionParams`. If the path documentation lives in another file, STOP and ask.
-4. Route tests in the same file (use the `loaded()` / `get_json` helpers): `detail_without_window_is_unchanged` is already covered by the existing detail test — keep it passing. Add:
+   - OpenAPI: `get_user` is documented by hand in `crates/server/src/api/openapi.rs` (~line 2310, `operation("get_user", …).parameters(Some(with_query::<ExclusionParams>(…)))`). Change only `with_query::<ExclusionParams>` to `with_query::<UserDetailParams>` in that operation and add `UserDetailParams` to that file's imports. Do not touch its `.description(...)` text. `ExclusionParams` stays imported there (`get_session` uses it).
+   - `crates/server/src/api/common.rs` ~line 351: the `ExclusionParams` doc comment says "session and user detail endpoints"; make it "the session detail endpoint".
+4. Route tests in the same file (use the `loaded()` / `get_json` helpers; the module has `use super::*`). The existing detail test `detail_lists_the_user_sessions_with_scores` must keep passing unchanged. Add:
    - `detail_with_a_window_counts_only_traces_in_it`: read the example dataset's user-42 traces (the existing list test says 3 traces, 1 session; read `fixtures/api/dataset/spans.json` for their start times) and request `/users/user-42?from=<A>&to=<B>` with a window that holds a known subset; assert `trace_count` and `first_seen` from the dataset (compute them from the data, don't copy the response).
    - `detail_outside_the_window_is_404`: a window before every trace → 404.
-   - `detail_rejects_unknown_params`: `?foo=1` → 400 (as `deny_unknown_fields` gives elsewhere; check the existing status for an unknown param in another route's test and use the same).
+   - `detail_rejects_unknown_params`: `?foo=1` → `StatusCode::BAD_REQUEST` (as `routes/deletions.rs` tests near lines 816 and 1631 assert for unknown params).
 5. Spec 09, `docs/spec/09-api.md`, in the `GET /users` · `GET /users/{user_id}` row: add "`GET /users/{user_id}` also takes `from` and `to`: the user row and `sessions` then cover the user's traces that start in `[from, to)`, a session's numbers cover its traces in that window, and the activity buckets span the window; 404 when the user has no trace in scope".
 6. Regenerate: `just openapi`, then `just api-examples`. Check `git diff --stat` on `crates/server/openapi.json` and `web/src/api/schema.gen.ts`: the only change must be the new query parameters of `get_user`. If anything else changes, STOP and ask.
 
@@ -101,7 +103,7 @@ Steps:
 
 Steps:
 
-1. DSL quoting, `web/src/lib/dsl/dsl.ts`: rename the private `function quote(value: string): string` to `export function quoteString(value: string): string` and update its callers in that file (`serializeField`, `serializeValue`). Test: `quoteString("it's")` is `'it''s'`.
+1. DSL quoting, `web/src/lib/dsl/dsl.ts`: rename the private `function quote(value: string): string` (~line 498) to `export function quoteString(value: string): string` and rename all its call sites in that file (~lines 208, 210, 482, 490; grep `quote(` to be sure). Test in `web/src/lib/dsl/dsl.test.ts`: `quoteString("it's")` is `'it''s'`.
 2. `web/src/lib/search/users.ts`:
    - Add `import { quoteString } from "@/lib/dsl/dsl";` and
 
@@ -111,7 +113,7 @@ Steps:
        return `user_id = ${quoteString(userId)}`;
      }
      ```
-   - Extend the page search (UP-2):
+   - Extend the page search (UP-2): replace the existing `UserPageSearch` type and `parseUserPageSearch` function in place (today they handle only `eval` and `exp`; the existing test in `users.test.ts` must still pass):
 
      ```ts
      export const USER_PAGE_TABS = ["sessions", "traces"] as const;
@@ -141,9 +143,18 @@ Steps:
      ```
 
      (import `rangeFromSearch` and `RangeState` from `@/lib/time-range`).
+   - Add the URL form of a range, used by every link that carries the page's range:
+
+     ```ts
+     /** A range as URL params: the preset, or the absolute pair. Always explicit. */
+     export function rangeParams(state: RangeState): { range: Preset } | { from: string; to: string } {
+       return state.kind === "preset" ? { range: state.preset } : { from: state.from, to: state.to };
+     }
+     ```
+     Test: both kinds.
    - Tests in `users.test.ts`: `userTraceFilter("o'brien")` is `user_id = 'o''brien'`; `parseUserPageSearch` keeps `range=7d`, `tab=traces`, drops `tab=bogus`, drops `from` without `to` and an inverted pair; `userPageRange({})` is the 30d preset, `userPageRange({ range: "7d" })` is 7d, an absolute pair stays absolute.
 3. Identity, new `web/src/lib/user-identity.ts`:
-   - Move `decodeValue` from `web/src/components/user-columns.tsx` here unchanged (keep its doc comment), export it, and change the imports in `user-columns.tsx` (it uses it in `MetadataCell`) and `user/user-panel.tsx` to `@/lib/user-identity`. Remove the old export from `user-columns.tsx`. Grep for other importers of `decodeValue` and update them too (if one is outside the files this phase lists, STOP and ask).
+   - Move `decodeValue` and `scoreText` from `web/src/components/user-columns.tsx` here unchanged (keep their doc comments; `scoreText` needs `import type { Schema } from "@/api/types"`), export them, and change the imports in `user-columns.tsx` (it uses `decodeValue` in `MetadataCell` and `scoreText` in `ScoreCell`) and `user/user-panel.tsx` to `@/lib/user-identity`. Remove the old exports from `user-columns.tsx`. (This avoids an import cycle between `user-columns.tsx` and `user/user-chips.tsx`.) Grep for other importers of `decodeValue` and `scoreText` and update them too (if one is outside the files this phase lists, STOP and ask).
    - Add
 
      ```ts
@@ -155,7 +166,7 @@ Steps:
 
      Each field is `decodeValue(metadata[key]).trim()` when the key exists and the result is not empty.
    - Tests: all three present (JSON-encoded strings decode), missing metadata → `{}`, a `name` of `"\"\""` (empty JSON string) is absent, a non-JSON value is kept as is.
-4. Relative time, new `web/src/components/relative-time.tsx`: move the private `RelativeTime` function out of `web/src/components/session-columns.tsx` (keep its body and doc comment), export it as `export function RelativeTime({ value }: { value: string })`, and import it in `session-columns.tsx`. In `session-columns.tsx`, the line `/** A preview on one line; the full text shows on hover. */` directly above `RelativeTime` belongs to `Preview` (check where `Preview` is defined; if it has no doc comment of its own, move that line onto `Preview`; if `Preview` already has one, delete the stray line). Remove imports in `session-columns.tsx` that become unused. Test `relative-time.test.tsx`: renders "2h ago" for a time two hours before `Date.now()` (use `vi.useFakeTimers({ now: … })` or compute from `Date.now()`), and the `dateTime` attribute is the input.
+4. Relative time, new `web/src/components/relative-time.tsx`: move the private `RelativeTime` function out of `web/src/components/session-columns.tsx` (keep its body and doc comment), export it as `export function RelativeTime({ value }: { value: string })`, and import it in `session-columns.tsx`. In `session-columns.tsx`, delete the stray line `/** A preview on one line; the full text shows on hover. */` directly above `RelativeTime` (`Preview` is defined and documented in `trace-columns.tsx`). Remove imports in `session-columns.tsx` that become unused. Test `relative-time.test.tsx`: renders "2h ago" for a time two hours before `Date.now()` (use `vi.useFakeTimers({ now: … })` or compute from `Date.now()`), and the `dateTime` attribute is the input.
 5. KPI delta, `web/src/components/charts/kpi-tiles.tsx`: export the existing `Delta` component (`export function Delta`) and add `export const KPI_ADVERSE: Record<KpiMetric, boolean>` built from `TILES` (`traces: false, error_rate: true, latency_p95: true, cost_total: true, total_tokens: false`); make `TILES` use `KPI_ADVERSE[metric]` instead of repeating the booleans. No behaviour change; existing `kpi-tiles.test.tsx` must pass.
 6. Count bar chart, new `web/src/components/charts/count-bar-chart.tsx`: move the chart markup of `SessionsStartedChart` (the `ChartContainer`/`BarChart`/`XAxis`/`YAxis`/`Tooltip`/`Bar` block and the tooltip component) into
 
@@ -173,7 +184,7 @@ Steps:
    })
    ```
 
-   `SessionsStartedChart` becomes `startedBuckets(...)` + `<CountBarChart rows={rows} label="Sessions started" seriesLabel="Sessions" />`; `StartedBucket` becomes an alias of `CountBucket` only if the tests import it — otherwise replace its uses by `CountBucket` and delete it. The chart config's `count.label` comes from `seriesLabel`. The existing `sessions-started-chart.test.tsx` must pass unchanged. Test `count-bar-chart.test.tsx`: renders `role="img"` with the given name and one bar per non-null row (copy the bar-counting approach of `sessions-started-chart.test.tsx`).
+   `SessionsStartedChart` becomes `startedBuckets(...)` + `<CountBarChart rows={rows} label="Sessions started" seriesLabel="Sessions" />`; Delete `StartedBucket` and use `CountBucket` instead (it is used only inside `sessions-started-chart.tsx`). The chart config's `count.label` comes from `seriesLabel`. The existing `sessions-started-chart.test.tsx` must pass unchanged. Test `count-bar-chart.test.tsx`: renders `role="img"` with the given name and one bar per non-null row (copy the bar-counting approach of `sessions-started-chart.test.tsx`).
 7. Activity chart, new `web/src/components/user/activity-chart.tsx`:
 
    ```ts
@@ -191,7 +202,26 @@ Steps:
    export function UserChips({ user }: { user: Schema<"EndUserSummary"> })
    ```
 
-   Use `MetricChip` (`@/components/trace/metric-chip`) with lucide icons `ListTree` "Traces" (`${trace_count} traces`, singular for 1), `MessagesSquare` "Sessions" (same rule), `Coins` "Tokens" (`formatTokens`, only when `total_tokens` is defined), `DollarSign` "Cost" (`formatCost`, only when `cost_total` is defined), `TriangleAlert` "Error rate" (`formatPercent(error_trace_count / trace_count)` from `@/lib/metrics`; only when `trace_count > 0`; when `error_trace_count > 0` add `className="border-status-error/40 text-status-error"`). Wrap them in `<div className="flex flex-wrap items-center gap-2">`. Tests: chip texts for a sample user, the error chip has the error class only when errors exist, tokens/cost chips are absent when undefined.
+   Use `MetricChip` (`@/components/trace/metric-chip`) with lucide icons `ListTree` "Traces" (`${trace_count} traces`, singular for 1), `MessagesSquare` "Sessions" (same rule), `Coins` "Tokens" (`formatTokens`, only when `total_tokens` is defined), `DollarSign` "Cost" (`formatCost`, only when `cost_total` is defined), `TriangleAlert` "Error rate" (`formatPercent(error_trace_count / trace_count)` from `@/lib/metrics`; only when `trace_count > 0`; when `error_trace_count > 0` add `className="border-status-error/40 text-status-error"`). Wrap them in `<div className="flex flex-wrap items-center gap-2">`.
+
+   In the same file add the shared pieces the drawer (UP5), the list (UP4) and the page (UP6) use:
+
+   ```ts
+   /** The user's plan as a coloured pill. */
+   export function PlanPill({ plan }: { plan: string })
+   // <Badge variant="secondary" className={cn("h-4 px-1.5 text-[10px]", categoryClasses(plan).pill)}>{plan}</Badge>
+   // Badge from "@/components/ui/badge", categoryClasses from "@/lib/colors", cn from "cn".
+
+   /** Score averages: name, badge, count; "No scores" when empty. */
+   export function UserScores({ scores }: { scores: readonly Schema<"UserScore">[] })
+
+   /** The metadata as a key/value list; "No metadata" when empty. */
+   export function UserMetadata({ metadata }: { metadata: Record<string, string> | undefined })
+   ```
+
+   `UserScores` and `UserMetadata` copy the markup of the "Scores" and "Metadata" sections' contents in `user/user-panel.tsx` (the `ul`/`dl` and the empty lines; not the `Section` heading), importing `decodeValue` and `scoreText` from `@/lib/user-identity`. Do not change `user-panel.tsx` in this phase beyond its `decodeValue`/`scoreText` imports (UP5 switches it to these components).
+
+   Tests: chip texts for a sample user, the error chip has the error class only when errors exist, tokens/cost chips are absent when undefined; `PlanPill` renders its text; `UserScores` and `UserMetadata` render rows and their empty lines.
 9. Queries, `web/src/api/queries.ts`: add
 
    ```ts
@@ -229,9 +259,10 @@ Steps:
      ```
 
      Match `/^\s*user_id\s*=\s*'((?:[^']|'')*)'\s*$/` and return the captured text with `''` replaced by `'`.
-   - `oneUser`: pass `{ from: parsed.from, to: parsed.to }` (only the keys that are defined) to `dataset.user`.
-   - `metrics`: pass `userIdOfFilter(parsed.filter)` to `dataset.metrics`; send the `X-Mock-Filter-Ignored` header only when a filter is present and `userIdOfFilter` returned undefined.
-   - Traces list: find the `GET /traces` handler (it uses `filterTraces`). In `filterTraces`, when `userIdOfFilter(query.filter)` is defined, also keep only traces with that `user_id`. The ignored-filter header follows the same rule as for metrics. If the traces handler builds its header somewhere other than `ignoredFilter(query)`, STOP and ask.
+   - `oneUser` (~line 174): pass `{ from: parsed.from, to: parsed.to }` (only the keys that are defined) to `dataset.user`. The only callers of `dataset.user(` and `dataset.metrics(` are this file (~lines 183, 204) and the tests.
+   - `metrics` (~line 190): pass `userIdOfFilter(parsed.filter)` to `dataset.metrics`.
+   - `filterTraces`: when `userIdOfFilter(query.filter)` is defined, also keep only traces with that `user_id`. `filterTraces` also serves the spans list; that is intended (spans of the user's traces).
+   - Do **not** change `ignoredFilter` itself (sessions, users and spans still ignore filters and keep flagging them). Only in the traces list handler (~line 80, `HttpResponse.json(..., { headers: ignoredFilter(parsed) })`) and in `metrics` (~line 211) replace `ignoredFilter(parsed)` with `userIdOfFilter(parsed.filter) === undefined ? ignoredFilter(parsed) : {}`.
 3. Tests:
    - `dataset.test.ts`: for a user with traces on several days, a window around one day gives that day's trace count, `first_seen` in the window, and only sessions with a trace in the window; a window with no trace → `undefined`; `metrics(…, userId)` counts only that user's traces (compare the `traces` KPI with a manual count).
    - `handlers.test.ts`: `userIdOfFilter("user_id = 'o''brien'")` is `o'brien`; other filters → undefined; `GET /traces?filter=user_id%20%3D%20'<id>'` returns only that user's traces and no ignored-filter header; `GET /users/<id>?from&to` honours the window.
@@ -242,20 +273,20 @@ Steps:
 
 ## UP5 — Drawer
 
-Runs after UP1 and UP2. **Edit only:** `web/src/api/queries.ts` (`userQuery` only), `web/src/components/user/user-panel.tsx` (+ `user-panel.test.tsx`), `web/src/routes/$org/$project/users/index.tsx` (the `<UserPanel …>` props only), `web/src/routes/$org/$project/users/$userId.tsx` (the two `userQuery` calls only: pass the page's resolved range, see step 1).
+Runs after UP1 and UP2. **Edit only:** `web/src/api/queries.ts` (`userQuery` only), `web/src/components/user/user-panel.tsx` (+ `user-panel.test.tsx`), `web/src/routes/$org/$project/users/index.tsx` (the `<UserPanel …>` props only) and `index.test.tsx`, `web/src/routes/$org/$project/users/$userId.tsx` (the two `userQuery` calls only: pass the page's resolved range, see step 1) and `$userId.test.tsx`.
 
 Steps:
 
-1. `userQuery(org, project, userId, flags: { from?: string; to?: string; includeEval?: boolean; includeExperiments?: boolean })`: add `from` and `to` to the query when set. In `$userId.tsx`, for now, pass the range from `userPageRange(search)` resolved with `resolveRange(range, Date.now())` in the loader and the component (UP6 rewrites this page; keep the change minimal so it compiles and its tests pass). If the loader's `loaderDeps` must change for this, add `range`, `from`, `to` to it.
+1. `userQuery(org, project, userId, flags: { from?: string; to?: string; includeEval?: boolean; includeExperiments?: boolean })`: add `from` and `to` to the query when set. In `$userId.tsx`, for now, pass the range from `userPageRange(search)` resolved with `resolveRange(range, Date.now())` in the loader and the component (UP6 rewrites this page; keep the change minimal so it compiles and its tests pass). If the loader's `loaderDeps` must change for this, add `range`, `from`, `to` to it. The loader and the component resolve `Date.now()` separately, so their keys differ by milliseconds; that is accepted here (UP6 rewrites it).
 2. `UserPanel` gets new required props `from: string` and `to: string` (the list's resolved range) and an optional `range` prop of type `{ range?: Preset; from?: string; to?: string }` — the list's URL range params — used for the "Open page" link's search (merge into `pageSearch`). Pass `from`, `to` into `userQuery`. In `users/index.tsx` pass `from={resolved.from} to={resolved.to}` and `range={search.range ? { range: search.range } : search.from && search.to ? { from: search.from, to: search.to } : {}}`.
 3. Layout of the drawer body (keep the outer `<section aria-label="User">`, the header bar with layout controls / Open page / Close, the loading and error states):
-   - Header bar: replace `<IdText value={userId} kind="user" />` with: the name (from `userIdentity(user?.metadata)`) in `text-[13px] font-semibold` followed by the id in `font-mono text-[11px] text-muted-foreground`, or the `IdText` alone when there is no name; then the plan pill (`<Badge variant="secondary" className={cn("h-4 px-1.5 text-[10px]", categoryClasses(plan).pill)}>`) when there is a plan. While `user` is not loaded, show the `IdText` as today.
+   - Header bar: replace `<IdText value={userId} kind="user" />` with: the name (from `userIdentity(user?.metadata)`) in `text-[13px] font-semibold` followed by the id in `font-mono text-[11px] text-muted-foreground`, or the `IdText` alone when there is no name; then `<PlanPill plan={plan} />` (`@/components/user/user-chips`) when there is a plan. While `user` is not loaded, show the `IdText` as today.
    - Body, `p-3`, `flex flex-col gap-4`:
      1. `email` (when present) as a muted `text-[12px]` line, then `<UserChips user={user} />`, then the time span line as today.
      2. Section "Activity": `<ActivityChart values={user.activity} from={from} to={to} />`.
-     3. Sections "Scores" and "Metadata" as today (section titles stay; text size `text-[12px]`).
+     3. Sections "Scores" and "Metadata": keep the `Section` headings, and replace their contents with `<UserScores scores={user.scores} />` and `<UserMetadata metadata={user.metadata} />` (from UP2). Delete the old "Totals" section (the chips replace it), the `Stat` component, the `Sparkline` import, and any other code of `user-panel.tsx` that becomes unused.
      4. Section "Recent sessions": each session (first 20) is a `Link` to the session page, rendered as a block with two lines: line 1 — a red dot (`<span aria-label="Has errors" className="size-1.5 shrink-0 rounded-full bg-status-error" />`) when `error_trace_count > 0`, then `first_input_preview` truncated to one line (`truncate`), or the `session_id` in mono when there is no preview; line 2 (muted, `text-[11px]`) — `<RelativeTime value={session.start_time} />` · `N traces` · `formatCost(cost_total)` · `formatDuration(duration_ns)`. Use `title` on line 1 with the full preview.
-4. Tests (`user-panel.test.tsx`; render it the way the existing test does): the name and id show when metadata has a name; the plan pill shows; the chips show; the activity chart has `role="img"` named "Activity"; a recent session shows its first message and links to `/…/sessions/<id>`; the error dot shows for a session with `error_trace_count > 0` (override the user endpoint with `server.use` returning a fixture copy with that field changed). And in `users/index.test.tsx` nothing changes unless a test breaks — if one breaks, fix the test only when the break is the intended new layout, and list it in the report.
+4. Tests (`user-panel.test.tsx`; render it the way the existing test does). The existing assertion `getByText("Ada Example")` (~line 14) will now match twice (header and metadata): that break is intended; change it to `getAllByText(...)` or scope it with `within`. New: the name and id show when metadata has a name; the plan pill shows; the chips show; the activity chart has `role="img"` named "Activity"; a recent session shows its first message and links to `/…/sessions/<id>`; the error dot shows for a session with `error_trace_count > 0` (override the user endpoint with `server.use` returning a fixture copy with that field changed). And in `users/index.test.tsx` nothing changes unless a test breaks — if one breaks, fix the test only when the break is the intended new layout, and list it in the report.
 
 **Done when:** vitest passes for `src/components/user`, `src/routes/$org/$project/users`; `npx tsc -b` has no errors; Biome clean.
 
@@ -267,10 +298,10 @@ Runs after UP2 and UP5. **Edit only:** `web/src/components/user-columns.tsx` (+ 
 
 Steps:
 
-1. User cell (`user-columns.tsx`, column `user`): `size` 220; remove `mono: true` from its `meta` (keep the icon). Cell: with `userIdentity(row.metadata).name` → `<span className="flex min-w-0 items-center gap-1.5"><span className="truncate font-medium">{name}</span><span className="truncate font-mono text-[11px] text-muted-foreground">{user_id}</span>{plan pill}</span>`; without a name → the id in `font-mono` plus the plan pill. The plan pill is the same `Badge` as in the drawer (UP5 step 3). Set `title` on the outer span to `name ? \`${name} (${user_id})\` : user_id`.
+1. User cell (`user-columns.tsx`, column `user`): `size` 220; remove `mono: true` from its `meta` (keep the icon). Cell: with `userIdentity(row.metadata).name` → `<span className="flex min-w-0 items-center gap-1.5"><span className="truncate font-medium">{name}</span><span className="truncate font-mono text-[11px] text-muted-foreground">{user_id}</span>{plan pill}</span>`; without a name → the id in `font-mono` plus the plan pill. The plan pill is `<PlanPill plan={plan} />` from `@/components/user/user-chips`. Set `title` on the outer span to `name ? \`${name} (${user_id})\` : user_id`.
 2. `first_seen` and `last_seen` cells: `<RelativeTime value={…} />` (`@/components/relative-time`); `size` 104 for both.
 3. The filmstrip in `users/index.tsx`: `label: userIdentity(row.metadata).name ?? row.user_id`.
-4. Summary deltas (`users-summary.tsx`): each KPI item renders its value and then `<Delta adverse={KPI_ADVERSE[item.metric]} direction={delta.direction} changePct={delta.changePct} />` (from `@/components/charts/kpi-tiles`), where `delta = kpiDelta(kpi ?? {})`. Wrap the item in a `<span title={\`Previous: ${previous}\`}>` with `previous` formatted like `KpiTile` does (`formatKpi` or "—"). The "Users" item has no delta.
+4. Summary deltas (`users-summary.tsx`): the private `Item` component's props become `{ label: string; value: string; delta?: KpiDelta; adverse?: boolean; previous?: string }` (`KpiDelta` from `@/lib/metrics`). Each KPI item renders its value and then `<Delta adverse={KPI_ADVERSE[item.metric]} direction={delta.direction} changePct={delta.changePct} />` (from `@/components/charts/kpi-tiles`), where `delta = kpiDelta(kpi ?? {})`. Wrap the item in a `<span title={\`Previous: ${previous}\`}>` with `previous` formatted like `KpiTile` does (`formatKpi` or "—"). The "Users" item has no delta.
 5. Top users, new `web/src/components/user/top-users.tsx`:
 
    ```ts
@@ -286,7 +317,7 @@ Steps:
    - `user-columns.test.tsx`: a row with metadata name/plan shows the name, the id and the plan; a row without metadata shows the id; first/last seen render relative text.
    - `users-summary.test.tsx`: with kpis having `value` and `previous`, the delta percentage shows (e.g. value 120, previous 100 → "20%").
    - `top-users.test.tsx`: renders buttons in order with costs; nothing for an empty list; clicking calls `onSelect` with the id.
-   - `users/index.test.tsx`: the "Top users by cost" region appears with the fixture's users (override `GET /users` with `server.use` when the request has `sort=cost_total` if the fixture does not match), and clicking one opens the drawer (`?user=` in the URL).
+   - `users/index.test.tsx`: the fixture mock serves the same users page for `sort=cost_total&limit=5` (its entries match query subsets), unsorted. Override with `server.use(http.get("/api/v1/projects/:project/users", …))` that returns a two-user page sorted by cost when `new URL(request.url).searchParams.get("sort") === "cost_total"`, and otherwise falls through (`return undefined` lets the next handler answer — check MSW's passthrough idiom used in other tests, e.g. grep `server.use` in `web/src/routes`; if none falls through, return the fixture page for the other case by importing the fixture JSON the way `$userId.test.tsx` imports fixtures). Assert the "Top users by cost" region lists them in order, and clicking one opens the drawer (`?user=` in the URL).
 
 **Done when:** vitest passes for `src/components/user-columns.test.tsx`, `src/components/user`, `src/routes/$org/$project/users`; `npx tsc -b` has no errors; Biome clean.
 
@@ -294,19 +325,20 @@ Steps:
 
 ## UP6 — User page
 
-Runs after UP2 and UP5. **Edit only:** `web/src/routes/$org/$project/users/$userId.tsx` (+ `$userId.test.tsx`), new `web/src/components/user/user-overview.tsx` (+ test), new `web/src/components/user/user-traces.tsx` (+ test).
+Runs after UP2 and UP5. **Edit only:** `web/src/routes/$org/$project/users/$userId.tsx` (+ `$userId.test.tsx`), new `web/src/components/user/user-overview.tsx`, new `web/src/components/user/user-traces.tsx`.
 
 Steps:
 
 1. Route:
    - `validateSearch: parseUserPageSearch`; `loaderDeps: ({ search }) => ({ eval: search.eval, exp: search.exp, range: search.range, from: search.from, to: search.to })`.
-   - Loader: resolve `userPageRange(deps)` with `resolveRange(range, Date.now())` and prefetch with `context.queryClient.prefetchQuery(userQuery(…, { from, to, includeEval, includeExperiments }))` (prefetch does not throw; UP-3). Remove the `notFound()` import if unused.
+   - Remove the route's `loader` and `loaderDeps` entirely (its `Date.now()` never matched the component's window, so it prefetched nothing; UP-3 also drops its `notFound()`). The component loads the user. Remove imports that become unused (`notFound`, `problemOf` if unused, …). Replace the `useMemo` window that UP5 added with the anchor pattern below.
    - Component: keep a range anchor like the list (`const [anchor, setAnchor] = useState(() => Date.now())`, reset when the range key changes; copy the pattern from `users/index.tsx` lines with `rangeKey` / `seenRange`). `resolved = resolveRange(userPageRange(search), anchor)`.
    - `detail = useQuery(userQuery(…, { from: resolved.from, to: resolved.to, includeEval, includeExperiments }))`. While pending: a header skeleton (`<Skeleton className="h-6 w-64" />` in the header area). On error: when `problemOf(error)?.status === 404`, render the header (id only) and `<EmptyState icon={Users} title="No traces from this user in this range" />`; otherwise throw.
 2. Header (`UserHeader`, replace today's), modelled on `SessionHeader` in `web/src/components/session/session-view.tsx` (read it): `<header className="flex shrink-0 flex-col gap-2 border-b px-4 py-3">`.
-   - Row 1: back link "Users" (`ChevronLeft`, to `/$org/$project/users` with the page's `range`/`from`/`to`/`eval`/`exp` as search), "/", the name (or the id when no name) in `text-[15px] font-semibold select-text`, `CopyButton` for the id (`label="user ID"`), the id in `font-mono text-[12px] text-muted-foreground` when a name is shown, the plan pill, the email in muted `text-[12px]` when present. Right side (`ml-auto flex items-center gap-2`): `<TimeRangePicker state={range} onChange={…} />` (`@/components/time-range/time-range-picker`; on change navigate with the new range params, removing the old ones, as `withRange` does in `users/index.tsx`), a ghost `xs` Button-Link "Dashboard" (`LayoutDashboard` icon) to `/$org/$project/dashboard` with search `{ …range params, filter: userTraceFilter(userId), eval/exp }`, and the existing "Delete user data…" button and dialog unchanged.
+   - `range` below means the page's `RangeState` (`userPageRange(search)`), and "range params" means `rangeParams(range)` from UP2 (always explicit, so a page opened without `range` still links with `range: "30d"`).
+   - Row 1: back link "Users" (`ChevronLeft`, to `/$org/$project/users` with search `{ ...rangeParams(range), eval/exp when set }`), "/", the name (or the id when no name) in `text-[15px] font-semibold select-text`, `CopyButton` for the id (`label="user ID"`), the id in `font-mono text-[12px] text-muted-foreground` when a name is shown, `<PlanPill plan={plan} />` when present, the email in muted `text-[12px]` when present. Right side (`ml-auto flex items-center gap-2`): `<TimeRangePicker state={range} onChange={(next) => …} />` (`@/components/time-range/time-range-picker`); on change navigate with `search: (prev) => { const { range: _r, from: _f, to: _t, ...rest } = prev; return { ...rest, ...rangeParams(next) }; }` and reset the anchor as the list does. Then a ghost `xs` Button-Link "Dashboard" (`LayoutDashboard` icon) to `/$org/$project/dashboard` with search `{ ...rangeParams(range), filter: userTraceFilter(userId), eval/exp when set }`, and the existing "Delete user data…" button and dialog unchanged.
    - Row 2: `<UserChips user={user} />` preceded by a `MetricChip` `Clock` "Time span" with first → last seen (as `SessionHeader` does).
-3. Tabs: `Tabs` from `@/components/ui/tabs`, `value={search.tab ?? "overview"}`; `onValueChange` navigates with `tab` set (omitted for `overview`), `replace: true`. `TabsList` under the header (`px-4 pt-2`), triggers "Overview", "Sessions (N)" (N = `detail.sessions.length`, shown as `100+` when it equals 100), "Traces". Each `TabsContent` fills the remaining height (`min-h-0 flex-1`), only the active tab's content mounts (Radix default).
+3. Tabs: `Tabs` from `@/components/ui/tabs`, `value={search.tab ?? "overview"}`; `onValueChange` navigates with `tab` set (omitted for `overview`), `replace: true`. `TabsList` under the header (`px-4 pt-2`), triggers "Overview", "Sessions (N)" (N = `detail.sessions.length`, shown as `100+` when it equals 100), "Traces". Each `TabsContent` fills the remaining height (`min-h-0 flex-1`), only the active tab's content mounts (Radix default). Wrap the whole page body (header, `Tabs`, `TabsList` and every `TabsContent`) in one `<TooltipProvider>` (`@/components/ui/tooltip`), replacing today's wrapper around the `DataTable`: `KpiRow`, `DataTable` and `TimeText` use tooltips.
 4. Overview, new `user-overview.tsx`:
 
    ```ts
@@ -321,7 +353,7 @@ Steps:
    })
    ```
 
-   Scrollable (`overflow-auto p-4`). Top: a grid `grid grid-cols-1 gap-3 md:grid-cols-2` of two cards (`rounded-md border p-3`): "Scores" (the list from the drawer: name, `ScoreAverageBadge`, count; "No scores" when empty) and "Metadata" (the `dl` from the drawer; "No metadata" when empty). Below, a heading "Usage" and `metricsQuery(org, project, { from, to, filter: userTraceFilter(user.user_id), includeEval, includeExperiments })` through `useQuery`: loading → `KpiRowSkeleton` + `DashboardBodySkeleton`; data → `<KpiRow kpis={data.kpis} />` + `<DashboardBody response={data} onBucket={…} />`, where `onBucket(timeMs)` navigates to `/$org/$project/traces` with `bucketRange(timeMs, data.bucket_ns)` as `from`/`to`, `filter: userTraceFilter(user.user_id)` and the eval/exp flags (copy `openBucket` in `dashboard-view.tsx`). An error from the metrics query shows a muted "Could not load the usage charts." line instead of throwing. Wrap in `TooltipProvider` if `KpiRow` needs it (it uses `Tooltip`).
+   Scrollable (`overflow-auto p-4`). Top: a grid `grid grid-cols-1 gap-3 md:grid-cols-2` of two cards (`rounded-md border p-3`, each with a heading `text-[11px] uppercase text-muted-foreground`): "Scores" with `<UserScores scores={user.scores} />` and "Metadata" with `<UserMetadata metadata={user.metadata} />` (from `@/components/user/user-chips`). The `range` prop is not needed by the metrics query; drop it from the props if `onBucket` doesn't use it (it doesn't: the bucket gives `from`/`to`). Below, a heading "Usage" and `metricsQuery(org, project, { from, to, filter: userTraceFilter(user.user_id), includeEval, includeExperiments })` through `useQuery`: loading → `KpiRowSkeleton` + `DashboardBodySkeleton`; data → `<KpiRow kpis={data.kpis} />` + `<DashboardBody response={data} onBucket={…} />`, where `onBucket(timeMs)` navigates to `/$org/$project/traces` with `bucketRange(timeMs, data.bucket_ns)` as `from`/`to`, `filter: userTraceFilter(user.user_id)` and the eval/exp flags (copy `openBucket` in `dashboard-view.tsx`). An error from the metrics query shows a muted "Could not load the usage charts." line instead of throwing. `UserOverview` relies on the page's `TooltipProvider`; it does not add its own.
 5. Sessions tab: today's `DataTable` of `detail.sessions`, with columns `orderedSessionColumns(sessions, visibleColumnIds(specs, undefined).filter((id) => id !== "user"))`, `rowTone` red for sessions with `error_trace_count > 0` if `DataTable` `rowTone` fits (`(row) => row.error_trace_count > 0 ? "error" : undefined`).
 6. Traces tab, new `user-traces.tsx`:
 
@@ -331,10 +363,10 @@ Steps:
    })
    ```
 
-   `useInfiniteQuery(traceListOptions(org, project, { from, to, filter: userTraceFilter(userId), includeEval, includeExperiments }))` (`traceListOptions` is in `@/components/data-table/use-infinite-list`). Rows = pages flattened. Columns: `orderedTraceColumns(rows, visibleColumnIds(traceColumnSpecs(scoreNames(rows)), undefined).filter((id) => id !== "user"))`. `DataTable` with `tableId="user-traces"`, `ariaLabel="Traces"`, `getRowId` trace id, `rowTone={traceRowTone}`, infinite props from the query, `emptyState={<EmptyState icon={ListTree} title="No traces" />}`, `onActivate` → navigate to `/$org/$project/traces/$traceId` (check that route's search type in `routes/$org/$project/traces/$traceId.tsx`; pass nothing it doesn't accept). No sorting UI (omit `sorting`/`onSortingChange`). A query error throws.
+   `useInfiniteQuery(traceListOptions(org, project, { from, to, filter: userTraceFilter(userId), includeEval, includeExperiments }))` (`traceListOptions` is in `@/components/data-table/use-infinite-list`). Rows = `query.data?.pages.flatMap((page) => page.data) ?? []`. Columns: `orderedTraceColumns(rows, visibleColumnIds(traceColumnSpecs(scoreNames(rows)), undefined).filter((id) => id !== "user"))`. `DataTable` with `tableId="user-traces"`, `ariaLabel="Traces"`, `getRowId` trace id, `rowTone={traceRowTone}`, infinite props from the query, `emptyState={<EmptyState icon={ListTree} title="No traces" />}`, `onActivate` → navigate to `/$org/$project/traces/$traceId` with `params: { org, project, traceId }` and no `search` (that route accepts only `span` and `mode`). No sorting UI (omit `sorting`/`onSortingChange`). A query error throws.
 7. Tests:
    - `$userId.test.tsx`: keep the existing tests passing, adjusting only what the new layout changes (e.g. "3 traces" now in a chip, the sessions grid is under the Sessions tab: click the tab first). New: Overview shows the Scores and Metadata cards and the KPI row; the Traces tab lists user-42's traces and opens a trace page; the Dashboard link's `href` contains `filter=user_id` and `range`; a 404 from `GET /users/:id` (`server.use`) shows "No traces from this user in this range" and the range picker; `?tab=traces` opens on the Traces tab.
-   - `user-overview.test.tsx` and `user-traces.test.tsx`: render through `renderApp` or the same wrapper the neighbouring component tests use for components that call queries (find one that renders a component using `useProject`; if none exists, STOP and ask).
+   - No standalone component tests for `UserOverview` and `UserTraces` (they need the router and project context): test them through `renderApp` (`web/src/test/render.tsx`) in `$userId.test.tsx`, on `/acme/support-bot/users/user-42` (Overview) and `/acme/support-bot/users/user-42?tab=traces`, with `screen` and `server.use`. So UP6 creates no `user-overview.test.tsx` / `user-traces.test.tsx`.
 
 **Done when:** vitest passes for `src/routes/$org/$project/users`, `src/components/user`; `npx tsc -b` has no errors; Biome clean.
 

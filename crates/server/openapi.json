@@ -16795,9 +16795,27 @@
             }
           },
           {
+            "name": "from",
+            "in": "query",
+            "description": "Inclusive range start. RFC 3339 or epoch milliseconds.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/TimeParam"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Exclusive range end. RFC 3339 or epoch milliseconds.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/TimeParam"
+            }
+          },
+          {
             "name": "include_eval",
             "in": "query",
-            "description": "Include traces from the evaluation environment. Default false.",
+            "description": "Include traces from the evaluation environment. Default false. Spec 05 § Default exclusions.",
             "required": false,
             "schema": {
               "type": "boolean"
@@ -16806,7 +16824,7 @@
           {
             "name": "include_experiments",
             "in": "query",
-            "description": "Include experiment traces. Default false.",
+            "description": "Include experiment traces. Default false. Spec 05 § Default exclusions.",
             "required": false,
             "schema": {
               "type": "boolean"

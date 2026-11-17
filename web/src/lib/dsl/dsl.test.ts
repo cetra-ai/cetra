@@ -5,6 +5,7 @@ import {
   type CompareOp,
   type Field,
   parseChip,
+  quoteString,
   serializeChip,
   serializeFilter,
   splitConjuncts,
@@ -476,3 +477,7 @@ function str(value: string): { kind: "string"; value: string } {
 function num(value: number, text: string): { kind: "number"; value: number; text: string } {
   return { kind: "number", value, text };
 }
+
+it("quotes a string value by doubling single quotes", () => {
+  expect(quoteString("it's")).toBe("'it''s'");
+});

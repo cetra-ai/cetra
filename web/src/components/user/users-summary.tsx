@@ -1,5 +1,6 @@
 import type { Schema } from "@/api/types";
-import { formatKpi, type KpiMetric, kpiDelta } from "@/lib/metrics";
+import { Delta, KPI_ADVERSE } from "@/components/charts/kpi-tiles";
+import { formatKpi, type KpiDelta, type KpiMetric, kpiDelta } from "@/lib/metrics";
 
 const ITEMS: { label: string; metric: KpiMetric }[] = [
   { label: "Traces", metric: "traces" },
@@ -26,12 +27,15 @@ export function UsersSummary({
       <Item label="Users" value={`${users}${more ? "+" : ""}`} />
       {ITEMS.map((item) => {
         const kpi = kpis?.find((entry) => entry.metric === item.metric);
-        const value = kpiDelta(kpi ?? {}).value;
+        const delta = kpiDelta(kpi ?? {});
         return (
           <Item
             key={item.metric}
             label={item.label}
-            value={value === undefined ? "—" : formatKpi(item.metric, value)}
+            value={delta.value === undefined ? "—" : formatKpi(item.metric, delta.value)}
+            delta={delta}
+            adverse={KPI_ADVERSE[item.metric]}
+            previous={delta.previous === undefined ? "—" : formatKpi(item.metric, delta.previous)}
           />
         );
       })}
@@ -39,10 +43,28 @@ export function UsersSummary({
   );
 }
 
-function Item({ label, value }: { label: string; value: string }) {
+function Item({
+  label,
+  value,
+  delta,
+  adverse,
+  previous,
+}: {
+  label: string;
+  value: string;
+  delta?: KpiDelta;
+  adverse?: boolean;
+  previous?: string;
+}) {
   return (
-    <span className="shrink-0">
+    <span className="shrink-0" title={previous === undefined ? undefined : `Previous: ${previous}`}>
       <span className="text-muted-foreground">{label}</span> <span className="num">{value}</span>
+      {delta && adverse !== undefined ? (
+        <>
+          {" "}
+          <Delta adverse={adverse} direction={delta.direction} changePct={delta.changePct} />
+        </>
+      ) : null}
     </span>
   );
 }

@@ -15,12 +15,14 @@ import type { Schema } from "@/api/types";
 import type { ColumnSpec } from "@/components/data-table/column-layout";
 import type { DataTableColumn } from "@/components/data-table/data-table";
 import { LazyTooltip } from "@/components/lazy-tooltip";
+import { RelativeTime } from "@/components/relative-time";
 import { ScoreAverageBadge } from "@/components/score-badge";
-import { TimeText } from "@/components/time-text";
 import { BarCell } from "@/components/user/bar-cell";
 import { Sparkline } from "@/components/user/sparkline";
+import { PlanPill } from "@/components/user/user-chips";
 import { formatCost, formatTokens } from "@/lib/format";
 import { USER_COLUMN_IDS, type UserColumnId } from "@/lib/search/users";
+import { decodeValue, scoreText, userIdentity } from "@/lib/user-identity";
 
 const HIDDEN = new Set<UserColumnId>(["metadata"]);
 
@@ -90,11 +92,11 @@ function userColumnDefs(
   const fixed: DataTableColumn<Schema<"EndUserSummary">>[] = [
     {
       id: "user",
-      size: 160,
+      size: 220,
       header: "User",
       enableSorting: false,
-      meta: { mono: true, icon: User },
-      cell: ({ row }) => row.original.user_id,
+      meta: { icon: User },
+      cell: ({ row }) => <UserCell user={row.original} />,
     },
     {
       id: "activity",
@@ -212,20 +214,20 @@ function userColumnDefs(
     {
       id: "first_seen",
       accessorFn: (row) => row.first_seen,
-      size: 168,
+      size: 104,
       header: "First seen",
       enableSorting: true,
       meta: { icon: Clock },
-      cell: ({ row }) => <TimeText value={row.original.first_seen} style="datetime" />,
+      cell: ({ row }) => <RelativeTime value={row.original.first_seen} />,
     },
     {
       id: "last_seen",
       accessorFn: (row) => row.last_seen,
-      size: 168,
+      size: 104,
       header: "Last seen",
       enableSorting: true,
       meta: { icon: Clock },
-      cell: ({ row }) => <TimeText value={row.original.last_seen} style="datetime" />,
+      cell: ({ row }) => <RelativeTime value={row.original.last_seen} />,
     },
   ];
   const names = userScoreNames(rows);
@@ -245,9 +247,27 @@ function scoreColumn(name: string): DataTableColumn<Schema<"EndUserSummary">> {
   };
 }
 
-/** A user's average score: a percentage for booleans, two decimals for numbers. */
-export function scoreText(score: Schema<"UserScore">): string {
-  return score.data_type === "boolean" ? `${Math.round(score.avg * 100)}%` : score.avg.toFixed(2);
+/** The name (UP-4) with the id after it in mono, or the id alone, and the plan pill. */
+function UserCell({ user }: { user: Schema<"EndUserSummary"> }) {
+  const { name, plan } = userIdentity(user.metadata);
+  return (
+    <span
+      className="flex min-w-0 items-center gap-1.5"
+      title={name ? `${name} (${user.user_id})` : user.user_id}
+    >
+      {name ? (
+        <>
+          <span className="truncate font-medium">{name}</span>
+          <span className="truncate font-mono text-[11px] text-muted-foreground">
+            {user.user_id}
+          </span>
+        </>
+      ) : (
+        <span className="truncate font-mono">{user.user_id}</span>
+      )}
+      {plan ? <PlanPill plan={plan} /> : null}
+    </span>
+  );
 }
 
 function ScoreCell({ user, name }: { user: Schema<"EndUserSummary">; name: string }) {
@@ -267,19 +287,6 @@ function ScoreCell({ user, name }: { user: Schema<"EndUserSummary">; name: strin
       />
     </LazyTooltip>
   );
-}
-
-/** Stored metadata values are JSON-encoded; strings and numbers are shown decoded. */
-export function decodeValue(raw: string): string {
-  try {
-    const value: unknown = JSON.parse(raw);
-    if (typeof value === "string" || typeof value === "number") {
-      return String(value);
-    }
-  } catch {
-    // Not JSON: the stored text is shown as it is.
-  }
-  return raw;
 }
 
 function MetadataCell({ metadata }: { metadata?: Record<string, string> }) {

@@ -77,7 +77,8 @@ function listTraces(dataset: Dataset, request: Request): Response {
     return parsed;
   }
   const rows = sortTraces(filterTraces(dataset.traces, parsed), parsed.sort, parsed.order);
-  return page(rows, parsed, ignoredFilter(parsed));
+  const filtered = userIdOfFilter(parsed.filter) !== undefined;
+  return page(rows, parsed, filtered ? {} : ignoredFilter(parsed));
 }
 
 function listSpans(dataset: Dataset, request: Request): Response {
@@ -91,7 +92,7 @@ function listSpans(dataset: Dataset, request: Request): Response {
     return page(
       sortSpans(filterSpans(spans, parsed), parsed.sort, parsed.order),
       parsed,
-      ignoredFilter(parsed),
+      userIdOfFilter(parsed.filter) === undefined ? ignoredFilter(parsed) : {},
     );
   }
   return pageSpans(dataset, traces, parsed);
@@ -180,7 +181,10 @@ function oneUser(
   if (parsed instanceof Response) {
     return parsed;
   }
-  const detail = dataset.user(text(userId), parsed.includeEval, parsed.includeExperiments);
+  const detail = dataset.user(text(userId), parsed.includeEval, parsed.includeExperiments, {
+    from: parsed.from,
+    to: parsed.to,
+  });
   if (!detail) {
     return problem(404, "not_found", "Not Found");
   }
@@ -201,14 +205,22 @@ function metrics(dataset: Dataset, request: Request): Response {
   if (from === undefined || to === undefined) {
     return problem(400, "bad_request", "Bad Request");
   }
+  const userId = userIdOfFilter(parsed.filter);
   const body = dataset.metrics(
     from,
     to,
     bucketOf(url.searchParams.get("bucket")),
     parsed.includeEval,
     parsed.includeExperiments,
+    userId,
   );
-  return HttpResponse.json(body, { headers: ignoredFilter(parsed) });
+  return HttpResponse.json(body, { headers: userId === undefined ? ignoredFilter(parsed) : {} });
+}
+
+/** The user id of a filter of exactly the form `user_id = '<id>'` (UP-5), else undefined. */
+export function userIdOfFilter(filter: string | undefined): string | undefined {
+  const match = /^\s*user_id\s*=\s*'((?:[^']|'')*)'\s*$/.exec(filter ?? "");
+  return match?.[1]?.replaceAll("''", "'");
 }
 
 type Query = {
@@ -264,8 +276,12 @@ function filterTraces(
   traces: readonly Schema<"TraceSummary">[],
   query: Query,
 ): Schema<"TraceSummary">[] {
+  const userId = userIdOfFilter(query.filter);
   return visibleTraces(traces, query.includeEval, query.includeExperiments).filter((trace) => {
     if (!inRange(trace.start_time, query.from, query.to)) {
+      return false;
+    }
+    if (userId !== undefined && trace.user_id !== userId) {
       return false;
     }
     if (!query.search) {
@@ -327,7 +343,7 @@ function pageSpans(
   }
   return HttpResponse.json(
     { data, next_cursor: hasMore ? encodeCursor(query.offset + query.limit) : null },
-    { headers: ignoredFilter(query) },
+    { headers: userIdOfFilter(query.filter) === undefined ? ignoredFilter(query) : {} },
   );
 }
 

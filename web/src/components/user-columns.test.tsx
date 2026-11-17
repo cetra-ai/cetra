@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, within } from "@testing-library/react";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import type { Schema } from "@/api/types";
 import { DataTable } from "@/components/data-table/data-table";
 import { ScoreDefinitionsProvider } from "@/components/score-badge";
@@ -86,6 +86,29 @@ it("shows error rate, traces per session, score rates, activity and metadata", (
   expect(within(grid).getByText("0.70")).toBeInTheDocument();
   expect(within(grid).getByRole("img", { name: "4 traces over the range" })).toBeInTheDocument();
   expect(within(grid).getByText("name: Ada Example · plan: pro")).toBeInTheDocument();
+});
+
+it("shows the name with the id after it and the plan pill (UP-4)", () => {
+  renderColumns([summary(), summary({ user_id: "user-7", metadata: undefined })], ["user"]);
+  const grid = screen.getByRole("grid", { name: "Users" });
+  expect(within(grid).getByText("Ada Example")).toBeInTheDocument();
+  expect(within(grid).getByText("user-42")).toHaveClass("font-mono");
+  expect(within(grid).getByText("pro")).toBeInTheDocument();
+  expect(within(grid).getByTitle("Ada Example (user-42)")).toBeInTheDocument();
+  expect(within(grid).getByText("user-7")).toHaveClass("font-mono");
+  expect(within(grid).getByTitle("user-7")).toBeInTheDocument();
+});
+
+it("shows first and last seen as relative time", () => {
+  vi.useFakeTimers({ now: Date.parse("2026-01-01T12:00:00.000Z") });
+  try {
+    renderColumns([summary()], ["first_seen", "last_seen"]);
+  } finally {
+    vi.useRealTimers();
+  }
+  const grid = screen.getByRole("grid", { name: "Users" });
+  expect(within(grid).getByText("2h ago")).toBeInTheDocument();
+  expect(within(grid).getByText("1h ago")).toBeInTheDocument();
 });
 
 it("shows a dash for error rate and traces per session without traces or sessions", () => {
