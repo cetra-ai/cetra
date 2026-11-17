@@ -35,8 +35,9 @@ function EditRulePage() {
 
   const toRule = () => {
     void navigate({
-      to: "/$org/$project/alerts/$ruleId",
-      params: { org, project, ruleId: rule.id },
+      to: "/$org/$project/alerts",
+      params: { org, project },
+      search: { rule: rule.id },
     });
   };
 

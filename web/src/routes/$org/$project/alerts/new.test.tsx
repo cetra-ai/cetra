@@ -14,7 +14,7 @@ import projectFixture from "../../../../../../fixtures/api/static/project.json";
 const PAGE = "/acme/support-bot/alerts/new";
 const RULES = "/api/v1/projects/:project/alert-rules";
 const METRICS = "/api/v1/projects/:project/metrics";
-const RULE_PAGE = `/acme/support-bot/alerts/${FIRING_RULE_ID}`;
+const LIST = "/acme/support-bot/alerts";
 
 /** Chooses an option of a select by its label, through the trigger and the listbox. */
 async function choose(user: UserEvent, label: string, option: string) {
@@ -63,7 +63,9 @@ it("creates an error rate rule", async () => {
       notify_while_firing: false,
     }),
   );
-  await waitFor(() => expect(router.state.location.pathname).toBe(RULE_PAGE));
+  await waitFor(() => expect(router.state.location.pathname).toBe(LIST));
+  expect(router.state.location.search).toMatchObject({ rule: FIRING_RULE_ID });
+  await waitFor(() => expect(router.state.status).toBe("idle"));
 });
 
 it("sends the score fields", async () => {

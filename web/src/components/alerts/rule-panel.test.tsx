@@ -77,13 +77,19 @@ it("shows the rule's name, state and content", async () => {
   const header = panel.querySelector("header") as HTMLElement;
   expect(within(header).getByText("Firing")).toBeInTheDocument();
   expect(within(header).getByText("Layout controls")).toBeInTheDocument();
-  expect(within(header).getByRole("link", { name: "Open page" })).toHaveAttribute(
-    "href",
-    `/acme/support-bot/alerts/${FIRING_RULE_ID}`,
-  );
   expect(await within(panel).findByText("Team Slack, Pager webhook")).toBeInTheDocument();
   expect(within(panel).getByText("Every 60 minutes while firing")).toBeInTheDocument();
   expect(within(panel).getByRole("table", { name: "Alert events" })).toBeInTheDocument();
+});
+
+it("has no Open page link; the list's layout controls open the page layout", async () => {
+  await renderPanel();
+
+  const panel = await screen.findByRole("region", { name: "Alert rule" });
+  await waitFor(() => {
+    expect(within(panel).getByText(ruleFixture.name)).toBeInTheDocument();
+  });
+  expect(within(panel).queryByRole("link", { name: "Open page" })).toBeNull();
 });
 
 it("shows the metric against its threshold above the history", async () => {

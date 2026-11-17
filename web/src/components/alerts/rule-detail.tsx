@@ -40,7 +40,7 @@ const CANNOT_MANAGE = "Only project members and above can manage alerts";
 
 /**
  * A rule's content: enabled switch, edit and delete, condition, channels, the metric preview and
- * the history. Shared by the rule page and the rule panel. `onDeleted` runs after a successful
+ * the history. `onDeleted` runs after a successful
  * delete (the page navigates to the list, the panel tells its list).
  */
 export function RuleDetail({

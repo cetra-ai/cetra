@@ -1,5 +1,4 @@
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
 import { X } from "lucide-react";
 import type { ReactNode } from "react";
 import { problemOf } from "@/api/problem";
@@ -13,7 +12,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 
 /**
  * The alert rule drawer beside the alerts list: header with the name and state, then the rule's
- * content (the same as the rule page). `layout` is the list's layout controls; `onDeleted` runs
+ * content. `layout` is the list's layout controls; `onDeleted` runs
  * after the rule is deleted. `row` is the rule as the list has it, shown until the fetch answers.
  */
 export function RulePanel({
@@ -46,11 +45,6 @@ export function RulePanel({
         ) : null}
         <div className="ml-auto flex shrink-0 items-center gap-1">
           {layout}
-          <Button variant="ghost" size="xs" asChild>
-            <Link to="/$org/$project/alerts/$ruleId" params={{ org, project, ruleId }}>
-              Open page
-            </Link>
-          </Button>
           <Button type="button" variant="ghost" size="icon-xs" aria-label="Close" onClick={onClose}>
             <X />
           </Button>
