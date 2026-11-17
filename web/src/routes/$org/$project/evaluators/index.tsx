@@ -32,6 +32,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { useBackState } from "@/lib/list-return";
 import { canManageEvaluation } from "@/lib/roles";
 import { parseEnum, parseString } from "@/lib/search/common";
 
@@ -113,6 +114,7 @@ function EvaluatorsPage() {
   const canManage = canManageEvaluation(data.role);
   const search = Route.useSearch();
   const navigate = Route.useNavigate();
+  const backState = useBackState("Evaluators");
   const query = $api.useInfiniteQuery(
     "get",
     "/api/v1/projects/{project}/evaluators",
@@ -283,6 +285,7 @@ function EvaluatorsPage() {
                         <Link
                           to="/$org/$project/evaluators/$evaluatorId"
                           params={{ org, project, evaluatorId: evaluator.id }}
+                          state={backState}
                           className="rounded-sm font-medium underline-offset-4 outline-none hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 focus-visible:outline-solid"
                         >
                           {evaluator.name}

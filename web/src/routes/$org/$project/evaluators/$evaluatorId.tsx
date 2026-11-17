@@ -1,10 +1,12 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { createFileRoute, notFound, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, Link, notFound, useNavigate } from "@tanstack/react-router";
+import { ChevronLeft } from "lucide-react";
 import { useState } from "react";
 import { $api } from "@/api/client";
 import { type Problem, problemMessage, problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
 import { evaluatorQuery, evaluatorsKey } from "@/api/queries-evaluation";
+import { BACK_LINK_CLASS, BackLink } from "@/components/back-link";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DisabledReason } from "@/components/disabled-reason";
 import { EvaluatorForm } from "@/components/evaluators/evaluator-form";
@@ -82,6 +84,8 @@ function EvaluatorPage() {
       to: "/$org/$project/evaluators/$evaluatorId",
       params: { org, project, evaluatorId },
       search: (prev) => ({ ...prev, tab: next }),
+      // Keeps the history state, which carries the way back to where the evaluator was opened from.
+      state: true,
     });
   }
 
@@ -108,7 +112,25 @@ function EvaluatorPage() {
     <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-6 overflow-auto px-4 py-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="flex flex-col gap-1">
-          <h1 className="text-title font-medium">{evaluator.name}</h1>
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <BackLink
+              fallback={
+                <Link
+                  to="/$org/$project/evaluators"
+                  params={{ org, project }}
+                  aria-label="Back to evaluators"
+                  className={BACK_LINK_CLASS}
+                >
+                  <ChevronLeft aria-hidden="true" className="size-3.5" />
+                  Evaluators
+                </Link>
+              }
+            />
+            <span aria-hidden="true" className="text-muted-foreground/60">
+              /
+            </span>
+            <h1 className="text-title font-medium">{evaluator.name}</h1>
+          </div>
           <p className="text-caption text-muted-foreground">
             {KIND_LABELS[evaluator.kind]} · version {evaluator.version} · score{" "}
             {evaluator.output_score.name} ({evaluator.output_score.data_type})

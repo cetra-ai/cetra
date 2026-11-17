@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Link, useNavigate, useRouter } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn } from "cn";
 import {
@@ -17,6 +17,7 @@ import { problemOf } from "@/api/problem";
 import { sessionQuery } from "@/api/queries";
 import type { Schema } from "@/api/types";
 import { AnnotationForm } from "@/components/annotation/annotation-form";
+import { BACK_LINK_CLASS, BackLink } from "@/components/back-link";
 import { CopyButton } from "@/components/copy-button";
 import { DisabledReason } from "@/components/disabled-reason";
 import { ChatView } from "@/components/payload/chat-view";
@@ -49,7 +50,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { targetKey } from "@/lib/annotation";
 import { categoryClasses } from "@/lib/colors";
 import { formatCost, formatDuration, formatTokens } from "@/lib/format";
-import { useBackTo, useListReturn } from "@/lib/list-return";
+import { useListReturn } from "@/lib/list-return";
 import { canAnnotate } from "@/lib/roles";
 import { parseSessionsSearch, type SessionPageSearch } from "@/lib/search/sessions";
 
@@ -185,52 +186,33 @@ function SessionHeader({
   const [annotating, setAnnotating] = useState(false);
   const canAnnotateSession = canAnnotate(data.role);
   const ret = useListReturn("sessions");
-  const backTo = useBackTo();
-  const router = useRouter();
   return (
     <header className="flex shrink-0 flex-col gap-2 border-b px-4 py-3">
       <div className="flex min-w-0 flex-wrap items-center gap-2">
-        {backTo ? (
-          <a
-            href={backTo.href}
-            aria-label={`Back to ${backTo.label}`}
-            onClick={(event) => {
-              // Modified and non-primary clicks keep the browser's own behaviour, such as a new tab.
-              if (
-                event.button !== 0 ||
-                event.metaKey ||
-                event.ctrlKey ||
-                event.shiftKey ||
-                event.altKey
-              ) {
-                return;
-              }
-              event.preventDefault();
-              router.history.push(backTo.href);
-            }}
-            className="focus-ring -ml-1 inline-flex items-center gap-0.5 rounded-sm px-1 text-body text-muted-foreground hover:bg-row-hover hover:text-foreground"
-          >
-            <ChevronLeft aria-hidden="true" className="size-3.5" />
-            {backTo.label}
-          </a>
-        ) : (
-          <Link
-            to="/$org/$project/sessions"
-            params={{ org, project }}
-            search={parseSessionsSearch(ret?.search ?? {})}
-            state={(current) => ({
-              ...current,
-              listRestore: ret
-                ? { anchorId: ret.anchorId, anchorOffset: ret.anchorOffset, openedId: ret.openedId }
-                : undefined,
-            })}
-            aria-label="Back to sessions"
-            className="focus-ring -ml-1 inline-flex items-center gap-0.5 rounded-sm px-1 text-body text-muted-foreground hover:bg-row-hover hover:text-foreground"
-          >
-            <ChevronLeft aria-hidden="true" className="size-3.5" />
-            Sessions
-          </Link>
-        )}
+        <BackLink
+          fallback={
+            <Link
+              to="/$org/$project/sessions"
+              params={{ org, project }}
+              search={parseSessionsSearch(ret?.search ?? {})}
+              state={(current) => ({
+                ...current,
+                listRestore: ret
+                  ? {
+                      anchorId: ret.anchorId,
+                      anchorOffset: ret.anchorOffset,
+                      openedId: ret.openedId,
+                    }
+                  : undefined,
+              })}
+              aria-label="Back to sessions"
+              className={BACK_LINK_CLASS}
+            >
+              <ChevronLeft aria-hidden="true" className="size-3.5" />
+              Sessions
+            </Link>
+          }
+        />
         <span aria-hidden="true" className="text-muted-foreground/60">
           /
         </span>

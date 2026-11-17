@@ -259,3 +259,58 @@ it("opens the history tab from the tab list", async () => {
   expect(await screen.findByRole("button", { name: /^v1/ })).toBeInTheDocument();
   expect(router.state.location.search).toEqual({ tab: "history" });
 });
+
+it("links back to the evaluators list when opened directly", async () => {
+  await renderApp(EVALUATOR_URL);
+
+  expect(await screen.findByRole("link", { name: "Back to evaluators" })).toHaveAttribute(
+    "href",
+    "/acme/support-bot/evaluators",
+  );
+});
+
+it("returns to the filtered list it was opened from", async () => {
+  const { user, router } = await renderApp("/acme/support-bot/evaluators?q=rel");
+
+  await user.click(await screen.findByRole("link", { name: "Relevance" }));
+  await user.click(await screen.findByRole("link", { name: "Back to Evaluators" }));
+
+  await waitFor(() => {
+    expect(router.state.location.pathname).toBe("/acme/support-bot/evaluators");
+    expect(router.state.location.search).toEqual({ q: "rel" });
+  });
+  await waitFor(() => {
+    expect(router.state.status).toBe("idle");
+  });
+});
+
+it("returns to the online rule it was opened from", async () => {
+  const { user, router } = await renderApp(
+    "/acme/support-bot/online-rules/01900000-0000-7000-8000-000000000700",
+  );
+
+  const details = await screen.findByRole("region", { name: "Details" });
+  await user.click(await within(details).findByRole("link", { name: "Relevance" }));
+  await user.click(await screen.findByRole("link", { name: "Back to Relevance on answers" }));
+
+  await waitFor(() => {
+    expect(router.state.location.pathname).toBe(
+      "/acme/support-bot/online-rules/01900000-0000-7000-8000-000000000700",
+    );
+  });
+  await waitFor(() => {
+    expect(router.state.status).toBe("idle");
+  });
+});
+
+it("keeps the way back when switching tabs", async () => {
+  const { user, router } = await renderApp("/acme/support-bot/evaluators?q=rel");
+
+  await user.click(await screen.findByRole("link", { name: "Relevance" }));
+  await user.click(await screen.findByRole("tab", { name: "Configuration" }));
+
+  expect(await screen.findByRole("link", { name: "Back to Evaluators" })).toBeInTheDocument();
+  await waitFor(() => {
+    expect(router.state.status).toBe("idle");
+  });
+});

@@ -24,6 +24,7 @@ import { useProject } from "@/components/shell/project-context";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatCost } from "@/lib/format";
+import { useBackState } from "@/lib/list-return";
 import { canManageEvaluation } from "@/lib/roles";
 
 export const Route = createFileRoute("/$org/$project/online-rules/$ruleId/")({
@@ -77,6 +78,8 @@ function OnlineRulePage() {
   const [backfillOpen, setBackfillOpen] = useState(false);
   // The same query as the table's, so the button sees a running backfill as soon as the table does.
   const backfills = useQuery(backfillsQuery(org, project, ruleId));
+  // The rule's name is in the loaded detail; the link is only drawn once it has loaded.
+  const backState = useBackState(detail.data?.name ?? "");
 
   if (detail.isPending) {
     return null;
@@ -161,6 +164,7 @@ function OnlineRulePage() {
               <Link
                 to="/$org/$project/evaluators/$evaluatorId"
                 params={{ org, project, evaluatorId }}
+                state={backState}
                 className="underline-offset-4 hover:underline"
               >
                 {evaluator.data.name}
