@@ -363,6 +363,13 @@ web-dev-server: js-install
 docs-dev: js-install
     pnpm --dir website run dev
 
+# Build the site and upload it to Cloudflare Pages (D-W-3). `branch` is `main`
+# (production) or `pr-<number>` (a preview). Needs CLOUDFLARE_API_TOKEN and
+# CLOUDFLARE_ACCOUNT_ID in the environment.
+docs-deploy branch: js-install
+    pnpm --dir website run build
+    pnpm --dir website exec wrangler pages deploy dist --project-name cetra-site --branch {{branch}} --commit-dirty=true
+
 # Regenerate crates/server/openapi.json and web/src/api/schema.gen.ts
 openapi: js-install
     CETRA_OPENAPI_WRITE=1 cargo test -p cetra-server --test openapi -- contract_file_is_up_to_date
