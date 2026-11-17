@@ -3,16 +3,18 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "astro dev",
-    "build": "astro build",
+    "gen:openapi": "node scripts/public-openapi.mjs",
+    "dev": "pnpm gen:openapi && astro dev",
+    "build": "pnpm gen:openapi && astro build",
     "test:scripts": "node --test scripts/",
     "check:content": "node scripts/check-terms.mjs",
-    "check": "biome check . && pnpm test:scripts && astro check && pnpm check:content && astro build"
+    "check": "biome check . && pnpm test:scripts && pnpm gen:openapi && astro check && pnpm check:content && astro build"
   },
   "dependencies": {
     "@astrojs/starlight": "0.42.10",
     "astro": "7.4.8",
     "starlight-links-validator": "0.27.0",
+    "starlight-openapi": "0.27.0",
     "starlight-sidebar-topics": "0.9.0"
   },
   "devDependencies": {

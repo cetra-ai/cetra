@@ -1,0 +1,21 @@
+---
+title: Reference
+description: The REST API and the OTLP endpoint, the two interfaces your code and your tools use to talk to cetra.
+---
+
+import { CardGrid, LinkCard } from "@astrojs/starlight/components";
+
+Use these pages to look up the exact shape of an interface.
+
+<CardGrid>
+  <LinkCard
+    title="REST API"
+    description="Authentication, errors, pagination and every public operation."
+    href="/docs/reference/api/overview/"
+  />
+  <LinkCard
+    title="OTLP endpoint"
+    description="Where to send spans, the accepted encodings, the limits and the answers."
+    href="/docs/reference/otlp/"
+  />
+</CardGrid>
