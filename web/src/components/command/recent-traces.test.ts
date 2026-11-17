@@ -5,6 +5,7 @@ import {
   readRecent,
   rememberTrace,
 } from "@/components/command/recent-traces";
+import { rememberItem } from "@/components/shell/recent-items";
 import { STORAGE_PREFIX } from "@/product";
 
 it("keeps the last 10 traces per project, ids and names only", () => {
@@ -22,10 +23,18 @@ it("keeps the last 10 traces per project, ids and names only", () => {
     name: "trace 11",
   });
   expect(readRecent("acme", "playground")).toEqual([{ id: "b".repeat(32), name: "other" }]);
-  const stored = JSON.parse(localStorage.getItem(`${STORAGE_PREFIX}recent-traces`) ?? "{}") as {
-    "acme/support-bot": { id: string; name: string }[];
-  };
-  expect(Object.keys(stored["acme/support-bot"]?.[0] ?? {})).toEqual(["id", "name"]);
+  const stored = JSON.parse(localStorage.getItem(`${STORAGE_PREFIX}recent`) ?? "{}") as Record<
+    string,
+    Record<string, unknown>[]
+  >;
+  expect(Object.keys(stored["acme/support-bot"]?.[0] ?? {})).toEqual(["kind", "id", "label"]);
+  expect(localStorage.getItem(`${STORAGE_PREFIX}recent-traces`)).toBeNull();
+});
+
+it("lists only traces, not other kinds of recent items", () => {
+  rememberItem("acme", "support-bot", { kind: "evaluator", id: "e1", label: "Relevance" });
+  rememberTrace("acme", "support-bot", { id: "e".repeat(32), name: "trace" });
+  expect(readRecent("acme", "support-bot")).toEqual([{ id: "e".repeat(32), name: "trace" }]);
 });
 
 it("reads a trace id from the split or the full page", () => {
@@ -43,8 +52,9 @@ it("forgets a deleted trace in every project and keeps the rest", () => {
   forgetTrace(gone);
   expect(readRecent("acme", "support-bot")).toEqual([{ id: kept, name: "kept" }]);
   expect(readRecent("acme", "playground")).toEqual([]);
-  const stored = JSON.parse(
-    localStorage.getItem(`${STORAGE_PREFIX}recent-traces`) ?? "{}",
-  ) as Record<string, unknown>;
+  const stored = JSON.parse(localStorage.getItem(`${STORAGE_PREFIX}recent`) ?? "{}") as Record<
+    string,
+    unknown
+  >;
   expect(Object.keys(stored)).toEqual(["acme/support-bot"]);
 });

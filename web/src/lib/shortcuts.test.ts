@@ -1,6 +1,8 @@
 import { expect, it } from "vitest";
 import {
+  GO_TARGETS,
   goDestination,
+  goKeyOf,
   hexId,
   isTypingTarget,
   matchesBinding,
@@ -20,7 +22,7 @@ it("lists every shortcut the help dialog shows", () => {
     "t",
     "0",
     "⌘↵",
-    "g then t / s / e / u / d",
+    "g then a letter",
     "⌘K",
     "?",
   ]);
@@ -37,8 +39,11 @@ it("recognizes keys, chords, and modifiers", () => {
     chord: "g",
     action: null,
   });
-  expect(reduceShortcut("g", { ...plain, key: "s" }, false).action).toBe("go-spans");
-  expect(reduceShortcut("g", { ...plain, key: "e" }, false).action).toBe("go-sessions");
+  expect(reduceShortcut("g", { ...plain, key: "p" }, false).action).toBe("go-spans");
+  expect(reduceShortcut("g", { ...plain, key: "s" }, false).action).toBe("go-sessions");
+  expect(reduceShortcut("g", { ...plain, key: "e" }, false).action).toBe("go-evaluators");
+  expect(reduceShortcut("g", { ...plain, key: "i" }, false).action).toBe("go-datasets");
+  expect(reduceShortcut("g", { ...plain, key: "x" }, false).action).toBe("go-experiments");
   expect(reduceShortcut("g", { ...plain, key: "d" }, false).action).toBe("go-dashboard");
   expect(reduceShortcut("g", { ...plain, key: "j" }, false)).toEqual({
     chord: null,
@@ -54,8 +59,20 @@ it("recognizes keys, chords, and modifiers", () => {
     action: null,
   });
   expect(goDestination("go-users")).toBe("/$org/$project/users");
+  expect(goDestination("go-alerts")).toBe("/$org/$project/alerts");
   expect(matchesBinding({ ...plain, key: "0" }, "fit")).toBe(true);
   expect(matchesBinding({ ...plain, key: "k", metaKey: true }, "row-prev")).toBe(false);
+});
+
+it("gives every project page its go letter and back again", () => {
+  expect(goKeyOf("/$org/$project/spans")).toBe("p");
+  expect(goKeyOf("/$org/$project/sessions")).toBe("s");
+  expect(goKeyOf("/$org/$project/experiments")).toBe("x");
+  expect(goKeyOf("/$org/$project/settings/general")).toBeUndefined();
+  for (const letter of Object.keys(GO_TARGETS)) {
+    const target = GO_TARGETS[letter as keyof typeof GO_TARGETS];
+    expect(goKeyOf(target.to)).toBe(letter);
+  }
 });
 
 it("accepts a trace or span id with dashes and any case", () => {

@@ -37,77 +37,86 @@ export const DENSITY_OPTIONS = [
   { value: "comfortable", label: "Comfortable" },
 ] as const satisfies ReadonlyArray<{ value: Density; label: string }>;
 
+/**
+ * `onOpenChange` for a menu that holds `ThemeMenuItems`. Closing without a pick restores the
+ * saved palette. A pick saves synchronously before the menu closes, so storage is up to date here.
+ */
+export function restoreSavedPaletteOnClose(open: boolean): void {
+  if (!open) {
+    applyPalette(readStoredPalette());
+  }
+}
+
+/** Theme, palette and density radio groups. Works in a menu or in a submenu. */
+export function ThemeMenuItems() {
+  const { theme, setTheme, palette, setPalette, density, setDensity } = useTheme();
+
+  return (
+    <>
+      <DropdownMenuRadioGroup
+        value={theme}
+        onValueChange={(value) => {
+          setTheme(value as Theme);
+        }}
+      >
+        {OPTIONS.map((option) => (
+          <DropdownMenuRadioItem key={option.value} value={option.value}>
+            {option.label}
+          </DropdownMenuRadioItem>
+        ))}
+      </DropdownMenuRadioGroup>
+      <DropdownMenuSeparator />
+      <DropdownMenuLabel className="text-caption text-muted-foreground">Density</DropdownMenuLabel>
+      <DropdownMenuRadioGroup
+        value={density}
+        onValueChange={(value) => {
+          setDensity(value as Density);
+        }}
+      >
+        {DENSITY_OPTIONS.map((option) => (
+          <DropdownMenuRadioItem key={option.value} value={option.value}>
+            {option.label}
+          </DropdownMenuRadioItem>
+        ))}
+      </DropdownMenuRadioGroup>
+      <DropdownMenuSeparator />
+      <DropdownMenuLabel className="text-caption text-muted-foreground">Palette</DropdownMenuLabel>
+      <DropdownMenuRadioGroup
+        value={palette}
+        onValueChange={(value) => {
+          setPalette(value as Palette);
+        }}
+      >
+        {PALETTE_OPTIONS.map((option) => (
+          <DropdownMenuRadioItem
+            key={option.value}
+            value={option.value}
+            onFocus={() => {
+              // Radix focuses items on hover and arrow keys: preview only, do not save.
+              applyPalette(option.value);
+            }}
+          >
+            {option.label}
+          </DropdownMenuRadioItem>
+        ))}
+      </DropdownMenuRadioGroup>
+    </>
+  );
+}
+
 export function ThemeToggle() {
-  const { theme, resolvedTheme, setTheme, palette, setPalette, density, setDensity } = useTheme();
+  const { resolvedTheme } = useTheme();
   const Icon = resolvedTheme === "dark" ? Moon : Sun;
 
   return (
-    <DropdownMenu
-      onOpenChange={(open) => {
-        // Closing without a pick restores the saved palette. A pick saves
-        // synchronously before the menu closes, so storage is up to date here.
-        if (!open) {
-          applyPalette(readStoredPalette());
-        }
-      }}
-    >
+    <DropdownMenu onOpenChange={restoreSavedPaletteOnClose}>
       <DropdownMenuTrigger asChild>
         <Button variant="ghost" size="icon" aria-label="Theme">
           <Icon />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-48">
-        <DropdownMenuRadioGroup
-          value={theme}
-          onValueChange={(value) => {
-            setTheme(value as Theme);
-          }}
-        >
-          {OPTIONS.map((option) => (
-            <DropdownMenuRadioItem key={option.value} value={option.value}>
-              {option.label}
-            </DropdownMenuRadioItem>
-          ))}
-        </DropdownMenuRadioGroup>
-        <DropdownMenuSeparator />
-        <DropdownMenuLabel className="text-caption text-muted-foreground">
-          Density
-        </DropdownMenuLabel>
-        <DropdownMenuRadioGroup
-          value={density}
-          onValueChange={(value) => {
-            setDensity(value as Density);
-          }}
-        >
-          {DENSITY_OPTIONS.map((option) => (
-            <DropdownMenuRadioItem key={option.value} value={option.value}>
-              {option.label}
-            </DropdownMenuRadioItem>
-          ))}
-        </DropdownMenuRadioGroup>
-        <DropdownMenuSeparator />
-        <DropdownMenuLabel className="text-caption text-muted-foreground">
-          Palette
-        </DropdownMenuLabel>
-        <DropdownMenuRadioGroup
-          value={palette}
-          onValueChange={(value) => {
-            setPalette(value as Palette);
-          }}
-        >
-          {PALETTE_OPTIONS.map((option) => (
-            <DropdownMenuRadioItem
-              key={option.value}
-              value={option.value}
-              onFocus={() => {
-                // Radix focuses items on hover and arrow keys: preview only, do not save.
-                applyPalette(option.value);
-              }}
-            >
-              {option.label}
-            </DropdownMenuRadioItem>
-          ))}
-        </DropdownMenuRadioGroup>
+        <ThemeMenuItems />
       </DropdownMenuContent>
     </DropdownMenu>
   );
