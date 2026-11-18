@@ -1,6 +1,7 @@
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
-import { expect, it } from "vitest";
+import type { GridLayoutProps } from "react-grid-layout";
+import { expect, it, vi } from "vitest";
 import type { Dashboard, Definition } from "@/lib/dashboards/types";
 import { dashboardHandlers } from "@/mocks/dashboards";
 import { server } from "@/mocks/node";
@@ -9,6 +10,20 @@ import { renderApp } from "@/test/render";
 import { recordRequests } from "@/test/requests";
 import dashboardDocument from "../../../../fixtures/api/static/dashboard.json";
 import staleDocument from "../../../../fixtures/api/static/dashboard-stale.json";
+import projectDocument from "../../../../fixtures/api/static/project.json";
+import { AUTOSAVE_DELAY_MS } from "./use-layout-autosave";
+
+/** The props the grid last rendered react-grid-layout with; the grid itself is the real one. */
+const grid = vi.hoisted(() => ({ last: undefined as GridLayoutProps | undefined }));
+
+vi.mock("react-grid-layout", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react-grid-layout")>();
+  function CapturedGridLayout(props: GridLayoutProps) {
+    grid.last = props;
+    return <actual.GridLayout {...props} />;
+  }
+  return { ...actual, GridLayout: CapturedGridLayout };
+});
 
 const DASHBOARD_ID = dashboardDocument.id;
 const CUSTOM = `/acme/support-bot/dashboard/${DASHBOARD_ID}`;
@@ -24,6 +39,31 @@ async function savedBody(requests: ReturnType<typeof recordRequests>) {
     expect(requests.calls.find((call) => call.method === "PATCH")?.body).toBeDefined();
   });
   return requests.calls.find((call) => call.method === "PATCH")?.body;
+}
+
+/** The PATCH bodies sent so far, once at least `count` have been sent (a save waits 800 ms). */
+async function patchBodies(requests: ReturnType<typeof recordRequests>, count: number) {
+  await waitFor(
+    () => {
+      expect(requests.calls.filter((call) => call.method === "PATCH")).toHaveLength(count);
+    },
+    { timeout: 3000 },
+  );
+  return requests.calls
+    .filter((call) => call.method === "PATCH")
+    .map((call) => call.body as { version: number; definition: Definition });
+}
+
+/**
+ * Reports a finished drag of the widget titled `title` to column `x`, the way react-grid-layout
+ * does when the mouse is released. jsdom lays nothing out, so the drop is reported directly.
+ */
+function dropWidget(title: string, x: number) {
+  const id = STORED.widgets.find((widget) => widget.title === title)?.id;
+  const next = (grid.last?.layout ?? []).map((item) => (item.i === id ? { ...item, x } : item));
+  act(() => {
+    grid.last?.onDragStop?.(next, null, null, null, new Event("mouseup"), null);
+  });
 }
 
 /** Opens the custom dashboard in edit mode. */
@@ -581,4 +621,144 @@ it("does not ask to save a dashboard whose stored layout the grid packs upwards"
   await user.click(screen.getByRole("link", { name: "Traces" }));
   await waitFor(() => expect(router.state.location.pathname).toBe("/acme/support-bot/traces"));
   expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+});
+
+it("a member's grid moves outside edit mode, and a drop saves the layout after the quiet time", async () => {
+  const requests = recordRequests();
+  try {
+    const { router, user } = await renderApp(CUSTOM);
+    await screen.findByRole("region", { name: REQUESTS });
+    // The grid is movable (react-draggable items) and no resize handle is hidden.
+    expect(document.querySelectorAll(".react-draggable").length).toBeGreaterThan(0);
+    expect(document.querySelectorAll(".react-resizable-hide")).toHaveLength(0);
+
+    dropWidget(REQUESTS, 1);
+    const [saved] = await patchBodies(requests, 1);
+    expect(saved?.definition.widgets.find((widget) => widget.title === REQUESTS)?.layout).toEqual({
+      x: 1,
+      y: 1,
+      w: 8,
+      h: 6,
+    });
+    expect(router.state.location.pathname).toBe(CUSTOM);
+    expect(await screen.findByText("Layout saved.")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Undo" }));
+    const [, undone] = await patchBodies(requests, 2);
+    expect(undone?.definition.widgets.find((widget) => widget.title === REQUESTS)?.layout).toEqual({
+      x: 0,
+      y: 1,
+      w: 8,
+      h: 6,
+    });
+  } finally {
+    requests.stop();
+  }
+});
+
+it("a resize saves the new size", async () => {
+  const requests = recordRequests();
+  try {
+    await renderApp(CUSTOM);
+    await screen.findByRole("region", { name: REQUESTS });
+    const id = STORED.widgets.find((widget) => widget.title === REQUESTS)?.id;
+    const next = (grid.last?.layout ?? []).map((item) =>
+      item.i === id ? { ...item, w: 6 } : item,
+    );
+    act(() => {
+      grid.last?.onResizeStop?.(next, null, null, null, new Event("mouseup"), null);
+    });
+    const [saved] = await patchBodies(requests, 1);
+    expect(saved?.definition.widgets.find((widget) => widget.title === REQUESTS)?.layout.w).toBe(6);
+  } finally {
+    requests.stop();
+  }
+});
+
+it("viewing a dashboard whose stored layout is gapped saves nothing", async () => {
+  const gapped = dashboardWith((widgets) =>
+    widgets.map((widget) =>
+      widget.id === "slowest-operations"
+        ? { ...widget, layout: { ...widget.layout, y: 9 } }
+        : widget,
+    ),
+  );
+  server.use(...dashboardHandlers([gapped]));
+  const requests = recordRequests();
+  try {
+    await renderApp(CUSTOM);
+    await screen.findByRole("region", { name: SLOWEST });
+    await new Promise((resolve) => setTimeout(resolve, AUTOSAVE_DELAY_MS + 300));
+    expect(requests.calls.some((call) => call.method === "PATCH")).toBe(false);
+  } finally {
+    requests.stop();
+  }
+});
+
+it("a viewer's grid stays static and has no Edit", async () => {
+  server.use(
+    http.get("/api/v1/projects/:project", () =>
+      HttpResponse.json({ ...projectDocument, role: "viewer" }),
+    ),
+  );
+  await renderApp(CUSTOM);
+  await screen.findByRole("region", { name: REQUESTS });
+  expect(screen.queryByRole("button", { name: "Edit" })).not.toBeInTheDocument();
+  expect(document.querySelectorAll(".react-draggable")).toHaveLength(0);
+  expect(grid.last?.onDragStop).toBeUndefined();
+});
+
+it("a bucket click still opens its list outside edit mode for a member", async () => {
+  const { router } = await renderApp(CUSTOM);
+  const card = await screen.findByRole("region", { name: REQUESTS });
+  const chart = await within(card).findByRole("group", { name: /^Requests by model\./ });
+  chart.focus();
+  fireEvent.keyDown(chart, { key: "ArrowRight" });
+  fireEvent.keyDown(chart, { key: "Enter" });
+  await waitFor(() => expect(router.state.location.pathname).not.toBe(CUSTOM));
+  expect(router.state.location.pathname).toMatch(/\/(traces|spans)$/);
+});
+
+it("Edit then Save hides the Undo bar", async () => {
+  const requests = recordRequests();
+  try {
+    const { user } = await renderApp(CUSTOM);
+    await screen.findByRole("region", { name: REQUESTS });
+    dropWidget(REQUESTS, 1);
+    await patchBodies(requests, 1);
+    expect(await screen.findByRole("button", { name: "Undo" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await patchBodies(requests, 2);
+    expect(screen.queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Layout saved.")).not.toBeInTheDocument();
+  } finally {
+    requests.stop();
+  }
+});
+
+it("Edit is disabled while a layout save is pending", async () => {
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  server.use(
+    http.patch(ONE, async () => {
+      await gate;
+      return problemResponse(500, "internal", { detail: "Try again later." });
+    }),
+  );
+  const { user } = await renderApp(CUSTOM);
+  await screen.findByRole("region", { name: REQUESTS });
+  dropWidget(REQUESTS, 1);
+
+  expect(await screen.findByText("Saving layout…")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Edit" })).toBeDisabled();
+
+  release();
+  expect(await screen.findByText("Try again later.")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Edit" })).toBeEnabled();
+  await user.click(screen.getByRole("button", { name: "Edit" }));
+  expect(screen.getByRole("button", { name: "Save" })).toBeInTheDocument();
 });

@@ -1,7 +1,20 @@
 import { render, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import type { GridLayoutProps } from "react-grid-layout";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Widget as WidgetModel } from "@/lib/dashboards/types";
 import { compactWidgets, layoutItems, nudgeWidgets, WidgetGrid } from "./widget-grid";
+
+/** The props the grid last rendered react-grid-layout with; the grid itself is the real one. */
+const grid = vi.hoisted(() => ({ last: undefined as GridLayoutProps | undefined }));
+
+vi.mock("react-grid-layout", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react-grid-layout")>();
+  function CapturedGridLayout(props: GridLayoutProps) {
+    grid.last = props;
+    return <actual.GridLayout {...props} />;
+  }
+  return { ...actual, GridLayout: CapturedGridLayout };
+});
 
 function widget(id: string, x: number, y: number, w: number, h: number): WidgetModel {
   return {
@@ -141,6 +154,24 @@ describe("charts below the fold", () => {
     }
     // A heading costs no query, so it mounts at once wherever it is.
     expect(screen.getByText("h")).toBeInTheDocument();
+  });
+});
+
+describe("the grid's finished moves", () => {
+  it("forwards onDragStop and onResizeStop to react-grid-layout", () => {
+    const onDragStop = vi.fn();
+    const onResizeStop = vi.fn();
+    render(
+      <WidgetGrid
+        widgets={widgets}
+        editing
+        onDragStop={onDragStop}
+        onResizeStop={onResizeStop}
+        renderCell={(item) => <span>{item.id}</span>}
+      />,
+    );
+    expect(grid.last?.onDragStop).toBe(onDragStop);
+    expect(grid.last?.onResizeStop).toBe(onResizeStop);
   });
 });
 

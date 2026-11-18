@@ -100,7 +100,10 @@ export function Widget({
   );
 }
 
-/** A widget's title bar: its title, then its actions. In edit mode it drags the widget. */
+/**
+ * A widget's title bar: its title, then its actions. It drags the widget wherever the grid is
+ * movable (edit mode, or a member's dashboard outside it).
+ */
 function TitleBar({ actions, children }: { actions?: ReactNode; children: ReactNode }) {
   return (
     <div className={cn(DRAG_HANDLE, "flex min-w-0 items-center gap-2")}>

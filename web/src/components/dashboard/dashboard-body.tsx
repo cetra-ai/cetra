@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { MoreHorizontal } from "lucide-react";
-import { type ReactNode, useEffect, useState } from "react";
+import { type ComponentProps, type ReactNode, useEffect, useState } from "react";
 import type { Layout as GridLayout } from "react-grid-layout";
 import { dashboardQuery, isStaleDashboard, useUpdateDashboard } from "@/api/dashboards";
 import { problemMessage, problemOf } from "@/api/problem";
@@ -41,6 +41,7 @@ import type { Dashboard, Definition, Layout, Widget } from "@/lib/dashboards/typ
 import { type FieldIssue, validateDefinition } from "@/lib/dashboards/validate";
 import { canManageDashboards } from "@/lib/roles";
 import { DashboardMenu, DashboardSwitcher } from "./dashboard-header";
+import { useLayoutAutosave } from "./use-layout-autosave";
 import type { WidgetContext } from "./widget";
 import { HeadingDialog, WidgetEditor } from "./widget-editor";
 import { compactWidgets, nudgeWidgets, WidgetGrid } from "./widget-grid";
@@ -49,6 +50,8 @@ import { compactWidgets, nudgeWidgets, WidgetGrid } from "./widget-grid";
 const MAX_WIDGETS = 50;
 /** A new chart's size: half the grid, seven rows. */
 const NEW_CHART = { w: 6, h: 7 } as const;
+/** How long a notice about a layout save stays on screen. */
+const NOTICE_MS = 10_000;
 
 /**
  * An edit session: a draft of the definition, started from the version it was read at. The
@@ -77,9 +80,14 @@ type Open =
 
 /**
  * The grid of the open dashboard, with its header. Members on a custom dashboard can edit it:
- * the draft is kept here until it is saved or dropped. The Overview is read only.
+ * the draft is kept here until it is saved or dropped. The Overview is stored or the preset.
+ * Each dashboard gets a body of its own, so a layout save still pending for one goes to that one.
  */
-export function DashboardBody({
+export function DashboardBody(props: ComponentProps<typeof DashboardGrid>) {
+  return <DashboardGrid key={props.dashboard?.id ?? "overview"} {...props} />;
+}
+
+function DashboardGrid({
   dashboard,
   active,
   context,
@@ -100,6 +108,7 @@ export function DashboardBody({
   const update = useUpdateDashboard(org, project, dashboard?.id ?? "");
   const [session, setSession] = useState<Session | null>(null);
   const [open, setOpen] = useState<Open>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   // A hidden dashboard keeps its state, so leaving it drops the draft: the effect runs when it
   // is shown again.
@@ -110,11 +119,32 @@ export function DashboardBody({
     }
   }, [active]);
 
+  useEffect(() => {
+    if (notice === null) {
+      return;
+    }
+    const timer = setTimeout(() => setNotice(null), NOTICE_MS);
+    return () => clearTimeout(timer);
+  }, [notice]);
+
   // A demo-org viewer edits the dashboards kept in this browser (D-C-17).
   const canEdit = dashboard !== undefined && (local || canManageDashboards(data.role)) && !narrow;
   const editing = canEdit && session !== null;
   const draft = editing ? session.draft : undefined;
-  const shown: Definition = draft ?? dashboard?.definition ?? OVERVIEW;
+  // Outside Edit, a moved or resized chart is saved by itself (D-C-18). Viewing saves nothing.
+  const autosaving = canEdit && session === null && active;
+  const autosave = useLayoutAutosave({
+    definition: dashboard?.definition ?? OVERVIEW,
+    version: dashboard?.version,
+    enabled: autosaving,
+    persist,
+    onConflict: () => {
+      reload();
+      setNotice("Someone else changed this dashboard. It was reloaded.");
+    },
+    onError: setNotice,
+  });
+  const shown: Definition = draft ?? autosave.pending ?? dashboard?.definition ?? OVERVIEW;
   // A draft is kept while the grid is not shown (a narrow window), so it still guards the page.
   const dirty = session !== null && !sameDefinition(session.draft, session.base);
 
@@ -153,6 +183,11 @@ export function DashboardBody({
       issues: [],
       conflict: false,
     });
+  }
+
+  /** Saves the open custom dashboard's definition at `version`. A stale version is a 409. */
+  async function persist(definition: Definition, version: number | undefined) {
+    await update.mutateAsync({ version: version ?? 0, definition });
   }
 
   function cancelEditing() {
@@ -252,7 +287,7 @@ export function DashboardBody({
       return;
     }
     try {
-      await update.mutateAsync({ version: session.version, definition: session.draft });
+      await persist(session.draft, session.version);
       setSession(null);
     } catch (error) {
       const problem = problemOf(error);
@@ -339,7 +374,13 @@ export function DashboardBody({
               </Button>
             </>
           ) : canEdit ? (
-            <Button type="button" variant="outline" size="sm" onClick={startEditing}>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={autosave.pending !== undefined || autosave.saving}
+              onClick={startEditing}
+            >
               Edit
             </Button>
           ) : null}
@@ -351,6 +392,26 @@ export function DashboardBody({
         <p role="status" className="pb-3 text-caption text-muted-foreground">
           These dashboards are stored in this browser only.
         </p>
+      ) : null}
+
+      {!editing && (autosave.saving || autosave.undo || notice) ? (
+        <div
+          role="status"
+          className="flex flex-wrap items-center gap-2 pb-3 text-caption text-muted-foreground"
+        >
+          {autosave.saving ? (
+            <span>Saving layout…</span>
+          ) : autosave.undo ? (
+            <>
+              <span>Layout saved.</span>
+              <Button type="button" variant="link" size="sm" onClick={autosave.undo.run}>
+                Undo
+              </Button>
+            </>
+          ) : (
+            <span>{notice}</span>
+          )}
+        </div>
       ) : null}
 
       {editing && (topIssues.length > 0 || session.message) ? (
@@ -366,8 +427,10 @@ export function DashboardBody({
 
       <WidgetGrid
         widgets={shown.widgets}
-        editing={movable}
+        editing={movable || autosaving}
         onLayoutChange={movable ? applyLayout : undefined}
+        onDragStop={autosaving ? autosave.onMoveEnd : undefined}
+        onResizeStop={autosaving ? autosave.onMoveEnd : undefined}
         renderCell={(widget) => {
           if (!editing) {
             return renderWidget(widget);

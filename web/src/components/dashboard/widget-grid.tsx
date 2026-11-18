@@ -87,18 +87,25 @@ export function nudgeWidgets(widgets: WidgetModel[], index: number, step: Nudge)
 
 /**
  * The widgets on the 12-column grid. Outside edit mode they are static. In edit mode they can be
- * dragged and resized, and `onLayoutChange` reports the new positions. Below 768 px they stack in
- * one column in `(y, x)` order, and nothing can be moved.
+ * dragged and resized, and `onLayoutChange` reports the new positions. `onDragStop` and
+ * `onResizeStop` report a finished move with its final layout. Below 768 px they stack in one
+ * column in `(y, x)` order, and nothing can be moved.
  */
 export function WidgetGrid({
   widgets,
   editing,
   onLayoutChange,
+  onDragStop,
+  onResizeStop,
   renderCell,
 }: {
   widgets: readonly WidgetModel[];
   editing: boolean;
   onLayoutChange?: (layout: Layout) => void;
+  /** A finished drag, with the final layout. */
+  onDragStop?: (layout: Layout) => void;
+  /** A finished resize, with the final layout. */
+  onResizeStop?: (layout: Layout) => void;
   /** The content of one widget's cell. */
   renderCell: (widget: WidgetModel) => ReactNode;
 }) {
@@ -111,6 +118,8 @@ export function WidgetGrid({
       widgets={widgets}
       editing={editing}
       onLayoutChange={onLayoutChange}
+      onDragStop={onDragStop}
+      onResizeStop={onResizeStop}
       renderCell={renderCell}
     />
   );
@@ -120,11 +129,15 @@ function FreeWidgets({
   widgets,
   editing,
   onLayoutChange,
+  onDragStop,
+  onResizeStop,
   renderCell,
 }: {
   widgets: readonly WidgetModel[];
   editing: boolean;
   onLayoutChange?: (layout: Layout) => void;
+  onDragStop?: (layout: Layout) => void;
+  onResizeStop?: (layout: Layout) => void;
   renderCell: (widget: WidgetModel) => ReactNode;
 }) {
   const { width, containerRef } = useContainerWidth();
@@ -141,6 +154,8 @@ function FreeWidgets({
         dragConfig={dragConfig}
         resizeConfig={resizeConfig}
         onLayoutChange={onLayoutChange}
+        onDragStop={onDragStop}
+        onResizeStop={onResizeStop}
       >
         {widgets.map((widget) => (
           <div key={widget.id} className="relative h-full min-w-0">
