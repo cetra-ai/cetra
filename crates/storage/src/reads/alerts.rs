@@ -17,7 +17,7 @@ use datafusion::functions_aggregate::expr_fn::{avg, count, sum};
 use datafusion::logical_expr::expr_fn::when;
 use datafusion::logical_expr::{Expr, LogicalPlan, col, in_subquery, lit};
 
-use super::metrics::{f64_at, i64_at, internal, percentile, require};
+use super::columns::{f64_at, i64_at, internal, percentile, require};
 use super::{ListScope, present, scoped_traces};
 use crate::filter::{Filter, FilterView};
 use crate::query_error::{RunError, classify};

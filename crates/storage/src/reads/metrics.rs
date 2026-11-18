@@ -11,40 +11,25 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arrow::array::{Array, AsArray};
-use arrow::datatypes::{Float64Type, Int64Type, TimestampNanosecondType, UInt64Type};
+use arrow::datatypes::{Int64Type, TimestampNanosecondType, UInt64Type};
 use arrow::record_batch::RecordBatch;
 use cetra_core::enums::{ScoreTargetKind, SpanKind};
 use cetra_core::names::environment;
 use cetra_core::schema::{scores, spans, traces};
 use datafusion::common::{NullHandling, ScalarValue, UnnestOptions};
-use datafusion::error::DataFusionError;
 use datafusion::functions::datetime::expr_fn::date_bin;
-use datafusion::functions_aggregate::expr_fn::{approx_percentile_cont, avg, count, sum};
+use datafusion::functions_aggregate::expr_fn::{avg, count, sum};
 use datafusion::logical_expr::expr_fn::when;
-use datafusion::logical_expr::{Expr, LogicalPlan, SortExpr, col, in_subquery, lit};
+use datafusion::logical_expr::{Expr, LogicalPlan, col, in_subquery, lit};
 use datafusion::prelude::DataFrame;
 
+use super::buckets::{Bucket, BucketWidth, bucket_grid, resolve};
+use super::columns::{f64_at, i64_at, internal, percentile, require};
+use super::widgets::GroupBy;
 use super::{ListScope, present, scoped_traces};
 use crate::filter::{Filter, FilterView};
 use crate::query_error::{RunError, classify};
 use crate::views::{QueryContext, TimeWindow, exact_cost_sum};
-
-const NS_MINUTE: i64 = 60_000_000_000;
-const NS_HOUR: i64 = 60 * NS_MINUTE;
-const AUTO_LIMIT: i64 = 120;
-const FIXED_LIMIT: i64 = 2_000;
-const TOO_MANY_BUCKETS: &str = "too many buckets; pick a wider bucket";
-
-const AUTO_WIDTHS: [BucketWidth; 8] = [
-    BucketWidth::M1,
-    BucketWidth::M5,
-    BucketWidth::M10,
-    BucketWidth::M15,
-    BucketWidth::M30,
-    BucketWidth::H1,
-    BucketWidth::H6,
-    BucketWidth::H12,
-];
 
 const DURATION_NS: &str = "duration_ns";
 const BUCKET: &str = "bucket";
@@ -59,66 +44,6 @@ const VALUE: &str = "value";
 const LLM_COUNT: &str = "llm_count";
 const TOP_MODELS: usize = 10;
 
-/// Width of one dashboard bucket.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BucketWidth {
-    /// One minute.
-    M1,
-    /// Five minutes.
-    M5,
-    /// Ten minutes.
-    M10,
-    /// Fifteen minutes.
-    M15,
-    /// Thirty minutes.
-    M30,
-    /// One hour.
-    H1,
-    /// Six hours.
-    H6,
-    /// Twelve hours.
-    H12,
-    /// One day, UTC.
-    D1,
-}
-
-impl BucketWidth {
-    /// Width in nanoseconds.
-    pub fn ns(self) -> i64 {
-        match self {
-            Self::M1 => NS_MINUTE,
-            Self::M5 => 5 * NS_MINUTE,
-            Self::M10 => 10 * NS_MINUTE,
-            Self::M15 => 15 * NS_MINUTE,
-            Self::M30 => 30 * NS_MINUTE,
-            Self::H1 => NS_HOUR,
-            Self::H6 => 6 * NS_HOUR,
-            Self::H12 => 12 * NS_HOUR,
-            Self::D1 => 24 * NS_HOUR,
-        }
-    }
-}
-
-/// How the dashboard picks a bucket width.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Bucket {
-    /// Smallest width of at most 120 buckets, else one day.
-    Auto,
-    /// The given width.
-    Fixed(BucketWidth),
-}
-
-/// Column a dashboard series is split by.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MetricsGroupBy {
-    /// One row per element of `models`.
-    Model,
-    /// The `environment` column.
-    Environment,
-    /// The `release` column.
-    Release,
-}
-
 /// Dashboard metrics over one window.
 #[derive(Debug, Clone)]
 pub struct MetricsRequest<'a> {
@@ -130,7 +55,7 @@ pub struct MetricsRequest<'a> {
     pub filter: Option<&'a str>,
     /// Split the series that follow it. Eval cost, LLM latency, cost by model,
     /// and score averages keep their own keys.
-    pub group_by: Option<MetricsGroupBy>,
+    pub group_by: Option<GroupBy>,
     /// Keep rows whose environment is the eval environment.
     pub include_eval: bool,
     /// Keep rows that belong to an experiment.
@@ -363,70 +288,6 @@ async fn compute(ctx: &QueryContext, request: MetricsRequest<'_>) -> Result<Metr
     ))
 }
 
-fn resolve(window: TimeWindow, bucket: Bucket) -> Result<i64, RunError> {
-    match bucket {
-        Bucket::Fixed(width) => {
-            let count = bucket_count(window, width.ns())?;
-            if !(1..=FIXED_LIMIT).contains(&count) {
-                return Err(too_many());
-            }
-            Ok(width.ns())
-        }
-        Bucket::Auto => {
-            for width in AUTO_WIDTHS {
-                if bucket_count(window, width.ns())? <= AUTO_LIMIT {
-                    return Ok(width.ns());
-                }
-            }
-            let width = BucketWidth::D1.ns();
-            if bucket_count(window, width)? > FIXED_LIMIT {
-                return Err(too_many());
-            }
-            Ok(width)
-        }
-    }
-}
-
-fn bucket_count(window: TimeWindow, width: i64) -> Result<i64, RunError> {
-    let first = align_down(window.from(), width)?;
-    let last_tick = window.to().checked_sub(1).ok_or_else(too_many)?;
-    let last = align_down(last_tick, width)?;
-    let span = last.checked_sub(first).ok_or_else(too_many)?;
-    if span.checked_rem_euclid(width) != Some(0) {
-        return Err(too_many());
-    }
-    span.checked_div(width)
-        .and_then(|steps| steps.checked_add(1))
-        .ok_or_else(too_many)
-}
-
-fn bucket_grid(window: TimeWindow, width: i64) -> Result<Vec<i64>, RunError> {
-    let count = bucket_count(window, width)?;
-    if count < 1 {
-        return Err(too_many());
-    }
-    let first = align_down(window.from(), width)?;
-    let len = usize::try_from(count).map_err(|_| too_many())?;
-    let mut times = Vec::with_capacity(len);
-    for step in 0..count {
-        let at = step
-            .checked_mul(width)
-            .and_then(|offset| first.checked_add(offset))
-            .ok_or_else(too_many)?;
-        times.push(at);
-    }
-    Ok(times)
-}
-
-fn align_down(time: i64, width: i64) -> Result<i64, RunError> {
-    let remainder = time.checked_rem_euclid(width).ok_or_else(too_many)?;
-    time.checked_sub(remainder).ok_or_else(too_many)
-}
-
-fn too_many() -> RunError {
-    RunError::InvalidRequest(TOO_MANY_BUCKETS.to_owned())
-}
-
 async fn trace_rows(
     ctx: &QueryContext,
     request: &MetricsRequest<'_>,
@@ -580,11 +441,11 @@ fn kind_is(kinds: &[SpanKind]) -> Expr {
     col(spans::SPAN_KIND).in_list(kinds.iter().map(|kind| lit(kind.as_str())).collect(), false)
 }
 
-fn span_group(group_by: Option<MetricsGroupBy>) -> Option<&'static str> {
+fn span_group(group_by: Option<GroupBy>) -> Option<&'static str> {
     match group_by {
-        Some(MetricsGroupBy::Model) => Some(spans::MODEL),
-        Some(MetricsGroupBy::Environment) => Some(spans::ENVIRONMENT),
-        Some(MetricsGroupBy::Release) => Some(spans::RELEASE),
+        Some(GroupBy::Model) => Some(spans::MODEL),
+        Some(GroupBy::Environment) => Some(spans::ENVIRONMENT),
+        Some(GroupBy::Release) => Some(spans::RELEASE),
         None => None,
     }
 }
@@ -986,9 +847,9 @@ fn map_rows<T>(
         .collect()
 }
 
-fn grouped(frame: DataFrame, group_by: Option<MetricsGroupBy>) -> Result<DataFrame, RunError> {
+fn grouped(frame: DataFrame, group_by: Option<GroupBy>) -> Result<DataFrame, RunError> {
     match group_by {
-        Some(MetricsGroupBy::Model) => frame
+        Some(GroupBy::Model) => frame
             .unnest_columns_with_options(
                 &[traces::MODELS],
                 UnnestOptions::new().with_null_handling(NullHandling::Drop),
@@ -996,21 +857,17 @@ fn grouped(frame: DataFrame, group_by: Option<MetricsGroupBy>) -> Result<DataFra
             .map_err(classify)?
             .filter(col(traces::MODELS).is_not_null())
             .map_err(classify),
-        Some(MetricsGroupBy::Environment) => frame
+        Some(GroupBy::Environment) => frame
             .filter(col(traces::ENVIRONMENT).is_not_null())
             .map_err(classify),
-        Some(MetricsGroupBy::Release) => frame
+        Some(GroupBy::Release) => frame
             .filter(col(traces::RELEASE).is_not_null())
             .map_err(classify),
         None => Ok(frame),
     }
 }
 
-fn project(
-    frame: DataFrame,
-    width: i64,
-    group_by: Option<MetricsGroupBy>,
-) -> Result<DataFrame, RunError> {
+fn project(frame: DataFrame, width: i64, group_by: Option<GroupBy>) -> Result<DataFrame, RunError> {
     let mut columns = vec![
         bucket_expr(width, traces::START_TIME),
         col(traces::ERROR_COUNT),
@@ -1023,11 +880,11 @@ fn project(
     frame.select(columns).map_err(classify)
 }
 
-fn group_column(group_by: Option<MetricsGroupBy>) -> Option<&'static str> {
+fn group_column(group_by: Option<GroupBy>) -> Option<&'static str> {
     match group_by {
-        Some(MetricsGroupBy::Model) => Some(traces::MODELS),
-        Some(MetricsGroupBy::Environment) => Some(traces::ENVIRONMENT),
-        Some(MetricsGroupBy::Release) => Some(traces::RELEASE),
+        Some(GroupBy::Model) => Some(traces::MODELS),
+        Some(GroupBy::Environment) => Some(traces::ENVIRONMENT),
+        Some(GroupBy::Release) => Some(traces::RELEASE),
         None => None,
     }
 }
@@ -1056,10 +913,6 @@ fn aggregate(frame: DataFrame, grouped: bool) -> Result<DataFrame, RunError> {
             ],
         )
         .map_err(classify)
-}
-
-pub(super) fn percentile(column: &str, quantile: f64) -> Expr {
-    approx_percentile_cont(SortExpr::new(col(column), true, true), lit(quantile), None)
 }
 
 fn bucket_expr(width: i64, time: &str) -> Expr {
@@ -1198,7 +1051,7 @@ fn value_rows(
 fn assemble(
     width: i64,
     grid: &[i64],
-    group_by: Option<MetricsGroupBy>,
+    group_by: Option<GroupBy>,
     rows: &SeriesRows,
     kpis: Vec<Kpi>,
     top_models: Vec<ModelUsageRow>,
@@ -1369,10 +1222,7 @@ fn assemble(
     }
 }
 
-fn group_keys<T>(
-    group_by: Option<MetricsGroupBy>,
-    rows: &BTreeMap<RowKey, T>,
-) -> Vec<Option<String>> {
+fn group_keys<T>(group_by: Option<GroupBy>, rows: &BTreeMap<RowKey, T>) -> Vec<Option<String>> {
     if group_by.is_none() {
         vec![None]
     } else {
@@ -1489,23 +1339,6 @@ fn score_of(row: Option<&Option<f64>>) -> Option<f64> {
     row.copied().flatten()
 }
 
-pub(super) fn require<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a dyn Array, RunError> {
-    match batch.column_by_name(name) {
-        Some(column) => Ok(column.as_ref()),
-        None => Err(missing_column(batch, name)),
-    }
-}
-
-fn missing_column(batch: &RecordBatch, name: &str) -> RunError {
-    let schema = batch.schema();
-    let columns: Vec<&str> = schema
-        .fields()
-        .iter()
-        .map(|field| field.name().as_str())
-        .collect();
-    internal(format!("missing column {name}; columns {columns:?}"))
-}
-
 fn time_at(column: &dyn Array, index: usize) -> Result<i64, RunError> {
     let Some(values) = column.as_primitive_opt::<TimestampNanosecondType>() else {
         return Err(internal(format!("bucket has type {}", column.data_type())));
@@ -1514,26 +1347,6 @@ fn time_at(column: &dyn Array, index: usize) -> Result<i64, RunError> {
         return Err(internal("bucket is null".to_owned()));
     }
     Ok(values.value(index))
-}
-
-pub(super) fn i64_at(column: &dyn Array, index: usize) -> Result<i64, RunError> {
-    if let Some(values) = column.as_primitive_opt::<Int64Type>() {
-        if values.is_null(index) {
-            return Err(internal("aggregate count is null".to_owned()));
-        }
-        return Ok(values.value(index));
-    }
-    if let Some(values) = column.as_primitive_opt::<UInt64Type>() {
-        if values.is_null(index) {
-            return Err(internal("aggregate count is null".to_owned()));
-        }
-        return i64::try_from(values.value(index))
-            .map_err(|_| internal("aggregate count overflows i64".to_owned()));
-    }
-    Err(internal(format!(
-        "aggregate count has type {}",
-        column.data_type()
-    )))
 }
 
 fn i64_opt(column: &dyn Array, index: usize) -> Result<Option<i64>, RunError> {
@@ -1549,19 +1362,6 @@ fn i64_opt(column: &dyn Array, index: usize) -> Result<Option<i64>, RunError> {
         return Ok(None);
     }
     Ok(Some(i64_at(column, index)?))
-}
-
-pub(super) fn f64_at(column: &dyn Array, index: usize) -> Result<Option<f64>, RunError> {
-    if let Some(values) = column.as_primitive_opt::<Float64Type>() {
-        return Ok((!values.is_null(index)).then(|| values.value(index)));
-    }
-    if let Some(values) = column.as_primitive_opt::<Int64Type>() {
-        return Ok((!values.is_null(index)).then(|| values.value(index) as f64));
-    }
-    Err(internal(format!(
-        "aggregate value has type {}",
-        column.data_type()
-    )))
 }
 
 fn string_at(column: &dyn Array, index: usize) -> Result<Option<String>, RunError> {
@@ -1583,10 +1383,6 @@ fn string_at(column: &dyn Array, index: usize) -> Result<Option<String>, RunErro
     )))
 }
 
-pub(super) fn internal(message: String) -> RunError {
-    RunError::Internal(DataFusionError::Internal(message))
-}
-
 #[cfg(test)]
 mod tests {
     use std::cmp::Ordering;
@@ -1595,7 +1391,6 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use super::resolve;
     use cetra_core::enums::SpanKind;
     use cetra_core::ids::{SpanId, TraceId};
     use cetra_core::names::environment;
@@ -1606,8 +1401,8 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        Bucket, BucketWidth, Kpi, KpiName, MetricsData, MetricsGroupBy, MetricsRequest,
-        ModelUsageRow, Series, SeriesName, metrics,
+        Bucket, BucketWidth, GroupBy, Kpi, KpiName, MetricsData, MetricsRequest, ModelUsageRow,
+        Series, SeriesName, metrics,
     };
     use crate::query_error::RunError;
     use crate::test_support::{
@@ -1930,7 +1725,7 @@ mod tests {
             "2026-01-01T11:00:00Z",
             Bucket::Fixed(BucketWidth::M10),
         );
-        request.group_by = Some(MetricsGroupBy::Model);
+        request.group_by = Some(GroupBy::Model);
         let data = run(request).await;
         let loaded = samples("traces.json");
         let models: BTreeSet<_> = loaded
@@ -1995,7 +1790,7 @@ mod tests {
             "2026-01-01T11:00:00Z",
             Bucket::Fixed(BucketWidth::M10),
         );
-        request.group_by = Some(MetricsGroupBy::Environment);
+        request.group_by = Some(GroupBy::Environment);
         request.include_eval = true;
         let data = run(request).await;
         let loaded = samples("traces-include-eval.json");
@@ -2135,28 +1930,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn auto_buckets_stop_at_two_thousand_days() {
-        let day = BucketWidth::D1.ns();
-        let window = |from, to| TimeWindow::new(from, to).expect("window");
-        assert_eq!(
-            resolve(window(0, 2_000 * day), Bucket::Auto).expect("2,000 days"),
-            day
-        );
-        for to in [2_000 * day + 1, i64::MAX] {
-            match resolve(window(0, to), Bucket::Auto) {
-                Err(RunError::InvalidRequest(message)) => {
-                    assert_eq!(message, "too many buckets; pick a wider bucket");
-                }
-                other => panic!("{other:?}"),
-            }
-        }
-        assert!(matches!(
-            resolve(window(i64::MIN, i64::MAX), Bucket::Auto),
-            Err(RunError::InvalidRequest(_))
-        ));
-    }
-
     #[tokio::test]
     async fn metrics_reject_an_auto_window_past_two_thousand_days() {
         let span = 2_001i64.checked_mul(BucketWidth::D1.ns()).expect("span");
@@ -2175,19 +1948,6 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-    }
-
-    #[test]
-    fn exactly_two_thousand_fixed_buckets_are_accepted() {
-        let span = 2_000i64.checked_mul(BucketWidth::M1.ns()).expect("span");
-        assert_eq!(
-            resolve(
-                TimeWindow::new(0, span).expect("window"),
-                Bucket::Fixed(BucketWidth::M1)
-            )
-            .expect("2,000 buckets"),
-            BucketWidth::M1.ns()
-        );
     }
 
     #[derive(Clone)]

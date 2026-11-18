@@ -140,8 +140,8 @@ Request body:
 - `filter`: a DSL expression on the source view.
 - `measures`: 1–6 items `{agg, field?, where?}`.
   - `agg`: `count`, `count_distinct`, `sum`, `avg`, `min`, `max`, `p50`, `p75`, `p90`, `p95`, `p99` or `rate`.
-  - `field`: none for `count` and `rate`; a numeric field for `sum`, `avg`, `min`, `max` and the percentiles; any breakdown field, `trace_id`, `session_id` or `user_id` for `count_distinct`.
-  - `where`: a DSL expression on the source view. For `rate` it is required and the value is the share of the rows that match it (0 to 1). For every other aggregate it is optional and keeps only the matching rows for that measure.
+  - `field`: none for `count` and `rate`; a numeric field for `sum`, `avg`, `min`, `max` and the percentiles; any breakdown field except the list fields `tags` and `models`, or `trace_id`, `session_id` or `user_id`, for `count_distinct`.
+  - `where`: a DSL expression on the source view. For `rate` it is required and the value is the share of the rows that match it (0 to 1). For every other aggregate it is optional and keeps only the matching rows for that measure. A `where` cannot call the score functions (`score`, `score_label`, `has_score`); the widget filter can.
 - `breakdown`: `{field, limit?, other?}`. `limit` is 1–20 (default 5): the groups kept are the `limit` values with the largest first measure over `[from, to)`, nulls last, then by value ascending. With `other` (default `true`) the rows of every other value form one more group, `other: true`, whose measures are computed over those rows (not summed from the groups). A list field (`tags`, `models`) counts a row once under each of its values. Rows whose value is null are left out.
 
 Fields by source:

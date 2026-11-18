@@ -5,6 +5,8 @@
 //! Dashboard metrics return plain structs. The server maps either to API types.
 
 mod alerts;
+mod buckets;
+mod columns;
 mod cursor;
 mod deletions;
 mod experiments;
@@ -14,6 +16,7 @@ mod scores;
 mod sessions;
 mod traces;
 mod users;
+mod widgets;
 
 use arrow::record_batch::RecordBatch;
 use datafusion::logical_expr::Expr;
@@ -24,6 +27,7 @@ use crate::query_error::{RunError, classify};
 use crate::views::{QueryContext, TimeWindow, ViewName};
 
 pub use alerts::{AlertMeasure, AlertValue, AlertValueRequest, alert_value};
+pub use buckets::{Bucket, BucketWidth};
 pub use deletions::{
     FilterDeletionRequest, MAX_FILTER_DELETION_TRACES, UserDeletionScope, eval_trace_ids,
     filter_trace_ids, user_deletion_scope,
@@ -38,8 +42,7 @@ pub use facets::{
     HistogramBucket, MAX_FACET_KEY, MAX_FACET_LIMIT, MAX_FACET_QUERY, facet,
 };
 pub use metrics::{
-    Bucket, BucketWidth, Kpi, KpiName, MetricsData, MetricsGroupBy, MetricsRequest, ModelUsageRow,
-    Point, Series, SeriesName,
+    Kpi, KpiName, MetricsData, MetricsRequest, ModelUsageRow, Point, Series, SeriesName,
 };
 pub use scores::{
     LATEST_SCORE_COLUMNS, ScoreListRequest, ScoreTargets, latest_scores, score_list, scores_by_id,
@@ -60,6 +63,11 @@ pub use users::{
     ACTIVITY_BUCKETS, ERROR_TRACE_COUNT, MAX_USER_METADATA_KEYS, MAX_USER_SESSIONS, USER_COLUMNS,
     UserDetailData, UserExtras, UserExtrasRequest, UserListRequest, UserSort, user_detail,
     user_extras, user_list,
+};
+pub use widgets::{
+    Agg, Breakdown, DEFAULT_BREAKDOWN_LIMIT, FieldError, GroupBy, MAX_BREAKDOWN_LIMIT, MAX_MAP_KEY,
+    MAX_MEASURES, Measure, WidgetError, WidgetQuery, WidgetSource, validate_expressions,
+    validate_shape,
 };
 
 /// Sort direction for a list. Nulls are last in both directions.

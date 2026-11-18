@@ -247,11 +247,11 @@ fn bucket(bucket: MetricsBucket) -> storage::Bucket {
     storage::Bucket::Fixed(width)
 }
 
-fn storage_group_by(group_by: MetricsGroupBy) -> storage::MetricsGroupBy {
+fn storage_group_by(group_by: MetricsGroupBy) -> storage::GroupBy {
     match group_by {
-        MetricsGroupBy::Model => storage::MetricsGroupBy::Model,
-        MetricsGroupBy::Environment => storage::MetricsGroupBy::Environment,
-        MetricsGroupBy::Release => storage::MetricsGroupBy::Release,
+        MetricsGroupBy::Model => storage::GroupBy::Model,
+        MetricsGroupBy::Environment => storage::GroupBy::Environment,
+        MetricsGroupBy::Release => storage::GroupBy::Release,
     }
 }
 
