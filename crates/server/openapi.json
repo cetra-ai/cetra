@@ -24762,9 +24762,14 @@
           "id",
           "slug",
           "name",
-          "role"
+          "role",
+          "demo"
         ],
         "properties": {
+          "demo": {
+            "type": "boolean",
+            "description": "The demo org (`demo.org`, D187). Its role is `viewer` for a caller without a row."
+          },
           "id": {
             "$ref": "#/components/schemas/OrgId",
             "description": "Org id."

@@ -31,6 +31,7 @@ it("creates an organization and opens it", async () => {
         slug: "beta",
         name: "Beta",
         role: "owner",
+        demo: false,
       };
       orgs.push(created);
       return HttpResponse.json(created, { status: 201 });

@@ -6102,6 +6102,8 @@ export interface components {
          *     Spec 04 `org_members`.
          */
         OrgMembership: {
+            /** @description The demo org (`demo.org`, D187). Its role is `viewer` for a caller without a row. */
+            demo: boolean;
             /** @description Org id. */
             id: components["schemas"]["OrgId"];
             /** @description Display name. */
