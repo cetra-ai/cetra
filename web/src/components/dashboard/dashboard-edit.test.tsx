@@ -108,7 +108,7 @@ it("adds a widget through the editor and saves the definition", async () => {
               measures: [{ agg: "p95", field: "duration_ns" }],
               breakdown: { field: "model", limit: 5 },
             },
-            layout: { x: 0, y: 12, w: 6, h: 7 },
+            layout: { x: 0, y: 12, w: 30, h: 7 },
           },
         ],
       },
@@ -132,7 +132,7 @@ it("adds a heading across the full width and saves it", async () => {
       id: expect.stringMatching(/^w-/),
       title: "Latency",
       kind: "heading",
-      layout: { x: 0, y: 12, w: 12, h: 1 },
+      layout: { x: 0, y: 12, w: 60, h: 1 },
     });
   } finally {
     requests.stop();
@@ -482,10 +482,11 @@ it("moves a widget from its menu", async () => {
     await user.click(await screen.findByRole("menuitem", { name: "Move right" }));
     await user.click(screen.getByRole("button", { name: "Save" }));
     const body = (await savedBody(requests)) as { definition: Definition };
+    // One step is five of the 60 columns.
     expect(body.definition.widgets.find((widget) => widget.title === REQUESTS)?.layout).toEqual({
-      x: 1,
+      x: 5,
       y: 1,
-      w: 8,
+      w: 40,
       h: 6,
     });
   } finally {
@@ -509,9 +510,9 @@ it("resizes a widget from its menu, and refuses a step past the grid", async () 
     await user.click(screen.getByRole("button", { name: "Save" }));
     const body = (await savedBody(requests)) as { definition: Definition };
     expect(body.definition.widgets.find((widget) => widget.title === ERROR_RATE)?.layout).toEqual({
-      x: 8,
+      x: 40,
       y: 1,
-      w: 3,
+      w: 15,
       h: 4,
     });
   } finally {
@@ -642,7 +643,7 @@ it("a member's grid moves outside edit mode, and a drop saves the layout after t
     expect(saved?.definition.widgets.find((widget) => widget.title === REQUESTS)?.layout).toEqual({
       x: 1,
       y: 1,
-      w: 8,
+      w: 40,
       h: 6,
     });
     expect(router.state.location.pathname).toBe(CUSTOM);
@@ -653,7 +654,7 @@ it("a member's grid moves outside edit mode, and a drop saves the layout after t
     expect(undone?.definition.widgets.find((widget) => widget.title === REQUESTS)?.layout).toEqual({
       x: 0,
       y: 1,
-      w: 8,
+      w: 40,
       h: 6,
     });
   } finally {
@@ -710,7 +711,9 @@ it("a viewer's grid stays static and has no Edit", async () => {
   await screen.findByRole("region", { name: REQUESTS });
   expect(screen.queryByRole("button", { name: "Edit" })).not.toBeInTheDocument();
   expect(document.querySelectorAll(".react-draggable")).toHaveLength(0);
-  expect(grid.last?.onDragStop).toBeUndefined();
+  // Neither a drag nor a resize can start, so nothing can save a layout.
+  expect(grid.last?.dragConfig?.enabled).toBe(false);
+  expect(grid.last?.resizeConfig?.enabled).toBe(false);
 });
 
 it("a bucket click still opens its list outside edit mode for a member", async () => {

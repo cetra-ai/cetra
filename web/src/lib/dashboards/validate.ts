@@ -1,3 +1,4 @@
+import { COLUMNS } from "./draft";
 import { breakdownFields, countDistinctFields, isMapKeyField, numericFields } from "./fields";
 import type { Chart, Definition, Measure, Widget, WidgetQuery, WidgetSource } from "./types";
 
@@ -116,16 +117,16 @@ function validateWidget(widget: Widget, base: string, ids: Set<string>): FieldIs
 function validateLayout(widget: Widget, base: string): FieldIssue[] {
   const issues: FieldIssue[] = [];
   const { x, y, w, h } = widget.layout;
-  if (!(x >= 0 && x <= 11)) {
-    issues.push({ field: `${base}.layout.x`, message: "must be 0 to 11" });
+  if (!(x >= 0 && x < COLUMNS)) {
+    issues.push({ field: `${base}.layout.x`, message: `must be 0 to ${COLUMNS - 1}` });
   }
   if (!(y >= 0 && y <= 1000)) {
     issues.push({ field: `${base}.layout.y`, message: "must be 0 to 1000" });
   }
-  if (!(w >= 1 && w <= 12)) {
-    issues.push({ field: `${base}.layout.w`, message: "must be 1 to 12" });
-  } else if (x + w > 12) {
-    issues.push({ field: `${base}.layout.w`, message: "x + w must be at most 12" });
+  if (!(w >= 1 && w <= COLUMNS)) {
+    issues.push({ field: `${base}.layout.w`, message: `must be 1 to ${COLUMNS}` });
+  } else if (x + w > COLUMNS) {
+    issues.push({ field: `${base}.layout.w`, message: `x + w must be at most ${COLUMNS}` });
   }
   if (!(h >= 1 && h <= 40)) {
     issues.push({ field: `${base}.layout.h`, message: "must be 1 to 40" });

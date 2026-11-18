@@ -1,26 +1,30 @@
+import { COLUMNS } from "./draft";
 import type { Chart, Definition, Measure, Widget, WidgetQuery, WidgetSource } from "./types";
 
 /**
  * The built-in Overview (spec 11 § Dashboard): fixed widgets in this order, with their queries.
- * Its numbers take a 2-column slot each, its headings the full width, its charts 6 columns by 7
- * rows. The Overview is not stored; it is not edited.
+ * Its five numbers share the first row equally, its headings take the full width, its charts half
+ * the width by 7 rows. The Overview is not stored; it is not edited.
  */
 
 const CHART_HEIGHT = 7;
-const HALF = 6;
+const HALF = COLUMNS / 2;
+/** The five number tiles share the first row. */
+const TILE = COLUMNS / 5;
 
 function heading(id: string, title: string, y: number): Widget {
-  return { id, title, kind: "heading", layout: { x: 0, y, w: 12, h: 1 } };
+  return { id, title, kind: "heading", layout: { x: 0, y, w: COLUMNS, h: 1 } };
 }
 
-function number(id: string, title: string, x: number, query: WidgetQuery): Widget {
+/** A number tile in slot `slot` (0 to 4) of the first row. */
+function number(id: string, title: string, slot: number, query: WidgetQuery): Widget {
   return {
     id,
     title,
     kind: "chart",
     chart: { type: "number" },
     query,
-    layout: { x, y: 0, w: 2, h: 4 },
+    layout: { x: slot * TILE, y: 0, w: TILE, h: 4 },
   };
 }
 
@@ -68,12 +72,12 @@ export const OVERVIEW: Definition = {
     number(
       "ov-2",
       "Error rate",
-      2,
+      1,
       query("traces", [{ agg: "rate", where: ERROR, label: "Error rate" }]),
     ),
-    number("ov-3", "p95 latency", 4, query("traces", [{ agg: "p95", field: "duration_ns" }])),
-    number("ov-4", "Cost", 6, query("traces", [{ agg: "sum", field: "cost_total" }])),
-    number("ov-5", "Tokens", 8, query("traces", [{ agg: "sum", field: "total_tokens" }])),
+    number("ov-3", "p95 latency", 2, query("traces", [{ agg: "p95", field: "duration_ns" }])),
+    number("ov-4", "Cost", 3, query("traces", [{ agg: "sum", field: "cost_total" }])),
+    number("ov-5", "Tokens", 4, query("traces", [{ agg: "sum", field: "total_tokens" }])),
 
     heading("ov-6", "Volume", 4),
     chart(
@@ -90,7 +94,7 @@ export const OVERVIEW: Definition = {
     chart(
       "ov-8",
       "Tokens by type",
-      6,
+      HALF,
       5,
       { type: "bar", stacked: true },
       query(
@@ -117,7 +121,7 @@ export const OVERVIEW: Definition = {
     chart(
       "ov-11",
       "Scores",
-      6,
+      HALF,
       13,
       { type: "line", split: true },
       query("scores", [{ agg: "avg", field: "value_num" }], {
@@ -142,7 +146,7 @@ export const OVERVIEW: Definition = {
     chart(
       "ov-14",
       "LLM latency by model",
-      6,
+      HALF,
       21,
       { type: "line" },
       query("spans", [{ agg: "p95", field: "duration_ns", label: "p95" }], {
@@ -181,7 +185,7 @@ export const OVERVIEW: Definition = {
     chart(
       "ov-18",
       "Evaluation cost",
-      6,
+      HALF,
       36,
       { type: "bar" },
       query("traces", [{ agg: "sum", field: "cost_total", label: "Evaluation cost" }], {

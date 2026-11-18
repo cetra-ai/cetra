@@ -46,20 +46,20 @@ describe("the user Usage", () => {
     expect(USER_OVERVIEW.widgets.some((widget) => widget.kind === "heading")).toBe(false);
   });
 
-  it("lays the charts out two per row, 6 columns by 7 rows, below the numbers", () => {
+  it("lays the charts out two per row, half the width by 7 rows, below the numbers", () => {
     const charts = USER_OVERVIEW.widgets.slice(5);
     expect(
       charts.map((widget) => [widget.layout.x, widget.layout.y, widget.layout.w, widget.layout.h]),
     ).toEqual([
-      [0, 4, 6, 7],
-      [6, 4, 6, 7],
-      [0, 11, 6, 7],
-      [6, 11, 6, 7],
-      [0, 18, 6, 7],
-      [6, 18, 6, 7],
-      [0, 25, 6, 7],
-      [6, 25, 6, 7],
-      [0, 32, 6, 7],
+      [0, 4, 30, 7],
+      [30, 4, 30, 7],
+      [0, 11, 30, 7],
+      [30, 11, 30, 7],
+      [0, 18, 30, 7],
+      [30, 18, 30, 7],
+      [0, 25, 30, 7],
+      [30, 25, 30, 7],
+      [0, 32, 30, 7],
     ]);
   });
 

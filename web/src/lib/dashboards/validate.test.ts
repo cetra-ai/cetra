@@ -23,7 +23,7 @@ function heading(overrides: Record<string, unknown> = {}): Widget {
     id: "h1",
     title: "Traffic",
     kind: "heading",
-    layout: { x: 0, y: 0, w: 12, h: 1 },
+    layout: { x: 0, y: 0, w: 60, h: 1 },
     ...overrides,
   } as Widget;
 }
@@ -106,18 +106,18 @@ it("checks titles: a heading needs 1 to 100 trimmed characters, a chart at most 
 });
 
 it("checks the layout bounds and that x + w fits the grid", () => {
-  expect(issuesOf(chart({ layout: { x: 12, y: 0, w: 1, h: 1 } }))).toEqual([
-    "definition.widgets[0].layout.x: must be 0 to 11",
-    "definition.widgets[0].layout.w: x + w must be at most 12",
+  expect(issuesOf(chart({ layout: { x: 60, y: 0, w: 1, h: 1 } }))).toEqual([
+    "definition.widgets[0].layout.x: must be 0 to 59",
+    "definition.widgets[0].layout.w: x + w must be at most 60",
   ]);
   expect(issuesOf(chart({ layout: { x: 0, y: 1001, w: 1, h: 1 } }))).toEqual([
     "definition.widgets[0].layout.y: must be 0 to 1000",
   ]);
-  expect(issuesOf(chart({ layout: { x: 0, y: 0, w: 13, h: 1 } }))).toEqual([
-    "definition.widgets[0].layout.w: must be 1 to 12",
+  expect(issuesOf(chart({ layout: { x: 0, y: 0, w: 61, h: 1 } }))).toEqual([
+    "definition.widgets[0].layout.w: must be 1 to 60",
   ]);
-  expect(issuesOf(chart({ layout: { x: 8, y: 0, w: 5, h: 1 } }))).toEqual([
-    "definition.widgets[0].layout.w: x + w must be at most 12",
+  expect(issuesOf(chart({ layout: { x: 40, y: 0, w: 21, h: 1 } }))).toEqual([
+    "definition.widgets[0].layout.w: x + w must be at most 60",
   ]);
   expect(issuesOf(chart({ layout: { x: 0, y: 0, w: 1, h: 41 } }))).toEqual([
     "definition.widgets[0].layout.h: must be 1 to 40",
@@ -294,7 +294,7 @@ it("reports every error at once, in path order", () => {
   const bad = chart({
     id: "bad id",
     title: "t".repeat(101),
-    layout: { x: 11, y: 0, w: 2, h: 0 },
+    layout: { x: 59, y: 0, w: 2, h: 0 },
     query: query([{ agg: "count", field: "name" }, { agg: "rate" }], {
       breakdown: { field: "attributes" },
     }),
@@ -302,7 +302,7 @@ it("reports every error at once, in path order", () => {
   expect(issuesOf(bad)).toEqual([
     "definition.widgets[0].id: must be 1 to 64 characters of letters, digits, _ or -",
     "definition.widgets[0].title: must be at most 100 characters",
-    "definition.widgets[0].layout.w: x + w must be at most 12",
+    "definition.widgets[0].layout.w: x + w must be at most 60",
     "definition.widgets[0].layout.h: must be 1 to 40",
     "definition.widgets[0].query.measures[0].field: count takes no field",
     "definition.widgets[0].query.measures[1].where: rate needs a where",

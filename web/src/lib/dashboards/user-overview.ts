@@ -1,3 +1,4 @@
+import { COLUMNS } from "./draft";
 import { OVERVIEW } from "./overview";
 import type { Definition, Widget } from "./types";
 
@@ -7,7 +8,7 @@ import type { Definition, Widget } from "./types";
  * (6 columns by 7 rows each), as the Overview lays out its charts.
  */
 
-const CHART_WIDTH = 6;
+const CHART_WIDTH = COLUMNS / 2;
 const CHART_HEIGHT = 7;
 
 const EXCLUDED = new Set(["ov-18"]);

@@ -290,7 +290,7 @@ A row of kind `overview` is the project's edited Overview: at most one per proje
 A **Widget** is `{id, title, layout: {x, y, w, h}, kind, chart?, query?}`:
 - `id`: 1–64 characters of `[A-Za-z0-9_-]`, unique in the dashboard.
 - `title`: 0–100 characters (a heading needs 1–100). `description` of the dashboard: 0–500.
-- `layout`: integers on the 12-column grid, `0 ≤ x ≤ 11`, `1 ≤ w ≤ 12`, `x + w ≤ 12`, `0 ≤ y ≤ 1000`, `1 ≤ h ≤ 40`.
+- `layout`: integers on the 60-column grid (D-C-19), `0 ≤ x ≤ 59`, `1 ≤ w ≤ 60`, `x + w ≤ 60`, `0 ≤ y ≤ 1000`, `1 ≤ h ≤ 40`.
 - `kind`: `chart` or `heading`. A heading has no `chart` and no `query`.
 - `chart`: `{type, stacked?, split?, fade_below?, share?}`. `type` is `line`, `bar`, `area`, `bar_h`, `number` or `table`. `stacked` applies to `bar` and `area`; `split` (one small chart per group; needs a breakdown with `limit` at most 6) to `line`; `fade_below` (1–1,000: buckets with fewer rows are faded) to `bar`; `share` (each row's share of the first measure's total, as a bar) to `table`.
 - `query`: a WidgetQuery (05 § Dashboard queries), checked with the same rules, plus a `label` (0–60 characters) on each measure. `line`, `bar` and `area` read the `series` shape; `bar_h`, `number` and `table` read `total`. `bar_h` needs a breakdown; `number` has one measure and no breakdown.

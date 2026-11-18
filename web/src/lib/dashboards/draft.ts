@@ -3,7 +3,9 @@ import { formOf, widgetOf } from "./editor";
 import type { Definition, Layout, Widget } from "./types";
 
 /** The grid's columns. A widget's `x + w` never passes this (spec 04 § Dashboards). */
-export const COLUMNS = 12;
+export const COLUMNS = 60;
+/** How far the widget menu moves or resizes a widget across: a twelfth of the width. */
+export const NUDGE_COLUMNS = 5;
 /** The tallest widget, in rows, and the lowest row a widget can start on (spec 04 § Dashboards). */
 export const MAX_HEIGHT = 40;
 export const MAX_Y = 1000;
@@ -78,13 +80,13 @@ export function nudgedLayout(layout: Layout, step: Nudge): Layout | undefined {
     case "down":
       return y < MAX_Y ? { x, y: y + 1, w, h } : undefined;
     case "left":
-      return x > 0 ? { x: x - 1, y, w, h } : undefined;
+      return x > 0 ? { x: Math.max(0, x - NUDGE_COLUMNS), y, w, h } : undefined;
     case "right":
-      return x + w < COLUMNS ? { x: x + 1, y, w, h } : undefined;
+      return x + w < COLUMNS ? { x: Math.min(COLUMNS - w, x + NUDGE_COLUMNS), y, w, h } : undefined;
     case "wider":
-      return x + w < COLUMNS ? { x, y, w: w + 1, h } : undefined;
+      return x + w < COLUMNS ? { x, y, w: Math.min(COLUMNS - x, w + NUDGE_COLUMNS), h } : undefined;
     case "narrower":
-      return w > 1 ? { x, y, w: w - 1, h } : undefined;
+      return w > 1 ? { x, y, w: Math.max(1, w - NUDGE_COLUMNS), h } : undefined;
     case "taller":
       return h < MAX_HEIGHT ? { x, y, w, h: h + 1 } : undefined;
     case "shorter":

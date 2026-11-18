@@ -40,6 +40,14 @@ describe("the Overview", () => {
   it("gives the numbers four rows and places no two widgets over each other", () => {
     const numbers = OVERVIEW.widgets.filter((widget) => widget.chart?.type === "number");
     expect(numbers.map((widget) => widget.layout.h)).toEqual([4, 4, 4, 4, 4]);
+    // The five share the whole first row equally.
+    expect(numbers.map((widget) => [widget.layout.x, widget.layout.w])).toEqual([
+      [0, 12],
+      [12, 12],
+      [24, 12],
+      [36, 12],
+      [48, 12],
+    ]);
     expect(overlapping(OVERVIEW)).toEqual([]);
   });
 

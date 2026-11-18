@@ -24520,7 +24520,7 @@
       },
       "Layout": {
         "type": "object",
-        "description": "Position and size of a widget on the 12-column grid.",
+        "description": "Position and size of a widget on the 60-column grid (D-C-19).",
         "required": [
           "x",
           "y",
@@ -24536,12 +24536,12 @@
           "w": {
             "type": "integer",
             "format": "int64",
-            "description": "Width in columns, 1 to 12; `x + w` is at most 12."
+            "description": "Width in columns, 1 to 60; `x + w` is at most 60."
           },
           "x": {
             "type": "integer",
             "format": "int64",
-            "description": "Column, 0 to 11."
+            "description": "Column, 0 to 59."
           },
           "y": {
             "type": "integer",

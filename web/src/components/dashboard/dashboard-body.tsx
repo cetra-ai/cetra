@@ -32,6 +32,7 @@ import {
 import { useIsMobile } from "@/hooks/use-mobile";
 import {
   bottomOf,
+  COLUMNS,
   issueWidgetIndex,
   issueWithin,
   type Nudge,
@@ -54,7 +55,7 @@ import { compactWidgets, nudgeWidgets, WidgetGrid } from "./widget-grid";
 /** A dashboard's widgets, the most a definition holds (spec 04 § Dashboards). */
 const MAX_WIDGETS = 50;
 /** A new chart's size: half the grid, seven rows. */
-const NEW_CHART = { w: 6, h: 7 } as const;
+const NEW_CHART = { w: COLUMNS / 2, h: 7 } as const;
 /** How long a notice about a layout save stays on screen. */
 const NOTICE_MS = 10_000;
 
@@ -273,7 +274,7 @@ function DashboardGrid({
           id: newWidgetId(),
           title,
           kind: "heading",
-          layout: { x: 0, y: bottomOf(current.widgets), w: 12, h: 1 },
+          layout: { x: 0, y: bottomOf(current.widgets), w: COLUMNS, h: 1 },
         };
         return { widgets: [...current.widgets, heading] };
       }

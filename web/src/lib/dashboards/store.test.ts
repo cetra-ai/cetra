@@ -62,14 +62,14 @@ describe("localStore", () => {
               id: "a",
               title: "Hi",
               kind: "heading",
-              layout: { x: 0, y: 0, w: 13, h: 1 },
+              layout: { x: 0, y: 0, w: 61, h: 1 },
             },
           ],
         },
       }),
     ).rejects.toMatchObject({
       status: 400,
-      errors: [{ field: "definition.widgets[0].layout.w", message: "must be 1 to 12" }],
+      errors: [{ field: "definition.widgets[0].layout.w", message: "must be 1 to 60" }],
     });
     expect(await store.list()).toEqual([]);
   });

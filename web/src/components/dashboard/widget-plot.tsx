@@ -1,4 +1,12 @@
-import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type KeyboardEvent,
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { BarShapeProps } from "recharts";
 import {
   Area,
@@ -13,6 +21,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { LayoutKey } from "@/components/charts/layout-key";
 import {
   AXIS_TICK,
   axisStyle,
@@ -106,6 +115,13 @@ export function WidgetPlot({
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
+  // When the dashboard cell redraws the chart at a new size, the labels fit it in the same render.
+  const layoutKey = useContext(LayoutKey);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new key is what asks for a measure
+  useLayoutEffect(() => {
+    const measured = root.current?.clientWidth ?? 0;
+    if (measured > 0) setWidth(measured);
+  }, [layoutKey]);
   const plotWidth = (width ?? UNMEASURED_WIDTH) - Y_AXIS_WIDTH - PLOT_RIGHT_MARGIN;
   const drag = useDragZoom({ rows, bucketNs, onZoom });
   // A bucket opens with its group only when the chart has one group (and is not an area): with

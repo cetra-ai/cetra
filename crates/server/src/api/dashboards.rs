@@ -259,15 +259,15 @@ pub enum WidgetQueryResponse {
     Total(WidgetTotalResponse),
 }
 
-/// Position and size of a widget on the 12-column grid.
+/// Position and size of a widget on the 60-column grid (D-C-19).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Layout {
-    /// Column, 0 to 11.
+    /// Column, 0 to 59.
     pub x: i64,
     /// Row, 0 to 1000.
     pub y: i64,
-    /// Width in columns, 1 to 12; `x + w` is at most 12.
+    /// Width in columns, 1 to 60; `x + w` is at most 60.
     pub w: i64,
     /// Height in rows, 1 to 40.
     pub h: i64,

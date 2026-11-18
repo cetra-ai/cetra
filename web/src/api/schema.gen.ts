@@ -5562,7 +5562,7 @@ export interface components {
          * @enum {string}
          */
         LatencyTarget: "trace" | "llm_span";
-        /** @description Position and size of a widget on the 12-column grid. */
+        /** @description Position and size of a widget on the 60-column grid (D-C-19). */
         Layout: {
             /**
              * Format: int64
@@ -5571,12 +5571,12 @@ export interface components {
             h: number;
             /**
              * Format: int64
-             * @description Width in columns, 1 to 12; `x + w` is at most 12.
+             * @description Width in columns, 1 to 60; `x + w` is at most 60.
              */
             w: number;
             /**
              * Format: int64
-             * @description Column, 0 to 11.
+             * @description Column, 0 to 59.
              */
             x: number;
             /**

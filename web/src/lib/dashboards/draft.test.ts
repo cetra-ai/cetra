@@ -110,22 +110,29 @@ describe("sameDefinition", () => {
 describe("nudgedLayout", () => {
   const at = (x: number, y: number, w: number, h: number) => ({ x, y, w, h });
 
-  it("moves and resizes by one cell or row", () => {
-    expect(nudgedLayout(at(2, 3, 4, 5), "up")).toEqual(at(2, 2, 4, 5));
-    expect(nudgedLayout(at(2, 3, 4, 5), "down")).toEqual(at(2, 4, 4, 5));
-    expect(nudgedLayout(at(2, 3, 4, 5), "left")).toEqual(at(1, 3, 4, 5));
-    expect(nudgedLayout(at(2, 3, 4, 5), "right")).toEqual(at(3, 3, 4, 5));
-    expect(nudgedLayout(at(2, 3, 4, 5), "wider")).toEqual(at(2, 3, 5, 5));
-    expect(nudgedLayout(at(2, 3, 4, 5), "narrower")).toEqual(at(2, 3, 3, 5));
-    expect(nudgedLayout(at(2, 3, 4, 5), "taller")).toEqual(at(2, 3, 4, 6));
-    expect(nudgedLayout(at(2, 3, 4, 5), "shorter")).toEqual(at(2, 3, 4, 4));
+  it("moves and resizes by five columns across and one row down", () => {
+    expect(nudgedLayout(at(10, 3, 20, 5), "up")).toEqual(at(10, 2, 20, 5));
+    expect(nudgedLayout(at(10, 3, 20, 5), "down")).toEqual(at(10, 4, 20, 5));
+    expect(nudgedLayout(at(10, 3, 20, 5), "left")).toEqual(at(5, 3, 20, 5));
+    expect(nudgedLayout(at(10, 3, 20, 5), "right")).toEqual(at(15, 3, 20, 5));
+    expect(nudgedLayout(at(10, 3, 20, 5), "wider")).toEqual(at(10, 3, 25, 5));
+    expect(nudgedLayout(at(10, 3, 20, 5), "narrower")).toEqual(at(10, 3, 15, 5));
+    expect(nudgedLayout(at(10, 3, 20, 5), "taller")).toEqual(at(10, 3, 20, 6));
+    expect(nudgedLayout(at(10, 3, 20, 5), "shorter")).toEqual(at(10, 3, 20, 4));
+  });
+
+  it("stops a step across at the grid's edges", () => {
+    expect(nudgedLayout(at(3, 0, 20, 1), "left")).toEqual(at(0, 0, 20, 1));
+    expect(nudgedLayout(at(38, 0, 20, 1), "right")).toEqual(at(40, 0, 20, 1));
+    expect(nudgedLayout(at(38, 0, 20, 1), "wider")).toEqual(at(38, 0, 22, 1));
+    expect(nudgedLayout(at(0, 0, 3, 1), "narrower")).toEqual(at(0, 0, 1, 1));
   });
 
   it("refuses a step that leaves the grid's limits", () => {
     expect(nudgedLayout(at(0, 0, 4, 1), "up")).toBeUndefined();
     expect(nudgedLayout(at(0, 0, 4, 1), "left")).toBeUndefined();
-    expect(nudgedLayout(at(8, 0, 4, 1), "right")).toBeUndefined();
-    expect(nudgedLayout(at(8, 0, 4, 1), "wider")).toBeUndefined();
+    expect(nudgedLayout(at(40, 0, 20, 1), "right")).toBeUndefined();
+    expect(nudgedLayout(at(40, 0, 20, 1), "wider")).toBeUndefined();
     expect(nudgedLayout(at(0, 0, 1, 1), "narrower")).toBeUndefined();
     expect(nudgedLayout(at(0, 0, 4, 40), "taller")).toBeUndefined();
     expect(nudgedLayout(at(0, 0, 4, 1), "shorter")).toBeUndefined();

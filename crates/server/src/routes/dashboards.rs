@@ -54,6 +54,8 @@ const MAX_ENTRIES: usize = 256;
 const MAX_DEFINITION_BYTES: usize = 256 * 1024;
 /// Most widgets in one dashboard (spec 04).
 const MAX_WIDGETS: usize = 50;
+/// The dashboard grid's width in columns (spec 04 § Dashboards, D-C-19).
+const GRID_COLUMNS: i64 = 60;
 /// Longest name and widget title, in characters after trimming.
 const MAX_NAME_CHARS: usize = 100;
 /// Longest description, in characters.
@@ -587,10 +589,10 @@ fn refuse_if_any(errors: Vec<FieldError>) -> Result<(), ApiError> {
     }
 }
 
-fn field(path: impl Into<String>, message: &str) -> FieldError {
+fn field(path: impl Into<String>, message: impl Into<String>) -> FieldError {
     FieldError {
         field: path.into(),
-        message: message.to_owned(),
+        message: message.into(),
         position: None,
     }
 }
@@ -691,18 +693,24 @@ fn check_widget(
     }
 
     let layout = widget.layout;
-    if !(0..=11).contains(&layout.x) {
-        errors.push(field(format!("{base}.layout.x"), "must be 0 to 11"));
+    if !(0..GRID_COLUMNS).contains(&layout.x) {
+        errors.push(field(
+            format!("{base}.layout.x"),
+            format!("must be 0 to {}", GRID_COLUMNS - 1),
+        ));
     }
     if !(0..=1000).contains(&layout.y) {
         errors.push(field(format!("{base}.layout.y"), "must be 0 to 1000"));
     }
-    if !(1..=12).contains(&layout.w) {
-        errors.push(field(format!("{base}.layout.w"), "must be 1 to 12"));
-    } else if layout.x.saturating_add(layout.w) > 12 {
+    if !(1..=GRID_COLUMNS).contains(&layout.w) {
         errors.push(field(
             format!("{base}.layout.w"),
-            "x + w must be at most 12",
+            format!("must be 1 to {GRID_COLUMNS}"),
+        ));
+    } else if layout.x.saturating_add(layout.w) > GRID_COLUMNS {
+        errors.push(field(
+            format!("{base}.layout.w"),
+            format!("x + w must be at most {GRID_COLUMNS}"),
         ));
     }
     if !(1..=40).contains(&layout.h) {
@@ -1040,7 +1048,7 @@ mod tests {
     fn heading(id: &str) -> Value {
         json!({
             "id": id, "title": "Traffic",
-            "layout": {"x": 0, "y": 0, "w": 12, "h": 1},
+            "layout": {"x": 0, "y": 0, "w": 60, "h": 1},
             "kind": "heading"
         })
     }
@@ -1134,7 +1142,7 @@ mod tests {
     #[test]
     fn layout_bounds_are_checked() {
         let mut widget = heading("h");
-        widget["layout"] = json!({"x": 11, "y": 0, "w": 2, "h": 1});
+        widget["layout"] = json!({"x": 59, "y": 0, "w": 2, "h": 1});
         assert_eq!(
             paths_of(one_widget(widget.clone())),
             ["definition.widgets[0].layout.w"]
@@ -1295,7 +1303,7 @@ mod tests {
     #[test]
     fn every_error_comes_back_at_once() {
         let mut bad_id = heading("bad id");
-        bad_id["layout"] = json!({"x": 0, "y": 0, "w": 13, "h": 1});
+        bad_id["layout"] = json!({"x": 0, "y": 0, "w": 61, "h": 1});
         let widget = chart(json!({"type": "bar", "split": true}), query(json!([])));
         let mut bad_chart = widget;
         bad_chart["id"] = json!("bad id");
@@ -1721,7 +1729,7 @@ mod tests {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
         let mut bad = heading("bad id");
-        bad["layout"] = json!({"x": 0, "y": 0, "w": 13, "h": 1});
+        bad["layout"] = json!({"x": 0, "y": 0, "w": 61, "h": 1});
         let response = send(
             &app,
             Method::POST,
@@ -2731,7 +2739,7 @@ mod tests {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
         let mut widget = heading("heading-traffic");
-        widget["layout"]["x"] = json!(20);
+        widget["layout"]["x"] = json!(60);
         let response = send(
             &app,
             Method::PUT,

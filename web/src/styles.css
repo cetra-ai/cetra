@@ -864,7 +864,19 @@
  * Dashboard grid (react-grid-layout). Its own stylesheet loads with the dashboard chunk, after this
  * one, so each rule here is scoped under `.react-grid-layout` to win.
  */
+/*
+ * Widgets move at once when the grid's width changes (a window resize, a zoom): an animation there
+ * trails behind the window's edge. They slide only around a drag or a resize: while one runs (the
+ * placeholder is shown), the others make room; just after it, the dropped widget settles.
+ */
 .react-grid-layout .react-grid-item.cssTransforms {
+  transition: none;
+}
+
+.react-grid-layout:has(> .react-grid-placeholder)
+  > .react-grid-item.cssTransforms:not(.react-draggable-dragging):not(.resizing),
+.dashboard-grid-settling > .react-grid-layout > .react-grid-item.cssTransforms {
+  transition-property: transform, width, height;
   transition-duration: 180ms;
   transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
 }
@@ -881,6 +893,14 @@
 /* The dragged widget lifts off the page: it is opaque, raised, and slightly larger. */
 .react-grid-layout .dashboard-cell {
   border-radius: var(--radius-md);
+}
+
+/*
+ * The lift animates only as a drag starts and while the dropped widget settles: a body otherwise
+ * changes its transform when a window resize stretches it, and must follow at once.
+ */
+.react-grid-layout .react-draggable-dragging > .dashboard-cell,
+.dashboard-grid-settling > .react-grid-layout .dashboard-cell {
   transition:
     transform 150ms cubic-bezier(0.2, 0, 0, 1),
     box-shadow 150ms cubic-bezier(0.2, 0, 0, 1);
@@ -925,7 +945,8 @@
 @media (prefers-reduced-motion: reduce) {
   .react-grid-layout,
   .react-grid-layout .react-grid-item,
-  .react-grid-layout .dashboard-cell {
+  .react-grid-layout .react-draggable-dragging > .dashboard-cell,
+  .dashboard-grid-settling > .react-grid-layout .dashboard-cell {
     transition: none;
   }
 
