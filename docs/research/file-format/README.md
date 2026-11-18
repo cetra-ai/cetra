@@ -540,6 +540,20 @@ Sizes of Parquet and Vortex are from M7.4; `pq_default`'s write speed is from th
 - **The VM was shared.** Other sessions ran on it; the load average reached 5 during some runs. Each figure is a minimum, and Parquet and Vortex ran in the same runs.
 - **G1a and G1b were measured on local disk.** They count bytes and waves, which do not depend on the store, but the S3 run of M7.4 was not repeated.
 
+## Time-series data: the columnar-format-benchmarks tests
+
+[timeseries.md](timeseries.md) runs the tests of [balicat/columnar-format-benchmarks](https://github.com/balicat/columnar-format-benchmarks) on Strata, Parquet and Vortex, using 75M rows of public EIA energy series. On that data Strata is the slowest format in nearly every test, and never the smallest:
+- full reads are 1.3–5× slower than Parquet;
+- sorted, a one-series query is 24–110× slower than Parquet.
+
+Four gaps explain it:
+- no chunk statistics on high-cardinality strings;
+- `count(*)` scans a column;
+- no run-length or delta encoding of sorted columns;
+- the per-chunk decode cost.
+
+The first two would also hurt cetra's filters and counts.
+
 ## What each format gets right and wrong
 
 The full analysis is in [parquet.md](parquet.md) and [vortex.md](vortex.md).

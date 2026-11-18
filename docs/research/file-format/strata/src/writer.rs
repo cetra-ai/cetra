@@ -42,7 +42,8 @@ pub struct StrataWriter {
     schema: SchemaRef,
     sort_key: Vec<usize>,
     config: Config,
-    converter: RowConverter,
+    /// `None` when the sort key is empty.
+    converter: Option<RowConverter>,
     last_key: Option<OwnedRow>,
     batches: Vec<RecordBatch>,
     rows: u64,
@@ -83,7 +84,9 @@ pub struct FileSummary {
 
 impl StrataWriter {
     /// A writer for `schema`, sorted by `sort_key` (column names). The first sort-key
-    /// column must be FixedSizeBinary, an integer or a timestamp.
+    /// column must be FixedSizeBinary, an integer or a timestamp. An empty `sort_key` writes
+    /// the rows in the order given, in a file with no sort key: no lookup by key, and no
+    /// merge.
     pub fn new(schema: SchemaRef, sort_key: &[&str], config: Config) -> Result<Self> {
         if config.chunk_max_rows > MAX_CHUNK_ROWS {
             return Err(StrataError::Schema {
@@ -109,7 +112,12 @@ impl StrataWriter {
                 ),
             });
         }
-        let (indexes, converter) = sort_key_indexes(&schema, sort_key)?;
+        let (indexes, converter) = if sort_key.is_empty() {
+            (Vec::new(), None)
+        } else {
+            let (indexes, converter) = sort_key_indexes(&schema, sort_key)?;
+            (indexes, Some(converter))
+        };
         Ok(Self {
             schema,
             sort_key: indexes,
@@ -134,6 +142,11 @@ impl StrataWriter {
             return Err(StrataError::TooManyRows { rows: total });
         }
 
+        let Some(converter) = &self.converter else {
+            self.rows = total;
+            self.batches.push(batch.clone());
+            return Ok(());
+        };
         let mut key_columns: Vec<ArrayRef> = Vec::with_capacity(self.sort_key.len());
         for index in &self.sort_key {
             let column = batch.column(*index);
@@ -147,7 +160,7 @@ impl StrataWriter {
             }
             key_columns.push(Arc::clone(column));
         }
-        let rows = self.converter.convert_columns(&key_columns)?;
+        let rows = converter.convert_columns(&key_columns)?;
         for i in 0..n {
             let row = rows.row(i);
             let in_order = if i == 0 {
@@ -900,6 +913,37 @@ mod tests {
         let file = StrataFile::open(store, path, None, &Config::default())
             .await
             .unwrap();
+        for column in 0..rows.num_columns() {
+            let decoded = crate::reader::read_column(&file, column).await.unwrap();
+            assert_same(decoded.as_ref(), rows.column(column).as_ref());
+        }
+    }
+
+    #[tokio::test]
+    async fn an_empty_sort_key_keeps_unsorted_rows_in_the_order_given() {
+        let sorted = wide_batch(5_000);
+        let reversed: Vec<u32> = (0..5_000u32).rev().collect();
+        let rows =
+            arrow::compute::take_record_batch(&sorted, &arrow::array::UInt32Array::from(reversed))
+                .unwrap();
+        // The sort key refuses these rows; an empty one takes them as they are.
+        let mut keyed = StrataWriter::new(wide_schema(), &SORT, Config::default()).unwrap();
+        assert!(matches!(
+            keyed.write(&rows),
+            Err(StrataError::Unsorted { .. })
+        ));
+        let mut w = StrataWriter::new(wide_schema(), &[], Config::default()).unwrap();
+        w.write(&rows.slice(0, 2_000)).unwrap();
+        w.write(&rows.slice(2_000, 3_000)).unwrap();
+        let (bytes, summary) = w.finish().unwrap();
+        assert_eq!(summary.rows, 5_000);
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("unsorted.strata");
+        store.put(&path, PutPayload::from(bytes)).await.unwrap();
+        let file = StrataFile::open(store, path, None, &Config::default())
+            .await
+            .unwrap();
+        assert_eq!(file.sort_key_column(), None);
         for column in 0..rows.num_columns() {
             let decoded = crate::reader::read_column(&file, column).await.unwrap();
             assert_same(decoded.as_ref(), rows.column(column).as_ref());

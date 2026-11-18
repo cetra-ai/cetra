@@ -8,6 +8,7 @@ mod counting;
 mod payload;
 mod pqfast;
 mod profile;
+mod series;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -102,6 +103,10 @@ async fn run() -> R<()> {
             .await
         }
         Some("merge") => merge_cmd(&args[2]).await,
+        Some("series") => {
+            let runs: usize = args.get(4).map(|s| s.parse()).transpose()?.unwrap_or(5);
+            series::series_cmd(Path::new(args.get(2).ok_or(USAGE)?), Path::new(args.get(3).ok_or(USAGE)?), runs, args.get(5..).unwrap_or_default()).await
+        }
         Some("zexp") => zexp_cmd(&args[2..]),
         Some("gexp") => gexp_cmd(&args[2], &args[3..]),
         Some("lookupcols") => lookup_cols(args.get(2).ok_or(USAGE)?).await,
@@ -118,7 +123,7 @@ async fn run() -> R<()> {
     }
 }
 
-const USAGE: &str = "usage: fmtbench gen <dir> <traces> <files> [--swe <max_trajectories> <shard>...] | query <dir|s3://bucket/key> [runs] [only] | profile <dir|s3://bucket/key> [runs] | merge <dir> (local only) | restrata <dir> [out] (local only)\n  s3 needs AWS_ENDPOINT, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION and AWS_ALLOW_HTTP=true";
+const USAGE: &str = "usage: fmtbench gen <dir> <traces> <files> [--swe <max_trajectories> <shard>...] | query <dir|s3://bucket/key> [runs] [only] | profile <dir|s3://bucket/key> [runs] | merge <dir> (local only) | restrata <dir> [out] (local only) | series <data> <out> [runs] [datasets...] (local only)\n  s3 needs AWS_ENDPOINT, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION and AWS_ALLOW_HTTP=true";
 
 // ------------------------------------------------------------------ generate
 

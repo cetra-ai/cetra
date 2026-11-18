@@ -295,7 +295,7 @@ Field sizes: 4 + 4 + 8 + 4 + 1 + 1 + 2 + 16 + 16 = 56. `const_len` is the byte l
 - A predicate on a dictionary column is evaluated once against the dictionary, which turns it into a set or range of codes.
 - A scan decodes a dictionary column's chunks as `Dictionary(UInt32, Utf8)` arrays that share the file dictionary's values, so no row's string is copied. Comparisons run on the codes: the dictionary is sorted bytewise, so the literal's position in it turns `=`, `<>`, `<`, `<=`, `>` and `>=` into comparisons of codes. Through DataFusion the columns come out as `Utf8View` built over the same values.
 
-**Row order.** The writer is given the sort key (`["trace_id", "start_time"]`). It checks that rows arrive in that order and returns `StrataError::Unsorted` otherwise.
+**Row order.** The writer is given the sort key (`["trace_id", "start_time"]`). It checks that rows arrive in that order and returns `StrataError::Unsorted` otherwise. An empty sort key writes the rows in the order given, with `sort_key_column = u32::MAX`: such a file has no sort-key lookup and cannot be merged. The time-series comparison uses it to store unsorted data as the other formats do.
 
 ### S4. Payload layer
 
