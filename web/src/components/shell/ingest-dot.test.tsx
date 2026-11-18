@@ -110,3 +110,23 @@ it("turns grey without a refetch as time passes", async () => {
     screen.getByRole("link", { name: "No spans in the last 5 minutes · last 5m ago" }),
   ).toBeInTheDocument();
 });
+
+it("keeps showing the last known state when a refetch fails", async () => {
+  await renderDot(new Date(NOW - 2 * 60_000).toISOString());
+  await screen.findByRole("link", { name: "Receiving spans · last 2m ago" });
+
+  let failures = 0;
+  server.use(
+    http.get(PROJECT, () => {
+      failures += 1;
+      return HttpResponse.json({ error: "unavailable" }, { status: 500 });
+    }),
+  );
+  // Past the 30 s refetch.
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(31_000);
+  });
+
+  expect(failures).toBeGreaterThan(0);
+  expect(screen.getByRole("link", { name: /spans/ })).toBeInTheDocument();
+});

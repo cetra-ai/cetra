@@ -175,7 +175,7 @@ function DatasetPage() {
   return (
     <div className="flex h-full min-h-0 w-full flex-1 flex-col">
       <header className="flex min-h-9 flex-wrap items-center gap-2 border-b px-3 py-1.5">
-        <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5">
+        <nav aria-label="Dataset" className="flex min-w-0 items-center gap-1.5">
           <BackLink
             fallback={
               <Link

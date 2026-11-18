@@ -31,6 +31,7 @@ export function ListToolbar({
   presets,
   columns,
   views,
+  actions,
   loaded,
   live,
   notice,
@@ -54,6 +55,8 @@ export function ListToolbar({
   presets?: ReactNode;
   columns?: ReactNode;
   views?: ReactNode;
+  /** Toolbar actions shown where the views menu used to be, e.g. bulk actions on checked rows. */
+  actions?: ReactNode;
   loaded?: number;
   live?: ReactNode;
   /** Below row 2: a notice about the list's filters, e.g. the filters carried in (D8). */
@@ -108,6 +111,7 @@ export function ListToolbar({
         />
         {columns}
         {views ? <TopBarCrumb>{views}</TopBarCrumb> : null}
+        {actions}
         {loaded !== undefined ? (
           <span className="shrink-0 text-caption text-muted-foreground">{loaded} loaded</span>
         ) : null}

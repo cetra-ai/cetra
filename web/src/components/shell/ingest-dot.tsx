@@ -11,7 +11,8 @@ const RECEIVING_WINDOW_MS = 5 * 60_000;
 /**
  * Whether the project has received spans over OTLP lately (D-C-20). Green while its last batch is
  * under five minutes old, grey when older, and grey with no time when the server has not received
- * one since it started. Renders nothing while the project loads or after it fails.
+ * one since it started. Renders nothing until the project first loads; a failed refetch keeps the
+ * last known state.
  */
 export function IngestDot({ org, project }: { org: string; project: string }) {
   const query = useQuery({ ...projectQuery(org, project), refetchInterval: 30_000 });
@@ -21,7 +22,7 @@ export function IngestDot({ org, project }: { org: string; project: string }) {
     return () => clearInterval(timer);
   }, []);
 
-  if (!query.data || query.isError) {
+  if (!query.data) {
     return null;
   }
   const at = query.data.last_ingest_at;

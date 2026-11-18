@@ -1609,6 +1609,15 @@ it("checks trace rows without opening them and offers to add them to a dataset",
   expect(router.state.location.search.trace).toBeUndefined();
 });
 
+it("keeps the bulk actions out of the breadcrumb", async () => {
+  const { user } = await renderApp("/acme/support-bot/traces");
+  await user.click(await rowBox(0));
+
+  const crumb = await screen.findByRole("navigation", { name: "Breadcrumb" });
+  expect(within(crumb).queryByRole("button", { name: "Add 1 to dataset" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Add 1 to dataset" })).toBeInTheDocument();
+});
+
 it("disables the add action for viewers and says why", async () => {
   server.use(
     http.get("/api/v1/projects/:project", () =>

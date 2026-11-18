@@ -7,11 +7,11 @@ import {
   Outlet,
   RouterProvider,
 } from "@tanstack/react-router";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { Suspense } from "react";
-import { expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { alertRulesQuery } from "@/api/queries-alerts";
 import { server } from "@/mocks/node";
 import { AlertBell } from "./alert-bell";
@@ -33,6 +33,10 @@ function alertRule(id: string, name: string, enabled: boolean) {
     updated_at: "2026-01-01T09:00:00.000000000Z",
   };
 }
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 /** Renders the bell in a project route, with an alerts route to navigate to. */
 async function renderBell() {
@@ -141,4 +145,33 @@ it("the All alerts link goes to the alerts page and closes the popover", async (
   expect(await screen.findByText("Alerts page")).toBeInTheDocument();
   expect(router.state.location.pathname).toBe("/acme/support-bot/alerts");
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+});
+
+it("keeps showing the last known count when a refetch fails", async () => {
+  server.use(
+    http.get(ALERT_RULES, () =>
+      HttpResponse.json({
+        data: [alertRule("01900000-0000-7000-8000-000000000001", "Daily cost", true)],
+        next_cursor: null,
+      }),
+    ),
+  );
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  await renderBell();
+  await screen.findByRole("button", { name: "1 alert rule firing" });
+
+  let failures = 0;
+  server.use(
+    http.get(ALERT_RULES, () => {
+      failures += 1;
+      return HttpResponse.json({ error: "unavailable" }, { status: 500 });
+    }),
+  );
+  // Past the 60 s refetch.
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(61_000);
+  });
+
+  expect(failures).toBeGreaterThan(0);
+  expect(screen.getByRole("button", { name: "1 alert rule firing" })).toBeInTheDocument();
 });

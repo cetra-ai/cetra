@@ -749,6 +749,10 @@ mod tests {
         send(&app.state, &[bearer(&seeded.ingest_key)], &message)
             .await
             .expect("exported");
+        assert_eq!(
+            app.state.last_ingest.get(seeded.project.id),
+            Some(app.state.clock.now_ns())
+        );
         let text = app
             .state
             .telemetry

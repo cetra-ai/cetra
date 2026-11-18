@@ -537,9 +537,9 @@ function TracesPage() {
                   columns={
                     <ColumnChooser columns={specs} visible={visible} onVisible={onColumns} />
                   }
-                  views={
+                  views={<SavedViewsMenu kind="traces" search={search} onApply={applyView} />}
+                  actions={
                     <>
-                      <SavedViewsMenu kind="traces" search={search} onApply={applyView} />
                       {checkedIds.size > 0 ? (
                         <DisabledReason reason={addReason}>
                           <Button

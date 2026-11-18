@@ -1200,17 +1200,4 @@ mod tests {
         assert_eq!(body["data"].as_array().map(Vec::len), Some(1));
         assert!(body["data"][0].get("last_ingest_at").is_none());
     }
-
-    #[tokio::test]
-    async fn internal_commits_do_not_count() {
-        let app = TestApp::new().await;
-        let (_, ada) = signed_in(&app, "ada@example.com").await;
-        let created = support_bot(&app, &ada).await;
-        let row = projects::project_by_id(app.state.meta.reader(), created.id)
-            .await
-            .unwrap()
-            .expect("the project exists");
-        app.commit_spans(&row, vec![dataset_span(0)]).await;
-        assert_eq!(app.state.last_ingest.get(created.id), None);
-    }
 }

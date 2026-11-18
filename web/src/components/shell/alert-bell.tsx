@@ -10,13 +10,14 @@ import { formatRelative } from "@/lib/format";
 
 /**
  * The count of enabled alert rules that are firing, with the list of them (D-C-20). Renders
- * nothing when none fires, or while the rules load or after they fail.
+ * nothing when none fires, or until the rules first load; a failed refetch keeps the last known
+ * count.
  */
 export function AlertBell({ org, project }: { org: string; project: string }) {
   const [open, setOpen] = useState(false);
   const query = useQuery({ ...alertRulesQuery(org, project), refetchInterval: 60_000 });
 
-  if (!query.data || query.isError) {
+  if (!query.data) {
     return null;
   }
   const firing = firingRules(query.data.data);

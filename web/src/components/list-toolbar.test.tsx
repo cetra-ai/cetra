@@ -199,3 +199,25 @@ it("renders the views menu in the top bar slot", async () => {
   const crumb = await screen.findByRole("navigation", { name: "Breadcrumb" });
   expect(await within(crumb).findByText("Views")).toBeInTheDocument();
 });
+
+it("renders actions in the toolbar, not in the top bar", async () => {
+  await renderInTopBar(
+    <TooltipProvider>
+      <ListToolbar
+        range={{ kind: "preset", preset: "15m" }}
+        onRange={() => undefined}
+        onRefresh={() => undefined}
+        evalOn={false}
+        onEval={() => undefined}
+        expOn={false}
+        onExp={() => undefined}
+        views={<span>Views</span>}
+        actions={<button type="button">Bulk action</button>}
+      />
+    </TooltipProvider>,
+  );
+  const crumb = await screen.findByRole("navigation", { name: "Breadcrumb" });
+  expect(within(crumb).getByText("Views")).toBeInTheDocument();
+  expect(within(crumb).queryByRole("button", { name: "Bulk action" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Bulk action" })).toBeInTheDocument();
+});
