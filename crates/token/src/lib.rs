@@ -462,7 +462,7 @@ mod tests {
             "path":"/api/internal/v1/orgs/0193a3b4-0000-7000-8000-000000000002"}"#;
         assert!(verify(&dev_sign(control_plane.as_bytes())).is_ok());
 
-        for kid in ["prod-1", "license-1", "license-2"] {
+        for kid in ["license-offline-1", "license-1", "license-2"] {
             let key = built_in_keys().find(|key| key.kid == kid).unwrap();
             assert_eq!(key.kinds, &[Kind::License], "{kid}");
 
@@ -562,16 +562,19 @@ mod tests {
 
     #[test]
     fn release_key_needs_prod_signature() {
-        let token =
-            dev_sign(fixture("payloads/active.json").as_bytes()).replacen(".dev-1.", ".prod-1.", 1);
+        let token = dev_sign(fixture("payloads/active.json").as_bytes()).replacen(
+            ".dev-1.",
+            ".license-offline-1.",
+            1,
+        );
         assert_eq!(verify(&token), Err(TokenError::BadSignature));
     }
 
     #[test]
     fn keys_are_bound_to_kinds() {
-        // A payload of kind `org` under `prod-1` fails on the signature, before the kind check.
+        // A payload of kind `org` under `license-offline-1` fails on the signature, before the kind check.
         let org = fixture("payloads/org-pro.json");
-        let token = dev_sign(org.as_bytes()).replacen(".dev-1.", ".prod-1.", 1);
+        let token = dev_sign(org.as_bytes()).replacen(".dev-1.", ".license-offline-1.", 1);
         assert_eq!(verify(&token), Err(TokenError::BadSignature));
 
         // Every kind verifies under the development key, which is bound to all three.

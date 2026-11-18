@@ -18,13 +18,13 @@ pub struct BuiltInKey {
     pub kinds: &'static [Kind],
 }
 
-/// Keys every build trusts. `prod-1`, `license-1` and `license-2` sign licences only
+/// Keys every build trusts. `license-offline-1`, `license-1` and `license-2` sign licences only
 /// (D-P-27, D-P-73). `cloud-1` and `cloud-2` sign org and control-plane tokens and never
 /// licences.
 const RELEASE_KEYS: &[BuiltInKey] = &[
     // Offline, kept by the operator (D-P-6).
     BuiltInKey {
-        kid: "prod-1",
+        kid: "license-offline-1",
         public: "AvIxTEduiC/amifl8QFxLYjXjPYON8LsreI7sL7UDWE=",
         kinds: &[Kind::License],
     },
