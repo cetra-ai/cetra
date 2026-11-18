@@ -19,7 +19,8 @@ use crate::auth::principal::Principal;
 use crate::auth::roles::{
     self, KeyScope, KeyScopes, OrgPerm, OrgRole, ProjectPerm, Role, org_rank,
 };
-use crate::meta::members::{org_role, project_override};
+use crate::demo::{DemoVisitor, org_role_for};
+use crate::meta::members::project_override;
 use crate::meta::orgs::{OrgRow, org_by_id, org_by_slug};
 use crate::meta::projects::{ProjectRow, project_by_id, project_by_slugs};
 
@@ -110,6 +111,8 @@ pub(crate) struct ProjectAccess {
     pub(crate) project: ProjectRow,
     /// Effective project role. Absent when the caller is an API key.
     pub(crate) role: Option<Role>,
+    /// The org role is the implicit demo role (D187). Always `false` for an API key.
+    pub(crate) implicit: bool,
 }
 
 /// Health probes. Later sub-phases append their handlers here.
@@ -217,10 +220,26 @@ async fn enforce(
     let outcome = if hidden_without_control_plane(&state, path) {
         Err(ApiError::NotFound)
     } else {
-        prepare(state, access, request).await
+        prepare(state.clone(), access, request).await
     };
     match outcome {
         Ok(request) => {
+            // An implicit visitor of the demo org passes the demo limits (spec 08 § Demo org).
+            // The slots are held until the handler returns: an open stream keeps its own caps.
+            let _demo = match request.extensions().get::<DemoVisitor>().copied() {
+                Some(visitor) => match state.limits.demo.admit(visitor.0, state.clock.now_ns()) {
+                    Ok(guard) => Some(guard),
+                    Err(retry) => {
+                        let mut response = ApiError::RateLimited {
+                            retry_after_s: retry.0.as_secs().max(1),
+                        }
+                        .into_response();
+                        record_access(&mut response, "denied-other");
+                        return response;
+                    }
+                },
+                None => None,
+            };
             let mut response = next.run(request).await;
             // The handler's own 404 or 400 must not look like a denial.
             record_access(&mut response, "allowed");
@@ -393,13 +412,19 @@ async fn grant_org(
     if org.state != "active" {
         return Err(ApiError::NotFound);
     }
-    let Some(role) = org_role(state.meta.reader(), org.id, user.id).await? else {
+    let Some(found) = org_role_for(state, org.id, user).await? else {
         return Err(ApiError::NotFound);
     };
-    if org_rank(role) < org_rank(perm.min_role()) {
+    if org_rank(found.role) < org_rank(perm.min_role()) {
         return Err(forbidden());
     }
-    parts.extensions.insert(OrgAccess { org, role });
+    if found.implicit {
+        parts.extensions.insert(DemoVisitor(user.id));
+    }
+    parts.extensions.insert(OrgAccess {
+        org,
+        role: found.role,
+    });
     Ok(())
 }
 
@@ -493,11 +518,11 @@ pub(crate) async fn user_project(
     if project.state != "active" || org.state != "active" {
         return Err(ApiError::NotFound);
     }
-    let Some(org_role) = org_role(state.meta.reader(), org.id, user.id).await? else {
+    let Some(found) = org_role_for(state, org.id, user).await? else {
         return Err(ApiError::NotFound);
     };
     let ov = project_override(state.meta.reader(), project.id, user.id).await?;
-    let Some(role) = roles::effective_project_role(org_role, ov) else {
+    let Some(role) = roles::effective_project_role(found.role, ov) else {
         return Err(ApiError::NotFound);
     };
     if role < perm.min_role() {
@@ -506,6 +531,7 @@ pub(crate) async fn user_project(
     Ok(ProjectAccess {
         project,
         role: Some(role),
+        implicit: found.implicit,
     })
 }
 
@@ -517,6 +543,9 @@ async fn grant_session_project(
     perm: ProjectPerm,
 ) -> Result<(), ApiError> {
     let access = user_project(state, user, key, perm).await?;
+    if access.implicit {
+        parts.extensions.insert(DemoVisitor(user.id));
+    }
     parts.extensions.insert(access);
     Ok(())
 }
@@ -565,6 +594,7 @@ async fn grant_key_project(
     parts.extensions.insert(ProjectAccess {
         project,
         role: None,
+        implicit: false,
     });
     Ok(())
 }
@@ -581,6 +611,7 @@ async fn grant_key_only_project(
     parts.extensions.insert(ProjectAccess {
         project,
         role: None,
+        implicit: false,
     });
     Ok(())
 }

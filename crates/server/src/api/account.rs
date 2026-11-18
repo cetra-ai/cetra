@@ -105,6 +105,8 @@ pub struct OrgMembership {
     pub name: String,
     /// Org role. A project override of `none` hides that project and is never returned.
     pub role: OrgRole,
+    /// The demo org (`demo.org`, D187). Its role is `viewer` for a caller without a row.
+    pub demo: bool,
 }
 
 /// Role on an org, and the caller's effective role on a project.
@@ -430,6 +432,7 @@ mod tests {
                 slug: "acme".to_owned(),
                 name: "Acme".to_owned(),
                 role: OrgRole::Owner,
+                demo: false,
             }],
         };
         let project = Project {
