@@ -366,8 +366,8 @@ export function previewRows(
   });
 }
 
-/** The widget query that draws a rule's preview and trend (the series the fixed dashboard showed
- *  for the metric), with the divisor that turns its value into the condition's unit. Latency of
+/** The widget query that draws a rule's preview and trend (the trace error rate, cost, p95 latency
+ *  or score average), with the divisor that turns its value into the condition's unit. Latency of
  *  llm spans has no preview: `undefined`. Score measures draw the average of the named score. */
 export function previewQuery(
   condition: Pick<RuleFormValues, "metric" | "target" | "scoreName">,

@@ -47,10 +47,35 @@ afterEach(() => {
 });
 
 it("reads the OK and error counts of each bucket, with missing points as 0", () => {
-  expect(histogramRows(answer(TRACES_AND_ERRORS))).toEqual([
+  expect(histogramRows(answer(TRACES_AND_ERRORS), MS0, MS0 + 3 * 60_000)).toEqual([
     { time: MS0, ok: 2, errors: 1 },
     { time: MS1, ok: 2, errors: 0 },
     { time: MS2, ok: 0, errors: 7 },
+  ]);
+});
+
+it("has a row for every bucket of the range, empty ones included", () => {
+  const TEN_MINUTES_NS = 10 * MINUTE_NS;
+  const at = (time: string) => ({ time, value: 1, rows: 1 });
+  const sparse = answer([
+    {
+      measure: 0,
+      other: false,
+      points: [at("2026-11-17T10:00:00.000Z"), at("2026-11-17T10:40:00.000Z")],
+    },
+  ]);
+  const rows = histogramRows(
+    { ...sparse, bucket_ns: TEN_MINUTES_NS },
+    Date.parse("2026-11-17T10:00:00.000Z"),
+    Date.parse("2026-11-17T11:00:00.000Z"),
+  );
+  expect(rows).toEqual([
+    { time: Date.parse("2026-11-17T10:00:00.000Z"), ok: 1, errors: 0 },
+    { time: Date.parse("2026-11-17T10:10:00.000Z"), ok: 0, errors: 0 },
+    { time: Date.parse("2026-11-17T10:20:00.000Z"), ok: 0, errors: 0 },
+    { time: Date.parse("2026-11-17T10:30:00.000Z"), ok: 0, errors: 0 },
+    { time: Date.parse("2026-11-17T10:40:00.000Z"), ok: 1, errors: 0 },
+    { time: Date.parse("2026-11-17T10:50:00.000Z"), ok: 0, errors: 0 },
   ]);
 });
 

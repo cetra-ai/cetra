@@ -29,17 +29,31 @@ const CONFIG = {
   errors: { label: "Errors", color: "var(--chart-error)" },
 } satisfies ChartConfig;
 
+const NS_PER_MS = 1_000_000;
+
 /**
- * One row per bucket with a traces count, sorted by time. The first measure counts the OK traces
- * and the second the error traces; a missing point counts as 0.
+ * One row per bucket of the grid from the bucket containing `fromMs` to the bucket containing
+ * `toMs - 1`, in steps of the answer's bucket width and aligned to the epoch, so a bucket without
+ * points is a row of 0 OK and 0 errors. The first measure counts the OK traces and the second the
+ * error traces.
  */
-export function histogramRows(answer: Schema<"WidgetSeriesResponse">): HistogramRow[] {
+export function histogramRows(
+  answer: Schema<"WidgetSeriesResponse">,
+  fromMs: number,
+  toMs: number,
+): HistogramRow[] {
+  const width = answer.bucket_ns / NS_PER_MS;
+  if (!(width > 0)) {
+    return [];
+  }
   const ok = pointTotals(answer, 0);
   const errors = pointTotals(answer, 1);
-  const times = new Set<number>([...ok.keys(), ...errors.keys()]);
-  return [...times]
-    .sort((left, right) => left - right)
-    .map((time) => ({ time, ok: ok.get(time) ?? 0, errors: errors.get(time) ?? 0 }));
+  const last = Math.floor((toMs - 1) / width) * width;
+  const rows: HistogramRow[] = [];
+  for (let time = Math.floor(fromMs / width) * width; time <= last; time += width) {
+    rows.push({ time, ok: ok.get(time) ?? 0, errors: errors.get(time) ?? 0 });
+  }
+  return rows;
 }
 
 /**
@@ -102,7 +116,7 @@ export function TracesHistogram({
   }
 
   const bucketNs = query.data.bucket_ns;
-  const rows = histogramRows(query.data);
+  const rows = histogramRows(query.data, Date.parse(from), Date.parse(to));
   const tickStyle = axisStyle(rows);
   const selected = drag ? [drag.start, drag.end].sort((left, right) => left - right) : undefined;
   const low = selected?.[0];

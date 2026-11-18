@@ -71,7 +71,10 @@ export function UserOverview({
         <h2 className="text-caption text-muted-foreground uppercase">Usage</h2>
         <WidgetGrid
           widgets={USER_OVERVIEW.widgets}
-          render={(widget) => <Widget widget={widget} context={context} onBucket={openBucket} />}
+          editing={false}
+          renderCell={(widget) => (
+            <Widget widget={widget} context={context} onBucket={openBucket} />
+          )}
         />
       </div>
     </div>

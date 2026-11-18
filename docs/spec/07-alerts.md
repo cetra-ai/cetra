@@ -18,7 +18,7 @@ Per-project alert rules over four metrics, evaluated in the background over slid
 - Rule fields: `name` (1–100, unique per project), `enabled`, `channel_ids` (≤ 10 channels of the same project), `cooldown_s` (300–604 800, default 3 600), `notify_while_firing` (default false).
 - Limits: 100 rules and 20 channels per project (D-K-5). On the cloud Free plan an org may have one enabled rule; creating or re-enabling past the plan limit is `403 plan_limit` (D178, D-K-14). Self-hosted has no limit.
 - There is no `group_by` in the MVP: a per-model cost alert is a rule with a filter (D-K-2).
-- The web preview (the alert form and the rule list) draws the dashboard's widget query that computes the same series as the old fixed-dashboard metric (same source, time column and filter). It may therefore differ from the value the evaluator computes for score measures (7-day trace lookback, D-K-17) and for `llm_span` latency (end-time window, D-K-18); the web preview does not draw `llm_span` latency at all.
+- The web preview (the alert form and the rule list) draws the dashboard's trace error rate, cost, p95 latency and score average through the widget query (same source, time column and filter). It may therefore differ from the value the evaluator computes for score measures (7-day trace lookback, D-K-17) and for `llm_span` latency (end-time window, D-K-18); the web preview does not draw `llm_span` latency at all.
 
 ## Evaluation loop
 
