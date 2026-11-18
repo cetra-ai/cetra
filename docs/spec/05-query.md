@@ -163,7 +163,7 @@ A map key is 1–256 characters, written as in the DSL. Any other field, or a `f
 **Answer.**
 
 - `series`: `{bucket_ns, series: [{measure, group, other, points: [{time, value, rows}]}]}`. `measure` is the measure's index; `group` is the breakdown value (null without a breakdown, and for the other group); `rows` is the number of source rows of the point's group in the bucket. A bucket with no rows for a series has no point; a point whose aggregate is null (e.g. a percentile over null values) has no `value`. Series come in breakdown order (largest first, other last), then measure order.
-- `total`: `{rows: [{group, other, values, previous?}]}`, one row per group in the same order (one row without a breakdown). `values[i]` is measure `i`, null when no row counted; `previous` is there with `compare`, over `[from − (to − from), from)`.
+- `total`: `{rows: [{group, other, values, previous?}]}`, one row per group in the same order (one row without a breakdown). `values[i]` is measure `i`, null when the group has no rows (a `count` whose `where` matches none of the group's rows is 0); `previous` is there with `compare`, over `[from − (to − from), from)`.
 
 Counts are integers; `rate` is 0 to 1; durations are nanoseconds; costs are summed as `Decimal128(38, 18)` and returned as numbers (D-A2-4). A non-finite or out-of-range trace cost fails the query with `query_failed`; it is not skipped.
 

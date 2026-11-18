@@ -139,7 +139,7 @@ async fn compute(
                 references_environment,
                 vec![
                     count(lit(1_i64)).alias(COUNT),
-                    exact_cost_sum().alias(VALUE),
+                    exact_cost_sum(col(traces::COST_TOTAL)).alias(VALUE),
                 ],
             )
             .await?;

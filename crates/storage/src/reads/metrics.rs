@@ -11,28 +11,26 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arrow::array::{Array, AsArray};
-use arrow::datatypes::{Int64Type, TimestampNanosecondType, UInt64Type};
+use arrow::datatypes::{Int64Type, UInt64Type};
 use arrow::record_batch::RecordBatch;
 use cetra_core::enums::{ScoreTargetKind, SpanKind};
 use cetra_core::names::environment;
 use cetra_core::schema::{scores, spans, traces};
-use datafusion::common::{NullHandling, ScalarValue, UnnestOptions};
-use datafusion::functions::datetime::expr_fn::date_bin;
+use datafusion::common::{NullHandling, UnnestOptions};
 use datafusion::functions_aggregate::expr_fn::{avg, count, sum};
 use datafusion::logical_expr::expr_fn::when;
 use datafusion::logical_expr::{Expr, LogicalPlan, col, in_subquery, lit};
 use datafusion::prelude::DataFrame;
 
-use super::buckets::{Bucket, BucketWidth, bucket_grid, resolve};
-use super::columns::{f64_at, i64_at, internal, percentile, require};
-use super::widgets::GroupBy;
+use super::buckets::{BUCKET, Bucket, bucket_expr, bucket_grid, resolve};
+use super::columns::{f64_at, i64_at, internal, percentile, require, string_at, time_at};
+use super::widgets::{GroupBy, trace_ids};
 use super::{ListScope, present, scoped_traces};
 use crate::filter::{Filter, FilterView};
 use crate::query_error::{RunError, classify};
 use crate::views::{QueryContext, TimeWindow, exact_cost_sum};
 
 const DURATION_NS: &str = "duration_ns";
-const BUCKET: &str = "bucket";
 const GROUP: &str = "group_key";
 const TRACES: &str = "traces";
 const ERRORS: &str = "errors";
@@ -267,7 +265,15 @@ pub async fn metrics(
 async fn compute(ctx: &QueryContext, request: MetricsRequest<'_>) -> Result<MetricsData, RunError> {
     let width = resolve(request.window, request.bucket)?;
     let grid = bucket_grid(request.window, width)?;
-    let ids = trace_ids(ctx, &request).await?;
+    let ids = trace_ids(
+        ctx,
+        request.window,
+        request.filter,
+        request.include_eval,
+        request.include_experiments,
+        false,
+    )
+    .await?;
     let rows = SeriesRows {
         traces: trace_rows(ctx, &request, width, &grid).await?,
         eval_cost: eval_cost(ctx, &request, width, &grid).await?,
@@ -353,7 +359,10 @@ async fn eval_cost(
             col(traces::COST_TOTAL),
         ])
         .map_err(classify)?
-        .aggregate(vec![col(BUCKET)], vec![exact_cost_sum().alias(COST)])
+        .aggregate(
+            vec![col(BUCKET)],
+            vec![exact_cost_sum(col(traces::COST_TOTAL)).alias(COST)],
+        )
         .map_err(classify)?
         .collect()
         .await
@@ -368,56 +377,8 @@ fn parsed(ctx: &QueryContext, text: Option<&str>) -> Result<Option<Filter>, RunE
     }
 }
 
-/// Scoped trace ids over the lookback day. `None` skips the semi-join: the
-/// filter is absent and both include flags are on.
-async fn trace_ids(
-    ctx: &QueryContext,
-    request: &MetricsRequest<'_>,
-) -> Result<Option<LogicalPlan>, RunError> {
-    if present(request.filter).is_none() && request.include_eval && request.include_experiments {
-        return Ok(None);
-    }
-    let start = request
-        .window
-        .from()
-        .checked_sub(BucketWidth::D1.ns())
-        .ok_or_else(out_of_range)?;
-    let window = TimeWindow::new(start, request.window.to())?;
-    let filter = parsed(ctx, request.filter)?;
-    let references_environment = filter
-        .as_ref()
-        .is_some_and(|filter| filter.references_environment);
-    let mut frame = scoped_traces(
-        ctx,
-        ListScope {
-            window: Some(window),
-            include_eval: request.include_eval,
-            include_experiments: request.include_experiments,
-        },
-        references_environment,
-    )
-    .await?;
-    frame = frame
-        .filter(at_least(traces::END_TIME, request.window.from()))
-        .map_err(classify)?;
-    if let Some(filter) = filter {
-        frame = filter.apply(frame, ctx).await.map_err(classify)?;
-    }
-    let frame = frame
-        .select(vec![col(traces::TRACE_ID)])
-        .map_err(classify)?;
-    Ok(Some(frame.logical_plan().clone()))
-}
-
-fn out_of_range() -> RunError {
+pub(super) fn out_of_range() -> RunError {
     RunError::InvalidRequest("from is out of range".to_owned())
-}
-
-fn at_least(column: &str, ns: i64) -> Expr {
-    col(column).gt_eq(Expr::Literal(
-        ScalarValue::TimestampNanosecond(Some(ns), Some("UTC".into())),
-        None,
-    ))
 }
 
 async fn span_frame(
@@ -599,7 +560,7 @@ async fn llm_rows(
             vec![
                 percentile(DURATION_NS, 0.5).alias(P50),
                 percentile(DURATION_NS, 0.95).alias(P95),
-                exact_cost_sum().alias(COST),
+                exact_cost_sum(col(spans::COST_TOTAL)).alias(COST),
             ],
         )
         .map_err(classify)?
@@ -699,7 +660,7 @@ async fn kpi_pair(ctx: &QueryContext, request: &MetricsRequest<'_>) -> Result<Ve
     ])
 }
 
-fn previous_window(window: TimeWindow) -> Result<TimeWindow, RunError> {
+pub(super) fn previous_window(window: TimeWindow) -> Result<TimeWindow, RunError> {
     let length = window
         .to()
         .checked_sub(window.from())
@@ -740,7 +701,7 @@ async fn kpi_range(
                 count(lit(1_i64)).alias(TRACES),
                 sum(errors).alias(ERRORS),
                 percentile(DURATION_NS, 0.95).alias(P95),
-                exact_cost_sum().alias(COST),
+                exact_cost_sum(col(traces::COST_TOTAL)).alias(COST),
                 sum(col(traces::TOTAL_TOKENS)).alias(traces::TOTAL_TOKENS),
             ],
         )
@@ -797,7 +758,7 @@ async fn top_model_rows(
             vec![
                 count(lit(1_i64)).alias(LLM_COUNT),
                 sum(col(spans::TOTAL_TOKENS)).alias(spans::TOTAL_TOKENS),
-                exact_cost_sum().alias(COST),
+                exact_cost_sum(col(spans::COST_TOTAL)).alias(COST),
             ],
         )
         .map_err(classify)?
@@ -909,22 +870,10 @@ fn aggregate(frame: DataFrame, grouped: bool) -> Result<DataFrame, RunError> {
                 percentile(DURATION_NS, 0.5).alias(P50),
                 percentile(DURATION_NS, 0.95).alias(P95),
                 percentile(DURATION_NS, 0.99).alias(P99),
-                exact_cost_sum().alias(COST),
+                exact_cost_sum(col(traces::COST_TOTAL)).alias(COST),
             ],
         )
         .map_err(classify)
-}
-
-fn bucket_expr(width: i64, time: &str) -> Expr {
-    date_bin(
-        Expr::Literal(ScalarValue::new_interval_mdn(0, 0, width), None),
-        col(time),
-        Expr::Literal(
-            ScalarValue::TimestampNanosecond(Some(0), Some("UTC".into())),
-            None,
-        ),
-    )
-    .alias(BUCKET)
 }
 
 fn rows_from(
@@ -1339,16 +1288,6 @@ fn score_of(row: Option<&Option<f64>>) -> Option<f64> {
     row.copied().flatten()
 }
 
-fn time_at(column: &dyn Array, index: usize) -> Result<i64, RunError> {
-    let Some(values) = column.as_primitive_opt::<TimestampNanosecondType>() else {
-        return Err(internal(format!("bucket has type {}", column.data_type())));
-    };
-    if values.is_null(index) {
-        return Err(internal("bucket is null".to_owned()));
-    }
-    Ok(values.value(index))
-}
-
 fn i64_opt(column: &dyn Array, index: usize) -> Result<Option<i64>, RunError> {
     let is_int = column.as_primitive_opt::<Int64Type>().is_some()
         || column.as_primitive_opt::<UInt64Type>().is_some();
@@ -1362,25 +1301,6 @@ fn i64_opt(column: &dyn Array, index: usize) -> Result<Option<i64>, RunError> {
         return Ok(None);
     }
     Ok(Some(i64_at(column, index)?))
-}
-
-fn string_at(column: &dyn Array, index: usize) -> Result<Option<String>, RunError> {
-    if column.is_null(index) {
-        return Ok(None);
-    }
-    if let Some(values) = column.as_string_opt::<i32>() {
-        return Ok(Some(values.value(index).to_owned()));
-    }
-    if let Some(values) = column.as_string_opt::<i64>() {
-        return Ok(Some(values.value(index).to_owned()));
-    }
-    if let Some(values) = column.as_string_view_opt() {
-        return Ok(Some(values.value(index).to_owned()));
-    }
-    Err(internal(format!(
-        "group key has type {}",
-        column.data_type()
-    )))
 }
 
 #[cfg(test)]
@@ -1401,10 +1321,11 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        Bucket, BucketWidth, GroupBy, Kpi, KpiName, MetricsData, MetricsRequest, ModelUsageRow,
-        Series, SeriesName, metrics,
+        Bucket, GroupBy, Kpi, KpiName, MetricsData, MetricsRequest, ModelUsageRow, Series,
+        SeriesName, metrics,
     };
     use crate::query_error::RunError;
+    use crate::reads::buckets::BucketWidth;
     use crate::test_support::{
         dataset_scores, dataset_spans, example_query, live_scores, live_scores_table, spans_table,
         traces_table,

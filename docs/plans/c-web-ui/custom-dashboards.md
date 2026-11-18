@@ -360,18 +360,18 @@ Members build their own dashboards. A dashboard is a free 12-column grid of widg
 
 ---
 
-## CD8 — Browser-local dashboards on the demo instance (web)
+## CD8 — Browser-local dashboards in the demo org (web)
 
-**Depends on** the demo-instance design, which defines how the UI learns that the instance is a demo (expected: a `demo` boolean in `GET /api/auth/config`) and lets a visitor read without signing in. **Do not start before that field exists in `web/src/api/schema.gen.ts`; if it is named or shaped differently, stop and ask.**
+**Depends on** plan `docs/plans/demo-org/` phase DO2, which adds `demo` to `OrgMembership` (`GET /api/auth/me`). **Do not start before that field exists in `web/src/api/schema.gen.ts`; if it is named or shaped differently, stop and ask.**
 
-**Edit** `web/src/lib/dashboards/store.ts` (new), the dashboard components of CD5, mocks, tests, spec 11 only if behaviour differs from § Dashboard → Demo instance.
+**Edit** `web/src/lib/dashboards/store.ts` (new), the dashboard components of CD5, mocks, tests, spec 11 only if behaviour differs from § Dashboard → Demo org.
 
 **Steps**
-1. `store.ts`: one `DashboardStore` type (`list`, `get`, `create`, `update`, `remove`), two implementations: `apiStore` (the CD5 calls, moved here) and `localStore` (localStorage key `${STORAGE_PREFIX}dashboards.<org>/<project>`, try/catch around every access with an in-memory fallback, as `web/src/lib/settings.ts` does). `useDashboardStore()` picks one from the auth config's `demo`.
+1. `store.ts`: one `DashboardStore` type (`list`, `get`, `create`, `update`, `remove`), two implementations: `apiStore` (the CD5 calls, moved here) and `localStore` (localStorage key `${STORAGE_PREFIX}dashboards.<org>/<project>`, try/catch around every access with an in-memory fallback, as `web/src/lib/settings.ts` does). `useDashboardStore()` picks `localStore` when the current org membership has `demo` true and the role is `viewer`, else `apiStore`.
 2. `localStore` checks the 04 § Dashboards rules with the client validation of CD5 (move it here if needed) and answers the same errors the server would (`bad_request` with paths), so the edit-mode error display works unchanged. IDs are UUIDv7 generated in the browser; `version` still increments. The 100-dashboard cap applies.
-3. On a demo instance every visitor gets the editing controls (whatever their role), and edit mode shows the banner of spec 11.
+3. With `localStore`, the switcher lists the Overview and the local dashboards only (never the project's server dashboards), the user gets the editing controls despite the viewer role, and edit mode shows the banner of spec 11.
 4. The CD5 components read and write only through the store; TanStack Query keys stay the same so invalidation does not change.
 
-**Tests**: `localStore` CRUD round trip, validation errors with paths, the cap, broken or missing localStorage (fallback), JSON that does not parse is ignored (an empty list, no crash); a page test with `demo: true` in the auth config mock: create, edit, reload (still there), no network call to `/dashboards`, the banner; with `demo: false` the API is used.
+**Tests**: `localStore` CRUD round trip, validation errors with paths, the cap, broken or missing localStorage (fallback), JSON that does not parse is ignored (an empty list, no crash); a page test with a demo viewer membership in the `/api/auth/me` mock: create, edit, reload (still there), no network call to `/dashboards`, server dashboards not listed, the banner; a demo member (not viewer) and a non-demo viewer use the API.
 
 **Done when** `just check-web` passes.

@@ -1,7 +1,14 @@
 //! Dashboard bucket widths and the grid of buckets a window gives.
 
+use datafusion::common::ScalarValue;
+use datafusion::functions::datetime::expr_fn::date_bin;
+use datafusion::logical_expr::{Expr, col};
+
 use crate::query_error::RunError;
 use crate::views::TimeWindow;
+
+/// Output column of a bucket expression.
+pub(super) const BUCKET: &str = "bucket";
 
 const NS_MINUTE: i64 = 60_000_000_000;
 const NS_HOUR: i64 = 60 * NS_MINUTE;
@@ -122,6 +129,20 @@ pub(crate) fn bucket_grid(window: TimeWindow, width: i64) -> Result<Vec<i64>, Ru
         times.push(at);
     }
     Ok(times)
+}
+
+/// `date_bin(width, time, epoch)` as [`BUCKET`]: the bucket start of each row, aligned to the
+/// Unix epoch, UTC.
+pub(super) fn bucket_expr(width: i64, time: &str) -> Expr {
+    date_bin(
+        Expr::Literal(ScalarValue::new_interval_mdn(0, 0, width), None),
+        col(time),
+        Expr::Literal(
+            ScalarValue::TimestampNanosecond(Some(0), Some("UTC".into())),
+            None,
+        ),
+    )
+    .alias(BUCKET)
 }
 
 fn align_down(time: i64, width: i64) -> Result<i64, RunError> {

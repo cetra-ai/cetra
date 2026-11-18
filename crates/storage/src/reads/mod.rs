@@ -66,8 +66,8 @@ pub use users::{
 };
 pub use widgets::{
     Agg, Breakdown, DEFAULT_BREAKDOWN_LIMIT, FieldError, GroupBy, MAX_BREAKDOWN_LIMIT, MAX_MAP_KEY,
-    MAX_MEASURES, Measure, WidgetError, WidgetQuery, WidgetSource, validate_expressions,
-    validate_shape,
+    MAX_MEASURES, Measure, Shape, TotalRow, WidgetData, WidgetError, WidgetPoint, WidgetQuery,
+    WidgetRequest, WidgetSeries, WidgetSource, validate_expressions, validate_shape, widget_query,
 };
 
 /// Sort direction for a list. Nulls are last in both directions.

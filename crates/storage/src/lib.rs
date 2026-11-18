@@ -106,16 +106,17 @@ pub use reads::{
     MetricsRequest, ModelUsageRow, Page, Point, SESSION_ERROR_TRACE_COUNT,
     SESSION_FIRST_INPUT_PREVIEW, SESSION_LAST_OUTPUT_PREVIEW, SPAN_LIST_COLUMNS,
     SPAN_REFRESH_COLUMNS, ScoreListRequest, ScoreTargets, Series, SeriesName, SessionDetailData,
-    SessionExtrasRequest, SessionListRequest, SessionSort, SortOrder, SpanListRequest,
-    SpanRefreshRequest, SpanSort, TRACE_REFRESH_STRICT_COLUMNS, TraceDetailData, TraceListRequest,
-    TraceRefreshRequest, TraceSort, TraceSpansData, TraceSpansRequest, USER_COLUMNS,
-    UserDeletionScope, UserDetailData, UserExtras, UserExtrasRequest, UserListRequest, UserSort,
-    WidgetError, WidgetQuery, WidgetSource, alert_value, eval_trace_ids, experiment_score_means,
+    SessionExtrasRequest, SessionListRequest, SessionSort, Shape, SortOrder, SpanListRequest,
+    SpanRefreshRequest, SpanSort, TRACE_REFRESH_STRICT_COLUMNS, TotalRow, TraceDetailData,
+    TraceListRequest, TraceRefreshRequest, TraceSort, TraceSpansData, TraceSpansRequest,
+    USER_COLUMNS, UserDeletionScope, UserDetailData, UserExtras, UserExtrasRequest,
+    UserListRequest, UserSort, WidgetData, WidgetError, WidgetPoint, WidgetQuery, WidgetRequest,
+    WidgetSeries, WidgetSource, alert_value, eval_trace_ids, experiment_score_means,
     experiment_scores, experiment_traces, facet, filter_trace_ids, latest_scores, match_count,
     metrics::metrics, score_list, scores_by_id, session_detail, session_extras, session_list,
     span_detail, span_list, span_refresh, trace_detail, trace_list, trace_list_plan, trace_refresh,
     trace_spans, user_deletion_scope, user_detail, user_extras, user_list, validate_expressions,
-    validate_filter, validate_shape,
+    validate_filter, validate_shape, widget_query,
 };
 pub use snapshot::CopyReport;
 pub use snapshot::{CatalogSnapshot, LiveObject};

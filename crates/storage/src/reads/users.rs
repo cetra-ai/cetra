@@ -253,7 +253,7 @@ fn aggregate_users(frame: DataFrame) -> Result<DataFrame, RunError> {
                 sum(col(traces::ERROR_COUNT)).alias(traces::ERROR_COUNT),
                 sum(error_trace_flag()?).alias(ERROR_TRACE_COUNT),
                 sum(col(traces::TOTAL_TOKENS)).alias(traces::TOTAL_TOKENS),
-                exact_cost_sum().alias(traces::COST_TOTAL),
+                exact_cost_sum(col(traces::COST_TOTAL)).alias(traces::COST_TOTAL),
             ],
         )
         .map_err(classify)?;
