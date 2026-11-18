@@ -1,12 +1,17 @@
 import { screen, waitFor } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
-import { expect, it } from "vitest";
+import { beforeEach, expect, it } from "vitest";
 import { server } from "@/mocks/node";
-import { savedViewHandlers, seedSavedViews } from "@/mocks/saved-views";
+import { savedViewHandlers, seedSavedViews, seedWithDefaultView } from "@/mocks/saved-views";
 import { renderApp } from "@/test/render";
 
 const ERRORS = "01900000-0000-7000-8000-000000000210";
 const REFUNDS = "01900000-0000-7000-8000-000000000299";
+
+// These tests use "Errors" as the shared default of Traces; the fixture has no default.
+beforeEach(() => {
+  savedViewHandlers(seedWithDefaultView());
+});
 
 /**
  * The saved-view trigger named `name`. It is the menu button: a preset chip of the same name is a

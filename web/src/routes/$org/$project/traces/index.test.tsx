@@ -13,7 +13,7 @@ import { defaultCollapsed } from "@/lib/tree";
 import { createDataset, type Dataset } from "@/mocks/generated/dataset";
 import { largeHandlers } from "@/mocks/generated/handlers";
 import { server } from "@/mocks/node";
-import { savedViewHandlers } from "@/mocks/saved-views";
+import { savedViewHandlers, seedWithDefaultView } from "@/mocks/saved-views";
 import { type StreamEmit, spanStreamHandler, traceStreamHandler } from "@/mocks/sse";
 import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
@@ -634,6 +634,7 @@ function near(url: URL, windowMs: number): boolean {
 }
 
 it("shows the plain empty state when the default filter matches nothing", async () => {
+  savedViewHandlers(seedWithDefaultView());
   server.use(
     http.get("/api/v1/projects/:project/traces", () =>
       HttpResponse.json({ data: [], next_cursor: null }),

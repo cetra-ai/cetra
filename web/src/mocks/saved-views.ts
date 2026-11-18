@@ -35,6 +35,16 @@ export function seedSavedViews(): StoredView[] {
   }));
 }
 
+/** The shared "Errors" traces view of the fixture. */
+export const ERRORS_VIEW_ID = "01900000-0000-7000-8000-000000000210";
+
+/** The fixture views with "Errors" as the shared default of Traces. The fixture has no default. */
+export function seedWithDefaultView(): StoredView[] {
+  return seedSavedViews().map((view) =>
+    view.id === ERRORS_VIEW_ID ? { ...view, is_default: true } : view,
+  );
+}
+
 /** Handlers for one in-memory store. Calling this replaces the store with `initial`. */
 export function savedViewHandlers(initial: readonly StoredView[]): HttpHandler[] {
   views = initial.map((view) => structuredClone(view));
