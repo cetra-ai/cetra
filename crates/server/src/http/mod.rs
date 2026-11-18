@@ -67,6 +67,8 @@ pub(crate) struct AppInner {
     pub(crate) oauth_key: [u8; 32],
     /// OTLP ingest core: budget, prices, `accept` and `commit` (D-G-1).
     pub(crate) ingest: crate::ingest::Ingest,
+    /// When each project last received OTLP spans (D-C-20), in memory.
+    pub(crate) last_ingest: crate::ingest::last_ingest::LastIngest,
     /// Live bus and stream slots (D-G-12).
     pub(crate) live: crate::live::LiveBus,
     /// `POST /dashboards/query` answers cached 10 s (spec 05 § Dashboard queries).

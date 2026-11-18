@@ -362,6 +362,9 @@ async fn export_request(
     let receipt = commit_in_task(state, target, normalized, reservation)
         .await
         .map_err(|error| refused(state, error))?;
+    if receipt.accepted > 0 {
+        state.last_ingest.record(project.id, now);
+    }
     state.telemetry.accept_ingest(
         Protocol::otlp_grpc,
         u64::try_from(receipt.accepted).unwrap_or(u64::MAX),

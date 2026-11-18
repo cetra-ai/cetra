@@ -6,6 +6,7 @@ pub(crate) mod environment;
 #[cfg(test)]
 mod fixtures_tests;
 pub(crate) mod grpc;
+pub(crate) mod last_ingest;
 pub(crate) mod otlp;
 
 use std::collections::HashMap;
