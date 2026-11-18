@@ -13,6 +13,11 @@ ignore = [
     # openidconnect 4.1.0 requires rsa ^0.9. The Marvin fix is rsa 0.10, which that crate does not accept.
     # The mock IdP signs with rsa 0.10. openidconnect uses the 0.9 copy to verify signatures.
     { id = "RUSTSEC-2023-0071", reason = "openidconnect 4.1.0 requires rsa ^0.9; the Marvin fix is rsa 0.10, which that crate does not accept" },
+    # Marked unmaintained on 2026-11-17 (chronotope/chrono#1768); no vulnerability. arrow requires
+    # chrono and chrono-tz, and object_store requires humantime, so we can't drop them on our own.
+    { id = "RUSTSEC-2026-0542", reason = "humantime is unmaintained; object_store 0.13 and humantime-serde require it" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained; arrow 59 requires it" },
+    { id = "RUSTSEC-2026-0555", reason = "chrono-tz is unmaintained; arrow 59 requires it" },
 ]
 
 [licenses]
