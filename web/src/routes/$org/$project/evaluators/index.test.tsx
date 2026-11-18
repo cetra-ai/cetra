@@ -18,6 +18,9 @@ function rowOf(table: HTMLElement, name: string): HTMLElement {
 
 it("lists evaluators with their kind, score and details", async () => {
   await renderApp("/acme/support-bot/evaluators");
+  expect(
+    screen.getAllByRole("heading", { level: 1 }).map((heading) => heading.textContent),
+  ).toEqual(["Evaluators"]);
 
   const table = await screen.findByRole("table", { name: "Evaluators" });
   const row = rowOf(table, "Relevance");

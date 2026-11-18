@@ -52,6 +52,9 @@ function stubHeaderSlots(grid: HTMLElement) {
 
 it("saves a column dragged to a new place as cols", async () => {
   const { router } = await renderApp("/acme/support-bot/traces");
+  expect(
+    screen.getAllByRole("heading", { level: 1 }).map((heading) => heading.textContent),
+  ).toEqual(["Traces"]);
   const grid = await screen.findByRole("grid", { name: "Traces" });
   stubHeaderSlots(grid);
   vi.useFakeTimers();

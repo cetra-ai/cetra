@@ -45,6 +45,9 @@ function errorRateAnswer(values: (number | undefined)[]) {
 
 it("lists the rules with their state", async () => {
   await renderApp(PAGE);
+  expect(
+    screen.getAllByRole("heading", { level: 1 }).map((heading) => heading.textContent),
+  ).toEqual(["Alerts"]);
 
   const table = await screen.findByRole("table", { name: "Alert rules" });
   expect(within(table).getAllByRole("row").slice(1)).toHaveLength(3);

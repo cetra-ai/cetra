@@ -157,14 +157,14 @@ export function CommandPalette() {
       <Button
         type="button"
         variant="outline"
-        className="h-7 w-36 justify-between px-2 text-caption font-normal text-muted-foreground"
+        className="h-7 w-56 justify-between px-2 text-caption font-normal text-muted-foreground"
         aria-label="Command palette"
         aria-keyshortcuts="Meta+K Control+K"
         onClick={() => setPalette(true)}
       >
         <span className="inline-flex items-center gap-1.5">
           <Search />
-          Search
+          Search or jump to…
         </span>
         <kbd className="font-mono text-caption">⌘K</kbd>
       </Button>

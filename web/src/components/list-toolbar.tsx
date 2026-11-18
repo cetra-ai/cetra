@@ -15,7 +15,6 @@ import type { RangeState } from "@/lib/time-range";
 const SEARCH_DEBOUNCE_MS = 300;
 
 export function ListToolbar({
-  title,
   range,
   onRange,
   onRefresh,
@@ -36,7 +35,6 @@ export function ListToolbar({
   notice,
   updatedAt,
 }: {
-  title: string;
   range: RangeState;
   onRange: (state: RangeState) => void;
   onRefresh: () => void;
@@ -84,7 +82,6 @@ export function ListToolbar({
   return (
     <div ref={barRef} className="shrink-0">
       <div className="flex min-h-9 items-center gap-2 overflow-x-auto border-b px-3">
-        <h1 className="shrink-0 text-body font-medium">{title}</h1>
         <TimeRangePicker state={range} onChange={onRange} />
         <Button
           type="button"

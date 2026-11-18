@@ -50,6 +50,9 @@ it("renders the four headings, the five numbers and every chart", async () => {
   const queries = listenQueries();
   try {
     await renderApp(DASHBOARD);
+    expect(
+      screen.getAllByRole("heading", { level: 1 }).map((heading) => heading.textContent),
+    ).toEqual(["Dashboard"]);
     for (const heading of HEADINGS) {
       expect(await screen.findByRole("heading", { level: 2, name: heading })).toBeInTheDocument();
     }

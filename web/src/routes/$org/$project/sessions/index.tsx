@@ -195,7 +195,6 @@ function SessionsPage() {
     <div className="flex h-full min-h-0 flex-1 flex-col">
       <TooltipProvider>
         <ListToolbar
-          title="Sessions"
           idPrefix="sessions"
           range={range}
           onRange={(next) => {

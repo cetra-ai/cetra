@@ -443,7 +443,6 @@ function TracesPage() {
             <div className="flex h-full min-h-0 flex-col">
               <TooltipProvider>
                 <ListToolbar
-                  title="Traces"
                   range={range}
                   onRange={changeRange}
                   onRefresh={() => setAnchor(Date.now())}

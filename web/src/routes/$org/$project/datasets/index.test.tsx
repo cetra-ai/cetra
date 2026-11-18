@@ -19,6 +19,9 @@ function firstDataset() {
 it("lists the datasets with their items, version and experiments", async () => {
   const dataset = firstDataset();
   await renderApp("/acme/support-bot/datasets");
+  expect(
+    screen.getAllByRole("heading", { level: 1 }).map((heading) => heading.textContent),
+  ).toEqual(["Datasets"]);
 
   const grid = await screen.findByRole("grid", { name: "Datasets" });
   const row = within(grid).getByText(dataset.name).closest('[role="row"]');

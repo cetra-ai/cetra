@@ -240,7 +240,6 @@ export function DashboardView({
     <div className="flex h-full min-h-0 flex-1 flex-col">
       <TooltipProvider>
         <ListToolbar
-          title="Dashboard"
           idPrefix="dashboard"
           range={range}
           onRange={changeRange}

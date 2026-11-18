@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
-import { Plus } from "lucide-react";
+import { ChevronsUpDown, Plus } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { authConfigQuery } from "@/api/auth";
 import { $api } from "@/api/client";
@@ -52,8 +52,15 @@ export function OrgSwitcher() {
     <>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
-          <Button variant="outline" aria-label={membership?.name ?? current}>
-            {membership?.name ?? current}
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-label={membership?.name ?? current}
+            className="h-7 gap-1 px-1.5 font-medium"
+          >
+            <span className="max-w-48 truncate">{membership?.name ?? current}</span>
+            {membership?.demo ? <Badge variant="secondary">Demo</Badge> : null}
+            <ChevronsUpDown className="size-3.5 text-muted-foreground" aria-hidden />
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start">
