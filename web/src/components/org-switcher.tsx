@@ -23,6 +23,7 @@ export function OrgSwitcher() {
   const { data: me } = $api.useSuspenseQuery("get", "/api/auth/me");
   const membership = me.orgs.find((org) => org.slug === current);
   const demo = me.orgs.find((org) => org.demo);
+  const ownOrgs = me.orgs.filter((org) => !org.demo);
   const [creating, setCreating] = useState(false);
   const { data: config } = useQuery(authConfigQuery);
   // While the config loads, creating is offered. Off on a cloud cell (D-P-31).
@@ -62,16 +63,14 @@ export function OrgSwitcher() {
               void navigate({ to: "/$org", params: { org: slug } });
             }}
           >
-            {me.orgs
-              .filter((org) => !org.demo)
-              .map((org) => (
-                <DropdownMenuRadioItem key={org.id} value={org.slug}>
-                  {org.name}
-                </DropdownMenuRadioItem>
-              ))}
+            {ownOrgs.map((org) => (
+              <DropdownMenuRadioItem key={org.id} value={org.slug}>
+                {org.name}
+              </DropdownMenuRadioItem>
+            ))}
             {demo === undefined ? null : (
               <>
-                <DropdownMenuSeparator />
+                {ownOrgs.length === 0 ? null : <DropdownMenuSeparator />}
                 <DropdownMenuRadioItem value={demo.slug}>
                   {demo.name}
                   <Badge variant="secondary">Demo</Badge>

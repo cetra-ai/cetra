@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import type { UserEvent } from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { expect, it } from "vitest";
@@ -70,6 +70,32 @@ it("lists the demo org last, badged", async () => {
   const items = screen.getAllByRole("menuitemradio");
   expect(items.map((item) => item.textContent)).toEqual(["Acme", "cetra DemoDemo"]);
   expect(items[1]).toHaveTextContent("Demo");
+  // One separator before the demo org, one before "New organization".
+  expect(within(screen.getByRole("menu")).getAllByRole("separator")).toHaveLength(2);
+});
+
+it("puts no separator above the demo org when it is the user's only org", async () => {
+  const demo = {
+    id: "01900000-0000-7000-8000-000000000020",
+    slug: "cetra-demo",
+    name: "cetra Demo",
+    role: "viewer",
+    demo: true,
+  };
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json({ user: meFixture.user, orgs: [demo] })),
+  );
+
+  const { user } = await renderApp("/cetra-demo");
+  await user.click(screen.getByRole("button", { name: "cetra Demo" }));
+  const menu = screen.getByRole("menu");
+  expect(
+    within(menu)
+      .getAllByRole("menuitemradio")
+      .map((item) => item.textContent),
+  ).toEqual(["cetra DemoDemo"]);
+  // Only the separator before "New organization".
+  expect(within(menu).getAllByRole("separator")).toHaveLength(1);
 });
 
 it("links to the create URL when users may not create orgs", async () => {
