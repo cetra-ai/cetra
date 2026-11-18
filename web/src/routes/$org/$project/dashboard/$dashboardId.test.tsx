@@ -61,6 +61,29 @@ it("lists the Overview and the project's dashboards, and opens the chosen one", 
   await waitFor(() => expect(router.state.location.pathname).toBe(CUSTOM));
 });
 
+it("the dashboard switcher sits in the breadcrumb on the dashboard", async () => {
+  await renderApp(CUSTOM);
+  await screen.findByRole("heading", { level: 2, name: "Traffic" });
+  const crumb = screen.getByRole("navigation", { name: "Breadcrumb" });
+  expect(within(crumb).getByRole("button", { name: "Switch dashboard" })).toHaveTextContent(
+    dashboardDocument.name,
+  );
+});
+
+it("the breadcrumb has no dashboard switcher on Traces after visiting the dashboard", async () => {
+  const { router } = await renderApp(CUSTOM);
+  await screen.findByRole("heading", { level: 2, name: "Traffic" });
+  router.history.push("/acme/support-bot/traces");
+  await waitFor(() => expect(router.state.location.pathname).toBe("/acme/support-bot/traces"));
+  const crumb = await screen.findByRole("navigation", { name: "Breadcrumb" });
+  expect(within(crumb).getByRole("heading", { level: 1, name: "Traces" })).toBeInTheDocument();
+  await waitFor(() =>
+    expect(
+      within(crumb).queryByRole("button", { name: "Switch dashboard" }),
+    ).not.toBeInTheDocument(),
+  );
+});
+
 it("creates a new dashboard from the switcher and opens it", async () => {
   const { router, user } = await renderApp(OVERVIEW_URL);
   await user.click(await screen.findByRole("button", { name: "Switch dashboard" }));

@@ -650,6 +650,13 @@ it("shows the plain empty state when the default filter matches nothing", async 
   expect(screen.getByText("0 loaded")).toBeInTheDocument();
 });
 
+it("the saved views menu sits in the breadcrumb", async () => {
+  savedViewHandlers([]);
+  await renderApp("/acme/support-bot/traces");
+  const crumb = await screen.findByRole("navigation", { name: "Breadcrumb" });
+  expect(await within(crumb).findByRole("button", { name: "Default view" })).toBeInTheDocument();
+});
+
 it("shows onboarding snippets when the project has no traces", async () => {
   savedViewHandlers([]);
   server.use(

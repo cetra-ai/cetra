@@ -67,7 +67,13 @@ export function DashboardSwitcher({ dashboard }: { dashboard: Dashboard | undefi
     <>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
-          <Button type="button" variant="outline" size="sm" aria-label="Switch dashboard">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            aria-label="Switch dashboard"
+            className="h-7 gap-1 px-1.5 font-medium"
+          >
             <span className="max-w-64 truncate">{current}</span>
             <ChevronDown />
           </Button>
