@@ -233,7 +233,7 @@ nightly-issue:
 eval-live:
     cargo test -p cetra-eval --test live -- --ignored --test-threads 1
 
-# Supply-chain checks: advisories, bans, licences, sources (D-P-3), for the root graph and the fuzz graph (track R M3)
+# Supply-chain checks: advisories, bans, licences, sources (D-P-3), for the root graph and the fuzz graph (track R M3). Run by hand until the first release (D187)
 deny: fuzz-lock
     cargo deny check advisories bans licenses sources
     cargo deny --manifest-path fuzz/Cargo.toml check advisories bans licenses sources
@@ -255,8 +255,8 @@ check-release: build-release
 run *args:
     cargo run -p cetra-cli -- {{args}}
 
-# Rust checks: format, lint, tests, supply chain
-check-rust: fmt-check lint test deny check-ee check-golden
+# Rust checks: format, lint, tests, licence headers, golden directories. `just deny` is off until the first release (D187)
+check-rust: fmt-check lint test check-ee check-golden
 
 # Install JS dependencies from the lockfile
 js-install:
