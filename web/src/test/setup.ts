@@ -2,6 +2,7 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, configure } from "@testing-library/react";
 import { HttpNetworkFrame } from "msw/experimental";
 import { afterAll, afterEach, beforeAll, beforeEach } from "vitest";
+import { dashboardHandlers, seedDashboards } from "../mocks/dashboards";
 import { server } from "../mocks/node";
 import { savedViewHandlers, seedSavedViews } from "../mocks/saved-views";
 import { installTestEventSource } from "./event-source";
@@ -75,7 +76,11 @@ if (typeof globalThis.IntersectionObserver === "undefined") {
 }
 
 beforeEach(() => {
-  server.use(...savedViewHandlers(seedSavedViews()), onlineRulePreviewHandler());
+  server.use(
+    ...savedViewHandlers(seedSavedViews()),
+    ...dashboardHandlers(seedDashboards()),
+    onlineRulePreviewHandler(),
+  );
 });
 
 afterEach(() => {

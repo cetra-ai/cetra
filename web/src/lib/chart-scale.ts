@@ -208,3 +208,11 @@ export function chooseBucket(fromMs: number, toMs: number): ChartBucket {
   }
   return "1d";
 }
+
+/**
+ * Ticks of a percent axis: `max` is a rate (0 to 1), so the ticks are nice percentages divided by
+ * 100. The step is at least a tenth of a percent, so that every label is different.
+ */
+export function percentTicks(max: number): number[] {
+  return niceTicks(max * 100, 4, 0.1).map((tick) => Number((tick / 100).toPrecision(12)));
+}

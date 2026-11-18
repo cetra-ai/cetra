@@ -309,6 +309,36 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/projects/{project}/saved-views/{id}",
         "delete_saved_view",
     ),
+    (
+        "get",
+        "/api/v1/projects/{project}/dashboards",
+        "list_dashboards",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/dashboards",
+        "create_dashboard",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/dashboards/{id}",
+        "get_dashboard",
+    ),
+    (
+        "patch",
+        "/api/v1/projects/{project}/dashboards/{id}",
+        "update_dashboard",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/dashboards/{id}",
+        "delete_dashboard",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/dashboards/query",
+        "query_widget",
+    ),
     ("post", "/api/v1/projects/{project}/sql", "run_sql"),
     (
         "get",
@@ -370,7 +400,6 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/projects/{project}/alert-events",
         "list_project_alert_events",
     ),
-    ("get", "/api/v1/projects/{project}/metrics", "get_metrics"),
     ("get", "/api/v1/projects/{project}/facets", "get_facets"),
     (
         "get",
@@ -736,7 +765,8 @@ const QUERY_OR_BODY: &[&str] = &[
     "list_scores",
     "list_saved_views",
     "get_saved_view",
-    "get_metrics",
+    "list_dashboards",
+    "get_dashboard",
     "get_facets",
     "list_deletions",
     "get_deletion",
@@ -773,7 +803,6 @@ const READ_OPERATIONS: &[&str] = &[
     "list_users",
     "get_user",
     "list_scores",
-    "get_metrics",
     "get_facets",
     "get_experiment_results",
     "compare_experiments",
@@ -800,8 +829,8 @@ const TAGS: &[&str] = &[
     "model_prices",
     "schema",
     "saved_views",
+    "dashboards",
     "sql",
-    "metrics",
     "media",
     "internal",
     "deletions",
@@ -1024,10 +1053,14 @@ fn document_lint() {
             // The handler always answers 204. CSRF is the shared origin check.
         } else if *id == "create_scores" || *id == "create_key_scores" {
             expected_errors.extend(["400", "401", "402", "403", "404", "413", "429"]);
-        } else if *id == "delete_score" || *id == "delete_saved_view" {
+        } else if *id == "delete_score" || *id == "delete_saved_view" || *id == "delete_dashboard" {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
-        } else if *id == "create_saved_view" || *id == "update_saved_view" {
-            // 409: unsharing a view whose owner was deleted.
+        } else if *id == "create_saved_view"
+            || *id == "update_saved_view"
+            || *id == "create_dashboard"
+            || *id == "update_dashboard"
+        {
+            // 409: unsharing a view whose owner was deleted, a dashboard past its limit, or a stale version.
             expected_errors.extend(["400", "401", "403", "404", "409", "413", "415", "429"]);
         } else if *id == "post_feedback" {
             expected_errors.extend(["400", "401", "402", "403", "404", "413", "429"]);
@@ -1051,7 +1084,7 @@ fn document_lint() {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
         } else if *id == "post_org_sso_domain_verify" || *id == "delete_org_sso_provider" {
             expected_errors.extend(["401", "403", "404", "409", "429"]);
-        } else if *id == "run_sql" {
+        } else if *id == "run_sql" || *id == "query_widget" {
             expected_errors.extend(["400", "401", "403", "404", "413", "415", "422", "429"]);
         } else if *id == "create_deletion" {
             expected_errors.extend(["400", "401", "403", "404", "409", "422", "429"]);
@@ -1195,6 +1228,7 @@ fn document_lint() {
         ("ApiKeyPage", "ApiKey"),
         ("PersonalTokenPage", "PersonalToken"),
         ("SavedViewPage", "SavedView"),
+        ("DashboardPage", "DashboardSummary"),
         ("LlmConnectionPage", "LlmConnection"),
         ("DeletionPage", "Deletion"),
         ("EvaluatorPage", "Evaluator"),
@@ -1365,7 +1399,6 @@ fn check_property_names(schema: &Value, owner: &str) {
 fn assert_exclusions(document: &Value) {
     const EXPECTED: &[&str] = &[
         "get_facets",
-        "get_metrics",
         "get_session",
         "get_user",
         "list_sessions",
@@ -1479,6 +1512,7 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "ApiKeyPage",
         "PersonalTokenPage",
         "SavedViewPage",
+        "DashboardPage",
         "LlmConnectionPage",
         "DeletionPage",
         "EvaluatorPage",

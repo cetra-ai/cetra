@@ -6,7 +6,7 @@ type Session = Schema<"SessionSummary">;
 
 /**
  * KPIs over the loaded session rows. The session list filters sessions, so the
- * metrics endpoint cannot reproduce these numbers.
+ * widget query cannot reproduce these numbers.
  */
 export type SessionStats = {
   sessions: number;

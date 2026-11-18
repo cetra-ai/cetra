@@ -22,7 +22,7 @@ import { RulePanel } from "./rule-panel";
 const ORG = "acme";
 const PROJECT = "support-bot";
 const RULE = "/api/v1/projects/:project/alert-rules/:id";
-const METRICS = "/api/v1/projects/:project/metrics";
+const WIDGET = "/api/v1/projects/:project/dashboards/query";
 
 /** Renders the panel inside the project context, with a root route for its links. */
 async function renderPanel(
@@ -94,22 +94,20 @@ it("has no Open page link; the list's layout controls open the page layout", asy
 
 it("shows the metric against its threshold above the history", async () => {
   server.use(
-    http.get(METRICS, () =>
+    http.post(WIDGET, () =>
       HttpResponse.json({
+        shape: "series",
         bucket_ns: 300_000_000_000,
-        from: "2026-01-01T00:00:00.000Z",
-        to: "2026-01-02T00:00:00.000Z",
-        kpis: [],
         series: [
           {
-            metric: "error_rate",
+            measure: 0,
+            other: false,
             points: [
-              { time: "2026-01-01T00:00:00Z", value: 0.02 },
-              { time: "2026-01-01T00:05:00Z", value: 0.08 },
+              { time: "2026-01-01T00:00:00Z", value: 0.02, rows: 1 },
+              { time: "2026-01-01T00:05:00Z", value: 0.08, rows: 1 },
             ],
           },
         ],
-        top_models: [],
       }),
     ),
   );

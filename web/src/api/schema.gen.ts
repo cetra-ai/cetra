@@ -1309,6 +1309,78 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{project}/dashboards": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List dashboards
+         * @description Dashboards of the project, by name then id. Leaves out the definition; get one dashboard for its widgets. Readable with a read key and a read-only token.
+         */
+        get: operations["list_dashboards"];
+        put?: never;
+        /**
+         * Create a dashboard
+         * @description Creates a dashboard at version 1. Every widget query is checked, and every filter is parsed, before the write. A project holds at most 100 dashboards (409). A session or a read-write personal access token with role member or above; API keys cannot write dashboards.
+         */
+        post: operations["create_dashboard"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/dashboards/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Get one widget's data
+         * @description Answers one widget query over `[from, to)`: a series (one value per bucket) or a total (one value over the range, with `compare` also the previous range). Spec 05 § Dashboard queries. The dashboard's `filter` is a traces expression, and the default exclusions apply: evaluation traces (`environment = cetra-eval`) and experiment traces are left out unless `include_eval` or `include_experiments` is set. A read: a read-only personal access token and a `read` key may call it. Results are cached for 10 seconds per project and body.
+         */
+        post: operations["query_widget"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/dashboards/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get a dashboard
+         * @description One dashboard with its definition. Any other id is 404.
+         */
+        get: operations["get_dashboard"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete a dashboard
+         * @description Deletes the dashboard. Same roles as create.
+         */
+        delete: operations["delete_dashboard"];
+        options?: never;
+        head?: never;
+        /**
+         * Update a dashboard
+         * @description Changes the fields given; omitted fields are unchanged. `version` must be the stored version, else 409 with the stored version in `detail`. A successful update raises the version by one. Same roles as create.
+         */
+        patch: operations["update_dashboard"];
+        trace?: never;
+    };
     "/api/v1/projects/{project}/dataset-trends": {
         parameters: {
             query?: never;
@@ -2087,26 +2159,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/projects/{project}/metrics": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get metrics
-         * @description Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Series have one point per bucket. Latencies and TTFT are nanoseconds. Costs are USD. Results are cached for 10 seconds. The evaluation cost series always counts evaluation traces (spec 05 § Dashboard metrics).
-         */
-        get: operations["get_metrics"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/projects/{project}/models": {
         parameters: {
             query?: never;
@@ -2849,6 +2901,11 @@ export interface components {
             next_cursor: string | null;
         };
         /**
+         * @description How a measure aggregates its rows.
+         * @enum {string}
+         */
+        AggBody: "count" | "count_distinct" | "sum" | "avg" | "min" | "max" | "p50" | "p75" | "p90" | "p95" | "p99" | "rate";
+        /**
          * @description What a rule measures and when it breaches (D-K-2).
          *
          *     Fields that do not apply to `metric` must be absent. A stored or returned
@@ -3284,6 +3341,15 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** @description The split of a widget query by one field. */
+        BreakdownBody: {
+            /** @description The field the rows are grouped by. */
+            field: string;
+            /** @description Groups kept, 1 to 20. Default 5. */
+            limit?: number;
+            /** @description Whether the rows of every other value form one more group. Default true. */
+            other?: boolean;
+        };
         /**
          * @description The period of a rule budget, in UTC.
          * @enum {string}
@@ -3343,6 +3409,27 @@ export interface components {
             /** @description The channel accepted the message. */
             ok: boolean;
         };
+        /** @description How a chart widget draws its data. */
+        Chart: {
+            /**
+             * Format: int64
+             * @description Fades the buckets with fewer rows than this, 1 to 1000. Bar only.
+             */
+            fade_below?: number;
+            /** @description Shows each row's share of the first measure's total. Table only. */
+            share?: boolean;
+            /** @description One small chart per group. Line only. */
+            split?: boolean;
+            /** @description Stacks the series. Bar and area only. */
+            stacked?: boolean;
+            /** @description The chart type. */
+            type: components["schemas"]["ChartType"];
+        };
+        /**
+         * @description Type of a chart widget.
+         * @enum {string}
+         */
+        ChartType: "line" | "bar" | "area" | "bar_h" | "number" | "table";
         /**
          * @description One column of a logical view.
          *
@@ -3521,6 +3608,15 @@ export interface components {
             secret?: string;
             /** @description `slack` and `webhook`: the URL. */
             url?: string;
+        };
+        /** @description Body of `POST /api/v1/projects/{project}/dashboards`. */
+        CreateDashboard: {
+            /** @description The widgets. */
+            definition: components["schemas"]["Definition"];
+            /** @description Free text, 0 to 500 characters. */
+            description?: string;
+            /** @description Display name, 1 to 100 characters after trimming. */
+            name: string;
         };
         /** @description `POST /api/v1/projects/{project}/datasets` body. */
         CreateDatasetRequest: {
@@ -3804,6 +3900,89 @@ export interface components {
             /** @description The stored token, without the secret. */
             token: components["schemas"]["PersonalToken"];
         };
+        /** @description A dashboard with its definition. */
+        Dashboard: {
+            /**
+             * Format: date-time
+             * @description Creation time, nanoseconds since the Unix epoch. JSON is RFC 3339.
+             */
+            created_at: string;
+            /**
+             * Format: uuid
+             * @description Creator. Omitted when the user is gone.
+             */
+            created_by?: string;
+            /** @description The widgets. */
+            definition: components["schemas"]["Definition"];
+            /** @description Free text, 0 to 500 characters. */
+            description?: string;
+            /**
+             * Format: uuid
+             * @description Dashboard id.
+             */
+            id: string;
+            /** @description Display name. Names are not unique. */
+            name: string;
+            /**
+             * Format: date-time
+             * @description Last update, nanoseconds since the Unix epoch. JSON is RFC 3339.
+             */
+            updated_at: string;
+            /**
+             * Format: uuid
+             * @description Last editor. Omitted when the user is gone.
+             */
+            updated_by?: string;
+            /**
+             * Format: int64
+             * @description Incremented by every change. A `PATCH` names the version it read.
+             */
+            version: number;
+        };
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        DashboardPage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["DashboardSummary"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+        };
+        /** @description A dashboard without its definition, as the list returns it. */
+        DashboardSummary: {
+            /**
+             * Format: date-time
+             * @description Creation time, nanoseconds since the Unix epoch. JSON is RFC 3339.
+             */
+            created_at: string;
+            /**
+             * Format: uuid
+             * @description Creator. Omitted when the user is gone.
+             */
+            created_by?: string;
+            /** @description Free text. */
+            description?: string;
+            /**
+             * Format: uuid
+             * @description Dashboard id.
+             */
+            id: string;
+            /** @description Display name. */
+            name: string;
+            /**
+             * Format: date-time
+             * @description Last update, nanoseconds since the Unix epoch. JSON is RFC 3339.
+             */
+            updated_at: string;
+            /**
+             * Format: uuid
+             * @description Last editor. Omitted when the user is gone.
+             */
+            updated_by?: string;
+            /**
+             * Format: int64
+             * @description Incremented by every change.
+             */
+            version: number;
+        };
         /** @description A dataset (D-J-2, D-J-3). */
         Dataset: {
             /**
@@ -3943,6 +4122,11 @@ export interface components {
             data: components["schemas"]["DatasetVersion"][];
             /** @description Opaque cursor for the next page, or null when this is the last page. */
             next_cursor: string | null;
+        };
+        /** @description The stored definition of a dashboard: the widgets, in order. */
+        Definition: {
+            /** @description Up to 50 widgets. */
+            widgets: components["schemas"]["Widget"][];
         };
         /** @description `POST …/datasets/{dataset}/items/delete` body (D-J-23): 1 to 1 000 distinct live item ids. */
         DeleteItemsRequest: {
@@ -5346,36 +5530,33 @@ export interface components {
             skipped: number;
         };
         /**
-         * @description One headline number.
-         *
-         *     `previous` covers the same-length period just before `from`. Spec 05 § Dashboard metrics.
-         */
-        Kpi: {
-            /** @description Which headline. */
-            metric: components["schemas"]["KpiMetric"];
-            /**
-             * Format: double
-             * @description Value over the previous range. Omitted when that range has no data.
-             */
-            previous?: number;
-            /**
-             * Format: double
-             * @description Value over `[from, to)`. Omitted when the range has no data.
-             */
-            value?: number;
-        };
-        /**
-         * @description Headline metrics.
-         *
-         *     Spec 05 § Dashboard metrics.
-         * @enum {string}
-         */
-        KpiMetric: "traces" | "error_rate" | "latency_p95" | "cost_total" | "total_tokens";
-        /**
          * @description Which latency a `latency_p95` rule measures.
          * @enum {string}
          */
         LatencyTarget: "trace" | "llm_span";
+        /** @description Position and size of a widget on the 12-column grid. */
+        Layout: {
+            /**
+             * Format: int64
+             * @description Height in rows, 1 to 40.
+             */
+            h: number;
+            /**
+             * Format: int64
+             * @description Width in columns, 1 to 12; `x + w` is at most 12.
+             */
+            w: number;
+            /**
+             * Format: int64
+             * @description Column, 0 to 11.
+             */
+            x: number;
+            /**
+             * Format: int64
+             * @description Row, 0 to 1000.
+             */
+            y: number;
+        };
         /**
          * @description Where the instance licence stands (D-P-7).
          * @enum {string}
@@ -5505,6 +5686,17 @@ export interface components {
             /** @description The signed-in user. */
             user: components["schemas"]["User"];
         };
+        /** @description One measure of a widget query. */
+        MeasureBody: {
+            /** @description How the rows aggregate. */
+            agg: components["schemas"]["AggBody"];
+            /** @description The field aggregated. Absent for `count` and `rate`. */
+            field?: string;
+            /** @description Name shown in the legend, 0 to 60 characters. Not part of the query. */
+            label?: string;
+            /** @description A filter over the source view. Required for `rate`. */
+            where?: string;
+        };
         /** @description A user as seen by the other members of an org. */
         MemberUser: {
             /** @description Email address. */
@@ -5564,16 +5756,9 @@ export interface components {
         /** @description Message speaker. Known values are `system`, `user`, `assistant`, and `tool`. Any other string is kept. */
         MessageRole: string;
         /**
-         * @description Series name.
+         * @description One bucket of a time series.
          *
-         *     Latencies and TTFT are nanoseconds as `f64`. Costs are USD. Spec 05 § Dashboard metrics.
-         * @enum {string}
-         */
-        MetricName: "traces" | "errors" | "error_rate" | "latency_p50" | "latency_p95" | "latency_p99" | "cost" | "input_tokens" | "output_tokens" | "cache_read_tokens" | "cache_write_tokens" | "ttft_p50" | "ttft_p95" | "llm_latency_p50" | "llm_latency_p95" | "cost_by_model" | "score_avg" | "eval_cost";
-        /**
-         * @description One bucket of a series.
-         *
-         *     Spec 05 § Dashboard metrics.
+         *     Spec 05 § Dashboard queries, spec 06 (score summaries).
          */
         MetricPoint: {
             /**
@@ -5588,62 +5773,19 @@ export interface components {
             value?: number;
         };
         /**
-         * @description One time series.
+         * @description Width of each bucket of a widget query.
          *
-         *     Every series has one point per bucket from `from` to `to`. Spec 05 § Dashboard metrics.
-         */
-        MetricSeries: {
-            /** @description Group key: the `group_by` value, a model, or a score name. Omitted when the series is not split. */
-            group?: string;
-            /** @description Which series. */
-            metric: components["schemas"]["MetricName"];
-            /** @description One point per bucket. */
-            points: components["schemas"]["MetricPoint"][];
-        };
-        /**
-         * @description Width of each metrics bucket.
-         *
-         *     Spec 05 § Dashboard metrics.
+         *     Spec 05 § Dashboard queries.
          * @enum {string}
          */
         MetricsBucket: "auto" | "1m" | "5m" | "10m" | "15m" | "30m" | "1h" | "6h" | "12h" | "1d";
         /**
-         * @description Dimension that splits series which are not already split.
+         * @description Dimension that splits a widget's series.
          *
-         *     Spec 05 § Dashboard metrics.
+         *     Spec 05 § Dashboard queries.
          * @enum {string}
          */
         MetricsGroupBy: "model" | "environment" | "release";
-        /**
-         * @description Dashboard response.
-         *
-         *     Spec 05 § Dashboard metrics.
-         */
-        MetricsResponse: {
-            /**
-             * Format: int64
-             * @description Resolved bucket width, nanoseconds.
-             */
-            bucket_ns: number;
-            /**
-             * Format: date-time
-             * @description Inclusive range start, nanoseconds since the Unix epoch. JSON is RFC 3339.
-             */
-            from: string;
-            /** @description Split applied to series that are not already split. Omitted when absent. */
-            group_by?: components["schemas"]["MetricsGroupBy"];
-            /** @description Headline numbers for the range and the previous range of the same length. */
-            kpis: components["schemas"]["Kpi"][];
-            /** @description One point per bucket, for every series. */
-            series: components["schemas"]["MetricSeries"][];
-            /**
-             * Format: date-time
-             * @description Exclusive range end, nanoseconds since the Unix epoch. JSON is RFC 3339.
-             */
-            to: string;
-            /** @description At most 10 models, by cost descending. */
-            top_models: components["schemas"]["ModelUsage"][];
-        };
         /** @description Media kind. Known values are `image`, `video`, and `audio`. Any other string is kept. */
         Modality: string;
         /** @description A price row. */
@@ -5800,30 +5942,6 @@ export interface components {
              * @description USD per 1M reasoning tokens.
              */
             price_reasoning?: number;
-        };
-        /**
-         * @description One model in the cost ranking.
-         *
-         *     At most 10, by cost descending. Spec 05 § Dashboard metrics.
-         */
-        ModelUsage: {
-            /**
-             * Format: double
-             * @description Sum of `cost_total`, USD. Omitted when every span omitted the field.
-             */
-            cost_total?: number;
-            /**
-             * Format: int64
-             * @description Number of `llm` spans.
-             */
-            llm_count: number;
-            /** @description Model name. */
-            model: string;
-            /**
-             * Format: int64
-             * @description Sum of `total_tokens`. Omitted when every span omitted the field.
-             */
-            total_tokens?: number;
         };
         /** @description One item to add. */
         NewDatasetItem: {
@@ -6102,6 +6220,8 @@ export interface components {
          *     Spec 04 `org_members`.
          */
         OrgMembership: {
+            /** @description The demo org (`demo.org`, D187). Its role is `viewer` for a caller without a row. */
+            demo: boolean;
             /** @description Org id. */
             id: components["schemas"]["OrgId"];
             /** @description Display name. */
@@ -7785,6 +7905,17 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** @description One group of a total, with every measure. Spec 05 § Dashboard queries. */
+        TotalRow: {
+            /** @description The breakdown value. Omitted without a breakdown, and for the other group. */
+            group?: string;
+            /** @description Whether this is the group of every other value. */
+            other: boolean;
+            /** @description With `compare`, the same values over the previous range of the same length. */
+            previous?: (number | null)[];
+            /** @description The value of each measure, in query order. Null when the group has no rows. */
+            values: (number | null)[];
+        };
         /**
          * @description Trace summary plus its span tree.
          *
@@ -7994,6 +8125,20 @@ export interface components {
             secret?: string;
             /** @description `slack` and `webhook`: a new URL. */
             url?: string;
+        };
+        /** @description Body of `PATCH /api/v1/projects/{project}/dashboards/{id}`. Omitted fields are unchanged. */
+        UpdateDashboard: {
+            /** @description The widgets. */
+            definition?: components["schemas"]["Definition"];
+            /** @description Free text, 0 to 500 characters. Omitted: unchanged. `""`: cleared (stored as none). */
+            description?: string;
+            /** @description Display name, 1 to 100 characters after trimming. */
+            name?: string;
+            /**
+             * Format: int64
+             * @description The version the caller read. Must be the stored one, else `409`.
+             */
+            version: number;
         };
         /**
          * @description `PATCH /api/v1/projects/{project}/datasets/{dataset}` body. An absent field is unchanged;
@@ -8303,6 +8448,128 @@ export interface components {
             description: string;
             /** @description View name. */
             name: components["schemas"]["ViewName"];
+        };
+        /** @description One widget of a dashboard. */
+        Widget: {
+            /** @description Chart settings. Chart widgets only. */
+            chart?: components["schemas"]["Chart"];
+            /** @description 1 to 64 characters of `[A-Za-z0-9_-]`, unique in the dashboard. */
+            id: string;
+            /** @description Chart or heading. */
+            kind: components["schemas"]["WidgetKind"];
+            /** @description Position and size. */
+            layout: components["schemas"]["Layout"];
+            /** @description The data. Chart widgets only. */
+            query?: components["schemas"]["WidgetQueryBody"];
+            /** @description Title, 0 to 100 characters (1 to 100 for a heading). */
+            title: string;
+        };
+        /**
+         * @description Kind of a widget.
+         * @enum {string}
+         */
+        WidgetKind: "chart" | "heading";
+        /** @description One bucket of a series. Spec 05 § Dashboard queries. */
+        WidgetPoint: {
+            /**
+             * Format: int64
+             * @description Source rows of the group in the bucket.
+             */
+            rows: number;
+            /**
+             * Format: date-time
+             * @description Bucket start, nanoseconds since the Unix epoch. JSON is RFC 3339.
+             */
+            time: string;
+            /**
+             * Format: double
+             * @description The aggregate over the bucket. Omitted when it is null.
+             */
+            value?: number;
+        };
+        /** @description A widget's query: one source, its measures and an optional breakdown. */
+        WidgetQueryBody: {
+            /** @description The split, if any. */
+            breakdown?: components["schemas"]["BreakdownBody"];
+            /** @description A filter over the source view. */
+            filter?: string;
+            /** @description One to six measures. */
+            measures: components["schemas"]["MeasureBody"][];
+            /** @description The view the query reads. */
+            source: components["schemas"]["WidgetSourceBody"];
+        };
+        /** @description Body of `POST /api/v1/projects/{project}/dashboards/query`. Spec 05 § Dashboard queries. */
+        WidgetQueryRequest: {
+            /** @description Bucket width. Defaults to `auto`. Ignored for `total`. */
+            bucket?: components["schemas"]["MetricsBucket"];
+            /** @description `total` only: also the value over the previous range of the same length. Default false. */
+            compare?: boolean;
+            /** @description The dashboard's filter, a traces expression. */
+            filter?: string;
+            /**
+             * Format: date-time
+             * @description Inclusive range start, RFC 3339.
+             */
+            from: string;
+            /** @description The dashboard's split. Ignored when the query has its own breakdown, and for scores. */
+            group_by?: components["schemas"]["MetricsGroupBy"];
+            /** @description Include traces from the evaluation environment. Default false. */
+            include_eval?: boolean;
+            /** @description Include experiment traces. Default false. */
+            include_experiments?: boolean;
+            /** @description The widget's query. */
+            query: components["schemas"]["WidgetQueryBody"];
+            /** @description `series` or `total`. */
+            shape: components["schemas"]["WidgetShape"];
+            /**
+             * Format: date-time
+             * @description Exclusive range end, RFC 3339.
+             */
+            to: string;
+        };
+        /** @description A widget answer, tagged by `shape`. */
+        WidgetQueryResponse: (components["schemas"]["WidgetSeriesResponse"] & {
+            /** @enum {string} */
+            shape: "series";
+        }) | (components["schemas"]["WidgetTotalResponse"] & {
+            /** @enum {string} */
+            shape: "total";
+        });
+        /** @description One measure of one group over the buckets. Spec 05 § Dashboard queries. */
+        WidgetSeries: {
+            /** @description The breakdown value. Omitted without a breakdown, and for the other group. */
+            group?: string;
+            /** @description Index of the measure in the query. */
+            measure: number;
+            /** @description Whether this is the group of every other value. */
+            other: boolean;
+            /** @description One point per bucket with rows, in time order. */
+            points: components["schemas"]["WidgetPoint"][];
+        };
+        /** @description A series answer. `shape` is `series`. Spec 05 § Dashboard queries. */
+        WidgetSeriesResponse: {
+            /**
+             * Format: int64
+             * @description Width of every bucket, nanoseconds.
+             */
+            bucket_ns: number;
+            /** @description The series: breakdown order (largest first, other last), then measure order. */
+            series: components["schemas"]["WidgetSeries"][];
+        };
+        /**
+         * @description Whether a widget query answers one value per bucket or one value over the range.
+         * @enum {string}
+         */
+        WidgetShape: "series" | "total";
+        /**
+         * @description The view a widget query reads.
+         * @enum {string}
+         */
+        WidgetSourceBody: "traces" | "spans" | "scores";
+        /** @description A total answer. `shape` is `total`. Spec 05 § Dashboard queries. */
+        WidgetTotalResponse: {
+            /** @description One row per group, in breakdown order (other last). One row without a breakdown. */
+            rows: components["schemas"]["TotalRow"][];
         };
     };
     responses: never;
@@ -14260,6 +14527,525 @@ export interface operations {
             };
         };
     };
+    list_dashboards: {
+        parameters: {
+            query?: {
+                /** @description Maximum number of items to return (1–1000, default 50). */
+                limit?: components["schemas"]["Limit"];
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of dashboards. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DashboardPage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    create_dashboard: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateDashboard"];
+            };
+        };
+        responses: {
+            /** @description The created dashboard. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Dashboard"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is not JSON. */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    query_widget: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WidgetQueryRequest"];
+            };
+        };
+        responses: {
+            /** @description The widget's answer, tagged by `shape`. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WidgetQueryResponse"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is not JSON. */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_dashboard: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dashboard id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The dashboard. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Dashboard"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_dashboard: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dashboard id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    update_dashboard: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dashboard id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateDashboard"];
+            };
+        };
+        responses: {
+            /** @description The updated dashboard. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Dashboard"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is not JSON. */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     list_experiment_trends: {
         parameters: {
             query: {
@@ -18395,107 +19181,6 @@ export interface operations {
             };
             /** @description Too many requests. */
             429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    get_metrics: {
-        parameters: {
-            query: {
-                /** @description Inclusive range start. RFC 3339 or epoch milliseconds. */
-                from: components["schemas"]["TimeParam"];
-                /** @description Exclusive range end. RFC 3339 or epoch milliseconds. */
-                to: components["schemas"]["TimeParam"];
-                /** @description Bucket width. Defaults to `auto` (~120 points). */
-                bucket?: components["schemas"]["MetricsBucket"];
-                /** @description Filter DSL expression. Applied to the view each series is computed on (spec 05). */
-                filter?: string;
-                /** @description Split series that are not already split. */
-                group_by?: components["schemas"]["MetricsGroupBy"];
-                /** @description Include traces from the evaluation environment. Default false. Spec 05 § Default exclusions. */
-                include_eval?: boolean;
-                /** @description Include experiment traces. Default false. Spec 05 § Default exclusions. */
-                include_experiments?: boolean;
-            };
-            header?: never;
-            path: {
-                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
-                project: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Dashboard metrics. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["MetricsResponse"];
-                };
-            };
-            /** @description The request is malformed or a filter is invalid. */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description No credentials, or the credentials are invalid. */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description The resource does not exist. */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Too many requests. */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description The server is busy or a dependency is unavailable. Retry later. */
-            503: {
                 headers: {
                     [name: string]: unknown;
                 };

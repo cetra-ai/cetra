@@ -1,5 +1,5 @@
 import type { Schema } from "@/api/types";
-import { PALETTE } from "@/components/charts/metric-chart";
+import { PALETTE } from "@/lib/metrics";
 
 /** Categorical labels shown before the rest is folded into "other". */
 const MAX_LABELS = 4;

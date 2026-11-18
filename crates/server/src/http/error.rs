@@ -140,6 +140,22 @@ pub(crate) enum ApiError {
     /// invalid statement is reported on the `query` field.
     #[error("sql error")]
     Sql(#[source] RunError),
+    /// Like [`Self::Query`], but an invalid expression is reported on `field`, a path the
+    /// caller names (e.g. `definition.widgets[0].query.filter`).
+    #[error("query error")]
+    QueryAt {
+        /// The field of the invalid expression.
+        field: String,
+        /// The refusal.
+        #[source]
+        error: RunError,
+    },
+    /// A dashboard's `version` is not the stored one (409). `current` is the stored version.
+    #[error("stale version")]
+    StaleVersion {
+        /// The stored version.
+        current: i64,
+    },
     /// The server failed. The source is logged; the response detail is generic.
     #[error("internal error")]
     Internal(#[source] Box<dyn StdError + Send + Sync>),
@@ -152,7 +168,7 @@ impl ApiError {
         if let Self::Internal(source) = self {
             tracing::error!(error = %source, "internal error");
         }
-        if let Self::Query(error) | Self::Sql(error) = self {
+        if let Self::Query(error) | Self::Sql(error) | Self::QueryAt { error, .. } = self {
             if matches!(error, RunError::Internal(_)) {
                 tracing::error!(kind = error.kind(), "query failed");
             } else {
@@ -216,6 +232,13 @@ impl ApiError {
             }
             Self::Query(error) => query_problem(error, "filter", "invalid filter"),
             Self::Sql(error) => query_problem(error, "query", "invalid query"),
+            Self::QueryAt { field, error } => query_problem(error, field, "invalid filter"),
+            Self::StaleVersion { current } => Problem::new(
+                ProblemCode::Conflict,
+                Some(format!(
+                    "the dashboard changed; current version is {current}"
+                )),
+            ),
             Self::Internal(_) => {
                 Problem::new(ProblemCode::Internal, Some("internal error".to_owned()))
             }
@@ -275,7 +298,7 @@ impl IntoResponse for ApiError {
 
 impl ApiError {
     /// The problem response for this error, logged as [`Self::log`] does. Takes a reference, so
-    /// one error can answer every request that shared it (the metrics cache, D-M-11).
+    /// one error can answer every request that shared it (the widget cache, D-M-11).
     pub(crate) fn to_response(&self) -> Response {
         self.log();
         let mut headers = HeaderMap::new();
@@ -583,6 +606,43 @@ mod tests {
             problem.errors[0].position,
             Some(TextPosition { line: 2, column: 7 })
         );
+    }
+
+    #[test]
+    fn query_at_names_the_given_field_with_its_position() {
+        let problem = ApiError::QueryAt {
+            field: "definition.widgets[1].query.filter".to_owned(),
+            error: RunError::Invalid(InvalidQuery {
+                message: "unexpected token".to_owned(),
+                position: Some(Position { line: 1, column: 4 }),
+            }),
+        }
+        .problem();
+        assert_eq!(problem.status, 400);
+        assert_eq!(problem.code, ProblemCode::InvalidFilter);
+        assert_eq!(problem.detail.as_deref(), Some("invalid filter"));
+        assert_eq!(problem.errors.len(), 1);
+        assert_eq!(
+            problem.errors[0].field,
+            "definition.widgets[1].query.filter"
+        );
+        assert_eq!(problem.errors[0].message, "unexpected token");
+        assert_eq!(
+            problem.errors[0].position,
+            Some(TextPosition { line: 1, column: 4 })
+        );
+    }
+
+    #[test]
+    fn stale_version_is_409_with_the_stored_version() {
+        let problem = ApiError::StaleVersion { current: 7 }.problem();
+        assert_eq!(problem.status, 409);
+        assert_eq!(problem.code, ProblemCode::Conflict);
+        assert_eq!(
+            problem.detail.as_deref(),
+            Some("the dashboard changed; current version is 7")
+        );
+        assert!(problem.errors.is_empty());
     }
 
     #[test]

@@ -20,12 +20,12 @@ use super::{
     P2, P3, ns_at, window,
 };
 use crate::format::FORMAT_VERSION;
+use crate::test_support::headline_kpis;
 use crate::{
-    Bucket, BucketWidth, DeletionStatus, ListScope, MAX_PAGE, MetricsRequest, QueryContext,
-    QueryOptions, ScoreListRequest, ScoreTargets, SessionListRequest, SessionSort, SortOrder,
-    SpanListRequest, SpanSort, Storage, TimeWindow, TraceListRequest, TraceSort, UserListRequest,
-    UserSort, latest_scores, metrics, score_list, session_list, span_detail, span_list,
-    trace_detail, trace_list, user_list,
+    DeletionStatus, ListScope, MAX_PAGE, QueryContext, QueryOptions, ScoreListRequest,
+    ScoreTargets, SessionListRequest, SessionSort, SortOrder, SpanListRequest, SpanSort, Storage,
+    TimeWindow, TraceListRequest, TraceSort, UserListRequest, UserSort, latest_scores, score_list,
+    session_list, span_detail, span_list, trace_detail, trace_list, user_list,
 };
 
 /// Time allowed for each read request.
@@ -322,23 +322,19 @@ async fn project_dump(storage: &Storage, project: ProjectId) -> Value {
     let users = all_users(storage, project).await;
 
     let ctx = context(storage, project).await;
-    let kpis = metrics(
-        &ctx,
-        MetricsRequest {
-            window: time_window(),
-            bucket: Bucket::Fixed(BucketWidth::D1),
-            filter: None,
-            group_by: None,
-            include_eval: false,
-            include_experiments: true,
-            timeout: TIMEOUT,
-        },
-    )
-    .await
-    .unwrap_or_else(|error| panic!("metrics of a golden project: {error}"))
-    .kpis
-    .iter()
-    .map(|kpi| json!({ "name": format!("{:?}", kpi.name), "value": kpi.value, "previous": kpi.previous }))
+    let headline = headline_kpis(&ctx, time_window())
+        .await
+        .unwrap_or_else(|error| panic!("KPI totals of a golden project: {error}"));
+    let kpis = [
+        "Traces",
+        "ErrorRate",
+        "LatencyP95",
+        "CostTotal",
+        "TotalTokens",
+    ]
+    .into_iter()
+    .zip(headline)
+    .map(|(name, (value, previous))| json!({ "name": name, "value": value, "previous": previous }))
     .collect::<Vec<Value>>();
 
     json!({

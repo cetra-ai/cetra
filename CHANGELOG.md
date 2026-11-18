@@ -32,11 +32,13 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Added
 
+- A demo org that every signed-in user can read (`demo.org`): users see it last in their org switcher as an implicit viewer, without a membership row (D187).
 - A filter sidebar on the Traces, Spans, Sessions and Users lists: per-field values with counts, keys of metadata and attributes, and histograms with range selection for durations, costs and tokens, all written into the filter text. Backed by the new `GET /facets` endpoint (D-C-13).
 - Preset filters (Errors, Slow, Expensive, Has score, LLM), value autocomplete in the filter editor, a "+ Filter" button with a searchable field picker and token input for `IN`, and wrapping chips in a new filter row.
 - Lists opened without URL parameters keep the range, flags and compatible filters of the last list (D-C-14).
 - A right-click menu on filterable list cells: filter, exclude, copy, open the session or user.
-- Dashboard: sections (Volume, Quality, Latency, Cost) that collapse, KPI sparklines, a shared hover cursor across charts, drag to zoom the range, per-score small charts, and top-model rows that open the filtered traces (D-C-15).
+- Dashboard: KPI sparklines, a shared hover cursor across charts, drag to zoom the range, per-score small charts, and top-model rows that open the filtered traces (D-C-15).
+- Custom dashboards (D-C-16): any number of named dashboards per project on a 12-column grid that members edit by dragging, resizing and a widget editor; widgets are line, bar, area, horizontal bar, number and table charts, and headings. The built-in Overview is a read-only preset of the same widgets that can be duplicated. API: `GET/POST /dashboards`, `GET/PATCH/DELETE /dashboards/{id}` and `POST /dashboards/query`, which computes one widget from traces, spans or scores with up to six measures, a breakdown and filters.
 - Online rules: `GET /online-rules/stats` answers the last 24 hours per rule, with the finished jobs by hour and the score summary with an hourly series (D-I-50), and the reworked Online rules page shows them beside a full-width list with a side panel: status, spend, hourly jobs, score summary and trend, and recent failures.
 - Experiments:
   - The list is full width, with a status strip, metadata tags, score badges with the change since the previous run, errors, latency and cost, and a trend chart per dataset. Experiments open in the list's panel (drawer, bottom or page).
@@ -221,3 +223,7 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 - Cloud cells must set `entitlements.control_plane = true`; without it, `/api/internal/v1/*`
   answers 404 and org and control-plane tokens are refused (D-P-50).
+
+### Removed
+
+- `GET /metrics`: every chart now reads `POST /dashboards/query` (D-C-16).

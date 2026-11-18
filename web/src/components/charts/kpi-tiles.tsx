@@ -1,19 +1,6 @@
 import { cn } from "cn";
 import { ArrowDown, ArrowUp, Minus } from "lucide-react";
-import type { Schema } from "@/api/types";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import {
-  epochMs,
-  formatKpi,
-  type KpiDelta,
-  type KpiDirection,
-  type KpiMetric,
-  kpiDelta,
-  type MetricName,
-  type MetricSeries,
-  seriesByMetric,
-} from "@/lib/metrics";
+import type { KpiDelta, KpiDirection } from "@/lib/metrics";
 
 /**
  * What a rise in a metric means. `up-good`: a rise is good news. `up-bad`: a
@@ -21,117 +8,9 @@ import {
  */
 export type KpiTone = "up-good" | "up-bad" | "neutral";
 
-export const KPI_TONE: Record<KpiMetric, KpiTone> = {
-  traces: "neutral",
-  error_rate: "up-bad",
-  latency_p95: "up-bad",
-  cost_total: "up-bad",
-  total_tokens: "neutral",
-};
-
 /** A change of at least this many percent shows as a ratio (`×6`) instead. */
 const RATIO_FROM_PCT = 500;
 const SPARK_HEIGHT = 20;
-const TOKEN_METRICS: readonly MetricName[] = [
-  "input_tokens",
-  "output_tokens",
-  "cache_read_tokens",
-  "cache_write_tokens",
-];
-/** The series behind the KPI sparklines: a grouped one has no sparkline. */
-const TREND_METRICS: ReadonlySet<MetricName> = new Set<MetricName>([
-  "traces",
-  "errors",
-  "error_rate",
-  "latency_p95",
-  "cost",
-  ...TOKEN_METRICS,
-]);
-
-/** Per-bucket values of each tile's sparkline, in time order. `null` is a gap. */
-export type KpiTrend = Partial<Record<KpiMetric, readonly (number | null)[]>>;
-
-const TILES: { metric: KpiMetric; label: string }[] = [
-  { metric: "traces", label: "Traces" },
-  { metric: "error_rate", label: "Error rate" },
-  { metric: "latency_p95", label: "p95 latency" },
-  { metric: "cost_total", label: "Cost" },
-  { metric: "total_tokens", label: "Tokens" },
-];
-
-export function KpiRow({
-  kpis,
-  trend,
-  onSelect,
-}: {
-  kpis: readonly Schema<"Kpi">[];
-  trend?: KpiTrend;
-  onSelect?: (metric: KpiMetric) => void;
-}) {
-  return (
-    <div className="grid grid-cols-2 gap-2 md:grid-cols-5">
-      {TILES.map((tile) => (
-        <KpiTile
-          key={tile.metric}
-          tile={tile}
-          kpi={kpis.find((item) => item.metric === tile.metric)}
-          trend={trend?.[tile.metric]}
-          onSelect={onSelect}
-        />
-      ))}
-    </div>
-  );
-}
-
-/** The KPI row while its data loads: each tile's label, with a bar where the value goes. */
-export function KpiRowSkeleton() {
-  return (
-    <div className="grid grid-cols-2 gap-2 md:grid-cols-5">
-      {TILES.map((tile) => (
-        <div key={tile.metric} className="flex h-16 flex-col justify-center rounded-md border px-3">
-          <span className="text-muted-foreground text-caption">{tile.label}</span>
-          <Skeleton className="mt-1 h-4 w-16" />
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function KpiTile({
-  tile,
-  kpi,
-  trend,
-  onSelect,
-}: {
-  tile: (typeof TILES)[number];
-  kpi?: Schema<"Kpi">;
-  trend?: readonly (number | null)[];
-  onSelect?: (metric: KpiMetric) => void;
-}) {
-  const delta = kpiDelta(kpi ?? {});
-  const value = delta.value === undefined ? "—" : formatKpi(tile.metric, delta.value);
-  const previous =
-    delta.previous === undefined ? "no data" : formatKpi(tile.metric, delta.previous);
-  return (
-    <Tooltip>
-      <TooltipTrigger
-        type="button"
-        className="focus-ring flex min-h-16 flex-col justify-center rounded-md border px-3 py-1 text-left"
-        aria-label={`${tile.label}: ${value}`}
-        onClick={() => onSelect?.(tile.metric)}
-      >
-        <span className="text-muted-foreground text-caption">{tile.label}</span>
-        <span className="flex items-baseline gap-2">
-          <span className="font-mono text-body tabular-nums">{value}</span>
-          <Delta tone={KPI_TONE[tile.metric]} delta={delta} />
-        </span>
-        <Sparkline values={trend} />
-      </TooltipTrigger>
-      <TooltipContent>Previous period: {previous}</TooltipContent>
-    </Tooltip>
-  );
-}
-
 export function Delta({ tone, delta }: { tone: KpiTone; delta: KpiDelta }) {
   const Icon = delta.direction === "up" ? ArrowUp : delta.direction === "down" ? ArrowDown : Minus;
   return (
@@ -179,7 +58,7 @@ function formatChange(changePct: number): string {
  * A small line under the value. Gaps break the line. Nothing is drawn with
  * fewer than two present values.
  */
-function Sparkline({ values }: { values?: readonly (number | null)[] }) {
+export function Sparkline({ values }: { values?: readonly (number | null)[] }) {
   if (!values) {
     return null;
   }
@@ -227,60 +106,6 @@ function Sparkline({ values }: { values?: readonly (number | null)[] }) {
         ))}
     </svg>
   );
-}
-
-/**
- * The sparkline values for each KPI tile, one per bucket in time order. Counts
- * and costs are summed over their series, tokens over the four token metrics
- * (`null` when all four lack a value), error rate and p95 latency take the
- * first series. A response grouped by model has no sparklines: none of the
- * tiles has one value per bucket then.
- */
-export function kpiTrend(response: Schema<"MetricsResponse">): KpiTrend {
-  if (response.series.some((item) => item.group !== undefined && TREND_METRICS.has(item.metric))) {
-    return {};
-  }
-  const grouped = seriesByMetric(response);
-  const pick = (names: readonly MetricName[]): MetricSeries[] =>
-    names.flatMap((name) => grouped.get(name) ?? []);
-  return {
-    traces: trendOf(pick(["traces"]), "sum"),
-    error_rate: trendOf(pick(["error_rate"]), "first"),
-    latency_p95: trendOf(pick(["latency_p95"]), "first"),
-    cost_total: trendOf(pick(["cost"]), "sum"),
-    total_tokens: trendOf(pick(TOKEN_METRICS), "sum"),
-  };
-}
-
-function trendOf(series: readonly MetricSeries[], combine: "sum" | "first"): (number | null)[] {
-  const byTime = series.map((item) => {
-    const values = new Map<number, number>();
-    for (const point of item.points) {
-      const time = epochMs(point.time);
-      if (time !== undefined && point.value !== undefined) {
-        values.set(time, point.value);
-      }
-    }
-    return values;
-  });
-  const times = new Set<number>();
-  for (const item of series) {
-    for (const point of item.points) {
-      const time = epochMs(point.time);
-      if (time !== undefined) {
-        times.add(time);
-      }
-    }
-  }
-  return [...times]
-    .sort((left, right) => left - right)
-    .map((time) => {
-      if (combine === "first") {
-        return byTime[0]?.get(time) ?? null;
-      }
-      const values = byTime.map((map) => map.get(time)).filter(isNumber);
-      return values.length === 0 ? null : values.reduce((sum, value) => sum + value, 0);
-    });
 }
 
 function isNumber(value: number | null | undefined): value is number {

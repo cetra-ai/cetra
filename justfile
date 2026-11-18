@@ -250,6 +250,19 @@ check-release: build-release
 run *args:
     cargo run -p cetra-cli -- {{args}}
 
+# Run the demo data generator (tools/demo), e.g. `just demo -- --help`
+demo *args:
+    cargo run -q -p cetra-demo -- {{args}}
+
+# Build the cetra-demo image (D187): a static musl binary and the fixtures, staged in target/demo-image, then the image from that directory (tools/demo/Dockerfile)
+demo-image tag="cetra-demo:dev":
+    CC_x86_64_unknown_linux_musl=musl-gcc cargo build --release --locked -p cetra-demo --target x86_64-unknown-linux-musl
+    rm -rf target/demo-image
+    mkdir -p target/demo-image/fixtures
+    cp "${CARGO_TARGET_DIR:-target}/x86_64-unknown-linux-musl/release/cetra-demo" target/demo-image/
+    cp -r fixtures/otlp target/demo-image/fixtures/otlp
+    docker build -f tools/demo/Dockerfile -t {{tag}} target/demo-image
+
 # Rust checks: format, lint, tests, supply chain
 check-rust: fmt-check lint test deny check-ee check-golden
 

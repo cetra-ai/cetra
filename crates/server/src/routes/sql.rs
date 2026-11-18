@@ -22,6 +22,8 @@ use tokio::sync::oneshot;
 use crate::api::common::ProblemCode;
 use crate::api::sql::{SqlColumnInfo, SqlQueryRequest, SqlQueryResult};
 use crate::auth::roles::{ProjectPerm, Role};
+use crate::config::DemoConfig;
+use crate::demo::DemoVisitor;
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError, field_error};
@@ -206,6 +208,7 @@ impl SqlFormat {
 async fn run_sql(
     State(state): State<AppState>,
     Extension(access): Extension<ProjectAccess>,
+    visitor: Option<Extension<DemoVisitor>>,
     headers: HeaderMap,
     error::Json(body): error::Json<SqlQueryRequest>,
 ) -> Result<Response, ApiError> {
@@ -213,7 +216,8 @@ async fn run_sql(
     let query_len = body.query.len();
     let format = negotiate(&headers);
     let Some(export) = format.export() else {
-        let result = run_json(&state, &access, body).await;
+        let demo = visitor.map(|_| &state.config.demo);
+        let result = run_json(&state, &access, body, demo).await;
         log_end(access.project.id, "json", query_len, started, &result);
         return result.map(|result| error::Json(result).into_response());
     };
@@ -232,13 +236,19 @@ async fn run_sql(
     }
 }
 
-/// Checks the request and runs it as JSON.
+/// Checks the request and runs it as JSON. For an implicit visitor of the demo org (`demo`), the
+/// row count and the time limit are lowered to the demo limits, not refused (spec 08 § Demo org).
 async fn run_json(
     state: &AppState,
     access: &ProjectAccess,
     body: SqlQueryRequest,
+    demo: Option<&DemoConfig>,
 ) -> Result<SqlQueryResult, ApiError> {
-    let checked = check_request(body)?;
+    let mut checked = check_request(body)?;
+    if let Some(demo) = demo {
+        checked.limit = checked.limit.min(demo.sql_max_rows);
+        checked.timeout = checked.timeout.min(demo.sql_timeout);
+    }
     let ctx = open_query_windowed(
         state,
         access.project.org_id,
@@ -691,6 +701,7 @@ mod tests {
 
     use super::*;
     use crate::auth::roles::{OrgRole, ProjectOverride};
+    use crate::demo::tests::{signed_in, world_with};
     use crate::meta::members::set_project_override;
     use crate::test_support::{Seeded, TestApp, TestResponse, set_limits};
 
@@ -1119,6 +1130,67 @@ mod tests {
             &body,
         )
         .await;
+        assert_eq!(
+            response.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        assert_eq!(response.problem().code, ProblemCode::QueryTimeout);
+    }
+
+    /// An implicit visitor's console answer is capped at the demo limits (spec 08 § Demo org):
+    /// the row count and the time limit are lowered; a member's answer is not.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_implicit_visitor_is_capped_at_the_demo_limits() {
+        let w = world_with(|demo| {
+            demo.sql_max_rows = 3;
+            demo.sql_timeout = Duration::from_secs(1);
+        })
+        .await;
+        w.app.load_example_dataset(w.project).await;
+        let visitor = signed_in(&w.app, "visitor@example.com", false).await;
+        let path = format!("/api/v1/projects/{}/sql", w.project);
+        let rows = json!({"query": "SELECT span_id FROM spans ORDER BY span_id", "limit": 5000});
+
+        let response = w
+            .app
+            .request(Method::POST, &path)
+            .header("cookie", &visitor.cookie)
+            .json(&rows)
+            .send()
+            .await;
+        assert_eq!(response.status, StatusCode::OK);
+        let body: Value = response.json();
+        assert_eq!(body["rows"].as_array().unwrap().len(), 3, "{body}");
+        assert_eq!(body["truncated"], true);
+
+        let response = w
+            .app
+            .request(Method::POST, &path)
+            .header("cookie", &w.member.cookie)
+            .json(&rows)
+            .send()
+            .await;
+        assert_eq!(response.status, StatusCode::OK);
+        let body: Value = response.json();
+        assert_eq!(body["rows"].as_array().unwrap().len(), 14, "{body}");
+        assert_eq!(body["truncated"], false);
+
+        // The slow query of the test above, asked for 60 s: the visitor's 1 s limit applies.
+        let slow = json!({
+            "query": "SELECT sum(length(a.span_kind)) FROM spans AS a CROSS JOIN spans AS b \
+                      CROSS JOIN spans AS c CROSS JOIN spans AS d CROSS JOIN spans AS e \
+                      CROSS JOIN spans AS f CROSS JOIN spans AS g CROSS JOIN spans AS h",
+            "timeout_ms": 60000,
+        });
+        let response = w
+            .app
+            .request(Method::POST, &path)
+            .header("cookie", &visitor.cookie)
+            .json(&slow)
+            .send()
+            .await;
         assert_eq!(
             response.status,
             StatusCode::UNPROCESSABLE_ENTITY,

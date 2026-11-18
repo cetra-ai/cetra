@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::api::account::{CreateOrgRequest, OrgMembership, OrgRole, UpdateOrgRequest};
 use crate::api::common::{FieldError, Page, PageParams, ProblemCode};
 use crate::auth::principal::{self, Principal};
+use crate::demo::{is_demo_org, orgs_for};
 use crate::http::AppState;
 use crate::http::access::{Access, OrgAccess, RouteDef};
 use crate::http::error::{self, ApiError};
@@ -69,11 +70,19 @@ async fn list_orgs(
     error::Query(params): error::Query<PageParams>,
 ) -> Result<error::Json<Page<OrgMembership>>, ApiError> {
     let user = principal::session_user(&principal)?;
-    let rows = orgs::orgs_of_user(state.meta.reader(), user.id).await?;
+    let rows = orgs_for(&state, user.id, user.is_instance_admin).await?;
+    // The demo org sorts after every real name, so the cursor order holds (D187).
     let items = rows
         .into_iter()
-        .filter(|(org, _)| org.state == "active")
-        .map(|(org, role)| (org.name.clone(), org.id.to_string(), membership(&org, role)))
+        .filter(|(org, _, _)| org.state == "active")
+        .map(|(org, role, demo)| {
+            let key = if demo {
+                format!("\u{10ffff}{}", org.name)
+            } else {
+                org.name.clone()
+            };
+            (key, org.id.to_string(), membership(&org, role, demo))
+        })
         .collect();
     Ok(error::Json(page_named(
         items,
@@ -117,15 +126,20 @@ async fn create_org(
         })
         .await?;
     tracing::info!(target: "audit", %user_id, org_id = %org.id, "org created");
+    let demo = is_demo_org(&state.config, org.id);
     Ok((
         StatusCode::CREATED,
-        error::Json(membership(&org, OrgRole::Owner)),
+        error::Json(membership(&org, OrgRole::Owner, demo)),
     )
         .into_response())
 }
 
-async fn get_org(Extension(access): Extension<OrgAccess>) -> error::Json<OrgMembership> {
-    error::Json(membership(&access.org, access.role))
+async fn get_org(
+    State(state): State<AppState>,
+    Extension(access): Extension<OrgAccess>,
+) -> error::Json<OrgMembership> {
+    let demo = is_demo_org(&state.config, access.org.id);
+    error::Json(membership(&access.org, access.role, demo))
 }
 
 async fn update_org(
@@ -141,17 +155,19 @@ async fn update_org(
         .meta
         .write(move |conn| Box::pin(async move { orgs::rename_org(conn, id, &stored, now).await }))
         .await?;
+    let demo = is_demo_org(&state.config, access.org.id);
     let mut org = access.org;
     org.name = name;
-    Ok(error::Json(membership(&org, access.role)))
+    Ok(error::Json(membership(&org, access.role, demo)))
 }
 
-fn membership(org: &OrgRow, role: OrgRole) -> OrgMembership {
+fn membership(org: &OrgRow, role: OrgRole, demo: bool) -> OrgMembership {
     OrgMembership {
         id: org.id,
         slug: org.slug.clone(),
         name: org.name.clone(),
         role,
+        demo,
     }
 }
 

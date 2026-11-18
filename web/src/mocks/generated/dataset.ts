@@ -86,15 +86,6 @@ export type Dataset = {
     includeExperiments: boolean,
     window: { from?: number; to?: number },
   ): Schema<"EndUserDetail"> | undefined;
-  /** With `userId`, only that user's traces count (UP-5, UP-9). */
-  metrics(
-    from: number,
-    to: number,
-    bucket: Schema<"MetricsBucket"> | undefined,
-    includeEval: boolean,
-    includeExperiments: boolean,
-    userId: string | undefined,
-  ): Schema<"MetricsResponse">;
 };
 
 export function createDataset(options: { seed: number; now: number; traces: number }): Dataset {
@@ -194,17 +185,6 @@ export function createDataset(options: { seed: number; now: number; traces: numb
         right.end_time.localeCompare(left.end_time),
       );
       return { user, sessions: sessions.slice(0, 100) };
-    },
-    metrics(from, to, bucket, includeEval, includeExperiments, userId) {
-      const scoped =
-        userId === undefined ? traces : traces.filter((trace) => trace.user_id === userId);
-      return metricsFrom(
-        visibleTraces(scoped, includeEval, includeExperiments),
-        scoped.filter((trace) => trace.environment === "cetra-eval"),
-        from,
-        to,
-        bucket,
-      );
     },
   };
 }
@@ -1201,243 +1181,7 @@ function userScores(rows: readonly Schema<"TraceSummary">[]): Schema<"UserScore"
     }));
 }
 
-function metricsFrom(
-  traces: readonly Schema<"TraceSummary">[],
-  evalTraces: readonly Schema<"TraceSummary">[],
-  from: number,
-  to: number,
-  bucket: Schema<"MetricsBucket"> | undefined,
-): Schema<"MetricsResponse"> {
-  const widthMs = bucketWidth(bucket, from, to);
-  // Buckets sit on multiples of their width from the epoch; the first one may start before
-  // `from` and the last one is the bucket holding `to - 1` (spec 05, dashboard metrics).
-  const firstStart = Math.floor(from / widthMs) * widthMs;
-  const lastStart = Math.floor((to - 1) / widthMs) * widthMs;
-  const times: number[] = [];
-  for (let time = firstStart; time <= lastStart; time += widthMs) {
-    times.push(time);
-  }
-  const inRange = traces.filter((trace) => {
-    const start = Date.parse(trace.start_time);
-    return start >= from && start < to;
-  });
-  const buckets = times.map(() => [] as Schema<"TraceSummary">[]);
-  for (const trace of inRange) {
-    const slot = Math.floor(Date.parse(trace.start_time) / widthMs) - Math.floor(from / widthMs);
-    buckets[slot]?.push(trace);
-  }
-  const previousFrom = from - (to - from);
-  const previous = traces.filter((trace) => {
-    const start = Date.parse(trace.start_time);
-    return start >= previousFrom && start < from;
-  });
-  const series: Schema<"MetricSeries">[] = [
-    seriesOf("traces", times, buckets, (rows) => rows.length),
-    seriesOf(
-      "errors",
-      times,
-      buckets,
-      (rows) => rows.filter((trace) => trace.status === "error").length,
-    ),
-    seriesOf("error_rate", times, buckets, (rows) =>
-      rows.length === 0
-        ? undefined
-        : rows.filter((trace) => trace.status === "error").length / rows.length,
-    ),
-    seriesOf("latency_p50", times, buckets, (rows) =>
-      percentile(
-        rows.map((trace) => trace.duration_ns),
-        50,
-      ),
-    ),
-    seriesOf("latency_p95", times, buckets, (rows) =>
-      percentile(
-        rows.map((trace) => trace.duration_ns),
-        95,
-      ),
-    ),
-    seriesOf("latency_p99", times, buckets, (rows) =>
-      percentile(
-        rows.map((trace) => trace.duration_ns),
-        99,
-      ),
-    ),
-    seriesOf("cost", times, buckets, (rows) => sum(rows, (trace) => trace.cost_total ?? 0)),
-    seriesOf("input_tokens", times, buckets, (rows) =>
-      sum(rows, (trace) => trace.input_tokens ?? 0),
-    ),
-    seriesOf("output_tokens", times, buckets, (rows) =>
-      sum(rows, (trace) => trace.output_tokens ?? 0),
-    ),
-    ...modelSeries(times, buckets),
-    ...scoreSeries(times, buckets),
-    seriesOf(
-      "eval_cost",
-      times,
-      times.map((time) =>
-        evalTraces.filter((trace) => {
-          const start = Date.parse(trace.start_time);
-          return start >= from && start >= time && start < time + widthMs && start < to;
-        }),
-      ),
-      (rows) => sum(rows, (trace) => trace.cost_total ?? 0),
-    ),
-  ];
-  return {
-    from: rfc3339(from),
-    to: rfc3339(to),
-    bucket_ns: widthMs * 1_000_000,
-    kpis: kpis(inRange, previous),
-    series,
-    top_models: topModels(inRange),
-  };
-}
-
-function seriesOf(
-  metric: Schema<"MetricName">,
-  times: readonly number[],
-  buckets: readonly Schema<"TraceSummary">[][],
-  value: (rows: readonly Schema<"TraceSummary">[]) => number | undefined,
-  group?: string,
-): Schema<"MetricSeries"> {
-  return {
-    metric,
-    ...(group ? { group } : {}),
-    points: times.map((time, index) => {
-      const next = value(buckets[index] ?? []);
-      return next === undefined ? { time: rfc3339(time) } : { time: rfc3339(time), value: next };
-    }),
-  };
-}
-
-function modelSeries(
-  times: readonly number[],
-  buckets: readonly Schema<"TraceSummary">[][],
-): Schema<"MetricSeries">[] {
-  const models = new Set<string>();
-  for (const rows of buckets) {
-    for (const trace of rows) {
-      const model = trace.models[0];
-      if (model) {
-        models.add(model);
-      }
-    }
-  }
-  return [...models].sort().map((model) =>
-    seriesOf(
-      "cost_by_model",
-      times,
-      buckets,
-      (rows) =>
-        sum(
-          rows.filter((trace) => trace.models[0] === model),
-          (trace) => trace.cost_total ?? 0,
-        ),
-      model,
-    ),
-  );
-}
-
-function scoreSeries(
-  times: readonly number[],
-  buckets: readonly Schema<"TraceSummary">[][],
-): Schema<"MetricSeries">[] {
-  const names = new Set<string>();
-  for (const rows of buckets) {
-    for (const trace of rows) {
-      for (const score of trace.scores) {
-        names.add(score.name);
-      }
-    }
-  }
-  return [...names].sort().map((name) =>
-    seriesOf(
-      "score_avg",
-      times,
-      buckets,
-      (rows) => {
-        const values = rows.flatMap((trace) =>
-          trace.scores.filter((score) => score.name === name).map(scoreNumber),
-        );
-        const numbers = values.filter((item): item is number => item !== undefined);
-        if (numbers.length === 0) {
-          return undefined;
-        }
-        return numbers.reduce((total, item) => total + item, 0) / numbers.length;
-      },
-      name,
-    ),
-  );
-}
-
-function kpis(
-  current: readonly Schema<"TraceSummary">[],
-  previous: readonly Schema<"TraceSummary">[],
-): Schema<"Kpi">[] {
-  const value = (rows: readonly Schema<"TraceSummary">[], metric: Schema<"KpiMetric">) => {
-    if (rows.length === 0) {
-      return undefined;
-    }
-    if (metric === "traces") {
-      return rows.length;
-    }
-    if (metric === "error_rate") {
-      return rows.filter((trace) => trace.status === "error").length / rows.length;
-    }
-    if (metric === "latency_p95") {
-      return percentile(
-        rows.map((trace) => trace.duration_ns),
-        95,
-      );
-    }
-    if (metric === "cost_total") {
-      return sum(rows, (trace) => trace.cost_total ?? 0);
-    }
-    return sum(rows, (trace) => trace.total_tokens ?? 0);
-  };
-  const metrics: Schema<"KpiMetric">[] = [
-    "traces",
-    "error_rate",
-    "latency_p95",
-    "cost_total",
-    "total_tokens",
-  ];
-  return metrics.map((metric) => {
-    const currentValue = value(current, metric);
-    const previousValue = value(previous, metric);
-    return {
-      metric,
-      ...(currentValue === undefined ? {} : { value: currentValue }),
-      ...(previousValue === undefined ? {} : { previous: previousValue }),
-    };
-  });
-}
-
-function topModels(traces: readonly Schema<"TraceSummary">[]): Schema<"ModelUsage">[] {
-  const groups = new Map<string, { cost: number; tokens: number; llm: number }>();
-  for (const trace of traces) {
-    const model = trace.models[0];
-    if (!model) {
-      continue;
-    }
-    const row = groups.get(model) ?? { cost: 0, tokens: 0, llm: 0 };
-    row.cost += trace.cost_total ?? 0;
-    row.tokens += trace.total_tokens ?? 0;
-    row.llm += trace.llm_count;
-    groups.set(model, row);
-  }
-  return [...groups.entries()]
-    .sort((left, right) => right[1].cost - left[1].cost)
-    .slice(0, 10)
-    .map(([model, row]) => ({
-      model,
-      llm_count: row.llm,
-      cost_total: row.cost,
-      total_tokens: row.tokens,
-    }));
-}
-
-function scoreNumber(score: Schema<"ScoreBrief">): number | undefined {
+export function scoreNumber(score: Schema<"ScoreBrief">): number | undefined {
   if (score.value.data_type === "numeric") {
     return score.value.value;
   }
@@ -1450,7 +1194,7 @@ function scoreNumber(score: Schema<"ScoreBrief">): number | undefined {
   return undefined;
 }
 
-function percentile(values: readonly number[], p: number): number | undefined {
+export function percentile(values: readonly number[], p: number): number | undefined {
   if (values.length === 0) {
     return undefined;
   }
@@ -1459,14 +1203,7 @@ function percentile(values: readonly number[], p: number): number | undefined {
   return sorted[rank];
 }
 
-function sum(
-  rows: readonly Schema<"TraceSummary">[],
-  value: (trace: Schema<"TraceSummary">) => number,
-): number {
-  return rows.reduce((total, trace) => total + value(trace), 0);
-}
-
-function bucketWidth(
+export function bucketWidth(
   bucket: Schema<"MetricsBucket"> | undefined,
   from: number,
   to: number,
@@ -1573,7 +1310,7 @@ function textPayload(value: string): Schema<"Payload"> {
   return { format: "text", value };
 }
 
-function rfc3339(ms: number): string {
+export function rfc3339(ms: number): string {
   return new Date(ms)
     .toISOString()
     .replace(/\.(\d{3})Z$/, (_match, fraction: string) => `.${fraction}000000Z`);

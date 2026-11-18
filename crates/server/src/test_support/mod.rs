@@ -46,8 +46,8 @@ use crate::auth::secret::{self, KeyKind, NewKey};
 use crate::auth::session::{SessionOrigin, start_session};
 use crate::clock::Clock;
 use crate::config::{
-    AuthSettings, EntitlementsConfig, EvalConfig, IngestConfig, InitConfig, LogConfig, MediaConfig,
-    OrgsConfig, PublicUrl, SecurityConfig, ServerConfig,
+    AuthSettings, DemoConfig, EntitlementsConfig, EvalConfig, IngestConfig, InitConfig, LogConfig,
+    MediaConfig, OrgsConfig, PublicUrl, SecurityConfig, ServerConfig,
 };
 use crate::http::access::RouteDef;
 use crate::http::{AppInner, AppState, router, router_with, serve_router};
@@ -370,13 +370,14 @@ impl TestApp {
             crate::ee::org_sso::dns::TxtResolver::fixed(),
         )
         .expect("org SSO state");
+        let limits = Limits::new(&config.demo);
         let state = AppState::new(AppInner {
             config,
             meta,
             storage: Arc::new(storage),
             ready: crate::http::health::ReadyCache::default(),
             clock: Clock::Manual(Arc::new(AtomicI64::new(MANUAL_NOW_NS))),
-            limits: Limits::new(),
+            limits,
             key_cache: crate::auth::principal::ApiKeyCache::new(),
             pat_cache: crate::auth::principal::PatCache::new(),
             last_used: crate::auth::last_used::LastUsed::new(),
@@ -388,7 +389,7 @@ impl TestApp {
             oauth_key: crate::auth::oidc::random_key().expect("oauth key"),
             ingest,
             live: crate::live::LiveBus::new(crate::live::StreamTiming::TEST),
-            metrics_cache: crate::routes::metrics::MetricsCache::default(),
+            widget_cache: crate::routes::dashboards::WidgetCache::default(),
             usage: crate::usage::Usage::default(),
             alert_email_count: crate::alerts::quota::DailyEmailCount::default(),
             deletions: crate::deletion::Deletions::new(),
@@ -1037,6 +1038,7 @@ fn default_config(data_dir: &std::path::Path) -> ServerConfig {
             ..EntitlementsConfig::default()
         },
         orgs: OrgsConfig::default(),
+        demo: DemoConfig::default(),
         encryption_key: None,
         license_key: None,
         auth: AuthSettings::default(),
@@ -1585,6 +1587,7 @@ pub(crate) fn config(data_dir: &std::path::Path) -> ServerConfig {
         security: SecurityConfig::default(),
         entitlements: EntitlementsConfig::default(),
         orgs: OrgsConfig::default(),
+        demo: DemoConfig::default(),
         encryption_key: None,
         license_key: None,
         auth: AuthSettings::default(),

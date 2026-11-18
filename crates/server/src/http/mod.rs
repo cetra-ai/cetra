@@ -21,6 +21,7 @@ use axum::Router;
 use axum::extract::{DefaultBodyLimit, MatchedPath, Request};
 use axum::middleware::{self, Next};
 use axum::response::Response;
+use cetra_core::ids::ProjectId;
 use cetra_storage::Storage;
 use tower::ServiceExt;
 
@@ -30,6 +31,7 @@ use crate::auth::principal::{ApiKeyCache, PatCache, authenticate};
 use crate::clock::Clock;
 use crate::config::ServerConfig;
 use crate::meta::MetaDb;
+use crate::routes::dashboards::WidgetCache;
 
 /// Bodies on this router. Later tracks raise it on a single route.
 const BODY_LIMIT: usize = 1024 * 1024;
@@ -67,8 +69,8 @@ pub(crate) struct AppInner {
     pub(crate) ingest: crate::ingest::Ingest,
     /// Live bus and stream slots (D-G-12).
     pub(crate) live: crate::live::LiveBus,
-    /// `GET /metrics` answers cached 10 s (spec 05).
-    pub(crate) metrics_cache: crate::routes::metrics::MetricsCache,
+    /// `POST /dashboards/query` answers cached 10 s (spec 05 § Dashboard queries).
+    pub(crate) widget_cache: WidgetCache,
     /// Usage counters, flushed every 10 s (D-G-11).
     pub(crate) usage: crate::usage::Usage,
     /// Alert emails sent per org on the current UTC day (D-K-19).
@@ -104,6 +106,11 @@ pub(crate) struct AppInner {
 impl AppState {
     pub(crate) fn new(inner: AppInner) -> Self {
         Self(Arc::new(inner))
+    }
+
+    /// Drops the cached answers of `project` (D-M-11).
+    pub(crate) fn clear_answers(&self, project: ProjectId) {
+        self.widget_cache.clear_project(project);
     }
 
     /// The state when this is the last clone. The router holds the other one

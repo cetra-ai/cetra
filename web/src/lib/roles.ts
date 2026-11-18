@@ -79,6 +79,11 @@ export function canManageAlerts(role: OrgRole | undefined): boolean {
   return atLeast(role, "member");
 }
 
+/** Members and above create, edit and delete custom dashboards (spec 09 § Dashboards). */
+export function canManageDashboards(role: OrgRole | undefined): boolean {
+  return atLeast(role, "member");
+}
+
 /** Mirrors `ProjectPerm::ManageDatasets`: project members and above write datasets and experiments (D-J-5). */
 export function canManageDatasets(role: OrgRole | undefined): boolean {
   return atLeast(role, "member");

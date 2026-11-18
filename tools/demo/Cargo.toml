@@ -1,0 +1,31 @@
+[package]
+name = "cetra-demo"
+description = "Sidecar generator for the cetra demo org: realistic traces built from the captured fixtures (D187)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+license.workspace = true
+
+[[bin]]
+name = "cetra-demo"
+path = "src/main.rs"
+
+[dependencies]
+axum = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

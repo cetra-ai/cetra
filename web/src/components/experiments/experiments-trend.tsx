@@ -2,7 +2,6 @@ import { ChevronDown, ChevronRight } from "lucide-react";
 import { useState } from "react";
 import { CartesianGrid, Line, LineChart, Tooltip, XAxis, YAxis } from "recharts";
 import type { Schema } from "@/api/types";
-import { PALETTE } from "@/components/charts/metric-chart";
 import { TimeText } from "@/components/time-text";
 import {
   type ChartConfig,
@@ -11,6 +10,7 @@ import {
   ChartLegendContent,
 } from "@/components/ui/chart";
 import { headlineValue } from "@/lib/experiments";
+import { PALETTE } from "@/lib/metrics";
 import { STORAGE_PREFIX } from "@/product";
 
 /** A run with its summary, oldest first. */

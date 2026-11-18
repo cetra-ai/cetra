@@ -1,367 +1,188 @@
-import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
-import { expect, it, vi } from "vitest";
+import { expect, it } from "vitest";
 import type { Schema } from "@/api/types";
 import { server } from "@/mocks/node";
-import { STORAGE_PREFIX } from "@/product";
 import { renderApp } from "@/test/render";
 
 const DASHBOARD = "/acme/support-bot/dashboard";
-const TRACES = "/acme/support-bot/traces";
-const COLLAPSED = `${STORAGE_PREFIX}dashboard.collapsed.acme/support-bot`;
 
-const TITLES = [
+const HEADINGS = ["Volume", "Quality", "Latency", "Cost"];
+const NUMBERS = ["Traces", "Error rate", "p95 latency", "Cost", "Tokens"];
+const CHARTS = [
   "Traces & errors",
+  "Tokens by type",
   "Error rate",
+  "Scores",
   "Latency",
   "LLM latency by model",
-  "Cost by model",
-  "Tokens by type",
   "TTFT",
-  "Scores",
+  "Cost by model",
   "Evaluation cost",
   "Top models by cost",
 ];
 
-function listenMetrics() {
-  const urls: URL[] = [];
+/** Records the bodies of the widget queries the page sends. */
+function listenQueries() {
+  const bodies: Schema<"WidgetQueryRequest">[] = [];
   const onStart = ({ request }: { request: Request }) => {
-    const url = new URL(request.url);
-    if (url.pathname.endsWith("/metrics")) {
-      urls.push(url);
+    if (new URL(request.url).pathname.endsWith("/dashboards/query")) {
+      void request
+        .clone()
+        .json()
+        .then((body) => bodies.push(body as Schema<"WidgetQueryRequest">));
     }
   };
   server.events.on("request:start", onStart);
   return {
-    urls,
+    bodies,
     stop() {
       server.events.removeListener("request:start", onStart);
     },
   };
 }
 
-it("renders the five KPIs and every chart card", async () => {
-  const metrics = listenMetrics();
+it("renders the four headings, the five numbers and every chart", async () => {
+  const queries = listenQueries();
   try {
-    await renderApp("/acme/support-bot/dashboard");
-    expect(await screen.findByRole("heading", { name: "Dashboard" })).toBeInTheDocument();
-    expect(await screen.findByRole("button", { name: "Traces: 5" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Error rate: 20%" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "p95 latency: 4.20s" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Cost: $0.00955" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Tokens: 5.7k" })).toBeInTheDocument();
-    for (const title of TITLES) {
-      // A section heading (h2) can share a card's title ("Latency"), so look inside the card at h3.
-      const card = screen.getByRole("region", { name: new RegExp(`^${title}(: |$)`) });
-      expect(within(card).getByRole("heading", { level: 3, name: title })).toBeInTheDocument();
+    await renderApp(DASHBOARD);
+    for (const heading of HEADINGS) {
+      expect(await screen.findByRole("heading", { level: 2, name: heading })).toBeInTheDocument();
     }
-    expect(
-      screen.getByRole("region", { name: "Traces & errors: 5 traces, 1 error in range" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("region", { name: "TTFT: p50 600ms, p95 600ms in range" }),
-    ).toBeInTheDocument();
-    expect(metrics.urls.some((url) => url.searchParams.get("bucket") === "30m")).toBe(true);
-    expect(metrics.urls.some((url) => url.searchParams.has("group_by"))).toBe(false);
+    for (const title of NUMBERS) {
+      expect(screen.getAllByRole("region", { name: title }).length).toBeGreaterThan(0);
+    }
+    for (const title of CHARTS) {
+      expect(screen.getAllByRole("region", { name: title }).length).toBeGreaterThan(0);
+    }
+    expect(await screen.findAllByText("5")).not.toHaveLength(0);
+    await waitFor(() => {
+      expect(queries.bodies.some((body) => body.bucket === "30m")).toBe(true);
+    });
+    expect(queries.bodies.every((body) => body.group_by === undefined)).toBe(true);
   } finally {
-    metrics.stop();
+    queries.stop();
   }
+});
+
+it("has no sections to collapse", async () => {
+  await renderApp(DASHBOARD);
+  await screen.findByRole("heading", { level: 2, name: "Volume" });
+  expect(screen.queryByRole("button", { name: "Volume" })).not.toBeInTheDocument();
+  expect(localStorage.getItem("cetra.dashboard.collapsed.acme/support-bot")).toBeNull();
 });
 
 it("refetches when the range changes", async () => {
-  const metrics = listenMetrics();
+  const queries = listenQueries();
   try {
-    const { router } = await renderApp("/acme/support-bot/dashboard");
-    await screen.findByRole("heading", { name: "Dashboard" });
-    const before = metrics.urls.at(-1)?.searchParams.get("from");
+    const { router } = await renderApp(DASHBOARD);
+    await screen.findByRole("heading", { level: 2, name: "Volume" });
+    const before = queries.bodies.at(-1)?.from;
     fireEvent.click(screen.getByRole("button", { name: "Last 24 hours" }));
     fireEvent.click(await screen.findByRole("button", { name: "Last 1 hour" }));
     await waitFor(() => {
-      const latest = metrics.urls.at(-1);
-      expect(latest?.searchParams.get("from")).toBeTruthy();
-      expect(latest?.searchParams.get("from")).not.toBe(before);
-      const from = Date.parse(latest?.searchParams.get("from") ?? "");
-      const to = Date.parse(latest?.searchParams.get("to") ?? "");
-      expect(Math.abs(to - from - 3_600_000)).toBeLessThan(5_000);
+      const latest = queries.bodies.at(-1);
+      expect(latest?.from).toBeTruthy();
+      expect(latest?.from).not.toBe(before);
+      const span = Date.parse(latest?.to ?? "") - Date.parse(latest?.from ?? "");
+      expect(Math.abs(span - 3_600_000)).toBeLessThan(5_000);
     });
     expect(router.state.location.search).toMatchObject({ range: "1h" });
   } finally {
-    metrics.stop();
+    queries.stop();
   }
 });
 
-it("sends group_by when grouping by model", async () => {
-  const metrics = listenMetrics();
+it("sends group_by with the charts when grouping by model, but not with the numbers", async () => {
+  const queries = listenQueries();
   try {
-    const { router } = await renderApp("/acme/support-bot/dashboard");
-    await screen.findByRole("heading", { name: "Dashboard" });
+    const { router } = await renderApp(DASHBOARD);
+    await screen.findByRole("heading", { level: 2, name: "Volume" });
     fireEvent.change(screen.getByRole("combobox", { name: "Group by" }), {
       target: { value: "model" },
     });
     await waitFor(() => {
-      expect(metrics.urls.some((url) => url.searchParams.get("group_by") === "model")).toBe(true);
+      expect(queries.bodies.some((body) => body.group_by === "model")).toBe(true);
     });
+    // A number is the only widget that asks for the previous period (`compare`): it ignores the split.
+    const numbers = queries.bodies.filter((body) => body.compare === true);
+    expect(numbers.length).toBeGreaterThan(0);
+    expect(numbers.every((body) => body.group_by === undefined)).toBe(true);
     expect(router.state.location.search).toMatchObject({ group: "model" });
   } finally {
-    metrics.stop();
+    queries.stop();
   }
 });
 
-it("opens traces for the clicked bucket", async () => {
-  const { router } = await renderApp(
-    "/acme/support-bot/dashboard?filter=status%20%3D%20'error'&eval=1&exp=1",
+it("opens the spans of a bucket with the widget's filter and group, not the dashboard's filter", async () => {
+  // One model in the answer, so the bucket's group is that model.
+  server.use(
+    http.post("/api/v1/projects/:project/dashboards/query", async ({ request }) => {
+      const body = (await request.json()) as Schema<"WidgetQueryRequest">;
+      if (body.shape !== "series" || body.query.source !== "spans") {
+        return undefined;
+      }
+      return HttpResponse.json({
+        shape: "series",
+        bucket_ns: 600_000_000_000,
+        series: [
+          {
+            measure: 0,
+            group: "gpt-4.1",
+            other: false,
+            points: [{ time: "2026-01-01T10:00:00.000000000Z", value: 1, rows: 1 }],
+          },
+        ],
+      });
+    }),
   );
-  const card = await screen.findByRole("region", { name: /Traces & errors: / });
-  const bucket = await waitFor(() => {
-    const found = card.querySelector('[aria-label="Open bucket 2026-01-01T10:00:00.000Z"]');
-    expect(found).toBeInstanceOf(Element);
-    return found;
-  });
-  if (!(bucket instanceof Element)) {
-    throw new Error("missing bucket");
-  }
-  fireEvent.click(bucket);
+  const { router } = await renderApp(
+    "/acme/support-bot/dashboard?filter=status%20%3D%20'error'&group=model&eval=1",
+  );
+  const card = await screen.findByRole("region", { name: "TTFT" });
+  const chart = await within(card).findByRole("group", { name: /^TTFT\./ });
+  chart.focus();
+  fireEvent.keyDown(chart, { key: "ArrowRight" });
+  fireEvent.keyDown(chart, { key: "Enter" });
   await waitFor(() => {
-    expect(router.state.location.pathname).toContain("/traces");
+    expect(router.state.location.pathname).toContain("/spans");
   });
-  expect(router.state.location.search).toMatchObject({
+  expect(router.state.location.search).toEqual({
     from: "2026-01-01T10:00:00.000Z",
     to: "2026-01-01T10:10:00.000Z",
-    filter: "status = 'error'",
-    eval: 1,
-    exp: 1,
+    filter: "span_kind = 'llm' AND ttft_ns IS NOT NULL AND model = 'gpt-4.1'",
   });
-  expect(router.state.location.search).not.toHaveProperty("range");
 });
 
-it("gives each chart one tab stop", async () => {
-  await renderApp("/acme/support-bot/dashboard");
-  const card = await screen.findByRole("region", { name: /Traces & errors: / });
-  await waitFor(() => {
-    expect(card.querySelector('[aria-label^="Open bucket"]')).toBeInstanceOf(Element);
-  });
-  const stops = [...card.querySelectorAll<HTMLElement>("button, [tabindex]")].filter(
-    (element) => element.tabIndex >= 0,
+it("shows the message of an invalid dashboard filter in place of the widgets", async () => {
+  // The server refuses the dashboard's filter; the ranking query carries it, so the page shows why.
+  server.use(
+    http.post("/api/v1/projects/:project/dashboards/query", async ({ request }) => {
+      const body = (await request.json()) as Schema<"WidgetQueryRequest">;
+      if (body.filter === undefined) {
+        return undefined;
+      }
+      return HttpResponse.json(
+        {
+          type: "about:blank",
+          title: "Bad Request",
+          status: 400,
+          code: "invalid_filter",
+          detail: "The filter is not valid.",
+          errors: [
+            {
+              field: "filter",
+              message: "Unknown field in the dashboard filter.",
+              position: { line: 1, column: 1 },
+            },
+          ],
+        },
+        { status: 400, headers: { "Content-Type": "application/problem+json" } },
+      );
+    }),
   );
-  expect(stops).toHaveLength(1);
-  expect(stops[0]).toHaveAttribute("role", "group");
-  for (const point of document.querySelectorAll<HTMLElement>("foreignObject button")) {
-    expect(point.tabIndex).toBe(-1);
-  }
-});
-
-it("opens a bucket from the keyboard", async () => {
-  const { router } = await renderApp(
-    "/acme/support-bot/dashboard?filter=status%20%3D%20'error'&eval=1&exp=1",
-  );
-  const card = await screen.findByRole("region", { name: /Traces & errors: / });
-  const chart = await within(card).findByRole("group", { name: /^Traces & errors\./ });
-  chart.focus();
-  fireEvent.keyDown(chart, { key: "ArrowRight" });
-  fireEvent.keyDown(chart, { key: "ArrowRight" });
-  const live = card.querySelector('[aria-live="polite"]');
-  expect(live?.textContent).toContain("Traces");
-  fireEvent.keyDown(chart, { key: "Enter" });
-  await waitFor(() => {
-    expect(router.state.location.pathname).toContain("/traces");
-  });
-  expect(router.state.location.search).toMatchObject({
-    from: "2026-01-01T10:10:00.000Z",
-    to: "2026-01-01T10:20:00.000Z",
-    filter: "status = 'error'",
-    eval: 1,
-    exp: 1,
-  });
-});
-
-it("jumps to the last bucket with End", async () => {
-  const { router } = await renderApp("/acme/support-bot/dashboard");
-  const card = await screen.findByRole("region", { name: /Traces & errors: / });
-  const chart = await within(card).findByRole("group", { name: /^Traces & errors\./ });
-  chart.focus();
-  fireEvent.keyDown(chart, { key: "End" });
-  fireEvent.keyDown(chart, { key: "Enter" });
-  await waitFor(() => {
-    expect(router.state.location.search).toMatchObject({
-      from: "2026-01-01T10:50:00.000Z",
-      to: "2026-01-01T11:00:00.000Z",
-    });
-  });
-});
-
-it("reuses the cached dashboard when it is shown again within the same minute", async () => {
-  vi.useFakeTimers({ shouldAdvanceTime: true });
-  vi.setSystemTime(new Date("2026-01-01T10:00:02Z"));
-  const metrics = listenMetrics();
-  try {
-    const { router } = await renderApp(DASHBOARD);
-    expect(await screen.findByRole("button", { name: "Traces: 5" })).toBeInTheDocument();
-    await act(() => router.navigate({ href: TRACES }));
-    vi.setSystemTime(new Date("2026-01-01T10:00:08Z"));
-    await act(() => router.navigate({ href: DASHBOARD }));
-    expect(screen.getByRole("button", { name: "Traces: 5" })).toBeInTheDocument();
-    expect(screen.queryByRole("status", { name: "Loading dashboard" })).not.toBeInTheDocument();
-    expect(metrics.urls).toHaveLength(1);
-  } finally {
-    metrics.stop();
-    vi.useRealTimers();
-  }
-});
-
-it("shows the previous dashboard at once and refetches two minutes later", async () => {
-  vi.useFakeTimers({ shouldAdvanceTime: true });
-  vi.setSystemTime(new Date("2026-01-01T10:00:02Z"));
-  const metrics = listenMetrics();
-  try {
-    const { router, queryClient } = await renderApp(DASHBOARD);
-    expect(await screen.findByRole("button", { name: "Traces: 5" })).toBeInTheDocument();
-    const [cached] = queryClient
-      .getQueryCache()
-      .findAll({ queryKey: ["get", "/api/v1/projects/{project}/metrics"] });
-    const body = cached?.state.data as Schema<"MetricsResponse">;
-    server.use(
-      http.get("*/api/v1/projects/*/metrics", () =>
-        HttpResponse.json({
-          ...body,
-          kpis: body.kpis.map((kpi) => (kpi.metric === "traces" ? { ...kpi, value: 9 } : kpi)),
-        }),
-      ),
-    );
-    await act(() => router.navigate({ href: TRACES }));
-    vi.setSystemTime(new Date("2026-01-01T10:02:02Z"));
-    await act(() => router.navigate({ href: DASHBOARD }));
-    expect(screen.getByRole("button", { name: "Traces: 5" })).toBeInTheDocument();
-    expect(screen.queryByRole("status", { name: "Loading dashboard" })).not.toBeInTheDocument();
-    expect(await screen.findByRole("button", { name: "Traces: 9" })).toBeInTheDocument();
-    expect(metrics.urls).toHaveLength(2);
-  } finally {
-    metrics.stop();
-    vi.useRealTimers();
-  }
-});
-
-it("fetches again when refresh is pressed within the same minute", async () => {
-  vi.useFakeTimers({ shouldAdvanceTime: true });
-  vi.setSystemTime(new Date("2026-01-01T10:00:02Z"));
-  const metrics = listenMetrics();
-  try {
-    await renderApp(DASHBOARD);
-    expect(await screen.findByRole("button", { name: "Traces: 5" })).toBeInTheDocument();
-    expect(metrics.urls).toHaveLength(1);
-    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
-    await waitFor(() => {
-      expect(metrics.urls).toHaveLength(2);
-    });
-  } finally {
-    metrics.stop();
-    vi.useRealTimers();
-  }
-});
-
-it("shows how long ago the dashboard data was updated", async () => {
-  vi.useFakeTimers({ shouldAdvanceTime: true });
-  vi.setSystemTime(new Date("2026-01-01T10:00:02Z"));
-  try {
-    await renderApp(DASHBOARD);
-    expect(await screen.findByText(/^Updated \d+s ago$/)).toBeInTheDocument();
-    act(() => {
-      vi.setSystemTime(new Date("2026-01-01T10:03:02Z"));
-      vi.advanceTimersByTime(10_000);
-    });
-    expect(await screen.findByText("Updated 3 min ago")).toBeInTheDocument();
-  } finally {
-    vi.useRealTimers();
-  }
-});
-
-it("shows the loading skeleton with every chart title while metrics are pending", async () => {
-  server.use(http.get("*/api/v1/projects/*/metrics", () => new Promise<never>(() => {})));
-  await renderApp(DASHBOARD);
-  const status = await screen.findByRole("status", { name: "Loading dashboard" });
-  for (const title of TITLES) {
-    expect(within(status).getByRole("region", { name: title })).toHaveAttribute(
-      "aria-busy",
-      "true",
-    );
-  }
-  expect(screen.queryByRole("button", { name: /^Traces:/ })).not.toBeInTheDocument();
-});
-
-it("keeps the dashboard mounted while another project page is open", async () => {
-  const { router } = await renderApp(DASHBOARD);
-  const tile = await screen.findByRole("button", { name: "Traces: 5" });
-  await act(() => router.navigate({ href: TRACES }));
-  expect(screen.queryByRole("button", { name: "Traces: 5" })).not.toBeInTheDocument();
-  expect(tile.isConnected).toBe(true);
-  await act(() => router.navigate({ href: DASHBOARD }));
-  expect(screen.getByRole("button", { name: "Traces: 5" })).toBe(tile);
-});
-
-it("draws a sparkline in the KPI tiles", async () => {
-  await renderApp(DASHBOARD);
-  const tile = await screen.findByRole("button", { name: "Traces: 5" });
-  expect(tile.querySelector("polyline")).toBeInstanceOf(Element);
-});
-
-it("stores the collapsed sections of the project and shows them collapsed again", async () => {
-  localStorage.removeItem(COLLAPSED);
-  try {
-    await renderApp(DASHBOARD);
-    fireEvent.click(await screen.findByRole("button", { name: "Quality" }));
-    expect(screen.getByRole("button", { name: "Quality" })).toHaveAttribute(
-      "aria-expanded",
-      "false",
-    );
-    expect(screen.queryByRole("region", { name: /^Error rate: / })).not.toBeInTheDocument();
-    expect(JSON.parse(localStorage.getItem(COLLAPSED) ?? "null")).toEqual(["Quality"]);
-    cleanup();
-    await renderApp(DASHBOARD);
-    expect(await screen.findByRole("button", { name: "Quality" })).toHaveAttribute(
-      "aria-expanded",
-      "false",
-    );
-  } finally {
-    localStorage.removeItem(COLLAPSED);
-  }
-});
-
-it("expands the section of a KPI tile's card before scrolling to the card", async () => {
-  localStorage.setItem(COLLAPSED, JSON.stringify(["Cost"]));
-  const scrolled: Element[] = [];
-  const spy = vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(function (
-    this: Element,
-  ) {
-    scrolled.push(this);
-  });
-  try {
-    await renderApp(DASHBOARD);
-    fireEvent.click(await screen.findByRole("button", { name: "Cost: $0.00955" }));
-    await waitFor(() => {
-      expect(scrolled.map((element) => element.id)).toEqual(["chart-cost-by-model"]);
-    });
-    expect(screen.getByRole("button", { name: "Cost" })).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByRole("region", { name: /^Cost by model: / })).toBeInTheDocument();
-    expect(JSON.parse(localStorage.getItem(COLLAPSED) ?? "null")).toEqual([]);
-  } finally {
-    spy.mockRestore();
-    localStorage.removeItem(COLLAPSED);
-  }
-});
-
-it("scrolls a KPI tile to its chart card", async () => {
-  const scrolled: Element[] = [];
-  const spy = vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(function (
-    this: Element,
-  ) {
-    scrolled.push(this);
-  });
-  try {
-    await renderApp(DASHBOARD);
-    fireEvent.click(await screen.findByRole("button", { name: "Cost: $0.00955" }));
-    expect(scrolled.map((element) => element.id)).toEqual(["chart-cost-by-model"]);
-    fireEvent.click(screen.getByRole("button", { name: "Error rate: 20%" }));
-    expect(scrolled.at(-1)?.id).toBe("chart-error-rate");
-  } finally {
-    spy.mockRestore();
-  }
+  await renderApp("/acme/support-bot/dashboard?filter=status%20%3D%20'error'");
+  expect(await screen.findByRole("heading", { level: 2, name: "Bad Request" })).toBeInTheDocument();
+  expect(screen.getAllByText("Unknown field in the dashboard filter.").length).toBeGreaterThan(0);
+  expect(screen.queryByRole("region", { name: "Traces & errors" })).not.toBeInTheDocument();
 });

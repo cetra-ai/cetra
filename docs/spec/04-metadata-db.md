@@ -264,6 +264,35 @@ CREATE INDEX saved_views_owner ON saved_views(project_id, owner_user_id);   -- t
 
 Names are not unique: several visible views may share a name. Visibility, sharing, moderation, the two default scopes and the limits (names 1–200 characters, state ≤ 64 KiB, 1,000 views per project and owner) are D-H-6. Preset ranges are stored relative (`range: "24h"`). A view whose filter no longer validates (column removed) still loads; the filter shows as a raw chip with the error.
 
+## Dashboards
+
+Custom dashboards (D-C-16). The built-in Overview is defined by the UI and is not stored.
+
+```sql
+CREATE TABLE dashboards (
+  id TEXT PRIMARY KEY,                -- UUIDv7
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  description TEXT,
+  definition TEXT NOT NULL,           -- JSON: {widgets: [Widget]}, validated by the server
+  version INTEGER NOT NULL DEFAULT 1, -- +1 on every update; a PATCH names the version it read
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE INDEX dashboards_project ON dashboards(project_id, name);
+```
+
+A **Widget** is `{id, title, layout: {x, y, w, h}, kind, chart?, query?}`:
+- `id`: 1–64 characters of `[A-Za-z0-9_-]`, unique in the dashboard.
+- `title`: 0–100 characters (a heading needs 1–100). `description` of the dashboard: 0–500.
+- `layout`: integers on the 12-column grid, `0 ≤ x ≤ 11`, `1 ≤ w ≤ 12`, `x + w ≤ 12`, `0 ≤ y ≤ 1000`, `1 ≤ h ≤ 40`.
+- `kind`: `chart` or `heading`. A heading has no `chart` and no `query`.
+- `chart`: `{type, stacked?, split?, fade_below?, share?}`. `type` is `line`, `bar`, `area`, `bar_h`, `number` or `table`. `stacked` applies to `bar` and `area`; `split` (one small chart per group; needs a breakdown with `limit` at most 6) to `line`; `fade_below` (1–1,000: buckets with fewer rows are faded) to `bar`; `share` (each row's share of the first measure's total, as a bar) to `table`.
+- `query`: a WidgetQuery (05 § Dashboard queries), checked with the same rules, plus a `label` (0–60 characters) on each measure. `line`, `bar` and `area` read the `series` shape; `bar_h`, `number` and `table` read `total`. `bar_h` needs a breakdown; `number` has one measure and no breakdown.
+
+Limits: names 1–100 characters (not unique), 50 widgets per dashboard, `definition` at most 256 KiB, 100 dashboards per project. An invalid definition is `400 bad_request` with the path of each error in `errors` (e.g. `widgets[3].query.measures[0].field`). A definition stored before a column was removed still loads; the widget's query answers its own 400.
+
 ## Datasets & experiments
 
 Track J (D-J-1–D-J-19, [`plans/j-datasets/00-design.md`](../plans/j-datasets/00-design.md)). Dataset versioning uses validity ranges: an item revision is visible in version *v* iff `valid_from_version ≤ v < coalesce(valid_to_version, ∞)`. Every mutating request makes version `current_version + 1` with one `dataset_versions` row; editing an item closes the old revision and inserts a new one in the new version; a new dataset is at version 0 with no items (D-J-3). An experiment pins a dataset version and snapshots each item's input and expected output into its results, so later edits, item deletions and dataset deletions leave it intact (D-J-10). Experiments have no server evaluators (D-J-11).

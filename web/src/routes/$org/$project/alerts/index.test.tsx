@@ -17,30 +17,29 @@ const RULES = "/api/v1/projects/:project/alert-rules";
 const EVENTS = "/api/v1/projects/:project/alert-events";
 const RULE = "/api/v1/projects/:project/alert-rules/:id";
 const RULE_EVENTS = "/api/v1/projects/:project/alert-rules/:id/events";
-const METRICS = "/api/v1/projects/:project/metrics";
+const WIDGET = "/api/v1/projects/:project/dashboards/query";
 const CANNOT_MANAGE = "Only project members and above can manage alerts";
 
 afterEach(() => {
   vi.useRealTimers();
 });
 
-/** A metrics response with one error-rate series. */
-function errorRateMetrics(values: (number | undefined)[]) {
+/** A widget query answer with one error-rate series. */
+function errorRateAnswer(values: (number | undefined)[]) {
   return {
+    shape: "series",
     bucket_ns: 300_000_000_000,
-    from: "2026-01-01T00:00:00.000Z",
-    to: "2026-01-02T00:00:00.000Z",
-    kpis: [],
     series: [
       {
-        metric: "error_rate",
-        points: values.map((value, index) => ({
-          time: new Date(Date.UTC(2026, 0, 1, index)).toISOString(),
-          ...(value === undefined ? {} : { value }),
-        })),
+        measure: 0,
+        other: false,
+        points: values.flatMap((value, index) =>
+          value === undefined
+            ? []
+            : [{ time: new Date(Date.UTC(2026, 0, 1, index)).toISOString(), value, rows: 1 }],
+        ),
       },
     ],
-    top_models: [],
   };
 }
 
@@ -251,9 +250,9 @@ it("shows no duration for a firing rule without a fire time", async () => {
 it("draws the trend with the threshold once the row is visible", async () => {
   let requests = 0;
   server.use(
-    http.get(METRICS, () => {
+    http.post(WIDGET, () => {
       requests += 1;
-      return HttpResponse.json(errorRateMetrics([0.01, 0.2, undefined, 0.08]));
+      return HttpResponse.json(errorRateAnswer([0.01, 0.2, undefined, 0.08]));
     }),
   );
   const callbacks: IntersectionObserverCallback[] = [];
@@ -292,8 +291,8 @@ it("draws the trend with the threshold once the row is visible", async () => {
   }
 });
 
-it("shows a dash in the trend when the metrics request fails", async () => {
-  server.use(http.get(METRICS, () => problemResponse(500, "internal")));
+it("shows a dash in the trend when the widget query fails", async () => {
+  server.use(http.post(WIDGET, () => problemResponse(500, "internal")));
 
   await renderApp(PAGE);
 

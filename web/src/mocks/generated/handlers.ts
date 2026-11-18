@@ -13,6 +13,7 @@ import {
   itemsAt,
 } from "@/mocks/generated/datasets";
 import { experimentHandlers } from "@/mocks/generated/experiments";
+import { widgetQueryHandler } from "@/mocks/generated/widget-query";
 import {
   type SpanStreamSource,
   type StreamEmit,
@@ -92,6 +93,7 @@ const SCORE_DEFINITIONS: Schema<"ScoreDefinition">[] = [
 
 export function largeHandlers(dataset: Dataset): HttpHandler[] {
   return [
+    widgetQueryHandler(dataset),
     traceStreamHandler(liveTraceSource(dataset)),
     spanStreamHandler(liveSpanSource(dataset)),
     http.get(`${PROJECT}/traces`, ({ request }) => listTraces(dataset, request)),
@@ -108,7 +110,6 @@ export function largeHandlers(dataset: Dataset): HttpHandler[] {
       oneUser(dataset, request, params.user_id),
     ),
     http.get(`${PROJECT}/users`, ({ request }) => listUsers(dataset, request)),
-    http.get(`${PROJECT}/metrics`, ({ request }) => metrics(dataset, request)),
     http.get(`${PROJECT}/facets`, ({ request }) => facets(dataset, request)),
     http.get(`${PROJECT}/score-definitions`, () =>
       HttpResponse.json({ data: SCORE_DEFINITIONS, next_cursor: null }),
@@ -600,32 +601,6 @@ function oneUser(
     return problem(404, "not_found", "Not Found");
   }
   return HttpResponse.json(detail);
-}
-
-function metrics(dataset: Dataset, request: Request): Response {
-  const url = new URL(request.url);
-  const parsed = readQuery(url);
-  if (parsed instanceof Response) {
-    return parsed;
-  }
-  if (parsed.filter === "bad") {
-    return invalidFilter();
-  }
-  const from = parsed.from;
-  const to = parsed.to;
-  if (from === undefined || to === undefined) {
-    return problem(400, "bad_request", "Bad Request");
-  }
-  const userId = userIdOfFilter(parsed.filter);
-  const body = dataset.metrics(
-    from,
-    to,
-    bucketOf(url.searchParams.get("bucket")),
-    parsed.includeEval,
-    parsed.includeExperiments,
-    userId,
-  );
-  return HttpResponse.json(body, { headers: userId === undefined ? ignoredFilter(parsed) : {} });
 }
 
 /**
@@ -1310,14 +1285,6 @@ function encodeCursor(offset: number): string {
 
 function flag(value: string | null): boolean {
   return value === "true" || value === "1";
-}
-
-function bucketOf(value: string | null): Schema<"MetricsBucket"> | undefined {
-  const allowed = ["auto", "1m", "5m", "10m", "15m", "30m", "1h", "6h", "12h", "1d"];
-  if (value !== null && allowed.includes(value)) {
-    return value as Schema<"MetricsBucket">;
-  }
-  return undefined;
 }
 
 function ignoredFilter(query: Query): HeadersInit {

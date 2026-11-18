@@ -15,6 +15,7 @@ use crate::api::members::MemberUser;
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::{self, OrgPerm, OrgRole};
 use crate::auth::secret::{hash_token, is_opaque_token, new_opaque_token};
+use crate::demo::is_demo_org;
 use crate::email::Email;
 use crate::entitlements::{over_limit, plan_limit};
 use crate::http::AppState;
@@ -347,12 +348,14 @@ async fn accept_invite(
                     users::set_email_verified(conn, caller_id, now, EmailVerifiedVia::Invite)
                         .await?;
                 }
+                let demo = is_demo_org(&limits_state.config, org.id);
                 Ok(Accepted::Done {
                     membership: OrgMembership {
                         id: org.id,
                         slug: org.slug,
                         name: org.name,
                         role,
+                        demo,
                     },
                     invite_id: invite.id,
                 })

@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::api::common::Page;
+use crate::api::dashboards::WidgetQueryResponse;
 use crate::api::datasets::{Dataset, DatasetItem, DatasetVersion, ExperimentTrends, ItemChange};
 use crate::api::facets::FacetsResponse;
-use crate::api::metrics::MetricsResponse;
 use crate::api::schema::SchemaResponse;
 use crate::api::sessions::{SessionDetail, SessionSummary};
 use crate::api::sql::SqlQueryResult;
@@ -411,14 +411,6 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
         &trends,
     );
 
-    let metrics: MetricsResponse = fetch(
-        &app,
-        cookie,
-        "/metrics?from=2026-01-01T10:00:00Z&to=2026-01-01T11:00:00Z&bucket=10m",
-    )
-    .await;
-    out.add("get_metrics", &[], &[], "responses/metrics.json", &metrics);
-
     // Every facet the web shows open by default, and every preset field, has an answer here.
     const FACET_WINDOW: &str = "from=2026-01-01T00:00:00Z&to=2026-01-02T00:00:00Z";
     const FACETS: &[(&str, &str)] = &[
@@ -460,6 +452,28 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
     let request: Value = read_json(&api_dir().join("requests/sql-query.json"));
     let sql: SqlQueryResult = post_json(&app, cookie, "/sql", &request).await;
     out.add("run_sql", &[], &[], "static/sql-result.json", &sql);
+
+    // Widget queries (spec 05 § Dashboard queries): a series and a total with `compare`.
+    let series_request: Value = read_json(&api_dir().join("requests/dashboard-query-series.json"));
+    let series: WidgetQueryResponse =
+        post_json(&app, cookie, "/dashboards/query", &series_request).await;
+    out.add(
+        "query_widget",
+        &[],
+        &[],
+        "responses/dashboard-query-series.json",
+        &series,
+    );
+    let total_request: Value = read_json(&api_dir().join("requests/dashboard-query-total.json"));
+    let total: WidgetQueryResponse =
+        post_json(&app, cookie, "/dashboards/query", &total_request).await;
+    out.add(
+        "query_widget",
+        &[],
+        &[],
+        "responses/dashboard-query-total.json",
+        &total,
+    );
 
     // Checked against the static files, not written.
     let schema: SchemaResponse = fetch(&app, cookie, "/schema").await;
@@ -944,6 +958,36 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
             "static/saved-view.json",
             "application/json",
         ),
+        example(
+            "list_dashboards",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "static/dashboards.json",
+            "application/json",
+        ),
+        example(
+            "get_dashboard",
+            params(&[("id", "01900000-0000-7000-8000-000000000f01")]),
+            BTreeMap::new(),
+            "static/dashboard.json",
+            "application/json",
+        ),
+        example_created("create_dashboard", BTreeMap::new(), "static/dashboard.json"),
+        example(
+            "update_dashboard",
+            params(&[("id", "01900000-0000-7000-8000-000000000f01")]),
+            BTreeMap::new(),
+            "static/dashboard.json",
+            "application/json",
+        ),
+        Example {
+            operation_id: "update_dashboard".to_owned(),
+            path_params: params(&[("id", "01900000-0000-7000-8000-000000000f01")]),
+            query: BTreeMap::new(),
+            status: 409,
+            content_type: "application/problem+json".to_owned(),
+            file: "static/dashboard-stale.json".to_owned(),
+        },
         example(
             "list_deletions",
             BTreeMap::new(),

@@ -7694,6 +7694,670 @@
         }
       }
     },
+    "/api/v1/projects/{project}/dashboards": {
+      "get": {
+        "tags": [
+          "dashboards"
+        ],
+        "summary": "List dashboards",
+        "description": "Dashboards of the project, by name then id. Leaves out the definition; get one dashboard for its widgets. Readable with a read key and a read-only token.",
+        "operationId": "list_dashboards",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of items to return (1–1000, default 50).",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Limit",
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque cursor from a previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of dashboards.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "dashboards"
+        ],
+        "summary": "Create a dashboard",
+        "description": "Creates a dashboard at version 1. Every widget query is checked, and every filter is parsed, before the write. A project holds at most 100 dashboards (409). A session or a read-write personal access token with role member or above; API keys cannot write dashboards.",
+        "operationId": "create_dashboard",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateDashboard"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The created dashboard.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Dashboard"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is larger than the limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The request body is not JSON.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/dashboards/query": {
+      "post": {
+        "tags": [
+          "dashboards"
+        ],
+        "summary": "Get one widget's data",
+        "description": "Answers one widget query over `[from, to)`: a series (one value per bucket) or a total (one value over the range, with `compare` also the previous range). Spec 05 § Dashboard queries. The dashboard's `filter` is a traces expression, and the default exclusions apply: evaluation traces (`environment = cetra-eval`) and experiment traces are left out unless `include_eval` or `include_experiments` is set. A read: a read-only personal access token and a `read` key may call it. Results are cached for 10 seconds per project and body.",
+        "operationId": "query_widget",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WidgetQueryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The widget's answer, tagged by `shape`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WidgetQueryResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is larger than the limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The request body is not JSON.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is busy or a dependency is unavailable. Retry later.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/dashboards/{id}": {
+      "get": {
+        "tags": [
+          "dashboards"
+        ],
+        "summary": "Get a dashboard",
+        "description": "One dashboard with its definition. Any other id is 404.",
+        "operationId": "get_dashboard",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Dashboard id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The dashboard.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Dashboard"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "dashboards"
+        ],
+        "summary": "Delete a dashboard",
+        "description": "Deletes the dashboard. Same roles as create.",
+        "operationId": "delete_dashboard",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Dashboard id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted."
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "dashboards"
+        ],
+        "summary": "Update a dashboard",
+        "description": "Changes the fields given; omitted fields are unchanged. `version` must be the stored version, else 409 with the stored version in `detail`. A successful update raises the version by one. Same roles as create.",
+        "operationId": "update_dashboard",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Dashboard id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateDashboard"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated dashboard.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Dashboard"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is larger than the limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The request body is not JSON.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{project}/dataset-trends": {
       "get": {
         "tags": [
@@ -13420,172 +14084,6 @@
         ]
       }
     },
-    "/api/v1/projects/{project}/metrics": {
-      "get": {
-        "tags": [
-          "metrics"
-        ],
-        "summary": "Get metrics",
-        "description": "Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Series have one point per bucket. Latencies and TTFT are nanoseconds. Costs are USD. Results are cached for 10 seconds. The evaluation cost series always counts evaluation traces (spec 05 § Dashboard metrics).",
-        "operationId": "get_metrics",
-        "parameters": [
-          {
-            "name": "project",
-            "in": "path",
-            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "from",
-            "in": "query",
-            "description": "Inclusive range start. RFC 3339 or epoch milliseconds.",
-            "required": true,
-            "schema": {
-              "$ref": "#/components/schemas/TimeParam"
-            }
-          },
-          {
-            "name": "to",
-            "in": "query",
-            "description": "Exclusive range end. RFC 3339 or epoch milliseconds.",
-            "required": true,
-            "schema": {
-              "$ref": "#/components/schemas/TimeParam"
-            }
-          },
-          {
-            "name": "bucket",
-            "in": "query",
-            "description": "Bucket width. Defaults to `auto` (~120 points).",
-            "required": false,
-            "schema": {
-              "$ref": "#/components/schemas/MetricsBucket"
-            }
-          },
-          {
-            "name": "filter",
-            "in": "query",
-            "description": "Filter DSL expression. Applied to the view each series is computed on (spec 05).",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "group_by",
-            "in": "query",
-            "description": "Split series that are not already split.",
-            "required": false,
-            "schema": {
-              "$ref": "#/components/schemas/MetricsGroupBy"
-            }
-          },
-          {
-            "name": "include_eval",
-            "in": "query",
-            "description": "Include traces from the evaluation environment. Default false. Spec 05 § Default exclusions.",
-            "required": false,
-            "schema": {
-              "type": "boolean"
-            }
-          },
-          {
-            "name": "include_experiments",
-            "in": "query",
-            "description": "Include experiment traces. Default false. Spec 05 § Default exclusions.",
-            "required": false,
-            "schema": {
-              "type": "boolean"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Dashboard metrics.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/MetricsResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "The request is malformed or a filter is invalid.",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "No credentials, or the credentials are invalid.",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "The resource does not exist.",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Too many requests.",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "The server is busy or a dependency is unavailable. Retry later.",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/v1/projects/{project}/models": {
       "get": {
         "tags": [
@@ -18736,6 +19234,24 @@
           }
         }
       },
+      "AggBody": {
+        "type": "string",
+        "description": "How a measure aggregates its rows.",
+        "enum": [
+          "count",
+          "count_distinct",
+          "sum",
+          "avg",
+          "min",
+          "max",
+          "p50",
+          "p75",
+          "p90",
+          "p95",
+          "p99",
+          "rate"
+        ]
+      },
       "AlertCondition": {
         "type": "object",
         "description": "What a rule measures and when it breaches (D-K-2).\n\nFields that do not apply to `metric` must be absent. A stored or returned\ncondition always has its defaults filled in.",
@@ -19484,6 +20000,29 @@
         },
         "additionalProperties": true
       },
+      "BreakdownBody": {
+        "type": "object",
+        "description": "The split of a widget query by one field.",
+        "required": [
+          "field"
+        ],
+        "properties": {
+          "field": {
+            "type": "string",
+            "description": "The field the rows are grouped by."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Groups kept, 1 to 20. Default 5.",
+            "minimum": 0
+          },
+          "other": {
+            "type": "boolean",
+            "description": "Whether the rows of every other value form one more group. Default true."
+          }
+        },
+        "additionalProperties": false
+      },
       "BudgetPeriod": {
         "type": "string",
         "description": "The period of a rule budget, in UTC.",
@@ -19610,6 +20149,49 @@
             "description": "The channel accepted the message."
           }
         }
+      },
+      "Chart": {
+        "type": "object",
+        "description": "How a chart widget draws its data.",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "fade_below": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Fades the buckets with fewer rows than this, 1 to 1000. Bar only."
+          },
+          "share": {
+            "type": "boolean",
+            "description": "Shows each row's share of the first measure's total. Table only."
+          },
+          "split": {
+            "type": "boolean",
+            "description": "One small chart per group. Line only."
+          },
+          "stacked": {
+            "type": "boolean",
+            "description": "Stacks the series. Bar and area only."
+          },
+          "type": {
+            "$ref": "#/components/schemas/ChartType",
+            "description": "The chart type."
+          }
+        },
+        "additionalProperties": false
+      },
+      "ChartType": {
+        "type": "string",
+        "description": "Type of a chart widget.",
+        "enum": [
+          "line",
+          "bar",
+          "area",
+          "bar_h",
+          "number",
+          "table"
+        ]
       },
       "ColumnSchema": {
         "type": "object",
@@ -19946,6 +20528,29 @@
           "url": {
             "type": "string",
             "description": "`slack` and `webhook`: the URL."
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateDashboard": {
+        "type": "object",
+        "description": "Body of `POST /api/v1/projects/{project}/dashboards`.",
+        "required": [
+          "name",
+          "definition"
+        ],
+        "properties": {
+          "definition": {
+            "$ref": "#/components/schemas/Definition",
+            "description": "The widgets."
+          },
+          "description": {
+            "type": "string",
+            "description": "Free text, 0 to 500 characters."
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name, 1 to 100 characters after trimming."
           }
         },
         "additionalProperties": false
@@ -20537,6 +21142,137 @@
           }
         }
       },
+      "Dashboard": {
+        "type": "object",
+        "description": "A dashboard with its definition.",
+        "required": [
+          "id",
+          "name",
+          "definition",
+          "version",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Creation time, nanoseconds since the Unix epoch. JSON is RFC 3339."
+          },
+          "created_by": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Creator. Omitted when the user is gone."
+          },
+          "definition": {
+            "$ref": "#/components/schemas/Definition",
+            "description": "The widgets."
+          },
+          "description": {
+            "type": "string",
+            "description": "Free text, 0 to 500 characters."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Dashboard id."
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name. Names are not unique."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Last update, nanoseconds since the Unix epoch. JSON is RFC 3339."
+          },
+          "updated_by": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Last editor. Omitted when the user is gone."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Incremented by every change. A `PATCH` names the version it read."
+          }
+        }
+      },
+      "DashboardPage": {
+        "type": "object",
+        "description": "One page of results. `next_cursor` is null when there is no next page.",
+        "required": [
+          "data",
+          "next_cursor"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DashboardSummary"
+            },
+            "description": "Items in this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor for the next page, or null when this is the last page."
+          }
+        }
+      },
+      "DashboardSummary": {
+        "type": "object",
+        "description": "A dashboard without its definition, as the list returns it.",
+        "required": [
+          "id",
+          "name",
+          "version",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Creation time, nanoseconds since the Unix epoch. JSON is RFC 3339."
+          },
+          "created_by": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Creator. Omitted when the user is gone."
+          },
+          "description": {
+            "type": "string",
+            "description": "Free text."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Dashboard id."
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Last update, nanoseconds since the Unix epoch. JSON is RFC 3339."
+          },
+          "updated_by": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Last editor. Omitted when the user is gone."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Incremented by every change."
+          }
+        }
+      },
       "Dataset": {
         "type": "object",
         "description": "A dataset (D-J-2, D-J-3).",
@@ -20790,6 +21526,23 @@
             "description": "Opaque cursor for the next page, or null when this is the last page."
           }
         }
+      },
+      "Definition": {
+        "type": "object",
+        "description": "The stored definition of a dashboard: the widgets, in order.",
+        "required": [
+          "widgets"
+        ],
+        "properties": {
+          "widgets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Widget"
+            },
+            "description": "Up to 50 widgets."
+          }
+        },
+        "additionalProperties": false
       },
       "DeleteItemsRequest": {
         "type": "object",
@@ -23469,40 +24222,6 @@
           }
         }
       },
-      "Kpi": {
-        "type": "object",
-        "description": "One headline number.\n\n`previous` covers the same-length period just before `from`. Spec 05 § Dashboard metrics.",
-        "required": [
-          "metric"
-        ],
-        "properties": {
-          "metric": {
-            "$ref": "#/components/schemas/KpiMetric",
-            "description": "Which headline."
-          },
-          "previous": {
-            "type": "number",
-            "format": "double",
-            "description": "Value over the previous range. Omitted when that range has no data."
-          },
-          "value": {
-            "type": "number",
-            "format": "double",
-            "description": "Value over `[from, to)`. Omitted when the range has no data."
-          }
-        }
-      },
-      "KpiMetric": {
-        "type": "string",
-        "description": "Headline metrics.\n\nSpec 05 § Dashboard metrics.",
-        "enum": [
-          "traces",
-          "error_rate",
-          "latency_p95",
-          "cost_total",
-          "total_tokens"
-        ]
-      },
       "LatencyTarget": {
         "type": "string",
         "description": "Which latency a `latency_p95` rule measures.",
@@ -23510,6 +24229,39 @@
           "trace",
           "llm_span"
         ]
+      },
+      "Layout": {
+        "type": "object",
+        "description": "Position and size of a widget on the 12-column grid.",
+        "required": [
+          "x",
+          "y",
+          "w",
+          "h"
+        ],
+        "properties": {
+          "h": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Height in rows, 1 to 40."
+          },
+          "w": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Width in columns, 1 to 12; `x + w` is at most 12."
+          },
+          "x": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Column, 0 to 11."
+          },
+          "y": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Row, 0 to 1000."
+          }
+        },
+        "additionalProperties": false
       },
       "LicenseStatus": {
         "type": "string",
@@ -23745,6 +24497,32 @@
           }
         }
       },
+      "MeasureBody": {
+        "type": "object",
+        "description": "One measure of a widget query.",
+        "required": [
+          "agg"
+        ],
+        "properties": {
+          "agg": {
+            "$ref": "#/components/schemas/AggBody",
+            "description": "How the rows aggregate."
+          },
+          "field": {
+            "type": "string",
+            "description": "The field aggregated. Absent for `count` and `rate`."
+          },
+          "label": {
+            "type": "string",
+            "description": "Name shown in the legend, 0 to 60 characters. Not part of the query."
+          },
+          "where": {
+            "type": "string",
+            "description": "A filter over the source view. Required for `rate`."
+          }
+        },
+        "additionalProperties": false
+      },
       "MemberUser": {
         "type": "object",
         "description": "A user as seen by the other members of an org.",
@@ -23871,33 +24649,9 @@
         "type": "string",
         "description": "Message speaker. Known values are `system`, `user`, `assistant`, and `tool`. Any other string is kept."
       },
-      "MetricName": {
-        "type": "string",
-        "description": "Series name.\n\nLatencies and TTFT are nanoseconds as `f64`. Costs are USD. Spec 05 § Dashboard metrics.",
-        "enum": [
-          "traces",
-          "errors",
-          "error_rate",
-          "latency_p50",
-          "latency_p95",
-          "latency_p99",
-          "cost",
-          "input_tokens",
-          "output_tokens",
-          "cache_read_tokens",
-          "cache_write_tokens",
-          "ttft_p50",
-          "ttft_p95",
-          "llm_latency_p50",
-          "llm_latency_p95",
-          "cost_by_model",
-          "score_avg",
-          "eval_cost"
-        ]
-      },
       "MetricPoint": {
         "type": "object",
-        "description": "One bucket of a series.\n\nSpec 05 § Dashboard metrics.",
+        "description": "One bucket of a time series.\n\nSpec 05 § Dashboard queries, spec 06 (score summaries).",
         "required": [
           "time"
         ],
@@ -23914,34 +24668,9 @@
           }
         }
       },
-      "MetricSeries": {
-        "type": "object",
-        "description": "One time series.\n\nEvery series has one point per bucket from `from` to `to`. Spec 05 § Dashboard metrics.",
-        "required": [
-          "metric",
-          "points"
-        ],
-        "properties": {
-          "group": {
-            "type": "string",
-            "description": "Group key: the `group_by` value, a model, or a score name. Omitted when the series is not split."
-          },
-          "metric": {
-            "$ref": "#/components/schemas/MetricName",
-            "description": "Which series."
-          },
-          "points": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/MetricPoint"
-            },
-            "description": "One point per bucket."
-          }
-        }
-      },
       "MetricsBucket": {
         "type": "string",
-        "description": "Width of each metrics bucket.\n\nSpec 05 § Dashboard metrics.",
+        "description": "Width of each bucket of a widget query.\n\nSpec 05 § Dashboard queries.",
         "enum": [
           "auto",
           "1m",
@@ -23957,66 +24686,12 @@
       },
       "MetricsGroupBy": {
         "type": "string",
-        "description": "Dimension that splits series which are not already split.\n\nSpec 05 § Dashboard metrics.",
+        "description": "Dimension that splits a widget's series.\n\nSpec 05 § Dashboard queries.",
         "enum": [
           "model",
           "environment",
           "release"
         ]
-      },
-      "MetricsResponse": {
-        "type": "object",
-        "description": "Dashboard response.\n\nSpec 05 § Dashboard metrics.",
-        "required": [
-          "from",
-          "to",
-          "bucket_ns",
-          "kpis",
-          "series",
-          "top_models"
-        ],
-        "properties": {
-          "bucket_ns": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Resolved bucket width, nanoseconds."
-          },
-          "from": {
-            "type": "string",
-            "format": "date-time",
-            "description": "Inclusive range start, nanoseconds since the Unix epoch. JSON is RFC 3339."
-          },
-          "group_by": {
-            "$ref": "#/components/schemas/MetricsGroupBy",
-            "description": "Split applied to series that are not already split. Omitted when absent."
-          },
-          "kpis": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Kpi"
-            },
-            "description": "Headline numbers for the range and the previous range of the same length."
-          },
-          "series": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/MetricSeries"
-            },
-            "description": "One point per bucket, for every series."
-          },
-          "to": {
-            "type": "string",
-            "format": "date-time",
-            "description": "Exclusive range end, nanoseconds since the Unix epoch. JSON is RFC 3339."
-          },
-          "top_models": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ModelUsage"
-            },
-            "description": "At most 10 models, by cost descending."
-          }
-        }
       },
       "Modality": {
         "type": "string",
@@ -24244,35 +24919,6 @@
           }
         },
         "additionalProperties": false
-      },
-      "ModelUsage": {
-        "type": "object",
-        "description": "One model in the cost ranking.\n\nAt most 10, by cost descending. Spec 05 § Dashboard metrics.",
-        "required": [
-          "model",
-          "llm_count"
-        ],
-        "properties": {
-          "cost_total": {
-            "type": "number",
-            "format": "double",
-            "description": "Sum of `cost_total`, USD. Omitted when every span omitted the field."
-          },
-          "llm_count": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Number of `llm` spans."
-          },
-          "model": {
-            "type": "string",
-            "description": "Model name."
-          },
-          "total_tokens": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Sum of `total_tokens`. Omitted when every span omitted the field."
-          }
-        }
       },
       "NewDatasetItem": {
         "type": "object",
@@ -24762,9 +25408,14 @@
           "id",
           "slug",
           "name",
-          "role"
+          "role",
+          "demo"
         ],
         "properties": {
+          "demo": {
+            "type": "boolean",
+            "description": "The demo org (`demo.org`, D187). Its role is `viewer` for a caller without a row."
+          },
           "id": {
             "$ref": "#/components/schemas/OrgId",
             "description": "Org id."
@@ -27893,6 +28544,46 @@
         },
         "additionalProperties": true
       },
+      "TotalRow": {
+        "type": "object",
+        "description": "One group of a total, with every measure. Spec 05 § Dashboard queries.",
+        "required": [
+          "other",
+          "values"
+        ],
+        "properties": {
+          "group": {
+            "type": "string",
+            "description": "The breakdown value. Omitted without a breakdown, and for the other group."
+          },
+          "other": {
+            "type": "boolean",
+            "description": "Whether this is the group of every other value."
+          },
+          "previous": {
+            "type": "array",
+            "items": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "description": "With `compare`, the same values over the previous range of the same length."
+          },
+          "values": {
+            "type": "array",
+            "items": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "description": "The value of each measure, in query order. Null when the group has no rows."
+          }
+        }
+      },
       "TraceDetail": {
         "type": "object",
         "description": "Trace summary plus its span tree.\n\nSpec 09 § Response shapes.",
@@ -28258,6 +28949,33 @@
           "url": {
             "type": "string",
             "description": "`slack` and `webhook`: a new URL."
+          }
+        },
+        "additionalProperties": false
+      },
+      "UpdateDashboard": {
+        "type": "object",
+        "description": "Body of `PATCH /api/v1/projects/{project}/dashboards/{id}`. Omitted fields are unchanged.",
+        "required": [
+          "version"
+        ],
+        "properties": {
+          "definition": {
+            "$ref": "#/components/schemas/Definition",
+            "description": "The widgets."
+          },
+          "description": {
+            "type": "string",
+            "description": "Free text, 0 to 500 characters. Omitted: unchanged. `\"\"`: cleared (stored as none)."
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name, 1 to 100 characters after trimming."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The version the caller read. Must be the stored one, else `409`."
           }
         },
         "additionalProperties": false
@@ -28801,6 +29519,299 @@
             "description": "View name."
           }
         }
+      },
+      "Widget": {
+        "type": "object",
+        "description": "One widget of a dashboard.",
+        "required": [
+          "id",
+          "title",
+          "layout",
+          "kind"
+        ],
+        "properties": {
+          "chart": {
+            "$ref": "#/components/schemas/Chart",
+            "description": "Chart settings. Chart widgets only."
+          },
+          "id": {
+            "type": "string",
+            "description": "1 to 64 characters of `[A-Za-z0-9_-]`, unique in the dashboard."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/WidgetKind",
+            "description": "Chart or heading."
+          },
+          "layout": {
+            "$ref": "#/components/schemas/Layout",
+            "description": "Position and size."
+          },
+          "query": {
+            "$ref": "#/components/schemas/WidgetQueryBody",
+            "description": "The data. Chart widgets only."
+          },
+          "title": {
+            "type": "string",
+            "description": "Title, 0 to 100 characters (1 to 100 for a heading)."
+          }
+        },
+        "additionalProperties": false
+      },
+      "WidgetKind": {
+        "type": "string",
+        "description": "Kind of a widget.",
+        "enum": [
+          "chart",
+          "heading"
+        ]
+      },
+      "WidgetPoint": {
+        "type": "object",
+        "description": "One bucket of a series. Spec 05 § Dashboard queries.",
+        "required": [
+          "time",
+          "rows"
+        ],
+        "properties": {
+          "rows": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Source rows of the group in the bucket.",
+            "minimum": 0
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Bucket start, nanoseconds since the Unix epoch. JSON is RFC 3339."
+          },
+          "value": {
+            "type": "number",
+            "format": "double",
+            "description": "The aggregate over the bucket. Omitted when it is null."
+          }
+        }
+      },
+      "WidgetQueryBody": {
+        "type": "object",
+        "description": "A widget's query: one source, its measures and an optional breakdown.",
+        "required": [
+          "source",
+          "measures"
+        ],
+        "properties": {
+          "breakdown": {
+            "$ref": "#/components/schemas/BreakdownBody",
+            "description": "The split, if any."
+          },
+          "filter": {
+            "type": "string",
+            "description": "A filter over the source view."
+          },
+          "measures": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MeasureBody"
+            },
+            "description": "One to six measures."
+          },
+          "source": {
+            "$ref": "#/components/schemas/WidgetSourceBody",
+            "description": "The view the query reads."
+          }
+        },
+        "additionalProperties": false
+      },
+      "WidgetQueryRequest": {
+        "type": "object",
+        "description": "Body of `POST /api/v1/projects/{project}/dashboards/query`. Spec 05 § Dashboard queries.",
+        "required": [
+          "from",
+          "to",
+          "query",
+          "shape"
+        ],
+        "properties": {
+          "bucket": {
+            "$ref": "#/components/schemas/MetricsBucket",
+            "description": "Bucket width. Defaults to `auto`. Ignored for `total`."
+          },
+          "compare": {
+            "type": "boolean",
+            "description": "`total` only: also the value over the previous range of the same length. Default false."
+          },
+          "filter": {
+            "type": "string",
+            "description": "The dashboard's filter, a traces expression."
+          },
+          "from": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Inclusive range start, RFC 3339."
+          },
+          "group_by": {
+            "$ref": "#/components/schemas/MetricsGroupBy",
+            "description": "The dashboard's split. Ignored when the query has its own breakdown, and for scores."
+          },
+          "include_eval": {
+            "type": "boolean",
+            "description": "Include traces from the evaluation environment. Default false."
+          },
+          "include_experiments": {
+            "type": "boolean",
+            "description": "Include experiment traces. Default false."
+          },
+          "query": {
+            "$ref": "#/components/schemas/WidgetQueryBody",
+            "description": "The widget's query."
+          },
+          "shape": {
+            "$ref": "#/components/schemas/WidgetShape",
+            "description": "`series` or `total`."
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Exclusive range end, RFC 3339."
+          }
+        },
+        "additionalProperties": false
+      },
+      "WidgetQueryResponse": {
+        "oneOf": [
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/WidgetSeriesResponse",
+                "description": "`shape: series`."
+              },
+              {
+                "type": "object",
+                "required": [
+                  "shape"
+                ],
+                "properties": {
+                  "shape": {
+                    "type": "string",
+                    "enum": [
+                      "series"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "`shape: series`."
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/WidgetTotalResponse",
+                "description": "`shape: total`."
+              },
+              {
+                "type": "object",
+                "required": [
+                  "shape"
+                ],
+                "properties": {
+                  "shape": {
+                    "type": "string",
+                    "enum": [
+                      "total"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "`shape: total`."
+          }
+        ],
+        "description": "A widget answer, tagged by `shape`."
+      },
+      "WidgetSeries": {
+        "type": "object",
+        "description": "One measure of one group over the buckets. Spec 05 § Dashboard queries.",
+        "required": [
+          "measure",
+          "other",
+          "points"
+        ],
+        "properties": {
+          "group": {
+            "type": "string",
+            "description": "The breakdown value. Omitted without a breakdown, and for the other group."
+          },
+          "measure": {
+            "type": "integer",
+            "description": "Index of the measure in the query.",
+            "minimum": 0
+          },
+          "other": {
+            "type": "boolean",
+            "description": "Whether this is the group of every other value."
+          },
+          "points": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WidgetPoint"
+            },
+            "description": "One point per bucket with rows, in time order."
+          }
+        }
+      },
+      "WidgetSeriesResponse": {
+        "type": "object",
+        "description": "A series answer. `shape` is `series`. Spec 05 § Dashboard queries.",
+        "required": [
+          "bucket_ns",
+          "series"
+        ],
+        "properties": {
+          "bucket_ns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Width of every bucket, nanoseconds."
+          },
+          "series": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WidgetSeries"
+            },
+            "description": "The series: breakdown order (largest first, other last), then measure order."
+          }
+        }
+      },
+      "WidgetShape": {
+        "type": "string",
+        "description": "Whether a widget query answers one value per bucket or one value over the range.",
+        "enum": [
+          "series",
+          "total"
+        ]
+      },
+      "WidgetSourceBody": {
+        "type": "string",
+        "description": "The view a widget query reads.",
+        "enum": [
+          "traces",
+          "spans",
+          "scores"
+        ]
+      },
+      "WidgetTotalResponse": {
+        "type": "object",
+        "description": "A total answer. `shape` is `total`. Spec 05 § Dashboard queries.",
+        "required": [
+          "rows"
+        ],
+        "properties": {
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TotalRow"
+            },
+            "description": "One row per group, in breakdown order (other last). One row without a breakdown."
+          }
+        }
       }
     },
     "securitySchemes": {
@@ -28895,12 +29906,12 @@
       "description": "Saved list views and SQL queries."
     },
     {
-      "name": "sql",
-      "description": "SQL console over the project's views."
+      "name": "dashboards",
+      "description": "Custom dashboards and their widget definitions."
     },
     {
-      "name": "metrics",
-      "description": "Dashboard metrics."
+      "name": "sql",
+      "description": "SQL console over the project's views."
     },
     {
       "name": "media",

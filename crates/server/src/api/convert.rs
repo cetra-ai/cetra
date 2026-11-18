@@ -24,9 +24,9 @@ use cetra_core::score::{Score, ScoreTarget, ScoreValue};
 use cetra_core::span::{Span, SpanEvent, SpanLink};
 use uuid::Uuid;
 
-use super::metrics::{
-    Kpi, KpiMetric, MetricName, MetricPoint, MetricSeries, MetricsGroupBy, MetricsResponse,
-    ModelUsage,
+use super::dashboards::{
+    TotalRow, WidgetPoint, WidgetQueryResponse, WidgetSeries, WidgetSeriesResponse,
+    WidgetTotalResponse,
 };
 use super::payload::Payload;
 use super::schema::{ColumnSchema, ColumnType, FunctionSchema, SchemaResponse, ViewSchema};
@@ -1176,88 +1176,44 @@ fn score_batch(batch: &RecordBatch, project_id: ProjectId) -> Result<Vec<Score>,
     Ok(out)
 }
 
-/// The API dashboard response. Storage names map variant by variant.
-pub(crate) fn metrics_response(
-    data: cetra_storage::MetricsData,
-    from: i64,
-    to: i64,
-    group_by: Option<MetricsGroupBy>,
-) -> MetricsResponse {
-    MetricsResponse {
-        from,
-        to,
-        bucket_ns: data.bucket_ns,
-        group_by,
-        kpis: data
-            .kpis
-            .into_iter()
-            .map(|kpi| Kpi {
-                metric: kpi_metric(kpi.name),
-                value: kpi.value,
-                previous: kpi.previous,
-            })
-            .collect(),
-        series: data
-            .series
-            .into_iter()
-            .map(|series| MetricSeries {
-                metric: metric_name(series.name),
-                group: series.group,
-                points: series
-                    .points
+/// The API widget answer. Storage names map variant by variant.
+pub(crate) fn widget_response(data: cetra_storage::WidgetData) -> WidgetQueryResponse {
+    match data {
+        cetra_storage::WidgetData::Series { bucket_ns, series } => {
+            WidgetQueryResponse::Series(WidgetSeriesResponse {
+                bucket_ns,
+                series: series
                     .into_iter()
-                    .map(|point| MetricPoint {
-                        time: point.time,
-                        value: point.value,
+                    .map(|series| WidgetSeries {
+                        measure: series.measure,
+                        group: series.group,
+                        other: series.other,
+                        points: series
+                            .points
+                            .into_iter()
+                            .map(|point| WidgetPoint {
+                                time: point.time,
+                                value: point.value,
+                                rows: point.rows,
+                            })
+                            .collect(),
                     })
                     .collect(),
             })
-            .collect(),
-        top_models: data
-            .top_models
-            .into_iter()
-            .map(|row| ModelUsage {
-                model: row.model,
-                llm_count: row.llm_count,
-                total_tokens: row.total_tokens,
-                cost_total: row.cost_total,
+        }
+        cetra_storage::WidgetData::Total { rows } => {
+            WidgetQueryResponse::Total(WidgetTotalResponse {
+                rows: rows
+                    .into_iter()
+                    .map(|row| TotalRow {
+                        group: row.group,
+                        other: row.other,
+                        values: row.values,
+                        previous: row.previous,
+                    })
+                    .collect(),
             })
-            .collect(),
-    }
-}
-
-fn kpi_metric(name: cetra_storage::KpiName) -> KpiMetric {
-    use cetra_storage::KpiName;
-    match name {
-        KpiName::Traces => KpiMetric::Traces,
-        KpiName::ErrorRate => KpiMetric::ErrorRate,
-        KpiName::LatencyP95 => KpiMetric::LatencyP95,
-        KpiName::CostTotal => KpiMetric::CostTotal,
-        KpiName::TotalTokens => KpiMetric::TotalTokens,
-    }
-}
-
-fn metric_name(name: cetra_storage::SeriesName) -> MetricName {
-    use cetra_storage::SeriesName;
-    match name {
-        SeriesName::Traces => MetricName::Traces,
-        SeriesName::Errors => MetricName::Errors,
-        SeriesName::ErrorRate => MetricName::ErrorRate,
-        SeriesName::LatencyP50 => MetricName::LatencyP50,
-        SeriesName::LatencyP95 => MetricName::LatencyP95,
-        SeriesName::LatencyP99 => MetricName::LatencyP99,
-        SeriesName::Cost => MetricName::Cost,
-        SeriesName::InputTokens => MetricName::InputTokens,
-        SeriesName::OutputTokens => MetricName::OutputTokens,
-        SeriesName::CacheReadTokens => MetricName::CacheReadTokens,
-        SeriesName::CacheWriteTokens => MetricName::CacheWriteTokens,
-        SeriesName::TtftP50 => MetricName::TtftP50,
-        SeriesName::TtftP95 => MetricName::TtftP95,
-        SeriesName::LlmLatencyP50 => MetricName::LlmLatencyP50,
-        SeriesName::LlmLatencyP95 => MetricName::LlmLatencyP95,
-        SeriesName::CostByModel => MetricName::CostByModel,
-        SeriesName::ScoreAvg => MetricName::ScoreAvg,
-        SeriesName::EvalCost => MetricName::EvalCost,
+        }
     }
 }
 

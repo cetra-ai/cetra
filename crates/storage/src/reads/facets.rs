@@ -14,7 +14,7 @@ use datafusion::logical_expr::{Expr, Like, cast, col, lit};
 use datafusion::prelude::DataFrame;
 use std::ops::Not;
 
-use super::metrics::{f64_at, i64_at, internal, percentile, require};
+use super::columns::{f64_at, i64_at, internal, percentile, require};
 use super::sessions::session_rows;
 use super::{ListScope, present};
 use crate::filter::{Filter, FilterView, exclusions, like_pattern, search, time_window};

@@ -1,13 +1,11 @@
-import { keepPreviousData } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
-import { $api } from "@/api/client";
-import { projectRef } from "@/api/project-ref";
+import { widgetQuery } from "@/api/dashboards";
 import type { Schema } from "@/api/types";
 import { LazyMount } from "@/components/charts/lazy-mount";
-import { formFromRule, previewParams, previewSeries } from "@/lib/alerts";
-import { seriesByMetric } from "@/lib/metrics";
+import { formFromRule, previewParams, previewQuery, previewRows } from "@/lib/alerts";
+import type { WidgetQuery } from "@/lib/dashboards/types";
 
-const NS_PER_MS = 1_000_000;
 const WIDTH = 120;
 const HEIGHT = 28;
 const PAD = 2;
@@ -41,50 +39,57 @@ function TrendChart({
   project: string;
   rule: Schema<"AlertRule">;
 }) {
-  const series = previewSeries(formFromRule(rule));
+  const preview = previewQuery(formFromRule(rule));
+  if (preview === undefined) {
+    return <Dash />;
+  }
+  return (
+    <Trend
+      org={org}
+      project={project}
+      rule={rule}
+      query={preview.query}
+      divisor={preview.divisor}
+    />
+  );
+}
+
+function Trend({
+  org,
+  project,
+  rule,
+  query: widget,
+  divisor,
+}: {
+  org: string;
+  project: string;
+  rule: Schema<"AlertRule">;
+  query: WidgetQuery;
+  divisor: number;
+}) {
   const window = rule.condition.window;
   const params = useMemo(() => previewParams(window, Date.now()), [window]);
   const filter = rule.condition.filter?.trim();
-  const query = $api.useQuery(
-    "get",
-    "/api/v1/projects/{project}/metrics",
-    {
-      params: {
-        path: { project: projectRef(org, project) },
-        query: {
-          from: params.from,
-          to: params.to,
-          bucket: params.bucket,
-          ...(filter ? { filter } : {}),
-        },
-      },
-    },
-    {
-      staleTime: 60_000,
-      placeholderData: keepPreviousData,
-      enabled: series !== undefined,
-    },
-  );
+  const query = useQuery({
+    ...widgetQuery(org, project, {
+      from: params.from,
+      to: params.to,
+      shape: "series",
+      bucket: params.bucket,
+      query: widget,
+      ...(filter ? { filter } : {}),
+    }),
+    staleTime: 60_000,
+  });
 
-  if (series === undefined) {
-    return <Dash />;
-  }
   if (query.isPending) {
     return <span aria-hidden="true" className="block" style={{ width: WIDTH, height: HEIGHT }} />;
   }
   if (query.error || !query.data) {
     return <Dash />;
   }
-  const entry = seriesByMetric(query.data)
-    .get(series.metric)
-    ?.find((item) => (item.group ?? undefined) === series.group);
-  const values =
-    entry?.points.map((point) =>
-      point.value === undefined || series.metric !== "latency_p95"
-        ? point.value
-        : point.value / NS_PER_MS,
-    ) ?? [];
-  const defined = values.filter((value): value is number => value !== undefined);
+  const values = previewRows(widget, query.data, divisor).map((row) => row.all ?? null);
+  const defined = values.filter((value): value is number => value !== null);
   if (defined.length === 0) {
     return <Dash />;
   }
@@ -96,7 +101,7 @@ function TrendChart({
   const y = (value: number) => PAD + (1 - (value - low) / span) * (HEIGHT - 2 * PAD);
   const step = values.length > 1 ? WIDTH / (values.length - 1) : 0;
   const line = values
-    .flatMap((value, index) => (value === undefined ? [] : [`${index * step},${y(value)}`]))
+    .flatMap((value, index) => (value === null ? [] : [`${index * step},${y(value)}`]))
     .join(" ");
 
   return (
