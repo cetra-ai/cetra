@@ -3,7 +3,7 @@ import { renderHook, waitFor } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
 import type { ReactNode } from "react";
 import { expect, it } from "vitest";
-import { apiStore } from "@/lib/dashboards/store";
+import { apiStore, localStore } from "@/lib/dashboards/store";
 import { dashboardHandlers, seedDashboards } from "@/mocks/dashboards";
 import { server } from "@/mocks/node";
 import { problemResponse } from "@/test/problem";
@@ -61,6 +61,13 @@ it("reads every page of the list until next_cursor is null", async () => {
   await waitFor(() => expect(result.current.isSuccess).toBe(true));
   expect(seen).toEqual([null, "p2"]);
   expect(result.current.data?.map((item) => item.name)).toEqual(["Support overview", "Second"]);
+});
+
+it("local and API dashboards use different query keys", () => {
+  const api = dashboardsQuery(ORG, PROJECT, apiStore(ORG, PROJECT)).queryKey;
+  const local = dashboardsQuery(ORG, PROJECT, localStore(ORG, PROJECT)).queryKey;
+  expect(local).not.toEqual(api);
+  expect(local.slice(0, api.length)).toEqual(api);
 });
 
 it("creates a dashboard and refreshes the list", async () => {

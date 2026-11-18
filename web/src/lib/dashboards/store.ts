@@ -1,6 +1,6 @@
-import { useQuery } from "@tanstack/react-query";
-import { useMemo } from "react";
-import { api } from "@/api/client";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo } from "react";
+import { $api, api } from "@/api/client";
 import { projectRef } from "@/api/project-ref";
 import { meQuery } from "@/api/queries";
 import type { Schema } from "@/api/types";
@@ -26,6 +26,8 @@ const MAX_DASHBOARDS = 100;
  * demo-org viewer (D-C-17). Both answer the same shapes and throw the same problems.
  */
 export type DashboardStore = {
+  /** Whether the dashboards are the browser's. It keeps their query keys apart from the API's. */
+  readonly local: boolean;
   list(): Promise<DashboardSummary[]>;
   get(id: string): Promise<Dashboard>;
   create(body: CreateDashboard): Promise<Dashboard>;
@@ -34,10 +36,30 @@ export type DashboardStore = {
   remove(id: string): Promise<void>;
 };
 
+/**
+ * The query key of the dashboard list. The browser's list adds a trailing "local", so the two
+ * never share a cache entry. Invalidating the key without it refreshes both (a prefix match).
+ */
+export function dashboardsKey(org: string, project: string, local: boolean) {
+  const key = $api.queryOptions("get", "/api/v1/projects/{project}/dashboards", {
+    params: { path: { project: projectRef(org, project) }, query: { limit: 100 } },
+  }).queryKey;
+  return local ? [...key, "local"] : key;
+}
+
+/** The query key of one dashboard, with the same trailing "local" as `dashboardsKey`. */
+export function dashboardKey(org: string, project: string, id: string, local: boolean) {
+  const key = $api.queryOptions("get", "/api/v1/projects/{project}/dashboards/{id}", {
+    params: { path: { project: projectRef(org, project), id } },
+  }).queryKey;
+  return local ? [...key, "local"] : key;
+}
+
 /** The dashboards API, read page by page until `next_cursor` is null. */
 export function apiStore(org: string, project: string): DashboardStore {
   const path = { project: projectRef(org, project) };
   return {
+    local: false,
     async list() {
       const dashboards: DashboardSummary[] = [];
       const seen = new Set<string>();
@@ -116,74 +138,141 @@ export function apiStore(org: string, project: string): DashboardStore {
 /** A dashboard as the browser keeps it. */
 type LocalDashboard = Dashboard;
 
-/** Writes that failed because localStorage refused them, for this page only. */
-const unsaved = new Map<string, string>();
+/** One element of the stored list: a dashboard that passes the rules, or any other element, kept as it is. */
+type Slot = { kind: "record"; dashboard: LocalDashboard } | { kind: "raw"; raw: unknown };
 
-function readText(key: string): string | null {
-  const pending = unsaved.get(key);
-  if (pending !== undefined) {
-    return pending;
-  }
-  try {
-    return localStorage.getItem(key);
-  } catch {
-    // Storage is blocked (private mode, cleared site data): the list reads as empty.
-    return null;
-  }
-}
+/** The stored list, when it can be read: its elements in their stored order. */
+type Readable = { readable: true; slots: Slot[] };
 
-function writeText(key: string, text: string): void {
-  try {
-    localStorage.setItem(key, text);
-    unsaved.delete(key);
-  } catch {
-    // Storage refused the write: this page keeps the list in memory until a write succeeds.
-    unsaved.set(key, text);
-  }
+/** Not a JSON list, or storage is unavailable: the list reads as empty and writes are refused. */
+type Stored = Readable | { readable: false };
+
+const UNREADABLE = "Saved dashboards in this browser cannot be read; nothing was changed.";
+const FULL = "Could not save in this browser: its storage is full or unavailable.";
+
+/** The last parsed text. Unchanged text is not validated again. */
+let parsed: { text: string; stored: Stored } | undefined;
+
+/** The browser's storage key for a project's dashboards. */
+export function localDashboardsKey(org: string, project: string): string {
+  return `${STORAGE_PREFIX}dashboards.${org}/${project}`;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/**
- * The stored list, or an empty one when the stored text does not parse or a record does not
- * pass the dashboard rules. A record that breaks the rules would break the page it renders on.
- */
-function readDashboards(key: string): LocalDashboard[] {
-  const text = readText(key);
-  if (text === null) {
-    return [];
+/** The element as a dashboard, or undefined when it does not pass the record shape and the rules. */
+function asDashboard(raw: unknown): LocalDashboard | undefined {
+  if (
+    !isObject(raw) ||
+    typeof raw.id !== "string" ||
+    typeof raw.name !== "string" ||
+    typeof raw.version !== "number" ||
+    typeof raw.created_at !== "string" ||
+    typeof raw.updated_at !== "string" ||
+    !isObject(raw.definition)
+  ) {
+    return undefined;
   }
   try {
-    const value: unknown = JSON.parse(text);
-    if (!Array.isArray(value)) {
-      return [];
-    }
-    const valid = value.every(
-      (item): item is LocalDashboard =>
-        isObject(item) &&
-        typeof item.id === "string" &&
-        typeof item.name === "string" &&
-        typeof item.version === "number" &&
-        typeof item.created_at === "string" &&
-        typeof item.updated_at === "string" &&
-        isObject(item.definition) &&
-        validateDashboard({
-          name: item.name,
-          description: typeof item.description === "string" ? item.description : undefined,
-          definition: item.definition as Definition,
-        }).length === 0,
-    );
-    return valid ? value : [];
+    const issues = validateDashboard({
+      name: raw.name,
+      description: typeof raw.description === "string" ? raw.description : undefined,
+      definition: raw.definition as Definition,
+    });
+    return issues.length === 0 ? (raw as LocalDashboard) : undefined;
   } catch {
-    // A value that does not parse (or whose rules throw while checking it) reads as empty.
-    return [];
+    // A value whose rules throw while checking it is skipped like any other invalid one.
+    return undefined;
   }
 }
 
-function writeDashboards(key: string, dashboards: LocalDashboard[]): void {
-  writeText(key, JSON.stringify(dashboards));
+/** A list of stored elements as slots. An element that repeats an earlier id is skipped too. */
+function slotsOf(items: unknown[]): Slot[] {
+  const seen = new Set<string>();
+  return items.map((raw): Slot => {
+    const dashboard = asDashboard(raw);
+    if (dashboard === undefined || seen.has(dashboard.id)) {
+      return { kind: "raw", raw };
+    }
+    seen.add(dashboard.id);
+    return { kind: "record", dashboard };
+  });
+}
+
+function parseStored(text: string): Stored {
+  if (parsed?.text === text) {
+    return parsed.stored;
+  }
+  let stored: Stored;
+  try {
+    const value: unknown = JSON.parse(text);
+    stored = Array.isArray(value) ? { readable: true, slots: slotsOf(value) } : { readable: false };
+  } catch {
+    stored = { readable: false };
+  }
+  parsed = { text, stored };
+  return stored;
+}
+
+function readStored(key: string): Stored {
+  let text: string | null;
+  try {
+    text = localStorage.getItem(key);
+  } catch {
+    // Storage is blocked (private mode, cleared site data): the store is unreadable.
+    return { readable: false };
+  }
+  return text === null ? { readable: true, slots: [] } : parseStored(text);
+}
+
+/** The stored dashboards that pass the rules. An unreadable store has none. */
+function records(stored: Stored): LocalDashboard[] {
+  if (!stored.readable) {
+    return [];
+  }
+  return stored.slots.flatMap((slot) => (slot.kind === "record" ? [slot.dashboard] : []));
+}
+
+/** The store as a write sees it. An unreadable one is refused, and never overwritten. */
+function readForWrite(key: string): Readable {
+  const stored = readStored(key);
+  if (!stored.readable) {
+    throw problem(409, "conflict", "Conflict", UNREADABLE);
+  }
+  return stored;
+}
+
+/**
+ * The stored list after a write: the skipped elements stay where they were, the dashboards that
+ * are still there take their place in the list, and the new ones are added at the end.
+ */
+function rebuild(slots: Slot[], dashboards: LocalDashboard[]): unknown[] {
+  const pending = new Map(dashboards.map((item) => [item.id, item]));
+  const out: unknown[] = [];
+  for (const slot of slots) {
+    if (slot.kind === "raw") {
+      out.push(slot.raw);
+      continue;
+    }
+    const next = pending.get(slot.dashboard.id);
+    if (next !== undefined) {
+      out.push(next);
+      pending.delete(slot.dashboard.id);
+    }
+  }
+  out.push(...pending.values());
+  return out;
+}
+
+function writeDashboards(key: string, stored: Readable, dashboards: LocalDashboard[]): void {
+  const text = JSON.stringify(rebuild(stored.slots, dashboards));
+  try {
+    localStorage.setItem(key, text);
+  } catch {
+    throw problem(507, "internal", "Insufficient Storage", FULL);
+  }
 }
 
 /** A problem shaped like the server's, so the edit dialogs show it the same way. */
@@ -216,19 +305,21 @@ function trimmedOrUndefined(text: string): string | undefined {
  * 100-dashboard cap.
  */
 export function localStore(org: string, project: string): DashboardStore {
-  const key = `${STORAGE_PREFIX}dashboards.${org}/${project}`;
+  const key = localDashboardsKey(org, project);
   return {
+    local: true,
     async list() {
-      return readDashboards(key).map(({ definition: _definition, ...summary }) => summary);
+      return records(readStored(key)).map(({ definition: _definition, ...summary }) => summary);
     },
     async get(id) {
-      const found = readDashboards(key).find((item) => item.id === id);
+      const found = records(readStored(key)).find((item) => item.id === id);
       if (found === undefined) {
         throw problem(404, "not_found", "Not Found");
       }
       return found;
     },
     async create(body) {
+      const stored = readForWrite(key);
       const name = body.name.trim();
       const description =
         body.description === undefined ? undefined : trimmedOrUndefined(body.description);
@@ -236,7 +327,7 @@ export function localStore(org: string, project: string): DashboardStore {
       if (issues.length > 0) {
         throw problem(400, "bad_request", "Bad Request", undefined, issues);
       }
-      const dashboards = readDashboards(key);
+      const dashboards = records(stored);
       if (dashboards.length >= MAX_DASHBOARDS) {
         throw problem(409, "conflict", "Conflict", "too many dashboards");
       }
@@ -250,13 +341,13 @@ export function localStore(org: string, project: string): DashboardStore {
         created_at: now,
         updated_at: now,
       };
-      writeDashboards(key, [...dashboards, dashboard]);
+      writeDashboards(key, stored, [...dashboards, dashboard]);
       return dashboard;
     },
     async update(id, body) {
-      const dashboards = readDashboards(key);
-      const index = dashboards.findIndex((item) => item.id === id);
-      const current = dashboards[index];
+      const stored = readForWrite(key);
+      const dashboards = records(stored);
+      const current = dashboards.find((item) => item.id === id);
       if (current === undefined) {
         throw problem(404, "not_found", "Not Found");
       }
@@ -279,17 +370,20 @@ export function localStore(org: string, project: string): DashboardStore {
       };
       writeDashboards(
         key,
-        dashboards.map((item, at) => (at === index ? next : item)),
+        stored,
+        dashboards.map((item) => (item.id === id ? next : item)),
       );
       return next;
     },
     async remove(id) {
-      const dashboards = readDashboards(key);
+      const stored = readForWrite(key);
+      const dashboards = records(stored);
       if (!dashboards.some((item) => item.id === id)) {
         throw problem(404, "not_found", "Not Found");
       }
       writeDashboards(
         key,
+        stored,
         dashboards.filter((item) => item.id !== id),
       );
     },
@@ -317,14 +411,30 @@ export function uuidv7(now: number = Date.now()): string {
 /**
  * The store of the open project: the local one for a demo-org viewer, else the API. `local` tells
  * the components the store is the browser's, so the editing controls are shown to that viewer.
+ * For that viewer, a change to the browser's dashboards from another tab refreshes the lists.
  */
 export function useDashboardStore(
   org: string,
   project: string,
 ): { store: DashboardStore; local: boolean } {
   const { data: me } = useQuery(meQuery);
+  const queryClient = useQueryClient();
   const membership = me?.orgs.find((entry) => entry.slug === org);
   const local = membership?.demo === true && membership.role === "viewer";
+  useEffect(() => {
+    if (!local) {
+      return;
+    }
+    const key = localDashboardsKey(org, project);
+    // A null key is a clear() of the storage, which also changes these dashboards.
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === key || event.key === null) {
+        void queryClient.invalidateQueries({ queryKey: dashboardsKey(org, project, false) });
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [local, org, project, queryClient]);
   return useMemo(
     () => ({ store: local ? localStore(org, project) : apiStore(org, project), local }),
     [local, org, project],

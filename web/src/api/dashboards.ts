@@ -1,30 +1,19 @@
 import { keepPreviousData, queryOptions, useMutation, useQueryClient } from "@tanstack/react-query";
-import { type DashboardStore, useDashboardStore } from "@/lib/dashboards/store";
+import {
+  type DashboardStore,
+  dashboardKey,
+  dashboardsKey,
+  useDashboardStore,
+} from "@/lib/dashboards/store";
 import { $api } from "./client";
 import { problemOf } from "./problem";
 import { projectRef } from "./project-ref";
 import type { Schema } from "./types";
 
-/**
- * The query keys of the dashboard list and of one dashboard. They are the same for both stores
- * (the API and the browser's), so invalidation does not depend on which one is open.
- */
-function dashboardsKey(org: string, project: string) {
-  return $api.queryOptions("get", "/api/v1/projects/{project}/dashboards", {
-    params: { path: { project: projectRef(org, project) }, query: { limit: 100 } },
-  }).queryKey;
-}
-
-function dashboardKey(org: string, project: string, id: string) {
-  return $api.queryOptions("get", "/api/v1/projects/{project}/dashboards/{id}", {
-    params: { path: { project: projectRef(org, project), id } },
-  }).queryKey;
-}
-
 /** Every dashboard of the project, without definitions. */
 export function dashboardsQuery(org: string, project: string, store: DashboardStore) {
   return queryOptions({
-    queryKey: dashboardsKey(org, project),
+    queryKey: dashboardsKey(org, project, store.local),
     queryFn: () => store.list(),
   });
 }
@@ -32,7 +21,7 @@ export function dashboardsQuery(org: string, project: string, store: DashboardSt
 /** One dashboard with its definition. */
 export function dashboardQuery(org: string, project: string, id: string, store: DashboardStore) {
   return queryOptions({
-    queryKey: dashboardKey(org, project, id),
+    queryKey: dashboardKey(org, project, id, store.local),
     queryFn: () => store.get(id),
   });
 }
@@ -62,12 +51,16 @@ export function isStaleDashboard(error: unknown): boolean {
   return problemOf(error)?.status === 409;
 }
 
+/**
+ * Refreshes the list and, when given, one dashboard. The keys without "local" are prefixes of the
+ * browser's keys too, so both stores are refreshed.
+ */
 function useInvalidateDashboards(org: string, project: string, id?: string) {
   const queryClient = useQueryClient();
   return async (): Promise<void> => {
-    await queryClient.invalidateQueries({ queryKey: dashboardsKey(org, project) });
+    await queryClient.invalidateQueries({ queryKey: dashboardsKey(org, project, false) });
     if (id !== undefined) {
-      await queryClient.invalidateQueries({ queryKey: dashboardKey(org, project, id) });
+      await queryClient.invalidateQueries({ queryKey: dashboardKey(org, project, id, false) });
     }
   };
 }

@@ -87,18 +87,83 @@ describe("localStore", () => {
     expect(await store.list()).toHaveLength(100);
   });
 
-  it("keeps the dashboards in memory when localStorage throws", async () => {
+  it("rejects a write when storage throws, and stores nothing", async () => {
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("quota");
+    });
+    const store = localStore("acme", "store-tests");
+    await expect(store.create({ name: "Lost", definition: EMPTY })).rejects.toMatchObject({
+      status: 507,
+      code: "internal",
+      detail: "Could not save in this browser: its storage is full or unavailable.",
+    });
+    expect(localStorage.getItem(KEY)).toBeNull();
+    expect(await store.list()).toEqual([]);
+  });
+
+  it("an unavailable localStorage reads as empty and refuses writes", async () => {
     vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
       throw new Error("blocked");
     });
     vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
       throw new Error("blocked");
     });
-    const store = localStore("acme", "fallback");
+    const store = localStore("acme", "store-tests");
+    expect(await store.list()).toEqual([]);
+    await expect(store.get("missing")).rejects.toMatchObject({ status: 404 });
+    await expect(store.create({ name: "Refused", definition: EMPTY })).rejects.toMatchObject({
+      status: 409,
+      code: "conflict",
+      detail: "Saved dashboards in this browser cannot be read; nothing was changed.",
+    });
+  });
+
+  it("refuses to write over unreadable saved dashboards", async () => {
+    const store = localStore("acme", "store-tests");
+    const detail = "Saved dashboards in this browser cannot be read; nothing was changed.";
+    for (const text of ["{not json", JSON.stringify({ widgets: [] })]) {
+      localStorage.setItem(KEY, text);
+      expect(await store.list()).toEqual([]);
+      await expect(store.create({ name: "Nope", definition: EMPTY })).rejects.toMatchObject({
+        status: 409,
+        code: "conflict",
+        detail,
+      });
+      await expect(store.update("any", { version: 1, name: "Nope" })).rejects.toMatchObject({
+        status: 409,
+        detail,
+      });
+      await expect(store.remove("any")).rejects.toMatchObject({ status: 409, detail });
+      expect(localStorage.getItem(KEY)).toBe(text);
+    }
+  });
+
+  it("skips an invalid record and keeps it on the next write", async () => {
+    const store = localStore("acme", "store-tests");
     const { id } = await store.create({ name: "Kept", definition: EMPTY });
-    await store.update(id, { version: 1, name: "Kept again" });
-    expect(await store.list()).toEqual([expect.objectContaining({ name: "Kept again" })]);
-    expect(await store.get(id)).toMatchObject({ version: 2 });
+    const stored = JSON.parse(localStorage.getItem(KEY) ?? "[]") as unknown[];
+    const invalid = { id: "bad", name: 3, definition: {} };
+    localStorage.setItem(KEY, JSON.stringify([invalid, ...stored]));
+
+    expect(await store.list()).toEqual([expect.objectContaining({ id })]);
+    await store.create({ name: "Second", definition: EMPTY });
+
+    const after = JSON.parse(localStorage.getItem(KEY) ?? "[]") as unknown[];
+    expect(after).toHaveLength(3);
+    expect(after[0]).toEqual(invalid);
+    expect(await store.list()).toHaveLength(2);
+  });
+
+  it("update with an empty description clears it", async () => {
+    const store = localStore("acme", "store-tests");
+    const { id } = await store.create({
+      name: "Costs",
+      description: "by model",
+      definition: EMPTY,
+    });
+    const cleared = await store.update(id, { version: 1, description: "   " });
+    expect(cleared).not.toHaveProperty("description");
+    expect(await store.get(id)).not.toHaveProperty("description");
   });
 
   it("reads a value that does not parse, or has the wrong shape, as an empty list", async () => {
@@ -125,6 +190,13 @@ describe("uuidv7", () => {
     expect(uuidv7()).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
     );
+  });
+
+  it("uuidv7 encodes the current time in its first 48 bits", () => {
+    const now = 1_750_000_123_456;
+    vi.spyOn(Date, "now").mockReturnValue(now);
+    const id = uuidv7();
+    expect(Number.parseInt(id.replace(/-/g, "").slice(0, 12), 16)).toBe(now);
   });
 
   it("sorts in the order of the time it was made", () => {

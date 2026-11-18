@@ -86,6 +86,54 @@ it("lists only the Overview and the browser's dashboards to a demo viewer", asyn
   expect(within(menu).queryByRole("menuitem", { name: SERVER_NAME })).toBeNull();
 });
 
+it("duplicating the Overview as a demo viewer stores it locally", async () => {
+  signedInAs("viewer", true);
+  const requests = recordRequests();
+  try {
+    const { user } = await renderApp("/acme/support-bot/dashboard");
+    await user.click(await screen.findByRole("button", { name: "Dashboard actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Duplicate" }));
+    await user.click(screen.getByRole("button", { name: "Duplicate" }));
+
+    await waitFor(() => expect(localStorage.getItem(LOCAL_KEY)).not.toBeNull());
+    const stored = JSON.parse(localStorage.getItem(LOCAL_KEY) ?? "[]") as { name: string }[];
+    expect(stored.map((item) => item.name)).toEqual(["Copy of Overview"]);
+    expect(dashboardsApiCalls(requests.calls)).toEqual([]);
+  } finally {
+    requests.stop();
+  }
+});
+
+it("a storage event from another tab refreshes the list", async () => {
+  signedInAs("viewer", true);
+  const { user } = await renderApp("/acme/support-bot/dashboard");
+  await user.click(await screen.findByRole("button", { name: "Switch dashboard" }));
+  expect(
+    within(await screen.findByRole("menu")).queryByRole("menuitem", { name: "Elsewhere" }),
+  ).toBeNull();
+  await user.keyboard("{Escape}");
+
+  localStorage.setItem(
+    LOCAL_KEY,
+    JSON.stringify([
+      {
+        id: "01900000-0000-7000-8000-000000000a01",
+        name: "Elsewhere",
+        version: 1,
+        created_at: "2026-11-18T10:00:00.000Z",
+        updated_at: "2026-11-18T10:00:00.000Z",
+        definition: { widgets: [] },
+      },
+    ]),
+  );
+  window.dispatchEvent(new StorageEvent("storage", { key: LOCAL_KEY }));
+
+  await user.click(await screen.findByRole("button", { name: "Switch dashboard" }));
+  expect(
+    within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Elsewhere" }),
+  ).toBeInTheDocument();
+});
+
 it("shows the browser-only banner in edit mode for a demo viewer", async () => {
   signedInAs("viewer", true);
   const { user } = await renderApp("/acme/support-bot/dashboard");
