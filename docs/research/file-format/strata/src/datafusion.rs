@@ -22,9 +22,10 @@ use object_store::ObjectStore;
 use object_store::path::Path;
 
 use ::datafusion::catalog::Session;
+use ::datafusion::common::stats::Precision;
 use ::datafusion::common::tree_node::TreeNodeRecursion;
 use ::datafusion::common::utils::project_schema;
-use ::datafusion::common::{DataFusionError, ScalarValue};
+use ::datafusion::common::{DataFusionError, ScalarValue, Statistics};
 use ::datafusion::datasource::TableProvider;
 use ::datafusion::error::Result as DfResult;
 use ::datafusion::execution::TaskContext;
@@ -37,7 +38,7 @@ use ::datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilde
 use ::datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use ::datafusion::physical_plan::{
     ChildrenPropertiesMode, DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning,
-    PlanProperties, ReplaceChildrenOptions, SendableRecordBatchStream,
+    PlanProperties, ReplaceChildrenOptions, SendableRecordBatchStream, StatisticsArgs,
 };
 
 use crate::config::Config;
@@ -800,6 +801,40 @@ impl ExecutionPlan for StrataExec {
         vec![]
     }
 
+    /// The row count, from the files' postscripts: exact for a plain scan, so DataFusion
+    /// answers `count(*)` without reading a column; an estimate with a predicate, a lookup or a
+    /// limit. Column statistics are unknown.
+    fn statistics_from_inputs(
+        &self,
+        _input_stats: &[Arc<Statistics>],
+        args: &StatisticsArgs,
+    ) -> DfResult<Arc<Statistics>> {
+        let rows_of = |(file, range): &(usize, Option<Range<u32>>)| -> u64 {
+            match range {
+                Some(r) => u64::from(r.end.saturating_sub(r.start)),
+                None => self.files.get(*file).map_or(0, |f| f.row_count()),
+            }
+        };
+        let rows: u64 = match args.partition() {
+            Some(i) => self.parts.get(i).map_or(0, rows_of),
+            None => self.parts.iter().map(rows_of).sum(),
+        };
+        let mut rows = usize::try_from(rows).unwrap_or(usize::MAX);
+        // How a limit splits across partitions is not modelled: it only caps the estimate.
+        let filtered = self.predicate.is_some() || self.lookup.is_some() || self.limit.is_some();
+        if let Some(limit) = self.limit {
+            rows = rows.min(limit);
+        }
+        let rows = if filtered {
+            Precision::Inexact(rows)
+        } else {
+            Precision::Exact(rows)
+        };
+        Ok(Arc::new(
+            Statistics::new_unknown(&self.schema).with_num_rows(rows),
+        ))
+    }
+
     fn apply_expressions(
         &self,
         _f: &mut dyn FnMut(
@@ -1219,6 +1254,85 @@ mod tests {
                     .iter()
                     .all(|r| u64::from(r.end - r.start) >= MIN_PARTITION_ROWS)
             );
+        }
+    }
+
+    /// Rows of one `count(*)`-style query and the bytes the table's files fetched for it.
+    async fn rows_and_bytes(table: StrataTable, sql: &str) -> (i64, u64) {
+        let files = table.files.clone();
+        let ctx = ::datafusion::prelude::SessionContext::new();
+        ctx.register_table("t", Arc::new(table)).unwrap();
+        files.iter().for_each(|f| f.reset_io_stats());
+        let batches = ctx.sql(sql).await.unwrap().collect().await.unwrap();
+        let count = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap()
+            .value(0);
+        (count, files.iter().map(|f| f.io_stats().bytes).sum())
+    }
+
+    #[tokio::test]
+    async fn count_star_comes_from_the_row_count_without_a_read() {
+        let (rows, bytes) = rows_and_bytes(main_table().await, "SELECT count(*) FROM t").await;
+        assert_eq!((rows, bytes), (3_000, 0));
+        // With a filter, the count is computed from the rows, which needs reads.
+        let all = wide_batch(3_000);
+        let status = all
+            .column(all.schema().index_of("status").unwrap())
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let ok = status.iter().filter(|s| *s == Some("ok")).count() as i64;
+        let (rows, bytes) = rows_and_bytes(
+            main_table().await,
+            "SELECT count(*) FROM t WHERE status = 'ok'",
+        )
+        .await;
+        assert_eq!(rows, ok);
+        assert!(bytes > 0);
+    }
+
+    #[tokio::test]
+    async fn a_string_filter_skips_the_varbin_chunks_its_zones_rule_out() {
+        // 40,000 sorted, distinct series ids: too many for a dictionary, so `Varbin` chunks.
+        let n = 40_000usize;
+        let ids = StringArray::from_iter_values((0..n).map(|i| format!("ELEC.SERIES-{i:06}.M")));
+        let values = arrow::array::Float64Array::from_iter_values((0..n).map(|i| i as f64));
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("series_id", DataType::Utf8, false),
+            Field::new("value", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(ids), Arc::new(values)]).unwrap();
+        let config = Config {
+            dict_max_values: 1_000,
+            ..Config::default()
+        };
+        let mut writer = StrataWriter::new(batch.schema(), &[], config.clone()).unwrap();
+        writer.write(&batch).unwrap();
+        let (bytes, _) = writer.finish().unwrap();
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("series.strata");
+        store.put(&path, PutPayload::from(bytes)).await.unwrap();
+        let file = Arc::new(StrataFile::open(store, path, None, &config).await.unwrap());
+        assert_eq!(file.directory()[0].dict_offset, 0);
+        let table = || StrataTable::new(vec![Arc::clone(&file)]).unwrap();
+
+        let (all, all_bytes) =
+            rows_and_bytes(table(), "SELECT count(*) FROM t WHERE value >= 0").await;
+        assert_eq!(all, n as i64);
+        for (id, expected) in [
+            ("ELEC.SERIES-012345.M", 1),
+            ("ELEC.SERIES-039999.M", 1),
+            ("ELEC.SERIES-040000.M", 0),
+            ("ELEC.A", 0),
+        ] {
+            let sql = format!("SELECT count(*) FROM t WHERE series_id = '{id}'");
+            let (rows, bytes) = rows_and_bytes(table(), &sql).await;
+            assert_eq!(rows, expected, "{id}");
+            // One chunk of ~20 chunks of `series_id` at most, and no `value` chunk outside it.
+            assert!(bytes * 5 < all_bytes, "{id}: {bytes} of {all_bytes} bytes");
         }
     }
 

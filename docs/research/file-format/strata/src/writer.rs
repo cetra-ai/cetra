@@ -951,9 +951,9 @@ mod tests {
     }
 
     /// xxh3_64 of the file written from `wide_batch(20_000)` with `Config::default()`.
-    /// Recorded after 2,048-row narrow chunks and the 30% narrow-chunk zstd threshold. A
-    /// change to this value means the output changed.
-    const GOLDEN: u64 = 0x80b0_81c3_de74_7657;
+    /// Recorded after zones on `Varbin` chunks. A change to this value means the output
+    /// changed.
+    const GOLDEN: u64 = 0x5d6c_4d57_c42a_d126;
 
     #[test]
     fn golden_output_hash() {

@@ -7,12 +7,21 @@
 
 Their S3 tests were not run.
 
-**Summary.** On this data Strata is the slowest format in nearly every test, and never the smallest:
-- **Sizes:** unsorted, it is 1–11% bigger than Parquet and 28–32% bigger than vx_compact. Sorted, it is 37% (ELEC) to 137% (PET) bigger than the smallest file.
-- **Full reads:** 1.3–5× slower than Parquet, and 2.5–4.5× slower than the faster Vortex variant.
-- **Point queries for one series:** unsorted, within 8% of Parquet on PET and 3.3× slower on ELEC. Sorted, 24× (PET) and 110× (ELEC) slower than Parquet.
+**Summary.** The first run found four gaps in Strata, set out under [Why Strata lost here](#why-strata-lost-here). Two of them are now fixed:
+- **String zones.** Chunks of strings stored without a dictionary now have min/max zones.
+- **Row count.** DataFusion now gets the row count of a scan.
 
-Most of this comes from four gaps in Strata, set out under [Why Strata loses here](#why-strata-loses-here). Strata was designed around LLM traces, with an id sort key and text payloads; none of that is used here.
+**After the fixes:**
+- **Queries:**
+  - `count(*)` is the fastest of all formats, at 0.3 ms.
+  - A one-series query on sorted data is as fast as Parquet on PET (2.8 against 3.4 ms). On ELEC it is 2.5× Parquet (10.1 against 4.0 ms), against 110× before.
+  - Unsorted, Strata now beats Parquet on that query (137 against 202 ms on ELEC; 30 against 87 ms on PET), but stays behind Vortex (51 and 18 ms).
+- **Unchanged, from the two gaps still open:**
+  - **Size:** unsorted, Strata is 1–11% bigger than Parquet and 28–32% bigger than vx_compact. Sorted, it is 37% (ELEC) to 137% (PET) bigger than the smallest file.
+  - **Full reads:** 1.3–5× slower than Parquet, and 2.5–4.5× slower than the faster Vortex variant.
+  - **Aggregates:** 1.5–2× slower.
+
+Strata was designed around LLM traces, with an id sort key and text payloads; none of that is used here.
 
 ## Data
 
@@ -135,47 +144,92 @@ Query engines on the source Parquet, ms:
 | ELEC | v1_3col | 1,035 (11.9) | 727 (8.0) | 387 (4.6) | **351** (4.2) |
 | | v3_d32sort | 958 (10.6) | **189** (1.5) | 230 (2.7) | 214 (2.5) |
 
-**Queries, min ms** (`point` is per series, with the KiB it read)
+**Queries, min ms** (`point` is per series, with the KiB it read). From the run after the two fixes, with Strata's first run beside it.
 
-| | Variant | Query | st | pq | vx_compact | vx_default |
-|---|---|---|---|---|---|---|
-| PET | v2_date32 | count | 5.20 | **0.34** | 0.44 | 0.41 |
-| | v2_date32 | agg | 73.0 | 48.4 | 52.8 | **37.5** |
-| | v1_3col | point | 91.5 / 22,506 KiB | 84.9 / 14,609 | 37.7 / 48,113 | **17.8** / 110,624 |
-| | v3_d32sort | point | 85.2 / 1,915 KiB | **3.6** / 329 | 5.8 / 7,196 | 4.4 / 7,260 |
-| ELEC | v2_date32 | count | 19.84 | **0.35** | 0.44 | 0.41 |
-| | v2_date32 | agg | 316.8 | 186.6 | 224.7 | **158.4** |
-| | v1_3col | point | 635.7 / 85,085 KiB | 195.4 / 52,230 | 91.9 / 206,050 | **51.3** / 367,775 |
-| | v3_d32sort | point | 575.8 / 15,009 KiB | **5.2** / 736 | 10.6 / 19,980 | 8.1 / 17,825 |
+| | Variant | Query | st | st, first run | pq | vx_compact | vx_default |
+|---|---|---|---|---|---|---|---|
+| PET | v2_date32 | count | **0.30** | 5.20 | 0.34 | 0.43 | 0.46 |
+| | v2_date32 | agg | 72.2 | 73.0 | 46.2 | 53.0 | **37.3** |
+| | v1_3col | point | 30.4 / 21,783 KiB | 91.5 / 22,506 | 86.8 / 14,609 | 36.4 / 48,675 | **17.7** / 110,875 |
+| | v3_d32sort | point | **2.8** / 7 KiB | 85.2 / 1,915 | 3.4 / 329 | 5.7 / 6,927 | 3.8 / 6,391 |
+| ELEC | v2_date32 | count | **0.31** | 19.84 | 0.34 | 0.43 | 0.42 |
+| | v2_date32 | agg | 311.5 | 316.8 | 183.7 | 224.3 | **151.9** |
+| | v1_3col | point | 137.6 / 66,810 KiB | 635.7 / 85,085 | 201.6 / 52,230 | 90.1 / 205,601 | **51.4** / 371,624 |
+| | v3_d32sort | point | 10.1 / 18 KiB | 575.8 / 15,009 | **4.0** / 736 | 9.8 / 16,117 | 8.5 / 20,050 |
 
-The tables leave out `v0_today` and some variants; the full output is under [Raw output](#raw-output).
+Unsorted rows are still grouped by series (EIA ships them series by series), so the zones rule out most chunks there too.
 
-## Why Strata loses here
+The size, write and full-read tables are from the first run; the second run matched them within the noise (see [Raw output](#raw-output)). The tables leave out `v0_today` and some variants; the full output is under [Raw output](#raw-output).
 
-1. **No chunk statistics on strings.**
-   - **Unsorted data.** Zones (chunk min/max) exist for numbers and dictionary codes only. `series_id` has 175k distinct values on PET and 785k on ELEC, above the 65,535-value dictionary limit (`Config::dict_max_values`). So it is stored without a dictionary: no zone, and no chunk postings either.
-   - **Point queries.** `WHERE series_id = '…'` therefore decodes the whole `series_id` column on every query. In a profile of Strata on sorted PET, where the point queries take most of the time, 36% of the samples are in decoding chunks and 27% in evaluating the filter.
-   - **Sorted data.** Parquet's page statistics prune all but one page, and Vortex's zone maps do the same. Strata's key filter only tells whether a value is somewhere in the file.
-   - **The fix:** zones on Utf8 (a 16-byte prefix as min and max, like Parquet's truncated statistics), or a dictionary limit high enough for 800k ids.
-2. **`count(*)` scans a column.** `StrataExec` does not report its row count to DataFusion as an exact statistic, so a count decodes a column: 5–20 ms against 0.35 ms. The row count is in the postscript.
-3. **Sorted data barely compresses better.** Sorting shrank Parquet by 28% (PET) and 41% (ELEC), and Vortex compact by 44% and 25%. Strata got 10% bigger on PET and 21% smaller on ELEC:
+## Why Strata lost here
+
+1. **No chunk statistics on strings (fixed).**
+   - **The gap.** Zones (chunk min/max) existed for numbers and dictionary codes only. `series_id` has 175k distinct values on PET and 785k on ELEC, above the 65,535-value dictionary limit (`Config::dict_max_values`). So it was stored without a dictionary: no zone, and no chunk postings either.
+   - **Its cost.** `WHERE series_id = '…'` decoded the whole `series_id` column on every query. In a profile of Strata on sorted PET, where the point queries take most of the time, 36% of the samples were in decoding chunks and 27% in evaluating the filter. Parquet's page statistics prune all but one page; Strata's key filter only tells whether a value is somewhere in the file.
+   - **The fix.** A `Varbin` chunk (Utf8 or Binary without a dictionary) now has a zone in one of two forms:
+     - **Plain form:** the first 16 bytes of its lowest and highest value, zero-padded. Padding keeps the byte order, so comparisons prune when taken as non-strict.
+     - **Shared-prefix form** (new flag `SHARED_PREFIX`), when those values share a prefix of 6 bytes or more: the prefix length, a 4-byte hash of the prefix, and the next 11 bytes of each bound. Only equality prunes with it; a hash collision only keeps a chunk.
+
+     The second form is what fixed ELEC: its sorted ids share prefixes such as `ELEC.PLANT.AVG_HEAT.1391-`, longer than 16 bytes. With the plain form alone, a sorted ELEC point query still took 238 ms.
+2. **`count(*)` scanned a column (fixed).** `StrataExec` did not report a row count to DataFusion, so a count decoded a column: 5–20 ms against 0.35 ms. It now reports the row count from the postscripts. The count is exact for a plain scan, so DataFusion answers `count(*)` without a read; with a predicate, a lookup or a limit it is only an estimate.
+3. **Sorted data barely compresses better (open).** Sorting shrank Parquet by 28% (PET) and 41% (ELEC), and Vortex compact by 44% and 25%. Strata got 10% bigger on PET and 21% smaller on ELEC:
    - Its narrow encodings have no run-length encoding for repeated strings without a dictionary, and no delta encoding for dates.
    - Its chunks are small (2,048 rows), each with its own zstd frame.
    - It has nothing like ALP for floats; Vortex uses ALP.
-4. **Reads use more CPU.** A full read costs Strata 1.5–7× Parquet's CPU. Every 2,048-row chunk is a separate zstd frame and its own decode call, and nothing is skipped when a column is constant across a chunk.
+4. **Reads use more CPU (open).** A full read costs Strata 1.5–7× Parquet's CPU. Every 2,048-row chunk is a separate zstd frame and its own decode call, and nothing is skipped when a column is constant across a chunk.
+
+The sorted ELEC point query remains 2.5× Parquet's time, though it reads 18 KiB against 736: zone checks run over about 30,000 block-table entries per column. That cost has not been profiled.
 
 Strata's strengths do not apply to this data:
 - no text payloads, so no deduplication and no trigram search;
 - no id sort key, so no trace lookup;
 - a high-cardinality string column used as the key.
 
-Gaps 1 and 2 would also hurt cetra:
-- **Gap 1:** a filter on `user_id`, `session_id` or a high-cardinality attribute in a map column would decode the whole column the same way. The key filters only answer "absent from this file".
-- **Gap 2:** a count in the UI would scan a column.
+Gaps 1 and 2 also mattered for cetra:
+- **Gap 1:** a filter on a high-cardinality string column such as `user_id` or `session_id` decoded the whole column. Values inside map columns still get no zone.
+- **Gap 2:** a count in the UI scanned a column.
 
 ## Raw output
 
-`fmtbench series ~/cfb/data ~/cfb/st-out 5 PET ELEC` took 951 s, with a peak RSS of 15.9 GB.
+**After the fixes.** `fmtbench series ~/cfb/data ~/cfb/st-out 5 PET ELEC` took 580 s, with a peak RSS of 15.9 GB:
+
+```
+ds    variant     format            MB  write ms  read med  read min  read cpu     count   agg med   agg min point med point min point KiB
+PET   v0_today    pq              42.4      1586     166.8     165.4    1242.7      0.33      58.5      55.3    89.122    88.768   14609.4
+PET   v0_today    vx_default     104.7       985      96.6      94.8    1052.3      0.41      61.3      61.0    17.697    17.355  109945.0
+PET   v0_today    vx_compact      38.3      1387     147.2     145.1    1627.1      0.43      84.9      81.8    36.721    36.518   48290.1
+PET   v0_today    st              48.6      2913     236.8     216.8    2562.3      0.30      94.9      94.5    30.873    30.296   21783.3
+PET   v1_3col     pq              40.5      1220     156.0     142.6    1179.2      0.33      57.7      54.0    88.857    86.825   14609.4
+PET   v1_3col     vx_default      87.1       922      75.9      75.1     816.6      0.45      62.8      61.5    17.938    17.668  110875.3
+PET   v1_3col     vx_compact      35.2      1115     105.4     103.2    1159.4      0.45      83.1      80.5    36.855    36.350   48675.4
+PET   v1_3col     st              45.1      2043     197.7     187.9    2195.1      0.30      95.0      94.1    31.163    30.443   21783.3
+PET   v2_date32   pq              40.5      1096     152.3     146.3    1087.1      0.34      52.0      46.2    89.569    87.645   14611.4
+PET   v2_date32   vx_default      85.9       806      64.3      62.9     675.3      0.46      38.3      37.3    18.002    17.645  109139.3
+PET   v2_date32   vx_compact      37.2      1006      82.9      81.6     904.4      0.43      54.6      53.0    35.904    35.200   52655.6
+PET   v2_date32   st              45.1      1511     178.0     176.5    2028.4      0.30      73.4      72.2    30.862    29.979   21790.6
+PET   v3_d32sort  pq              29.0       851      44.6      38.8     272.0      0.35      45.8      45.0     3.756     3.383     328.7
+PET   v3_d32sort  vx_default      51.6       585      49.5      47.8     529.9      0.42      39.2      38.8     4.186     3.817    6390.7
+PET   v3_d32sort  vx_compact      20.9       771      53.6      53.5     562.9      0.46      51.4      49.9     5.844     5.666    6927.0
+PET   v3_d32sort  st              49.6      2045     169.8     159.9    1675.2      0.30      78.2      75.8     3.427     2.799       7.4
+ELEC  v0_today    pq             270.5      7410     865.7     823.9    9024.9      0.38     236.0     229.0   205.033   201.430   52230.1
+ELEC  v0_today    vx_default     416.2      4394     478.9     452.1    5016.5      0.39     263.2     255.0    51.596    49.968  352529.6
+ELEC  v0_today    vx_compact     213.1      6861     539.1     482.3    6279.3      0.39     299.7     297.0    89.809    88.807  202413.2
+ELEC  v0_today    st             276.7     12889    1368.9    1303.8   15823.0      0.29     429.5     416.5   138.914   136.492   66810.4
+ELEC  v1_3col     pq             268.2      5808     801.9     725.0    8041.6      0.36     243.2     225.3   202.749   201.637   52230.1
+ELEC  v1_3col     vx_default     384.0      4111     372.6     353.5    4172.4      0.43     254.4     249.4    52.615    51.432  371623.6
+ELEC  v1_3col     vx_compact     205.7      5899     394.1     378.7    4532.5      0.40     297.2     290.6    90.348    90.088  205600.5
+ELEC  v1_3col     st             270.8      9497    1064.8    1054.6   12096.4      0.30     434.7     399.2   139.113   137.619   66810.4
+ELEC  v2_date32   pq             267.9      5276     741.5     694.0    7609.6      0.34     196.5     183.7   201.965   200.915   52227.6
+ELEC  v2_date32   vx_default     380.1      3665     305.5     290.9    3404.6      0.42     170.1     151.9    53.223    51.097  372296.3
+ELEC  v2_date32   vx_compact     218.4      5307     357.7     350.4    4175.9      0.43     233.4     224.3    90.561    90.299  218821.6
+ELEC  v2_date32   st             271.8      7066    1055.2    1004.1   11332.7      0.31     327.3     311.5   139.096   136.947   67058.1
+ELEC  v3_d32sort  pq             157.1      3932     189.2     175.8    1500.8      0.35     179.1     175.2     4.342     3.955     736.1
+ELEC  v3_d32sort  vx_default     302.1      2617     219.6     215.0    2472.6      0.44     173.0     160.7     8.544     8.500   20050.4
+ELEC  v3_d32sort  vx_compact     162.8      3289     249.2     231.5    2795.1      0.42     227.7     220.5    10.271     9.796   16117.0
+ELEC  v3_d32sort  st             215.4      8733    1046.2     986.9   11523.9      0.29     287.2     279.5    10.499    10.059      17.6
+```
+
+**First run, before the fixes**, 951 s:
 
 ```
 ds    variant     format            MB  write ms  read med  read min  read cpu     count   agg med   agg min point med point min point KiB

@@ -252,12 +252,16 @@ Field sizes: 4 + 4 + 8 + 4 + 1 + 1 + 2 + 16 + 16 = 56. `const_len` is the byte l
 | 1 | zone values valid |
 | 2 | has NaN |
 | 3 | all null |
+| 4 | shared-prefix zone (`VARBIN` only, below) |
 
 **Zone values:**
 - Integers (Int8–Int64, UInt8–UInt32) and timestamps: i64 in `min[0..8]` and `max[0..8]`. UInt64 has no zone.
 - Floats: f64 over non-NaN values, with −0.0 stored as 0.0. NaN sets flag bit 2.
 - Dictionary columns: the minimum and maximum code, as u32.
 - FixedSizeBinary(w), w ≤ 16: the minimum and maximum values, zero-padded. They are exact, so comparisons are inclusive.
+- `VARBIN` chunks (Utf8 or Binary without a dictionary), from the lowest and highest valid value in byte order. There are two forms:
+  - **Plain form:** the first 16 bytes of each bound, zero-padded. Zero-padding keeps the byte order, but two values can share a prefix, so every comparison prunes as non-strict: `<` as `<=`, `>` as `>=`.
+  - **Shared-prefix form** (flag bit 4), when the two values share a prefix of `k ≥ 6` bytes (at most 255 are counted). Both bounds start with `u8 k` and the low four bytes of `xxh3_64` of the prefix, then hold the next 11 bytes of their value, zero-padded. Only equality prunes in this form: a literal shorter than `k`, or with another prefix hash, cannot be in the chunk, and neither can one whose next 11 bytes fall outside the bounds. A hash collision only keeps a chunk. Sorted ids often share prefixes longer than 16 bytes, which the plain form cannot see past (time-series comparison, `timeseries.md`).
 - Other types: none (flag bit 1 clear).
 
 **Encodings** (the `encoding` byte):
@@ -568,6 +572,7 @@ The Parquet baseline is measured with the same counting store (`bench/src/counti
 **`StrataExec`.**
 - One partition per remaining file; with no file left, one partition that reads nothing. A `trace_id` lookup that leaves one file therefore reports 1 partition, as does one that leaves none.
 - `output_ordering`: the first sort-key column only, declared when that column is in the projection. Each partition reads at most one file, so the order holds per partition.
+- Statistics: the row count from the postscripts, per partition or in total. It is exact for a plain scan, so DataFusion answers `count(*)` without a read; with a predicate, a lookup or a limit it is only an estimate. Column statistics are unknown.
 - `limit` reaches `scan` only when DataFusion passes it, which it does only when every pushed filter is `Exact`.
 - Metrics, registered with `MetricBuilder`:
 

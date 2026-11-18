@@ -542,17 +542,17 @@ Sizes of Parquet and Vortex are from M7.4; `pq_default`'s write speed is from th
 
 ## Time-series data: the columnar-format-benchmarks tests
 
-[timeseries.md](timeseries.md) runs the tests of [balicat/columnar-format-benchmarks](https://github.com/balicat/columnar-format-benchmarks) on Strata, Parquet and Vortex, using 75M rows of public EIA energy series. On that data Strata is the slowest format in nearly every test, and never the smallest:
-- full reads are 1.3–5× slower than Parquet;
-- sorted, a one-series query is 24–110× slower than Parquet.
+[timeseries.md](timeseries.md) runs the tests of [balicat/columnar-format-benchmarks](https://github.com/balicat/columnar-format-benchmarks) on Strata, Parquet and Vortex, using 75M rows of public EIA energy series.
 
-Four gaps explain it:
-- no chunk statistics on high-cardinality strings;
-- `count(*)` scans a column;
-- no run-length or delta encoding of sorted columns;
-- the per-chunk decode cost.
+The first run found four gaps. Two are now fixed:
+- **String zones.** Strings stored without a dictionary now have chunk zones, in a plain 16-byte form or a shared-prefix form.
+- **Row count.** DataFusion now gets the row count of a scan.
 
-The first two would also hurt cetra's filters and counts.
+`count(*)` is now the fastest of all formats (0.3 ms). A one-series query on sorted data went from 24–110× Parquet's time to 0.8× (PET) and 2.5× (ELEC).
+
+Two gaps remain:
+- **Size.** Strata has no run-length or delta encoding of sorted columns, so its files stay 1–137% bigger than the smallest.
+- **Full reads.** The per-chunk decode cost keeps them 1.3–5× slower than Parquet.
 
 ## What each format gets right and wrong
 

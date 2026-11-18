@@ -10,7 +10,10 @@ use arrow::ipc::writer::StreamWriter;
 
 use super::bitpack::{pack, width_for};
 use super::lengths::encode_lengths;
-use super::{Class, Dictionary, Encoding, Numeric, flags, is_utf8_map, numeric_of, unsupported};
+use super::{
+    Class, Dictionary, Encoding, Numeric, SHARED_PREFIX_MIN, SHARED_SUFFIX, flags, is_utf8_map,
+    numeric_of, prefix_hash, unsupported,
+};
 use crate::config::Config;
 use crate::error::{Result, StrataError};
 use crate::format::{MAX_CHUNK_ELEMENTS, MAX_CHUNK_OUTPUT, le_u64};
@@ -546,6 +549,8 @@ fn varbin_rows(array: &dyn Array) -> Result<Vec<&[u8]>> {
 /// bytes long, and none is null, it is `Const` with the bytes inline. Otherwise it is
 /// `Varbin`: the validity bitmap if there are nulls, a lengths block of the value lengths
 /// (null slots have length 0), then the bytes.
+///
+/// A `Varbin` chunk has a zone from its lowest and highest valid value ([`set_varbin_zone`]).
 fn encode_varbin(array: &dyn Array) -> Result<EncodedChunk> {
     let rows = varbin_rows(array)?;
     let has_nulls = array.null_count() > 0;
@@ -573,8 +578,46 @@ fn encode_varbin(array: &dyn Array) -> Result<EncodedChunk> {
         body.extend_from_slice(row);
     }
     let mut chunk = EncodedChunk::bare(Encoding::Varbin, chunk_flags);
+    // Not all null (that chunk is `ConstNull`), so there is a valid value.
+    let mut valid = rows
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| array.is_valid(*i))
+        .map(|(_, row)| *row);
+    if let Some(first) = valid.next() {
+        let (lo, hi) = valid.fold((first, first), |(lo, hi), v| (lo.min(v), hi.max(v)));
+        set_varbin_zone(&mut chunk, lo, hi);
+    }
     chunk.body = Some(body);
     Ok(chunk)
+}
+
+/// Sets the zone of a `Varbin` chunk from its lowest and highest valid value. Every value lies
+/// between them, so every value starts with their common prefix. A common prefix of at least
+/// [`SHARED_PREFIX_MIN`] bytes (sorted ids often share long ones) gives the shared-prefix form
+/// ([`flags::SHARED_PREFIX`]); otherwise the zone holds the first 16 bytes of each, zero-padded.
+fn set_varbin_zone(chunk: &mut EncodedChunk, lo: &[u8], hi: &[u8]) {
+    let shared = lo
+        .iter()
+        .zip(hi)
+        .take_while(|(a, b)| a == b)
+        .count()
+        .min(255);
+    chunk.flags |= flags::HAS_ZONE;
+    if shared < SHARED_PREFIX_MIN {
+        set_prefix(&mut chunk.min, lo.get(..16).unwrap_or(lo));
+        set_prefix(&mut chunk.max, hi.get(..16).unwrap_or(hi));
+        return;
+    }
+    chunk.flags |= flags::SHARED_PREFIX;
+    let hash = prefix_hash(lo.get(..shared).unwrap_or(lo));
+    for (bound, value) in [(&mut chunk.min, lo), (&mut chunk.max, hi)] {
+        let rest = value.get(shared..).unwrap_or_default();
+        let mut zone = vec![shared as u8];
+        zone.extend_from_slice(&hash);
+        zone.extend_from_slice(rest.get(..SHARED_SUFFIX).unwrap_or(rest));
+        set_prefix(bound, &zone);
+    }
 }
 
 /// Any chunk of a type without a narrow encoding: an Arrow IPC stream holding one batch

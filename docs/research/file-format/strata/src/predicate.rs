@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, BinaryArray, BooleanArray, DictionaryArray, FixedSizeBinaryArray,
+    Array, ArrayRef, AsArray, BinaryArray, BooleanArray, DictionaryArray, FixedSizeBinaryArray,
     Float64Array, Int64Array, MapArray, Scalar, StringArray, UInt32Array, UInt64Array,
     new_null_array,
 };
@@ -19,7 +19,7 @@ use arrow::datatypes::{DataType, Field, UInt32Type};
 use crate::error::{Result, StrataError};
 use crate::file::StrataFile;
 use crate::hot::Layer;
-use crate::narrow::{BlockEntry, Dictionary, Encoding, flags};
+use crate::narrow::{BlockEntry, Dictionary, Encoding, SHARED_SUFFIX, flags, prefix_hash};
 use crate::payload::MAX_NEEDLE;
 
 /// A literal in a predicate.
@@ -837,8 +837,81 @@ fn term_may_match(entry: &BlockEntry, field: &Field, op: CmpOp, lit: &ArrayRef) 
             };
             Ok(may_hold::<[u8]>(op, min, max, array.value(0)))
         }
+        DataType::Utf8 | DataType::Binary if entry.encoding == Encoding::Varbin => {
+            let Some(v) = lit_bytes(lit) else {
+                return Ok(true);
+            };
+            if entry.flags & flags::SHARED_PREFIX != 0 {
+                return Ok(shared_prefix_may_hold(op, &entry.min, &entry.max, v));
+            }
+            Ok(prefix_may_hold(op, &entry.min, &entry.max, &zone_prefix(v)))
+        }
         _ => Ok(true),
     }
+}
+
+/// The bytes of a one-element string or binary literal. `None` for any other type.
+fn lit_bytes(lit: &ArrayRef) -> Option<&[u8]> {
+    match lit.data_type() {
+        DataType::Utf8 => lit.as_string_opt::<i32>().map(|a| a.value(0).as_bytes()),
+        DataType::LargeUtf8 => lit.as_string_opt::<i64>().map(|a| a.value(0).as_bytes()),
+        DataType::Utf8View => lit.as_string_view_opt().map(|a| a.value(0).as_bytes()),
+        DataType::Binary => lit.as_binary_opt::<i32>().map(|a| a.value(0)),
+        DataType::LargeBinary => lit.as_binary_opt::<i64>().map(|a| a.value(0)),
+        DataType::BinaryView => lit.as_binary_view_opt().map(|a| a.value(0)),
+        _ => None,
+    }
+}
+
+/// The first 16 bytes of `v`, zero-padded: how a `Varbin` zone stores its bounds.
+fn zone_prefix(v: &[u8]) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    let n = v.len().min(16);
+    if let (Some(dst), Some(src)) = (out.get_mut(..n), v.get(..n)) {
+        dst.copy_from_slice(src);
+    }
+    out
+}
+
+/// [`may_hold`] on 16-byte prefixes. Prefixes keep the order of the values but not its
+/// strictness (two values can share a prefix), so every comparison is taken as non-strict:
+/// `x < v` only implies `prefix(x) <= prefix(v)`.
+fn prefix_may_hold(op: CmpOp, min: &[u8; 16], max: &[u8; 16], v: &[u8; 16]) -> bool {
+    match op {
+        CmpOp::Eq => min <= v && v <= max,
+        CmpOp::NotEq => true,
+        CmpOp::Lt | CmpOp::LtEq => min <= v,
+        CmpOp::Gt | CmpOp::GtEq => max >= v,
+    }
+}
+
+/// [`may_hold`] on a shared-prefix zone ([`flags::SHARED_PREFIX`]). Only equality is pruned:
+/// a value equal to `v` starts with the shared prefix, so `v` must be at least as long, its
+/// prefix must have the stored hash (a collision only keeps a chunk), and its next 11 bytes,
+/// zero-padded, must lie in the zone, non-strictly as in [`prefix_may_hold`].
+fn shared_prefix_may_hold(op: CmpOp, min: &[u8; 16], max: &[u8; 16], v: &[u8]) -> bool {
+    if op != CmpOp::Eq {
+        return true;
+    }
+    let Some(&shared) = min.first() else {
+        return true;
+    };
+    let shared = usize::from(shared);
+    let (Some(prefix), Some(rest)) = (v.get(..shared), v.get(shared..)) else {
+        return false;
+    };
+    if min.get(1..5) != Some(prefix_hash(prefix).as_slice()) {
+        return false;
+    }
+    let mut next = [0u8; SHARED_SUFFIX];
+    let n = rest.len().min(SHARED_SUFFIX);
+    if let (Some(dst), Some(src)) = (next.get_mut(..n), rest.get(..n)) {
+        dst.copy_from_slice(src);
+    }
+    let (Some(lo), Some(hi)) = (min.get(5..), max.get(5..)) else {
+        return true;
+    };
+    lo <= next.as_slice() && next.as_slice() <= hi
 }
 
 /// Whether one conjunct may hold for a row of a chunk. A null chunk never does. A constant chunk
@@ -947,6 +1020,125 @@ mod tests {
         assert!(!may_hold(CmpOp::GtEq, &10, &20, &21));
         assert!(may_hold(CmpOp::GtEq, &10, &20, &20));
         assert!(may_hold(CmpOp::NotEq, &10, &10, &10));
+    }
+
+    #[test]
+    fn a_varbin_zone_prunes_strings_by_their_16_byte_prefix() {
+        // The two longest values share their first 16 bytes and differ after them.
+        let values: ArrayRef = Arc::new(StringArray::from(vec![
+            Some("ELEC.GEN.ALL-AK-99.A"),
+            None,
+            Some("ELEC.GEN.ALL-AK-99.Q"),
+            Some("ELEC.CONS"),
+        ]));
+        let chunk =
+            crate::narrow::encode_chunk(&values, None, &crate::config::Config::default()).unwrap();
+        assert_eq!(chunk.encoding, Encoding::Varbin);
+        assert_ne!(chunk.flags & flags::HAS_ZONE, 0);
+        assert_eq!(&chunk.min[..9], b"ELEC.CONS");
+        assert_eq!(chunk.min[9..], [0u8; 7]);
+        assert_eq!(&chunk.max, b"ELEC.GEN.ALL-AK-");
+        let entry = BlockEntry {
+            first_row: 0,
+            n_rows: 4,
+            segment_offset: 0,
+            segment_len: 0,
+            encoding: chunk.encoding,
+            flags: chunk.flags,
+            const_len: 0,
+            min: chunk.min,
+            max: chunk.max,
+        };
+        let field = Field::new("series_id", DataType::Utf8, true);
+        let may = |op, v: &str| {
+            let lit: ArrayRef = Arc::new(StringArray::from(vec![v]));
+            term_may_match(&entry, &field, op, &lit).unwrap()
+        };
+        // Every value in the chunk may match itself, including one past the stored prefix.
+        for v in ["ELEC.CONS", "ELEC.GEN.ALL-AK-99.A", "ELEC.GEN.ALL-AK-99.Q"] {
+            assert!(may(CmpOp::Eq, v));
+        }
+        // A value whose prefix is inside the zone cannot be ruled out.
+        assert!(may(CmpOp::Eq, "ELEC.GEN.ALL-AK-99.Z"));
+        assert!(may(CmpOp::Eq, "ELEC.D"));
+        // Below the minimum or above the maximum prefix.
+        assert!(!may(CmpOp::Eq, "ELEC.CON"));
+        assert!(!may(CmpOp::Eq, "ELEC.GEN.ALL-AL"));
+        assert!(!may(CmpOp::Eq, "PET.X"));
+        // Ranges are non-strict on prefixes: a shared prefix never prunes.
+        assert!(may(CmpOp::Gt, "ELEC.GEN.ALL-AK-99.Z"));
+        assert!(!may(CmpOp::Gt, "ELEC.GEN.ALL-AL"));
+        assert!(may(CmpOp::Lt, "ELEC.CONS"));
+        assert!(!may(CmpOp::Lt, "ELEC.CON"));
+        assert!(may(CmpOp::NotEq, "ELEC.CONS"));
+        // A literal of another type is not pruned.
+        let int: ArrayRef = Arc::new(Int64Array::from(vec![1]));
+        assert!(term_may_match(&entry, &field, CmpOp::Eq, &int).unwrap());
+    }
+
+    #[test]
+    fn a_shared_prefix_zone_prunes_equality_past_the_first_16_bytes() {
+        // Sorted ids sharing 25 bytes: a plain 16-byte zone could not tell these chunks apart.
+        let values: ArrayRef = Arc::new(StringArray::from(vec![
+            "ELEC.PLANT.AVG_HEAT.1391-DFO-ALL.Q",
+            "ELEC.PLANT.AVG_HEAT.1391-NG-ALL.Q",
+            "ELEC.PLANT.AVG_HEAT.1391-SUB-ALL.Q",
+        ]));
+        let chunk =
+            crate::narrow::encode_chunk(&values, None, &crate::config::Config::default()).unwrap();
+        assert_ne!(chunk.flags & flags::SHARED_PREFIX, 0);
+        assert_eq!(chunk.min[0], 25);
+        assert_eq!(&chunk.min[5..], b"DFO-ALL.Q\0\0");
+        assert_eq!(&chunk.max[5..], b"SUB-ALL.Q\0\0");
+        let entry = BlockEntry {
+            first_row: 0,
+            n_rows: 3,
+            segment_offset: 0,
+            segment_len: 0,
+            encoding: chunk.encoding,
+            flags: chunk.flags,
+            const_len: 0,
+            min: chunk.min,
+            max: chunk.max,
+        };
+        let field = Field::new("series_id", DataType::Utf8, false);
+        let may = |op, v: &str| {
+            let lit: ArrayRef = Arc::new(StringArray::from(vec![v]));
+            term_may_match(&entry, &field, op, &lit).unwrap()
+        };
+        for v in [
+            "ELEC.PLANT.AVG_HEAT.1391-DFO-ALL.Q",
+            "ELEC.PLANT.AVG_HEAT.1391-NG-ALL.Q",
+            "ELEC.PLANT.AVG_HEAT.1391-SUB-ALL.Q",
+            // Between the bounds: cannot be ruled out.
+            "ELEC.PLANT.AVG_HEAT.1391-OTHER",
+        ] {
+            assert!(may(CmpOp::Eq, v), "{v}");
+        }
+        // Another prefix, a suffix outside the zone, or too short for the prefix.
+        assert!(!may(CmpOp::Eq, "ELEC.PLANT.AVG_HEAT.1392-DFO-ALL.Q"));
+        assert!(!may(CmpOp::Eq, "ELEC.PLANT.AVG_HEAT.1391-AAA"));
+        assert!(!may(CmpOp::Eq, "ELEC.PLANT.AVG_HEAT.1391-ZZZ"));
+        assert!(!may(CmpOp::Eq, "ELEC.PLANT"));
+        // Only equality prunes in this form.
+        assert!(may(CmpOp::Lt, "A"));
+        assert!(may(CmpOp::Gt, "Z"));
+        // A chunk of one long value repeated is `Varbin` (too long for `Const`), with an empty
+        // suffix range.
+        let same: ArrayRef = Arc::new(StringArray::from(vec!["ELEC.PLANT.AVG_HEAT.X"; 3]));
+        let chunk =
+            crate::narrow::encode_chunk(&same, None, &crate::config::Config::default()).unwrap();
+        let entry = BlockEntry {
+            flags: chunk.flags,
+            min: chunk.min,
+            max: chunk.max,
+            ..entry
+        };
+        let lit = |v: &str| -> ArrayRef { Arc::new(StringArray::from(vec![v])) };
+        assert!(term_may_match(&entry, &field, CmpOp::Eq, &lit("ELEC.PLANT.AVG_HEAT.X")).unwrap());
+        assert!(
+            !term_may_match(&entry, &field, CmpOp::Eq, &lit("ELEC.PLANT.AVG_HEAT.XY")).unwrap()
+        );
     }
 
     #[test]

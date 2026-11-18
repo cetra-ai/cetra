@@ -84,6 +84,23 @@ pub mod flags {
     pub const HAS_NAN: u8 = 4;
     /// Every row is null.
     pub const ALL_NULL: u8 = 8;
+    /// A `Varbin` zone in its shared-prefix form: the chunk's valid values share a prefix of
+    /// `min[0]` bytes whose `xxh3_64` low four bytes are `min[1..5]` (and `max[1..5]`), and
+    /// `min[5..]` and `max[5..]` hold the next 11 bytes of the lowest and highest value,
+    /// zero-padded.
+    pub const SHARED_PREFIX: u8 = 16;
+}
+
+/// The shortest shared prefix stored in the shared-prefix form of a `Varbin` zone. A shorter
+/// one leaves at least 11 distinguishing bytes in the plain 16-byte form.
+pub const SHARED_PREFIX_MIN: usize = 6;
+/// Bytes of a value stored past the shared prefix.
+pub const SHARED_SUFFIX: usize = 11;
+
+/// The low four bytes of `xxh3_64(prefix)`, as stored in a shared-prefix zone.
+pub fn prefix_hash(prefix: &[u8]) -> [u8; 4] {
+    let h = xxhash_rust::xxh3::xxh3_64(prefix).to_le_bytes();
+    [h[0], h[1], h[2], h[3]]
 }
 
 /// One block-table entry (S3, 56 bytes): where a chunk is and how to decode it.
