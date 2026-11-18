@@ -452,8 +452,39 @@ mod tests {
             assert!(!key.kinds.contains(&Kind::License), "{kid} signs licences");
             assert_eq!(key.kinds, &[Kind::Org, Kind::ControlPlane]);
         }
-        let prod = built_in_keys().find(|key| key.kid == "prod-1").unwrap();
-        assert_eq!(prod.kinds, &[Kind::License]);
+    }
+
+    #[test]
+    fn licence_keys_sign_licences_only() {
+        let control_plane = r#"{"kind":"control_plane","id":"0193a3b4-0000-7000-8000-000000000001",
+            "issued_at":"2026-11-14T00:00:00Z","expires_at":"2099-01-01T00:00:00Z",
+            "audience":"https://eu1.example.com","scope":"orgs","method":"PUT",
+            "path":"/api/internal/v1/orgs/0193a3b4-0000-7000-8000-000000000002"}"#;
+        assert!(verify(&dev_sign(control_plane.as_bytes())).is_ok());
+
+        for kid in ["prod-1", "license-1", "license-2"] {
+            let key = built_in_keys().find(|key| key.kid == kid).unwrap();
+            assert_eq!(key.kinds, &[Kind::License], "{kid}");
+
+            // The same binding, with the dev key's halves standing in for this key's.
+            let bound = BuiltInKey {
+                kid: "dev-1",
+                public: "",
+                kinds: key.kinds,
+            };
+            let keys = [(&bound, dev_key().verifying_key())];
+            assert!(
+                verify_with(&dev_sign(fixture("payloads/active.json").as_bytes()), &keys).is_ok(),
+                "{kid}"
+            );
+            for payload in [fixture("payloads/org-pro.json"), control_plane.to_owned()] {
+                assert_eq!(
+                    verify_with(&dev_sign(payload.as_bytes()), &keys),
+                    Err(TokenError::KeyNotAllowed),
+                    "{kid}"
+                );
+            }
+        }
     }
 
     #[test]

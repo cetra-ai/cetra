@@ -32,6 +32,7 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Added
 
+- Licences: release builds also accept licence keys signed by `license-1`, the cloud control plane's online licence key, and `license-2`, its offline spare (D-P-73).
 - OTLP: `POST /v1/logs` and `POST /v1/metrics` (HTTP) and the gRPC `LogsService` and `MetricsService` are accepted and dropped instead of answering 404 (D-G-40). GenAI content sent as log events is counted per project; `GET /api/v1/projects/{project}` returns it as `genai_log_events`, and the UI tells the project's users once that the content was dropped. Migration `0018` adds `usage_daily.genai_log_events`.
 - Alerts: a `no_data` event kind, shown in the history, and a "No data" notification on Slack, email and webhooks (`alert.no_data`) (D-K-20).
 - Datasets: versioned datasets of input / expected output / metadata items with optional JSON Schemas, and their API (`/datasets`, items, versions) (track J).
