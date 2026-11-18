@@ -119,7 +119,7 @@ ipnet = { version = "2.12.2", features = ["serde"] }
 url = "2.5.8"
 # SMTP (spec 08). Default features include `native-tls`; rustls only.
 # `hostname` is the EHLO and generated `Message-ID` domain.
-lettre = { version = "0.11.23", default-features = false, features = [
+lettre = { version = "0.11.24", default-features = false, features = [
     "builder",
     "hostname",
     "smtp-transport",
