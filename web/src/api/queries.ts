@@ -1,4 +1,4 @@
-import { queryOptions } from "@tanstack/react-query";
+import { keepPreviousData, queryOptions } from "@tanstack/react-query";
 import { $api, api } from "./client";
 import { projectRef } from "./project-ref";
 import type { Schema } from "./types";
@@ -349,6 +349,50 @@ export function metricsQuery(
       },
     },
   });
+}
+
+/**
+ * One facet of a list (D1). The client caches each answer for 30 seconds; the server keeps none.
+ * Every facet request goes through here, so readers of one URL share one query shape.
+ */
+export function facetQuery(
+  org: string,
+  project: string,
+  query: {
+    view: Schema<"FacetView">;
+    field: string;
+    from: string;
+    to: string;
+    filter?: string;
+    search?: string;
+    includeEval?: boolean;
+    includeExperiments?: boolean;
+    q?: string;
+    limit?: number;
+  },
+) {
+  return {
+    ...$api.queryOptions("get", "/api/v1/projects/{project}/facets", {
+      params: {
+        path: { project: projectRef(org, project) },
+        query: {
+          view: query.view,
+          field: query.field,
+          from: query.from,
+          to: query.to,
+          ...(query.filter ? { filter: query.filter } : {}),
+          ...(query.search ? { search: query.search } : {}),
+          ...(query.includeEval ? { include_eval: true } : {}),
+          ...(query.includeExperiments ? { include_experiments: true } : {}),
+          ...(query.q ? { q: query.q } : {}),
+          ...(query.limit === undefined ? {} : { limit: query.limit }),
+        },
+      },
+    }),
+    staleTime: 30_000,
+    // Keeps the previous answer on screen while a filter, q or limit change refetches.
+    placeholderData: keepPreviousData,
+  };
 }
 
 export function savedViewsQuery(org: string, project: string, kind: Schema<"SavedViewKind">) {

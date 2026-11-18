@@ -24,10 +24,13 @@ export function ListToolbar({
   expOn,
   onExp,
   filter,
+  filtersToggle,
+  presets,
   columns,
   views,
   loaded,
   live,
+  notice,
   updatedAt,
 }: {
   title: string;
@@ -41,11 +44,18 @@ export function ListToolbar({
   onEval: (on: boolean) => void;
   expOn: boolean;
   onExp: (on: boolean) => void;
+  /** Row 2: the filter bar, shown whenever `filter` is set. */
   filter?: ReactNode;
+  /** Row 2, before the presets: the facet panel toggle (D2). */
+  filtersToggle?: ReactNode;
+  /** Row 2, after the toggle: the preset chips (D6). */
+  presets?: ReactNode;
   columns?: ReactNode;
   views?: ReactNode;
   loaded?: number;
   live?: ReactNode;
+  /** Below row 2: a notice about the list's filters, e.g. the filters carried in (D8). */
+  notice?: ReactNode;
   /** Epoch milliseconds of the data on screen. Shown as "Updated N ago" beside refresh when set. */
   updatedAt?: number;
 }) {
@@ -69,38 +79,53 @@ export function ListToolbar({
   });
 
   return (
-    <div
-      ref={barRef}
-      className="flex min-h-9 shrink-0 items-center gap-2 overflow-x-auto border-b px-3"
-    >
-      <h1 className="shrink-0 text-body font-medium">{title}</h1>
-      <TimeRangePicker state={range} onChange={onRange} />
-      <Button type="button" variant="ghost" size="icon-xs" aria-label="Refresh" onClick={onRefresh}>
-        <RefreshCw />
-      </Button>
-      {updatedAt !== undefined ? <UpdatedAgo at={updatedAt} /> : null}
-      {live}
-      <div className="min-w-0 flex-1">{filter}</div>
-      {onSearch ? <SearchBox inputRef={searchRef} value={search ?? ""} onValue={onSearch} /> : null}
-      <Flag
-        id={`${idPrefix}-eval`}
-        label="Eval"
-        tooltip="Show evaluation traces"
-        checked={evalOn}
-        onCheckedChange={onEval}
-      />
-      <Flag
-        id={`${idPrefix}-exp`}
-        label="Experiments"
-        tooltip="Show experiment traces"
-        checked={expOn}
-        onCheckedChange={onExp}
-      />
-      {columns}
-      {views}
-      {loaded !== undefined ? (
-        <span className="shrink-0 text-caption text-muted-foreground">{loaded} loaded</span>
+    <div ref={barRef} className="shrink-0">
+      <div className="flex min-h-9 items-center gap-2 overflow-x-auto border-b px-3">
+        <h1 className="shrink-0 text-body font-medium">{title}</h1>
+        <TimeRangePicker state={range} onChange={onRange} />
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          aria-label="Refresh"
+          onClick={onRefresh}
+        >
+          <RefreshCw />
+        </Button>
+        {updatedAt !== undefined ? <UpdatedAgo at={updatedAt} /> : null}
+        {live}
+        <div className="min-w-0 flex-1" />
+        {onSearch ? (
+          <SearchBox inputRef={searchRef} value={search ?? ""} onValue={onSearch} />
+        ) : null}
+        <Flag
+          id={`${idPrefix}-eval`}
+          label="Eval"
+          tooltip="Show evaluation traces"
+          checked={evalOn}
+          onCheckedChange={onEval}
+        />
+        <Flag
+          id={`${idPrefix}-exp`}
+          label="Experiments"
+          tooltip="Show experiment traces"
+          checked={expOn}
+          onCheckedChange={onExp}
+        />
+        {columns}
+        {views}
+        {loaded !== undefined ? (
+          <span className="shrink-0 text-caption text-muted-foreground">{loaded} loaded</span>
+        ) : null}
+      </div>
+      {filter ? (
+        <div className="flex min-h-9 flex-wrap items-center gap-2 border-b px-3 py-1">
+          {filtersToggle}
+          {presets}
+          <div className="min-w-48 flex-1 basis-64">{filter}</div>
+        </div>
       ) : null}
+      {notice}
     </div>
   );
 }

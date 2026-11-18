@@ -149,6 +149,26 @@ KPIs cover `[from, to)` and the previous range of the same length; every KPI val
 
 All series honor the filter DSL and the default exclusions (applied as above). Results are cached for 10 s per `(project, params)`, counted from the moment the query finishes. Concurrent requests for the same key share one query, and a failed query's error goes to every request waiting on it; nothing is cached for it.
 
+## Facets
+
+`GET /api/v1/projects/{p}/facets?view=traces|spans|sessions&field=<field>&from&to&filter&search&include_eval&include_experiments&q&limit` counts the values of one field over the rows a list would show (window, default exclusions, `search`, `filter`) for the filter sidebar, value autocomplete and presets (D-C-13). One field per request.
+
+`field` is a facet column of the view, or `map['key']` for a `string_map` column (key 1–256 characters, written as in the DSL). A bare map column facets its keys; keys starting with `cetra.` are left out. Facet columns:
+
+| View | values | list values | keys | histogram |
+|---|---|---|---|---|
+| traces | `name`, `status`, `environment`, `release`, `session_id`, `user_id`, `has_root` | `tags`, `models` | `metadata` | `duration_ms`, `cost_total`, `total_tokens`, `input_tokens`, `output_tokens`, `span_count`, `error_count`, `llm_count` |
+| spans | `name`, `span_kind`, `status`, `service_name`, `environment`, `release`, `provider`, `model`, `request_model`, `response_model`, `operation`, `cost_source`, `scope_name`, `session_id`, `user_id` | `tags` | `metadata`, `attributes`, `resource_attributes` | `duration_ms`, `cost_total`, `total_tokens`, `input_tokens`, `output_tokens` |
+| sessions | `user_id` | `tags` | — | `duration_ms`, `trace_count`, `error_count`, `total_tokens`, `cost_total` |
+
+Any other field is `400 bad_request`; so is `search` on sessions. IDs other than session and user IDs are not facets (their cardinality is the row count).
+
+The answer has `kind` (`values`, `keys` or `histogram`), `total` (rows counted) and `missing` (rows with no value: null, or an empty list or map; for numbers also NaN and ±inf). `values` and `keys` return at most `limit` (1–100, default 10) values with their row counts, by count descending then value ascending, and `more` when more matched; `q` (1–200 characters) keeps values containing it, case-insensitively. A list row counts once under each distinct element, a map row once under each key; booleans are `"true"`/`"false"`. `histogram` returns exact `min` and `max`, approximate `p50`, `p95` and `p99`, and buckets: 20 of equal width over `[min, p99)` plus `[p99, max]`, or one `[min, max]` bucket when `p99 ≤ min`; it is absent when no row has a value. Values are `f64`.
+
+The spans list drops stored copies of a span and facets do not, so a span stored twice before compaction counts twice. The users list filters traces, so its facets count traces.
+
+Cost: there are no pre-aggregates. A values or keys facet is two scans of the window (totals, then groups) and a histogram two (statistics, then buckets), each reading only the faceted column and the filter's columns, so the cost grows with the rows in the window. Answers are not cached on the server; the UI fetches only expanded facets and keeps each answer 30 s.
+
 ## Trace and span APIs
 
 These queries are `cetra_storage::reads` (D92).

@@ -173,6 +173,7 @@ pub(crate) fn routes() -> Vec<RouteDef> {
     routes.extend(crate::routes::sql::routes());
     routes.extend(crate::routes::schema::routes());
     routes.extend(crate::routes::metrics::routes());
+    routes.extend(crate::routes::facets::routes());
     routes.extend(crate::routes::media::routes());
     routes.extend(crate::routes::otlp::routes());
     routes.extend(crate::mcp::routes());

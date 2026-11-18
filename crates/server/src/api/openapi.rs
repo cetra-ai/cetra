@@ -79,6 +79,7 @@ use super::experiments::{
     ExperimentStatus, ExperimentSummaries, ExperimentSummary, FinishExperimentRequest, ResultRow,
     ResultScore, ResultsParams, ScoreDelta, ScoreDeltas, ScoreSummary, SummariesParams,
 };
+use super::facets::{FacetsParams, FacetsResponse};
 use super::internal::{
     CreateInternalOrgRequest, InternalDrop, InternalDropKind, InternalDropsQuery, InternalMember,
     InternalMembers, InternalMembersQuery, InternalOrg, InternalOwner, InternalUsageQuery,
@@ -280,6 +281,7 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<CreateSavedView>();
     set.insert::<UpdateSavedView>();
     set.insert::<MetricsResponse>();
+    set.insert::<FacetsResponse>();
     set.insert::<SqlQueryRequest>();
     set.insert::<SqlQueryResult>();
     set.insert::<SqlColumnInfo>();
@@ -2448,6 +2450,17 @@ fn score_paths(paths: PathsBuilder) -> PathsBuilder {
             AUTH_ERRORS,
         ))
         .build();
+    let facets = operation("get_facets", "traces", "Get facets")
+        .description(Some(format!(
+            "{EXCLUSIONS} A facet describes one field over the rows the list would show: the window, the default exclusions, `search` and `filter`, but not the list's cursor, sort or limit. The field is a column of the view, or `map['key']` of a map column; a bare map column facets its keys. `kind` is `values` (strings, booleans, lists and `map['key']`), `keys` (a bare map) or `histogram` (numbers: min, max, approximate p50, p95 and p99, and 20 equal buckets below p99 plus one bucket from p99 to max). `total` counts rows, `missing` the rows with no value (null, or an empty list or map). Values are counted per row: a list counts a row once under each distinct element. Keys starting with `cetra.` are left out. `q` keeps values containing it, ignoring case. Spans count stored copies separately. Sessions take no `search`. Nothing is cached on the server; a facet is computed on each call."
+        )))
+        .parameters(Some(with_query::<FacetsParams>(vec![project_param()])))
+        .responses(responses(
+            "200",
+            json_of::<FacetsResponse>("A facet: values, keys or a histogram."),
+            READ_ERRORS,
+        ))
+        .build();
     let metrics = operation("get_metrics", "metrics", "Get metrics")
         .description(Some(format!(
             "{EXCLUSIONS} Series have one point per bucket. Latencies and TTFT are nanoseconds. Costs are USD. Results are cached for 10 seconds. The evaluation cost series always counts evaluation traces (spec 05 § Dashboard metrics)."
@@ -2487,6 +2500,10 @@ fn score_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/metrics"),
             PathItem::new(HttpMethod::Get, metrics),
+        )
+        .path(
+            format!("{PROJECT}/facets"),
+            PathItem::new(HttpMethod::Get, facets),
         )
 }
 

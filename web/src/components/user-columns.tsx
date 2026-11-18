@@ -14,6 +14,7 @@ import {
 import type { Schema } from "@/api/types";
 import type { ColumnSpec } from "@/components/data-table/column-layout";
 import type { DataTableColumn } from "@/components/data-table/data-table";
+import { FilterHit } from "@/components/filter-hit";
 import { LazyTooltip } from "@/components/lazy-tooltip";
 import { RelativeTime } from "@/components/relative-time";
 import { ScoreAverageBadge } from "@/components/score-badge";
@@ -71,8 +72,9 @@ export function userColumnSpecs(scoreNames: readonly string[]): UserColumn[] {
 export function orderedUserColumns(
   rows: readonly Schema<"EndUserSummary">[],
   visible: readonly string[],
+  onFilter?: (conjunct: string) => void,
 ): DataTableColumn<Schema<"EndUserSummary">>[] {
-  const byId = new Map(userColumnDefs(rows).map((column) => [column.id, column]));
+  const byId = new Map(userColumnDefs(rows, onFilter).map((column) => [column.id, column]));
   return visible.flatMap((id) => {
     const column = byId.get(id);
     return column ? [column] : [];
@@ -85,6 +87,7 @@ function maxOf(values: readonly number[]): number {
 
 function userColumnDefs(
   rows: readonly Schema<"EndUserSummary">[],
+  onFilter?: (conjunct: string) => void,
 ): DataTableColumn<Schema<"EndUserSummary">>[] {
   const maxTraces = maxOf(rows.map((row) => row.trace_count));
   const maxTokens = maxOf(rows.map((row) => row.total_tokens ?? 0));
@@ -96,7 +99,7 @@ function userColumnDefs(
       header: "User",
       enableSorting: false,
       meta: { icon: User },
-      cell: ({ row }) => <UserCell user={row.original} />,
+      cell: ({ row }) => <UserCell user={row.original} onFilter={onFilter} />,
     },
     {
       id: "activity",
@@ -248,8 +251,31 @@ function scoreColumn(name: string): DataTableColumn<Schema<"EndUserSummary">> {
 }
 
 /** The name (UP-4) with the id after it in mono, or the id alone, and the plan pill. */
-function UserCell({ user }: { user: Schema<"EndUserSummary"> }) {
+function UserCell({
+  user,
+  onFilter,
+}: {
+  user: Schema<"EndUserSummary">;
+  onFilter?: (conjunct: string) => void;
+}) {
   const { name, plan } = userIdentity(user.metadata);
+  const id = (
+    <FilterHit
+      label={`Filter by user ${user.user_id}`}
+      field={{ column: "user_id" }}
+      value={user.user_id}
+      opens="user"
+      onFilter={onFilter}
+    >
+      <span
+        className={
+          name ? "truncate font-mono text-caption text-muted-foreground" : "truncate font-mono"
+        }
+      >
+        {user.user_id}
+      </span>
+    </FilterHit>
+  );
   return (
     <span
       className="flex min-w-0 items-center gap-1.5"
@@ -258,12 +284,10 @@ function UserCell({ user }: { user: Schema<"EndUserSummary"> }) {
       {name ? (
         <>
           <span className="truncate font-medium">{name}</span>
-          <span className="truncate font-mono text-caption text-muted-foreground">
-            {user.user_id}
-          </span>
+          {id}
         </>
       ) : (
-        <span className="truncate font-mono">{user.user_id}</span>
+        id
       )}
       {plan ? <PlanPill plan={plan} /> : null}
     </span>

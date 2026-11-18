@@ -1,6 +1,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, within } from "@testing-library/react";
-import { expect, it } from "vitest";
+import {
+  createMemoryHistory,
+  createRootRoute,
+  createRouter,
+  RouterProvider,
+} from "@tanstack/react-router";
+import { fireEvent, render, screen, within } from "@testing-library/react";
+import { expect, it, vi } from "vitest";
 import type { Schema } from "@/api/types";
 import { DataTable } from "@/components/data-table/data-table";
 import { ScoreDefinitionsProvider } from "@/components/score-badge";
@@ -122,4 +128,50 @@ it("orders the new columns and puts score columns after the fixed ones", () => {
   expect(ids.slice(0, SESSION_COLUMN_IDS.length)).toEqual([...SESSION_COLUMN_IDS]);
   expect(ids.at(-1)).toBe("score:resolved");
   expect(sessionScoreNames([session({ scores: [] })])).toEqual([]);
+});
+
+it("filters the user from the right-click menu", async () => {
+  const onFilter = vi.fn();
+  const rows = [session({ user_id: "user-42" })];
+  const queryClient = new QueryClient();
+  const rootRoute = createRootRoute({
+    component: () => (
+      <QueryClientProvider client={queryClient}>
+        <ProjectProvider
+          value={{
+            org: "acme",
+            project: "support-bot",
+            ref: "acme/support-bot",
+            data: projectFixture as Schema<"Project">,
+          }}
+        >
+          <ScoreDefinitionsProvider>
+            <TooltipProvider>
+              <DataTable
+                tableId="sessions-test"
+                ariaLabel="Sessions"
+                columns={orderedSessionColumns(rows, ["user"], onFilter)}
+                rows={rows}
+                getRowId={(row) => row.session_id}
+                onActivate={() => undefined}
+                hasNextPage={false}
+                isFetchingNextPage={false}
+                fetchNextPage={() => undefined}
+                emptyState={null}
+              />
+            </TooltipProvider>
+          </ScoreDefinitionsProvider>
+        </ProjectProvider>
+      </QueryClientProvider>
+    ),
+  });
+  const router = createRouter({
+    routeTree: rootRoute,
+    history: createMemoryHistory({ initialEntries: ["/"] }),
+  });
+  render(<RouterProvider router={router} />);
+  await router.load();
+  fireEvent.contextMenu(screen.getByText("user-42"));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Filter: user_id = 'user-42'" }));
+  expect(onFilter).toHaveBeenCalledWith("user_id = 'user-42'");
 });

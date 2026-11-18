@@ -8,6 +8,7 @@ mod alerts;
 mod cursor;
 mod deletions;
 mod experiments;
+mod facets;
 pub(crate) mod metrics;
 mod scores;
 mod sessions;
@@ -31,6 +32,10 @@ pub use experiments::{
     ExperimentScore, ExperimentScoreMean, ExperimentTrace, MAX_EXPERIMENT_SCORES,
     MAX_EXPERIMENT_TRACES, MAX_MEAN_EXPERIMENTS, experiment_score_means, experiment_scores,
     experiment_traces,
+};
+pub use facets::{
+    FacetData, FacetKind, FacetRequest, FacetValue, FacetView, HISTOGRAM_BUCKETS, Histogram,
+    HistogramBucket, MAX_FACET_KEY, MAX_FACET_LIMIT, MAX_FACET_QUERY, facet,
 };
 pub use metrics::{
     Bucket, BucketWidth, Kpi, KpiName, MetricsData, MetricsGroupBy, MetricsRequest, ModelUsageRow,

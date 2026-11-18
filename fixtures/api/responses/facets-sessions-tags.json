@@ -1,0 +1,18 @@
+{
+  "view": "sessions",
+  "field": "tags",
+  "kind": "values",
+  "total": 2,
+  "missing": 1,
+  "values": [
+    {
+      "value": "beta",
+      "count": 1
+    },
+    {
+      "value": "refund",
+      "count": 1
+    }
+  ],
+  "more": false
+}

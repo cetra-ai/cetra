@@ -16,6 +16,14 @@ import {
 } from "@/components/data-table/column-layout";
 import { DataTable } from "@/components/data-table/data-table";
 import { EmptyState } from "@/components/empty-state";
+import { CarriedNotice } from "@/components/facets/carried-notice";
+import {
+  FacetPanel,
+  type FacetScope,
+  FiltersToggle,
+  useFacetsOpen,
+} from "@/components/facets/facet-panel";
+import { PresetChips } from "@/components/facets/preset-chips";
 import { FilterBar } from "@/components/filter-bar/filter-bar";
 import { filterMessage } from "@/components/filter-bar/logic";
 import { TraceLayoutControls } from "@/components/layout-switcher";
@@ -30,7 +38,9 @@ import { TopUsers } from "@/components/user/top-users";
 import { UserPanel } from "@/components/user/user-panel";
 import { UsersSummary } from "@/components/user/users-summary";
 import { orderedUserColumns, userColumnSpecs, userScoreNames } from "@/components/user-columns";
+import { appendFilter } from "@/lib/dsl/dsl";
 import { formatCost } from "@/lib/format";
+import { rangeOnly, writeListContext } from "@/lib/list-context";
 import { getTraceMaximized, setTraceMaximized, useListLayout } from "@/lib/list-layout";
 import { parseUsersSearch, type UsersSearch } from "@/lib/search/users";
 import { type RangeState, rangeFromSearch, resolveRange } from "@/lib/time-range";
@@ -93,7 +103,20 @@ function UsersPage() {
     },
     [navigate, org, project],
   );
-  const { hold } = useDefaultSavedView("users", search, applyDefault);
+  const { hold, carried } = useDefaultSavedView("users", search, applyDefault, "users");
+  useEffect(() => {
+    if (!hold) {
+      writeListContext(org, project, "users", search);
+    }
+  }, [hold, org, project, search]);
+  function clearCarried() {
+    void navigate({
+      to: "/$org/$project/users",
+      params: { org, project },
+      search: (prev) => rangeOnly(prev),
+    });
+  }
+  const [facetsOpen, setFacetsOpen] = useFacetsOpen();
   const range = rangeFromSearch(search);
   const rangeKey = range.kind === "preset" ? range.preset : `${range.from}\n${range.to}`;
   const [anchor, setAnchor] = useState(() => Date.now());
@@ -106,6 +129,13 @@ function UsersPage() {
     setAnchor(Date.now());
   }, [rangeKey]);
   const resolved = resolveRange(range, anchor);
+  /** The list's window and flags: the facet panel, its presets and the filter bar fetch with it. */
+  const facetScope: FacetScope = {
+    from: resolved.from,
+    to: resolved.to,
+    includeEval: search.eval === 1,
+    includeExperiments: search.exp === 1,
+  };
   const list = useInfiniteQuery({
     ...userListOptions(org, project, {
       from: resolved.from,
@@ -152,7 +182,20 @@ function UsersPage() {
     const fromUrl = search.cols?.split(",");
     return visibleColumnIds(specs, fromUrl ?? readColumnChoice(TABLE_ID));
   }, [search.cols, specs]);
-  const tableColumns = useMemo(() => orderedUserColumns(rows, visible), [rows, visible]);
+  const onFilter = useCallback(
+    (conjunct: string) => {
+      void navigate({
+        to: "/$org/$project/users",
+        params: { org, project },
+        search: (prev) => withFilter(prev, appendFilter(prev.filter ?? "", conjunct)),
+      });
+    },
+    [navigate, org, project],
+  );
+  const tableColumns = useMemo(
+    () => orderedUserColumns(rows, visible, onFilter),
+    [rows, visible, onFilter],
+  );
 
   function onColumns(ids: string[]) {
     const choice = sameColumnIds(ids, defaults) ? undefined : ids;
@@ -270,12 +313,23 @@ function UsersPage() {
                       search: (prev) => withFlag(prev, "exp", on),
                     });
                   }}
+                  notice={
+                    carried ? (
+                      <CarriedNotice
+                        from={carried.from}
+                        dropped={carried.dropped}
+                        kept={carried.kept}
+                        onClear={clearCarried}
+                      />
+                    ) : null
+                  }
                   filter={
                     <FilterBar
                       view="traces"
                       placeholder={FILTER_PLACEHOLDER}
                       value={search.filter ?? ""}
                       error={filterError}
+                      scope={facetScope}
                       onApply={(text) => {
                         void navigate({
                           to: "/$org/$project/users",
@@ -285,76 +339,116 @@ function UsersPage() {
                       }}
                     />
                   }
+                  filtersToggle={
+                    <FiltersToggle
+                      open={facetsOpen}
+                      onOpenChange={setFacetsOpen}
+                      filter={search.filter ?? ""}
+                    />
+                  }
+                  presets={
+                    <PresetChips
+                      view="traces"
+                      filter={search.filter ?? ""}
+                      onFilter={(text) => {
+                        void navigate({
+                          to: "/$org/$project/users",
+                          params: { org, project },
+                          search: (prev) => withFilter(prev, text),
+                        });
+                      }}
+                      scope={facetScope}
+                    />
+                  }
                   columns={
                     <ColumnChooser columns={specs} visible={visible} onVisible={onColumns} />
                   }
                   views={<SavedViewsMenu kind="users" search={search} onApply={applyView} />}
                   loaded={list.data ? rows.length : undefined}
                 />
-                {filterError ? (
-                  <div className="mx-auto flex max-w-md flex-col gap-2 px-4 py-16">
-                    <h2 className="text-body font-medium">{filterError.title}</h2>
-                    <p className="text-body text-destructive">{filterMessage(filterError)}</p>
+                <div className="flex min-h-0 flex-1">
+                  {facetsOpen && !hold ? (
+                    <FacetPanel
+                      view="traces"
+                      filter={search.filter ?? ""}
+                      onFilter={(text) => {
+                        void navigate({
+                          to: "/$org/$project/users",
+                          params: { org, project },
+                          search: (prev) => withFilter(prev, text),
+                        });
+                      }}
+                      scope={facetScope}
+                      note="Counts are traces"
+                    />
+                  ) : null}
+                  <div className="flex min-w-0 flex-1 flex-col">
+                    {filterError ? (
+                      <div className="mx-auto flex max-w-md flex-col gap-2 px-4 py-16">
+                        <h2 className="text-body font-medium">{filterError.title}</h2>
+                        <p className="text-body text-destructive">{filterMessage(filterError)}</p>
+                      </div>
+                    ) : !hold && list.data ? (
+                      <>
+                        <UsersSummary
+                          kpis={metrics.data?.kpis}
+                          users={rows.length}
+                          more={list.hasNextPage}
+                        />
+                        <TopUsers
+                          users={top.data?.data ?? []}
+                          onSelect={(userId) => {
+                            void navigate({
+                              to: "/$org/$project/users",
+                              params: { org, project },
+                              search: (prev) => withUser(prev, userId),
+                            });
+                          }}
+                        />
+                        <DataTable
+                          tableId="users"
+                          ariaLabel="Users"
+                          onReorder={onColumns}
+                          lockedColumnIds={lockedIds}
+                          columns={tableColumns}
+                          rows={rows}
+                          getRowId={(row) => row.user_id}
+                          selectedRowId={search.user}
+                          onActivate={(row) => {
+                            void navigate({
+                              to: "/$org/$project/users",
+                              params: { org, project },
+                              search: (prev) => withUser(prev, row.user_id),
+                            });
+                          }}
+                          onSelectionMove={(row) => {
+                            void navigate({
+                              to: "/$org/$project/users",
+                              params: { org, project },
+                              search: (prev) => withUser(prev, row.user_id),
+                              replace: true,
+                            });
+                          }}
+                          hasNextPage={list.hasNextPage}
+                          isFetchingNextPage={list.isFetchingNextPage}
+                          fetchNextPage={fetchNextPage}
+                          sorting={{
+                            id: SORT_COLUMN[search.sort ?? "last_seen"],
+                            desc: (search.order ?? "desc") === "desc",
+                          }}
+                          onSortingChange={(next) => {
+                            void navigate({
+                              to: "/$org/$project/users",
+                              params: { org, project },
+                              search: (prev) => withSort(prev, next),
+                            });
+                          }}
+                          emptyState={<EmptyState icon={Users} title="No users" />}
+                        />
+                      </>
+                    ) : null}
                   </div>
-                ) : !hold && list.data ? (
-                  <>
-                    <UsersSummary
-                      kpis={metrics.data?.kpis}
-                      users={rows.length}
-                      more={list.hasNextPage}
-                    />
-                    <TopUsers
-                      users={top.data?.data ?? []}
-                      onSelect={(userId) => {
-                        void navigate({
-                          to: "/$org/$project/users",
-                          params: { org, project },
-                          search: (prev) => withUser(prev, userId),
-                        });
-                      }}
-                    />
-                    <DataTable
-                      tableId="users"
-                      ariaLabel="Users"
-                      onReorder={onColumns}
-                      lockedColumnIds={lockedIds}
-                      columns={tableColumns}
-                      rows={rows}
-                      getRowId={(row) => row.user_id}
-                      selectedRowId={search.user}
-                      onActivate={(row) => {
-                        void navigate({
-                          to: "/$org/$project/users",
-                          params: { org, project },
-                          search: (prev) => withUser(prev, row.user_id),
-                        });
-                      }}
-                      onSelectionMove={(row) => {
-                        void navigate({
-                          to: "/$org/$project/users",
-                          params: { org, project },
-                          search: (prev) => withUser(prev, row.user_id),
-                          replace: true,
-                        });
-                      }}
-                      hasNextPage={list.hasNextPage}
-                      isFetchingNextPage={list.isFetchingNextPage}
-                      fetchNextPage={fetchNextPage}
-                      sorting={{
-                        id: SORT_COLUMN[search.sort ?? "last_seen"],
-                        desc: (search.order ?? "desc") === "desc",
-                      }}
-                      onSortingChange={(next) => {
-                        void navigate({
-                          to: "/$org/$project/users",
-                          params: { org, project },
-                          search: (prev) => withSort(prev, next),
-                        });
-                      }}
-                      emptyState={<EmptyState icon={Users} title="No users" />}
-                    />
-                  </>
-                ) : null}
+                </div>
               </TooltipProvider>
             </div>
           }

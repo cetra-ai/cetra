@@ -1,0 +1,22 @@
+{
+  "view": "traces",
+  "field": "status",
+  "kind": "values",
+  "total": 5,
+  "missing": 0,
+  "values": [
+    {
+      "value": "ok",
+      "count": 3
+    },
+    {
+      "value": "error",
+      "count": 1
+    },
+    {
+      "value": "unset",
+      "count": 1
+    }
+  ],
+  "more": false
+}

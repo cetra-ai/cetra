@@ -1,5 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, within } from "@testing-library/react";
+import {
+  createMemoryHistory,
+  createRootRoute,
+  createRouter,
+  RouterProvider,
+} from "@tanstack/react-router";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { expect, it, vi } from "vitest";
 import type { Schema } from "@/api/types";
 import { DataTable } from "@/components/data-table/data-table";
@@ -163,4 +169,50 @@ it("puts one score column after error rate and hides metadata by default", () =>
     label: "Activity",
     defaultVisible: true,
   });
+});
+
+it("filters the user id from the right-click menu", async () => {
+  const onFilter = vi.fn();
+  const rows = [summary()];
+  const queryClient = new QueryClient();
+  const rootRoute = createRootRoute({
+    component: () => (
+      <QueryClientProvider client={queryClient}>
+        <ProjectProvider
+          value={{
+            org: "acme",
+            project: "support-bot",
+            ref: "acme/support-bot",
+            data: projectFixture as Schema<"Project">,
+          }}
+        >
+          <ScoreDefinitionsProvider>
+            <TooltipProvider>
+              <DataTable
+                tableId="users-filter-test"
+                ariaLabel="Users"
+                columns={orderedUserColumns(rows, ["user"], onFilter)}
+                rows={rows}
+                getRowId={(row) => row.user_id}
+                onActivate={() => undefined}
+                hasNextPage={false}
+                isFetchingNextPage={false}
+                fetchNextPage={() => undefined}
+                emptyState={null}
+              />
+            </TooltipProvider>
+          </ScoreDefinitionsProvider>
+        </ProjectProvider>
+      </QueryClientProvider>
+    ),
+  });
+  const router = createRouter({
+    routeTree: rootRoute,
+    history: createMemoryHistory({ initialEntries: ["/"] }),
+  });
+  render(<RouterProvider router={router} />);
+  await router.load();
+  fireEvent.contextMenu(screen.getByText("user-42"));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Filter: user_id = 'user-42'" }));
+  expect(onFilter).toHaveBeenCalledWith("user_id = 'user-42'");
 });

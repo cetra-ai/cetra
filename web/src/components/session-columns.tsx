@@ -14,6 +14,7 @@ import {
 import type { Schema } from "@/api/types";
 import type { ColumnSpec } from "@/components/data-table/column-layout";
 import type { DataTableColumn } from "@/components/data-table/data-table";
+import { filterIdCell } from "@/components/filter-hit";
 import { LazyTooltip } from "@/components/lazy-tooltip";
 import { RelativeTime } from "@/components/relative-time";
 import { ScoreBadge } from "@/components/score-badge";
@@ -81,8 +82,9 @@ export function sessionColumnSpecs(names: readonly string[]): SessionColumn[] {
 export function orderedSessionColumns(
   rows: readonly Schema<"SessionSummary">[],
   visible: readonly string[],
+  onFilter?: (conjunct: string) => void,
 ): DataTableColumn<Schema<"SessionSummary">>[] {
-  const byId = new Map(sessionColumnDefs(rows).map((column) => [column.id, column]));
+  const byId = new Map(sessionColumnDefs(rows, onFilter).map((column) => [column.id, column]));
   return visible.flatMap((id) => {
     const column = byId.get(id);
     return column ? [column] : [];
@@ -95,6 +97,7 @@ function maxOf(values: readonly number[]): number {
 
 function sessionColumnDefs(
   rows: readonly Schema<"SessionSummary">[],
+  onFilter?: (conjunct: string) => void,
 ): DataTableColumn<Schema<"SessionSummary">>[] {
   const maxTraces = maxOf(rows.map((row) => row.trace_count));
   const maxTokens = maxOf(rows.map((row) => row.total_tokens ?? 0));
@@ -153,7 +156,7 @@ function sessionColumnDefs(
       header: "User",
       enableSorting: false,
       meta: { mono: true, icon: User },
-      cell: ({ row }) => row.original.user_id ?? "—",
+      cell: ({ row }) => filterIdCell(row.original.user_id, "user", "user_id", "user", onFilter),
     },
     {
       id: "duration",

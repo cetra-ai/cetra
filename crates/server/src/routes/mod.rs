@@ -14,6 +14,7 @@ pub(crate) mod entitlements;
 pub(crate) mod eval_jobs;
 pub(crate) mod evaluators;
 pub(crate) mod experiments;
+pub(crate) mod facets;
 pub(crate) mod feedback;
 pub(crate) mod internal_deletions;
 pub(crate) mod internal_members;

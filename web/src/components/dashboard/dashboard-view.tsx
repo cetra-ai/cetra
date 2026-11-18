@@ -167,6 +167,12 @@ export function DashboardView({ search }: { search: DashboardSearch }) {
                   view="traces"
                   value={search.filter ?? ""}
                   error={filterError}
+                  scope={{
+                    from: resolved.from,
+                    to: resolved.to,
+                    includeEval: search.eval === 1,
+                    includeExperiments: search.exp === 1,
+                  }}
                   onApply={(text) => {
                     void navigate({
                       to: "/$org/$project/dashboard",

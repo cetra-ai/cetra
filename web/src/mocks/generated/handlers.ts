@@ -109,6 +109,7 @@ export function largeHandlers(dataset: Dataset): HttpHandler[] {
     ),
     http.get(`${PROJECT}/users`, ({ request }) => listUsers(dataset, request)),
     http.get(`${PROJECT}/metrics`, ({ request }) => metrics(dataset, request)),
+    http.get(`${PROJECT}/facets`, ({ request }) => facets(dataset, request)),
     http.get(`${PROJECT}/score-definitions`, () =>
       HttpResponse.json({ data: SCORE_DEFINITIONS, next_cursor: null }),
     ),
@@ -625,6 +626,371 @@ function metrics(dataset: Dataset, request: Request): Response {
     userId,
   );
   return HttpResponse.json(body, { headers: userId === undefined ? ignoredFilter(parsed) : {} });
+}
+
+/**
+ * The facet columns of each view and their kind, as the server's table (D1). A `string_map`
+ * column facets its keys (`keys`); `number` columns are histograms.
+ */
+type FacetColumnKind = "value" | "bool" | "list" | "keys" | "number";
+
+const FACET_COLUMNS: Record<"traces" | "spans" | "sessions", Record<string, FacetColumnKind>> = {
+  traces: {
+    name: "value",
+    status: "value",
+    environment: "value",
+    release: "value",
+    session_id: "value",
+    user_id: "value",
+    has_root: "bool",
+    tags: "list",
+    models: "list",
+    metadata: "keys",
+    duration_ms: "number",
+    cost_total: "number",
+    total_tokens: "number",
+    input_tokens: "number",
+    output_tokens: "number",
+    span_count: "number",
+    error_count: "number",
+    llm_count: "number",
+  },
+  spans: {
+    name: "value",
+    span_kind: "value",
+    status: "value",
+    service_name: "value",
+    environment: "value",
+    release: "value",
+    provider: "value",
+    model: "value",
+    request_model: "value",
+    response_model: "value",
+    operation: "value",
+    cost_source: "value",
+    scope_name: "value",
+    session_id: "value",
+    user_id: "value",
+    tags: "list",
+    metadata: "keys",
+    attributes: "keys",
+    resource_attributes: "keys",
+    duration_ms: "number",
+    cost_total: "number",
+    total_tokens: "number",
+    input_tokens: "number",
+    output_tokens: "number",
+  },
+  sessions: {
+    user_id: "value",
+    tags: "list",
+    duration_ms: "number",
+    trace_count: "number",
+    error_count: "number",
+    total_tokens: "number",
+    cost_total: "number",
+  },
+};
+
+/** One row of a facet view, flattened to the facet columns. Columns the summaries lack stay absent. */
+type FacetRow = Record<string, unknown>;
+
+/** The spans of every trace of a dataset, built once: a spans facet reads all of them. */
+const allSpanRows = new WeakMap<Dataset, Schema<"SpanSummary">[]>();
+
+function spansOfDataset(dataset: Dataset): Schema<"SpanSummary">[] {
+  const cached = allSpanRows.get(dataset);
+  if (cached) {
+    return cached;
+  }
+  const spans = dataset.traces.flatMap((trace) => spansOf(dataset, trace.trace_id, "asc"));
+  allSpanRows.set(dataset, spans);
+  return spans;
+}
+
+function traceRow(trace: Schema<"TraceSummary">): FacetRow {
+  return {
+    name: trace.name,
+    status: trace.status,
+    environment: trace.environment,
+    release: trace.release,
+    session_id: trace.session_id,
+    user_id: trace.user_id,
+    has_root: trace.has_root,
+    tags: trace.tags,
+    models: trace.models,
+    metadata: trace.metadata,
+    duration_ms: trace.duration_ns / 1e6,
+    cost_total: trace.cost_total,
+    total_tokens: trace.total_tokens,
+    input_tokens: trace.input_tokens,
+    output_tokens: trace.output_tokens,
+    span_count: trace.span_count,
+    error_count: trace.error_count,
+    llm_count: trace.llm_count,
+  };
+}
+
+function spanRow(span: Schema<"SpanSummary">): FacetRow {
+  return {
+    name: span.name,
+    span_kind: span.span_kind,
+    status: span.status,
+    service_name: span.service_name,
+    environment: span.environment,
+    release: span.release,
+    provider: span.provider,
+    model: span.model,
+    session_id: span.session_id,
+    user_id: span.user_id,
+    tags: span.tags,
+    metadata: span.metadata,
+    duration_ms: span.duration_ns / 1e6,
+    cost_total: span.cost_total,
+    total_tokens: span.total_tokens,
+    input_tokens: span.input_tokens,
+    output_tokens: span.output_tokens,
+  };
+}
+
+function sessionRow(session: Schema<"SessionSummary">): FacetRow {
+  return {
+    user_id: session.user_id,
+    tags: session.tags,
+    duration_ms: session.duration_ns / 1e6,
+    trace_count: session.trace_count,
+    error_count: session.error_count,
+    total_tokens: session.total_tokens,
+    cost_total: session.cost_total,
+  };
+}
+
+/**
+ * The rows a facet view counts, in the list's window and flags. The mock ignores `filter` and
+ * `search` (it has no filter engine), so its counts are those of the unfiltered list.
+ */
+function facetRows(
+  dataset: Dataset,
+  view: "traces" | "spans" | "sessions",
+  query: Query,
+): FacetRow[] {
+  if (view === "traces") {
+    return visibleTraces(dataset.traces, query.includeEval, query.includeExperiments)
+      .filter((trace) => inRange(trace.start_time, query.from, query.to))
+      .map(traceRow);
+  }
+  if (view === "sessions") {
+    return dataset
+      .sessions(query.includeEval, query.includeExperiments)
+      .filter((session) => inRange(session.start_time, query.from, query.to))
+      .map(sessionRow);
+  }
+  return spansOfDataset(dataset)
+    .filter(
+      (span) =>
+        (query.includeEval || span.environment !== "cetra-eval") &&
+        (query.includeExperiments || span.metadata["cetra.experiment_id"] === undefined) &&
+        inRange(span.start_time, query.from, query.to),
+    )
+    .map(spanRow);
+}
+
+/** The field of a facet request: `column` or `map['key']` (D1), else undefined. */
+function parseFacetField(
+  view: "traces" | "spans" | "sessions",
+  raw: string,
+): { column: string; key?: string } | undefined {
+  const match = /^([A-Za-z_]+)(?:\['((?:[^']|'')*)'\])?$/.exec(raw);
+  if (!match) {
+    return undefined;
+  }
+  const column = (match[1] ?? "").toLowerCase();
+  const kind: FacetColumnKind | undefined = FACET_COLUMNS[view][column];
+  if (kind === undefined) {
+    return undefined;
+  }
+  if (match[2] === undefined) {
+    return { column };
+  }
+  const key = match[2].replaceAll("''", "'");
+  if (kind !== "keys" || key.length < 1 || key.length > 256) {
+    return undefined;
+  }
+  return { column, key };
+}
+
+/** The distinct values a row holds under a value, list or key field (D1). */
+function rowValues(row: FacetRow, column: string, kind: FacetColumnKind, key?: string): string[] {
+  const raw = row[column];
+  if (key !== undefined) {
+    const found = (raw as Record<string, unknown> | undefined)?.[key];
+    return typeof found === "string" || typeof found === "number" || typeof found === "boolean"
+      ? [String(found)]
+      : [];
+  }
+  if (kind === "keys") {
+    return Object.keys((raw as Record<string, unknown> | undefined) ?? {}).filter(
+      (name) => !name.startsWith("cetra."),
+    );
+  }
+  if (kind === "list") {
+    return Array.isArray(raw) ? [...new Set(raw.map(String))] : [];
+  }
+  return raw === undefined || raw === null ? [] : [String(raw)];
+}
+
+function nearestRank(sorted: readonly number[], fraction: number): number {
+  const index = Math.max(0, Math.ceil(fraction * sorted.length) - 1);
+  return sorted[Math.min(index, sorted.length - 1)] ?? 0;
+}
+
+/** The buckets of D1: 20 equal-width buckets over `[min, p99)`, then `[p99, max]`. */
+function bucketsOf(
+  numbers: readonly number[],
+  min: number,
+  max: number,
+  p99: number,
+): { lo: number; hi: number; count: number }[] {
+  if (!(p99 > min)) {
+    return [{ lo: min, hi: max, count: numbers.length }];
+  }
+  const width = (p99 - min) / 20;
+  const counts = new Array<number>(21).fill(0);
+  for (const value of numbers) {
+    if (value >= p99) {
+      counts[20] = (counts[20] ?? 0) + 1;
+    } else {
+      const index = Math.min(19, Math.floor((value - min) / width));
+      counts[index] = (counts[index] ?? 0) + 1;
+    }
+  }
+  const buckets = Array.from({ length: 20 }, (_, index) => ({
+    lo: min + index * width,
+    hi: index === 19 ? p99 : min + (index + 1) * width,
+    count: counts[index] ?? 0,
+  }));
+  if (max >= p99) {
+    buckets.push({ lo: p99, hi: max, count: counts[20] ?? 0 });
+  }
+  return buckets;
+}
+
+/** The answer of one facet request over the rows of its view (D1). */
+function facetAnswer(
+  view: "traces" | "spans" | "sessions",
+  field: { column: string; key?: string },
+  rows: FacetRow[],
+  search: string | undefined,
+  limit: number,
+): Schema<"FacetsResponse"> {
+  const fieldText = field.key === undefined ? field.column : `${field.column}['${field.key}']`;
+  const kind = FACET_COLUMNS[view][field.column] ?? "value";
+  const total = rows.length;
+  if (kind === "number" && field.key === undefined) {
+    const numbers = rows
+      .map((row) => row[field.column])
+      .filter((value): value is number => typeof value === "number" && Number.isFinite(value))
+      .sort((left, right) => left - right);
+    const base = {
+      view,
+      field: fieldText,
+      kind: "histogram" as const,
+      total,
+      missing: total - numbers.length,
+    };
+    const min = numbers[0];
+    const max = numbers.at(-1);
+    if (min === undefined || max === undefined) {
+      return base;
+    }
+    const p99 = nearestRank(numbers, 0.99);
+    return {
+      ...base,
+      histogram: {
+        min,
+        max,
+        p50: nearestRank(numbers, 0.5),
+        p95: nearestRank(numbers, 0.95),
+        p99,
+        buckets: bucketsOf(numbers, min, max, p99),
+      },
+    };
+  }
+  const counts = new Map<string, number>();
+  let missing = 0;
+  for (const row of rows) {
+    const values = rowValues(row, field.column, kind, field.key);
+    if (values.length === 0) {
+      missing += 1;
+    }
+    for (const value of values) {
+      counts.set(value, (counts.get(value) ?? 0) + 1);
+    }
+  }
+  const needle = search?.toLowerCase();
+  const matching = [...counts]
+    .filter(([value]) => needle === undefined || value.toLowerCase().includes(needle))
+    .sort(([leftValue, leftCount], [rightValue, rightCount]) =>
+      rightCount !== leftCount
+        ? rightCount - leftCount
+        : leftValue < rightValue
+          ? -1
+          : leftValue > rightValue
+            ? 1
+            : 0,
+    );
+  return {
+    view,
+    field: fieldText,
+    kind: field.key === undefined && kind === "keys" ? "keys" : "values",
+    total,
+    missing,
+    values: matching.slice(0, limit).map(([value, count]) => ({ value, count })),
+    more: matching.length > limit,
+  };
+}
+
+/** `GET …/facets` (D1). The mock ignores `filter` and `search`; `q` narrows the values. */
+function facets(dataset: Dataset, request: Request): Response {
+  const url = new URL(request.url);
+  const parsed = readQuery(url);
+  if (parsed instanceof Response) {
+    return parsed;
+  }
+  const view = url.searchParams.get("view");
+  if (view !== "traces" && view !== "spans" && view !== "sessions") {
+    return problem(400, "bad_request", "Bad Request", [
+      { field: "view", message: "is not a view" },
+    ]);
+  }
+  const field = parseFacetField(view, url.searchParams.get("field") ?? "");
+  if (!field) {
+    return problem(400, "bad_request", "Bad Request", [
+      { field: "field", message: "field cannot be faceted" },
+    ]);
+  }
+  const rawLimit = url.searchParams.get("limit");
+  const limit = rawLimit === null ? 10 : /^\d+$/.test(rawLimit) ? Number(rawLimit) : 0;
+  if (limit < 1 || limit > 100) {
+    return problem(400, "bad_request", "Bad Request", [
+      { field: "limit", message: "must be 1 to 100" },
+    ]);
+  }
+  const rawQuery = url.searchParams.get("q");
+  const search = rawQuery === null ? undefined : rawQuery.trim();
+  if (search !== undefined && (search.length < 1 || [...search].length > 200)) {
+    return problem(400, "bad_request", "Bad Request", [
+      { field: "q", message: "must be 1 to 200 characters" },
+    ]);
+  }
+  if (view === "sessions" && url.searchParams.has("search")) {
+    return problem(400, "bad_request", "Bad Request", [
+      { field: "search", message: "is not supported for sessions" },
+    ]);
+  }
+  return HttpResponse.json(
+    facetAnswer(view, field, facetRows(dataset, view, parsed), search, limit),
+  );
 }
 
 /** The user id of a filter of exactly the form `user_id = '<id>'` (UP-5), else undefined. */
