@@ -1,0 +1,364 @@
+import { useQuery } from "@tanstack/react-query";
+import type { ReactNode } from "react";
+import { widgetQuery } from "@/api/dashboards";
+import { problemMessage } from "@/api/problem";
+import type { Schema } from "@/api/types";
+import type { KpiTone } from "@/components/charts/kpi-tiles";
+import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
+import { type ChartBucket, chooseBucket } from "@/lib/chart-scale";
+import { measureKind } from "@/lib/dashboards/format";
+import {
+  groupClause,
+  isErrorMeasure,
+  seriesPlot,
+  splitField,
+  totalTable,
+} from "@/lib/dashboards/plot";
+import type { Chart, Measure, Widget as WidgetModel, WidgetQuery } from "@/lib/dashboards/types";
+import { bucketRange, groupColorIndex, PALETTE } from "@/lib/metrics";
+import { WidgetBarH } from "./widget-bar-h";
+import { WidgetNumber } from "./widget-number";
+import { WidgetPlot } from "./widget-plot";
+import { WidgetTable } from "./widget-table";
+
+type Groups = Schema<"MetricsGroupBy">;
+
+/** What the dashboard applies to every widget, and the colours of its models. */
+export type WidgetContext = {
+  org: string;
+  project: string;
+  /** The range, RFC 3339: the start is inclusive, the end exclusive. */
+  from: string;
+  to: string;
+  /** The dashboard's filter, a traces expression. */
+  filter?: string;
+  /** The dashboard's split. */
+  groupBy?: Groups;
+  includeEval: boolean;
+  includeExperiments: boolean;
+  /** The models by cost, most expensive first. Undefined until it loads. */
+  ranking?: readonly string[];
+};
+
+/** The range of a clicked bucket and the clause of its group, for the list it opens. */
+export type BucketTarget = { from: string; to: string; clause?: string };
+
+/**
+ * One widget of a dashboard: a card with a time chart, a horizontal bar chart, a number, or a
+ * table, or a heading. A chart fetches its answer and shows a skeleton while it loads, the error
+ * with a retry when the query fails, and the reason when there is no data.
+ */
+export function Widget({
+  widget,
+  context,
+  onBucket,
+  onZoom,
+  onModel,
+}: {
+  widget: WidgetModel;
+  context: WidgetContext;
+  /** A bucket was opened. Only traces and spans widgets have one. */
+  onBucket?: (target: BucketTarget) => void;
+  onZoom?: (fromMs: number, toMs: number) => void;
+  onModel?: (model: string) => void;
+}) {
+  if (widget.kind === "heading") {
+    return <h2 className="text-heading font-medium">{widget.title}</h2>;
+  }
+  if (!widget.chart || !widget.query) {
+    return <p className="text-body text-muted-foreground">{widget.title}: no query.</p>;
+  }
+  return (
+    <ChartWidget
+      title={widget.title}
+      chart={widget.chart}
+      query={widget.query}
+      context={context}
+      onBucket={onBucket}
+      onZoom={onZoom}
+      onModel={onModel}
+    />
+  );
+}
+
+function ChartWidget({
+  title,
+  chart,
+  query,
+  context,
+  onBucket,
+  onZoom,
+  onModel,
+}: {
+  title: string;
+  chart: Chart;
+  query: WidgetQuery;
+  context: WidgetContext;
+  onBucket?: (target: BucketTarget) => void;
+  onZoom?: (fromMs: number, toMs: number) => void;
+  onModel?: (model: string) => void;
+}) {
+  const { org, project } = context;
+  const totalShape = chart.type === "bar_h" || chart.type === "table" || chart.type === "number";
+  const answer = useQuery(
+    widgetQuery(
+      org,
+      project,
+      bodyOf(context, totalShape ? "total" : "series", query, chart.type === "number"),
+    ),
+  );
+  // A number's sparkline is the series of the same query.
+  const sparkline = useQuery({
+    ...widgetQuery(org, project, bodyOf(context, "series", query, false)),
+    enabled: chart.type === "number",
+  });
+  const data = answer.data;
+  const card = (children: ReactNode, busy = false) => (
+    <section
+      aria-label={title}
+      aria-busy={busy || undefined}
+      className="flex min-h-[220px] min-w-0 flex-col rounded-md border p-3 md:h-full"
+    >
+      <h3 className="text-body font-medium">{title}</h3>
+      {children}
+    </section>
+  );
+  if (answer.isError && !data) {
+    return card(
+      <div className="mt-2 flex flex-col items-start gap-2">
+        <p role="alert" className="text-destructive text-body">
+          {problemMessage(answer.error, "The query failed.")}
+        </p>
+        <Button type="button" variant="outline" size="sm" onClick={() => void answer.refetch()}>
+          Retry
+        </Button>
+      </div>,
+    );
+  }
+  if (!data) {
+    return card(<Skeleton className="mt-2 flex-1" />, true);
+  }
+  const empty = <p className="mt-2 text-muted-foreground text-body">{emptyReason(query)}</p>;
+  if (data.shape === "series") {
+    return card(
+      <SeriesBody
+        title={title}
+        chart={chart}
+        query={query}
+        answer={data}
+        context={context}
+        onBucket={onBucket}
+        onZoom={onZoom}
+        empty={empty}
+      />,
+    );
+  }
+  if (chart.type === "number") {
+    const measure = query.measures[0];
+    const value = data.rows[0]?.values[0] ?? null;
+    const sparkValues = sparklineOf(query, sparkline.data);
+    if (value === null && !sparkValues?.some((item) => item !== null)) {
+      return card(empty);
+    }
+    return card(
+      <WidgetNumber
+        kind={measure ? measureKind(measure) : "number"}
+        value={value}
+        previous={data.rows[0]?.previous?.[0] ?? null}
+        tone={numberTone(measure)}
+        sparkline={sparkValues}
+      />,
+    );
+  }
+  const table = totalTable(query, data, chart.share ?? false);
+  if (table.rows.every((row) => row.values.every((value) => value === null))) {
+    return card(empty);
+  }
+  if (chart.type === "bar_h") {
+    const groups = table.rows.flatMap((row) => (row.group ? [row.group] : []));
+    const colors = groupColorIndex(context.ranking ?? groups, groups);
+    const byModel = isModelField(splitField(query, context.groupBy));
+    const first = query.measures[0];
+    return card(
+      <WidgetBarH
+        plot={table}
+        colorOf={(group) => {
+          if (first && isErrorMeasure(first)) return "var(--chart-error)";
+          if (!group || !byModel) return PALETTE[0];
+          return PALETTE[(colors.get(group) ?? 0) % PALETTE.length] ?? PALETTE[0];
+        }}
+      />,
+    );
+  }
+  return card(
+    <WidgetTable
+      plot={table}
+      breakdownField={query.breakdown?.field}
+      onModel={
+        onModel && (query.source === "traces" || query.source === "spans") ? onModel : undefined
+      }
+    />,
+  );
+}
+
+function SeriesBody({
+  title,
+  chart,
+  query,
+  answer,
+  context,
+  onBucket,
+  onZoom,
+  empty,
+}: {
+  title: string;
+  chart: Chart;
+  query: WidgetQuery;
+  answer: Schema<"WidgetSeriesResponse">;
+  context: WidgetContext;
+  onBucket?: (target: BucketTarget) => void;
+  onZoom?: (fromMs: number, toMs: number) => void;
+  empty: ReactNode;
+}) {
+  const plot = seriesPlot(query, answer, {
+    ranking: context.ranking,
+    groupBy: context.groupBy,
+  });
+  if (plot.rows.length === 0 || plot.columns.length === 0) {
+    return empty;
+  }
+  // Scores have no bucket click and no zoom: only traces and spans lists are opened.
+  const clickable = query.source !== "scores";
+  const field = splitField(query, context.groupBy);
+  const open =
+    onBucket && clickable
+      ? (timeMs: number, group: string | null | undefined) => {
+          // The other group has no filter of its own, so its bucket is not opened.
+          if (group === null) return;
+          const range = bucketRange(timeMs, answer.bucket_ns);
+          onBucket({
+            ...range,
+            ...(group !== undefined && field !== undefined
+              ? { clause: groupClause(query.source, field, group) }
+              : {}),
+          });
+        }
+      : undefined;
+  const zoom = clickable ? onZoom : undefined;
+  if (chart.type === "line" && chart.split) {
+    const groups = [...new Set(plot.columns.map((column) => column.group))];
+    const shown = groups.slice(0, SPLIT_CHARTS);
+    return (
+      <div className="mt-2 grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-auto sm:grid-cols-2 xl:grid-cols-3">
+        {shown.map((group) => {
+          const columns = plot.columns.filter((column) => column.group === group);
+          const name = group === null ? "Other" : (group ?? "");
+          return (
+            <div key={name} className="flex h-40 min-w-0 flex-col">
+              <span className="truncate text-caption font-medium">{name}</span>
+              <WidgetPlot
+                title={name}
+                kind="line"
+                stacked={false}
+                columns={columns}
+                rows={plot.rows}
+                bucketNs={answer.bucket_ns}
+                maxTicks={MINI_X_TICKS}
+                onBucket={open}
+                onZoom={zoom}
+              />
+            </div>
+          );
+        })}
+        {groups.length > shown.length ? (
+          <p className="text-caption text-muted-foreground">+{groups.length - shown.length} more</p>
+        ) : null}
+      </div>
+    );
+  }
+  return (
+    <WidgetPlot
+      title={title}
+      kind={chart.type === "area" ? "area" : chart.type === "bar" ? "bar" : "line"}
+      stacked={chart.stacked ?? false}
+      columns={plot.columns}
+      rows={plot.rows}
+      bucketNs={answer.bucket_ns}
+      maxTicks={MAIN_X_TICKS}
+      fadeBelow={chart.type === "bar" ? chart.fade_below : undefined}
+      onBucket={open}
+      onZoom={zoom}
+    />
+  );
+}
+
+/** Split charts shown in a widget; more groups than this are a "+N more" line. */
+const SPLIT_CHARTS = 6;
+/** X-axis labels of a widget's chart, and of a split chart. */
+const MAIN_X_TICKS = 6;
+const MINI_X_TICKS = 4;
+
+/** The bucket width for a range: the smallest that gives at most 60 buckets. */
+function bucketOf(context: WidgetContext): ChartBucket {
+  return chooseBucket(Date.parse(context.from), Date.parse(context.to));
+}
+
+function bodyOf(
+  context: WidgetContext,
+  shape: "series" | "total",
+  query: WidgetQuery,
+  compare: boolean,
+): Schema<"WidgetQueryRequest"> {
+  const base = {
+    from: context.from,
+    to: context.to,
+    shape,
+    query,
+    include_eval: context.includeEval,
+    include_experiments: context.includeExperiments,
+    ...(context.filter ? { filter: context.filter } : {}),
+    ...(context.groupBy ? { group_by: context.groupBy } : {}),
+  } satisfies Partial<Schema<"WidgetQueryRequest">>;
+  if (shape === "series") {
+    return { ...base, bucket: bucketOf(context) };
+  }
+  return compare ? { ...base, compare: true } : base;
+}
+
+/** A number's tone: a rise of an error rate, a duration or a cost is bad news. */
+function numberTone(measure: Measure | undefined): KpiTone {
+  if (!measure) {
+    return "neutral";
+  }
+  const kind = measureKind(measure);
+  if (kind === "rate") {
+    return isErrorMeasure(measure) ? "up-bad" : "neutral";
+  }
+  return kind === "duration" || kind === "cost" ? "up-bad" : "neutral";
+}
+
+/** The values of a number's sparkline: the first measure, one per bucket. */
+function sparklineOf(
+  query: WidgetQuery,
+  answer: Schema<"WidgetQueryResponse"> | undefined,
+): (number | null)[] | undefined {
+  if (answer?.shape !== "series") {
+    return undefined;
+  }
+  const plot = seriesPlot(query, answer);
+  const key = plot.columns[0]?.key;
+  return key === undefined ? undefined : plot.rows.map((row) => row[key] ?? null);
+}
+
+function isModelField(field: string | undefined): boolean {
+  return field === "model" || field === "models";
+}
+
+/** The reason a widget shows when its answer has no data. */
+function emptyReason(query: WidgetQuery): string {
+  const source = query.source;
+  return query.filter
+    ? `No ${source} in range match this widget's filter.`
+    : `No ${source} in range.`;
+}

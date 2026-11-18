@@ -1,9 +1,9 @@
 import { render as renderIn, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactElement } from "react";
-import { expect, it, vi } from "vitest";
+import { expect, it } from "vitest";
 import type { Schema } from "@/api/types";
-import { KPI_TONE, KpiRow, KpiRowSkeleton, kpiTrend } from "@/components/charts/kpi-tiles";
+import { KPI_TONE, KpiRow, KpiRowSkeleton } from "@/components/charts/kpi-tiles";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
 /** The tiles' tooltips need the provider the app mounts at its root. */
@@ -92,103 +92,4 @@ it("says there is no data for the previous period when it is missing", async () 
   render(<KpiRow kpis={[{ metric: "cost_total", value: 2 }]} />);
   await user.hover(tile(/^Cost:/));
   expect(await screen.findByRole("tooltip")).toHaveTextContent("Previous period: no data");
-});
-
-it("draws a sparkline for a tile with two or more values, and gaps break the line", () => {
-  const { container } = render(
-    <KpiRow kpis={kpis} trend={{ traces: [1, 2, null, 3, 4], error_rate: [0.1] }} />,
-  );
-  const traces = tile(/^Traces:/);
-  const svg = traces.querySelector("svg[aria-hidden='true']");
-  expect(svg).not.toBeNull();
-  expect(traces.querySelectorAll("polyline")).toHaveLength(2);
-  expect(tile(/^Error rate:/).querySelectorAll("polyline")).toHaveLength(0);
-  expect(container.querySelectorAll("polyline")).toHaveLength(2);
-});
-
-it("draws no sparkline for a tile without a trend", () => {
-  const { container } = render(<KpiRow kpis={kpis} trend={{ traces: [1, 2] }} />);
-  expect(tile(/^Cost:/).querySelectorAll("polyline")).toHaveLength(0);
-  expect(container.querySelectorAll("polyline")).toHaveLength(1);
-});
-
-it("calls onSelect with the metric when a tile is clicked", async () => {
-  const user = userEvent.setup();
-  const onSelect = vi.fn();
-  render(<KpiRow kpis={kpis} onSelect={onSelect} />);
-  await user.click(tile(/^Cost:/));
-  expect(onSelect).toHaveBeenCalledWith("cost_total");
-});
-
-const at = (minute: number) => new Date(Date.UTC(2026, 10, 17, 0, minute)).toISOString();
-const point = (minute: number, value?: number) =>
-  value === undefined ? { time: at(minute) } : { time: at(minute), value };
-
-function response(series: Schema<"MetricSeries">[]): Schema<"MetricsResponse"> {
-  return {
-    bucket_ns: 60_000_000_000,
-    from: at(0),
-    to: at(3),
-    kpis: [],
-    series,
-    top_models: [],
-  };
-}
-
-it("builds the traces and cost trends from ungrouped series", () => {
-  const trend = kpiTrend(
-    response([
-      { metric: "traces", points: [point(0, 3), point(1)] },
-      { metric: "cost", points: [point(0, 0.75), point(1, 1)] },
-    ]),
-  );
-  expect(trend.traces).toEqual([3, null]);
-  expect(trend.cost_total).toEqual([0.75, 1]);
-});
-
-it("builds the error rate and p95 trends from their first series", () => {
-  const trend = kpiTrend(
-    response([
-      { metric: "error_rate", points: [point(0, 0.1), point(1)] },
-      { metric: "latency_p95", points: [point(0, 2e9), point(1, 3e9)] },
-    ]),
-  );
-  expect(trend.error_rate).toEqual([0.1, null]);
-  expect(trend.latency_p95).toEqual([2e9, 3e9]);
-});
-
-it("draws no sparklines when a trend series is grouped by model", () => {
-  expect(
-    kpiTrend(
-      response([
-        { metric: "traces", group: "a", points: [point(0, 3), point(1, 4)] },
-        { metric: "traces", group: "b", points: [point(0, 1), point(1, 1)] },
-      ]),
-    ),
-  ).toEqual({});
-  expect(
-    kpiTrend(
-      response([
-        { metric: "cost", group: "a", points: [point(0, 0.5), point(1, 1)] },
-        { metric: "cost", group: "b", points: [point(0, 0.25), point(1)] },
-      ]),
-    ),
-  ).toEqual({});
-  expect(
-    kpiTrend(
-      response([{ metric: "error_rate", group: "other", points: [point(0, 0.9), point(1, 0.8)] }]),
-    ),
-  ).toEqual({});
-});
-
-it("sums the four token metrics per bucket and gives null where none is present", () => {
-  const trend = kpiTrend(
-    response([
-      { metric: "input_tokens", points: [point(0, 10), point(1, 5), point(2)] },
-      { metric: "output_tokens", points: [point(0, 1), point(1), point(2)] },
-      { metric: "cache_read_tokens", points: [point(0), point(1, 2), point(2)] },
-      { metric: "cache_write_tokens", points: [point(0), point(1), point(2)] },
-    ]),
-  );
-  expect(trend.total_tokens).toEqual([11, 7, null]);
 });

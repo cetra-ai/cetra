@@ -1,5 +1,5 @@
 import { Bar, BarChart, Tooltip, XAxis, YAxis } from "recharts";
-import { axisStyle, formatTick } from "@/components/charts/metric-chart";
+import { axisStyle, formatTick } from "@/components/charts/plot-helpers";
 import { type ChartConfig, ChartContainer } from "@/components/ui/chart";
 import { formatTimestamp } from "@/lib/format";
 import { type TimeZoneSetting, useTimeZone } from "@/lib/settings";

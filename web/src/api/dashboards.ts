@@ -1,4 +1,4 @@
-import { queryOptions, useMutation, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, queryOptions, useMutation, useQueryClient } from "@tanstack/react-query";
 import { $api, api } from "./client";
 import { problemOf } from "./problem";
 import { projectRef } from "./project-ref";
@@ -57,6 +57,22 @@ export function dashboardQuery(org: string, project: string, id: string) {
   return $api.queryOptions("get", "/api/v1/projects/{project}/dashboards/{id}", {
     params: { path: { project: projectRef(org, project), id } },
   });
+}
+
+/** The path of the widget query endpoint (spec 05 § Dashboard queries). */
+export const WIDGET_QUERY_PATH = "/api/v1/projects/{project}/dashboards/query" as const;
+
+/**
+ * One widget's answer. The previous answer stays on screen while a new one (another window or
+ * filter) is loading, so a range change does not blank the chart.
+ */
+export function widgetQuery(org: string, project: string, body: Schema<"WidgetQueryRequest">) {
+  return $api.queryOptions(
+    "post",
+    WIDGET_QUERY_PATH,
+    { params: { path: { project: projectRef(org, project) } }, body },
+    { placeholderData: keepPreviousData },
+  );
 }
 
 /** Whether a mutation failed because the dashboard changed since it was read (`409`). */

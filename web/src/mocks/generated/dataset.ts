@@ -1437,7 +1437,7 @@ function topModels(traces: readonly Schema<"TraceSummary">[]): Schema<"ModelUsag
     }));
 }
 
-function scoreNumber(score: Schema<"ScoreBrief">): number | undefined {
+export function scoreNumber(score: Schema<"ScoreBrief">): number | undefined {
   if (score.value.data_type === "numeric") {
     return score.value.value;
   }
@@ -1450,7 +1450,7 @@ function scoreNumber(score: Schema<"ScoreBrief">): number | undefined {
   return undefined;
 }
 
-function percentile(values: readonly number[], p: number): number | undefined {
+export function percentile(values: readonly number[], p: number): number | undefined {
   if (values.length === 0) {
     return undefined;
   }
@@ -1466,7 +1466,7 @@ function sum(
   return rows.reduce((total, trace) => total + value(trace), 0);
 }
 
-function bucketWidth(
+export function bucketWidth(
   bucket: Schema<"MetricsBucket"> | undefined,
   from: number,
   to: number,
@@ -1573,7 +1573,7 @@ function textPayload(value: string): Schema<"Payload"> {
   return { format: "text", value };
 }
 
-function rfc3339(ms: number): string {
+export function rfc3339(ms: number): string {
   return new Date(ms)
     .toISOString()
     .replace(/\.(\d{3})Z$/, (_match, fraction: string) => `.${fraction}000000Z`);

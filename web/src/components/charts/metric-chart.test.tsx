@@ -2,12 +2,8 @@ import { cleanup, fireEvent, render, screen, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event";
 import { expect, it, vi } from "vitest";
 import type { Schema } from "@/api/types";
-import {
-  chartElementId,
-  DashboardBody,
-  DashboardBodySkeleton,
-  xAxisTicks,
-} from "@/components/charts/metric-chart";
+import { DashboardBody, DashboardBodySkeleton } from "@/components/charts/metric-chart";
+import { xAxisTicks } from "@/components/charts/plot-helpers";
 import type { ChartRow } from "@/lib/metrics";
 
 const TITLES = [
@@ -462,62 +458,7 @@ it("sizes each model's cost bar by its share of the listed cost", () => {
   expect(bar).toHaveStyle({ width: "75%" });
 });
 
-it("groups the cards under section toggles and hides a collapsed section's cards", () => {
-  const onToggle = vi.fn();
-  render(
-    <DashboardBody
-      response={RESPONSE}
-      onBucket={() => {}}
-      sections={{ collapsed: new Set(["Latency"]), onToggle }}
-    />,
-  );
-  const names = ["Volume", "Quality", "Latency", "Cost"];
-  const toggles = names.map((name) => screen.getByRole("button", { name }));
-  expect(toggles.map((toggle) => toggle.getAttribute("aria-expanded"))).toEqual([
-    "true",
-    "true",
-    "false",
-    "true",
-  ]);
-  expect(screen.queryByRole("region", { name: /^Latency: / })).not.toBeInTheDocument();
-  expect(screen.queryByRole("region", { name: /^TTFT: / })).not.toBeInTheDocument();
-  expect(card("Traces & errors")).toBeInTheDocument();
-  fireEvent.click(toggles[1] as HTMLElement);
-  expect(onToggle).toHaveBeenCalledWith("Quality");
-});
-
-it("titles the cards at h3 under a section, and their score names at h4", () => {
-  render(
-    <DashboardBody
-      response={responseWith([
-        { metric: "score_avg", group: "alpha", points: points([0.5, 0.6, 0.7]) },
-      ])}
-      onBucket={() => {}}
-      sections={{ collapsed: new Set(), onToggle: () => {} }}
-    />,
-  );
-  expect(within(card("Latency")).getByRole("heading", { level: 3, name: "Latency" })).toBeVisible();
-  expect(within(card("Scores")).getByRole("heading", { level: 3, name: "Scores" })).toBeVisible();
-  expect(within(card("Scores")).getByRole("heading", { level: 4, name: "alpha" })).toBeVisible();
-});
-
-it("shows no section toggles on the flat grid of the user page, with h2 card titles", () => {
+it("shows the card titles at h2 on the flat grid of the user page", () => {
   renderBody();
-  expect(screen.queryByRole("button", { name: "Volume" })).not.toBeInTheDocument();
   expect(within(card("Latency")).getByRole("heading", { level: 2, name: "Latency" })).toBeVisible();
-});
-
-it("keeps the cards of a loading section skeleton in their sections", () => {
-  const onToggle = vi.fn();
-  render(<DashboardBodySkeleton sections={{ collapsed: new Set(["Cost"]), onToggle }} />);
-  expect(screen.getAllByRole("region")).toHaveLength(TITLES.length - 3);
-  expect(screen.getByRole("button", { name: "Cost" })).toHaveAttribute("aria-expanded", "false");
-});
-
-it("gives each chart card an id from its title", () => {
-  expect(chartElementId("Traces & errors")).toBe("chart-traces-errors");
-  expect(chartElementId("Cost by model")).toBe("chart-cost-by-model");
-  renderBody();
-  expect(document.getElementById("chart-error-rate")).toBe(card("Error rate"));
-  expect(document.getElementById("chart-scores")).toBe(card("Scores"));
 });

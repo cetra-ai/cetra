@@ -3,7 +3,7 @@ import { useState } from "react";
 import { Bar, BarChart, ReferenceArea, Tooltip, XAxis, YAxis } from "recharts";
 import { metricsQuery } from "@/api/queries";
 import type { Schema } from "@/api/types";
-import { axisStyle, formatTick } from "@/components/charts/metric-chart";
+import { axisStyle, formatTick } from "@/components/charts/plot-helpers";
 import { type ChartConfig, ChartContainer } from "@/components/ui/chart";
 import { formatTimestamp } from "@/lib/format";
 import { bucketRange, epochMs, seriesByMetric } from "@/lib/metrics";

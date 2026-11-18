@@ -13,6 +13,7 @@ import {
   itemsAt,
 } from "@/mocks/generated/datasets";
 import { experimentHandlers } from "@/mocks/generated/experiments";
+import { widgetQueryHandler } from "@/mocks/generated/widget-query";
 import {
   type SpanStreamSource,
   type StreamEmit,
@@ -92,6 +93,7 @@ const SCORE_DEFINITIONS: Schema<"ScoreDefinition">[] = [
 
 export function largeHandlers(dataset: Dataset): HttpHandler[] {
   return [
+    widgetQueryHandler(dataset),
     traceStreamHandler(liveTraceSource(dataset)),
     spanStreamHandler(liveSpanSource(dataset)),
     http.get(`${PROJECT}/traces`, ({ request }) => listTraces(dataset, request)),

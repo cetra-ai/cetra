@@ -1,5 +1,4 @@
-import { ChevronDownIcon } from "lucide-react";
-import { type KeyboardEvent, type ReactNode, useMemo, useState } from "react";
+import { type KeyboardEvent, useMemo, useState } from "react";
 import type { BarShapeProps } from "recharts";
 import {
   Area,
@@ -17,8 +16,17 @@ import {
 import type { Schema } from "@/api/types";
 import { LazyMount } from "@/components/charts/lazy-mount";
 import {
+  AXIS_TICK,
+  axisStyle,
+  BucketBar,
+  formatTick,
+  largestValue,
+  lineDot,
+  solitary,
+  xAxisTicks,
+} from "@/components/charts/plot-helpers";
+import {
   CardHeading,
-  type HeadingLevel,
   TOP_MODELS_TITLE,
   TOP_MODELS_UNIT,
   TopModels,
@@ -26,7 +34,7 @@ import {
 import { indexOf, useDragZoom } from "@/components/charts/use-drag-zoom";
 import { type ChartConfig, ChartContainer } from "@/components/ui/chart";
 import { Skeleton } from "@/components/ui/skeleton";
-import { durationTicks, niceTicks, timeTicks } from "@/lib/chart-scale";
+import { durationTicks, niceTicks, percentTicks } from "@/lib/chart-scale";
 import { formatTimestamp } from "@/lib/format";
 import {
   type ChartRow,
@@ -38,20 +46,19 @@ import {
   groupColorIndex,
   type MetricName,
   type MetricSeries,
+  PALETTE,
   presentSum,
   seriesByMetric,
   toChartRows,
 } from "@/lib/metrics";
 import { type TimeZoneSetting, useTimeZone } from "@/lib/settings";
 
-const DAY_MS = 24 * 60 * 60 * 1000;
 // Two rows on wide screens; the rest mount when scrolled near.
 const EAGER_CHARTS = 4;
 // Height of a chart card (`h-[220px]` in ChartCard), kept by placeholders.
 const CARD_HEIGHT = 220;
 // Error-rate buckets with fewer traces than this are drawn faded: their rate is noisy.
 const THIN_BUCKET = 5;
-const THIN_OPACITY = 0.35;
 // Hidden columns: the traces of each bucket, read by the error-rate chart (not drawn). One per
 // group, keyed by `traceCountKey`.
 const TRACES_KEY = "\u001ftraces";
@@ -60,15 +67,6 @@ const X_TICKS = 6;
 const MINI_X_TICKS = 4;
 // Scores charts shown in the Scores card; more than this is a "+N more" line.
 const SCORE_CHARTS = 6;
-// The top-models card's title and unit, as TopModels renders them.
-export const PALETTE = [
-  "var(--chart-1)",
-  "var(--chart-2)",
-  "var(--chart-3)",
-  "var(--chart-4)",
-  "var(--chart-5)",
-] as const;
-
 const METRIC_LABEL: Record<MetricName, string> = {
   traces: "Traces",
   errors: "Errors",
@@ -184,25 +182,6 @@ const CHARTS: readonly ChartSpec[] = [
   },
 ];
 
-/** The dashboard's sections, in order, with the cards each one holds (by title). */
-const SECTIONS: readonly { title: string; charts: readonly string[] }[] = [
-  { title: "Volume", charts: ["Traces & errors", "Tokens by type"] },
-  { title: "Quality", charts: ["Error rate", "Scores"] },
-  { title: "Latency", charts: ["Latency", "LLM latency by model", "TTFT"] },
-  { title: "Cost", charts: ["Cost by model", "Evaluation cost", TOP_MODELS_TITLE] },
-];
-
-/** The section that holds a chart card, by the card's title. */
-export function sectionOfChart(title: string): string | undefined {
-  return SECTIONS.find((section) => section.charts.includes(title))?.title;
-}
-
-/** Collapsed sections of the dashboard (by section title) and the toggle of one section. */
-export type SectionState = {
-  collapsed: ReadonlySet<string>;
-  onToggle: (title: string) => void;
-};
-
 /** What a column shows in the tooltip and the screen-reader summary. */
 type Tip = { label: string; value: string };
 
@@ -223,183 +202,71 @@ type Column = {
   countKey?: string;
 };
 
-const AXIS_TICK = {
-  fontSize: 11,
-  fontFamily: "var(--font-mono)",
-  fill: "var(--muted-foreground)",
-} as const;
-
 export function DashboardBody({
   response,
   onBucket,
   onZoom,
   onModel,
-  sections,
 }: {
   response: Schema<"MetricsResponse">;
   onBucket: (timeMs: number) => void;
   /** Drag across buckets: the absolute range to show, from the first bucket's start to the last one's end. */
   onZoom?: (fromMs: number, toMs: number) => void;
   onModel?: (model: string) => void;
-  /** Group the cards under section headings. Without it, one flat grid (the user page). */
-  sections?: SectionState;
 }) {
   const byMetric = seriesByMetric(response);
-  const colors = groupColorIndex(response);
-  // Under a section heading the card titles are h3; on the flat grid they are h2.
-  const level: HeadingLevel = sections ? "h3" : "h2";
-  const cards = new Map<string, ReactNode>(
-    CHARTS.map((spec, index): [string, ReactNode] => [
-      spec.title,
-      <LazyMount
-        key={spec.title}
-        eager={index < EAGER_CHARTS}
-        minHeight={CARD_HEIGHT}
-        fallback={<ChartCardSkeleton title={spec.title} unit={spec.unit} level={level} />}
-      >
-        <ChartCard
-          spec={spec}
-          byMetric={byMetric}
-          colors={colors}
-          bucketNs={response.bucket_ns}
-          onBucket={onBucket}
-          onZoom={onZoom}
-          level={level}
-        />
-      </LazyMount>,
-    ]),
+  const colors = groupColorIndex(
+    response.top_models.map((model) => model.model),
+    response.series.flatMap((item) => (item.group ? [item.group] : [])),
   );
-  cards.set(
-    TOP_MODELS_TITLE,
-    <TopModels
-      key={TOP_MODELS_TITLE}
-      models={response.top_models}
-      onModel={onModel}
-      level={level}
-    />,
-  );
-  if (!sections) {
-    return (
-      <div className="mt-3 grid grid-cols-1 gap-3 xl:grid-cols-2">
-        {CHARTS.map((spec) => cards.get(spec.title))}
-        {cards.get(TOP_MODELS_TITLE)}
-      </div>
-    );
-  }
   return (
-    <div className="mt-3 space-y-4">
-      {SECTIONS.map((section) => (
-        <SectionBlock key={section.title} title={section.title} state={sections}>
-          {section.charts.map((chart) => cards.get(chart))}
-        </SectionBlock>
-      ))}
-    </div>
-  );
-}
-
-/**
- * A dashboard section: a heading button that collapses it, then its cards in the grid. A
- * collapsed section renders no cards.
- */
-function SectionBlock({
-  title,
-  state,
-  children,
-}: {
-  title: string;
-  state: SectionState;
-  children: ReactNode;
-}) {
-  const collapsed = state.collapsed.has(title);
-  const panel = `dashboard-section-${title.toLowerCase()}`;
-  return (
-    <div>
-      <h2 className="text-ui font-medium">
-        <button
-          type="button"
-          aria-expanded={!collapsed}
-          aria-controls={collapsed ? undefined : panel}
-          onClick={() => state.onToggle(title)}
-          className="focus-ring flex items-center gap-1.5 rounded-sm py-1"
+    <div className="mt-3 grid grid-cols-1 gap-3 xl:grid-cols-2">
+      {CHARTS.map((spec, index) => (
+        <LazyMount
+          key={spec.title}
+          eager={index < EAGER_CHARTS}
+          minHeight={CARD_HEIGHT}
+          fallback={<ChartCardSkeleton title={spec.title} unit={spec.unit} />}
         >
-          <ChevronDownIcon
-            aria-hidden="true"
-            className={`size-4 text-muted-foreground transition-transform ${collapsed ? "-rotate-90" : ""}`}
+          <ChartCard
+            spec={spec}
+            byMetric={byMetric}
+            colors={colors}
+            bucketNs={response.bucket_ns}
+            onBucket={onBucket}
+            onZoom={onZoom}
           />
-          {title}
-        </button>
-      </h2>
-      {collapsed ? null : (
-        <div id={panel} className="mt-1 grid grid-cols-1 gap-3 xl:grid-cols-2">
-          {children}
-        </div>
-      )}
+        </LazyMount>
+      ))}
+      <TopModels models={response.top_models} onModel={onModel} />
     </div>
   );
 }
 
 /** The dashboard body while its data loads: the same grid of cards, with their titles. */
-export function DashboardBodySkeleton({ sections }: { sections?: SectionState }) {
-  if (!sections) {
-    return (
-      <div className="mt-3 grid grid-cols-1 gap-3 xl:grid-cols-2">
-        {CHARTS.map((spec) => (
-          <ChartCardSkeleton key={spec.title} title={spec.title} unit={spec.unit} />
-        ))}
-        <ChartCardSkeleton title={TOP_MODELS_TITLE} unit={TOP_MODELS_UNIT} />
-      </div>
-    );
-  }
+export function DashboardBodySkeleton() {
   return (
-    <div className="mt-3 space-y-4">
-      {SECTIONS.map((section) => (
-        <SectionBlock key={section.title} title={section.title} state={sections}>
-          {section.charts.map((chart) => (
-            <ChartCardSkeleton key={chart} title={chart} unit={unitOf(chart)} level="h3" />
-          ))}
-        </SectionBlock>
+    <div className="mt-3 grid grid-cols-1 gap-3 xl:grid-cols-2">
+      {CHARTS.map((spec) => (
+        <ChartCardSkeleton key={spec.title} title={spec.title} unit={spec.unit} />
       ))}
+      <ChartCardSkeleton title={TOP_MODELS_TITLE} unit={TOP_MODELS_UNIT} />
     </div>
   );
 }
 
-/** The unit a card shows in its header, by the card's title. */
-function unitOf(title: string): string {
-  return CHARTS.find((spec) => spec.title === title)?.unit ?? TOP_MODELS_UNIT;
-}
-
 /** A chart card that is still loading: the card's box and header, with a pulsing chart area. */
-export function ChartCardSkeleton({
-  title,
-  unit,
-  level = "h2",
-}: {
-  title: string;
-  unit: string;
-  level?: HeadingLevel;
-}) {
+function ChartCardSkeleton({ title, unit }: { title: string; unit: string }) {
   return (
     <section
-      id={chartElementId(title)}
       aria-label={title}
       aria-busy="true"
       className="flex h-[220px] min-w-0 flex-col rounded-md border p-3"
     >
-      <CardHeading title={title} unit={unit} level={level} />
+      <CardHeading title={title} unit={unit} />
       <Skeleton className="mt-2 flex-1" />
     </section>
   );
-}
-
-/**
- * The DOM id of a chart card, from its title: `chart-traces-errors` for "Traces & errors".
- * The KPI tiles scroll to these.
- */
-export function chartElementId(title: string): string {
-  return `chart-${title
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")}`;
 }
 
 function ChartCard({
@@ -409,7 +276,6 @@ function ChartCard({
   bucketNs,
   onBucket,
   onZoom,
-  level,
 }: {
   spec: ChartSpec;
   byMetric: Map<MetricName, MetricSeries[]>;
@@ -417,17 +283,15 @@ function ChartCard({
   bucketNs: number;
   onBucket: (timeMs: number) => void;
   onZoom?: (fromMs: number, toMs: number) => void;
-  level: HeadingLevel;
 }) {
   const described = describe(spec, byMetric);
   if (!described.hasData) {
     return (
       <section
-        id={chartElementId(spec.title)}
         aria-label={described.label}
         className="flex min-w-0 flex-col rounded-md border p-3 xl:col-span-2"
       >
-        <CardHeading title={spec.title} unit={spec.unit} level={level} />
+        <CardHeading title={spec.title} unit={spec.unit} />
         <p className="mt-2 text-muted-foreground text-body">{spec.empty}</p>
       </section>
     );
@@ -440,7 +304,6 @@ function ChartCard({
         bucketNs={bucketNs}
         onBucket={onBucket}
         onZoom={onZoom}
-        level={level}
       />
     );
   }
@@ -451,11 +314,10 @@ function ChartCard({
   );
   return (
     <section
-      id={chartElementId(spec.title)}
       aria-label={described.label}
       className="flex h-[220px] min-w-0 flex-col rounded-md border p-3"
     >
-      <CardHeading title={spec.title} unit={spec.unit} level={level} />
+      <CardHeading title={spec.title} unit={spec.unit} />
       <MetricPlot
         title={spec.title}
         spec={spec}
@@ -477,14 +339,12 @@ function ScoresCard({
   bucketNs,
   onBucket,
   onZoom,
-  level,
 }: {
   label: string;
   byMetric: Map<MetricName, MetricSeries[]>;
   bucketNs: number;
   onBucket: (timeMs: number) => void;
   onZoom?: (fromMs: number, toMs: number) => void;
-  level: HeadingLevel;
 }) {
   const series = (byMetric.get("score_avg") ?? [])
     .filter((item) => item.points.some((point) => point.value !== undefined))
@@ -492,14 +352,13 @@ function ScoresCard({
   const shown = series.slice(0, SCORE_CHARTS);
   const more = series.length - shown.length;
   // Each score's name is one level below its card's title.
-  const NameTag = level === "h2" ? "h3" : "h4";
+  const NameTag = "h3";
   return (
     <section
-      id={chartElementId("Scores")}
       aria-label={label}
       className="flex min-w-0 flex-col rounded-md border p-3 xl:col-span-2"
     >
-      <CardHeading title="Scores" unit="score" level={level} />
+      <CardHeading title="Scores" unit="score" />
       <div className="mt-2 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
         {shown.map((item) => {
           const name = scoreName(item);
@@ -689,7 +548,12 @@ function MetricPlot({
                   stackId={column.stacked ? "stack" : undefined}
                   isAnimationActive={false}
                   shape={(props: BarShapeProps) => (
-                    <BucketBar {...props} onBucket={onBucket} thinKey={column.countKey} />
+                    <BucketBar
+                      {...props}
+                      onBucket={onBucket}
+                      fadeKey={column.countKey}
+                      fadeBelow={THIN_BUCKET}
+                    />
                   )}
                 />
               );
@@ -796,130 +660,11 @@ function SeriesTooltip({
   );
 }
 
-function BucketBar({
-  x,
-  y,
-  width,
-  height,
-  fill,
-  payload,
-  onBucket,
-  thinKey,
-}: BarShapeProps & { onBucket: (timeMs: number) => void; thinKey?: string }) {
-  const left = x ?? 0;
-  const top = y ?? 0;
-  const time = rowTime(payload);
-  const count = thinKey === undefined ? undefined : rowNumber(payload, thinKey);
-  const fillOpacity = count !== undefined && count < THIN_BUCKET ? THIN_OPACITY : undefined;
-  if (time === undefined || width <= 0 || height <= 0) {
-    return (
-      <rect
-        x={left}
-        y={top}
-        width={Math.max(width, 0)}
-        height={Math.max(height, 0)}
-        fill={fill}
-        fillOpacity={fillOpacity}
-      />
-    );
-  }
-  return (
-    <g>
-      <rect x={left} y={top} width={width} height={height} fill={fill} fillOpacity={fillOpacity} />
-      {/* biome-ignore lint/a11y/noAriaHiddenOnFocusable: mouse-only bucket target with tabIndex -1; the chart group is the keyboard path (D-C-3) */}
-      <foreignObject x={left} y={top} width={width} height={height} aria-hidden="true">
-        <button
-          type="button"
-          tabIndex={-1}
-          aria-label={bucketLabel(time)}
-          className="focus-ring block h-full w-full cursor-pointer border-0 bg-transparent p-0"
-          onClick={() => onBucket(time)}
-        />
-      </foreignObject>
-    </g>
-  );
-}
-
-function lineDot(dataKey: string, onBucket: (timeMs: number) => void, showMarker: boolean) {
-  return (props: unknown) => {
-    if (typeof props !== "object" || props === null) {
-      return <g />;
-    }
-    const point = props as {
-      cx?: number;
-      cy?: number;
-      payload?: ChartRow;
-      value?: number | null;
-      stroke?: string;
-    };
-    const time = point.payload?.time;
-    const value = point.value ?? (point.payload ? point.payload[dataKey] : undefined);
-    if (
-      typeof point.cx !== "number" ||
-      typeof point.cy !== "number" ||
-      typeof time !== "number" ||
-      value === null ||
-      value === undefined
-    ) {
-      return <g />;
-    }
-    return (
-      <g>
-        {showMarker ? <circle cx={point.cx} cy={point.cy} r={3} fill={point.stroke} /> : null}
-        {/* biome-ignore lint/a11y/noAriaHiddenOnFocusable: mouse-only bucket target with tabIndex -1; the chart group is the keyboard path (D-C-3) */}
-        <foreignObject x={point.cx - 8} y={point.cy - 8} width={16} height={16} aria-hidden="true">
-          <button
-            type="button"
-            tabIndex={-1}
-            aria-label={bucketLabel(time)}
-            className="focus-ring block size-full cursor-pointer border-0 bg-transparent p-0"
-            onClick={() => onBucket(time)}
-          />
-        </foreignObject>
-      </g>
-    );
-  };
-}
-
 /**
  * The X-axis tick times: the row times that fall on round times of the shown zone (see
  * `timeTicks`). When none does (for example one-day buckets in a local zone), every k-th row
  * with k = ceil(rows / maxTicks), so the axis has at most about `maxTicks` labels.
  */
-export function xAxisTicks(rows: readonly ChartRow[], utc: boolean, maxTicks = 8): number[] {
-  const times = rows.map((row) => row.time);
-  const first = times[0];
-  const last = times.at(-1);
-  if (first === undefined || last === undefined) {
-    return [];
-  }
-  const round = new Set(timeTicks(first, last, utc, maxTicks));
-  const onRound = times.filter((time) => round.has(time));
-  if (onRound.length > 0) {
-    return onRound;
-  }
-  const every = Math.ceil(times.length / maxTicks);
-  return times.filter((_, index) => index % every === 0);
-}
-
-function solitary(rows: readonly ChartRow[], key: string): boolean {
-  let count = 0;
-  for (const row of rows) {
-    const value = row[key];
-    if (value !== null && value !== undefined) {
-      count += 1;
-      if (count > 1) {
-        return false;
-      }
-    }
-  }
-  return count === 1;
-}
-
-function bucketLabel(timeMs: number): string {
-  return `Open bucket ${new Date(timeMs).toISOString()}`;
-}
-
 function bucketSummary(
   row: ChartRow,
   columns: readonly Column[],
@@ -944,18 +689,6 @@ function tipOf(column: Column, row: ChartRow): Tip {
     label: column.label,
     value: formatMetric(column.metric, row[column.key] ?? null),
   };
-}
-
-function rowTime(payload: unknown): number | undefined {
-  return rowNumber(payload, "time");
-}
-
-function rowNumber(payload: unknown, key: string): number | undefined {
-  if (typeof payload !== "object" || payload === null || !(key in payload)) {
-    return undefined;
-  }
-  const value = (payload as Record<string, unknown>)[key];
-  return typeof value === "number" ? value : undefined;
 }
 
 function columnsFor(
@@ -1169,7 +902,7 @@ function valueAxis(
     spec.unit === "duration"
       ? durationTicks(max)
       : spec.unit === "%"
-        ? percentTicks(max)
+        ? { ticks: percentTicks(max), format: formatPercent }
         : {
             ticks: niceTicks(max, 4, minStepOf(spec)),
             format: (value: number) => formatMetric(columns[0]?.metric ?? "traces", value),
@@ -1193,38 +926,7 @@ function minStepOf(spec: ChartSpec): number {
  * Percent ticks: `max` is a rate (0 to 1), so the ticks are nice percentages divided by 100.
  * The step is at least a tenth of a percent, so that every label is different.
  */
-function percentTicks(max: number): { ticks: number[]; format: (value: number) => string } {
-  return {
-    ticks: niceTicks(max * 100, 4, 0.1).map((tick) => Number((tick / 100).toPrecision(12))),
-    format: formatPercent,
-  };
-}
-
 /** The largest value to fit: the sum of the stacked columns in a row, or the largest one. */
-function largestValue(columns: readonly Column[], rows: readonly ChartRow[]): number {
-  let max = 0;
-  for (const row of rows) {
-    let stackSum = 0;
-    let peak = 0;
-    let any = false;
-    for (const column of columns) {
-      const value = row[column.key];
-      if (typeof value !== "number" || Number.isNaN(value)) {
-        continue;
-      }
-      any = true;
-      if (column.stacked) {
-        stackSum += value;
-      }
-      peak = Math.max(peak, value);
-    }
-    if (any) {
-      max = Math.max(max, stackSum, peak);
-    }
-  }
-  return max;
-}
-
 /** The smallest present value of the columns, or `Infinity` when there is none. */
 function smallestValue(columns: readonly Column[], rows: readonly ChartRow[]): number {
   let min = Number.POSITIVE_INFINITY;
@@ -1356,39 +1058,4 @@ function lastPresent(series: MetricSeries): number | undefined {
     }
   }
   return last;
-}
-
-export function axisStyle(rows: readonly { time: number }[]): "time" | "datetime" {
-  const first = rows[0]?.time;
-  const last = rows[rows.length - 1]?.time;
-  if (first === undefined || last === undefined || last - first < DAY_MS) {
-    return "time";
-  }
-  return "datetime";
-}
-
-export function formatTick(
-  value: unknown,
-  zone: TimeZoneSetting,
-  style: "time" | "datetime",
-): string {
-  const ms = typeof value === "number" ? value : Number(value);
-  if (Number.isNaN(ms)) {
-    return "";
-  }
-  const date = new Date(ms);
-  const utc = zone === "utc";
-  const hours = pad(utc ? date.getUTCHours() : date.getHours());
-  const minutes = pad(utc ? date.getUTCMinutes() : date.getMinutes());
-  const clock = `${hours}:${minutes}`;
-  if (style === "time") {
-    return clock;
-  }
-  const month = pad((utc ? date.getUTCMonth() : date.getMonth()) + 1);
-  const day = pad(utc ? date.getUTCDate() : date.getDate());
-  return `${month}-${day} ${clock}`;
-}
-
-function pad(value: number): string {
-  return String(value).padStart(2, "0");
 }

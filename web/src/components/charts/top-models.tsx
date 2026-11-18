@@ -5,17 +5,12 @@ import { formatCount } from "@/lib/metrics";
 export const TOP_MODELS_TITLE = "Top models by cost";
 export const TOP_MODELS_UNIT = "USD";
 
-/** The level of a card's title: h2 on the flat grid, h3 under a dashboard section heading. */
-export type HeadingLevel = "h2" | "h3";
-
 export function TopModels({
   models,
   onModel,
-  level = "h2",
 }: {
   models: readonly Schema<"ModelUsage">[];
   onModel?: (model: string) => void;
-  level?: HeadingLevel;
 }) {
   // Each row's bar is its share of the listed models' cost.
   const listed = models.reduce((sum, model) => sum + (model.cost_total ?? 0), 0);
@@ -27,9 +22,11 @@ export function TopModels({
           .join(", ")} in range`;
   return (
     <section aria-label={label} className="flex h-[220px] min-w-0 flex-col rounded-md border p-3">
-      <CardHeading title={TOP_MODELS_TITLE} unit={TOP_MODELS_UNIT} level={level} />
+      <CardHeading title={TOP_MODELS_TITLE} unit={TOP_MODELS_UNIT} />
       {models.length === 0 ? (
-        <NoData />
+        <p className="flex flex-1 items-center justify-center text-muted-foreground text-body">
+          No data
+        </p>
       ) : (
         <div className="mt-2 min-h-0 flex-1 overflow-auto">
           <table className="w-full text-left text-caption">
@@ -94,31 +91,12 @@ export function TopModels({
   );
 }
 
-export function CardHeading({
-  title,
-  unit,
-  level = "h2",
-}: {
-  title: string;
-  unit: string;
-  level?: HeadingLevel;
-}) {
+/** A card's title and unit. */
+export function CardHeading({ title, unit }: { title: string; unit: string }) {
   return (
     <header className="flex items-baseline justify-between gap-2">
-      {level === "h3" ? (
-        <h3 className="text-body font-medium">{title}</h3>
-      ) : (
-        <h2 className="text-body font-medium">{title}</h2>
-      )}
+      <h2 className="text-body font-medium">{title}</h2>
       <span className="font-mono text-caption text-muted-foreground">{unit}</span>
     </header>
-  );
-}
-
-export function NoData() {
-  return (
-    <p className="flex flex-1 items-center justify-center text-muted-foreground text-body">
-      No data
-    </p>
   );
 }

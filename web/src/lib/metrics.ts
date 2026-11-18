@@ -19,6 +19,15 @@ export type KpiDelta = {
   direction: KpiDirection;
 };
 
+/** The five series colours of the charts; a group takes the one at its colour index. */
+export const PALETTE = [
+  "var(--chart-1)",
+  "var(--chart-2)",
+  "var(--chart-3)",
+  "var(--chart-4)",
+  "var(--chart-5)",
+] as const;
+
 const NS_PER_MS = 1_000_000;
 const MAX_BUCKETS = 10_000;
 const GROUP_LIMIT = 8;
@@ -42,30 +51,26 @@ export function seriesByMetric(
 }
 
 /**
- * A colour index for every group in the response, the same on every chart of the dashboard:
- * the models of `top_models` first (by cost, in that order), then the other groups
- * alphabetically. Groups are the series' `group` values.
+ * A colour index for each group. The ranked groups (the models by cost, in that order) keep their
+ * place in the ranking, whether or not a chart shows them; the other groups follow alphabetically.
  */
 export function groupColorIndex(
-  response: Pick<Schema<"MetricsResponse">, "series" | "top_models">,
+  ranked: readonly string[],
+  present: Iterable<string>,
 ): Map<string, number> {
-  const present = new Set<string>();
-  for (const series of response.series) {
-    if (series.group) {
-      present.add(series.group);
+  const index = new Map<string, number>();
+  for (const group of ranked) {
+    if (!index.has(group)) {
+      index.set(group, index.size);
     }
   }
-  const ranked = new Set<string>();
-  for (const model of response.top_models) {
-    if (present.has(model.model)) {
-      ranked.add(model.model);
-    }
-  }
-  const rest = [...present]
-    .filter((group) => !ranked.has(group))
+  const rest = [...new Set(present)]
+    .filter((group) => !index.has(group))
     .sort((left, right) => left.localeCompare(right));
-  const order = [...ranked, ...rest];
-  return new Map(order.map((group, index) => [group, index]));
+  for (const group of rest) {
+    index.set(group, index.size);
+  }
+  return index;
 }
 
 /**
