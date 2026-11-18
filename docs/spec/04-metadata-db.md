@@ -266,7 +266,7 @@ Names are not unique: several visible views may share a name. Visibility, sharin
 
 ## Dashboards
 
-Custom dashboards (D-C-16). The built-in Overview is defined by the UI and is not stored.
+Custom dashboards (D-C-16) and each project's edited Overview (D-C-18). The built-in Overview preset is defined by the UI; a project stores its own Overview only once a member saves a change to it.
 
 ```sql
 CREATE TABLE dashboards (
@@ -278,10 +278,14 @@ CREATE TABLE dashboards (
   version INTEGER NOT NULL DEFAULT 1, -- +1 on every update; a PATCH names the version it read
   created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
   updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
-  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'custom' CHECK (kind IN ('custom', 'overview'))  -- added by migration 0022 (D-C-18)
 );
 CREATE INDEX dashboards_project ON dashboards(project_id, name);
+CREATE UNIQUE INDEX dashboards_overview ON dashboards(project_id) WHERE kind = 'overview';
 ```
+
+A row of kind `overview` is the project's edited Overview: at most one per project, named `Overview`, with no description. It is read and written only through the `/dashboards/overview` endpoints (09): the list, the 100-dashboard cap and `/dashboards/{id}` ignore it (a `GET`, `PATCH` or `DELETE` of its id is a 404). Deleting it ("Reset to default") brings the built-in preset back.
 
 A **Widget** is `{id, title, layout: {x, y, w, h}, kind, chart?, query?}`:
 - `id`: 1–64 characters of `[A-Za-z0-9_-]`, unique in the dashboard.
