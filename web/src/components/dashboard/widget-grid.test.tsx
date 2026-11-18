@@ -18,17 +18,27 @@ import {
  * The props the grid last rendered react-grid-layout with; the grid itself is the real one. The
  * container's measured width is `grid.width` (jsdom lays nothing out).
  */
-const grid = vi.hoisted(() => ({ last: undefined as GridLayoutProps | undefined, width: 1248 }));
+const grid = vi.hoisted(() => ({
+  last: undefined as GridLayoutProps | undefined,
+  width: 1248,
+  /** False: the library's hook has not measured yet (it reports its 1280 px default). */
+  hookMeasured: true,
+  /** Every width the grid was rendered with, in order. */
+  widths: [] as number[],
+}));
 
 vi.mock("react-grid-layout", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react-grid-layout")>();
   function CapturedGridLayout(props: GridLayoutProps) {
     grid.last = props;
+    grid.widths.push(props.width);
     return <actual.GridLayout {...props} />;
   }
   function useMeasuredWidth() {
     const measured = actual.useContainerWidth();
-    return { ...measured, width: grid.width, mounted: true };
+    return grid.hookMeasured
+      ? { ...measured, width: grid.width, mounted: true }
+      : { ...measured, width: 1280, mounted: false };
   }
   return { ...actual, GridLayout: CapturedGridLayout, useContainerWidth: useMeasuredWidth };
 });
@@ -61,6 +71,8 @@ function setViewportWidth(width: number) {
 afterEach(() => {
   setViewportWidth(1024);
   grid.width = 1248;
+  grid.hookMeasured = true;
+  grid.widths = [];
   vi.useRealTimers();
 });
 
@@ -244,6 +256,17 @@ describe("the grid's finished moves", () => {
     act(() => grid.last?.onResizeStop?.(layout, tall, tall, null, new Event("mouseup"), element));
     expect(body("tall")?.style.width).toBe("100%");
     expect(body("tall")?.style.height).toBe("100%");
+  });
+});
+
+describe("the grid's first frame", () => {
+  it("is drawn at the width measured before paint, never at the library's 1280 px default", () => {
+    grid.hookMeasured = false;
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(900);
+    render(<WidgetGrid widgets={widgets} editing renderCell={(item) => <span>{item.id}</span>} />);
+    expect(grid.widths.length).toBeGreaterThan(0);
+    expect(grid.widths.every((width) => width === 900)).toBe(true);
+    vi.restoreAllMocks();
   });
 });
 

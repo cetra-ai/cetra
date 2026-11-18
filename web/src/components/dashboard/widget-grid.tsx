@@ -3,6 +3,7 @@ import {
   type CSSProperties,
   type ReactNode,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useReducer,
   useRef,
@@ -145,6 +146,29 @@ function redrawOrder(
   };
 }
 
+/**
+ * The grid's width. react-grid-layout's own hook starts at 1280 px and measures after the first
+ * paint, so a dashboard drew its first frame at the wrong width and its charts at that width, then
+ * snapped to the right one. This measures the container in a layout effect, before the browser
+ * paints, and the grid is not drawn until then (`width` is null). The library's hook (with
+ * `measureBeforeMount`) keeps following later changes.
+ */
+function useGridWidth(): {
+  width: number | null;
+  containerRef: ReturnType<typeof useContainerWidth>["containerRef"];
+  mounted: boolean;
+} {
+  const observed = useContainerWidth({ measureBeforeMount: true });
+  const { containerRef } = observed;
+  const [first, setFirst] = useState<number | null>(null);
+  useLayoutEffect(() => {
+    const node = containerRef.current;
+    if (node) setFirst(node.clientWidth);
+  }, [containerRef]);
+  if (observed.mounted) return { width: observed.width, containerRef, mounted: true };
+  return { width: first, containerRef, mounted: first !== null };
+}
+
 /** The class of a cell's body: the grid's styles lift it while it is dragged. */
 export const CELL_BODY = "dashboard-cell";
 
@@ -262,8 +286,8 @@ function FreeWidgets({
   onResizeStop?: (layout: Layout) => void;
   renderCell: (widget: WidgetModel) => ReactNode;
 }) {
-  const { width, containerRef, mounted } = useContainerWidth();
-  const drawnAt = useDrawnWidths(widgets, width, mounted, containerRef);
+  const { width, containerRef, mounted } = useGridWidth();
+  const drawnAt = useDrawnWidths(widgets, width ?? 0, mounted, containerRef);
   // After a drop or a resize the widgets slide into place; a width change moves them at once.
   const [settling, setSettling] = useState(false);
   useEffect(() => {
@@ -305,7 +329,7 @@ function FreeWidgets({
   const bodyStyle = (widget: WidgetModel): CSSProperties => {
     if (frozen?.id === widget.id) return { width: frozen.width, height: frozen.height };
     const drawnWidth = drawnAt(widget.id);
-    if (drawnWidth !== null && drawnWidth !== width) {
+    if (width !== null && drawnWidth !== null && drawnWidth !== width) {
       const drawn = cellWidth(drawnWidth, widget.layout.w);
       return {
         width: drawn,
@@ -321,47 +345,49 @@ function FreeWidgets({
     `${drawnAt(widget.id) ?? "unmeasured"}:${frozen?.id === widget.id ? "held" : "free"}`;
   return (
     <div ref={containerRef} className={settling ? SETTLING : undefined}>
-      <GridLayout
-        width={width}
-        layout={layout}
-        gridConfig={GRID_CONFIG}
-        dragConfig={dragConfig}
-        resizeConfig={resizeConfig}
-        onLayoutChange={onLayoutChange}
-        onDrag={() => followPointer()}
-        onDragStop={endDrag}
-        onResize={() => followPointer()}
-        onResizeStart={onResizeStart}
-        onResizeStop={endResize}
-      >
-        {widgets.map((widget) => (
-          <div key={widget.id} data-widget-id={widget.id} className="relative h-full min-w-0">
-            <div className={CELL_BODY} style={bodyStyle(widget)}>
-              {/* A new key in the render that resizes the body: its charts measure it then. */}
-              <LayoutKey.Provider value={layoutKeyOf(widget)}>
-                {widget.kind === "chart" ? (
-                  // A chart fetches its answer when it is near the viewport, so a long dashboard does
-                  // not query every widget at once. Its placeholder is its cell's height.
-                  <LazyMount
-                    eager={eager.has(widget.id)}
-                    minHeight={cellHeight(widget.layout.h)}
-                    fallback={
-                      <Skeleton
-                        className="h-full w-full"
-                        style={{ minHeight: cellHeight(widget.layout.h) }}
-                      />
-                    }
-                  >
-                    {renderCell(widget)}
-                  </LazyMount>
-                ) : (
-                  renderCell(widget)
-                )}
-              </LayoutKey.Provider>
+      {width === null ? null : (
+        <GridLayout
+          width={width}
+          layout={layout}
+          gridConfig={GRID_CONFIG}
+          dragConfig={dragConfig}
+          resizeConfig={resizeConfig}
+          onLayoutChange={onLayoutChange}
+          onDrag={() => followPointer()}
+          onDragStop={endDrag}
+          onResize={() => followPointer()}
+          onResizeStart={onResizeStart}
+          onResizeStop={endResize}
+        >
+          {widgets.map((widget) => (
+            <div key={widget.id} data-widget-id={widget.id} className="relative h-full min-w-0">
+              <div className={CELL_BODY} style={bodyStyle(widget)}>
+                {/* A new key in the render that resizes the body: its charts measure it then. */}
+                <LayoutKey.Provider value={layoutKeyOf(widget)}>
+                  {widget.kind === "chart" ? (
+                    // A chart fetches its answer when it is near the viewport, so a long dashboard does
+                    // not query every widget at once. Its placeholder is its cell's height.
+                    <LazyMount
+                      eager={eager.has(widget.id)}
+                      minHeight={cellHeight(widget.layout.h)}
+                      fallback={
+                        <Skeleton
+                          className="h-full w-full"
+                          style={{ minHeight: cellHeight(widget.layout.h) }}
+                        />
+                      }
+                    >
+                      {renderCell(widget)}
+                    </LazyMount>
+                  ) : (
+                    renderCell(widget)
+                  )}
+                </LayoutKey.Provider>
+              </div>
             </div>
-          </div>
-        ))}
-      </GridLayout>
+          ))}
+        </GridLayout>
+      )}
     </div>
   );
 }
