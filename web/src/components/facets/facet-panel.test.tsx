@@ -1,6 +1,6 @@
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
-import { HttpResponse, http } from "msw";
-import { afterEach, expect, it } from "vitest";
+import { delay, HttpResponse, http } from "msw";
+import { afterEach, expect, it, vi } from "vitest";
 import { FiltersToggle } from "@/components/facets/facet-panel";
 import { server } from "@/mocks/node";
 import { renderApp } from "@/test/render";
@@ -267,4 +267,48 @@ it("names the toggle with its active count", () => {
     <FiltersToggle open filter="name = 'a' AND status = 'ok'" onOpenChange={() => undefined} />,
   );
   expect(screen.getByRole("button", { name: "Filters 2 active" })).toBeInTheDocument();
+});
+
+it("shows the last counts at once when coming back to the list", async () => {
+  answerField("status", STATUS);
+  const urls = recordFacets();
+  const { router } = await renderApp(TRACES);
+  await within(await section(/^Status/)).findByRole("checkbox", { name: "ok" });
+  const firstFrom = urls
+    .find((url) => url.searchParams.get("field") === "status")
+    ?.searchParams.get("from");
+
+  await router.navigate({
+    to: "/$org/$project/spans",
+    params: { org: "acme", project: "support-bot" },
+  });
+  await screen.findByRole("button", { name: /^Status/ });
+  // The list fixes "now" when it opens, so coming back asks for a later window that is not cached.
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(Date.now() + 20_000);
+  server.use(
+    http.get("/api/v1/projects/:project/facets", async () => {
+      await delay("infinite");
+      return HttpResponse.json({});
+    }),
+  );
+  try {
+    await router.navigate({
+      to: "/$org/$project/traces",
+      params: { org: "acme", project: "support-bot" },
+      search: { range: "15m" },
+    });
+    const status = await section(/^Status/);
+    expect(within(status).getByRole("checkbox", { name: "ok" })).toBeInTheDocument();
+    expect(status.querySelector('[data-slot="skeleton"]')).toBeNull();
+    await waitFor(() => {
+      const asked = urls.filter(
+        (url) =>
+          url.searchParams.get("field") === "status" && url.searchParams.get("view") === "traces",
+      );
+      expect(asked.at(-1)?.searchParams.get("from")).not.toBe(firstFrom);
+    });
+  } finally {
+    vi.useRealTimers();
+  }
 });

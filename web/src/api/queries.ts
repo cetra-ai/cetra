@@ -1,4 +1,10 @@
-import { keepPreviousData, queryOptions } from "@tanstack/react-query";
+import {
+  keepPreviousData,
+  type QueryClient,
+  queryOptions,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { chooseBucket } from "@/lib/chart-scale";
 import { $api, api } from "./client";
 import { projectRef } from "./project-ref";
@@ -356,22 +362,20 @@ export function metricsQuery(
  * One facet of a list (D1). The client caches each answer for 30 seconds; the server keeps none.
  * Every facet request goes through here, so readers of one URL share one query shape.
  */
-export function facetQuery(
-  org: string,
-  project: string,
-  query: {
-    view: Schema<"FacetView">;
-    field: string;
-    from: string;
-    to: string;
-    filter?: string;
-    search?: string;
-    includeEval?: boolean;
-    includeExperiments?: boolean;
-    q?: string;
-    limit?: number;
-  },
-) {
+export type FacetAsk = {
+  view: Schema<"FacetView">;
+  field: string;
+  from: string;
+  to: string;
+  filter?: string;
+  search?: string;
+  includeEval?: boolean;
+  includeExperiments?: boolean;
+  q?: string;
+  limit?: number;
+};
+
+export function facetQuery(org: string, project: string, query: FacetAsk) {
   return {
     ...$api.queryOptions("get", "/api/v1/projects/{project}/facets", {
       params: {
@@ -394,6 +398,62 @@ export function facetQuery(
     // Keeps the previous answer on screen while a filter, q or limit change refetches.
     placeholderData: keepPreviousData,
   };
+}
+
+/**
+ * A facet the panel shows. A list fixes "now" when it opens, so coming back to it asks for a
+ * slightly later window that is not cached yet. Until that answer arrives, this shows the
+ * latest cached answer to the same question over a window of the same length, instead of a
+ * loading state.
+ */
+export function useFacetQuery(org: string, project: string, query: FacetAsk) {
+  const client = useQueryClient();
+  const options = facetQuery(org, project, query);
+  return useQuery({
+    ...options,
+    placeholderData: (previous) => previous ?? latestFacetAnswer(client, options.queryKey),
+  });
+}
+
+type FacetKey = ReturnType<typeof facetQuery>["queryKey"];
+type FacetAnswer = Schema<"FacetsResponse">;
+
+function windowLength(from: string | undefined, to: string | undefined): number | undefined {
+  return from === undefined || to === undefined ? undefined : Date.parse(to) - Date.parse(from);
+}
+
+/** The newest cached answer whose key differs from `key` only by a window of the same length. */
+export function latestFacetAnswer(client: QueryClient, key: FacetKey): FacetAnswer | undefined {
+  const [method, path, init] = key;
+  const wanted = init?.params;
+  if (wanted === undefined) {
+    return undefined;
+  }
+  const { from, to, ...rest } = wanted.query;
+  const length = windowLength(from, to);
+  if (length === undefined) {
+    return undefined;
+  }
+  const same = JSON.stringify([wanted.path, rest]);
+  let best: { at: number; data: FacetAnswer } | undefined;
+  for (const cached of client.getQueryCache().findAll({ queryKey: [method, path] })) {
+    const data = cached.state.data as FacetAnswer | undefined;
+    const params = (cached.queryKey[2] as typeof init)?.params;
+    if (data === undefined || params === undefined) {
+      continue;
+    }
+    const { from: cachedFrom, to: cachedTo, ...cachedRest } = params.query;
+    if (
+      windowLength(cachedFrom, cachedTo) !== length ||
+      JSON.stringify([params.path, cachedRest]) !== same
+    ) {
+      continue;
+    }
+    if (best === undefined || cached.state.dataUpdatedAt > best.at) {
+      best = { at: cached.state.dataUpdatedAt, data };
+    }
+  }
+  return best?.data;
 }
 
 export function savedViewsQuery(org: string, project: string, kind: Schema<"SavedViewKind">) {
