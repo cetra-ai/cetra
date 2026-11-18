@@ -23,7 +23,6 @@ async function renderToolbar(extra: {
   const toolbar = extra.toolbar ?? (
     <TooltipProvider>
       <ListToolbar
-        title="Traces"
         range={{ kind: "preset", preset: "15m" }}
         onRange={() => undefined}
         onRefresh={() => undefined}
@@ -53,7 +52,7 @@ async function renderToolbar(extra: {
 
 it("renders no second row without a filter", async () => {
   await renderToolbar({ withToggle: true, withPresets: true });
-  expect(await screen.findByRole("heading", { name: "Traces" })).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: "Refresh" })).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Toggle node" })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Preset node" })).not.toBeInTheDocument();
 });
@@ -67,8 +66,8 @@ it("puts the toggle, the presets and the filter in row 2", async () => {
   expect(screen.getByRole("textbox", { name: "Filter node" }).closest("div")?.parentElement).toBe(
     row,
   );
-  // Row 1 keeps the title, not the filter.
-  expect(screen.getByRole("heading", { name: "Traces" }).parentElement).not.toBe(row);
+  // Row 1 keeps the refresh button, not the filter.
+  expect(screen.getByRole("button", { name: "Refresh" }).parentElement).not.toBe(row);
 });
 
 function Harness({ calls }: { calls: string[] }) {
@@ -77,7 +76,6 @@ function Harness({ calls }: { calls: string[] }) {
   return (
     <TooltipProvider>
       <ListToolbar
-        title="Traces"
         range={{ kind: "preset", preset: "15m" }}
         onRange={() => undefined}
         onRefresh={() => undefined}
@@ -128,7 +126,6 @@ it("names the Include trigger without a count when nothing is included", async (
     toolbar: (
       <TooltipProvider>
         <ListToolbar
-          title="Traces"
           range={{ kind: "preset", preset: "15m" }}
           onRange={() => undefined}
           onRefresh={() => undefined}

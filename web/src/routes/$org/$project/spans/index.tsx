@@ -253,7 +253,6 @@ function SpansPage() {
             <div className="flex h-full min-h-0 flex-col">
               <TooltipProvider>
                 <ListToolbar
-                  title="Spans"
                   range={range}
                   onRange={(next) => {
                     seenRange.current =

@@ -283,7 +283,6 @@ function UsersPage() {
             <div className="flex h-full min-h-0 flex-col">
               <TooltipProvider>
                 <ListToolbar
-                  title="Users"
                   idPrefix="users"
                   range={range}
                   onRange={(next) => {

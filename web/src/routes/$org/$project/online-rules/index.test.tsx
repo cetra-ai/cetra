@@ -64,6 +64,9 @@ function rowNames(table: HTMLElement): string[] {
 
 it("lists the rules with their evaluator, status, sample, spend and jobs", async () => {
   await renderApp(PAGE);
+  expect(
+    screen.getAllByRole("heading", { level: 1 }).map((heading) => heading.textContent),
+  ).toEqual(["Online rules"]);
 
   const table = await screen.findByRole("table", { name: "Online rules" });
   const answers = rowOf(table, "Relevance on answers");

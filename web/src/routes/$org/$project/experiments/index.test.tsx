@@ -79,6 +79,9 @@ function rowOf(name: string): HTMLElement {
 
 it("lists the experiments", async () => {
   await renderApp("/acme/support-bot/experiments");
+  expect(
+    screen.getAllByRole("heading", { level: 1 }).map((heading) => heading.textContent),
+  ).toEqual(["Experiments"]);
 
   const table = await screen.findByRole("table", { name: "Experiments" });
   for (const fixture of experimentsFixture.data) {
