@@ -18,4 +18,8 @@ pub(crate) enum DemoError {
     Http(#[from] reqwest::Error),
     #[error("the server answered {status}")]
     Rejected { status: u16 },
+    #[error("the judge endpoint could not bind or serve")]
+    Judge(#[source] std::io::Error),
+    #[error("--judge-addr is set, so --judge-key must be set too")]
+    JudgeKeyMissing,
 }

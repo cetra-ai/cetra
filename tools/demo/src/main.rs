@@ -3,16 +3,20 @@
 //! It builds traces from the captured OTLP fixtures and sends them to a cell's
 //! `POST /v1/traces`. When the demo project has no trace in the backfill window it
 //! first writes that window, at the daily curve's rate, oldest first. Then it sends
-//! the live traces every tick. Lines go through `tracing`; the key is never printed.
+//! the live traces every tick. With `--judge-addr` it also serves the judge endpoint
+//! the demo's LLM connection uses (`judge.rs`). Lines go through `tracing`; the keys
+//! are never printed.
 
 mod curve;
 mod error;
 mod generate;
+mod judge;
 mod otlp;
 mod sink;
 mod synth;
 mod templates;
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -57,6 +61,12 @@ struct Args {
     /// Seed of the random generator, so a run repeats (tests and debugging).
     #[arg(long)]
     seed: Option<u64>,
+    /// Address to serve the judge endpoint on, for example `0.0.0.0:8099`. Unset, no judge runs.
+    #[arg(long, env = "CETRA_DEMO_JUDGE_ADDR")]
+    judge_addr: Option<SocketAddr>,
+    /// Bearer key the judge endpoint requires; needed with `--judge-addr`, never printed.
+    #[arg(long, env = "CETRA_DEMO_JUDGE_KEY")]
+    judge_key: Option<String>,
 }
 
 #[tokio::main]
@@ -85,6 +95,19 @@ async fn run(args: Args) -> Result<(), DemoError> {
     let templates = templates::load(&args.fixtures)?;
     let mut generator = Generator::new(templates, args.rate, args.seed);
     let sink = Sink::new(&args.url, args.key)?;
+    if let Some(addr) = args.judge_addr {
+        let key = args
+            .judge_key
+            .filter(|key| !key.is_empty())
+            .ok_or(DemoError::JudgeKeyMissing)?;
+        let listener = judge::bind(addr).await?;
+        info!(%addr, "judge endpoint listening");
+        tokio::spawn(async move {
+            if let Err(error) = judge::serve(listener, key).await {
+                tracing::error!("{error}");
+            }
+        });
+    }
 
     let now = Utc::now();
     let backfill_from = now - chrono::Duration::days(i64::from(args.backfill_days));
