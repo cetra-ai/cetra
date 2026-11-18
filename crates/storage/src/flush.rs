@@ -128,8 +128,11 @@ impl FlushHandle {
     }
 
     /// Cancels the task. A task already taken by shutdown is left alone.
+    ///
+    /// The stop is not requested: it would wake the task into a last flush,
+    /// which a worker may run before the abort lands. A drop without shutdown
+    /// stands for a crash, after which no flush may commit.
     pub(crate) fn abort(&self) {
-        self.request_stop();
         if let Some(task) = self.take_task() {
             task.abort();
         }
