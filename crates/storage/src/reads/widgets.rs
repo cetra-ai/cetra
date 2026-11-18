@@ -189,7 +189,6 @@ const TRACES: SourceFields = SourceFields {
         traces::USER_ID,
         traces::TAGS,
         traces::MODELS,
-        traces::METADATA,
     ],
     maps: &[traces::METADATA],
 };
@@ -220,9 +219,6 @@ const SPANS: SourceFields = SourceFields {
         spans::OPERATION,
         spans::USER_ID,
         spans::TAGS,
-        spans::METADATA,
-        spans::ATTRIBUTES,
-        spans::RESOURCE_ATTRIBUTES,
     ],
     maps: &[
         spans::METADATA,
@@ -239,7 +235,6 @@ const SCORES: SourceFields = SourceFields {
         scores::DATA_TYPE,
         scores::TARGET,
         scores::VALUE_STR,
-        scores::METADATA,
     ],
     maps: &[scores::METADATA],
 };
@@ -1590,6 +1585,19 @@ mod tests {
         assert!(validate_shape(&scored).is_ok());
         scored.breakdown = breakdown("attributes['k']", 5);
         assert_eq!(one_path(&scored), "breakdown.field");
+        // A bare map column is not a field: only one of its keys is.
+        for (source, column) in [
+            (WidgetSource::Traces, "metadata"),
+            (WidgetSource::Spans, "attributes"),
+            (WidgetSource::Spans, "resource_attributes"),
+            (WidgetSource::Scores, "metadata"),
+        ] {
+            let mut bare = query(source, vec![measure(Agg::Count, None, None)]);
+            bare.breakdown = breakdown(column, 5);
+            assert_eq!(one_path(&bare), "breakdown.field", "{column}");
+            let distinct = map_query(source, column, Agg::CountDistinct);
+            assert_eq!(one_path(&distinct), "measures[0].field", "{column}");
+        }
     }
 
     fn context() -> QueryContext {
