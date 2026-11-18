@@ -1,6 +1,5 @@
-import { useQuery } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
-import { facetQuery } from "@/api/queries";
+import { useFacetQuery } from "@/api/queries";
 import type { FacetBodyProps } from "@/components/facets/facet-panel";
 import { useProject } from "@/components/shell/project-context";
 import { Button } from "@/components/ui/button";
@@ -80,18 +79,16 @@ function textOf(bound: number | undefined): string {
 /** A range facet of a number field (D5): histogram bars, percentiles and min/max inputs. */
 export function RangeFacet({ view, def, filter, onFilter, scope }: FacetBodyProps) {
   const { org, project } = useProject();
-  const query = useQuery(
-    facetQuery(org, project, {
-      view,
-      field: fieldText(def.field),
-      from: scope.from,
-      to: scope.to,
-      includeEval: scope.includeEval,
-      includeExperiments: scope.includeExperiments,
-      search: scope.search,
-      filter: withoutField(filter, def.field) || undefined,
-    }),
-  );
+  const query = useFacetQuery(org, project, {
+    view,
+    field: fieldText(def.field),
+    from: scope.from,
+    to: scope.to,
+    includeEval: scope.includeEval,
+    includeExperiments: scope.includeExperiments,
+    search: scope.search,
+    filter: withoutField(filter, def.field) || undefined,
+  });
   const { lo, hi, mixed } = readRange(filter, def.field);
   const format = formatterOf(def.unit);
   const histogram: Histogram | undefined = query.data?.histogram;

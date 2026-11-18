@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { facetQuery } from "@/api/queries";
+import { useFacetQuery } from "@/api/queries";
 import { liveScoreDefinitionsQuery } from "@/api/queries-evaluation";
 import type { FacetScope } from "@/components/facets/facet-panel";
 import { useProject } from "@/components/shell/project-context";
@@ -96,17 +96,15 @@ function BoundPreset({
   scope: FacetScope;
 }) {
   const { org, project } = useProject();
-  const query = useQuery(
-    facetQuery(org, project, {
-      view,
-      field: p95Field,
-      from: scope.from,
-      to: scope.to,
-      includeEval: scope.includeEval,
-      includeExperiments: scope.includeExperiments,
-      limit: 1,
-    }),
-  );
+  const query = useFacetQuery(org, project, {
+    view,
+    field: p95Field,
+    from: scope.from,
+    to: scope.to,
+    includeEval: scope.includeEval,
+    includeExperiments: scope.includeExperiments,
+    limit: 1,
+  });
   const p95 = query.data?.histogram?.p95;
   const bound = p95 === undefined ? undefined : roundP95(p95);
   const pressed = presetActive(filter, preset);

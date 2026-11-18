@@ -1,7 +1,6 @@
-import { useQuery } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { useEffect, useState } from "react";
-import { facetQuery } from "@/api/queries";
+import { useFacetQuery } from "@/api/queries";
 import type { FacetBodyProps } from "@/components/facets/facet-panel";
 import { ValuesFacet } from "@/components/facets/values-facet";
 import { useProject } from "@/components/shell/project-context";
@@ -39,20 +38,18 @@ export function KeysFacet({ view, def, filter, onFilter, scope }: FacetBodyProps
     return () => window.clearTimeout(timer);
   }, [draft]);
 
-  const query = useQuery(
-    facetQuery(org, project, {
-      view,
-      field: fieldText(def.field),
-      from: scope.from,
-      to: scope.to,
-      includeEval: scope.includeEval,
-      includeExperiments: scope.includeExperiments,
-      search: scope.search,
-      filter: withoutField(filter, def.field) || undefined,
-      q: q || undefined,
-      limit: KEYS_LIMIT,
-    }),
-  );
+  const query = useFacetQuery(org, project, {
+    view,
+    field: fieldText(def.field),
+    from: scope.from,
+    to: scope.to,
+    includeEval: scope.includeEval,
+    includeExperiments: scope.includeExperiments,
+    search: scope.search,
+    filter: withoutField(filter, def.field) || undefined,
+    q: q || undefined,
+    limit: KEYS_LIMIT,
+  });
 
   function toggle(key: string) {
     setOpen((current) =>
