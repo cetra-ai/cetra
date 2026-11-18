@@ -4,7 +4,9 @@
 //! member and above through a session or a read-write personal access token. An API key cannot
 //! write (the access layer answers 403).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use axum::extract::{DefaultBodyLimit, Extension, State};
 use axum::http::{Method, StatusCode};
@@ -13,6 +15,7 @@ use axum::routing::{delete, get, patch, post};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
+use tokio::sync::OnceCell;
 use uuid::Uuid;
 
 use cetra_core::ids::ProjectId;
@@ -26,19 +29,25 @@ use crate::api::dashboards::{
     UpdateDashboard, Widget, WidgetKind, WidgetQueryBody, WidgetQueryRequest, WidgetQueryResponse,
     WidgetShape,
 };
+use crate::api::metrics::{MetricsBucket, MetricsGroupBy};
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::ProjectPerm;
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError, field_error};
 use crate::meta::dashboards::{self as store, DashboardChanges, NewDashboard, UpdateOutcome};
-use crate::routes::metrics::{ProjectKey, SharedError, bucket, storage_group_by};
 use crate::routes::read::{READ_TIMEOUT, open_query, page_limit};
 
 /// A 256 KiB definition plus the rest of the body fits (spec 04).
 const DASHBOARD_BODY_LIMIT: usize = 300 * 1024;
 /// A widget query is a few filters and six measures; the cache keys on the body.
 const WIDGET_QUERY_BODY_LIMIT: usize = 64 * 1024;
+/// The in-flight marker of a slot's expiry: a computation that has not finished never expires.
+const IN_FLIGHT: i64 = i64::MAX;
+/// How long a widget answer is kept, in nanoseconds (spec 05 § Dashboard queries).
+const TTL_NS: i64 = 10_000_000_000;
+/// Most cached widget answers. A full cache drops the expired ones, then the oldest.
+const MAX_ENTRIES: usize = 256;
 /// Longest serialized `definition`, in bytes (spec 04).
 const MAX_DEFINITION_BYTES: usize = 256 * 1024;
 /// Most widgets in one dashboard (spec 04).
@@ -164,9 +173,129 @@ impl WidgetKey {
     }
 }
 
-impl ProjectKey for WidgetKey {
-    fn project(&self) -> ProjectId {
-        self.project
+/// The widget answers, each kept [`TTL_NS`] (spec 05 § Dashboard queries). Concurrent misses of
+/// one key share one computation.
+#[derive(Default)]
+pub(crate) struct WidgetCache {
+    entries: Mutex<HashMap<WidgetKey, Slot>>,
+}
+
+/// One key's answer. The cell is filled once, so concurrent misses of the same key share one
+/// computation (single-flight), and a failure is shared by everyone waiting on it. A failed
+/// slot is removed as it settles, so the next request runs the query again.
+struct Slot {
+    /// `IN_FLIGHT` until the computation finishes, then `TTL_NS` after that finish.
+    expires_at: i64,
+    answer: Arc<OnceCell<Cached>>,
+}
+
+/// A computation's outcome. An error is shared, so it is an `Arc`: waiters each answer with it.
+type Cached = Result<Arc<WidgetQueryResponse>, Arc<ApiError>>;
+
+/// The error of a cached request. It answers with the same problem response as the error it
+/// wraps, whichever request it is sent to.
+pub(crate) struct SharedError(Arc<ApiError>);
+
+impl IntoResponse for SharedError {
+    fn into_response(self) -> Response {
+        self.0.to_response()
+    }
+}
+
+impl From<ApiError> for SharedError {
+    fn from(error: ApiError) -> Self {
+        Self(Arc::new(error))
+    }
+}
+
+impl WidgetCache {
+    /// The answer for `key`: the cached one, or `compute`'s, which runs once even when
+    /// identical requests miss together. `now` is read when the request starts and again when
+    /// the computation finishes, which stamps the answer's expiry.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of `compute`, shared with every request that waited on it. Nothing
+    /// stays cached for it.
+    async fn get_or_compute<F, Fut>(
+        &self,
+        key: WidgetKey,
+        now: impl Fn() -> i64,
+        compute: F,
+    ) -> Result<Arc<WidgetQueryResponse>, Arc<ApiError>>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<WidgetQueryResponse, ApiError>>,
+    {
+        let answer = self.slot(key.clone(), now());
+        let cached = answer
+            .get_or_init(|| async { compute().await.map(Arc::new).map_err(Arc::new) })
+            .await
+            .clone();
+        self.settle(&key, &answer, cached.is_err(), now());
+        cached
+    }
+
+    /// The cell of `key` while it is fresh at `now`. Otherwise a new empty one replaces it.
+    fn slot(&self, key: WidgetKey, now: i64) -> Arc<OnceCell<Cached>> {
+        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(slot) = entries.get(&key).filter(|slot| now < slot.expires_at) {
+            return Arc::clone(&slot.answer);
+        }
+        if !entries.contains_key(&key) && entries.len() >= MAX_ENTRIES {
+            evict(&mut entries, now);
+        }
+        let answer = Arc::new(OnceCell::new());
+        entries.insert(
+            key,
+            Slot {
+                expires_at: IN_FLIGHT,
+                answer: Arc::clone(&answer),
+            },
+        );
+        answer
+    }
+
+    /// Stamps the expiry of `answer` at `now`, the time its computation finished, or removes its
+    /// slot when the computation failed. Only the slot that holds `answer` is touched.
+    fn settle(&self, key: &WidgetKey, answer: &Arc<OnceCell<Cached>>, failed: bool, now: i64) {
+        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(slot) = entries.get_mut(key) else {
+            return;
+        };
+        if !Arc::ptr_eq(&slot.answer, answer) {
+            return;
+        }
+        if !failed {
+            if slot.expires_at == IN_FLIGHT {
+                slot.expires_at = now.saturating_add(TTL_NS);
+            }
+            return;
+        }
+        entries.remove(key);
+    }
+
+    /// Drops every cached answer of `project` (D-M-11).
+    pub(crate) fn clear_project(&self, project: ProjectId) {
+        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        entries.retain(|key, _| key.project != project);
+    }
+}
+
+/// Makes room for one entry in a full cache: the expired entries go first, then the oldest.
+fn evict(entries: &mut HashMap<WidgetKey, Slot>, now: i64) {
+    entries.retain(|_, slot| now < slot.expires_at);
+    if entries.len() < MAX_ENTRIES {
+        return;
+    }
+    let excess = entries.len() + 1 - MAX_ENTRIES;
+    let mut by_age: Vec<(i64, WidgetKey)> = entries
+        .iter()
+        .map(|(key, slot)| (slot.expires_at, key.clone()))
+        .collect();
+    by_age.sort_unstable_by_key(|(expires_at, _)| *expires_at);
+    for (_, key) in by_age.into_iter().take(excess) {
+        entries.remove(&key);
     }
 }
 
@@ -726,6 +855,33 @@ fn query_range(body: &WidgetQueryRequest) -> Result<(i64, i64), ApiError> {
     Ok((from, to))
 }
 
+/// The storage bucket of a request's bucket width.
+fn bucket(bucket: MetricsBucket) -> storage::Bucket {
+    use storage::BucketWidth;
+    let width = match bucket {
+        MetricsBucket::Auto => return storage::Bucket::Auto,
+        MetricsBucket::M1 => BucketWidth::M1,
+        MetricsBucket::M5 => BucketWidth::M5,
+        MetricsBucket::M10 => BucketWidth::M10,
+        MetricsBucket::M15 => BucketWidth::M15,
+        MetricsBucket::M30 => BucketWidth::M30,
+        MetricsBucket::H1 => BucketWidth::H1,
+        MetricsBucket::H6 => BucketWidth::H6,
+        MetricsBucket::H12 => BucketWidth::H12,
+        MetricsBucket::D1 => BucketWidth::D1,
+    };
+    storage::Bucket::Fixed(width)
+}
+
+/// The storage split of a request's `group_by`.
+fn storage_group_by(group_by: MetricsGroupBy) -> storage::GroupBy {
+    match group_by {
+        MetricsGroupBy::Model => storage::GroupBy::Model,
+        MetricsGroupBy::Environment => storage::GroupBy::Environment,
+        MetricsGroupBy::Release => storage::GroupBy::Release,
+    }
+}
+
 fn storage_shape(shape: WidgetShape) -> storage::Shape {
     match shape {
         WidgetShape::Series => storage::Shape::Series,
@@ -763,7 +919,7 @@ fn expression_field(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
     use std::time::Duration;
 
     use base64::Engine;
@@ -1962,7 +2118,7 @@ mod tests {
         let read = app
             .request(
                 Method::GET,
-                &format!("/api/v1/projects/{}/metrics?from={FROM}&to={TO}", other.id),
+                &format!("/api/v1/projects/{}/dashboards", other.id),
             )
             .header("authorization", &format!("Bearer {}", seeded.read_key))
             .send()
@@ -2150,5 +2306,215 @@ mod tests {
             !computed(&app, key_of(&app, &seeded, &base)).await,
             "the base body is still cached"
         );
+    }
+
+    /// A key of `project` that differs only in its start, `from`.
+    fn key_at(project: ProjectId, from: i64) -> WidgetKey {
+        WidgetKey {
+            project,
+            data_access_days: None,
+            from,
+            to: from + 1,
+            body: String::new(),
+        }
+    }
+
+    fn empty_response() -> WidgetQueryResponse {
+        WidgetQueryResponse::Total(WidgetTotalResponse { rows: Vec::new() })
+    }
+
+    fn cached_keys(cache: &WidgetCache) -> Vec<WidgetKey> {
+        let entries = cache.entries.lock().unwrap();
+        let mut keys: Vec<WidgetKey> = entries.keys().cloned().collect();
+        keys.sort_by_key(|key| (key.project, key.from));
+        keys
+    }
+
+    #[tokio::test]
+    async fn clear_project_drops_only_that_project() {
+        let cache = WidgetCache::default();
+        let (p, q) = (ProjectId::new_v7(), ProjectId::new_v7());
+        for key in [key_at(p, 0), key_at(q, 0)] {
+            cache
+                .get_or_compute(key, || 0, || async { Ok(empty_response()) })
+                .await
+                .unwrap();
+        }
+
+        cache.clear_project(p);
+        assert_eq!(cached_keys(&cache), vec![key_at(q, 0)]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_identical_misses_run_the_query_once() {
+        let cache = Arc::new(WidgetCache::default());
+        let runs = Arc::new(AtomicUsize::new(0));
+        let key = key_at(ProjectId::new_v7(), 0);
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let (cache, runs, key) = (Arc::clone(&cache), Arc::clone(&runs), key.clone());
+            tasks.push(tokio::spawn(async move {
+                cache
+                    .get_or_compute(
+                        key,
+                        || 0,
+                        || async {
+                            runs.fetch_add(1, Ordering::SeqCst);
+                            // Long enough that the other requests arrive while this one runs.
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            Ok(empty_response())
+                        },
+                    )
+                    .await
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap().unwrap();
+        }
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_waiters_share_one_failure_and_a_later_request_retries() {
+        let cache = Arc::new(WidgetCache::default());
+        let runs = Arc::new(AtomicUsize::new(0));
+        let key = key_at(ProjectId::new_v7(), 0);
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let (cache, runs, key) = (Arc::clone(&cache), Arc::clone(&runs), key.clone());
+            tasks.push(tokio::spawn(async move {
+                cache
+                    .get_or_compute(
+                        key,
+                        || 0,
+                        || async {
+                            runs.fetch_add(1, Ordering::SeqCst);
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            Err(ApiError::Query(storage::RunError::Timeout))
+                        },
+                    )
+                    .await
+            }));
+        }
+        for task in tasks {
+            let error = task.await.unwrap().expect_err("the query failed");
+            assert!(
+                matches!(error.as_ref(), ApiError::Query(storage::RunError::Timeout)),
+                "{error:?}"
+            );
+        }
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "the waiters share one run");
+
+        // The failed slot was removed: the next request runs the query again and is cached.
+        let answered = cache
+            .get_or_compute(
+                key.clone(),
+                || 0,
+                || async {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                    Ok(empty_response())
+                },
+            )
+            .await;
+        assert!(answered.is_ok());
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+        assert_eq!(cached_keys(&cache), vec![key]);
+    }
+
+    #[tokio::test]
+    async fn expiry_is_stamped_when_the_computation_finishes() {
+        const SECOND: i64 = 1_000_000_000;
+        let cache = WidgetCache::default();
+        let key = key_at(ProjectId::new_v7(), 0);
+        let clock = Arc::new(AtomicI64::new(0));
+        let now = {
+            let clock = Arc::clone(&clock);
+            move || clock.load(Ordering::SeqCst)
+        };
+        let runs = AtomicUsize::new(0);
+        // The query runs from 0 to 20 s, so its answer lives until 30 s, not until TTL_NS.
+        cache
+            .get_or_compute(key.clone(), &now, || async {
+                runs.fetch_add(1, Ordering::SeqCst);
+                clock.store(20 * SECOND, Ordering::SeqCst);
+                Ok(empty_response())
+            })
+            .await
+            .unwrap();
+        clock.store(25 * SECOND, Ordering::SeqCst);
+        cache
+            .get_or_compute(key.clone(), &now, || async {
+                runs.fetch_add(1, Ordering::SeqCst);
+                Ok(empty_response())
+            })
+            .await
+            .unwrap();
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "still fresh at 25 s");
+        clock.store(31 * SECOND, Ordering::SeqCst);
+        cache
+            .get_or_compute(key, &now, || async {
+                runs.fetch_add(1, Ordering::SeqCst);
+                Ok(empty_response())
+            })
+            .await
+            .unwrap();
+        assert_eq!(runs.load(Ordering::SeqCst), 2, "expired at 31 s");
+    }
+
+    #[tokio::test]
+    async fn a_full_cache_evicts_the_oldest_answers() {
+        let cache = WidgetCache::default();
+        let project = ProjectId::new_v7();
+        for from in 0..MAX_ENTRIES as i64 {
+            cache
+                .get_or_compute(
+                    key_at(project, from),
+                    || from,
+                    || async { Ok(empty_response()) },
+                )
+                .await
+                .unwrap();
+        }
+        let newest = key_at(project, MAX_ENTRIES as i64);
+        cache
+            .get_or_compute(
+                newest.clone(),
+                || MAX_ENTRIES as i64,
+                || async { Ok(empty_response()) },
+            )
+            .await
+            .unwrap();
+
+        let keys = cached_keys(&cache);
+        assert_eq!(keys.len(), MAX_ENTRIES);
+        assert!(!keys.contains(&key_at(project, 0)), "the oldest stayed");
+        assert!(keys.contains(&key_at(project, 1)), "a newer answer went");
+        assert!(keys.contains(&newest));
+    }
+
+    #[tokio::test]
+    async fn a_full_cache_drops_expired_answers_before_live_ones() {
+        let cache = WidgetCache::default();
+        let project = ProjectId::new_v7();
+        for from in 0..MAX_ENTRIES as i64 {
+            cache
+                .get_or_compute(
+                    key_at(project, from),
+                    || 0,
+                    || async { Ok(empty_response()) },
+                )
+                .await
+                .unwrap();
+        }
+        // Every answer above expires at TTL_NS, so none of them is live now.
+        cache
+            .get_or_compute(
+                key_at(project, -1),
+                || TTL_NS,
+                || async { Ok(empty_response()) },
+            )
+            .await
+            .unwrap();
+        assert_eq!(cached_keys(&cache), vec![key_at(project, -1)]);
     }
 }

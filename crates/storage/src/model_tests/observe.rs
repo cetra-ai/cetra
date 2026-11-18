@@ -16,15 +16,15 @@ use super::model::{ExpectedScore, ExpectedTrace};
 use super::ops::{SESSIONS, TRACES};
 use super::shape::{P, hex, span_id, trace_id};
 use crate::error::QueryError;
-use crate::reads::metrics::metrics;
 use crate::reads::{
-    AlertMeasure, AlertValue, AlertValueRequest, Bucket, BucketWidth, FilterDeletionRequest, Kpi,
-    ListScope, MAX_FILTER_DELETION_TRACES, MAX_PAGE, MetricsRequest, ScoreListRequest,
-    ScoreTargets, SessionListRequest, SessionSort, SortOrder, SpanListRequest, SpanSort,
-    TraceListRequest, TraceSort, UserDeletionScope, UserListRequest, UserSort, alert_value,
-    eval_trace_ids, filter_trace_ids, latest_scores, score_list, scores_by_id, session_list,
-    span_detail, span_list, trace_detail, trace_list, user_deletion_scope, user_list,
+    AlertMeasure, AlertValue, AlertValueRequest, FilterDeletionRequest, ListScope,
+    MAX_FILTER_DELETION_TRACES, MAX_PAGE, ScoreListRequest, ScoreTargets, SessionListRequest,
+    SessionSort, SortOrder, SpanListRequest, SpanSort, TraceListRequest, TraceSort,
+    UserDeletionScope, UserListRequest, UserSort, alert_value, eval_trace_ids, filter_trace_ids,
+    latest_scores, score_list, scores_by_id, session_list, span_detail, span_list, trace_detail,
+    trace_list, user_deletion_scope, user_list,
 };
+use crate::test_support::headline_kpis;
 use crate::views::{QueryContext, TimeWindow};
 use crate::{RunError, Storage};
 use cetra_core::ids::TraceId;
@@ -434,28 +434,51 @@ pub(super) async fn observe_users(
     Ok(rows)
 }
 
-/// The KPIs of the dashboard metrics over `window`, as the dashboard requests them: one day per
-/// bucket, no filter, no grouping, evaluation traces excluded, experiments kept.
+/// One headline KPI of the model test: its value over the window and over the previous window
+/// of the same length. The dashboard's totals give them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct Kpi {
+    pub(super) name: KpiName,
+    pub(super) value: Option<f64>,
+    pub(super) previous: Option<f64>,
+}
+
+/// The headline KPIs the model test compares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum KpiName {
+    Traces,
+    ErrorRate,
+    LatencyP95,
+    CostTotal,
+    TotalTokens,
+}
+
+/// The KPIs of `window`, as the dashboard's totals give them (see `headline_kpis`).
 pub(super) async fn observe_kpis(
     storage: &Storage,
     project: P,
     window: (i64, i64),
 ) -> Result<Vec<Kpi>, ReadFailure> {
+    const NAMES: [KpiName; 5] = [
+        KpiName::Traces,
+        KpiName::ErrorRate,
+        KpiName::LatencyP95,
+        KpiName::CostTotal,
+        KpiName::TotalTokens,
+    ];
     let ctx = context(storage, project).await?;
-    let response = metrics(
-        &ctx,
-        MetricsRequest {
-            window: window_of(window),
-            bucket: Bucket::Fixed(BucketWidth::D1),
-            filter: None,
-            group_by: None,
-            include_eval: false,
-            include_experiments: true,
-            timeout: TIMEOUT,
-        },
-    )
-    .await?;
-    Ok(response.kpis)
+    let values = headline_kpis(&ctx, window_of(window))
+        .await
+        .map_err(ReadFailure::Error)?;
+    Ok(NAMES
+        .into_iter()
+        .zip(values)
+        .map(|(name, (value, previous))| Kpi {
+            name,
+            value,
+            previous,
+        })
+        .collect())
 }
 
 /// The hex trace ids `filter_trace_ids` returns for `window`, evaluation traces excluded.

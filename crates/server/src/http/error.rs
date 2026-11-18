@@ -298,7 +298,7 @@ impl IntoResponse for ApiError {
 
 impl ApiError {
     /// The problem response for this error, logged as [`Self::log`] does. Takes a reference, so
-    /// one error can answer every request that shared it (the metrics cache, D-M-11).
+    /// one error can answer every request that shared it (the widget cache, D-M-11).
     pub(crate) fn to_response(&self) -> Response {
         self.log();
         let mut headers = HeaderMap::new();

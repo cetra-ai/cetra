@@ -3,7 +3,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { Users } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { problemOf } from "@/api/problem";
-import { metricsQuery, topUsersQuery, userListOptions } from "@/api/queries";
+import { topUsersQuery, userListOptions } from "@/api/queries";
 import type { Schema } from "@/api/types";
 import { useShortcut } from "@/components/command/use-shortcut";
 import { ColumnChooser } from "@/components/data-table/column-chooser";
@@ -36,7 +36,7 @@ import { SplitPane } from "@/components/trace/split-pane";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { TopUsers } from "@/components/user/top-users";
 import { UserPanel } from "@/components/user/user-panel";
-import { UsersSummary } from "@/components/user/users-summary";
+import { UsersSummary, usersKpiQuery, usersKpis } from "@/components/user/users-summary";
 import { orderedUserColumns, userColumnSpecs, userScoreNames } from "@/components/user-columns";
 import { appendFilter } from "@/lib/dsl/dsl";
 import { formatCost } from "@/lib/format";
@@ -150,8 +150,8 @@ function UsersPage() {
   });
   const problem = list.isError ? problemOf(list.error) : undefined;
   const filterError = problem?.code === "invalid_filter" ? problem : undefined;
-  const metrics = useQuery({
-    ...metricsQuery(org, project, {
+  const headline = useQuery({
+    ...usersKpiQuery(org, project, {
       from: resolved.from,
       to: resolved.to,
       filter: search.filter,
@@ -391,7 +391,7 @@ function UsersPage() {
                     ) : !hold && list.data ? (
                       <>
                         <UsersSummary
-                          kpis={metrics.data?.kpis}
+                          kpis={usersKpis(headline.data)}
                           users={rows.length}
                           more={list.hasNextPage}
                         />

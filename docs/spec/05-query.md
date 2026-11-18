@@ -13,7 +13,7 @@ Everything compiles to DataFusion plans over the project-scoped providers of 03 
 | `experiment_items` | one per experiment result (item × repetition) of the project's visible experiments, with the input snapshot | SQLite rows exposed via a `MemTable` built per query, only when the statement names the view, at most 1M rows and 256 MiB of text (else `query_failed`). The server owns the schema, the rows and the column catalog, and registers the table through `QueryContext::register_sqlite_view` (D93). D101's window applies to `created_at`; experiments older than the data window are left out (D-J-14, D-J-15) |
 | `dataset_items` | the live items of every dataset of the project at its latest version | same approach; no time window (D-J-15) |
 
-Cost totals of `sessions`, of the user list, and of the dashboard and alert queries (§ Dashboard metrics; spec 07) are summed as `Decimal128(38, 18)`, so they do not depend on the partitioning (D-A2-4).
+Cost totals of `sessions`, of the user list, and of the dashboard and alert queries (§ Dashboard queries; spec 07) are summed as `Decimal128(38, 18)`, so they do not depend on the partitioning (D-A2-4).
 
 Each view exposes the stored columns of its table in spec 01 order, without `project_id`. `traces` also drops `last_ingest_time` and `partial_count`. Binary IDs (`trace_id`, `span_id`, `parent_span_id`, `root_span_id`) are lowercase hex `Utf8`. `duration_ms` follows `duration_ns`: on `spans`, `duration_ns` is stored; on `traces` and `sessions`, `duration_ns = end_time − start_time` in nanoseconds, placed after `end_time`, and `duration_ms = duration_ns / 1e6`. `events` and `links` keep their native list-of-struct types. They are listed as `json` in the schema endpoint because clients receive them as JSON.
 
@@ -168,40 +168,6 @@ A map key is 1–256 characters, written as in the DSL. Any other field, or a `f
 Counts are integers; `rate` is 0 to 1; durations are nanoseconds; costs are summed as `Decimal128(38, 18)` and returned as numbers (D-A2-4). A non-finite or out-of-range trace cost fails the query with `query_failed`; it is not skipped.
 
 **Cost and caching.** One widget query is one scan of the window, plus one for the top groups of a breakdown and one for its other group, plus the trace semi-join for spans and scores. A query has the list reads' timeout (`422 query_timeout`). Answers are cached for 10 s per `(project, body)`, counted from the moment the query finishes. Concurrent requests for the same key share one query, and a failed query's error goes to every request waiting on it; nothing is cached for it.
-
-## Dashboard metrics (fixed dashboard)
-
-Replaced by § Dashboard queries (D-C-16). This endpoint stays until the pages that read it move to the widget query (custom-dashboards plan, CD6), and is then removed.
-
-`GET /api/v1/projects/{p}/metrics?from&to&bucket=auto&filter=<dsl>&group_by=model|environment|release`
-
-`bucket=auto` picks the smallest width in `1m, 5m, 10m, 15m, 30m, 1h, 6h, 12h, 1d` giving at most 120 buckets over `[from, to)`, else `1d`; past 2,000 daily buckets (aligned to midnight UTC, so a 2,000-day window that does not start at midnight already has 2,001) it is a 400, as for an explicit bucket (D-A2-3). Buckets are aligned to their width from the Unix epoch, UTC: a 10-minute bucket starts at :00, :10, …; a 1-day bucket at midnight UTC. The first bucket starts at `from` rounded down to the width, so it may cover part of its range only; the last one is the bucket containing `to − 1 ns`. An explicit bucket giving more than 2,000 buckets is a 400. Points cover every bucket. A bucket with no rows has no value (count series included). Rows are bucketed with `date_bin` over the series' time column.
-
-Returns time series:
-
-| Series | Query (sketch) |
-|---|---|
-| traces | `count(*)` on `traces` |
-| errors | `sum(error_count > 0)` on `traces` |
-| error rate | errors / traces |
-| latency p50/p95/p99 (traces) | `approx_percentile_cont(duration_ns, q)` on `traces` |
-| LLM latency p50/p95 by model | on `spans WHERE span_kind='llm'` |
-| tokens (input/output/cache) | sums on `spans WHERE span_kind IN ('llm','embedding')` |
-| cost | `sum(cost_total)` on `traces` (total) and on spans grouped by model, as `Decimal128(38, 18)` |
-| top models by cost | `llm` spans with a non-null model, at most 10, by their `Decimal128(38, 18)` cost sum descending (nulls last), then model ascending |
-| scores | `avg(value_num)` per score name per bucket on `scores` |
-| evaluation cost | `sum(cost_total)` on `traces WHERE environment = 'cetra-eval'`, as `Decimal128(38, 18)` |
-| TTFT p50/p95 | spans `ttft_ns` |
-
-Every cost series and KPI above (total, by model, top models, evaluation) and the alert cost value (`cost`, spec 07) are summed as `Decimal128(38, 18)` (D-A2-4). A non-finite or out-of-range trace cost fails the query with `query_failed`; it is not skipped.
-
-The filter is a `traces`-view DSL expression. Span series keep spans whose trace passes it, and score series keep scores whose trace passes it, through a semi-join on `trace_id` over traces with `start_time ∈ [from − 1 day, to)` and `end_time ≥ from`. Session-target scores are not in the score series.
-
-`group_by` splits the series that are not already split (traces, errors, error rate, trace latency, total cost, tokens, TTFT) by the group value; the response's `group` field carries it. With `group_by=model`, a trace-based series counts each trace once under every model in its `models` list. With `group_by`, rows whose group value is null are left out of the split series. Series that are inherently split carry their own key in `group`: the model for LLM latency and cost by model, the score name for score averages.
-
-KPIs cover `[from, to)` and the previous range of the same length; every KPI value is absent when its range has no traces.
-
-All series honor the filter DSL and the default exclusions (applied as above). Results are cached for 10 s per `(project, params)`, counted from the moment the query finishes. Concurrent requests for the same key share one query, and a failed query's error goes to every request waiting on it; nothing is cached for it.
 
 ## Facets
 

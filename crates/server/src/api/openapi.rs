@@ -98,7 +98,7 @@ use super::keys::{
     CreatedPersonalToken, PersonalToken,
 };
 use super::members::{OrgMember, ProjectMember, SetProjectOverrideRequest, UpdateOrgMemberRequest};
-use super::metrics::{MetricsBucket, MetricsGroupBy, MetricsParams, MetricsResponse};
+use super::metrics::{MetricsBucket, MetricsGroupBy};
 use super::model_prices::{
     ModelPrice, ModelPriceInput, ModelPriceListParams, ModelPriceResolution,
     ModelPriceResolveParams, ModelPriceScope, ModelPriceTier,
@@ -309,7 +309,6 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<WidgetPoint>();
     set.insert::<WidgetTotalResponse>();
     set.insert::<TotalRow>();
-    set.insert::<MetricsResponse>();
     set.insert::<FacetsResponse>();
     set.insert::<SqlQueryRequest>();
     set.insert::<SqlQueryResult>();
@@ -560,7 +559,6 @@ pub fn openapi() -> OpenApi {
                 "Custom dashboards and their widget definitions.",
             ),
             tag("sql", "SQL console over the project's views."),
-            tag("metrics", "Dashboard metrics."),
             tag("media", "Extracted media blobs."),
             tag("deletions", "GDPR deletions and their status."),
             tag(
@@ -2496,17 +2494,6 @@ fn score_paths(paths: PathsBuilder) -> PathsBuilder {
             READ_ERRORS,
         ))
         .build();
-    let metrics = operation("get_metrics", "metrics", "Get metrics")
-        .description(Some(format!(
-            "{EXCLUSIONS} Series have one point per bucket. Latencies and TTFT are nanoseconds. Costs are USD. Results are cached for 10 seconds. The evaluation cost series always counts evaluation traces (spec 05 § Dashboard metrics)."
-        )))
-        .parameters(Some(with_query::<MetricsParams>(vec![project_param()])))
-        .responses(responses(
-            "200",
-            json_of::<MetricsResponse>("Dashboard metrics."),
-            READ_ERRORS,
-        ))
-        .build();
     paths
         .path(
             format!("{PROJECT}/scores"),
@@ -2531,10 +2518,6 @@ fn score_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/schema"),
             PathItem::new(HttpMethod::Get, schema),
-        )
-        .path(
-            format!("{PROJECT}/metrics"),
-            PathItem::new(HttpMethod::Get, metrics),
         )
         .path(
             format!("{PROJECT}/facets"),

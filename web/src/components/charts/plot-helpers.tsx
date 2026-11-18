@@ -3,7 +3,7 @@ import { timeTicks } from "@/lib/chart-scale";
 import type { ChartRow } from "@/lib/metrics";
 import type { TimeZoneSetting } from "@/lib/settings";
 
-export const DAY_MS = 24 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
 // Faded bars and buckets are drawn at this opacity: their value is noisy.
 const THIN_OPACITY = 0.35;
 

@@ -1,15 +1,6 @@
 import { cn } from "cn";
 import { ArrowDown, ArrowUp, Minus } from "lucide-react";
-import type { Schema } from "@/api/types";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import {
-  formatKpi,
-  type KpiDelta,
-  type KpiDirection,
-  type KpiMetric,
-  kpiDelta,
-} from "@/lib/metrics";
+import type { KpiDelta, KpiDirection } from "@/lib/metrics";
 
 /**
  * What a rise in a metric means. `up-good`: a rise is good news. `up-bad`: a
@@ -17,76 +8,9 @@ import {
  */
 export type KpiTone = "up-good" | "up-bad" | "neutral";
 
-export const KPI_TONE: Record<KpiMetric, KpiTone> = {
-  traces: "neutral",
-  error_rate: "up-bad",
-  latency_p95: "up-bad",
-  cost_total: "up-bad",
-  total_tokens: "neutral",
-};
-
 /** A change of at least this many percent shows as a ratio (`×6`) instead. */
 const RATIO_FROM_PCT = 500;
 const SPARK_HEIGHT = 20;
-const TILES: { metric: KpiMetric; label: string }[] = [
-  { metric: "traces", label: "Traces" },
-  { metric: "error_rate", label: "Error rate" },
-  { metric: "latency_p95", label: "p95 latency" },
-  { metric: "cost_total", label: "Cost" },
-  { metric: "total_tokens", label: "Tokens" },
-];
-
-export function KpiRow({ kpis }: { kpis: readonly Schema<"Kpi">[] }) {
-  return (
-    <div className="grid grid-cols-2 gap-2 md:grid-cols-5">
-      {TILES.map((tile) => (
-        <KpiTile
-          key={tile.metric}
-          tile={tile}
-          kpi={kpis.find((item) => item.metric === tile.metric)}
-        />
-      ))}
-    </div>
-  );
-}
-
-/** The KPI row while its data loads: each tile's label, with a bar where the value goes. */
-export function KpiRowSkeleton() {
-  return (
-    <div className="grid grid-cols-2 gap-2 md:grid-cols-5">
-      {TILES.map((tile) => (
-        <div key={tile.metric} className="flex h-16 flex-col justify-center rounded-md border px-3">
-          <span className="text-muted-foreground text-caption">{tile.label}</span>
-          <Skeleton className="mt-1 h-4 w-16" />
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function KpiTile({ tile, kpi }: { tile: (typeof TILES)[number]; kpi?: Schema<"Kpi"> }) {
-  const delta = kpiDelta(kpi ?? {});
-  const value = delta.value === undefined ? "—" : formatKpi(tile.metric, delta.value);
-  const previous =
-    delta.previous === undefined ? "no data" : formatKpi(tile.metric, delta.previous);
-  return (
-    <Tooltip>
-      <TooltipTrigger
-        type="button"
-        className="focus-ring flex min-h-16 flex-col justify-center rounded-md border px-3 py-1 text-left"
-        aria-label={`${tile.label}: ${value}`}
-      >
-        <span className="text-muted-foreground text-caption">{tile.label}</span>
-        <span className="flex items-baseline gap-2">
-          <span className="font-mono text-body tabular-nums">{value}</span>
-          <Delta tone={KPI_TONE[tile.metric]} delta={delta} />
-        </span>
-      </TooltipTrigger>
-      <TooltipContent>Previous period: {previous}</TooltipContent>
-    </Tooltip>
-  );
-}
-
 export function Delta({ tone, delta }: { tone: KpiTone; delta: KpiDelta }) {
   const Icon = delta.direction === "up" ? ArrowUp : delta.direction === "down" ? ArrowDown : Minus;
   return (

@@ -25,16 +25,13 @@ use cetra_core::ids::ProjectId;
 use cetra_storage::Storage;
 use tower::ServiceExt;
 
-use crate::api::dashboards::WidgetQueryResponse;
-use crate::api::metrics::MetricsResponse;
 use crate::auth::Limits;
 use crate::auth::last_used::LastUsed;
 use crate::auth::principal::{ApiKeyCache, PatCache, authenticate};
 use crate::clock::Clock;
 use crate::config::ServerConfig;
 use crate::meta::MetaDb;
-use crate::routes::dashboards::WidgetKey;
-use crate::routes::metrics::{AnswerCache, MetricsKey};
+use crate::routes::dashboards::WidgetCache;
 
 /// Bodies on this router. Later tracks raise it on a single route.
 const BODY_LIMIT: usize = 1024 * 1024;
@@ -72,10 +69,8 @@ pub(crate) struct AppInner {
     pub(crate) ingest: crate::ingest::Ingest,
     /// Live bus and stream slots (D-G-12).
     pub(crate) live: crate::live::LiveBus,
-    /// `GET /metrics` answers cached 10 s (spec 05).
-    pub(crate) metrics_cache: AnswerCache<MetricsKey, MetricsResponse>,
     /// `POST /dashboards/query` answers cached 10 s (spec 05 § Dashboard queries).
-    pub(crate) widget_cache: AnswerCache<WidgetKey, WidgetQueryResponse>,
+    pub(crate) widget_cache: WidgetCache,
     /// Usage counters, flushed every 10 s (D-G-11).
     pub(crate) usage: crate::usage::Usage,
     /// Alert emails sent per org on the current UTC day (D-K-19).
@@ -113,9 +108,8 @@ impl AppState {
         Self(Arc::new(inner))
     }
 
-    /// Drops the cached answers of `project` from every answer cache (D-M-11).
+    /// Drops the cached answers of `project` (D-M-11).
     pub(crate) fn clear_answers(&self, project: ProjectId) {
-        self.metrics_cache.clear_project(project);
         self.widget_cache.clear_project(project);
     }
 

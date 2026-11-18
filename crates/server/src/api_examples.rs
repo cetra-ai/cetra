@@ -15,7 +15,6 @@ use crate::api::common::Page;
 use crate::api::dashboards::WidgetQueryResponse;
 use crate::api::datasets::{Dataset, DatasetItem, DatasetVersion, ExperimentTrends, ItemChange};
 use crate::api::facets::FacetsResponse;
-use crate::api::metrics::MetricsResponse;
 use crate::api::schema::SchemaResponse;
 use crate::api::sessions::{SessionDetail, SessionSummary};
 use crate::api::sql::SqlQueryResult;
@@ -411,14 +410,6 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
         "responses/dataset-trends.json",
         &trends,
     );
-
-    let metrics: MetricsResponse = fetch(
-        &app,
-        cookie,
-        "/metrics?from=2026-01-01T10:00:00Z&to=2026-01-01T11:00:00Z&bucket=10m",
-    )
-    .await;
-    out.add("get_metrics", &[], &[], "responses/metrics.json", &metrics);
 
     // Every facet the web shows open by default, and every preset field, has an answer here.
     const FACET_WINDOW: &str = "from=2026-01-01T00:00:00Z&to=2026-01-02T00:00:00Z";

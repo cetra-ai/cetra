@@ -1,12 +1,13 @@
-import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Bar, BarChart, ReferenceArea, Tooltip, XAxis, YAxis } from "recharts";
-import { metricsQuery } from "@/api/queries";
+import { widgetQuery } from "@/api/dashboards";
 import type { Schema } from "@/api/types";
 import { axisStyle, formatTick } from "@/components/charts/plot-helpers";
 import { type ChartConfig, ChartContainer } from "@/components/ui/chart";
+import { chooseBucket } from "@/lib/chart-scale";
 import { formatTimestamp } from "@/lib/format";
-import { bucketRange, epochMs, seriesByMetric } from "@/lib/metrics";
+import { bucketRange, epochMs } from "@/lib/metrics";
 import { type TimeZoneSetting, useTimeZone } from "@/lib/settings";
 
 type Props = {
@@ -29,21 +30,16 @@ const CONFIG = {
 } satisfies ChartConfig;
 
 /**
- * One row per bucket present in either series, sorted by time. A missing point
- * counts as 0. `ok` is traces minus errors, never below 0.
+ * One row per bucket with a traces count, sorted by time. The first measure counts the OK traces
+ * and the second the error traces; a missing point counts as 0.
  */
-export function histogramRows(response: Pick<Schema<"MetricsResponse">, "series">): HistogramRow[] {
-  const byMetric = seriesByMetric(response);
-  const traces = pointTotals(byMetric.get("traces") ?? []);
-  const errors = pointTotals(byMetric.get("errors") ?? []);
-  const times = new Set<number>([...traces.keys(), ...errors.keys()]);
+export function histogramRows(answer: Schema<"WidgetSeriesResponse">): HistogramRow[] {
+  const ok = pointTotals(answer, 0);
+  const errors = pointTotals(answer, 1);
+  const times = new Set<number>([...ok.keys(), ...errors.keys()]);
   return [...times]
     .sort((left, right) => left - right)
-    .map((time) => {
-      const total = traces.get(time) ?? 0;
-      const failed = errors.get(time) ?? 0;
-      return { time, ok: Math.max(0, total - failed), errors: failed };
-    });
+    .map((time) => ({ time, ok: ok.get(time) ?? 0, errors: errors.get(time) ?? 0 }));
 }
 
 /**
@@ -78,16 +74,30 @@ export function TracesHistogram({
   onRange,
 }: Props) {
   const zone = useTimeZone();
-  const query = useQuery({
-    ...metricsQuery(org, project, { from, to, filter, includeEval, includeExperiments }),
-    placeholderData: keepPreviousData,
-  });
+  const query = useQuery(
+    widgetQuery(org, project, {
+      from,
+      to,
+      shape: "series",
+      bucket: chooseBucket(Date.parse(from), Date.parse(to)),
+      ...(filter ? { filter } : {}),
+      include_eval: includeEval,
+      include_experiments: includeExperiments,
+      query: {
+        source: "traces",
+        measures: [
+          { agg: "count", where: "status <> 'error'", label: "OK" },
+          { agg: "count", where: "status = 'error'", label: "Errors" },
+        ],
+      },
+    }),
+  );
   const [drag, setDrag] = useState<{ start: number; end: number } | null>(null);
 
   if (query.isError) {
     return null;
   }
-  if (!query.data) {
+  if (query.data?.shape !== "series") {
     return <div role="img" aria-label="Traces over time" className="h-20 w-full" />;
   }
 
@@ -214,9 +224,13 @@ function HistogramTooltip({
   );
 }
 
-function pointTotals(series: readonly Schema<"MetricSeries">[]): Map<number, number> {
+/** The points of one measure of a series answer, by bucket start in epoch milliseconds. */
+function pointTotals(answer: Schema<"WidgetSeriesResponse">, measure: number): Map<number, number> {
   const totals = new Map<number, number>();
-  for (const item of series) {
+  for (const item of answer.series) {
+    if (item.measure !== measure) {
+      continue;
+    }
     for (const point of item.points) {
       const time = epochMs(point.time);
       if (time !== undefined) {
