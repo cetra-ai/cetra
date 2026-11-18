@@ -95,6 +95,8 @@ function EditorForm({
   const candidate = useMemo(() => widgetOf(form, base), [form, base]);
   const issues = useMemo(() => issuesOf(draft, index, candidate), [draft, index, candidate]);
   const preview = useDebounced(candidate, PREVIEW_DELAY_MS);
+  // The preview is the candidate once it has settled and only while the candidate is valid.
+  const previewReady = issues.length === 0 && preview === candidate;
   const update = (patch: Partial<WidgetForm>) => setForm((current) => ({ ...current, ...patch }));
   const source = form.source;
 
@@ -102,6 +104,11 @@ function EditorForm({
     <form
       className="contents"
       onSubmit={(event) => {
+        // A submit from a form inside this one (the filter bar's chip popover is portalled, so it
+        // reaches here through React) is that form's, not this editor's.
+        if (event.target !== event.currentTarget) {
+          return;
+        }
         event.preventDefault();
         if (issues.length === 0) {
           onApply(candidate);
@@ -301,11 +308,13 @@ function EditorForm({
 
       <section className="flex flex-col gap-2" aria-label="Preview">
         <span className="text-body font-medium">Preview</span>
-        {issues.length === 0 ? (
+        {previewReady ? (
           <Widget widget={preview} context={context} />
         ) : (
           <p className="text-caption text-muted-foreground">
-            Fix the highlighted fields to see the preview.
+            {issues.length === 0
+              ? "Updating the preview…"
+              : "Fix the highlighted fields to see the preview."}
           </p>
         )}
       </section>

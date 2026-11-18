@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { cn } from "cn";
 import type { ReactNode } from "react";
 import { widgetQuery } from "@/api/dashboards";
 import { problemMessage } from "@/api/problem";
@@ -45,30 +46,45 @@ export type WidgetContext = {
 /** The range of a clicked bucket and the clause of its group, for the list it opens. */
 export type BucketTarget = { from: string; to: string; clause?: string };
 
+/** The class of a widget's title bar: the drag handle of the grid in edit mode. */
+export const DRAG_HANDLE = "widget-drag-handle";
+
 /**
  * One widget of a dashboard: a card with a time chart, a horizontal bar chart, a number, or a
  * table, or a heading. A chart fetches its answer and shows a skeleton while it loads, the error
- * with a retry when the query fails, and the reason when there is no data.
+ * with a retry when the query fails, and the reason when there is no data. `actions` sits in the
+ * title bar, at its end.
  */
 export function Widget({
   widget,
   context,
+  actions,
   onBucket,
   onZoom,
   onModel,
 }: {
   widget: WidgetModel;
   context: WidgetContext;
+  /** Controls of the title bar, such as a widget's menu. */
+  actions?: ReactNode;
   /** A bucket was opened. Only traces and spans widgets have one. */
   onBucket?: (target: BucketTarget) => void;
   onZoom?: (fromMs: number, toMs: number) => void;
   onModel?: (model: string) => void;
 }) {
   if (widget.kind === "heading") {
-    return <h2 className="text-heading font-medium">{widget.title}</h2>;
+    return (
+      <TitleBar actions={actions}>
+        <h2 className="min-w-0 flex-1 text-heading font-medium">{widget.title}</h2>
+      </TitleBar>
+    );
   }
   if (!widget.chart || !widget.query) {
-    return <p className="text-body text-muted-foreground">{widget.title}: no query.</p>;
+    return (
+      <TitleBar actions={actions}>
+        <p className="min-w-0 flex-1 text-body text-muted-foreground">{widget.title}: no query.</p>
+      </TitleBar>
+    );
   }
   return (
     <ChartWidget
@@ -76,10 +92,21 @@ export function Widget({
       chart={widget.chart}
       query={widget.query}
       context={context}
+      actions={actions}
       onBucket={onBucket}
       onZoom={onZoom}
       onModel={onModel}
     />
+  );
+}
+
+/** A widget's title bar: its title, then its actions. In edit mode it drags the widget. */
+function TitleBar({ actions, children }: { actions?: ReactNode; children: ReactNode }) {
+  return (
+    <div className={cn(DRAG_HANDLE, "flex min-w-0 items-center gap-2")}>
+      {children}
+      {actions}
+    </div>
   );
 }
 
@@ -88,6 +115,7 @@ function ChartWidget({
   chart,
   query,
   context,
+  actions,
   onBucket,
   onZoom,
   onModel,
@@ -96,6 +124,7 @@ function ChartWidget({
   chart: Chart;
   query: WidgetQuery;
   context: WidgetContext;
+  actions?: ReactNode;
   onBucket?: (target: BucketTarget) => void;
   onZoom?: (fromMs: number, toMs: number) => void;
   onModel?: (model: string) => void;
@@ -118,7 +147,9 @@ function ChartWidget({
       aria-busy={busy || undefined}
       className="flex min-h-[220px] min-w-0 flex-col rounded-md border p-3 md:h-full"
     >
-      <h3 className="text-body font-medium">{title}</h3>
+      <TitleBar actions={actions}>
+        <h3 className="min-w-0 flex-1 text-body font-medium">{title}</h3>
+      </TitleBar>
       {children}
     </section>
   );

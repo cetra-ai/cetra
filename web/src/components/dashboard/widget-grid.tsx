@@ -1,11 +1,18 @@
 import "react-grid-layout/css/styles.css";
 import { type ReactNode, useMemo } from "react";
-import { GridLayout, type Layout, useContainerWidth } from "react-grid-layout";
+import {
+  GridLayout,
+  type Layout,
+  moveElement,
+  useContainerWidth,
+  verticalCompactor,
+} from "react-grid-layout";
 import { LazyMount } from "@/components/charts/lazy-mount";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useIsMobile } from "@/hooks/use-mobile";
-import { COLUMNS } from "@/lib/dashboards/draft";
+import { COLUMNS, MAX_HEIGHT, type Nudge, nudgedLayout, withLayouts } from "@/lib/dashboards/draft";
 import type { Widget as WidgetModel } from "@/lib/dashboards/types";
+import { DRAG_HANDLE } from "./widget";
 
 /** Height of one row in pixels. */
 const ROW_HEIGHT = 40;
@@ -22,6 +29,58 @@ const GRID_CONFIG = {
   margin: [GAP, GAP],
   containerPadding: [0, 0],
 } as const;
+
+/** Widgets are dragged by their title bar; a control inside it keeps its own clicks. */
+const DRAG_CONFIG = {
+  bounded: true,
+  handle: `.${DRAG_HANDLE}`,
+  cancel: "button, a, input",
+} as const;
+
+/**
+ * The grid's items: a widget's position and size, with the limits of spec 04 § Dashboards so that
+ * a drag or a resize cannot produce a layout the server refuses.
+ */
+export function layoutItems(widgets: readonly WidgetModel[]): Layout {
+  return widgets.map((widget) => ({
+    i: widget.id,
+    x: widget.layout.x,
+    y: widget.layout.y,
+    w: widget.layout.w,
+    h: widget.layout.h,
+    minW: 1,
+    maxW: COLUMNS,
+    minH: 1,
+    maxH: MAX_HEIGHT,
+  }));
+}
+
+/** The widgets packed upwards, as the grid packs them when it is shown in edit mode. */
+export function compactWidgets(widgets: WidgetModel[]): WidgetModel[] {
+  return withLayouts(widgets, verticalCompactor.compact(layoutItems(widgets), COLUMNS));
+}
+
+/**
+ * The widgets after one menu step on the widget at `index`: a move is placed the way a drag drops
+ * it (the widgets in its way move down), a resize sets its size, and the result is packed upwards.
+ * Returns `widgets` itself when the step is not allowed.
+ */
+export function nudgeWidgets(widgets: WidgetModel[], index: number, step: Nudge): WidgetModel[] {
+  const widget = widgets[index];
+  const next = widget ? nudgedLayout(widget.layout, step) : undefined;
+  const items = layoutItems(widgets);
+  const item = items[index];
+  if (next === undefined || item === undefined) {
+    return widgets;
+  }
+  if (step === "up" || step === "down" || step === "left" || step === "right") {
+    const placed = moveElement(items, item, next.x, next.y, true, false, "vertical", COLUMNS);
+    return withLayouts(widgets, verticalCompactor.compact(placed, COLUMNS));
+  }
+  item.w = next.w;
+  item.h = next.h;
+  return withLayouts(widgets, verticalCompactor.compact(items, COLUMNS));
+}
 
 /**
  * The widgets on the 12-column grid. Outside edit mode they are static. In edit mode they can be
@@ -66,11 +125,8 @@ function FreeWidgets({
   renderCell: (widget: WidgetModel) => ReactNode;
 }) {
   const { width, containerRef } = useContainerWidth();
-  const layout = useMemo(
-    () => widgets.map((widget) => ({ i: widget.id, ...widget.layout })),
-    [widgets],
-  );
-  const dragConfig = useMemo(() => ({ enabled: editing, bounded: true }), [editing]);
+  const layout = useMemo(() => layoutItems(widgets), [widgets]);
+  const dragConfig = useMemo(() => ({ ...DRAG_CONFIG, enabled: editing }), [editing]);
   const resizeConfig = useMemo(() => ({ enabled: editing }), [editing]);
   const eager = useMemo(() => eagerCharts(widgets), [widgets]);
   return (

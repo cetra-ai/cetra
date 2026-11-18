@@ -1,7 +1,7 @@
 import { render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Widget as WidgetModel } from "@/lib/dashboards/types";
-import { WidgetGrid } from "./widget-grid";
+import { compactWidgets, layoutItems, nudgeWidgets, WidgetGrid } from "./widget-grid";
 
 function widget(id: string, x: number, y: number, w: number, h: number): WidgetModel {
   return {
@@ -141,5 +141,36 @@ describe("charts below the fold", () => {
     }
     // A heading costs no query, so it mounts at once wherever it is.
     expect(screen.getByText("h")).toBeInTheDocument();
+  });
+});
+
+describe("the grid's layout", () => {
+  it("limits every item to the sizes the server accepts", () => {
+    for (const item of layoutItems(widgets)) {
+      expect(item).toMatchObject({ minW: 1, maxW: 12, minH: 1, maxH: 40 });
+    }
+  });
+
+  it("packs widgets upwards, as the grid does when it is shown", () => {
+    const gapped = [widget("top", 0, 0, 12, 1), widget("low", 0, 4, 6, 3)];
+    expect(compactWidgets(gapped).map((item) => item.layout.y)).toEqual([0, 1]);
+  });
+});
+
+describe("a menu step", () => {
+  it("resizes the widget and packs the rest", () => {
+    const next = nudgeWidgets(widgets, 1, "taller");
+    expect(next[1]?.layout).toEqual({ x: 0, y: 1, w: 6, h: 4 });
+    expect(next[0]).toBe(widgets[0]);
+  });
+
+  it("moves a widget into the place of another, which moves down", () => {
+    const next = nudgeWidgets(widgets, 1, "right");
+    expect(next[1]?.layout).toEqual({ x: 1, y: 1, w: 6, h: 3 });
+    expect(next[2]?.layout.y).toBeGreaterThan(1);
+  });
+
+  it("returns the same widgets when the step is not allowed", () => {
+    expect(nudgeWidgets(widgets, 0, "up")).toBe(widgets);
   });
 });

@@ -1,7 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { MoreHorizontal } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
-import type { Layout } from "react-grid-layout";
+import type { Layout as GridLayout } from "react-grid-layout";
 import { dashboardQuery, isStaleDashboard, useUpdateDashboard } from "@/api/dashboards";
 import { problemMessage, problemOf } from "@/api/problem";
 import { UnsavedChangesGuard } from "@/components/settings/unsaved-changes";
@@ -21,6 +21,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useIsMobile } from "@/hooks/use-mobile";
@@ -28,18 +29,20 @@ import {
   bottomOf,
   issueWidgetIndex,
   issueWithin,
+  type Nudge,
   newWidgetId,
+  nudgedLayout,
   sameDefinition,
   withLayouts,
 } from "@/lib/dashboards/draft";
 import { OVERVIEW } from "@/lib/dashboards/overview";
-import type { Dashboard, Definition, Widget } from "@/lib/dashboards/types";
+import type { Dashboard, Definition, Layout, Widget } from "@/lib/dashboards/types";
 import { type FieldIssue, validateDefinition } from "@/lib/dashboards/validate";
 import { canManageDashboards } from "@/lib/roles";
 import { DashboardMenu, DashboardSwitcher } from "./dashboard-header";
 import type { WidgetContext } from "./widget";
 import { HeadingDialog, WidgetEditor } from "./widget-editor";
-import { WidgetGrid } from "./widget-grid";
+import { compactWidgets, nudgeWidgets, WidgetGrid } from "./widget-grid";
 
 /** A dashboard's widgets, the most a definition holds (spec 04 § Dashboards). */
 const MAX_WIDGETS = 50;
@@ -86,7 +89,8 @@ export function DashboardBody({
   /** Whether the dashboard is the one on screen. A hidden dashboard drops its draft. */
   active: boolean;
   context: WidgetContext;
-  renderWidget: (widget: Widget) => ReactNode;
+  /** A widget's content. `edit` is given in edit mode: no clicks, and the actions for the title bar. */
+  renderWidget: (widget: Widget, edit?: { actions: ReactNode }) => ReactNode;
 }) {
   const { org, project, data } = useProject();
   const queryClient = useQueryClient();
@@ -108,7 +112,8 @@ export function DashboardBody({
   const editing = canEdit && session !== null;
   const draft = editing ? session.draft : undefined;
   const shown: Definition = draft ?? dashboard?.definition ?? OVERVIEW;
-  const dirty = session !== null && editing && !sameDefinition(session.draft, session.base);
+  // A draft is kept while the grid is not shown (a narrow window), so it still guards the page.
+  const dirty = session !== null && !sameDefinition(session.draft, session.base);
 
   function changeDraft(change: (current: Definition) => Definition) {
     setSession((current) =>
@@ -118,7 +123,7 @@ export function DashboardBody({
     );
   }
 
-  function applyLayout(layout: Layout) {
+  function applyLayout(layout: GridLayout) {
     setSession((current) => {
       if (current === null) {
         return current;
@@ -135,10 +140,13 @@ export function DashboardBody({
     if (dashboard === undefined) {
       return;
     }
+    // The grid packs the widgets upwards when it is shown, so the base is packed the same way:
+    // the first drag then changes only what the user moved.
+    const definition = { widgets: compactWidgets(dashboard.definition.widgets) };
     setSession({
       version: dashboard.version,
-      base: dashboard.definition,
-      draft: dashboard.definition,
+      base: definition,
+      draft: definition,
       issues: [],
       conflict: false,
     });
@@ -151,6 +159,10 @@ export function DashboardBody({
 
   function applyWidget(widget: Widget, index: number) {
     changeDraft((current) => ({ widgets: putWidget(current.widgets, index, widget) }));
+  }
+
+  function nudgeWidget(index: number, step: Nudge) {
+    changeDraft((current) => ({ widgets: nudgeWidgets(current.widgets, index, step) }));
   }
 
   function removeWidget(index: number) {
@@ -248,7 +260,7 @@ export function DashboardBody({
         if (isStaleDashboard(error)) {
           return { ...current, conflict: true };
         }
-        if (problem?.status === 400) {
+        if (problem?.status === 400 && (problem.errors?.length ?? 0) > 0) {
           return { ...current, issues: problem.errors ?? [], message: undefined };
         }
         return { ...current, message: problemMessage(error, "Could not save the dashboard.") };
@@ -273,6 +285,15 @@ export function DashboardBody({
     return index === undefined || index >= shown.widgets.length;
   });
   const full = (draft?.widgets.length ?? 0) >= MAX_WIDGETS;
+  // A save in flight locks the grid and its controls until the answer comes.
+  const busy = update.isPending;
+  const movable = editing && !busy;
+  // The number a widget without a title is named by: its place in reading order, from 1.
+  const places = new Map(
+    [...shown.widgets]
+      .sort((left, right) => left.layout.y - right.layout.y || left.layout.x - right.layout.x)
+      .map((widget, at) => [widget.id, at + 1]),
+  );
 
   return (
     <>
@@ -285,7 +306,7 @@ export function DashboardBody({
                 type="button"
                 variant="outline"
                 size="sm"
-                disabled={full}
+                disabled={full || busy}
                 title={full ? `A dashboard holds at most ${MAX_WIDGETS} widgets.` : undefined}
                 onClick={openNewWidget}
               >
@@ -295,19 +316,22 @@ export function DashboardBody({
                 type="button"
                 variant="outline"
                 size="sm"
+                disabled={full || busy}
+                title={full ? `A dashboard holds at most ${MAX_WIDGETS} widgets.` : undefined}
                 onClick={() => setOpen({ kind: "heading", title: "" })}
               >
                 Add heading
               </Button>
-              <Button type="button" variant="outline" size="sm" onClick={cancelEditing}>
-                Cancel
-              </Button>
               <Button
                 type="button"
+                variant="outline"
                 size="sm"
-                disabled={update.isPending}
-                onClick={() => void save()}
+                disabled={busy}
+                onClick={cancelEditing}
               >
+                Cancel
+              </Button>
+              <Button type="button" size="sm" disabled={busy} onClick={() => void save()}>
                 Save
               </Button>
             </>
@@ -333,23 +357,35 @@ export function DashboardBody({
 
       <WidgetGrid
         widgets={shown.widgets}
-        editing={editing}
-        onLayoutChange={editing ? applyLayout : undefined}
+        editing={movable}
+        onLayoutChange={movable ? applyLayout : undefined}
         renderCell={(widget) => {
           if (!editing) {
             return renderWidget(widget);
           }
           const index = shown.widgets.findIndex((item) => item.id === widget.id);
           const own = issues.filter((issue) => issueWidgetIndex(issue.field) === index);
+          const named = widget.title.trim() !== "";
           return (
             <>
-              {renderWidget(widget)}
-              <WidgetMenu
-                title={widget.title}
-                onEdit={() => openWidget(index)}
-                onDuplicate={() => duplicateWidget(index)}
-                onRemove={() => removeWidget(index)}
-              />
+              {renderWidget(widget, {
+                actions: (
+                  <WidgetMenu
+                    label={
+                      named
+                        ? `Actions for ${widget.title}`
+                        : `Actions for widget ${places.get(widget.id) ?? index + 1}`
+                    }
+                    layout={widget.layout}
+                    disabled={busy}
+                    full={full}
+                    onEdit={() => openWidget(index)}
+                    onDuplicate={() => duplicateWidget(index)}
+                    onNudge={(step) => nudgeWidget(index, step)}
+                    onRemove={() => removeWidget(index)}
+                  />
+                ),
+              })}
               {own.length > 0 ? (
                 <ul
                   role="alert"
@@ -421,7 +457,7 @@ export function DashboardBody({
         </AlertDialogContent>
       </AlertDialog>
 
-      <UnsavedChangesGuard dirty={dirty} />
+      <UnsavedChangesGuard dirty={dirty} ignoreSearchChanges />
     </>
   );
 }
@@ -433,39 +469,72 @@ function putWidget(widgets: Widget[], index: number, widget: Widget): Widget[] {
     : [...widgets, widget];
 }
 
-/** The "⋯" menu of a widget in edit mode: Edit, Duplicate, Remove. */
+/** The menu of a widget in edit mode, in its title bar: edit, duplicate, move, resize, remove. */
 function WidgetMenu({
-  title,
+  label,
+  layout,
+  disabled,
+  full,
   onEdit,
   onDuplicate,
+  onNudge,
   onRemove,
 }: {
-  title: string;
+  label: string;
+  layout: Layout;
+  disabled: boolean;
+  /** The dashboard holds the most widgets, so a copy is refused. */
+  full: boolean;
   onEdit: () => void;
   onDuplicate: () => void;
+  onNudge: (step: Nudge) => void;
   onRemove: () => void;
 }) {
   return (
-    <div className="absolute top-1 right-1 z-10">
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button
-            type="button"
-            variant="outline"
-            size="icon-xs"
-            aria-label={`Actions for ${title === "" ? "widget" : title}`}
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          size="icon-xs"
+          aria-label={label}
+          disabled={disabled}
+        >
+          <MoreHorizontal />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="min-w-40">
+        <DropdownMenuItem onSelect={onEdit}>Edit</DropdownMenuItem>
+        <DropdownMenuItem disabled={full} onSelect={onDuplicate}>
+          Duplicate
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        {NUDGES.map(([step, text]) => (
+          <DropdownMenuItem
+            key={step}
+            disabled={nudgedLayout(layout, step) === undefined}
+            onSelect={() => onNudge(step)}
           >
-            <MoreHorizontal />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="min-w-36">
-          <DropdownMenuItem onSelect={onEdit}>Edit</DropdownMenuItem>
-          <DropdownMenuItem onSelect={onDuplicate}>Duplicate</DropdownMenuItem>
-          <DropdownMenuItem variant="destructive" onSelect={onRemove}>
-            Remove
+            {text}
           </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </div>
+        ))}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem variant="destructive" onSelect={onRemove}>
+          Remove
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
+
+/** The menu's steps, in the order it lists them. */
+const NUDGES: readonly [Nudge, string][] = [
+  ["up", "Move up"],
+  ["down", "Move down"],
+  ["left", "Move left"],
+  ["right", "Move right"],
+  ["wider", "Wider"],
+  ["narrower", "Narrower"],
+  ["taller", "Taller"],
+  ["shorter", "Shorter"],
+];

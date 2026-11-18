@@ -147,17 +147,23 @@ export function DashboardView({
     });
   }
 
-  const renderWidget = (widget: WidgetModel) => (
-    <Widget
-      widget={widget}
-      context={context}
-      onBucket={
-        widget.query?.source === "scores" ? undefined : (target) => openBucket(widget, target)
-      }
-      onZoom={widget.query?.source === "scores" ? undefined : zoomTo}
-      onModel={openModel}
-    />
-  );
+  /**
+   * One widget. In edit mode (`edit` given) nothing opens or zooms, so a click on a chart does not
+   * take the user away from the draft; `edit.actions` goes in the widget's title bar.
+   */
+  const renderWidget = (widget: WidgetModel, edit?: { actions: ReactNode }) => {
+    const clickable = edit === undefined && widget.query?.source !== "scores";
+    return (
+      <Widget
+        widget={widget}
+        context={context}
+        actions={edit?.actions}
+        onBucket={clickable ? (target) => openBucket(widget, target) : undefined}
+        onZoom={clickable ? zoomTo : undefined}
+        onModel={edit === undefined ? openModel : undefined}
+      />
+    );
+  };
 
   let content: ReactNode;
   if (filterError) {

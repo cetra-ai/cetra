@@ -4,6 +4,7 @@ import {
   issueWidgetIndex,
   issueWithin,
   newWidgetId,
+  nudgedLayout,
   sameDefinition,
   withLayouts,
 } from "./draft";
@@ -75,5 +76,59 @@ describe("sameDefinition", () => {
     const widgets = [chart("a", 0, 0, 6, 3)];
     expect(sameDefinition({ widgets }, { widgets: structuredClone(widgets) })).toBe(true);
     expect(sameDefinition({ widgets }, { widgets: [chart("a", 0, 1, 6, 3)] })).toBe(false);
+  });
+
+  it("does not count the order of keys or an option the editor leaves out as a change", () => {
+    const stored: Widget = {
+      id: "a",
+      title: "a",
+      layout: { x: 0, y: 0, w: 6, h: 3 },
+      kind: "chart",
+      chart: { type: "line" },
+      query: {
+        source: "traces",
+        measures: [{ agg: "count" }],
+        breakdown: { field: "models", limit: 5, other: true },
+      },
+    };
+    const written: Widget = {
+      id: "a",
+      title: "a",
+      kind: "chart",
+      chart: { type: "line" },
+      query: {
+        source: "traces",
+        measures: [{ agg: "count" }],
+        breakdown: { field: "models", limit: 5 },
+      },
+      layout: { x: 0, y: 0, w: 6, h: 3 },
+    };
+    expect(sameDefinition({ widgets: [stored] }, { widgets: [written] })).toBe(true);
+  });
+});
+
+describe("nudgedLayout", () => {
+  const at = (x: number, y: number, w: number, h: number) => ({ x, y, w, h });
+
+  it("moves and resizes by one cell or row", () => {
+    expect(nudgedLayout(at(2, 3, 4, 5), "up")).toEqual(at(2, 2, 4, 5));
+    expect(nudgedLayout(at(2, 3, 4, 5), "down")).toEqual(at(2, 4, 4, 5));
+    expect(nudgedLayout(at(2, 3, 4, 5), "left")).toEqual(at(1, 3, 4, 5));
+    expect(nudgedLayout(at(2, 3, 4, 5), "right")).toEqual(at(3, 3, 4, 5));
+    expect(nudgedLayout(at(2, 3, 4, 5), "wider")).toEqual(at(2, 3, 5, 5));
+    expect(nudgedLayout(at(2, 3, 4, 5), "narrower")).toEqual(at(2, 3, 3, 5));
+    expect(nudgedLayout(at(2, 3, 4, 5), "taller")).toEqual(at(2, 3, 4, 6));
+    expect(nudgedLayout(at(2, 3, 4, 5), "shorter")).toEqual(at(2, 3, 4, 4));
+  });
+
+  it("refuses a step that leaves the grid's limits", () => {
+    expect(nudgedLayout(at(0, 0, 4, 1), "up")).toBeUndefined();
+    expect(nudgedLayout(at(0, 0, 4, 1), "left")).toBeUndefined();
+    expect(nudgedLayout(at(8, 0, 4, 1), "right")).toBeUndefined();
+    expect(nudgedLayout(at(8, 0, 4, 1), "wider")).toBeUndefined();
+    expect(nudgedLayout(at(0, 0, 1, 1), "narrower")).toBeUndefined();
+    expect(nudgedLayout(at(0, 0, 4, 40), "taller")).toBeUndefined();
+    expect(nudgedLayout(at(0, 0, 4, 1), "shorter")).toBeUndefined();
+    expect(nudgedLayout(at(0, 1000, 4, 1), "down")).toBeUndefined();
   });
 });

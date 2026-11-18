@@ -95,4 +95,47 @@ describe("withSource", () => {
     expect(withSource(form, "scores").measures[0]?.field).toBe("value_num");
     expect(withSource(form, "traces").measures[0]?.field).toBe("cost_total");
   });
+
+  it("clears the filter and each measure's condition, which were written over the old source", () => {
+    const form = {
+      ...blankForm(),
+      filter: "status = 'error'",
+      measures: [
+        {
+          rowId: "r",
+          agg: "rate" as const,
+          field: "",
+          mapKey: "",
+          where: "error_count > 0",
+          label: "",
+        },
+      ],
+    };
+    const next = withSource(form, "spans");
+    expect(next.filter).toBe("");
+    expect(next.measures[0]?.where).toBe("");
+  });
+
+  it("clears a map key whose column the new source does not have", () => {
+    const form = {
+      ...blankForm(),
+      measures: [
+        {
+          rowId: "r",
+          agg: "count_distinct" as const,
+          field: "trace_id",
+          mapKey: "attributes['tier']",
+          where: "",
+          label: "",
+        },
+      ],
+      breakdownMapKey: "attributes['tier']",
+    };
+    const toSpans = withSource(form, "spans");
+    expect(toSpans.measures[0]?.mapKey).toBe("attributes['tier']");
+    expect(toSpans.breakdownMapKey).toBe("attributes['tier']");
+    const toTraces = withSource(form, "traces");
+    expect(toTraces.measures[0]?.mapKey).toBe("");
+    expect(toTraces.breakdownMapKey).toBe("");
+  });
 });

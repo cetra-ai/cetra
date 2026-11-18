@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
 import { expect, it } from "vitest";
 import type { Dashboard, Definition } from "@/lib/dashboards/types";
@@ -299,4 +299,286 @@ it("previews the widget while it is edited", async () => {
   } finally {
     requests.stop();
   }
+});
+
+/** A copy of the fixture dashboard with `change` applied to its widgets. */
+function dashboardWith(change: (widgets: Definition["widgets"]) => Definition["widgets"]) {
+  const copy = structuredClone(dashboardDocument) as unknown as Dashboard;
+  copy.definition = { widgets: change(structuredClone(copy.definition.widgets)) };
+  return copy;
+}
+
+/** Replaces `window.matchMedia` for the mobile query, so a test can narrow the window. */
+function narrowable() {
+  const original = window.matchMedia;
+  const listeners = new Set<() => void>();
+  window.matchMedia = ((query: string) => {
+    if (!query.includes("767")) {
+      return original(query);
+    }
+    return {
+      matches: false,
+      media: query,
+      onchange: null,
+      addEventListener: (_type: string, listener: () => void) => listeners.add(listener),
+      removeEventListener: (_type: string, listener: () => void) => listeners.delete(listener),
+      addListener: () => undefined,
+      removeListener: () => undefined,
+      dispatchEvent: () => false,
+    };
+  }) as unknown as typeof window.matchMedia;
+  return {
+    narrow() {
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: 500 });
+      for (const listener of listeners) {
+        listener();
+      }
+    },
+    restore() {
+      window.matchMedia = original;
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: 1024 });
+    },
+  };
+}
+
+it("keeps the draft when only the search changes, and asks when the dashboard changes", async () => {
+  const { router, user } = await editing();
+  await user.click(screen.getByRole("button", { name: `Actions for ${ERROR_RATE}` }));
+  await user.click(await screen.findByRole("menuitem", { name: "Remove" }));
+
+  await user.selectOptions(screen.getByRole("combobox", { name: "Group by" }), "model");
+  expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  expect(router.state.location.search).toMatchObject({ group: "model" });
+  expect(screen.getByRole("button", { name: "Save" })).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "Switch dashboard" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Overview" }));
+  const dialog = await screen.findByRole("alertdialog");
+  expect(within(dialog).getByText("Discard unsaved changes?")).toBeInTheDocument();
+  await user.click(within(dialog).getByRole("button", { name: "Keep editing" }));
+  expect(router.state.location.pathname).toBe(CUSTOM);
+});
+
+it("opens nothing from a chart in edit mode", async () => {
+  const { router, user } = await editing();
+  const card = await screen.findByRole("region", { name: REQUESTS });
+  const chart = await within(card).findByRole("group", { name: /^Requests by model\./ });
+  chart.focus();
+  fireEvent.keyDown(chart, { key: "ArrowRight" });
+  fireEvent.keyDown(chart, { key: "Enter" });
+  const bucket = card.querySelector<HTMLElement>('[aria-label^="Open bucket"]');
+  if (bucket) {
+    await user.click(bucket);
+  }
+  expect(router.state.location.pathname).toBe(CUSTOM);
+  expect(screen.getByRole("button", { name: "Save" })).toBeInTheDocument();
+});
+
+it("shows a save the server refuses without details at the top", async () => {
+  server.use(
+    http.patch(ONE, () =>
+      problemResponse(400, "bad_request", { detail: "The dashboard is too large." }),
+    ),
+  );
+  const { user } = await editing();
+  await user.click(screen.getByRole("button", { name: "Add heading" }));
+  await user.type(screen.getByLabelText("Heading"), "Latency");
+  await user.click(screen.getByRole("button", { name: "Apply" }));
+  await user.click(screen.getByRole("button", { name: "Save" }));
+  const alert = await screen.findByRole("alert");
+  expect(within(alert).getByText("The dashboard is too large.")).toBeInTheDocument();
+});
+
+it("disables the adds and the copy at the widget limit", async () => {
+  const headings = Array.from({ length: 50 }, (_, index) => ({
+    id: `heading-${index}`,
+    title: `Heading ${index}`,
+    kind: "heading" as const,
+    layout: { x: 0, y: index, w: 12, h: 1 },
+  }));
+  server.use(...dashboardHandlers([dashboardWith(() => headings)]));
+  const { user } = await editing();
+  expect(screen.getByRole("button", { name: "Add widget" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Add heading" })).toBeDisabled();
+  await user.click(screen.getByRole("button", { name: "Actions for Heading 0" }));
+  expect(await screen.findByRole("menuitem", { name: "Duplicate" })).toHaveAttribute(
+    "aria-disabled",
+    "true",
+  );
+});
+
+it("shows the preview only once the title has settled", async () => {
+  const { user } = await editing();
+  await user.click(screen.getByRole("button", { name: "Add widget" }));
+  await user.type(screen.getByLabelText("Title"), "First");
+  expect(await screen.findByRole("region", { name: "First" })).toBeInTheDocument();
+  await user.type(screen.getByLabelText("Title"), " more");
+  expect(screen.queryByRole("region", { name: "First" })).not.toBeInTheDocument();
+  expect(await screen.findByRole("region", { name: "First more" })).toBeInTheDocument();
+});
+
+it("does not apply the widget when Enter is pressed in its filter bar", async () => {
+  const { user } = await editing();
+  await user.click(screen.getByRole("button", { name: "Add widget" }));
+  await user.click(screen.getByRole("button", { name: "+ Filter" }));
+  await user.type(await screen.findByRole("textbox", { name: "Value" }), "error{Enter}");
+  // The chip popover closes; the editor stays open with its controls.
+  expect(screen.getByRole("heading", { name: "New widget" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Apply" })).toBeInTheDocument();
+});
+
+it("moves a widget from its menu", async () => {
+  const requests = recordRequests();
+  try {
+    const { user } = await editing();
+    const card = screen.getByRole("region", { name: REQUESTS });
+    // The menu is in the widget's title bar, not over the chart.
+    await user.click(within(card).getByRole("button", { name: `Actions for ${REQUESTS}` }));
+    await user.click(await screen.findByRole("menuitem", { name: "Move right" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    const body = (await savedBody(requests)) as { definition: Definition };
+    expect(body.definition.widgets.find((widget) => widget.title === REQUESTS)?.layout).toEqual({
+      x: 1,
+      y: 1,
+      w: 8,
+      h: 6,
+    });
+  } finally {
+    requests.stop();
+  }
+});
+
+it("resizes a widget from its menu, and refuses a step past the grid", async () => {
+  const requests = recordRequests();
+  try {
+    const { user } = await editing();
+    await user.click(screen.getByRole("button", { name: `Actions for ${ERROR_RATE}` }));
+    // Error rate ends at the grid's right edge, so it cannot grow wider.
+    expect(await screen.findByRole("menuitem", { name: "Wider" })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+    await user.click(screen.getByRole("menuitem", { name: "Narrower" }));
+    await user.click(screen.getByRole("button", { name: `Actions for ${ERROR_RATE}` }));
+    await user.click(await screen.findByRole("menuitem", { name: "Taller" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    const body = (await savedBody(requests)) as { definition: Definition };
+    expect(body.definition.widgets.find((widget) => widget.title === ERROR_RATE)?.layout).toEqual({
+      x: 8,
+      y: 1,
+      w: 3,
+      h: 4,
+    });
+  } finally {
+    requests.stop();
+  }
+});
+
+it("names an untitled widget by its place in reading order", async () => {
+  const doc = dashboardWith((widgets) =>
+    widgets.map((widget) => (widget.title === ERROR_RATE ? { ...widget, title: "" } : widget)),
+  );
+  server.use(...dashboardHandlers([doc]));
+  await editing();
+  // Reading order: the heading, Requests by model, the untitled widget (1, 2, 3).
+  expect(await screen.findByRole("button", { name: "Actions for widget 3" })).toBeInTheDocument();
+});
+
+it("clears a widget's filter and conditions when its source changes", async () => {
+  const doc = dashboardWith((widgets) =>
+    widgets.map((widget) =>
+      widget.title === ERROR_RATE && widget.query
+        ? { ...widget, query: { ...widget.query, filter: "status = 'error'" } }
+        : widget,
+    ),
+  );
+  server.use(...dashboardHandlers([doc]));
+  const { user } = await editing();
+  await user.click(screen.getByRole("button", { name: `Actions for ${ERROR_RATE}` }));
+  await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
+  const dialog = await screen.findByRole("dialog");
+  expect(within(dialog).getByText("status = 'error'")).toBeInTheDocument();
+  expect(within(dialog).getByLabelText(/Condition/)).toHaveValue("error_count > 0");
+
+  await user.selectOptions(within(dialog).getByRole("combobox", { name: "Source" }), "spans");
+  expect(within(dialog).queryByText("status = 'error'")).not.toBeInTheDocument();
+  expect(within(dialog).getByLabelText(/Condition/)).toHaveValue("");
+  await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+  await user.click(screen.getByRole("button", { name: `Actions for ${REQUESTS}` }));
+  await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
+  const breakdown = await screen.findByRole("dialog");
+  await user.selectOptions(within(breakdown).getByRole("combobox", { name: "Source" }), "spans");
+  expect(within(breakdown).getByRole("combobox", { name: "Breakdown field" })).toHaveValue("");
+});
+
+it("leaves the draft clean when a widget is applied unchanged", async () => {
+  const { router, user } = await editing();
+  await user.click(screen.getByRole("button", { name: `Actions for ${REQUESTS}` }));
+  await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
+  await user.click(await screen.findByRole("button", { name: "Apply" }));
+  await user.click(screen.getByRole("link", { name: "Traces" }));
+  expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  expect(router.state.location.pathname).toBe("/acme/support-bot/traces");
+});
+
+it("keeps a draft guarded while the grid is hidden by a narrow window", async () => {
+  const viewport = narrowable();
+  try {
+    const { router, user } = await editing();
+    await user.click(screen.getByRole("button", { name: `Actions for ${ERROR_RATE}` }));
+    await user.click(await screen.findByRole("menuitem", { name: "Remove" }));
+    act(() => viewport.narrow());
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument(),
+    );
+    await user.click(screen.getByRole("button", { name: "Switch dashboard" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Overview" }));
+    expect(await screen.findByRole("alertdialog")).toBeInTheDocument();
+    expect(router.state.location.pathname).toBe(CUSTOM);
+  } finally {
+    viewport.restore();
+  }
+});
+
+it("locks the grid and its controls while a save is pending", async () => {
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  server.use(
+    http.patch(ONE, async () => {
+      await gate;
+      return problemResponse(500, "internal", { detail: "Try again later." });
+    }),
+  );
+  const { user } = await editing();
+  await user.click(screen.getByRole("button", { name: `Actions for ${ERROR_RATE}` }));
+  await user.click(await screen.findByRole("menuitem", { name: "Remove" }));
+  await user.click(screen.getByRole("button", { name: "Save" }));
+
+  await waitFor(() => expect(screen.getByRole("button", { name: "Save" })).toBeDisabled());
+  expect(screen.getByRole("button", { name: "Add widget" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Add heading" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: `Actions for ${REQUESTS}` })).toBeDisabled();
+
+  release();
+  expect(await screen.findByText("Try again later.")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
+});
+
+it("does not ask to save a dashboard whose stored layout the grid packs upwards", async () => {
+  const gapped = dashboardWith((widgets) =>
+    widgets.map((widget) =>
+      widget.id === "slowest-operations"
+        ? { ...widget, layout: { ...widget.layout, y: 9 } }
+        : widget,
+    ),
+  );
+  server.use(...dashboardHandlers([gapped]));
+  const { router, user } = await editing();
+  await user.click(screen.getByRole("link", { name: "Traces" }));
+  await waitFor(() => expect(router.state.location.pathname).toBe("/acme/support-bot/traces"));
+  expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
 });

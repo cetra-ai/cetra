@@ -249,24 +249,36 @@ function numberOf(text: string): number {
 }
 
 /**
- * Keeps each control valid after the source changes: a measure keeps its field when the new
- * source has it for the aggregate, else takes the first one; the breakdown field goes when the
- * source has no such field.
+ * Keeps each control valid after the source changes. The filter and each measure's condition go,
+ * since they are written over the old source. A measure keeps its field when the new source has
+ * it for the aggregate, else takes the first one; a map key goes when its column is not one of the
+ * new source's; the breakdown field goes when the source has no such field.
  */
 export function withSource(form: WidgetForm, source: WidgetSource): WidgetForm {
   const fields = breakdownFields(source);
   return {
     ...form,
     source,
+    filter: "",
     measures: form.measures.map((measure) => {
       const allowed = fieldsForAgg(source, measure.agg);
-      return allowed.includes(measure.field)
-        ? measure
-        : { ...measure, field: allowed[0] ?? "", mapKey: "" };
+      const fieldKept = allowed.includes(measure.field);
+      return {
+        ...measure,
+        where: "",
+        field: fieldKept ? measure.field : (allowed[0] ?? ""),
+        mapKey: fieldKept && mapKeyOn(source, measure.mapKey) ? measure.mapKey : "",
+      };
     }),
     breakdownField: fields.includes(form.breakdownField) ? form.breakdownField : "",
-    breakdownMapKey: mapColumns(source).length > 0 ? form.breakdownMapKey : "",
+    breakdownMapKey: mapKeyOn(source, form.breakdownMapKey) ? form.breakdownMapKey : "",
   };
+}
+
+/** Whether a typed map key (`column['key']`) names a map column of the source. */
+function mapKeyOn(source: WidgetSource, text: string): boolean {
+  const column = text.trim().split("[")[0] ?? "";
+  return mapColumns(source).includes(column);
 }
 
 /** Whether a source has map columns, so `column['key']` is offered. */

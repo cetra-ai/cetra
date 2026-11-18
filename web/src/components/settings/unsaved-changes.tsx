@@ -12,11 +12,19 @@ import {
 
 /**
  * Blocks navigation and closing the tab while `dirty`, and asks before discarding the edits.
- * Cancel and Esc keep editing.
+ * Cancel and Esc keep editing. With `ignoreSearchChanges`, a change of the URL search alone (the
+ * same page with other filters) is not blocked: only leaving the page is.
  */
-export function UnsavedChangesGuard({ dirty }: { dirty: boolean }) {
+export function UnsavedChangesGuard({
+  dirty,
+  ignoreSearchChanges = false,
+}: {
+  dirty: boolean;
+  ignoreSearchChanges?: boolean;
+}) {
   const blocker = useBlocker({
-    shouldBlockFn: () => dirty,
+    shouldBlockFn: ({ current, next }) =>
+      dirty && (!ignoreSearchChanges || current.pathname !== next.pathname),
     enableBeforeUnload: () => dirty,
     withResolver: true,
   });
