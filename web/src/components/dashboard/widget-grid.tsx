@@ -20,8 +20,6 @@ const ROW_HEIGHT = 40;
 const GAP = 12;
 /** The charts drawn at once, in reading order; the rest mount when scrolled near. */
 const EAGER_CHARTS = 4;
-/** The height of a chart's placeholder: a chart card's minimum height. */
-const CHART_HEIGHT = 220;
 
 const GRID_CONFIG = {
   cols: COLUMNS,
@@ -29,6 +27,11 @@ const GRID_CONFIG = {
   margin: [GAP, GAP],
   containerPadding: [0, 0],
 } as const;
+
+/** The height in pixels of a widget `rows` rows tall: its cell, gaps included. */
+function cellHeight(rows: number): number {
+  return rows * ROW_HEIGHT + (rows - 1) * GAP;
+}
 
 /** Widgets are dragged by their title bar; a control inside it keeps its own clicks. */
 const DRAG_CONFIG = {
@@ -143,12 +146,15 @@ function FreeWidgets({
           <div key={widget.id} className="relative h-full min-w-0">
             {widget.kind === "chart" ? (
               // A chart fetches its answer when it is near the viewport, so a long dashboard does
-              // not query every widget at once.
+              // not query every widget at once. Its placeholder is its cell's height.
               <LazyMount
                 eager={eager.has(widget.id)}
-                minHeight={CHART_HEIGHT}
+                minHeight={cellHeight(widget.layout.h)}
                 fallback={
-                  <Skeleton className="h-full w-full" style={{ minHeight: CHART_HEIGHT }} />
+                  <Skeleton
+                    className="h-full w-full"
+                    style={{ minHeight: cellHeight(widget.layout.h) }}
+                  />
                 }
               >
                 {renderCell(widget)}

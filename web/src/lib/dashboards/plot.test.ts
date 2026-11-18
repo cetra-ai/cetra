@@ -42,10 +42,29 @@ describe("seriesPlot", () => {
       ]),
     );
     expect(plot.columns.map((column) => [column.key, column.label, column.color])).toEqual([
-      ["m0:support", "Errors · support", "var(--chart-error)"],
-      ["m0:\u001fother", "Errors · Other", "var(--chart-error)"],
+      ["m0:support", "support", "var(--chart-error)"],
+      ["m0:\u001fother", "Other", "var(--chart-error)"],
     ]);
     expect(plot.columns.map((column) => column.group)).toEqual(["support", null]);
+  });
+
+  it("labels a group by its measure too when the query has several measures", () => {
+    const query: WidgetQuery = {
+      source: "spans",
+      measures: [
+        { agg: "sum", field: "cost_total", label: "Cost" },
+        { agg: "count", label: "Calls" },
+      ],
+      breakdown: { field: "model" },
+    };
+    const plot = seriesPlot(
+      query,
+      answer([
+        { measure: 0, group: "model-a", other: false, points: [{ time: H1, value: 1, rows: 1 }] },
+        { measure: 1, other: true, points: [{ time: H1, value: 4, rows: 4 }] },
+      ]),
+    );
+    expect(plot.columns.map((column) => column.label)).toEqual(["Cost · model-a", "Calls · Other"]);
   });
 
   it("colours a model by its place in the ranking, and keeps it when a chart shows fewer", () => {
@@ -66,7 +85,7 @@ describe("seriesPlot", () => {
       "var(--chart-2)",
       "var(--chart-1)",
     ]);
-    expect(plot.columns[0]?.label).toBe("Cost · gpt-4o");
+    expect(plot.columns[0]?.label).toBe("gpt-4o");
   });
 
   it("fills the buckets between points, with gaps and the rows of each bucket", () => {

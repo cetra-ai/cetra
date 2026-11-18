@@ -9,7 +9,6 @@ import type { Definition, Widget } from "./types";
 
 const CHART_WIDTH = 6;
 const CHART_HEIGHT = 7;
-const NUMBERS_END = 3;
 
 const EXCLUDED = new Set(["ov-18"]);
 
@@ -20,6 +19,10 @@ function isChart(widget: Widget): boolean {
 function isNumber(widget: Widget): boolean {
   return widget.chart?.type === "number";
 }
+
+const NUMBERS = OVERVIEW.widgets.filter((widget) => isChart(widget) && isNumber(widget));
+/** The row under the numbers: the charts start there, whatever height the numbers have. */
+const NUMBERS_END = Math.max(...NUMBERS.map((widget) => widget.layout.y + widget.layout.h));
 
 function charts(): Widget[] {
   const kept = OVERVIEW.widgets.filter(
@@ -38,8 +41,5 @@ function charts(): Widget[] {
 
 /** The user page's widgets: the five numbers, then the charts. Not stored; not edited. */
 export const USER_OVERVIEW: Definition = {
-  widgets: [
-    ...OVERVIEW.widgets.filter((widget) => isChart(widget) && isNumber(widget)),
-    ...charts(),
-  ],
+  widgets: [...NUMBERS, ...charts()],
 };

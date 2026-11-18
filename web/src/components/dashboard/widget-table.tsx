@@ -21,7 +21,7 @@ export function WidgetTable({
       <table className="w-full text-left text-caption">
         <thead className="text-muted-foreground">
           <tr>
-            <th className="py-1 font-medium">{breakdownField ?? "Group"}</th>
+            <th className="w-2/5 py-1 font-medium">{breakdownField ?? "Group"}</th>
             {plot.columns.map((column, index) => (
               // biome-ignore lint/suspicious/noArrayIndexKey: measures are positional; labels can repeat
               <th key={index} className="py-1 text-right font-medium">
@@ -35,7 +35,7 @@ export function WidgetTable({
             const label = row.other ? "Other" : (row.group ?? "Total");
             return (
               <tr key={row.group ?? `total-${index}`} className="border-t border-border/60">
-                <td className="max-w-0 truncate py-1 pr-2 font-mono">
+                <td className="max-w-0 truncate py-1 pr-2 font-mono" title={label}>
                   {modelGroups && onModel && row.group && !row.other ? (
                     <button
                       type="button"

@@ -69,6 +69,32 @@ function renderWidget(
   );
 }
 
+/** An ISO time with nanoseconds, as the server writes a bucket's start. */
+function isoAt(ms: number): string {
+  return new Date(ms).toISOString().replace(".000Z", ".000000000Z");
+}
+
+/** A ResizeObserver that reports every observed element at `width` once it is observed. */
+class FixedWidthObserver {
+  constructor(
+    private readonly callback: ResizeObserverCallback,
+    private readonly width: number,
+  ) {}
+  observe(target: Element): void {
+    this.callback(
+      [
+        {
+          target,
+          contentRect: { width: this.width, height: 200 },
+        } as unknown as ResizeObserverEntry,
+      ],
+      this as unknown as ResizeObserver,
+    );
+  }
+  unobserve(): void {}
+  disconnect(): void {}
+}
+
 describe("time charts", () => {
   it("draws a line chart of the series answer, asking for the bucket of the range", async () => {
     const bodies = answer(() =>
@@ -163,6 +189,74 @@ describe("time charts", () => {
       "Test · g6",
     ]);
     expect(screen.getByText("+1 more")).toBeInTheDocument();
+  });
+
+  it("lays four split charts in rows of up to three, each row an equal share of the card", async () => {
+    answer(() =>
+      seriesAnswer(
+        ["g1", "g2", "g3", "g4"].map((group) => ({
+          measure: 0,
+          group,
+          other: false,
+          points: [{ time: H1, value: 1, rows: 1 }],
+        })),
+      ),
+    );
+    renderWidget(
+      widget(
+        { type: "line", split: true },
+        {
+          source: "scores",
+          measures: [{ agg: "avg", field: "value_num" }],
+          breakdown: { field: "name", limit: 6, other: false },
+        },
+      ),
+    );
+    const charts = await screen.findAllByRole("group", { name: /^Test · g\d\. / });
+    expect(charts).toHaveLength(4);
+    // Each chart sits in its own cell of the grid; the cells are the grid's children.
+    const grid = charts[0]?.parentElement?.parentElement;
+    // jsdom writes the zero minimum as "0px"; a browser keeps "0".
+    expect(grid?.style.gridTemplateColumns).toMatch(/^repeat\(3, minmax\(0(px)?, 1fr\)\)$/);
+    expect(grid?.style.gridTemplateRows).toMatch(/^repeat\(2, minmax\(0(px)?, 1fr\)\)$/);
+  });
+
+  it("labels the X axis with at most one label per 90 px of the plot's measured width", async () => {
+    vi.stubGlobal(
+      "ResizeObserver",
+      class extends FixedWidthObserver {
+        constructor(callback: ResizeObserverCallback) {
+          super(callback, 300);
+        }
+      },
+    );
+    try {
+      // A day of ten-minute buckets: far more round times than a 300 px chart can label.
+      const start = Date.UTC(2026, 0, 1, 0, 0);
+      const points = Array.from({ length: 144 }, (_, index) => ({
+        time: isoAt(start + index * 600_000),
+        value: index,
+        rows: 1,
+      }));
+      answer(() => seriesAnswer([{ measure: 0, other: false, points }]));
+      const { container } = renderWidget(
+        widget(
+          { type: "line" },
+          { source: "traces", measures: [{ agg: "count", label: "Traces" }] },
+        ),
+      );
+      await screen.findByRole("group", { name: /^Test\. Arrow keys/ });
+      await waitFor(() => {
+        expect(
+          container.querySelectorAll(".recharts-xAxis .recharts-cartesian-axis-tick"),
+        ).not.toHaveLength(0);
+      });
+      const labels = container.querySelectorAll(".recharts-xAxis .recharts-cartesian-axis-tick");
+      // 300 px less the 84 px of the value axis and its margin: 216 px, two labels at least.
+      expect(labels.length).toBeLessThanOrEqual(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("stacks the bars of every series of a stacked chart", async () => {
@@ -483,6 +577,24 @@ describe("other widgets", () => {
     expect(row.querySelector("div[aria-hidden]")).toHaveStyle({ width: "75%" });
     fireEvent.click(screen.getByRole("button", { name: "Open traces of model-a" }));
     expect(onModel).toHaveBeenCalledWith("model-a");
+  });
+
+  it("shows a model's full name in the title of its row, and gives the first column two fifths", async () => {
+    const name = "claude-haiku-4-5-20251001-extended-context";
+    answer(() => totalAnswer([{ group: name, other: false, values: [3] }]));
+    renderWidget(
+      widget(
+        { type: "table" },
+        {
+          source: "spans",
+          measures: [{ agg: "sum", field: "cost_total", label: "Cost" }],
+          breakdown: { field: "model" },
+        },
+      ),
+    );
+    const cell = await screen.findByTitle(name);
+    expect(cell.tagName).toBe("TD");
+    expect(screen.getByRole("columnheader", { name: "model" })).toHaveClass("w-2/5");
   });
 
   it("shows a heading as a second-level title, with no card", () => {

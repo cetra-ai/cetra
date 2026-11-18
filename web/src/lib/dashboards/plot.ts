@@ -85,7 +85,7 @@ export function seriesPlot(
     const color = colorOf(measure, group, byModel, colors, columns.length);
     columns.push({
       key,
-      label: columnLabel(measure, group),
+      label: columnLabel(measure, group, query.measures.length === 1),
       kind: measureKind(measure),
       color,
       group,
@@ -176,12 +176,21 @@ function columnKey(measure: number, group: string | undefined, other: boolean): 
   return group === undefined ? `m${measure}` : `m${measure}:${group}`;
 }
 
-function columnLabel(measure: Measure, group: string | null | undefined): string {
+/**
+ * The label of a series. With one measure the group alone labels it (the measure is in the title);
+ * with several, "<measure> · <group>".
+ */
+function columnLabel(
+  measure: Measure,
+  group: string | null | undefined,
+  singleMeasure: boolean,
+): string {
   const name = measureLabel(measure);
   if (group === undefined) {
     return name;
   }
-  return `${name} · ${group === null ? "Other" : group}`;
+  const groupName = group === null ? "Other" : group;
+  return singleMeasure ? groupName : `${name} · ${groupName}`;
 }
 
 function colorOf(

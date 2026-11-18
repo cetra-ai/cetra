@@ -1,4 +1,4 @@
-import { type KeyboardEvent, useMemo, useState } from "react";
+import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { BarShapeProps } from "recharts";
 import {
   Area,
@@ -21,6 +21,7 @@ import {
   largestValue,
   lineDot,
   solitary,
+  tickBudget,
   xAxisTicks,
 } from "@/components/charts/plot-helpers";
 import { indexOf, useDragZoom } from "@/components/charts/use-drag-zoom";
@@ -33,6 +34,12 @@ import { type TimeZoneSetting, useTimeZone } from "@/lib/settings";
 
 export type PlotKind = "line" | "bar" | "area";
 
+/** The value axis's width and the chart's right margin: the plot is narrower than the chart by these. */
+const Y_AXIS_WIDTH = 72;
+const PLOT_RIGHT_MARGIN = 12;
+/** The width assumed before the chart is measured: the chart's initial dimension. */
+const UNMEASURED_WIDTH = 640;
+
 /** Axis labels: `ticks` undefined lets Recharts choose them; `domain` is `[0, top]` unless `auto`. */
 type Axis = {
   ticks?: number[];
@@ -42,9 +49,10 @@ type Axis = {
 
 /**
  * One time chart of a widget: a category X axis of buckets, a value axis, and the series as
- * lines, bars or areas. Only the chart under the pointer shows its tooltip; all the time charts of
- * the dashboard share a cursor. The chart is one keyboard stop: arrows move between buckets,
- * Home and End jump to the ends, Enter opens the bucket (D-C-3).
+ * lines, bars or areas. The X axis labels follow the plot's measured width (`tickBudget`). Only
+ * the chart under the pointer shows its tooltip; all the time charts of the dashboard share a
+ * cursor. The chart is one keyboard stop: arrows move between buckets, Home and End jump to the
+ * ends, Enter opens the bucket (D-C-3).
  */
 export function WidgetPlot({
   title,
@@ -53,7 +61,6 @@ export function WidgetPlot({
   columns,
   rows,
   bucketNs,
-  maxTicks,
   fadeBelow,
   onBucket,
   onZoom,
@@ -64,8 +71,6 @@ export function WidgetPlot({
   columns: PlotColumn[];
   rows: ChartRow[];
   bucketNs: number;
-  /** The most X-axis labels the plot draws. */
-  maxTicks: number;
   /** Bars and areas: buckets with fewer rows than this are faded. */
   fadeBelow?: number;
   /** A bucket was opened: its time, and its group when the chart has exactly one (else undefined). */
@@ -84,6 +89,24 @@ export function WidgetPlot({
   const activeRow = index === null ? undefined : rows[index];
   // Only the chart under the pointer shows its tooltip; the others share its cursor line.
   const [hovered, setHovered] = useState(false);
+  // The chart's own width, measured, sets how many X-axis labels fit.
+  const root = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState<number | undefined>(undefined);
+  useEffect(() => {
+    const element = root.current;
+    if (!element) return;
+    const measure = (measured: number) => {
+      // A hidden chart measures 0: the last measurement (or the default) stays.
+      if (measured > 0) setWidth(measured);
+    };
+    measure(element.clientWidth);
+    const observer = new ResizeObserver((entries) => {
+      measure(entries[0]?.contentRect.width ?? element.clientWidth);
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  const plotWidth = (width ?? UNMEASURED_WIDTH) - Y_AXIS_WIDTH - PLOT_RIGHT_MARGIN;
   const drag = useDragZoom({ rows, bucketNs, onZoom });
   // A bucket opens with its group only when the chart has one group (and is not an area): with
   // several groups, the bucket is opened without a group, so it lists every group's rows.
@@ -116,6 +139,7 @@ export function WidgetPlot({
   return (
     // biome-ignore lint/a11y/useSemanticElements: a chart is a focusable group with a custom keyboard model (D-C-3)
     <div
+      ref={root}
       role="group"
       aria-roledescription="chart"
       aria-label={`${title}. Arrow keys move between time buckets${onBucket ? "; Enter opens the bucket" : ""}.`}
@@ -141,7 +165,7 @@ export function WidgetPlot({
       >
         <ComposedChart
           data={rows}
-          margin={{ top: 8, right: 12, left: 0, bottom: 0 }}
+          margin={{ top: 8, right: PLOT_RIGHT_MARGIN, left: 0, bottom: 0 }}
           accessibilityLayer={false}
           syncId="dashboard"
           syncMethod="value"
@@ -163,7 +187,7 @@ export function WidgetPlot({
           <XAxis
             dataKey="time"
             tick={AXIS_TICK}
-            ticks={xAxisTicks(rows, zone === "utc", maxTicks)}
+            ticks={xAxisTicks(rows, zone === "utc", tickBudget(plotWidth))}
             interval={0}
             tickFormatter={(value) => formatTick(value, zone, style)}
             minTickGap={28}
@@ -175,7 +199,7 @@ export function WidgetPlot({
             ticks={axis.ticks}
             domain={axis.domain}
             tickFormatter={(value) => (typeof value === "number" ? axis.format(value) : "—")}
-            width={72}
+            width={Y_AXIS_WIDTH}
             axisLine={false}
             tickLine={false}
           />

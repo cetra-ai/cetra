@@ -20,7 +20,7 @@ function number(id: string, title: string, x: number, query: WidgetQuery): Widge
     kind: "chart",
     chart: { type: "number" },
     query,
-    layout: { x, y: 0, w: 2, h: 3 },
+    layout: { x, y: 0, w: 2, h: 4 },
   };
 }
 
@@ -75,12 +75,12 @@ export const OVERVIEW: Definition = {
     number("ov-4", "Cost", 6, query("traces", [{ agg: "sum", field: "cost_total" }])),
     number("ov-5", "Tokens", 8, query("traces", [{ agg: "sum", field: "total_tokens" }])),
 
-    heading("ov-6", "Volume", 3),
+    heading("ov-6", "Volume", 4),
     chart(
       "ov-7",
       "Traces & errors",
       0,
-      4,
+      5,
       { type: "bar", stacked: true },
       query("traces", [
         { agg: "count", where: "status <> 'error'", label: "OK" },
@@ -91,7 +91,7 @@ export const OVERVIEW: Definition = {
       "ov-8",
       "Tokens by type",
       6,
-      4,
+      5,
       { type: "bar", stacked: true },
       query(
         "spans",
@@ -105,12 +105,12 @@ export const OVERVIEW: Definition = {
       ),
     ),
 
-    heading("ov-9", "Quality", 11),
+    heading("ov-9", "Quality", 12),
     chart(
       "ov-10",
       "Error rate",
       0,
-      12,
+      13,
       { type: "bar", fade_below: 5 },
       query("traces", [{ agg: "rate", where: ERROR, label: "Error rate" }]),
     ),
@@ -118,7 +118,7 @@ export const OVERVIEW: Definition = {
       "ov-11",
       "Scores",
       6,
-      12,
+      13,
       { type: "line", split: true },
       query("scores", [{ agg: "avg", field: "value_num" }], {
         filter: "value_num IS NOT NULL",
@@ -126,12 +126,12 @@ export const OVERVIEW: Definition = {
       }),
     ),
 
-    heading("ov-12", "Latency", 19),
+    heading("ov-12", "Latency", 20),
     chart(
       "ov-13",
       "Latency",
       0,
-      20,
+      21,
       { type: "line" },
       query("traces", [
         { agg: "p50", field: "duration_ns", label: "p50" },
@@ -143,25 +143,18 @@ export const OVERVIEW: Definition = {
       "ov-14",
       "LLM latency by model",
       6,
-      20,
+      21,
       { type: "line" },
-      query(
-        "spans",
-        [
-          { agg: "p50", field: "duration_ns", label: "p50" },
-          { agg: "p95", field: "duration_ns", label: "p95" },
-        ],
-        {
-          filter: LLM,
-          breakdown: { field: "model", limit: 5, other: false },
-        },
-      ),
+      query("spans", [{ agg: "p95", field: "duration_ns", label: "p95" }], {
+        filter: LLM,
+        breakdown: { field: "model", limit: 5, other: false },
+      }),
     ),
     chart(
       "ov-15",
       "TTFT",
       0,
-      27,
+      28,
       { type: "line" },
       query(
         "spans",
@@ -173,12 +166,12 @@ export const OVERVIEW: Definition = {
       ),
     ),
 
-    heading("ov-16", "Cost", 34),
+    heading("ov-16", "Cost", 35),
     chart(
       "ov-17",
       "Cost by model",
       0,
-      35,
+      36,
       { type: "area", stacked: true },
       query("spans", [{ agg: "sum", field: "cost_total", label: "Cost" }], {
         filter: LLM,
@@ -189,7 +182,7 @@ export const OVERVIEW: Definition = {
       "ov-18",
       "Evaluation cost",
       6,
-      35,
+      36,
       { type: "bar" },
       query("traces", [{ agg: "sum", field: "cost_total", label: "Evaluation cost" }], {
         filter: "environment = 'cetra-eval'",
@@ -212,7 +205,7 @@ export const OVERVIEW: Definition = {
           breakdown: { field: "model", limit: 10, other: false },
         },
       ),
-      layout: { x: 0, y: 42, w: HALF, h: CHART_HEIGHT },
+      layout: { x: 0, y: 43, w: HALF, h: CHART_HEIGHT },
     },
   ],
 };

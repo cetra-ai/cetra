@@ -13,12 +13,20 @@ export const AXIS_TICK = {
   fill: "var(--muted-foreground)",
 } as const;
 
+/** Plot width per X-axis label: a label is about 90 px wide with its gap. */
+const LABEL_WIDTH_PX = 90;
+
+/** The X-axis label budget of a plot this many pixels wide: one per 90 px, and at least two. */
+export function tickBudget(plotWidth: number): number {
+  return Math.max(2, Math.floor(plotWidth / LABEL_WIDTH_PX));
+}
+
 /**
- * The X-axis tick times: the row times that fall on round times of the shown zone (see
- * `timeTicks`). When none does (for example one-day buckets in a local zone), every k-th row
- * with k = ceil(rows / maxTicks), so the axis has at most about `maxTicks` labels.
+ * The X-axis tick times, at most `maxTicks` of them: the row times that fall on round times of
+ * the shown zone (see `timeTicks`). When there are none within the budget (for example one-day
+ * buckets in a local zone), every k-th row with k = ceil(rows / maxTicks).
  */
-export function xAxisTicks(rows: readonly ChartRow[], utc: boolean, maxTicks = 8): number[] {
+export function xAxisTicks(rows: readonly ChartRow[], utc: boolean, maxTicks: number): number[] {
   const times = rows.map((row) => row.time);
   const first = times[0];
   const last = times.at(-1);
@@ -27,7 +35,7 @@ export function xAxisTicks(rows: readonly ChartRow[], utc: boolean, maxTicks = 8
   }
   const round = new Set(timeTicks(first, last, utc, maxTicks));
   const onRound = times.filter((time) => round.has(time));
-  if (onRound.length > 0) {
+  if (onRound.length > 0 && onRound.length <= maxTicks) {
     return onRound;
   }
   const every = Math.ceil(times.length / maxTicks);

@@ -145,7 +145,7 @@ function ChartWidget({
     <section
       aria-label={title}
       aria-busy={busy || undefined}
-      className="flex min-h-[220px] min-w-0 flex-col rounded-md border p-3 md:h-full"
+      className="flex min-h-[220px] min-w-0 flex-col overflow-hidden rounded-md border p-3 md:h-full md:min-h-0"
     >
       <TitleBar actions={actions}>
         <h3 className="min-w-0 flex-1 text-body font-medium">{title}</h3>
@@ -280,28 +280,38 @@ function SeriesBody({
   if (chart.type === "line" && chart.split) {
     const groups = sortedGroups(plot.columns);
     const shown = groups.slice(0, SPLIT_CHARTS);
+    // The mini charts share the card's height in equal rows, up to SPLIT_COLUMNS to a row.
+    const gridColumns = Math.min(shown.length, SPLIT_COLUMNS);
+    const gridRows = Math.ceil(shown.length / gridColumns);
     return (
-      <div className="mt-2 grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-auto sm:grid-cols-2 xl:grid-cols-3">
-        {shown.map((group) => {
-          const columns = plot.columns.filter((column) => column.group === group);
-          const name = group === null ? "Other" : (group ?? "");
-          return (
-            <div key={name} className="flex h-40 min-w-0 flex-col">
-              <span className="truncate text-caption font-medium">{name}</span>
-              <WidgetPlot
-                title={`${title} · ${name}`}
-                kind="line"
-                stacked={false}
-                columns={columns}
-                rows={plot.rows}
-                bucketNs={answer.bucket_ns}
-                maxTicks={MINI_X_TICKS}
-                onBucket={open}
-                onZoom={zoom}
-              />
-            </div>
-          );
-        })}
+      <div className="mt-2 flex min-h-0 flex-1 flex-col gap-1">
+        <div
+          className="grid min-h-0 flex-1 gap-3"
+          style={{
+            gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))`,
+            gridTemplateRows: `repeat(${gridRows}, minmax(0, 1fr))`,
+          }}
+        >
+          {shown.map((group) => {
+            const members = plot.columns.filter((column) => column.group === group);
+            const name = group === null ? "Other" : (group ?? "");
+            return (
+              <div key={name} className="flex min-h-0 min-w-0 flex-col">
+                <span className="truncate text-caption font-medium">{name}</span>
+                <WidgetPlot
+                  title={`${title} · ${name}`}
+                  kind="line"
+                  stacked={false}
+                  columns={members}
+                  rows={plot.rows}
+                  bucketNs={answer.bucket_ns}
+                  onBucket={open}
+                  onZoom={zoom}
+                />
+              </div>
+            );
+          })}
+        </div>
         {groups.length > shown.length ? (
           <p className="text-caption text-muted-foreground">+{groups.length - shown.length} more</p>
         ) : null}
@@ -316,7 +326,6 @@ function SeriesBody({
       columns={plot.columns}
       rows={plot.rows}
       bucketNs={answer.bucket_ns}
-      maxTicks={MAIN_X_TICKS}
       fadeBelow={chart.type === "bar" ? chart.fade_below : undefined}
       onBucket={open}
       onZoom={zoom}
@@ -338,9 +347,8 @@ function sortedGroups(columns: readonly PlotColumn[]): (string | null | undefine
 
 /** Split charts shown in a widget; more groups than this are a "+N more" line. */
 const SPLIT_CHARTS = 6;
-/** X-axis labels of a widget's chart, and of a split chart. */
-const MAIN_X_TICKS = 6;
-const MINI_X_TICKS = 4;
+/** Split charts side by side at most; more groups wrap to a new row. */
+const SPLIT_COLUMNS = 3;
 
 /** The bucket width for a range: the smallest that gives at most 60 buckets. */
 function bucketOf(context: WidgetContext): ChartBucket {
