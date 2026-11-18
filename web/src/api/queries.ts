@@ -1,4 +1,5 @@
 import { keepPreviousData, queryOptions } from "@tanstack/react-query";
+import { chooseBucket } from "@/lib/chart-scale";
 import { $api, api } from "./client";
 import { projectRef } from "./project-ref";
 import type { Schema } from "./types";
@@ -341,7 +342,7 @@ export function metricsQuery(
       query: {
         from: query.from,
         to: query.to,
-        bucket: "auto",
+        bucket: chooseBucket(Date.parse(query.from), Date.parse(query.to)),
         ...(query.filter ? { filter: query.filter } : {}),
         ...(query.groupBy ? { group_by: query.groupBy } : {}),
         ...(query.includeEval ? { include_eval: true } : {}),

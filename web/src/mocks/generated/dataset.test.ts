@@ -332,3 +332,22 @@ it("counts only the user's traces in metrics when a user is given", () => {
   expect(tracesKpi(userId)).toBe(visible.filter((trace) => trace.user_id === userId).length);
   expect(tracesKpi(undefined)).toBe(visible.length);
 });
+
+it("aligns metric buckets to their width from the epoch and counts each trace once", () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 400 });
+  const HOUR = 3_600_000;
+  const from = Date.parse("2026-05-20T00:30:00.000Z");
+  const to = Date.parse("2026-05-20T03:30:00.000Z");
+  const response = dataset.metrics(from, to, "1h", false, false, undefined);
+  const traces = response.series.find((series) => series.metric === "traces");
+  const times = (traces?.points ?? []).map((point) => Date.parse(point.time));
+  expect(times).toEqual(
+    [0, 1, 2, 3].map((hour) => Date.parse("2026-05-20T00:00:00.000Z") + hour * HOUR),
+  );
+  for (const time of times) {
+    expect(time % HOUR).toBe(0);
+  }
+  const counted = (traces?.points ?? []).reduce((total, point) => total + (point.value ?? 0), 0);
+  const kpi = response.kpis.find((item) => item.metric === "traces")?.value;
+  expect(counted).toBe(kpi);
+});

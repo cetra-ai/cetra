@@ -12,7 +12,10 @@ export type KpiDirection = "up" | "down" | "flat";
 export type KpiDelta = {
   value?: number;
   previous?: number;
+  /** Undefined when the previous value is 0. */
   changePct?: number;
+  /** Set when the previous value is 0 and the value is above 0. */
+  isNew?: true;
   direction: KpiDirection;
 };
 
@@ -36,6 +39,33 @@ export function seriesByMetric(
     }
   }
   return grouped;
+}
+
+/**
+ * A colour index for every group in the response, the same on every chart of the dashboard:
+ * the models of `top_models` first (by cost, in that order), then the other groups
+ * alphabetically. Groups are the series' `group` values.
+ */
+export function groupColorIndex(
+  response: Pick<Schema<"MetricsResponse">, "series" | "top_models">,
+): Map<string, number> {
+  const present = new Set<string>();
+  for (const series of response.series) {
+    if (series.group) {
+      present.add(series.group);
+    }
+  }
+  const ranked = new Set<string>();
+  for (const model of response.top_models) {
+    if (present.has(model.model)) {
+      ranked.add(model.model);
+    }
+  }
+  const rest = [...present]
+    .filter((group) => !ranked.has(group))
+    .sort((left, right) => left.localeCompare(right));
+  const order = [...ranked, ...rest];
+  return new Map(order.map((group, index) => [group, index]));
 }
 
 /**
@@ -116,7 +146,10 @@ export function kpiDelta(kpi: { value?: number; previous?: number }): KpiDelta {
     return { value, previous, direction: "flat" };
   }
   const direction: KpiDirection = value > previous ? "up" : value < previous ? "down" : "flat";
-  const changePct = previous === 0 ? undefined : ((value - previous) / previous) * 100;
+  if (previous === 0) {
+    return value > 0 ? { value, previous, isNew: true, direction } : { value, previous, direction };
+  }
+  const changePct = ((value - previous) / previous) * 100;
   return { value, previous, changePct, direction };
 }
 
@@ -183,6 +216,28 @@ export function formatPercent(rate: number): string {
 
 export function formatCount(value: number): string {
   return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(Math.round(value));
+}
+
+/**
+ * `minuend - subtrahend` per time, for the OK traces of a stacked error chart. A time the
+ * subtrahend has no point for counts as 0; a time the minuend has no value for is a gap.
+ */
+export function differenceSeries(
+  minuend: MetricSeries,
+  subtrahend: MetricSeries | undefined,
+): MetricSeries {
+  const subtracted = subtrahend
+    ? pointMap(subtrahend.points)
+    : new Map<number, number | undefined>();
+  const points: Point[] = minuend.points.map((point) => {
+    const time = epochMs(point.time);
+    const value = point.value;
+    if (value === undefined || time === undefined) {
+      return { time: point.time };
+    }
+    return { time: point.time, value: value - (subtracted.get(time) ?? 0) };
+  });
+  return { metric: minuend.metric, group: minuend.group, points };
 }
 
 /** Sum of present points. `undefined` when every point is a gap. */

@@ -3,26 +3,71 @@ import { ArrowDown, ArrowUp, Minus } from "lucide-react";
 import type { Schema } from "@/api/types";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { formatKpi, type KpiDirection, type KpiMetric, kpiDelta } from "@/lib/metrics";
+import {
+  epochMs,
+  formatKpi,
+  type KpiDelta,
+  type KpiDirection,
+  type KpiMetric,
+  kpiDelta,
+  type MetricName,
+  type MetricSeries,
+  seriesByMetric,
+} from "@/lib/metrics";
 
-/** Whether a rise in the metric is bad news: the tile's delta colour flips. */
-export const KPI_ADVERSE: Record<KpiMetric, boolean> = {
-  traces: false,
-  error_rate: true,
-  latency_p95: true,
-  cost_total: true,
-  total_tokens: false,
+/**
+ * What a rise in a metric means. `up-good`: a rise is good news. `up-bad`: a
+ * rise is bad news. `neutral`: the delta is shown in the muted colour.
+ */
+export type KpiTone = "up-good" | "up-bad" | "neutral";
+
+export const KPI_TONE: Record<KpiMetric, KpiTone> = {
+  traces: "neutral",
+  error_rate: "up-bad",
+  latency_p95: "up-bad",
+  cost_total: "up-bad",
+  total_tokens: "neutral",
 };
 
-const TILES: { metric: KpiMetric; label: string; adverse: boolean }[] = [
-  { metric: "traces", label: "Traces", adverse: KPI_ADVERSE.traces },
-  { metric: "error_rate", label: "Error rate", adverse: KPI_ADVERSE.error_rate },
-  { metric: "latency_p95", label: "p95 latency", adverse: KPI_ADVERSE.latency_p95 },
-  { metric: "cost_total", label: "Cost", adverse: KPI_ADVERSE.cost_total },
-  { metric: "total_tokens", label: "Tokens", adverse: KPI_ADVERSE.total_tokens },
+/** A change of at least this many percent shows as a ratio (`×6`) instead. */
+const RATIO_FROM_PCT = 500;
+const SPARK_HEIGHT = 20;
+const TOKEN_METRICS: readonly MetricName[] = [
+  "input_tokens",
+  "output_tokens",
+  "cache_read_tokens",
+  "cache_write_tokens",
+];
+/** The series behind the KPI sparklines: a grouped one has no sparkline. */
+const TREND_METRICS: ReadonlySet<MetricName> = new Set<MetricName>([
+  "traces",
+  "errors",
+  "error_rate",
+  "latency_p95",
+  "cost",
+  ...TOKEN_METRICS,
+]);
+
+/** Per-bucket values of each tile's sparkline, in time order. `null` is a gap. */
+export type KpiTrend = Partial<Record<KpiMetric, readonly (number | null)[]>>;
+
+const TILES: { metric: KpiMetric; label: string }[] = [
+  { metric: "traces", label: "Traces" },
+  { metric: "error_rate", label: "Error rate" },
+  { metric: "latency_p95", label: "p95 latency" },
+  { metric: "cost_total", label: "Cost" },
+  { metric: "total_tokens", label: "Tokens" },
 ];
 
-export function KpiRow({ kpis }: { kpis: readonly Schema<"Kpi">[] }) {
+export function KpiRow({
+  kpis,
+  trend,
+  onSelect,
+}: {
+  kpis: readonly Schema<"Kpi">[];
+  trend?: KpiTrend;
+  onSelect?: (metric: KpiMetric) => void;
+}) {
   return (
     <div className="grid grid-cols-2 gap-2 md:grid-cols-5">
       {TILES.map((tile) => (
@@ -30,6 +75,8 @@ export function KpiRow({ kpis }: { kpis: readonly Schema<"Kpi">[] }) {
           key={tile.metric}
           tile={tile}
           kpi={kpis.find((item) => item.metric === tile.metric)}
+          trend={trend?.[tile.metric]}
+          onSelect={onSelect}
         />
       ))}
     </div>
@@ -50,62 +97,192 @@ export function KpiRowSkeleton() {
   );
 }
 
-function KpiTile({ tile, kpi }: { tile: (typeof TILES)[number]; kpi?: Schema<"Kpi"> }) {
+function KpiTile({
+  tile,
+  kpi,
+  trend,
+  onSelect,
+}: {
+  tile: (typeof TILES)[number];
+  kpi?: Schema<"Kpi">;
+  trend?: readonly (number | null)[];
+  onSelect?: (metric: KpiMetric) => void;
+}) {
   const delta = kpiDelta(kpi ?? {});
-  const previous = delta.previous === undefined ? "—" : formatKpi(tile.metric, delta.previous);
+  const value = delta.value === undefined ? "—" : formatKpi(tile.metric, delta.value);
+  const previous =
+    delta.previous === undefined ? "no data" : formatKpi(tile.metric, delta.previous);
   return (
     <Tooltip>
       <TooltipTrigger
         type="button"
-        className="focus-ring flex h-16 flex-col justify-center rounded-md border px-3 text-left"
-        aria-label={`${tile.label}: ${delta.value === undefined ? "—" : formatKpi(tile.metric, delta.value)}`}
+        className="focus-ring flex min-h-16 flex-col justify-center rounded-md border px-3 py-1 text-left"
+        aria-label={`${tile.label}: ${value}`}
+        onClick={() => onSelect?.(tile.metric)}
       >
         <span className="text-muted-foreground text-caption">{tile.label}</span>
         <span className="flex items-baseline gap-2">
-          <span className="font-mono text-body tabular-nums">
-            {delta.value === undefined ? "—" : formatKpi(tile.metric, delta.value)}
-          </span>
-          <Delta adverse={tile.adverse} direction={delta.direction} changePct={delta.changePct} />
+          <span className="font-mono text-body tabular-nums">{value}</span>
+          <Delta tone={KPI_TONE[tile.metric]} delta={delta} />
         </span>
+        <Sparkline values={trend} />
       </TooltipTrigger>
-      <TooltipContent>Previous: {previous}</TooltipContent>
+      <TooltipContent>Previous period: {previous}</TooltipContent>
     </Tooltip>
   );
 }
 
-export function Delta({
-  adverse,
-  direction,
-  changePct,
-}: {
-  adverse: boolean;
-  direction: KpiDirection;
-  changePct?: number;
-}) {
-  const Icon = direction === "up" ? ArrowUp : direction === "down" ? ArrowDown : Minus;
+export function Delta({ tone, delta }: { tone: KpiTone; delta: KpiDelta }) {
+  const Icon = delta.direction === "up" ? ArrowUp : delta.direction === "down" ? ArrowDown : Minus;
   return (
     <span
       className={cn(
         "inline-flex items-center gap-0.5 text-caption",
-        deltaClass(adverse, direction),
+        deltaClass(tone, delta.isNew ? "up" : delta.direction),
       )}
     >
-      <Icon aria-hidden className="size-3" />
-      {changePct === undefined ? null : `${formatChange(changePct)}%`}
+      {delta.isNew ? null : <Icon aria-hidden className="size-3" />}
+      {deltaText(delta)}
     </span>
   );
 }
 
-function deltaClass(adverse: boolean, direction: KpiDirection): string {
-  if (direction === "flat") {
+/** The badge text: `new`, a ratio for large changes, otherwise the percentage. `null` shows no text. */
+function deltaText(delta: KpiDelta): string | null {
+  if (delta.isNew) {
+    return "new";
+  }
+  if (delta.changePct === undefined) {
+    return null;
+  }
+  if (Math.abs(delta.changePct) >= RATIO_FROM_PCT && delta.value !== undefined && delta.previous) {
+    return `×${formatChange(delta.value / delta.previous)}`;
+  }
+  return `${formatChange(delta.changePct)}%`;
+}
+
+function deltaClass(tone: KpiTone, direction: KpiDirection): string {
+  if (tone === "neutral" || direction === "flat") {
     return "text-muted-foreground";
   }
-  const improved = adverse ? direction === "down" : direction === "up";
-  return improved ? "text-chart-2" : "text-destructive";
+  const good = tone === "up-good" ? direction === "up" : direction === "down";
+  return good ? "text-chart-2" : "text-destructive";
 }
 
 function formatChange(changePct: number): string {
   const abs = Math.abs(changePct);
   const rounded = abs >= 10 ? Math.round(abs) : Math.round(abs * 10) / 10;
   return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+}
+
+/**
+ * A small line under the value. Gaps break the line. Nothing is drawn with
+ * fewer than two present values.
+ */
+function Sparkline({ values }: { values?: readonly (number | null)[] }) {
+  if (!values) {
+    return null;
+  }
+  const present = values.filter(isNumber);
+  if (present.length < 2) {
+    return null;
+  }
+  const min = Math.min(...present);
+  const span = Math.max(...present) - min;
+  const last = values.length - 1;
+  const runs: string[][] = [];
+  let run: string[] = [];
+  values.forEach((value, index) => {
+    if (!isNumber(value)) {
+      runs.push(run);
+      run = [];
+      return;
+    }
+    const x = last === 0 ? 0 : (index / last) * 100;
+    const y =
+      span === 0
+        ? SPARK_HEIGHT / 2
+        : SPARK_HEIGHT - 2 - ((value - min) / span) * (SPARK_HEIGHT - 4);
+    run.push(`${x.toFixed(2)},${y.toFixed(2)}`);
+  });
+  runs.push(run);
+  return (
+    <svg
+      aria-hidden="true"
+      className="text-muted-foreground mt-1 block h-5 w-full"
+      viewBox={`0 0 100 ${SPARK_HEIGHT}`}
+      preserveAspectRatio="none"
+    >
+      {runs
+        .filter((points) => points.length >= 2)
+        .map((points) => (
+          <polyline
+            key={points[0]}
+            points={points.join(" ")}
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={1.5}
+            vectorEffect="non-scaling-stroke"
+          />
+        ))}
+    </svg>
+  );
+}
+
+/**
+ * The sparkline values for each KPI tile, one per bucket in time order. Counts
+ * and costs are summed over their series, tokens over the four token metrics
+ * (`null` when all four lack a value), error rate and p95 latency take the
+ * first series. A response grouped by model has no sparklines: none of the
+ * tiles has one value per bucket then.
+ */
+export function kpiTrend(response: Schema<"MetricsResponse">): KpiTrend {
+  if (response.series.some((item) => item.group !== undefined && TREND_METRICS.has(item.metric))) {
+    return {};
+  }
+  const grouped = seriesByMetric(response);
+  const pick = (names: readonly MetricName[]): MetricSeries[] =>
+    names.flatMap((name) => grouped.get(name) ?? []);
+  return {
+    traces: trendOf(pick(["traces"]), "sum"),
+    error_rate: trendOf(pick(["error_rate"]), "first"),
+    latency_p95: trendOf(pick(["latency_p95"]), "first"),
+    cost_total: trendOf(pick(["cost"]), "sum"),
+    total_tokens: trendOf(pick(TOKEN_METRICS), "sum"),
+  };
+}
+
+function trendOf(series: readonly MetricSeries[], combine: "sum" | "first"): (number | null)[] {
+  const byTime = series.map((item) => {
+    const values = new Map<number, number>();
+    for (const point of item.points) {
+      const time = epochMs(point.time);
+      if (time !== undefined && point.value !== undefined) {
+        values.set(time, point.value);
+      }
+    }
+    return values;
+  });
+  const times = new Set<number>();
+  for (const item of series) {
+    for (const point of item.points) {
+      const time = epochMs(point.time);
+      if (time !== undefined) {
+        times.add(time);
+      }
+    }
+  }
+  return [...times]
+    .sort((left, right) => left - right)
+    .map((time) => {
+      if (combine === "first") {
+        return byTime[0]?.get(time) ?? null;
+      }
+      const values = byTime.map((map) => map.get(time)).filter(isNumber);
+      return values.length === 0 ? null : values.reduce((sum, value) => sum + value, 0);
+    });
+}
+
+function isNumber(value: number | null | undefined): value is number {
+  return typeof value === "number" && Number.isFinite(value);
 }

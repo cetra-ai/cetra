@@ -1,12 +1,14 @@
-import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
 import { expect, it, vi } from "vitest";
 import type { Schema } from "@/api/types";
 import { server } from "@/mocks/node";
+import { STORAGE_PREFIX } from "@/product";
 import { renderApp } from "@/test/render";
 
 const DASHBOARD = "/acme/support-bot/dashboard";
 const TRACES = "/acme/support-bot/traces";
+const COLLAPSED = `${STORAGE_PREFIX}dashboard.collapsed.acme/support-bot`;
 
 const TITLES = [
   "Traces & errors",
@@ -49,7 +51,9 @@ it("renders the five KPIs and every chart card", async () => {
     expect(screen.getByRole("button", { name: "Cost: $0.00955" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Tokens: 5.7k" })).toBeInTheDocument();
     for (const title of TITLES) {
-      expect(screen.getByRole("heading", { name: title })).toBeInTheDocument();
+      // A section heading (h2) can share a card's title ("Latency"), so look inside the card at h3.
+      const card = screen.getByRole("region", { name: new RegExp(`^${title}(: |$)`) });
+      expect(within(card).getByRole("heading", { level: 3, name: title })).toBeInTheDocument();
     }
     expect(
       screen.getByRole("region", { name: "Traces & errors: 5 traces, 1 error in range" }),
@@ -57,7 +61,7 @@ it("renders the five KPIs and every chart card", async () => {
     expect(
       screen.getByRole("region", { name: "TTFT: p50 600ms, p95 600ms in range" }),
     ).toBeInTheDocument();
-    expect(metrics.urls.some((url) => url.searchParams.get("bucket") === "auto")).toBe(true);
+    expect(metrics.urls.some((url) => url.searchParams.get("bucket") === "30m")).toBe(true);
     expect(metrics.urls.some((url) => url.searchParams.has("group_by"))).toBe(false);
   } finally {
     metrics.stop();
@@ -291,4 +295,73 @@ it("keeps the dashboard mounted while another project page is open", async () =>
   expect(tile.isConnected).toBe(true);
   await act(() => router.navigate({ href: DASHBOARD }));
   expect(screen.getByRole("button", { name: "Traces: 5" })).toBe(tile);
+});
+
+it("draws a sparkline in the KPI tiles", async () => {
+  await renderApp(DASHBOARD);
+  const tile = await screen.findByRole("button", { name: "Traces: 5" });
+  expect(tile.querySelector("polyline")).toBeInstanceOf(Element);
+});
+
+it("stores the collapsed sections of the project and shows them collapsed again", async () => {
+  localStorage.removeItem(COLLAPSED);
+  try {
+    await renderApp(DASHBOARD);
+    fireEvent.click(await screen.findByRole("button", { name: "Quality" }));
+    expect(screen.getByRole("button", { name: "Quality" })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    expect(screen.queryByRole("region", { name: /^Error rate: / })).not.toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem(COLLAPSED) ?? "null")).toEqual(["Quality"]);
+    cleanup();
+    await renderApp(DASHBOARD);
+    expect(await screen.findByRole("button", { name: "Quality" })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+  } finally {
+    localStorage.removeItem(COLLAPSED);
+  }
+});
+
+it("expands the section of a KPI tile's card before scrolling to the card", async () => {
+  localStorage.setItem(COLLAPSED, JSON.stringify(["Cost"]));
+  const scrolled: Element[] = [];
+  const spy = vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(function (
+    this: Element,
+  ) {
+    scrolled.push(this);
+  });
+  try {
+    await renderApp(DASHBOARD);
+    fireEvent.click(await screen.findByRole("button", { name: "Cost: $0.00955" }));
+    await waitFor(() => {
+      expect(scrolled.map((element) => element.id)).toEqual(["chart-cost-by-model"]);
+    });
+    expect(screen.getByRole("button", { name: "Cost" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("region", { name: /^Cost by model: / })).toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem(COLLAPSED) ?? "null")).toEqual([]);
+  } finally {
+    spy.mockRestore();
+    localStorage.removeItem(COLLAPSED);
+  }
+});
+
+it("scrolls a KPI tile to its chart card", async () => {
+  const scrolled: Element[] = [];
+  const spy = vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(function (
+    this: Element,
+  ) {
+    scrolled.push(this);
+  });
+  try {
+    await renderApp(DASHBOARD);
+    fireEvent.click(await screen.findByRole("button", { name: "Cost: $0.00955" }));
+    expect(scrolled.map((element) => element.id)).toEqual(["chart-cost-by-model"]);
+    fireEvent.click(screen.getByRole("button", { name: "Error rate: 20%" }));
+    expect(scrolled.at(-1)?.id).toBe("chart-error-rate");
+  } finally {
+    spy.mockRestore();
+  }
 });

@@ -4,18 +4,35 @@ import { useEffect, useRef, useState } from "react";
 import { problemOf } from "@/api/problem";
 import { metricsQuery } from "@/api/queries";
 import type { Schema } from "@/api/types";
-import { KpiRow, KpiRowSkeleton } from "@/components/charts/kpi-tiles";
-import { DashboardBody, DashboardBodySkeleton } from "@/components/charts/metric-chart";
+import { KpiRow, KpiRowSkeleton, kpiTrend } from "@/components/charts/kpi-tiles";
+import {
+  chartElementId,
+  DashboardBody,
+  DashboardBodySkeleton,
+  sectionOfChart,
+} from "@/components/charts/metric-chart";
 import { FilterBar } from "@/components/filter-bar/filter-bar";
 import { filterMessage } from "@/components/filter-bar/logic";
 import { ListToolbar } from "@/components/list-toolbar";
 import { useProject } from "@/components/shell/project-context";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { appendFilter, serializeChip } from "@/lib/dsl/dsl";
+import type { KpiMetric } from "@/lib/metrics";
 import { bucketRange } from "@/lib/metrics";
 import type { DashboardSearch } from "@/lib/search/dashboard";
 import { type RangeState, rangeFromSearch, resolveRange } from "@/lib/time-range";
+import { STORAGE_PREFIX } from "@/product";
 
 const METRICS_PATH = "/api/v1/projects/{project}/metrics";
+
+/** The chart card each KPI tile scrolls to, by its title. */
+const KPI_CHART: Record<KpiMetric, string> = {
+  traces: "Traces & errors",
+  error_rate: "Error rate",
+  latency_p95: "Latency",
+  cost_total: "Cost by model",
+  total_tokens: "Tokens by type",
+};
 
 /** The window's end is rounded down to the minute, so visits within one minute share a cache key. */
 function minuteAnchor(now = Date.now()): number {
@@ -47,6 +64,40 @@ export function DashboardView({ search }: { search: DashboardSearch }) {
   const queryClient = useQueryClient();
   const range = rangeFromSearch(search);
   const rangeKey = range.kind === "preset" ? range.preset : `${range.from}\n${range.to}`;
+  const scrollRef = useRef<HTMLDivElement>(null);
+  // The collapsed sections, per project. The state records the key it was read for, so a
+  // project change reads that project's sections.
+  const collapsedKey = `${STORAGE_PREFIX}dashboard.collapsed.${org}/${project}`;
+  const [collapsedState, setCollapsedState] = useState(() => ({
+    key: collapsedKey,
+    names: readCollapsed(collapsedKey),
+  }));
+  const collapsed =
+    collapsedState.key === collapsedKey ? collapsedState.names : readCollapsed(collapsedKey);
+  // A KPI tile whose card sits in a collapsed section expands it first; the card is scrolled to
+  // once it is rendered (the effect below).
+  const pendingScroll = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const id = pendingScroll.current;
+    if (id === undefined) {
+      return;
+    }
+    pendingScroll.current = undefined;
+    scrollToCard(id);
+  });
+  const sections = {
+    collapsed,
+    onToggle: (title: string) => {
+      const next = new Set(collapsed);
+      if (next.has(title)) {
+        next.delete(title);
+      } else {
+        next.add(title);
+      }
+      writeCollapsed(collapsedKey, next);
+      setCollapsedState({ key: collapsedKey, names: next });
+    },
+  };
   const [anchor, setAnchor] = useState(() => minuteAnchor());
   const seenRange = useRef(rangeKey);
   useEffect(() => {
@@ -101,6 +152,44 @@ export function DashboardView({ search }: { search: DashboardSearch }) {
   const shownAt = metrics.isPlaceholderData ? latestCached()?.dataUpdatedAt : metrics.dataUpdatedAt;
   const updatedAt = data && shownAt ? shownAt : undefined;
 
+  /** Shows another window: the toolbar's range picker and a zoom drag both come here. */
+  function changeRange(next: RangeState) {
+    seenRange.current = next.kind === "preset" ? next.preset : `${next.from}\n${next.to}`;
+    setAnchor(minuteAnchor());
+    void navigate({
+      to: "/$org/$project/dashboard",
+      params: { org, project },
+      search: (prev) => withRange(prev, next),
+    });
+  }
+
+  function zoomTo(fromMs: number, toMs: number) {
+    changeRange({
+      kind: "absolute",
+      from: new Date(fromMs).toISOString(),
+      to: new Date(toMs).toISOString(),
+    });
+  }
+
+  /** Scrolls to a chart card, within this dashboard (the page may hold others). */
+  function scrollToCard(id: string) {
+    const card = scrollRef.current?.querySelector(`#${id}`);
+    card?.scrollIntoView({ block: "start", behavior: "smooth" });
+  }
+
+  /** Scrolls to the chart card of a KPI tile, expanding its section first when it is collapsed. */
+  function scrollToChart(metric: KpiMetric) {
+    const title = KPI_CHART[metric];
+    const id = chartElementId(title);
+    const section = sectionOfChart(title);
+    if (section !== undefined && collapsed.has(section)) {
+      pendingScroll.current = id;
+      sections.onToggle(section);
+      return;
+    }
+    scrollToCard(id);
+  }
+
   function openBucket(timeMs: number) {
     if (!data) {
       return;
@@ -119,6 +208,25 @@ export function DashboardView({ search }: { search: DashboardSearch }) {
     });
   }
 
+  /** The traces of one model: the same range and flags, with the facet's `models` clause added. */
+  function openModel(model: string) {
+    const clause = serializeChip({
+      kind: "contains",
+      field: { column: "models" },
+      values: [model],
+    });
+    void navigate({
+      to: "/$org/$project/traces",
+      params: { org, project },
+      search: {
+        ...(range.kind === "preset" ? { range: range.preset } : { from: range.from, to: range.to }),
+        filter: appendFilter(search.filter ?? "", clause),
+        ...(search.eval ? { eval: 1 as const } : {}),
+        ...(search.exp ? { exp: 1 as const } : {}),
+      },
+    });
+  }
+
   return (
     <div className="flex h-full min-h-0 flex-1 flex-col">
       <TooltipProvider>
@@ -126,15 +234,7 @@ export function DashboardView({ search }: { search: DashboardSearch }) {
           title="Dashboard"
           idPrefix="dashboard"
           range={range}
-          onRange={(next) => {
-            seenRange.current = next.kind === "preset" ? next.preset : `${next.from}\n${next.to}`;
-            setAnchor(minuteAnchor());
-            void navigate({
-              to: "/$org/$project/dashboard",
-              params: { org, project },
-              search: (prev) => withRange(prev, next),
-            });
-          }}
+          onRange={changeRange}
           onRefresh={() => {
             const next = minuteAnchor();
             if (next === anchor) {
@@ -195,7 +295,7 @@ export function DashboardView({ search }: { search: DashboardSearch }) {
             </div>
           }
         />
-        <div className="min-h-0 flex-1 overflow-auto p-3">
+        <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto p-3">
           {filterError ? (
             <div className="mx-auto flex max-w-md flex-col gap-2 px-4 py-16">
               <h2 className="text-body font-medium">{filterError.title}</h2>
@@ -203,13 +303,19 @@ export function DashboardView({ search }: { search: DashboardSearch }) {
             </div>
           ) : data ? (
             <>
-              <KpiRow kpis={data.kpis} />
-              <DashboardBody response={data} onBucket={openBucket} />
+              <KpiRow kpis={data.kpis} trend={kpiTrend(data)} onSelect={scrollToChart} />
+              <DashboardBody
+                response={data}
+                onBucket={openBucket}
+                onZoom={zoomTo}
+                onModel={openModel}
+                sections={sections}
+              />
             </>
           ) : (
             <div role="status" aria-label="Loading dashboard">
               <KpiRowSkeleton />
-              <DashboardBodySkeleton />
+              <DashboardBodySkeleton sections={sections} />
             </div>
           )}
         </div>
@@ -265,6 +371,28 @@ function withFilter(search: DashboardSearch, value: string): DashboardSearch {
 function withFlag(search: DashboardSearch, key: "eval" | "exp", on: boolean): DashboardSearch {
   const { [key]: _flag, ...rest } = search;
   return on ? { ...rest, [key]: 1 } : rest;
+}
+
+/** The collapsed section titles stored for a project; none when storage is unavailable or invalid. */
+function readCollapsed(key: string): Set<string> {
+  try {
+    const stored: unknown = JSON.parse(localStorage.getItem(key) ?? "[]");
+    if (!Array.isArray(stored)) {
+      return new Set();
+    }
+    return new Set(stored.filter((item): item is string => typeof item === "string"));
+  } catch {
+    return new Set();
+  }
+}
+
+/** Stores the collapsed sections of a project; without storage the choice lasts for this visit. */
+function writeCollapsed(key: string, names: ReadonlySet<string>) {
+  try {
+    localStorage.setItem(key, JSON.stringify([...names]));
+  } catch {
+    // Storage is unavailable (private window, blocked site data): the state is kept in memory.
+  }
 }
 
 function withGroup(search: DashboardSearch, group: DashboardSearch["group"]): DashboardSearch {

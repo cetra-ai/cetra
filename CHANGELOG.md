@@ -36,6 +36,7 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 - Preset filters (Errors, Slow, Expensive, Has score, LLM), value autocomplete in the filter editor, a "+ Filter" button with a searchable field picker and token input for `IN`, and wrapping chips in a new filter row.
 - Lists opened without URL parameters keep the range, flags and compatible filters of the last list (D-C-14).
 - A right-click menu on filterable list cells: filter, exclude, copy, open the session or user.
+- Dashboard: sections (Volume, Quality, Latency, Cost) that collapse, KPI sparklines, a shared hover cursor across charts, drag to zoom the range, per-score small charts, and top-model rows that open the filtered traces (D-C-15).
 - Online rules: `GET /online-rules/stats` answers the last 24 hours per rule, with the finished jobs by hour and the score summary with an hourly series (D-I-50), and the reworked Online rules page shows them beside a full-width list with a side panel: status, spend, hourly jobs, score summary and trend, and recent failures.
 - Experiments:
   - The list is full width, with a status strip, metadata tags, score badges with the change since the previous run, errors, latency and cost, and a trend chart per dataset. Experiments open in the list's panel (drawer, bottom or page).
@@ -91,6 +92,7 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Changed
 
+- Dashboard charts use round axis ticks, at most 60 buckets, the error colour for errors and one colour per model; change badges show `new` or `×N` instead of huge percentages. The list toolbars' Eval and Experiments switches are now one "Include" menu (D-C-15).
 - The project sidebar groups its pages into Observe, Monitor, Evaluate and Explore, with live badges on Alerts, Online rules and Experiments, a Recent group, and the account menu, Docs link and version in its footer; `g` then a letter now reaches every project page (Spans moves to `g p`, Sessions to `g s`), and the sidebar starts collapsed below 1024 px (D-C-12).
 - Settings: `/settings` is now an overview with a live status per section; every settings page shares one layout with per-card Save, a danger zone last, inline validation and an unsaved-changes prompt; lists (API keys, members, invites, tokens, LLM connections, channels, model prices, score definitions) get search, sort, status pills and a row panel; destructive actions ask for the item's name; the settings sidebar has a filter and a usage meter, and ⌘K lists every settings page.
 - `GET /experiments/compare` takes `only=regressed|improved|changed` in place of `regressions_only`; compare cells carry `improved`, and score deltas count the improved and regressed items (D-J-21).

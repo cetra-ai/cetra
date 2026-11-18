@@ -505,10 +505,13 @@ it("includes evaluation traces when eval is on", async () => {
   };
   server.events.on("request:start", onStart);
   try {
-    const { router } = await renderApp("/acme/support-bot/traces");
+    const { router, user } = await renderApp("/acme/support-bot/traces");
     await screen.findByRole("grid", { name: "Traces" });
     expect(screen.queryByText("judge helpfulness")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("switch", { name: "Eval" }));
+    await user.click(
+      screen.getByRole("button", { name: /^Include evaluation and experiment traces/ }),
+    );
+    await user.click(await screen.findByRole("menuitemcheckbox", { name: "Evaluation traces" }));
     expect(await screen.findByText("judge helpfulness")).toBeInTheDocument();
     expect(urls.some((url) => url.searchParams.get("include_eval") === "true")).toBe(true);
     expect(router.state.location.search).toMatchObject({ eval: 1 });

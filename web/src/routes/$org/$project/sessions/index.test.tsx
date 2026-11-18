@@ -84,10 +84,13 @@ it("uses the include-eval fixture when eval is on", async () => {
   };
   server.events.on("request:start", onStart);
   try {
-    await renderApp("/acme/support-bot/sessions");
+    const { user } = await renderApp("/acme/support-bot/sessions");
     const grid = await screen.findByRole("grid", { name: "Sessions" });
     expect(within(grid).queryByText("3")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("switch", { name: "Eval" }));
+    await user.click(
+      screen.getByRole("button", { name: /^Include evaluation and experiment traces/ }),
+    );
+    await user.click(await screen.findByRole("menuitemcheckbox", { name: "Evaluation traces" }));
     expect(await screen.findByText("3")).toBeInTheDocument();
     expect(urls.some((url) => url.searchParams.get("include_eval") === "true")).toBe(true);
   } finally {

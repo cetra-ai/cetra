@@ -1,5 +1,5 @@
 import type { Schema } from "@/api/types";
-import { Delta, KPI_ADVERSE } from "@/components/charts/kpi-tiles";
+import { Delta, KPI_TONE, type KpiTone } from "@/components/charts/kpi-tiles";
 import { formatKpi, type KpiDelta, type KpiMetric, kpiDelta } from "@/lib/metrics";
 
 const ITEMS: { label: string; metric: KpiMetric }[] = [
@@ -34,7 +34,7 @@ export function UsersSummary({
             label={item.label}
             value={delta.value === undefined ? "—" : formatKpi(item.metric, delta.value)}
             delta={delta}
-            adverse={KPI_ADVERSE[item.metric]}
+            tone={KPI_TONE[item.metric]}
             previous={delta.previous === undefined ? "—" : formatKpi(item.metric, delta.previous)}
           />
         );
@@ -47,22 +47,22 @@ function Item({
   label,
   value,
   delta,
-  adverse,
+  tone,
   previous,
 }: {
   label: string;
   value: string;
   delta?: KpiDelta;
-  adverse?: boolean;
+  tone?: KpiTone;
   previous?: string;
 }) {
   return (
     <span className="shrink-0" title={previous === undefined ? undefined : `Previous: ${previous}`}>
       <span className="text-muted-foreground">{label}</span> <span className="num">{value}</span>
-      {delta && adverse !== undefined ? (
+      {delta && tone !== undefined ? (
         <>
           {" "}
-          <Delta adverse={adverse} direction={delta.direction} changePct={delta.changePct} />
+          <Delta tone={tone} delta={delta} />
         </>
       ) : null}
     </span>

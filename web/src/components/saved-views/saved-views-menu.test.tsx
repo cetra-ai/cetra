@@ -155,7 +155,10 @@ it("shows a failed save in the menu", async () => {
 it("keeps the search empty after an in-page change", async () => {
   const { router, user } = await renderApp("/acme/support-bot/traces?eval=1");
   await screen.findByRole("grid", { name: "Traces" });
-  await user.click(screen.getByRole("switch", { name: "Eval" }));
+  await user.click(
+    screen.getByRole("button", { name: /^Include evaluation and experiment traces/ }),
+  );
+  await user.click(await screen.findByRole("menuitemcheckbox", { name: "Evaluation traces" }));
   await waitFor(() => {
     expect(router.state.location.search).toEqual({});
   });

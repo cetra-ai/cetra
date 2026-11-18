@@ -3,10 +3,13 @@ import { type ReactNode, type RefObject, useEffect, useRef, useState } from "rea
 import { useShortcut } from "@/components/command/use-shortcut";
 import { TimeRangePicker } from "@/components/time-range/time-range-picker";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { RangeState } from "@/lib/time-range";
 
 const SEARCH_DEBOUNCE_MS = 300;
@@ -98,19 +101,12 @@ export function ListToolbar({
         {onSearch ? (
           <SearchBox inputRef={searchRef} value={search ?? ""} onValue={onSearch} />
         ) : null}
-        <Flag
-          id={`${idPrefix}-eval`}
-          label="Eval"
-          tooltip="Show evaluation traces"
-          checked={evalOn}
-          onCheckedChange={onEval}
-        />
-        <Flag
-          id={`${idPrefix}-exp`}
-          label="Experiments"
-          tooltip="Show experiment traces"
-          checked={expOn}
-          onCheckedChange={onExp}
+        <IncludeMenu
+          id={`${idPrefix}-include`}
+          evalOn={evalOn}
+          onEval={onEval}
+          expOn={expOn}
+          onExp={onExp}
         />
         {columns}
         {views}
@@ -144,31 +140,52 @@ function UpdatedAgo({ at }: { at: number }) {
   return <span className="shrink-0 text-caption text-muted-foreground">{label}</span>;
 }
 
-function Flag({
+function IncludeMenu({
   id,
-  label,
-  tooltip,
-  checked,
-  onCheckedChange,
+  evalOn,
+  onEval,
+  expOn,
+  onExp,
 }: {
   id: string;
-  label: string;
-  tooltip: string;
-  checked: boolean;
-  onCheckedChange: (on: boolean) => void;
+  evalOn: boolean;
+  onEval: (on: boolean) => void;
+  expOn: boolean;
+  onExp: (on: boolean) => void;
 }) {
+  const count = Number(evalOn) + Number(expOn);
+  const name = "Include evaluation and experiment traces";
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span className="inline-flex shrink-0 items-center gap-1.5">
-          <Switch id={id} size="sm" checked={checked} onCheckedChange={onCheckedChange} />
-          <Label htmlFor={id} className="text-caption font-normal">
-            {label}
-          </Label>
-        </span>
-      </TooltipTrigger>
-      <TooltipContent>{tooltip}</TooltipContent>
-    </Tooltip>
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          id={id}
+          type="button"
+          variant="ghost"
+          size="xs"
+          aria-label={count > 0 ? `${name}, ${count} on` : name}
+          className="shrink-0"
+        >
+          {count > 0 ? `Include · ${count}` : "Include"}
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuCheckboxItem
+          checked={evalOn}
+          onCheckedChange={onEval}
+          onSelect={(event) => event.preventDefault()}
+        >
+          Evaluation traces
+        </DropdownMenuCheckboxItem>
+        <DropdownMenuCheckboxItem
+          checked={expOn}
+          onCheckedChange={onExp}
+          onSelect={(event) => event.preventDefault()}
+        >
+          Experiment traces
+        </DropdownMenuCheckboxItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

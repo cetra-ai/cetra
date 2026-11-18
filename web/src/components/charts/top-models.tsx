@@ -5,7 +5,20 @@ import { formatCount } from "@/lib/metrics";
 export const TOP_MODELS_TITLE = "Top models by cost";
 export const TOP_MODELS_UNIT = "USD";
 
-export function TopModels({ models }: { models: readonly Schema<"ModelUsage">[] }) {
+/** The level of a card's title: h2 on the flat grid, h3 under a dashboard section heading. */
+export type HeadingLevel = "h2" | "h3";
+
+export function TopModels({
+  models,
+  onModel,
+  level = "h2",
+}: {
+  models: readonly Schema<"ModelUsage">[];
+  onModel?: (model: string) => void;
+  level?: HeadingLevel;
+}) {
+  // Each row's bar is its share of the listed models' cost.
+  const listed = models.reduce((sum, model) => sum + (model.cost_total ?? 0), 0);
   const label =
     models.length === 0
       ? `${TOP_MODELS_TITLE}: no data in range`
@@ -14,7 +27,7 @@ export function TopModels({ models }: { models: readonly Schema<"ModelUsage">[] 
           .join(", ")} in range`;
   return (
     <section aria-label={label} className="flex h-[220px] min-w-0 flex-col rounded-md border p-3">
-      <CardHeading title={TOP_MODELS_TITLE} unit={TOP_MODELS_UNIT} />
+      <CardHeading title={TOP_MODELS_TITLE} unit={TOP_MODELS_UNIT} level={level} />
       {models.length === 0 ? (
         <NoData />
       ) : (
@@ -29,20 +42,50 @@ export function TopModels({ models }: { models: readonly Schema<"ModelUsage">[] 
               </tr>
             </thead>
             <tbody>
-              {models.map((model) => (
-                <tr key={model.model} className="border-t border-border/60">
-                  <td className="max-w-0 truncate py-1 pr-2 font-mono">{model.model}</td>
-                  <td className="py-1 text-right font-mono tabular-nums">
-                    {formatCount(model.llm_count)}
-                  </td>
-                  <td className="py-1 text-right font-mono tabular-nums">
-                    {formatTokens(model.total_tokens)}
-                  </td>
-                  <td className="py-1 text-right font-mono tabular-nums">
-                    {formatCost(model.cost_total)}
-                  </td>
-                </tr>
-              ))}
+              {models.map((model) => {
+                const share = listed > 0 ? ((model.cost_total ?? 0) / listed) * 100 : 0;
+                return (
+                  <tr
+                    key={model.model}
+                    className={`border-t border-border/60 ${onModel ? "cursor-pointer hover:bg-muted/50" : ""}`}
+                    // A click on the row opens the traces of its model, as a mouse shortcut to the button.
+                    onClick={onModel ? () => onModel(model.model) : undefined}
+                  >
+                    <td className="max-w-0 truncate py-1 pr-2 font-mono">
+                      {onModel ? (
+                        <button
+                          type="button"
+                          aria-label={`Open traces of ${model.model}`}
+                          className="focus-ring max-w-full truncate rounded-sm text-left font-mono"
+                          onClick={(event) => {
+                            // The row's own click would open the same traces a second time.
+                            event.stopPropagation();
+                            onModel(model.model);
+                          }}
+                        >
+                          {model.model}
+                        </button>
+                      ) : (
+                        model.model
+                      )}
+                    </td>
+                    <td className="py-1 text-right font-mono tabular-nums">
+                      {formatCount(model.llm_count)}
+                    </td>
+                    <td className="py-1 text-right font-mono tabular-nums">
+                      {formatTokens(model.total_tokens)}
+                    </td>
+                    <td className="py-1 text-right font-mono tabular-nums">
+                      {formatCost(model.cost_total)}
+                      <div
+                        aria-hidden="true"
+                        className="ml-auto mt-0.5 h-0.5 rounded-full bg-chart-1"
+                        style={{ width: `${share}%` }}
+                      />
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -51,10 +94,22 @@ export function TopModels({ models }: { models: readonly Schema<"ModelUsage">[] 
   );
 }
 
-export function CardHeading({ title, unit }: { title: string; unit: string }) {
+export function CardHeading({
+  title,
+  unit,
+  level = "h2",
+}: {
+  title: string;
+  unit: string;
+  level?: HeadingLevel;
+}) {
   return (
     <header className="flex items-baseline justify-between gap-2">
-      <h2 className="text-body font-medium">{title}</h2>
+      {level === "h3" ? (
+        <h3 className="text-body font-medium">{title}</h3>
+      ) : (
+        <h2 className="text-body font-medium">{title}</h2>
+      )}
       <span className="font-mono text-caption text-muted-foreground">{unit}</span>
     </header>
   );

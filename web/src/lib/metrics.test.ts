@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import type { MetricSeries } from "@/lib/metrics";
-import { foldGroups, kpiDelta, seriesByMetric, toChartRows } from "@/lib/metrics";
+import { differenceSeries, foldGroups, kpiDelta, seriesByMetric, toChartRows } from "@/lib/metrics";
 
 const T0 = "2026-01-01T10:00:00.000000000Z";
 const T1 = "2026-01-01T10:10:00.000000000Z";
@@ -118,6 +118,7 @@ it("reports kpi direction and leaves the percentage undefined when the previous 
   expect(kpiDelta({ value: 5, previous: 0 })).toEqual({
     value: 5,
     previous: 0,
+    isNew: true,
     direction: "up",
   });
   expect(kpiDelta({ value: 0, previous: 0 })).toEqual({
@@ -127,4 +128,28 @@ it("reports kpi direction and leaves the percentage undefined when the previous 
   });
   expect(kpiDelta({ value: 5 })).toEqual({ value: 5, direction: "flat" });
   expect(kpiDelta({ previous: 5 })).toEqual({ previous: 5, direction: "flat" });
+});
+
+it("subtracts the errors per time, counting a missing error as 0", () => {
+  const traces = {
+    metric: "traces" as const,
+    points: [
+      { time: "2026-11-17T00:00:00Z", value: 10 },
+      { time: "2026-11-17T01:00:00Z", value: 4 },
+      { time: "2026-11-17T02:00:00Z" },
+    ],
+  };
+  const errors = {
+    metric: "errors" as const,
+    points: [{ time: "2026-11-17T00:00:00Z", value: 3 }],
+  };
+  expect(differenceSeries(traces, errors).points).toEqual([
+    { time: "2026-11-17T00:00:00Z", value: 7 },
+    { time: "2026-11-17T01:00:00Z", value: 4 },
+    { time: "2026-11-17T02:00:00Z" },
+  ]);
+  expect(differenceSeries(traces, undefined).points[0]).toEqual({
+    time: "2026-11-17T00:00:00Z",
+    value: 10,
+  });
 });

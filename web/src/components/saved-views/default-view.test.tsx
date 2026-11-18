@@ -83,7 +83,10 @@ it("removes the notice on the next search change", async () => {
   setContext({ source: "traces", range: "1h", filter: "user_id = 'u-1'" });
   const { router, user } = await renderApp("/acme/support-bot/spans");
   await screen.findByRole("status");
-  await user.click(screen.getByRole("switch", { name: "Eval" }));
+  await user.click(
+    screen.getByRole("button", { name: /^Include evaluation and experiment traces/ }),
+  );
+  await user.click(await screen.findByRole("menuitemcheckbox", { name: "Evaluation traces" }));
   await waitFor(() => {
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });

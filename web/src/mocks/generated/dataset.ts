@@ -1209,8 +1209,12 @@ function metricsFrom(
   bucket: Schema<"MetricsBucket"> | undefined,
 ): Schema<"MetricsResponse"> {
   const widthMs = bucketWidth(bucket, from, to);
+  // Buckets sit on multiples of their width from the epoch; the first one may start before
+  // `from` and the last one is the bucket holding `to - 1` (spec 05, dashboard metrics).
+  const firstStart = Math.floor(from / widthMs) * widthMs;
+  const lastStart = Math.floor((to - 1) / widthMs) * widthMs;
   const times: number[] = [];
-  for (let time = from; time < to; time += widthMs) {
+  for (let time = firstStart; time <= lastStart; time += widthMs) {
     times.push(time);
   }
   const inRange = traces.filter((trace) => {
@@ -1219,7 +1223,7 @@ function metricsFrom(
   });
   const buckets = times.map(() => [] as Schema<"TraceSummary">[]);
   for (const trace of inRange) {
-    const slot = Math.floor((Date.parse(trace.start_time) - from) / widthMs);
+    const slot = Math.floor(Date.parse(trace.start_time) / widthMs) - Math.floor(from / widthMs);
     buckets[slot]?.push(trace);
   }
   const previousFrom = from - (to - from);
@@ -1273,7 +1277,7 @@ function metricsFrom(
       times.map((time) =>
         evalTraces.filter((trace) => {
           const start = Date.parse(trace.start_time);
-          return start >= time && start < time + widthMs && start < to;
+          return start >= from && start >= time && start < time + widthMs && start < to;
         }),
       ),
       (rows) => sum(rows, (trace) => trace.cost_total ?? 0),

@@ -6,7 +6,9 @@ import {
   createRouter,
   RouterProvider,
 } from "@tanstack/react-router";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { type ReactNode, useState } from "react";
 import { expect, it } from "vitest";
 import { ListToolbar } from "@/components/list-toolbar";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -16,8 +18,9 @@ async function renderToolbar(extra: {
   filter?: boolean;
   withToggle?: boolean;
   withPresets?: boolean;
+  toolbar?: ReactNode;
 }) {
-  const toolbar = (
+  const toolbar = extra.toolbar ?? (
     <TooltipProvider>
       <ListToolbar
         title="Traces"
@@ -66,4 +69,79 @@ it("puts the toggle, the presets and the filter in row 2", async () => {
   );
   // Row 1 keeps the title, not the filter.
   expect(screen.getByRole("heading", { name: "Traces" }).parentElement).not.toBe(row);
+});
+
+function Harness({ calls }: { calls: string[] }) {
+  const [evalOn, setEvalOn] = useState(false);
+  const [expOn, setExpOn] = useState(true);
+  return (
+    <TooltipProvider>
+      <ListToolbar
+        title="Traces"
+        range={{ kind: "preset", preset: "15m" }}
+        onRange={() => undefined}
+        onRefresh={() => undefined}
+        evalOn={evalOn}
+        onEval={(on) => {
+          calls.push(`eval:${on}`);
+          setEvalOn(on);
+        }}
+        expOn={expOn}
+        onExp={(on) => {
+          calls.push(`exp:${on}`);
+          setExpOn(on);
+        }}
+      />
+    </TooltipProvider>
+  );
+}
+
+it("shows how many trace kinds are included and toggles each from the Include menu", async () => {
+  const calls: string[] = [];
+  await renderToolbar({ toolbar: <Harness calls={calls} /> });
+  const user = userEvent.setup();
+  const trigger = await screen.findByRole("button", {
+    name: "Include evaluation and experiment traces, 1 on",
+  });
+  expect(trigger).toHaveTextContent(/^Include · 1$/);
+
+  await user.click(trigger);
+  expect(await screen.findByRole("menuitemcheckbox", { name: "Experiment traces" })).toBeChecked();
+  expect(screen.getByRole("menuitemcheckbox", { name: "Evaluation traces" })).not.toBeChecked();
+
+  await user.click(screen.getByRole("menuitemcheckbox", { name: "Evaluation traces" }));
+  // The menu stays open after a toggle.
+  expect(screen.getByRole("menuitemcheckbox", { name: "Evaluation traces" })).toBeChecked();
+  await waitFor(() => {
+    expect(trigger).toHaveTextContent(/^Include · 2$/);
+  });
+
+  await user.click(screen.getByRole("menuitemcheckbox", { name: "Experiment traces" }));
+  await waitFor(() => {
+    expect(trigger).toHaveTextContent(/^Include · 1$/);
+  });
+  expect(calls).toEqual(["eval:true", "exp:false"]);
+});
+
+it("names the Include trigger without a count when nothing is included", async () => {
+  await renderToolbar({
+    toolbar: (
+      <TooltipProvider>
+        <ListToolbar
+          title="Traces"
+          range={{ kind: "preset", preset: "15m" }}
+          onRange={() => undefined}
+          onRefresh={() => undefined}
+          evalOn={false}
+          onEval={() => undefined}
+          expOn={false}
+          onExp={() => undefined}
+        />
+      </TooltipProvider>
+    ),
+  });
+  const trigger = await screen.findByRole("button", {
+    name: "Include evaluation and experiment traces",
+  });
+  expect(trigger).toHaveTextContent(/^Include$/);
 });
