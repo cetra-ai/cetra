@@ -250,6 +250,10 @@ check-release: build-release
 run *args:
     cargo run -p cetra-cli -- {{args}}
 
+# Run the demo data generator (tools/demo), e.g. `just demo -- --help`
+demo *args:
+    cargo run -q -p cetra-demo -- {{args}}
+
 # Rust checks: format, lint, tests, supply chain
 check-rust: fmt-check lint test deny check-ee check-golden
 

@@ -840,6 +840,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "cetra-demo"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "clap",
+ "rand 0.10.3",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "cetra-eval"
 version = "0.0.0"
 dependencies = [
