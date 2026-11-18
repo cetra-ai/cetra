@@ -22,6 +22,7 @@ import { EvaluateSnippet } from "@/components/experiments/evaluate-snippet";
 import { CompareSelection, ExperimentsTable } from "@/components/experiments/experiments-table";
 import { RelativeTime } from "@/components/relative-time";
 import { useProject } from "@/components/shell/project-context";
+import { TopBarCrumb } from "@/components/shell/top-bar-slot";
 import { MetricChip } from "@/components/trace/metric-chip";
 import { Button } from "@/components/ui/button";
 import {
@@ -193,6 +194,9 @@ function DatasetPage() {
             /
           </span>
           <h2 className="truncate text-ui font-medium">{dataset.name}</h2>
+          <TopBarCrumb>
+            <span className="max-w-64 truncate text-body font-medium">{dataset.name}</span>
+          </TopBarCrumb>
         </nav>
         <div className="flex flex-wrap items-center gap-1.5">
           <MetricChip icon={Rows3} label="Items">

@@ -391,3 +391,14 @@ it("keeps the way back to the list after a tab and a version change", async () =
   expect(screen.getByRole("link", { name: "Back to Datasets" })).toBeInTheDocument();
   await waitFor(() => expect(router.state.status).toBe("idle"));
 });
+
+it("names the dataset in the breadcrumb", async () => {
+  await renderApp(DATASET_URL);
+
+  // The top bar comes first in the document; a page may have its own breadcrumb navigation.
+  const [crumbs] = await screen.findAllByRole("navigation", { name: "Breadcrumb" });
+  if (!crumbs) {
+    throw new Error("no breadcrumb navigation");
+  }
+  expect(await within(crumbs).findByText(datasetFixture.name)).toBeInTheDocument();
+});

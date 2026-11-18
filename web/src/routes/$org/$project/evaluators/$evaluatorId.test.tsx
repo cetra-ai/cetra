@@ -315,3 +315,14 @@ it("keeps the way back when switching tabs", async () => {
     expect(router.state.status).toBe("idle");
   });
 });
+
+it("names the evaluator in the breadcrumb", async () => {
+  await renderApp(EVALUATOR_URL);
+
+  // The top bar comes first in the document; a page may have its own breadcrumb navigation.
+  const [crumbs] = await screen.findAllByRole("navigation", { name: "Breadcrumb" });
+  if (!crumbs) {
+    throw new Error("no breadcrumb navigation");
+  }
+  expect(await within(crumbs).findByText(evaluatorFixture.name)).toBeInTheDocument();
+});

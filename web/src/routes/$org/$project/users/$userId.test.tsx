@@ -77,7 +77,8 @@ it("shows the header and an empty state when the user has no trace in the range"
   );
   await renderApp("/acme/support-bot/users/user-42");
   expect(await screen.findByText("No traces from this user in this range")).toBeInTheDocument();
-  expect(screen.getByText("user-42")).toBeInTheDocument();
+  // The breadcrumb names the user too, so the id is looked up inside the page.
+  expect(within(screen.getByRole("main")).getByText("user-42")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: presetLabel("30d") })).toBeInTheDocument();
 });
 
@@ -206,4 +207,15 @@ it("goes back to the user page from a session opened there", async () => {
   await waitFor(() => {
     expect(router.state.status).toBe("idle");
   });
+});
+
+it("names the user in the breadcrumb", async () => {
+  await renderApp("/acme/support-bot/users/user-42");
+
+  // The top bar comes first in the document; a page may have its own breadcrumb navigation.
+  const [crumbs] = await screen.findAllByRole("navigation", { name: "Breadcrumb" });
+  if (!crumbs) {
+    throw new Error("no breadcrumb navigation");
+  }
+  expect(await within(crumbs).findByText("Ada Example")).toBeInTheDocument();
 });

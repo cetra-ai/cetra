@@ -322,3 +322,14 @@ it("goes back to the trace the session was opened from", async () => {
     expect(router.state.status).toBe("idle");
   });
 });
+
+it("names the session in the breadcrumb", async () => {
+  await renderApp("/acme/support-bot/sessions/sess-001");
+
+  // The top bar comes first in the document; a page may have its own breadcrumb navigation.
+  const [crumbs] = await screen.findAllByRole("navigation", { name: "Breadcrumb" });
+  if (!crumbs) {
+    throw new Error("no breadcrumb navigation");
+  }
+  expect(await within(crumbs).findByText("sess-001")).toBeInTheDocument();
+});

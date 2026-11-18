@@ -14,6 +14,7 @@ import { EvaluatorHistory } from "@/components/evaluators/evaluator-history";
 import { EvaluatorOverview } from "@/components/evaluators/evaluator-overview";
 import { RuleConflicts } from "@/components/online-rules/rule-conflicts";
 import { useProject } from "@/components/shell/project-context";
+import { TopBarCrumb } from "@/components/shell/top-bar-slot";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { canManageEvaluation } from "@/lib/roles";
@@ -130,6 +131,9 @@ function EvaluatorPage() {
               /
             </span>
             <h2 className="text-title font-medium">{evaluator.name}</h2>
+            <TopBarCrumb>
+              <span className="max-w-64 truncate text-body font-medium">{evaluator.name}</span>
+            </TopBarCrumb>
           </div>
           <p className="text-caption text-muted-foreground">
             {KIND_LABELS[evaluator.kind]} · version {evaluator.version} · score{" "}

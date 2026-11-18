@@ -17,6 +17,7 @@ import {
   sessionScoreNames,
 } from "@/components/session-columns";
 import { useProject } from "@/components/shell/project-context";
+import { TopBarCrumb } from "@/components/shell/top-bar-slot";
 import { TimeRangePicker } from "@/components/time-range/time-range-picker";
 import { TimeText } from "@/components/time-text";
 import { MetricChip } from "@/components/trace/metric-chip";
@@ -269,6 +270,9 @@ function UserHeader({
           <span className="min-w-0 truncate text-title font-semibold select-text">{userId}</span>
         )}
         <CopyButton value={userId} label="user ID" />
+        <TopBarCrumb>
+          <span className="max-w-64 truncate text-body font-medium">{identity.name ?? userId}</span>
+        </TopBarCrumb>
         {identity.plan ? <PlanPill plan={identity.plan} /> : null}
         {identity.email ? (
           <span className="text-body text-muted-foreground select-text">{identity.email}</span>
