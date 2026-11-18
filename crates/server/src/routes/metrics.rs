@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::hash::Hash;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use axum::extract::{Extension, State};
@@ -29,15 +30,30 @@ const TTL_NS: i64 = 10_000_000_000;
 /// Most cached answers. A full cache drops the expired ones, then the oldest.
 const MAX_ENTRIES: usize = 256;
 
-/// `GET /metrics` answers, kept for [`TTL_NS`] per project and parameters (spec 05 § Dashboard metrics).
-#[derive(Debug, Default)]
-pub(crate) struct MetricsCache {
-    entries: Mutex<HashMap<MetricsKey, Slot>>,
+/// Answers kept for [`TTL_NS`] per key. Concurrent misses of one key share one computation.
+#[derive(Debug)]
+pub(crate) struct AnswerCache<K, V> {
+    entries: Mutex<HashMap<K, Slot<V>>>,
 }
 
-/// Everything that changes the answer.
+impl<K, V> Default for AnswerCache<K, V> {
+    fn default() -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+/// A cache key that names the project its answer belongs to, so a project's answers can be
+/// dropped together (D-M-11).
+pub(crate) trait ProjectKey {
+    /// The project the answer is of.
+    fn project(&self) -> ProjectId;
+}
+
+/// Everything that changes a `GET /metrics` answer.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct MetricsKey {
+pub(crate) struct MetricsKey {
     project: ProjectId,
     from: i64,
     to: i64,
@@ -51,22 +67,28 @@ struct MetricsKey {
     data_access_days: Option<u64>,
 }
 
+impl ProjectKey for MetricsKey {
+    fn project(&self) -> ProjectId {
+        self.project
+    }
+}
+
 /// One key's answer. The cell is filled once, so concurrent misses of the same key share one
 /// computation (single-flight), and a failure is shared by everyone waiting on it. A failed
 /// slot is removed as it settles, so the next request runs the query again.
 #[derive(Debug)]
-struct Slot {
+struct Slot<V> {
     /// `IN_FLIGHT` until the computation finishes, then `TTL_NS` after that finish.
     expires_at: i64,
-    answer: Arc<OnceCell<Cached>>,
+    answer: Arc<OnceCell<Cached<V>>>,
 }
 
 /// A computation's outcome. An error is shared, so it is an `Arc`: waiters each answer with it.
-type Cached = Result<Arc<MetricsResponse>, Arc<ApiError>>;
+type Cached<V> = Result<Arc<V>, Arc<ApiError>>;
 
-/// The error of a metrics request. It answers with the same problem response as the error it
+/// The error of a cached request. It answers with the same problem response as the error it
 /// wraps, whichever request it is sent to.
-pub(crate) struct SharedError(Arc<ApiError>);
+pub(crate) struct SharedError(pub(crate) Arc<ApiError>);
 
 impl IntoResponse for SharedError {
     fn into_response(self) -> Response {
@@ -74,7 +96,17 @@ impl IntoResponse for SharedError {
     }
 }
 
-impl MetricsCache {
+impl From<ApiError> for SharedError {
+    fn from(error: ApiError) -> Self {
+        Self(Arc::new(error))
+    }
+}
+
+impl<K, V> AnswerCache<K, V>
+where
+    K: Clone + Eq + Hash,
+    V: Send + Sync,
+{
     /// The answer for `key`: the cached one, or `compute`'s, which runs once even when
     /// identical requests miss together. `now` is read when the request starts and again when
     /// the computation finishes, which stamps the answer's expiry.
@@ -83,15 +115,15 @@ impl MetricsCache {
     ///
     /// Returns the error of `compute`, shared with every request that waited on it. Nothing
     /// stays cached for it.
-    async fn get_or_compute<F, Fut>(
+    pub(crate) async fn get_or_compute<F, Fut>(
         &self,
-        key: MetricsKey,
+        key: K,
         now: impl Fn() -> i64,
         compute: F,
-    ) -> Result<Arc<MetricsResponse>, Arc<ApiError>>
+    ) -> Result<Arc<V>, Arc<ApiError>>
     where
         F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<MetricsResponse, ApiError>>,
+        Fut: Future<Output = Result<V, ApiError>>,
     {
         let answer = self.slot(key.clone(), now());
         let cached = answer
@@ -103,7 +135,7 @@ impl MetricsCache {
     }
 
     /// The cell of `key` while it is fresh at `now`. Otherwise a new empty one replaces it.
-    fn slot(&self, key: MetricsKey, now: i64) -> Arc<OnceCell<Cached>> {
+    fn slot(&self, key: K, now: i64) -> Arc<OnceCell<Cached<V>>> {
         let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(slot) = entries.get(&key).filter(|slot| now < slot.expires_at) {
             return Arc::clone(&slot.answer);
@@ -124,7 +156,7 @@ impl MetricsCache {
 
     /// Stamps the expiry of `answer` at `now`, the time its computation finished, or removes its
     /// slot when the computation failed. Only the slot that holds `answer` is touched.
-    fn settle(&self, key: &MetricsKey, answer: &Arc<OnceCell<Cached>>, failed: bool, now: i64) {
+    fn settle(&self, key: &K, answer: &Arc<OnceCell<Cached<V>>>, failed: bool, now: i64) {
         let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(slot) = entries.get_mut(key) else {
             return;
@@ -142,20 +174,23 @@ impl MetricsCache {
     }
 
     /// Drops every cached answer of `project` (D-M-11).
-    pub(crate) fn clear_project(&self, project: ProjectId) {
+    pub(crate) fn clear_project(&self, project: ProjectId)
+    where
+        K: ProjectKey,
+    {
         let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-        entries.retain(|key, _| key.project != project);
+        entries.retain(|key, _| key.project() != project);
     }
 }
 
 /// Makes room for one entry in a full cache: the expired entries go first, then the oldest.
-fn evict(entries: &mut HashMap<MetricsKey, Slot>, now: i64) {
+fn evict<K: Clone + Eq + Hash, V>(entries: &mut HashMap<K, Slot<V>>, now: i64) {
     entries.retain(|_, slot| now < slot.expires_at);
     if entries.len() < MAX_ENTRIES {
         return;
     }
     let excess = entries.len() + 1 - MAX_ENTRIES;
-    let mut by_age: Vec<(i64, MetricsKey)> = entries
+    let mut by_age: Vec<(i64, K)> = entries
         .iter()
         .map(|(key, slot)| (slot.expires_at, key.clone()))
         .collect();
@@ -230,7 +265,8 @@ async fn get_metrics(
     Ok(error::Json((*response).clone()))
 }
 
-fn bucket(bucket: MetricsBucket) -> storage::Bucket {
+/// The storage bucket of a request's bucket width.
+pub(crate) fn bucket(bucket: MetricsBucket) -> storage::Bucket {
     use storage::BucketWidth;
     let width = match bucket {
         MetricsBucket::Auto => return storage::Bucket::Auto,
@@ -247,7 +283,8 @@ fn bucket(bucket: MetricsBucket) -> storage::Bucket {
     storage::Bucket::Fixed(width)
 }
 
-fn storage_group_by(group_by: MetricsGroupBy) -> storage::GroupBy {
+/// The storage split of a request's `group_by`.
+pub(crate) fn storage_group_by(group_by: MetricsGroupBy) -> storage::GroupBy {
     match group_by {
         MetricsGroupBy::Model => storage::GroupBy::Model,
         MetricsGroupBy::Environment => storage::GroupBy::Environment,
@@ -379,7 +416,7 @@ mod tests {
         .unwrap()
     }
 
-    fn cached_keys(cache: &MetricsCache) -> Vec<MetricsKey> {
+    fn cached_keys(cache: &AnswerCache<MetricsKey, MetricsResponse>) -> Vec<MetricsKey> {
         let entries = cache.entries.lock().unwrap();
         let mut keys: Vec<MetricsKey> = entries.keys().cloned().collect();
         keys.sort_by_key(|key| (key.project, key.from));
@@ -388,7 +425,7 @@ mod tests {
 
     #[tokio::test]
     async fn clear_project_drops_only_that_project() {
-        let cache = MetricsCache::default();
+        let cache = AnswerCache::default();
         let (p, q) = (ProjectId::new_v7(), ProjectId::new_v7());
         for key in [key_at(p, 0), key_at(q, 0)] {
             cache
@@ -403,7 +440,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_identical_misses_run_the_query_once() {
-        let cache = Arc::new(MetricsCache::default());
+        let cache = Arc::new(AnswerCache::default());
         let runs = Arc::new(AtomicUsize::new(0));
         let key = key_at(ProjectId::new_v7(), 0);
         let mut tasks = Vec::new();
@@ -432,7 +469,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_waiters_share_one_failure_and_a_later_request_retries() {
-        let cache = Arc::new(MetricsCache::default());
+        let cache = Arc::new(AnswerCache::default());
         let runs = Arc::new(AtomicUsize::new(0));
         let key = key_at(ProjectId::new_v7(), 0);
         let mut tasks = Vec::new();
@@ -480,7 +517,7 @@ mod tests {
     #[tokio::test]
     async fn expiry_is_stamped_when_the_computation_finishes() {
         const SECOND: i64 = 1_000_000_000;
-        let cache = MetricsCache::default();
+        let cache = AnswerCache::default();
         let key = key_at(ProjectId::new_v7(), 0);
         let clock = Arc::new(AtomicI64::new(0));
         let now = {
@@ -519,7 +556,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_full_cache_evicts_the_oldest_answers() {
-        let cache = MetricsCache::default();
+        let cache = AnswerCache::default();
         let project = ProjectId::new_v7();
         for from in 0..MAX_ENTRIES as i64 {
             cache
@@ -550,7 +587,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_full_cache_drops_expired_answers_before_live_ones() {
-        let cache = MetricsCache::default();
+        let cache = AnswerCache::default();
         let project = ProjectId::new_v7();
         for from in 0..MAX_ENTRIES as i64 {
             cache

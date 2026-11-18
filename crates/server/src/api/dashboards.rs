@@ -8,6 +8,7 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use super::common::Limit;
+use super::metrics::{MetricsBucket, MetricsGroupBy};
 
 /// The view a widget query reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -143,6 +144,119 @@ impl WidgetQueryBody {
                 }),
         }
     }
+}
+
+/// Whether a widget query answers one value per bucket or one value over the range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WidgetShape {
+    /// One value per bucket.
+    Series,
+    /// One value over `[from, to)`.
+    Total,
+}
+
+/// Body of `POST /api/v1/projects/{project}/dashboards/query`. Spec 05 § Dashboard queries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WidgetQueryRequest {
+    /// Inclusive range start, RFC 3339.
+    #[schema(value_type = String, format = DateTime)]
+    pub from: String,
+    /// Exclusive range end, RFC 3339.
+    #[schema(value_type = String, format = DateTime)]
+    pub to: String,
+    /// Bucket width. Defaults to `auto`. Ignored for `total`.
+    #[serde(default)]
+    pub bucket: MetricsBucket,
+    /// The dashboard's filter, a traces expression.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<String>,
+    /// The dashboard's split. Ignored when the query has its own breakdown, and for scores.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_by: Option<MetricsGroupBy>,
+    /// Include traces from the evaluation environment. Default false.
+    #[serde(default)]
+    pub include_eval: bool,
+    /// Include experiment traces. Default false.
+    #[serde(default)]
+    pub include_experiments: bool,
+    /// The widget's query.
+    pub query: WidgetQueryBody,
+    /// `series` or `total`.
+    pub shape: WidgetShape,
+    /// `total` only: also the value over the previous range of the same length. Default false.
+    #[serde(default)]
+    pub compare: bool,
+}
+
+/// One bucket of a series. Spec 05 § Dashboard queries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct WidgetPoint {
+    /// Bucket start, nanoseconds since the Unix epoch. JSON is RFC 3339.
+    #[serde(with = "cetra_core::time_serde")]
+    #[schema(value_type = String, format = DateTime)]
+    pub time: i64,
+    /// The aggregate over the bucket. Omitted when it is null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<f64>,
+    /// Source rows of the group in the bucket.
+    pub rows: u64,
+}
+
+/// One measure of one group over the buckets. Spec 05 § Dashboard queries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct WidgetSeries {
+    /// Index of the measure in the query.
+    pub measure: usize,
+    /// The breakdown value. Omitted without a breakdown, and for the other group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// Whether this is the group of every other value.
+    pub other: bool,
+    /// One point per bucket with rows, in time order.
+    pub points: Vec<WidgetPoint>,
+}
+
+/// A series answer. `shape` is `series`. Spec 05 § Dashboard queries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct WidgetSeriesResponse {
+    /// Width of every bucket, nanoseconds.
+    pub bucket_ns: i64,
+    /// The series: breakdown order (largest first, other last), then measure order.
+    pub series: Vec<WidgetSeries>,
+}
+
+/// One group of a total, with every measure. Spec 05 § Dashboard queries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct TotalRow {
+    /// The breakdown value. Omitted without a breakdown, and for the other group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// Whether this is the group of every other value.
+    pub other: bool,
+    /// The value of each measure, in query order. Null when the group has no rows.
+    pub values: Vec<Option<f64>>,
+    /// With `compare`, the same values over the previous range of the same length.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous: Option<Vec<Option<f64>>>,
+}
+
+/// A total answer. `shape` is `total`. Spec 05 § Dashboard queries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct WidgetTotalResponse {
+    /// One row per group, in breakdown order (other last). One row without a breakdown.
+    pub rows: Vec<TotalRow>,
+}
+
+/// A widget answer, tagged by `shape`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "shape", rename_all = "snake_case")]
+pub enum WidgetQueryResponse {
+    /// `shape: series`.
+    Series(WidgetSeriesResponse),
+    /// `shape: total`.
+    Total(WidgetTotalResponse),
 }
 
 /// Position and size of a widget on the 12-column grid.

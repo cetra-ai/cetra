@@ -24,6 +24,10 @@ use cetra_core::score::{Score, ScoreTarget, ScoreValue};
 use cetra_core::span::{Span, SpanEvent, SpanLink};
 use uuid::Uuid;
 
+use super::dashboards::{
+    TotalRow, WidgetPoint, WidgetQueryResponse, WidgetSeries, WidgetSeriesResponse,
+    WidgetTotalResponse,
+};
 use super::metrics::{
     Kpi, KpiMetric, MetricName, MetricPoint, MetricSeries, MetricsGroupBy, MetricsResponse,
     ModelUsage,
@@ -1174,6 +1178,47 @@ fn score_batch(batch: &RecordBatch, project_id: ProjectId) -> Result<Vec<Score>,
         });
     }
     Ok(out)
+}
+
+/// The API widget answer. Storage names map variant by variant.
+pub(crate) fn widget_response(data: cetra_storage::WidgetData) -> WidgetQueryResponse {
+    match data {
+        cetra_storage::WidgetData::Series { bucket_ns, series } => {
+            WidgetQueryResponse::Series(WidgetSeriesResponse {
+                bucket_ns,
+                series: series
+                    .into_iter()
+                    .map(|series| WidgetSeries {
+                        measure: series.measure,
+                        group: series.group,
+                        other: series.other,
+                        points: series
+                            .points
+                            .into_iter()
+                            .map(|point| WidgetPoint {
+                                time: point.time,
+                                value: point.value,
+                                rows: point.rows,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            })
+        }
+        cetra_storage::WidgetData::Total { rows } => {
+            WidgetQueryResponse::Total(WidgetTotalResponse {
+                rows: rows
+                    .into_iter()
+                    .map(|row| TotalRow {
+                        group: row.group,
+                        other: row.other,
+                        values: row.values,
+                        previous: row.previous,
+                    })
+                    .collect(),
+            })
+        }
+    }
 }
 
 /// The API dashboard response. Storage names map variant by variant.

@@ -1333,6 +1333,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{project}/dashboards/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Get one widget's data
+         * @description Answers one widget query over `[from, to)`: a series (one value per bucket) or a total (one value over the range, with `compare` also the previous range). Spec 05 § Dashboard queries. The dashboard's `filter` is a traces expression, and the default exclusions apply: evaluation traces (`environment = cetra-eval`) and experiment traces are left out unless `include_eval` or `include_experiments` is set. A read: a read-only personal access token and a `read` key may call it. Results are cached for 10 seconds per project and body.
+         */
+        post: operations["query_widget"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{project}/dashboards/{id}": {
         parameters: {
             query?: never;
@@ -8003,6 +8023,17 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** @description One group of a total, with every measure. Spec 05 § Dashboard queries. */
+        TotalRow: {
+            /** @description The breakdown value. Omitted without a breakdown, and for the other group. */
+            group?: string;
+            /** @description Whether this is the group of every other value. */
+            other: boolean;
+            /** @description With `compare`, the same values over the previous range of the same length. */
+            previous?: (number | null)[];
+            /** @description The value of each measure, in query order. Null when the group has no rows. */
+            values: (number | null)[];
+        };
         /**
          * @description Trace summary plus its span tree.
          *
@@ -8556,6 +8587,24 @@ export interface components {
          * @enum {string}
          */
         WidgetKind: "chart" | "heading";
+        /** @description One bucket of a series. Spec 05 § Dashboard queries. */
+        WidgetPoint: {
+            /**
+             * Format: int64
+             * @description Source rows of the group in the bucket.
+             */
+            rows: number;
+            /**
+             * Format: date-time
+             * @description Bucket start, nanoseconds since the Unix epoch. JSON is RFC 3339.
+             */
+            time: string;
+            /**
+             * Format: double
+             * @description The aggregate over the bucket. Omitted when it is null.
+             */
+            value?: number;
+        };
         /** @description A widget's query: one source, its measures and an optional breakdown. */
         WidgetQueryBody: {
             /** @description The split, if any. */
@@ -8567,11 +8616,79 @@ export interface components {
             /** @description The view the query reads. */
             source: components["schemas"]["WidgetSourceBody"];
         };
+        /** @description Body of `POST /api/v1/projects/{project}/dashboards/query`. Spec 05 § Dashboard queries. */
+        WidgetQueryRequest: {
+            /** @description Bucket width. Defaults to `auto`. Ignored for `total`. */
+            bucket?: components["schemas"]["MetricsBucket"];
+            /** @description `total` only: also the value over the previous range of the same length. Default false. */
+            compare?: boolean;
+            /** @description The dashboard's filter, a traces expression. */
+            filter?: string;
+            /**
+             * Format: date-time
+             * @description Inclusive range start, RFC 3339.
+             */
+            from: string;
+            /** @description The dashboard's split. Ignored when the query has its own breakdown, and for scores. */
+            group_by?: components["schemas"]["MetricsGroupBy"];
+            /** @description Include traces from the evaluation environment. Default false. */
+            include_eval?: boolean;
+            /** @description Include experiment traces. Default false. */
+            include_experiments?: boolean;
+            /** @description The widget's query. */
+            query: components["schemas"]["WidgetQueryBody"];
+            /** @description `series` or `total`. */
+            shape: components["schemas"]["WidgetShape"];
+            /**
+             * Format: date-time
+             * @description Exclusive range end, RFC 3339.
+             */
+            to: string;
+        };
+        /** @description A widget answer, tagged by `shape`. */
+        WidgetQueryResponse: (components["schemas"]["WidgetSeriesResponse"] & {
+            /** @enum {string} */
+            shape: "series";
+        }) | (components["schemas"]["WidgetTotalResponse"] & {
+            /** @enum {string} */
+            shape: "total";
+        });
+        /** @description One measure of one group over the buckets. Spec 05 § Dashboard queries. */
+        WidgetSeries: {
+            /** @description The breakdown value. Omitted without a breakdown, and for the other group. */
+            group?: string;
+            /** @description Index of the measure in the query. */
+            measure: number;
+            /** @description Whether this is the group of every other value. */
+            other: boolean;
+            /** @description One point per bucket with rows, in time order. */
+            points: components["schemas"]["WidgetPoint"][];
+        };
+        /** @description A series answer. `shape` is `series`. Spec 05 § Dashboard queries. */
+        WidgetSeriesResponse: {
+            /**
+             * Format: int64
+             * @description Width of every bucket, nanoseconds.
+             */
+            bucket_ns: number;
+            /** @description The series: breakdown order (largest first, other last), then measure order. */
+            series: components["schemas"]["WidgetSeries"][];
+        };
+        /**
+         * @description Whether a widget query answers one value per bucket or one value over the range.
+         * @enum {string}
+         */
+        WidgetShape: "series" | "total";
         /**
          * @description The view a widget query reads.
          * @enum {string}
          */
         WidgetSourceBody: "traces" | "spans" | "scores";
+        /** @description A total answer. `shape` is `total`. Spec 05 § Dashboard queries. */
+        WidgetTotalResponse: {
+            /** @description One row per group, in breakdown order (other last). One row without a breakdown. */
+            rows: components["schemas"]["TotalRow"][];
+        };
     };
     responses: never;
     parameters: never;
@@ -14691,6 +14808,114 @@ export interface operations {
             };
             /** @description Too many requests. */
             429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    query_widget: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WidgetQueryRequest"];
+            };
+        };
+        responses: {
+            /** @description The widget's answer, tagged by `shape`. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WidgetQueryResponse"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is not JSON. */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

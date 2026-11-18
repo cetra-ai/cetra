@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::api::common::Page;
+use crate::api::dashboards::WidgetQueryResponse;
 use crate::api::datasets::{Dataset, DatasetItem, DatasetVersion, ExperimentTrends, ItemChange};
 use crate::api::facets::FacetsResponse;
 use crate::api::metrics::MetricsResponse;
@@ -460,6 +461,28 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
     let request: Value = read_json(&api_dir().join("requests/sql-query.json"));
     let sql: SqlQueryResult = post_json(&app, cookie, "/sql", &request).await;
     out.add("run_sql", &[], &[], "static/sql-result.json", &sql);
+
+    // Widget queries (spec 05 § Dashboard queries): a series and a total with `compare`.
+    let series_request: Value = read_json(&api_dir().join("requests/dashboard-query-series.json"));
+    let series: WidgetQueryResponse =
+        post_json(&app, cookie, "/dashboards/query", &series_request).await;
+    out.add(
+        "query_widget",
+        &[],
+        &[],
+        "responses/dashboard-query-series.json",
+        &series,
+    );
+    let total_request: Value = read_json(&api_dir().join("requests/dashboard-query-total.json"));
+    let total: WidgetQueryResponse =
+        post_json(&app, cookie, "/dashboards/query", &total_request).await;
+    out.add(
+        "query_widget",
+        &[],
+        &[],
+        "responses/dashboard-query-total.json",
+        &total,
+    );
 
     // Checked against the static files, not written.
     let schema: SchemaResponse = fetch(&app, cookie, "/schema").await;

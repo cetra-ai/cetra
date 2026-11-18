@@ -7917,6 +7917,139 @@
         }
       }
     },
+    "/api/v1/projects/{project}/dashboards/query": {
+      "post": {
+        "tags": [
+          "dashboards"
+        ],
+        "summary": "Get one widget's data",
+        "description": "Answers one widget query over `[from, to)`: a series (one value per bucket) or a total (one value over the range, with `compare` also the previous range). Spec 05 § Dashboard queries. The dashboard's `filter` is a traces expression, and the default exclusions apply: evaluation traces (`environment = cetra-eval`) and experiment traces are left out unless `include_eval` or `include_experiments` is set. A read: a read-only personal access token and a `read` key may call it. Results are cached for 10 seconds per project and body.",
+        "operationId": "query_widget",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WidgetQueryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The widget's answer, tagged by `shape`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WidgetQueryResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is larger than the limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The request body is not JSON.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is busy or a dependency is unavailable. Retry later.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{project}/dashboards/{id}": {
       "get": {
         "tags": [
@@ -28738,6 +28871,46 @@
         },
         "additionalProperties": true
       },
+      "TotalRow": {
+        "type": "object",
+        "description": "One group of a total, with every measure. Spec 05 § Dashboard queries.",
+        "required": [
+          "other",
+          "values"
+        ],
+        "properties": {
+          "group": {
+            "type": "string",
+            "description": "The breakdown value. Omitted without a breakdown, and for the other group."
+          },
+          "other": {
+            "type": "boolean",
+            "description": "Whether this is the group of every other value."
+          },
+          "previous": {
+            "type": "array",
+            "items": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "description": "With `compare`, the same values over the previous range of the same length."
+          },
+          "values": {
+            "type": "array",
+            "items": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "description": "The value of each measure, in query order. Null when the group has no rows."
+          }
+        }
+      },
       "TraceDetail": {
         "type": "object",
         "description": "Trace summary plus its span tree.\n\nSpec 09 § Response shapes.",
@@ -29719,6 +29892,32 @@
           "heading"
         ]
       },
+      "WidgetPoint": {
+        "type": "object",
+        "description": "One bucket of a series. Spec 05 § Dashboard queries.",
+        "required": [
+          "time",
+          "rows"
+        ],
+        "properties": {
+          "rows": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Source rows of the group in the bucket.",
+            "minimum": 0
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Bucket start, nanoseconds since the Unix epoch. JSON is RFC 3339."
+          },
+          "value": {
+            "type": "number",
+            "format": "double",
+            "description": "The aggregate over the bucket. Omitted when it is null."
+          }
+        }
+      },
       "WidgetQueryBody": {
         "type": "object",
         "description": "A widget's query: one source, its measures and an optional breakdown.",
@@ -29749,6 +29948,173 @@
         },
         "additionalProperties": false
       },
+      "WidgetQueryRequest": {
+        "type": "object",
+        "description": "Body of `POST /api/v1/projects/{project}/dashboards/query`. Spec 05 § Dashboard queries.",
+        "required": [
+          "from",
+          "to",
+          "query",
+          "shape"
+        ],
+        "properties": {
+          "bucket": {
+            "$ref": "#/components/schemas/MetricsBucket",
+            "description": "Bucket width. Defaults to `auto`. Ignored for `total`."
+          },
+          "compare": {
+            "type": "boolean",
+            "description": "`total` only: also the value over the previous range of the same length. Default false."
+          },
+          "filter": {
+            "type": "string",
+            "description": "The dashboard's filter, a traces expression."
+          },
+          "from": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Inclusive range start, RFC 3339."
+          },
+          "group_by": {
+            "$ref": "#/components/schemas/MetricsGroupBy",
+            "description": "The dashboard's split. Ignored when the query has its own breakdown, and for scores."
+          },
+          "include_eval": {
+            "type": "boolean",
+            "description": "Include traces from the evaluation environment. Default false."
+          },
+          "include_experiments": {
+            "type": "boolean",
+            "description": "Include experiment traces. Default false."
+          },
+          "query": {
+            "$ref": "#/components/schemas/WidgetQueryBody",
+            "description": "The widget's query."
+          },
+          "shape": {
+            "$ref": "#/components/schemas/WidgetShape",
+            "description": "`series` or `total`."
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Exclusive range end, RFC 3339."
+          }
+        },
+        "additionalProperties": false
+      },
+      "WidgetQueryResponse": {
+        "oneOf": [
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/WidgetSeriesResponse",
+                "description": "`shape: series`."
+              },
+              {
+                "type": "object",
+                "required": [
+                  "shape"
+                ],
+                "properties": {
+                  "shape": {
+                    "type": "string",
+                    "enum": [
+                      "series"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "`shape: series`."
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/WidgetTotalResponse",
+                "description": "`shape: total`."
+              },
+              {
+                "type": "object",
+                "required": [
+                  "shape"
+                ],
+                "properties": {
+                  "shape": {
+                    "type": "string",
+                    "enum": [
+                      "total"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "`shape: total`."
+          }
+        ],
+        "description": "A widget answer, tagged by `shape`."
+      },
+      "WidgetSeries": {
+        "type": "object",
+        "description": "One measure of one group over the buckets. Spec 05 § Dashboard queries.",
+        "required": [
+          "measure",
+          "other",
+          "points"
+        ],
+        "properties": {
+          "group": {
+            "type": "string",
+            "description": "The breakdown value. Omitted without a breakdown, and for the other group."
+          },
+          "measure": {
+            "type": "integer",
+            "description": "Index of the measure in the query.",
+            "minimum": 0
+          },
+          "other": {
+            "type": "boolean",
+            "description": "Whether this is the group of every other value."
+          },
+          "points": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WidgetPoint"
+            },
+            "description": "One point per bucket with rows, in time order."
+          }
+        }
+      },
+      "WidgetSeriesResponse": {
+        "type": "object",
+        "description": "A series answer. `shape` is `series`. Spec 05 § Dashboard queries.",
+        "required": [
+          "bucket_ns",
+          "series"
+        ],
+        "properties": {
+          "bucket_ns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Width of every bucket, nanoseconds."
+          },
+          "series": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WidgetSeries"
+            },
+            "description": "The series: breakdown order (largest first, other last), then measure order."
+          }
+        }
+      },
+      "WidgetShape": {
+        "type": "string",
+        "description": "Whether a widget query answers one value per bucket or one value over the range.",
+        "enum": [
+          "series",
+          "total"
+        ]
+      },
       "WidgetSourceBody": {
         "type": "string",
         "description": "The view a widget query reads.",
@@ -29757,6 +30123,22 @@
           "spans",
           "scores"
         ]
+      },
+      "WidgetTotalResponse": {
+        "type": "object",
+        "description": "A total answer. `shape` is `total`. Spec 05 § Dashboard queries.",
+        "required": [
+          "rows"
+        ],
+        "properties": {
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TotalRow"
+            },
+            "description": "One row per group, in breakdown order (other last). One row without a breakdown."
+          }
+        }
       }
     },
     "securitySchemes": {

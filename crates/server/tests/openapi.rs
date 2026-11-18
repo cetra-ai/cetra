@@ -334,6 +334,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/projects/{project}/dashboards/{id}",
         "delete_dashboard",
     ),
+    (
+        "post",
+        "/api/v1/projects/{project}/dashboards/query",
+        "query_widget",
+    ),
     ("post", "/api/v1/projects/{project}/sql", "run_sql"),
     (
         "get",
@@ -1083,7 +1088,7 @@ fn document_lint() {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
         } else if *id == "post_org_sso_domain_verify" || *id == "delete_org_sso_provider" {
             expected_errors.extend(["401", "403", "404", "409", "429"]);
-        } else if *id == "run_sql" {
+        } else if *id == "run_sql" || *id == "query_widget" {
             expected_errors.extend(["400", "401", "403", "404", "413", "415", "422", "429"]);
         } else if *id == "create_deletion" {
             expected_errors.extend(["400", "401", "403", "404", "409", "422", "429"]);

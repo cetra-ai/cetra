@@ -48,8 +48,9 @@ use super::connections::{
 };
 use super::dashboards::{
     AggBody, BreakdownBody, Chart, ChartType, CreateDashboard, Dashboard, DashboardListParams,
-    DashboardSummary, Definition, Layout, MeasureBody, UpdateDashboard, Widget, WidgetKind,
-    WidgetQueryBody, WidgetSourceBody,
+    DashboardSummary, Definition, Layout, MeasureBody, TotalRow, UpdateDashboard, Widget,
+    WidgetKind, WidgetPoint, WidgetQueryBody, WidgetQueryRequest, WidgetQueryResponse,
+    WidgetSeries, WidgetSeriesResponse, WidgetShape, WidgetSourceBody, WidgetTotalResponse,
 };
 use super::datasets::{
     AddItemsRequest, AddItemsResponse, ChangeLimit, CreateDatasetRequest, Dataset, DatasetItem,
@@ -300,6 +301,14 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<MeasureBody>();
     set.insert::<AggBody>();
     set.insert::<BreakdownBody>();
+    set.insert::<WidgetQueryRequest>();
+    set.insert::<WidgetShape>();
+    set.insert::<WidgetQueryResponse>();
+    set.insert::<WidgetSeriesResponse>();
+    set.insert::<WidgetSeries>();
+    set.insert::<WidgetPoint>();
+    set.insert::<WidgetTotalResponse>();
+    set.insert::<TotalRow>();
     set.insert::<MetricsResponse>();
     set.insert::<FacetsResponse>();
     set.insert::<SqlQueryRequest>();
@@ -3899,6 +3908,18 @@ fn dashboard_paths(paths: PathsBuilder) -> PathsBuilder {
             &[400, 401, 403, 404, 409, 413, 415, 429],
         ))
         .build();
+    let query = operation("query_widget", "dashboards", "Get one widget's data")
+        .description(Some(
+            "Answers one widget query over `[from, to)`: a series (one value per bucket) or a total (one value over the range, with `compare` also the previous range). Spec 05 § Dashboard queries. The dashboard's `filter` is a traces expression, and the default exclusions apply: evaluation traces (`environment = cetra-eval`) and experiment traces are left out unless `include_eval` or `include_experiments` is set. A read: a read-only personal access token and a `read` key may call it. Results are cached for 10 seconds per project and body.",
+        ))
+        .parameters(Some(vec![project_param()]))
+        .request_body(Some(json_body("WidgetQueryRequest")))
+        .responses(responses(
+            "200",
+            json_of::<WidgetQueryResponse>("The widget's answer, tagged by `shape`."),
+            &[400, 401, 403, 404, 413, 415, 422, 429, 503],
+        ))
+        .build();
     let delete = operation("delete_dashboard", "dashboards", "Delete a dashboard")
         .description(Some("Deletes the dashboard. Same roles as create."))
         .parameters(Some(vec![
@@ -3931,6 +3952,10 @@ fn dashboard_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/dashboards/{{id}}"),
             PathItem::new(HttpMethod::Delete, delete),
+        )
+        .path(
+            format!("{PROJECT}/dashboards/query"),
+            PathItem::new(HttpMethod::Post, query),
         )
 }
 

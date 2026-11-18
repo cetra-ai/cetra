@@ -132,7 +132,7 @@ Request body:
 | `include_eval`, `include_experiments` | bool | default `false` (§ Default exclusions) |
 | `query` | WidgetQuery | below |
 | `shape` | `series` \| `total` | `series` = one value per bucket; `total` = one value over `[from, to)` |
-| `compare` | bool | `total` only: also the value over the previous range of the same length |
+| `compare` | bool | `total` only (ignored for `series`): also the value over the previous range of the same length |
 
 **WidgetQuery** `{source, filter?, measures, breakdown?}`:
 
@@ -160,7 +160,7 @@ A map key is 1–256 characters, written as in the DSL. Any other field, or a `f
 
 **Buckets** (`shape: series`). `bucket=auto` picks the smallest width in `1m, 5m, 10m, 15m, 30m, 1h, 6h, 12h, 1d` giving at most 120 buckets over `[from, to)`, else `1d`; past 2,000 daily buckets (aligned to midnight UTC, so a 2,000-day window that does not start at midnight already has 2,001) it is a 400, as for an explicit bucket (D-A2-3). Buckets are aligned to their width from the Unix epoch, UTC: a 10-minute bucket starts at :00, :10, …; a 1-day bucket at midnight UTC. The first bucket starts at `from` rounded down to the width, so it may cover part of its range only; the last one is the bucket containing `to − 1 ns`. An explicit bucket giving more than 2,000 buckets is a 400. Rows are bucketed with `date_bin` over the time column.
 
-**Answer.**
+**Answer.** The answer carries `shape` (`series` or `total`) next to the fields below.
 
 - `series`: `{bucket_ns, series: [{measure, group, other, points: [{time, value, rows}]}]}`. `measure` is the measure's index; `group` is the breakdown value (null without a breakdown, and for the other group); `rows` is the number of source rows of the point's group in the bucket. A bucket with no rows for a series has no point; a point whose aggregate is null (e.g. a percentile over null values) has no `value`. Series come in breakdown order (largest first, other last), then measure order.
 - `total`: `{rows: [{group, other, values, previous?}]}`, one row per group in the same order (one row without a breakdown). `values[i]` is measure `i`, null when the group has no rows (a `count` whose `where` matches none of the group's rows is 0); `previous` is there with `compare`, over `[from − (to − from), from)`.

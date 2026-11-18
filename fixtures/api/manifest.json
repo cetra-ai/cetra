@@ -1462,6 +1462,22 @@
     "file": "static/deletion-preview.json"
   },
   {
+    "operation_id": "query_widget",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/dashboard-query-series.json"
+  },
+  {
+    "operation_id": "query_widget",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/dashboard-query-total.json"
+  },
+  {
     "operation_id": "resolve_model_price",
     "path_params": {},
     "query": {

@@ -21,7 +21,7 @@ use cetra_server::api::common::{Page, Problem};
 use cetra_server::api::connections::{
     CreateLlmConnectionRequest, LlmConnection, LlmConnectionTestResult,
 };
-use cetra_server::api::dashboards::{Dashboard, DashboardSummary};
+use cetra_server::api::dashboards::{Dashboard, DashboardSummary, WidgetQueryResponse};
 use cetra_server::api::datasets::{
     AddItemsRequest, CreateDatasetRequest, Dataset, DatasetItem, DatasetVersion, EditItemsResponse,
     ExperimentTrends, FromTraceRequest, FromTracesResult, ImportMapping, ImportPreview,
@@ -630,6 +630,7 @@ fn generated_files_roundtrip() {
             "get_metrics" => roundtrip::<MetricsResponse>(&example.file),
             "get_facets" => roundtrip::<FacetsResponse>(&example.file),
             "run_sql" => roundtrip::<SqlQueryResult>(&example.file),
+            "query_widget" => roundtrip::<WidgetQueryResponse>(&example.file),
             "list_deletions" => roundtrip::<Page<Deletion>>(&example.file),
             "list_org_deletions" => roundtrip::<Page<Deletion>>(&example.file),
             "get_org_usage" => roundtrip::<OrgUsage>(&example.file),

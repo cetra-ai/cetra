@@ -15,10 +15,16 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use cetra_core::ids::ProjectId;
+use cetra_core::time_serde::parse_rfc3339;
+use cetra_storage as storage;
+
 use crate::api::common::{FieldError, Page};
+use crate::api::convert;
 use crate::api::dashboards::{
     ChartType, CreateDashboard, Dashboard, DashboardListParams, DashboardSummary, Definition,
-    UpdateDashboard, Widget, WidgetKind, WidgetQueryBody,
+    UpdateDashboard, Widget, WidgetKind, WidgetQueryBody, WidgetQueryRequest, WidgetQueryResponse,
+    WidgetShape,
 };
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::ProjectPerm;
@@ -26,7 +32,8 @@ use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError, field_error};
 use crate::meta::dashboards::{self as store, DashboardChanges, NewDashboard, UpdateOutcome};
-use crate::routes::read::{open_query, page_limit};
+use crate::routes::metrics::{ProjectKey, SharedError, bucket, storage_group_by};
+use crate::routes::read::{READ_TIMEOUT, open_query, page_limit};
 
 /// A 256 KiB definition plus the rest of the body fits (spec 04).
 const DASHBOARD_BODY_LIMIT: usize = 300 * 1024;
@@ -81,6 +88,16 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             handler: get(get_dashboard),
         },
         RouteDef {
+            method: Method::POST,
+            path: "/api/v1/projects/{project}/dashboards/query",
+            access: Access::Project {
+                perm: ProjectPerm::Query,
+                session_only: false,
+            },
+            documented: true,
+            handler: post(query_widget),
+        },
+        RouteDef {
             method: Method::PATCH,
             path: "/api/v1/projects/{project}/dashboards/{id}",
             access: Access::Project {
@@ -106,6 +123,22 @@ pub(crate) fn routes() -> Vec<RouteDef> {
 #[derive(Debug, Deserialize)]
 struct DashboardPath {
     id: Uuid,
+}
+
+/// The key of a widget answer: everything that changes it (spec 05 § Dashboard queries).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct WidgetKey {
+    project: ProjectId,
+    /// The org's data window in days (D-P-21).
+    data_access_days: Option<u64>,
+    /// The request body as JSON. The field order is the struct's, so equal bodies give equal text.
+    body: String,
+}
+
+impl ProjectKey for WidgetKey {
+    fn project(&self) -> ProjectId {
+        self.project
+    }
 }
 
 async fn list_dashboards(
@@ -598,6 +631,103 @@ async fn check_expressions(
     Ok(())
 }
 
+/// `POST /dashboards/query`: one widget's data (spec 05 § Dashboard queries). A read, so a
+/// read-only PAT and a `read` key may call it.
+async fn query_widget(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Json(body): error::Json<WidgetQueryRequest>,
+) -> Result<error::Json<WidgetQueryResponse>, SharedError> {
+    let (from, to) = query_range(&body)?;
+    let key = WidgetKey {
+        project: access.project.id,
+        data_access_days: crate::entitlements::of(&state, access.project.org_id)
+            .limits
+            .data_access_days,
+        body: serde_json::to_string(&body).map_err(|error| ApiError::Internal(Box::new(error)))?,
+    };
+    let (org, project) = (access.project.org_id, access.project.id);
+    let clock = &state.clock;
+    let response = state
+        .widget_cache
+        .get_or_compute(
+            key,
+            || clock.now_ns(),
+            || async {
+                let window = storage::TimeWindow::new(from, to)?;
+                let ctx = open_query(&state, org, project, None).await?;
+                let query = body.query.to_storage();
+                let data = storage::widget_query(
+                    &ctx,
+                    storage::WidgetRequest {
+                        window,
+                        bucket: bucket(body.bucket),
+                        dashboard_filter: body.filter.as_deref(),
+                        group_by: body.group_by.map(storage_group_by),
+                        include_eval: body.include_eval,
+                        include_experiments: body.include_experiments,
+                        query: &query,
+                        shape: storage_shape(body.shape),
+                        compare: body.compare,
+                        timeout: READ_TIMEOUT,
+                    },
+                )
+                .await
+                .map_err(widget_error)?;
+                Ok(convert::widget_response(data))
+            },
+        )
+        .await
+        .map_err(SharedError)?;
+    Ok(error::Json((*response).clone()))
+}
+
+/// The request's `[from, to)` as nanoseconds. Both are RFC 3339 and `from` is before `to`.
+fn query_range(body: &WidgetQueryRequest) -> Result<(i64, i64), ApiError> {
+    const RFC3339: &str = "expected an RFC 3339 timestamp";
+    let from = parse_rfc3339(&body.from).map_err(|_| field_error("from", RFC3339))?;
+    let to = parse_rfc3339(&body.to).map_err(|_| field_error("to", RFC3339))?;
+    if from >= to {
+        return Err(field_error("from", "from must be before to"));
+    }
+    Ok((from, to))
+}
+
+fn storage_shape(shape: WidgetShape) -> storage::Shape {
+    match shape {
+        WidgetShape::Series => storage::Shape::Series,
+        WidgetShape::Total => storage::Shape::Total,
+    }
+}
+
+/// The problem of a refused widget query. Field paths are the request's: the widget's query
+/// fields sit under `query`, and the dashboard's `filter` is the request's own `filter`.
+fn widget_error(error: storage::WidgetError) -> ApiError {
+    match error {
+        storage::WidgetError::Fields(found) => ApiError::BadRequest {
+            detail: None,
+            errors: found
+                .into_iter()
+                .map(|error| field(format!("query.{}", error.path), &error.message))
+                .collect(),
+        },
+        storage::WidgetError::Expression { path, error } => ApiError::QueryAt {
+            field: expression_field(&path),
+            error: storage::RunError::Invalid(error),
+        },
+        storage::WidgetError::Run(error) => ApiError::Query(error),
+    }
+}
+
+/// The request path of an invalid expression that the storage layer names.
+fn expression_field(path: &str) -> String {
+    if path == "dashboard_filter" {
+        "filter".to_owned()
+    } else {
+        format!("query.{path}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -610,8 +740,9 @@ mod tests {
     use crate::api::common::ProblemCode;
     use crate::auth::roles::OrgRole;
     use crate::meta::projects::delete_project;
-    use crate::test_support::{Seeded, TestApp};
-    use cetra_core::ids::ProjectId;
+    use crate::test_support::{Seeded, TestApp, set_limits};
+    use cetra_core::ids::{ProjectId, TraceId};
+    use std::str::FromStr;
 
     fn heading(id: &str) -> Value {
         json!({
@@ -1570,5 +1701,310 @@ mod tests {
             .expect("the dashboard is stored");
         assert_eq!(row.definition, created.definition);
         assert_eq!(row.info.version, 1);
+    }
+
+    // Spec 05 § Dashboard queries. The example dataset has five traces in the window below.
+    const FROM: &str = "2026-01-01T10:00:00Z";
+    const TO: &str = "2026-01-01T11:00:00Z";
+    const TEN_MINUTES: i64 = 600_000_000_000;
+    const DAY: i64 = 86_400_000_000_000;
+
+    /// A series over the example window: count and error rate, split by `name`.
+    fn series_body() -> Value {
+        json!({
+            "from": FROM, "to": TO, "bucket": "10m", "shape": "series",
+            "query": {
+                "source": "traces",
+                "measures": [
+                    {"agg": "count"},
+                    {"agg": "rate", "where": "error_count > 0"}
+                ],
+                "breakdown": {"field": "name", "limit": 3}
+            }
+        })
+    }
+
+    /// A total over the example window with the previous range.
+    fn total_body() -> Value {
+        json!({
+            "from": FROM, "to": TO, "shape": "total", "compare": true,
+            "query": {"source": "traces", "measures": [{"agg": "count"}]}
+        })
+    }
+
+    /// A loaded example project.
+    async fn loaded() -> (TestApp, Seeded) {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        app.load_example_dataset(seeded.project.id).await;
+        (app, seeded)
+    }
+
+    fn query_path(project: ProjectId) -> String {
+        format!("/api/v1/projects/{project}/dashboards/query")
+    }
+
+    /// POSTs `body` to the widget query of `seeded`'s project as `cookie`.
+    async fn post_query(app: &TestApp, seeded: &Seeded, body: &Value) -> (StatusCode, Value) {
+        let response = send(
+            app,
+            Method::POST,
+            &query_path(seeded.project.id),
+            &seeded.cookie,
+            Some(body.clone()),
+        )
+        .await;
+        (response.status, response.json())
+    }
+
+    /// Asserts a `400` with `code` and an error on `field`.
+    fn assert_refused_at(status: StatusCode, body: &Value, code: &str, field: &str) {
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["code"], code, "{body}");
+        let errors = body["errors"].as_array().expect("field errors");
+        assert!(
+            errors.iter().any(|error| error["field"] == field),
+            "{field} in {body}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dashboards_query_series_has_points_and_rows() {
+        let (app, seeded) = loaded().await;
+        let (status, body) = post_query(&app, &seeded, &series_body()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["shape"], "series");
+        assert_eq!(body["bucket_ns"], TEN_MINUTES);
+        let series = body["series"].as_array().expect("series");
+        assert!(!series.is_empty(), "{body}");
+        for item in series {
+            assert!(item["measure"].is_u64(), "{item}");
+            assert!(item["other"].is_boolean(), "{item}");
+            let points = item["points"].as_array().expect("points");
+            for point in points {
+                assert!(point["time"].is_string(), "{point}");
+                assert!(point["rows"].is_u64(), "{point}");
+            }
+        }
+        assert!(
+            series.iter().any(|item| item["group"].is_string()),
+            "the breakdown names its groups: {body}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dashboards_query_total_has_values_and_previous() {
+        let (app, seeded) = loaded().await;
+        let (status, body) = post_query(&app, &seeded, &total_body()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["shape"], "total");
+        let rows = body["rows"].as_array().expect("rows");
+        assert_eq!(rows.len(), 1, "{body}");
+        assert_eq!(rows[0]["values"], json!([5.0]), "{body}");
+        assert_eq!(rows[0]["other"], false);
+        assert!(rows[0]["previous"].is_array(), "{body}");
+        assert!(rows[0].get("group").is_none(), "{body}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dashboards_query_without_compare_has_no_previous() {
+        let (app, seeded) = loaded().await;
+        let mut body = total_body();
+        body["compare"] = json!(false);
+        let (status, answer) = post_query(&app, &seeded, &body).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert!(answer["rows"][0].get("previous").is_none(), "{answer}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dashboards_query_refuses_bad_fields_at_their_paths() {
+        let (app, seeded) = loaded().await;
+
+        let mut body = series_body();
+        body["query"]["measures"] = json!([{"agg": "count"}, {"agg": "sum", "field": "name"}]);
+        let (status, answer) = post_query(&app, &seeded, &body).await;
+        assert_refused_at(status, &answer, "bad_request", "query.measures[1].field");
+
+        let mut body = series_body();
+        body["query"]["measures"] = json!([{"agg": "rate", "where": "error_count >"}]);
+        let (status, answer) = post_query(&app, &seeded, &body).await;
+        assert_refused_at(status, &answer, "invalid_filter", "query.measures[0].where");
+        assert!(
+            answer["errors"][0]["position"].is_object(),
+            "a DSL error has a position: {answer}"
+        );
+
+        let mut body = series_body();
+        body["query"]["filter"] = json!("nope =");
+        let (status, answer) = post_query(&app, &seeded, &body).await;
+        assert_refused_at(status, &answer, "invalid_filter", "query.filter");
+
+        let mut body = series_body();
+        body["filter"] = json!("nope =");
+        let (status, answer) = post_query(&app, &seeded, &body).await;
+        assert_refused_at(status, &answer, "invalid_filter", "filter");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dashboards_query_refuses_a_bad_range_and_a_fine_bucket() {
+        let (app, seeded) = loaded().await;
+        let mut body = total_body();
+        body["from"] = json!("not a time");
+        let (status, answer) = post_query(&app, &seeded, &body).await;
+        assert_refused_at(status, &answer, "bad_request", "from");
+
+        let mut body = total_body();
+        body["from"] = json!(TO);
+        body["to"] = json!(FROM);
+        let (status, answer) = post_query(&app, &seeded, &body).await;
+        assert_refused_at(status, &answer, "bad_request", "from");
+
+        // Two days of one-minute buckets is 2,880 buckets, past the 2,000 limit.
+        let mut body = series_body();
+        body["from"] = json!("2026-01-01T00:00:00Z");
+        body["to"] = json!("2026-01-03T00:00:00Z");
+        body["bucket"] = json!("1m");
+        let (status, answer) = post_query(&app, &seeded, &body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+        assert_eq!(answer["code"], "bad_request", "{answer}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dashboards_query_is_open_to_read_credentials_only() {
+        let (app, seeded) = loaded().await;
+        let viewer = app
+            .add_member(&seeded, "viewer@example.com", OrgRole::Viewer)
+            .await;
+        let token = app.personal_token(viewer.id, false).await;
+        let path = query_path(seeded.project.id);
+        let body = total_body();
+
+        let response = send(
+            &app,
+            Method::POST,
+            &path,
+            &viewer.cookie,
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::OK, "viewer session");
+
+        let response = app
+            .request(Method::POST, &path)
+            .header("authorization", &format!("Bearer {token}"))
+            .json(&body)
+            .send()
+            .await;
+        assert_eq!(response.status, StatusCode::OK, "read-only PAT");
+
+        let response = app
+            .request(Method::POST, &path)
+            .header("authorization", &format!("Bearer {}", seeded.read_key))
+            .json(&body)
+            .send()
+            .await;
+        assert_eq!(response.status, StatusCode::OK, "read key");
+
+        let response = app
+            .request(Method::POST, &path)
+            .header("authorization", &format!("Bearer {}", seeded.ingest_key))
+            .json(&body)
+            .send()
+            .await;
+        assert_eq!(response.status, StatusCode::FORBIDDEN, "ingest key");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dashboards_query_refuses_another_projects_key_like_other_reads() {
+        let (app, seeded) = loaded().await;
+        let (other, _key) = app.add_project(&seeded, "other", None).await;
+        let response = app
+            .request(Method::POST, &query_path(other.id))
+            .header("authorization", &format!("Bearer {}", seeded.read_key))
+            .json(&total_body())
+            .send()
+            .await;
+        let read = app
+            .request(
+                Method::GET,
+                &format!("/api/v1/projects/{}/metrics?from={FROM}&to={TO}", other.id),
+            )
+            .header("authorization", &format!("Bearer {}", seeded.read_key))
+            .send()
+            .await;
+        assert_eq!(response.status, read.status);
+        assert_ne!(response.status, StatusCode::OK);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dashboards_query_answers_are_cached_for_ten_seconds() {
+        let (app, seeded) = loaded().await;
+        let (_, first) = post_query(&app, &seeded, &total_body()).await;
+        assert_eq!(first["rows"][0]["values"], json!([5.0]));
+
+        let trace = TraceId::from_str("a1000000000000000000000000000009").unwrap();
+        app.commit_trace_at(
+            &seeded.project,
+            trace,
+            9,
+            1_767_261_600_000_000_000 + 40 * 60_000_000_000,
+        )
+        .await;
+        let (_, cached) = post_query(&app, &seeded, &total_body()).await;
+        assert_eq!(cached["rows"][0]["values"], json!([5.0]), "still cached");
+
+        app.state.clock.advance(Duration::from_secs(11));
+        let (_, fresh) = post_query(&app, &seeded, &total_body()).await;
+        assert_eq!(fresh["rows"][0]["values"], json!([6.0]), "expired");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn clearing_a_project_drops_its_widget_answers() {
+        let (app, seeded) = loaded().await;
+        let (_, first) = post_query(&app, &seeded, &total_body()).await;
+        assert_eq!(first["rows"][0]["values"], json!([5.0]));
+
+        let trace = TraceId::from_str("a1000000000000000000000000000008").unwrap();
+        app.commit_trace_at(
+            &seeded.project,
+            trace,
+            8,
+            1_767_261_600_000_000_000 + 40 * 60_000_000_000,
+        )
+        .await;
+        app.state.clear_answers(seeded.project.id);
+        let (_, fresh) = post_query(&app, &seeded, &total_body()).await;
+        assert_eq!(fresh["rows"][0]["values"], json!([6.0]));
+    }
+
+    /// D-P-21: the widget answer is keyed by the org's window, so a limit set within the TTL is
+    /// applied at once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dashboards_query_is_keyed_by_the_data_window() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let now = app.state.clock.now_ns();
+        let old = TraceId::from_str("a9000000000000000000000000000001").unwrap();
+        let fresh = TraceId::from_str("a9000000000000000000000000000002").unwrap();
+        app.commit_trace_at(&seeded.project, old, 1, now - 40 * DAY)
+            .await;
+        app.commit_trace_at(&seeded.project, fresh, 2, now - DAY)
+            .await;
+        let mut body = total_body();
+        body["from"] = json!("2025-11-01T00:00:00Z");
+        body["to"] = json!("2026-01-02T00:00:00Z");
+
+        let (status, first) = post_query(&app, &seeded, &body).await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        assert_eq!(first["rows"][0]["values"], json!([2.0]));
+
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-01T00:00:00Z",
+            &json!({"data_access_days": 30}),
+        );
+        let (_, limited) = post_query(&app, &seeded, &body).await;
+        assert_eq!(limited["rows"][0]["values"], json!([1.0]));
     }
 }
