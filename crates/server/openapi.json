@@ -14084,172 +14084,6 @@
         ]
       }
     },
-    "/api/v1/projects/{project}/metrics": {
-      "get": {
-        "tags": [
-          "metrics"
-        ],
-        "summary": "Get metrics",
-        "description": "Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Series have one point per bucket. Latencies and TTFT are nanoseconds. Costs are USD. Results are cached for 10 seconds. The evaluation cost series always counts evaluation traces (spec 05 § Dashboard metrics).",
-        "operationId": "get_metrics",
-        "parameters": [
-          {
-            "name": "project",
-            "in": "path",
-            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "from",
-            "in": "query",
-            "description": "Inclusive range start. RFC 3339 or epoch milliseconds.",
-            "required": true,
-            "schema": {
-              "$ref": "#/components/schemas/TimeParam"
-            }
-          },
-          {
-            "name": "to",
-            "in": "query",
-            "description": "Exclusive range end. RFC 3339 or epoch milliseconds.",
-            "required": true,
-            "schema": {
-              "$ref": "#/components/schemas/TimeParam"
-            }
-          },
-          {
-            "name": "bucket",
-            "in": "query",
-            "description": "Bucket width. Defaults to `auto` (~120 points).",
-            "required": false,
-            "schema": {
-              "$ref": "#/components/schemas/MetricsBucket"
-            }
-          },
-          {
-            "name": "filter",
-            "in": "query",
-            "description": "Filter DSL expression. Applied to the view each series is computed on (spec 05).",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "group_by",
-            "in": "query",
-            "description": "Split series that are not already split.",
-            "required": false,
-            "schema": {
-              "$ref": "#/components/schemas/MetricsGroupBy"
-            }
-          },
-          {
-            "name": "include_eval",
-            "in": "query",
-            "description": "Include traces from the evaluation environment. Default false. Spec 05 § Default exclusions.",
-            "required": false,
-            "schema": {
-              "type": "boolean"
-            }
-          },
-          {
-            "name": "include_experiments",
-            "in": "query",
-            "description": "Include experiment traces. Default false. Spec 05 § Default exclusions.",
-            "required": false,
-            "schema": {
-              "type": "boolean"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Dashboard metrics.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/MetricsResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "The request is malformed or a filter is invalid.",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "No credentials, or the credentials are invalid.",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "The resource does not exist.",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Too many requests.",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "The server is busy or a dependency is unavailable. Retry later.",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/v1/projects/{project}/models": {
       "get": {
         "tags": [
@@ -24388,40 +24222,6 @@
           }
         }
       },
-      "Kpi": {
-        "type": "object",
-        "description": "One headline number.\n\n`previous` covers the same-length period just before `from`. Spec 05 § Dashboard metrics.",
-        "required": [
-          "metric"
-        ],
-        "properties": {
-          "metric": {
-            "$ref": "#/components/schemas/KpiMetric",
-            "description": "Which headline."
-          },
-          "previous": {
-            "type": "number",
-            "format": "double",
-            "description": "Value over the previous range. Omitted when that range has no data."
-          },
-          "value": {
-            "type": "number",
-            "format": "double",
-            "description": "Value over `[from, to)`. Omitted when the range has no data."
-          }
-        }
-      },
-      "KpiMetric": {
-        "type": "string",
-        "description": "Headline metrics.\n\nSpec 05 § Dashboard metrics.",
-        "enum": [
-          "traces",
-          "error_rate",
-          "latency_p95",
-          "cost_total",
-          "total_tokens"
-        ]
-      },
       "LatencyTarget": {
         "type": "string",
         "description": "Which latency a `latency_p95` rule measures.",
@@ -24849,33 +24649,9 @@
         "type": "string",
         "description": "Message speaker. Known values are `system`, `user`, `assistant`, and `tool`. Any other string is kept."
       },
-      "MetricName": {
-        "type": "string",
-        "description": "Series name.\n\nLatencies and TTFT are nanoseconds as `f64`. Costs are USD. Spec 05 § Dashboard metrics.",
-        "enum": [
-          "traces",
-          "errors",
-          "error_rate",
-          "latency_p50",
-          "latency_p95",
-          "latency_p99",
-          "cost",
-          "input_tokens",
-          "output_tokens",
-          "cache_read_tokens",
-          "cache_write_tokens",
-          "ttft_p50",
-          "ttft_p95",
-          "llm_latency_p50",
-          "llm_latency_p95",
-          "cost_by_model",
-          "score_avg",
-          "eval_cost"
-        ]
-      },
       "MetricPoint": {
         "type": "object",
-        "description": "One bucket of a series.\n\nSpec 05 § Dashboard metrics.",
+        "description": "One bucket of a time series.\n\nSpec 05 § Dashboard queries, spec 06 (score summaries).",
         "required": [
           "time"
         ],
@@ -24892,34 +24668,9 @@
           }
         }
       },
-      "MetricSeries": {
-        "type": "object",
-        "description": "One time series.\n\nEvery series has one point per bucket from `from` to `to`. Spec 05 § Dashboard metrics.",
-        "required": [
-          "metric",
-          "points"
-        ],
-        "properties": {
-          "group": {
-            "type": "string",
-            "description": "Group key: the `group_by` value, a model, or a score name. Omitted when the series is not split."
-          },
-          "metric": {
-            "$ref": "#/components/schemas/MetricName",
-            "description": "Which series."
-          },
-          "points": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/MetricPoint"
-            },
-            "description": "One point per bucket."
-          }
-        }
-      },
       "MetricsBucket": {
         "type": "string",
-        "description": "Width of each metrics bucket.\n\nSpec 05 § Dashboard metrics.",
+        "description": "Width of each bucket of a widget query.\n\nSpec 05 § Dashboard queries.",
         "enum": [
           "auto",
           "1m",
@@ -24935,66 +24686,12 @@
       },
       "MetricsGroupBy": {
         "type": "string",
-        "description": "Dimension that splits series which are not already split.\n\nSpec 05 § Dashboard metrics.",
+        "description": "Dimension that splits a widget's series.\n\nSpec 05 § Dashboard queries.",
         "enum": [
           "model",
           "environment",
           "release"
         ]
-      },
-      "MetricsResponse": {
-        "type": "object",
-        "description": "Dashboard response.\n\nSpec 05 § Dashboard metrics.",
-        "required": [
-          "from",
-          "to",
-          "bucket_ns",
-          "kpis",
-          "series",
-          "top_models"
-        ],
-        "properties": {
-          "bucket_ns": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Resolved bucket width, nanoseconds."
-          },
-          "from": {
-            "type": "string",
-            "format": "date-time",
-            "description": "Inclusive range start, nanoseconds since the Unix epoch. JSON is RFC 3339."
-          },
-          "group_by": {
-            "$ref": "#/components/schemas/MetricsGroupBy",
-            "description": "Split applied to series that are not already split. Omitted when absent."
-          },
-          "kpis": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Kpi"
-            },
-            "description": "Headline numbers for the range and the previous range of the same length."
-          },
-          "series": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/MetricSeries"
-            },
-            "description": "One point per bucket, for every series."
-          },
-          "to": {
-            "type": "string",
-            "format": "date-time",
-            "description": "Exclusive range end, nanoseconds since the Unix epoch. JSON is RFC 3339."
-          },
-          "top_models": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ModelUsage"
-            },
-            "description": "At most 10 models, by cost descending."
-          }
-        }
       },
       "Modality": {
         "type": "string",
@@ -25222,35 +24919,6 @@
           }
         },
         "additionalProperties": false
-      },
-      "ModelUsage": {
-        "type": "object",
-        "description": "One model in the cost ranking.\n\nAt most 10, by cost descending. Spec 05 § Dashboard metrics.",
-        "required": [
-          "model",
-          "llm_count"
-        ],
-        "properties": {
-          "cost_total": {
-            "type": "number",
-            "format": "double",
-            "description": "Sum of `cost_total`, USD. Omitted when every span omitted the field."
-          },
-          "llm_count": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Number of `llm` spans."
-          },
-          "model": {
-            "type": "string",
-            "description": "Model name."
-          },
-          "total_tokens": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Sum of `total_tokens`. Omitted when every span omitted the field."
-          }
-        }
       },
       "NewDatasetItem": {
         "type": "object",
@@ -30239,10 +29907,6 @@
     {
       "name": "sql",
       "description": "SQL console over the project's views."
-    },
-    {
-      "name": "metrics",
-      "description": "Dashboard metrics."
     },
     {
       "name": "media",

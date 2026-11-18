@@ -19,7 +19,6 @@ use datafusion::prelude::DataFrame;
 
 use super::buckets::{BUCKET, Bucket, BucketWidth, bucket_expr, resolve};
 use super::columns::{f64_at, i64_at, internal, percentile_of, require, string_at, time_at};
-use super::metrics::{out_of_range, previous_window};
 use super::{ListScope, present, scoped_traces};
 use crate::filter::{Filter, FilterView};
 use crate::query_error::{InvalidQuery, RunError, classify};
@@ -1320,6 +1319,21 @@ async fn base_of_previous(
     base(ctx, request, filters, previous_window(request.window)?).await
 }
 
+/// The error of a range that reaches past the representable time.
+fn out_of_range() -> RunError {
+    RunError::InvalidRequest("from is out of range".to_owned())
+}
+
+/// The window of the same length just before `window`.
+fn previous_window(window: TimeWindow) -> Result<TimeWindow, RunError> {
+    let length = window
+        .to()
+        .checked_sub(window.from())
+        .ok_or_else(out_of_range)?;
+    let start = window.from().checked_sub(length).ok_or_else(out_of_range)?;
+    TimeWindow::new(start, window.from())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1711,7 +1725,7 @@ mod tests {
         );
     }
 
-    // Answers: parity with the fixed dashboard, breakdowns, filters, costs, compare, errors.
+    // Answers: the headline and series values, breakdowns, filters, costs, compare, errors.
 
     use std::collections::{BTreeMap, BTreeSet};
     use std::num::NonZeroUsize;
@@ -1727,9 +1741,6 @@ mod tests {
 
     use super::{Shape, TotalRow, WidgetData, WidgetRequest, WidgetSeries, widget_query};
     use crate::query_error::RunError;
-    use crate::reads::metrics::{
-        KpiName, MetricsData, MetricsRequest, Series, SeriesName, metrics,
-    };
     use crate::reads::{Bucket, BucketWidth, GroupBy};
     use crate::test_support::{live_scores_table, span_row, spans_table, traces_table};
     use crate::views::{ProjectQuery, TimeWindow};
@@ -1876,78 +1887,49 @@ mod tests {
         }
     }
 
-    fn metric_request(
-        window: TimeWindow,
-        filter: Option<&str>,
-        group_by: Option<GroupBy>,
-        include_eval: bool,
-    ) -> MetricsRequest<'_> {
-        MetricsRequest {
-            window,
-            bucket: Bucket::Fixed(BucketWidth::M10),
-            filter,
-            group_by,
-            include_eval,
-            include_experiments: false,
-            timeout: TIMEOUT,
-        }
-    }
-
-    fn named<'a>(data: &'a MetricsData, name: SeriesName, group: Option<&str>) -> &'a Series {
-        data.series
-            .iter()
-            .find(|series| series.name == name && series.group.as_deref() == group)
-            .unwrap_or_else(|| panic!("missing {name:?} group={group:?}"))
-    }
-
-    /// The widget line equals the metrics series at every bucket of the metrics grid.
-    fn assert_same_line(widget: &WidgetSeries, metric: &Series) {
-        for point in &metric.points {
-            let found = widget
-                .points
-                .iter()
-                .find(|candidate| candidate.time == point.time)
-                .and_then(|candidate| candidate.value);
-            assert_close(found, point.value);
-        }
+    /// The line's value at each ten-minute bucket of the hour, 10:00 to 10:50. A bucket not in
+    /// `expected` has no value. Every point must sit on that grid.
+    fn assert_line(widget: &WidgetSeries, expected: &[(i64, f64)]) {
         for point in &widget.points {
             assert!(
-                metric
-                    .points
-                    .iter()
-                    .any(|candidate| candidate.time == point.time),
-                "point {} is off the metrics grid",
+                (0..60)
+                    .step_by(10)
+                    .any(|bucket| point.time == minute(bucket)),
+                "point {} is off the bucket grid",
                 point.time
             );
         }
-    }
-
-    fn fixed_score_names(fixed: &MetricsData) -> BTreeSet<String> {
-        fixed
-            .series
-            .iter()
-            .filter(|series| series.name == SeriesName::ScoreAvg)
-            .filter_map(|series| series.group.clone())
-            .collect()
-    }
-
-    /// Each score name of the fixed dashboard matches its line. A name with no numeric
-    /// value (a string score) is a group of the widget without values, which the fixed
-    /// dashboard leaves out.
-    fn assert_same_scores(data: &WidgetData, fixed: &MetricsData, names: &BTreeSet<String>) {
-        for name in names {
-            assert_same_line(
-                line(data, 0, Some(name.as_str()), false),
-                named(fixed, SeriesName::ScoreAvg, Some(name.as_str())),
-            );
+        for bucket in (0..60).step_by(10) {
+            let found = widget
+                .points
+                .iter()
+                .find(|point| point.time == minute(bucket))
+                .and_then(|point| point.value);
+            let want = expected
+                .iter()
+                .find(|(at_minute, _)| *at_minute == bucket)
+                .map(|(_, value)| *value);
+            assert_close(found, want);
         }
-        for name in groups_of(data, 0).difference(names) {
+    }
+
+    /// The `ScoreAvg` lines: each named score has its expected values, and no other score name
+    /// has any value.
+    fn assert_scores(data: &WidgetData, expected: &[(&str, &[(i64, f64)])]) {
+        let names: BTreeSet<String> = expected
+            .iter()
+            .map(|(name, _)| (*name).to_owned())
+            .collect();
+        for (name, points) in expected {
+            assert_line(line(data, 0, Some(*name), false), points);
+        }
+        for name in groups_of(data, 0).difference(&names) {
             assert!(
                 line(data, 0, Some(name.as_str()), false)
                     .points
                     .iter()
                     .all(|point| point.value.is_none()),
-                "{name} has values the fixed dashboard lacks"
+                "{name} has values that no expected score line has"
             );
         }
     }
@@ -1969,9 +1951,6 @@ mod tests {
     async fn trace_series_match_the_fixed_dashboard() {
         let ctx = context();
         let window = hour();
-        let fixed = metrics(&ctx, metric_request(window, None, None, false))
-            .await
-            .expect("metrics");
         let counts = build(
             WidgetSource::Traces,
             vec![
@@ -1985,17 +1964,33 @@ mod tests {
             None,
         );
         let data = answer(&ctx, ask(&counts, window, Shape::Series)).await;
-        let pairs = [
-            (0, SeriesName::Traces),
-            (1, SeriesName::Errors),
-            (2, SeriesName::ErrorRate),
-            (3, SeriesName::LatencyP50),
-            (4, SeriesName::LatencyP95),
-            (5, SeriesName::LatencyP99),
+        assert_line(
+            line(&data, 0, None, false),
+            &[(0, 2.0), (10, 1.0), (20, 1.0), (30, 1.0)],
+        );
+        assert_line(
+            line(&data, 1, None, false),
+            &[(0, 0.0), (10, 1.0), (20, 0.0), (30, 0.0)],
+        );
+        assert_line(
+            line(&data, 2, None, false),
+            &[(0, 0.0), (10, 1.0), (20, 0.0), (30, 0.0)],
+        );
+        let latency_p50 = [
+            (0, 3_350_000_000.0),
+            (10, 800_000_000.0),
+            (20, 3_000_000_000.0),
+            (30, 2_000_000_000.0),
         ];
-        for (index, name) in pairs {
-            assert_same_line(line(&data, index, None, false), named(&fixed, name, None));
-        }
+        let latency_p95 = [
+            (0, 4_200_000_000.0),
+            (10, 800_000_000.0),
+            (20, 3_000_000_000.0),
+            (30, 2_000_000_000.0),
+        ];
+        assert_line(line(&data, 3, None, false), &latency_p50);
+        assert_line(line(&data, 4, None, false), &latency_p95);
+        assert_line(line(&data, 5, None, false), &latency_p95);
         for point in &line(&data, 0, None, false).points {
             assert_eq!(point.value, Some(point.rows as f64));
         }
@@ -2006,9 +2001,9 @@ mod tests {
             None,
         );
         let data = answer(&ctx, ask(&cost, window, Shape::Series)).await;
-        assert_same_line(
+        assert_line(
             line(&data, 0, None, false),
-            named(&fixed, SeriesName::Cost, None),
+            &[(0, 0.00552), (20, 0.00133), (30, 0.0027)],
         );
     }
 
@@ -2016,9 +2011,6 @@ mod tests {
     async fn span_series_match_the_fixed_dashboard() {
         let ctx = context();
         let window = hour();
-        let fixed = metrics(&ctx, metric_request(window, None, None, false))
-            .await
-            .expect("metrics");
         let tokens = filtered(
             build(
                 WidgetSource::Spans,
@@ -2033,15 +2025,16 @@ mod tests {
             "span_kind = 'llm' OR span_kind = 'embedding'",
         );
         let data = answer(&ctx, ask(&tokens, window, Shape::Series)).await;
-        let pairs = [
-            (0, SeriesName::InputTokens),
-            (1, SeriesName::OutputTokens),
-            (2, SeriesName::CacheReadTokens),
-            (3, SeriesName::CacheWriteTokens),
-        ];
-        for (index, name) in pairs {
-            assert_same_line(line(&data, index, None, false), named(&fixed, name, None));
-        }
+        assert_line(
+            line(&data, 0, None, false),
+            &[(0, 4000.0), (20, 850.0), (30, 400.0)],
+        );
+        assert_line(
+            line(&data, 1, None, false),
+            &[(0, 180.0), (20, 120.0), (30, 100.0)],
+        );
+        assert_line(line(&data, 2, None, false), &[(0, 3400.0)]);
+        assert_line(line(&data, 3, None, false), &[]);
 
         let ttft = filtered(
             build(
@@ -2055,13 +2048,13 @@ mod tests {
             "span_kind = 'llm' AND ttft_ns IS NOT NULL",
         );
         let data = answer(&ctx, ask(&ttft, window, Shape::Series)).await;
-        assert_same_line(
+        assert_line(
             line(&data, 0, None, false),
-            named(&fixed, SeriesName::TtftP50, None),
+            &[(0, 400_000_000.0), (20, 600_000_000.0)],
         );
-        assert_same_line(
+        assert_line(
             line(&data, 1, None, false),
-            named(&fixed, SeriesName::TtftP95, None),
+            &[(0, 600_000_000.0), (20, 600_000_000.0)],
         );
 
         let by_model = filtered(
@@ -2078,45 +2071,52 @@ mod tests {
         );
         let data = answer(&ctx, ask(&by_model, window, Shape::Series)).await;
         let models = groups_of(&data, 0);
-        let fixed_models: BTreeSet<String> = fixed
-            .series
-            .iter()
-            .filter(|series| series.name == SeriesName::LlmLatencyP50)
-            .filter_map(|series| series.group.clone())
+        let expected_models: BTreeSet<String> = ["claude-sonnet-4-5", "gpt-4o-mini"]
+            .into_iter()
+            .map(str::to_owned)
             .collect();
-        assert_eq!(models, fixed_models);
-        for model in &models {
-            assert_same_line(
-                line(&data, 0, Some(model), false),
-                named(&fixed, SeriesName::LlmLatencyP50, Some(model.as_str())),
-            );
-            assert_same_line(
-                line(&data, 1, Some(model), false),
-                named(&fixed, SeriesName::LlmLatencyP95, Some(model.as_str())),
-            );
-            assert_same_line(
-                line(&data, 2, Some(model), false),
-                named(&fixed, SeriesName::CostByModel, Some(model.as_str())),
-            );
-        }
+        assert_eq!(models, expected_models);
+        assert_line(
+            line(&data, 0, Some("claude-sonnet-4-5"), false),
+            &[(0, 1_800_000_000.0), (30, 2_000_000_000.0)],
+        );
+        assert_line(
+            line(&data, 1, Some("claude-sonnet-4-5"), false),
+            &[(0, 2_350_000_000.0), (30, 2_000_000_000.0)],
+        );
+        assert_line(
+            line(&data, 2, Some("claude-sonnet-4-5"), false),
+            &[(0, 0.00552), (30, 0.0027)],
+        );
+        assert_line(
+            line(&data, 0, Some("gpt-4o-mini"), false),
+            &[(10, 700_000_000.0), (20, 2_700_000_000.0)],
+        );
+        assert_line(
+            line(&data, 1, Some("gpt-4o-mini"), false),
+            &[(10, 700_000_000.0), (20, 2_700_000_000.0)],
+        );
+        assert_line(line(&data, 2, Some("gpt-4o-mini"), false), &[(20, 0.00133)]);
     }
 
     #[tokio::test]
     async fn score_and_eval_series_match_the_fixed_dashboard() {
         let ctx = context();
         let window = hour();
-        let fixed = metrics(&ctx, metric_request(window, None, None, true))
-            .await
-            .expect("metrics");
         let scores = build(
             WidgetSource::Scores,
             vec![measure(Agg::Avg, Some("value_num"), None)],
             split("name", 20, false),
         );
         let data = answer(&ctx, ask(&scores, window, Shape::Series)).await;
-        let fixed_names = fixed_score_names(&fixed);
-        assert!(!fixed_names.is_empty());
-        assert_same_scores(&data, &fixed, &fixed_names);
+        assert_scores(
+            &data,
+            &[
+                ("helpfulness", &[(0, 0.7)]),
+                ("thumbs", &[(0, 1.0)]),
+                ("tone", &[(0, 1.0)]),
+            ],
+        );
 
         let eval = filtered(
             build(
@@ -2129,10 +2129,7 @@ mod tests {
         let mut request = ask(&eval, window, Shape::Series);
         request.include_eval = true;
         let data = answer(&ctx, request).await;
-        assert_same_line(
-            line(&data, 0, None, false),
-            named(&fixed, SeriesName::EvalCost, None),
-        );
+        assert_line(line(&data, 0, None, false), &[(0, 0.0008)]);
     }
 
     #[tokio::test]
@@ -2140,9 +2137,6 @@ mod tests {
         let ctx = context();
         let window = hour();
         let text = "status = 'error'";
-        let fixed = metrics(&ctx, metric_request(window, Some(text), None, false))
-            .await
-            .expect("metrics");
         let counted = build(
             WidgetSource::Spans,
             vec![measure(Agg::Count, None, None)],
@@ -2167,10 +2161,7 @@ mod tests {
         let mut request = ask(&tokens, window, Shape::Series);
         request.dashboard_filter = Some(text);
         let data = answer(&ctx, request).await;
-        assert_same_line(
-            line(&data, 0, None, false),
-            named(&fixed, SeriesName::InputTokens, None),
-        );
+        assert_line(line(&data, 0, None, false), &[]);
 
         let scores = build(
             WidgetSource::Scores,
@@ -2180,16 +2171,13 @@ mod tests {
         let mut request = ask(&scores, window, Shape::Series);
         request.dashboard_filter = Some(text);
         let data = answer(&ctx, request).await;
-        assert_same_scores(&data, &fixed, &fixed_score_names(&fixed));
+        assert_scores(&data, &[]);
     }
 
     #[tokio::test]
     async fn totals_and_compare_match_the_kpis() {
         let ctx = context();
         let window = window("2026-01-01T10:15:00Z", "2026-01-01T10:30:00Z");
-        let fixed = metrics(&ctx, metric_request(window, None, None, false))
-            .await
-            .expect("metrics");
         let kpis = build(
             WidgetSource::Traces,
             vec![
@@ -2206,17 +2194,17 @@ mod tests {
         let data = answer(&ctx, request).await;
         let row = total_row(&data, None, false);
         let previous = row.previous.as_ref().expect("previous");
-        let names = [
-            KpiName::Traces,
-            KpiName::ErrorRate,
-            KpiName::LatencyP95,
-            KpiName::CostTotal,
-            KpiName::TotalTokens,
+        // Value and previous range of traces, error rate, p95 latency, cost and total tokens.
+        let expected = [
+            (1.0, 3.0),
+            (0.0, 1.0 / 3.0),
+            (3_000_000_000.0, 4_200_000_000.0),
+            (0.00133, 0.00552),
+            (970.0, 4180.0),
         ];
-        for (index, name) in names.into_iter().enumerate() {
-            let kpi = fixed.kpis.iter().find(|kpi| kpi.name == name).expect("kpi");
-            assert_close(row.values[index], kpi.value);
-            assert_close(previous[index], kpi.previous);
+        for (index, (value, before)) in expected.into_iter().enumerate() {
+            assert_close(row.values[index], Some(value));
+            assert_close(previous[index], Some(before));
         }
         assert!(row.values[0].is_some());
         assert!(previous[0].is_some_and(|value| value > 0.0));
@@ -2226,9 +2214,6 @@ mod tests {
     async fn top_models_match_the_fixed_ranking() {
         let ctx = context();
         let window = hour();
-        let fixed = metrics(&ctx, metric_request(window, None, None, false))
-            .await
-            .expect("metrics");
         let top = filtered(
             build(
                 WidgetSource::Spans,
@@ -2242,31 +2227,69 @@ mod tests {
             "span_kind = 'llm' AND model IS NOT NULL",
         );
         let data = answer(&ctx, ask(&top, window, Shape::Total)).await;
+        // Model, cost, llm spans and total tokens, by cost descending.
+        let expected = [
+            ("claude-sonnet-4-5", 0.00822, 4.0, 4680.0),
+            ("gpt-4o-mini", 0.00133, 2.0, 970.0),
+        ];
         let rows = rows_of(&data);
-        assert_eq!(rows.len(), fixed.top_models.len());
-        for (row, want) in rows.iter().zip(&fixed.top_models) {
-            assert_eq!(row.group.as_deref(), Some(want.model.as_str()));
-            assert_close(row.values[0], want.cost_total);
-            assert_eq!(row.values[1], Some(want.llm_count as f64));
-            assert_close(row.values[2], want.total_tokens.map(|value| value as f64));
+        assert_eq!(rows.len(), expected.len());
+        for (row, (model, cost, llm_count, tokens)) in rows.iter().zip(expected) {
+            assert_eq!(row.group.as_deref(), Some(model));
+            assert_close(row.values[0], Some(cost));
+            assert_eq!(row.values[1], Some(llm_count));
+            assert_close(row.values[2], Some(tokens));
         }
     }
+
+    /// The expected series of one `group_by`: each group's `Traces` and `Errors` values.
+    type Split = (&'static str, &'static [(i64, f64)], &'static [(i64, f64)]);
 
     #[tokio::test]
     async fn group_by_matches_the_fixed_splits() {
         let ctx = context();
         let window = hour();
-        for (group_by, include_eval) in [
-            (GroupBy::Model, false),
-            (GroupBy::Environment, true),
-            (GroupBy::Release, false),
-        ] {
-            let fixed = metrics(
-                &ctx,
-                metric_request(window, None, Some(group_by), include_eval),
-            )
-            .await
-            .expect("metrics");
+        let cases: [(GroupBy, bool, &[Split]); 3] = [
+            (
+                GroupBy::Model,
+                false,
+                &[
+                    (
+                        "claude-sonnet-4-5",
+                        &[(0, 2.0), (30, 1.0)],
+                        &[(0, 0.0), (30, 0.0)],
+                    ),
+                    (
+                        "gpt-4o-mini",
+                        &[(10, 1.0), (20, 1.0)],
+                        &[(10, 1.0), (20, 0.0)],
+                    ),
+                ],
+            ),
+            (
+                GroupBy::Environment,
+                true,
+                &[
+                    ("cetra-eval", &[(0, 1.0)], &[(0, 0.0)]),
+                    (
+                        "production",
+                        &[(0, 2.0), (10, 1.0), (30, 1.0)],
+                        &[(0, 0.0), (10, 1.0), (30, 0.0)],
+                    ),
+                    ("staging", &[(20, 1.0)], &[(20, 0.0)]),
+                ],
+            ),
+            (
+                GroupBy::Release,
+                false,
+                &[(
+                    "v1.4.0",
+                    &[(0, 2.0), (10, 1.0), (20, 1.0), (30, 1.0)],
+                    &[(0, 0.0), (10, 1.0), (20, 0.0), (30, 0.0)],
+                )],
+            ),
+        ];
+        for (group_by, include_eval, expected) in cases {
             let counted = build(
                 WidgetSource::Traces,
                 vec![
@@ -2280,22 +2303,14 @@ mod tests {
             request.include_eval = include_eval;
             let data = answer(&ctx, request).await;
             let groups = groups_of(&data, 0);
-            let fixed_groups: BTreeSet<String> = fixed
-                .series
+            let expected_groups: BTreeSet<String> = expected
                 .iter()
-                .filter(|series| series.name == SeriesName::Traces)
-                .filter_map(|series| series.group.clone())
+                .map(|(group, _, _)| (*group).to_owned())
                 .collect();
-            assert_eq!(groups, fixed_groups, "{group_by:?}");
-            for group in &groups {
-                assert_same_line(
-                    line(&data, 0, Some(group), false),
-                    named(&fixed, SeriesName::Traces, Some(group.as_str())),
-                );
-                assert_same_line(
-                    line(&data, 1, Some(group), false),
-                    named(&fixed, SeriesName::Errors, Some(group.as_str())),
-                );
+            assert_eq!(groups, expected_groups, "{group_by:?}");
+            for (group, traces, errors) in expected {
+                assert_line(line(&data, 0, Some(group), false), traces);
+                assert_line(line(&data, 1, Some(group), false), errors);
             }
         }
     }

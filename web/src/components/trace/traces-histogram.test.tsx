@@ -18,31 +18,26 @@ const MS0 = Date.parse(T0);
 const MS1 = Date.parse(T1);
 const MS2 = Date.parse(T2);
 
-function response(series: Schema<"MetricSeries">[]): Schema<"MetricsResponse"> {
-  return {
-    bucket_ns: MINUTE_NS,
-    from: T0,
-    to: "2026-11-17T10:03:00.000Z",
-    kpis: [],
-    series,
-    top_models: [],
-  };
+function answer(series: Schema<"WidgetSeriesResponse">["series"]): Schema<"WidgetSeriesResponse"> {
+  return { bucket_ns: MINUTE_NS, series };
 }
 
-const TRACES_AND_ERRORS: Schema<"MetricSeries">[] = [
+/** Measure 0 counts the OK traces and measure 1 the error traces; a bucket without a point is 0. */
+const TRACES_AND_ERRORS: Schema<"WidgetSeriesResponse">["series"] = [
   {
-    metric: "traces",
+    measure: 0,
+    other: false,
     points: [
-      { time: T0, value: 3 },
-      { time: T1, value: 2 },
-      { time: T2, value: 5 },
+      { time: T0, value: 2, rows: 2 },
+      { time: T1, value: 2, rows: 2 },
     ],
   },
   {
-    metric: "errors",
+    measure: 1,
+    other: false,
     points: [
-      { time: T0, value: 1 },
-      { time: T2, value: 7 },
+      { time: T0, value: 1, rows: 1 },
+      { time: T2, value: 7, rows: 7 },
     ],
   },
 ];
@@ -51,8 +46,8 @@ afterEach(() => {
   cleanup();
 });
 
-it("computes ok as traces minus errors, never below 0, with missing points as 0", () => {
-  expect(histogramRows(response(TRACES_AND_ERRORS))).toEqual([
+it("reads the OK and error counts of each bucket, with missing points as 0", () => {
+  expect(histogramRows(answer(TRACES_AND_ERRORS))).toEqual([
     { time: MS0, ok: 2, errors: 1 },
     { time: MS1, ok: 2, errors: 0 },
     { time: MS2, ok: 0, errors: 7 },
@@ -94,8 +89,12 @@ function renderChart(onRange = vi.fn()) {
   return { client, onRange, ...view };
 }
 
-it("renders the chart from the metrics response", async () => {
-  server.use(http.get("*/metrics", () => HttpResponse.json(response(TRACES_AND_ERRORS))));
+it("renders the chart from the widget query answer", async () => {
+  server.use(
+    http.post("*/dashboards/query", () =>
+      HttpResponse.json({ shape: "series", ...answer(TRACES_AND_ERRORS) }),
+    ),
+  );
   renderChart();
   const chart = await screen.findByRole("img", { name: "Traces over time" });
   await waitFor(() => {
@@ -105,9 +104,9 @@ it("renders the chart from the metrics response", async () => {
 
 it("renders an empty 80px box while loading", () => {
   server.use(
-    http.get("*/metrics", async () => {
+    http.post("*/dashboards/query", async () => {
       await new Promise(() => undefined);
-      return HttpResponse.json(response([]));
+      return HttpResponse.json({ shape: "series", ...answer([]) });
     }),
   );
   renderChart();
@@ -116,9 +115,9 @@ it("renders an empty 80px box while loading", () => {
   expect(chart).toBeEmptyDOMElement();
 });
 
-it("renders nothing when the metrics request fails", async () => {
+it("renders nothing when the widget query fails", async () => {
   server.use(
-    http.get("*/metrics", () =>
+    http.post("*/dashboards/query", () =>
       HttpResponse.json(
         { type: "about:blank", title: "Bad Request", status: 400, code: "invalid_filter" },
         { status: 400, headers: { "Content-Type": "application/problem+json" } },

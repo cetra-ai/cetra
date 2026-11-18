@@ -1,4 +1,8 @@
 import type { Schema } from "@/api/types";
+import { seriesPlot } from "@/lib/dashboards/plot";
+import type { WidgetQuery } from "@/lib/dashboards/types";
+import { serializeChip } from "@/lib/dsl/dsl";
+import type { ChartRow } from "@/lib/metrics";
 
 const KIND_LABELS: Record<Schema<"ChannelKind">, string> = {
   slack: "Slack",
@@ -316,6 +320,7 @@ export function conditionChanged(a: RuleFormValues, b: RuleFormValues): boolean 
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const NS_PER_MS = 1_000_000;
 
 /** D-K-13: the bucket equal to the window, and the preview range. */
 export function previewParams(
@@ -338,20 +343,66 @@ export function previewParams(
   };
 }
 
-/** Which series to draw: error_rate → "error_rate"; cost → "cost"; latency_p95 with target trace →
- *  "latency_p95" (ns, shown in ms); score → "score_avg" with group = the score name;
- *  latency_p95 with target llm_span → undefined (no preview). */
-export function previewSeries(
+/**
+ * The chart rows of a preview answer: one per bucket with a gap where the bucket has no value, and
+ * `all` the value in the condition's unit.
+ */
+export function previewRows(
+  query: WidgetQuery,
+  answer: Schema<"WidgetQueryResponse"> | undefined,
+  divisor: number,
+): ChartRow[] {
+  if (answer?.shape !== "series") {
+    return [];
+  }
+  const plot = seriesPlot(query, answer);
+  const key = plot.columns[0]?.key;
+  if (key === undefined) {
+    return [];
+  }
+  return plot.rows.map((row) => {
+    const value = row[key];
+    return { time: row.time, all: typeof value === "number" ? value / divisor : null };
+  });
+}
+
+/** The widget query that draws a rule's preview and trend (the series the fixed dashboard showed
+ *  for the metric), with the divisor that turns its value into the condition's unit. Latency of
+ *  llm spans has no preview: `undefined`. Score measures draw the average of the named score. */
+export function previewQuery(
   condition: Pick<RuleFormValues, "metric" | "target" | "scoreName">,
-): { metric: Schema<"MetricName">; group?: string } | undefined {
+): { query: WidgetQuery; divisor: number } | undefined {
   switch (condition.metric) {
     case "error_rate":
-      return { metric: "error_rate" };
+      return {
+        query: { source: "traces", measures: [{ agg: "rate", where: "status = 'error'" }] },
+        divisor: 1,
+      };
     case "cost":
-      return { metric: "cost" };
+      return {
+        query: { source: "traces", measures: [{ agg: "sum", field: "cost_total" }] },
+        divisor: 1,
+      };
     case "latency_p95":
-      return condition.target === "trace" ? { metric: "latency_p95" } : undefined;
+      return condition.target === "trace"
+        ? {
+            query: { source: "traces", measures: [{ agg: "p95", field: "duration_ns" }] },
+            divisor: NS_PER_MS,
+          }
+        : undefined;
     case "score":
-      return { metric: "score_avg", group: condition.scoreName.trim() };
+      return {
+        query: {
+          source: "scores",
+          filter: serializeChip({
+            kind: "compare",
+            field: { column: "name" },
+            op: "=",
+            value: { kind: "string", value: condition.scoreName.trim() },
+          }),
+          measures: [{ agg: "avg", field: "value_num" }],
+        },
+        divisor: 1,
+      };
   }
 }

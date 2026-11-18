@@ -113,24 +113,6 @@ fn bucket_count(window: TimeWindow, width: i64) -> Result<i64, RunError> {
         .ok_or_else(too_many)
 }
 
-pub(crate) fn bucket_grid(window: TimeWindow, width: i64) -> Result<Vec<i64>, RunError> {
-    let count = bucket_count(window, width)?;
-    if count < 1 {
-        return Err(too_many());
-    }
-    let first = align_down(window.from(), width)?;
-    let len = usize::try_from(count).map_err(|_| too_many())?;
-    let mut times = Vec::with_capacity(len);
-    for step in 0..count {
-        let at = step
-            .checked_mul(width)
-            .and_then(|offset| first.checked_add(offset))
-            .ok_or_else(too_many)?;
-        times.push(at);
-    }
-    Ok(times)
-}
-
 /// `date_bin(width, time, epoch)` as [`BUCKET`]: the bucket start of each row, aligned to the
 /// Unix epoch, UTC.
 pub(super) fn bucket_expr(width: i64, time: &str) -> Expr {

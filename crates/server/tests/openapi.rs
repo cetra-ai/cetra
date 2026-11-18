@@ -400,7 +400,6 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/projects/{project}/alert-events",
         "list_project_alert_events",
     ),
-    ("get", "/api/v1/projects/{project}/metrics", "get_metrics"),
     ("get", "/api/v1/projects/{project}/facets", "get_facets"),
     (
         "get",
@@ -768,7 +767,6 @@ const QUERY_OR_BODY: &[&str] = &[
     "get_saved_view",
     "list_dashboards",
     "get_dashboard",
-    "get_metrics",
     "get_facets",
     "list_deletions",
     "get_deletion",
@@ -805,7 +803,6 @@ const READ_OPERATIONS: &[&str] = &[
     "list_users",
     "get_user",
     "list_scores",
-    "get_metrics",
     "get_facets",
     "get_experiment_results",
     "compare_experiments",
@@ -834,7 +831,6 @@ const TAGS: &[&str] = &[
     "saved_views",
     "dashboards",
     "sql",
-    "metrics",
     "media",
     "internal",
     "deletions",
@@ -1403,7 +1399,6 @@ fn check_property_names(schema: &Value, owner: &str) {
 fn assert_exclusions(document: &Value) {
     const EXPECTED: &[&str] = &[
         "get_facets",
-        "get_metrics",
         "get_session",
         "get_user",
         "list_sessions",

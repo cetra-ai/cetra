@@ -30,7 +30,11 @@ use datafusion::physical_plan::ExecutionPlan;
 
 use crate::Storage;
 use crate::config::StorageConfig;
-use crate::views::{ProjectQuery, QueryContext};
+use crate::reads::{
+    Agg, Bucket, BucketWidth, Measure, Shape, WidgetData, WidgetQuery, WidgetRequest, WidgetSource,
+    widget_query,
+};
+use crate::views::{ProjectQuery, QueryContext, TimeWindow};
 
 /// Turns core dumps off for this process. A crash child calls it before it can abort, so an
 /// abort writes no `core.*` file to the working directory of the run.
@@ -903,3 +907,80 @@ fn collect_object_keys(dir: &Path, objects: &Path, keys: &mut Vec<String>) {
 
 mod chaos;
 pub(crate) use chaos::{Call, ChaosStore, Fault, Rates, Status, UploadState};
+
+/// The headline KPIs of `window`, in the dashboard's order: traces, error rate, p95 latency, cost
+/// and total tokens. Each is its value and its previous-window value. One widget total of the
+/// five measures, with no filter, evaluation traces excluded and experiments kept.
+pub(crate) async fn headline_kpis(
+    ctx: &QueryContext,
+    window: TimeWindow,
+) -> Result<Vec<(Option<f64>, Option<f64>)>, String> {
+    let query = WidgetQuery {
+        source: WidgetSource::Traces,
+        filter: None,
+        measures: vec![
+            Measure {
+                agg: Agg::Count,
+                field: None,
+                condition: None,
+            },
+            Measure {
+                agg: Agg::Rate,
+                field: None,
+                condition: Some("error_count > 0".to_owned()),
+            },
+            Measure {
+                agg: Agg::P95,
+                field: Some("duration_ns".to_owned()),
+                condition: None,
+            },
+            Measure {
+                agg: Agg::Sum,
+                field: Some("cost_total".to_owned()),
+                condition: None,
+            },
+            Measure {
+                agg: Agg::Sum,
+                field: Some("total_tokens".to_owned()),
+                condition: None,
+            },
+        ],
+        breakdown: None,
+    };
+    let data = widget_query(
+        ctx,
+        WidgetRequest {
+            window,
+            bucket: Bucket::Fixed(BucketWidth::D1),
+            dashboard_filter: None,
+            group_by: None,
+            include_eval: false,
+            include_experiments: true,
+            query: &query,
+            shape: Shape::Total,
+            compare: true,
+            timeout: Duration::from_secs(30),
+        },
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let WidgetData::Total { rows } = data else {
+        return Err("the KPI total answered a series".to_owned());
+    };
+    let [row] = rows.as_slice() else {
+        return Err(format!(
+            "the KPI total has {} rows, expected one",
+            rows.len()
+        ));
+    };
+    let previous = row
+        .previous
+        .as_ref()
+        .ok_or_else(|| "the KPI total has no previous values".to_owned())?;
+    Ok(row
+        .values
+        .iter()
+        .zip(previous)
+        .map(|(&value, &previous)| (value, previous))
+        .collect())
+}

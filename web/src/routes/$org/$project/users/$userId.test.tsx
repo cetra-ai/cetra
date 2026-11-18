@@ -144,14 +144,14 @@ it("keeps the page's range, eval flag and filter on the dashboard link", async (
   expect(href).toContain("filter=");
 });
 
-it("shows an error in the usage area when the metrics fail, and the page still renders", async () => {
+it("shows an error in the usage charts when the widget queries fail, and the page still renders", async () => {
   server.use(
-    http.get("/api/v1/projects/:project/metrics", () =>
+    http.post("/api/v1/projects/:project/dashboards/query", () =>
       HttpResponse.json({ status: 500, title: "Server error", code: "internal" }, { status: 500 }),
     ),
   );
   await renderApp("/acme/support-bot/users/user-42");
-  expect(await screen.findByText("Could not load the usage charts.")).toBeInTheDocument();
+  expect((await screen.findAllByRole("alert")).length).toBeGreaterThan(0);
   expect(screen.getByRole("region", { name: "User scores" })).toBeInTheDocument();
   expect(screen.getByRole("tab", { name: "Overview" })).toHaveAttribute("aria-selected", "true");
 });

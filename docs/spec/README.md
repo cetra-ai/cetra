@@ -13,7 +13,7 @@ The product is `cetra` (cetra.sh; D46). Its identifiers are the binary, the crat
 | 02 | [ingestion.md](02-ingestion.md) | OTLP endpoints, convention detection and mapping tables, media extraction, truncation, cost |
 | 03 | [storage.md](03-storage.md) | WAL, memtable, Parquet layout, catalog, flush, compaction, query path, deletion, retention, media GC |
 | 04 | [metadata-db.md](04-metadata-db.md) | SQLite schema (orgs, users, keys, datasets, rules, ...) |
-| 05 | [query.md](05-query.md) | filter DSL, SQL console sandbox, full-text search, dashboard metrics |
+| 05 | [query.md](05-query.md) | filter DSL, SQL console sandbox, full-text search, dashboard queries |
 | 06 | [evaluation.md](06-evaluation.md) | evaluators, online rules, datasets, experiments, scores |
 | 07 | [alerts.md](07-alerts.md) | alert rules, evaluation loop, channels |
 | 08 | [auth.md](08-auth.md) | users, sessions, OAuth/OIDC, RBAC, API keys, email |

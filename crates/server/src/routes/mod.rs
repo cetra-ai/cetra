@@ -26,7 +26,6 @@ pub(crate) mod invites;
 pub(crate) mod me;
 pub(crate) mod media;
 pub(crate) mod members;
-pub(crate) mod metrics;
 pub(crate) mod model_prices;
 pub(crate) mod oauth;
 pub(crate) mod online_rules;

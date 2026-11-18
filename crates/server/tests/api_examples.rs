@@ -42,7 +42,6 @@ use cetra_server::api::facets::FacetsResponse;
 use cetra_server::api::invites::{CreatedInvite, Invite, InvitePreview};
 use cetra_server::api::keys::{ApiKey, CreatedApiKey, CreatedPersonalToken, PersonalToken};
 use cetra_server::api::members::{OrgMember, ProjectMember};
-use cetra_server::api::metrics::MetricsResponse;
 use cetra_server::api::model_prices::{ModelPrice, ModelPriceInput, ModelPriceResolution};
 use cetra_server::api::online_rules::{
     CreateOnlineRuleRequest, OnlineRule, OnlineRulePage, OnlineRulePreview,
@@ -627,7 +626,6 @@ fn generated_files_roundtrip() {
             "post_api_key" => roundtrip::<CreatedApiKey>(&example.file),
             "list_personal_tokens" => roundtrip::<Page<PersonalToken>>(&example.file),
             "post_personal_token" => roundtrip::<CreatedPersonalToken>(&example.file),
-            "get_metrics" => roundtrip::<MetricsResponse>(&example.file),
             "get_facets" => roundtrip::<FacetsResponse>(&example.file),
             "run_sql" => roundtrip::<SqlQueryResult>(&example.file),
             "query_widget" => roundtrip::<WidgetQueryResponse>(&example.file),
