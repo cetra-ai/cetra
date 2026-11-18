@@ -3,6 +3,7 @@ import { $api } from "@/api/client";
 import { alertRulesQuery } from "@/api/queries-alerts";
 import { experimentsInit } from "@/api/queries-experiments";
 import { onlineRulesInit } from "@/api/queries-online-rules";
+import type { Schema } from "@/api/types";
 
 export type NavBadge =
   | { kind: "count"; value: number; tone: "destructive" | "muted"; label: string }
@@ -12,6 +13,11 @@ export type NavBadgeHref =
   | "/$org/$project/alerts"
   | "/$org/$project/online-rules"
   | "/$org/$project/experiments";
+
+/** The enabled rules that are firing, in the response's order. */
+export function firingRules(rules: readonly Schema<"AlertRule">[]): Schema<"AlertRule">[] {
+  return rules.filter((rule) => rule.enabled && rule.state === "firing");
+}
 
 /**
  * The live badge of each sidebar page that has one. Each badge reads the query its page makes, with
@@ -51,9 +57,7 @@ export function useNavBadges(
 
   const badges: Partial<Record<NavBadgeHref, NavBadge>> = {};
 
-  const firing = (alerts.data?.data ?? []).filter(
-    (rule) => rule.enabled && rule.state === "firing",
-  ).length;
+  const firing = firingRules(alerts.data?.data ?? []).length;
   if (firing > 0) {
     badges["/$org/$project/alerts"] = {
       kind: "count",

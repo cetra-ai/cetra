@@ -7,8 +7,9 @@ import { $api } from "@/api/client";
 import { alertRulesQuery } from "@/api/queries-alerts";
 import { experimentsInit } from "@/api/queries-experiments";
 import { onlineRulesInit } from "@/api/queries-online-rules";
+import type { Schema } from "@/api/types";
 import { server } from "@/mocks/node";
-import { useNavBadges } from "./use-nav-badges";
+import { firingRules, useNavBadges } from "./use-nav-badges";
 
 const ORG = "acme";
 const PROJECT = "support-bot";
@@ -246,4 +247,34 @@ it("shares the page's cache entries with the badges", async () => {
     pages: [expect.objectContaining({ data: expect.any(Array) })],
     pageParams: [null],
   });
+});
+
+function rule(
+  id: string,
+  name: string,
+  enabled: boolean,
+  state: Schema<"AlertRule">["state"],
+): Schema<"AlertRule"> {
+  return {
+    id,
+    name,
+    enabled,
+    condition: { metric: "cost", window: "24h", comparator: "gt", threshold: 50 },
+    channel_ids: [],
+    cooldown_s: 3600,
+    notify_while_firing: false,
+    state,
+    created_at: "2026-01-01T09:00:00.000000000Z",
+    updated_at: "2026-01-01T09:00:00.000000000Z",
+  };
+}
+
+it("firingRules keeps enabled firing rules in order", () => {
+  const rules = [
+    rule("a", "First", true, "firing"),
+    rule("b", "Disabled", false, "firing"),
+    rule("c", "Calm", true, "ok"),
+    rule("d", "Second", true, "firing"),
+  ];
+  expect(firingRules(rules).map((r) => r.id)).toEqual(["a", "d"]);
 });

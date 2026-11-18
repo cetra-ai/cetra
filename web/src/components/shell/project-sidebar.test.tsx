@@ -45,7 +45,12 @@ it("groups the pages under their section headings", async () => {
 
 it("shows the firing count on Alerts and the paused dot on Online rules", async () => {
   await renderApp("/acme/support-bot/traces");
-  expect(await screen.findByLabelText("1 alert rule firing")).toHaveTextContent("1");
+  // The top bar's bell carries the same label, so the badge is looked up in the sidebar's Monitor group.
+  await screen.findByRole("link", { name: "Alerts" });
+  const monitor = screen
+    .getByText("Monitor")
+    .closest<HTMLElement>('[data-slot="sidebar-group"]') as HTMLElement;
+  expect(await within(monitor).findByLabelText("1 alert rule firing")).toHaveTextContent("1");
   expect(await screen.findByLabelText("An online rule is paused on errors")).toBeInTheDocument();
 });
 

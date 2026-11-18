@@ -2,6 +2,8 @@ import { Link, useMatch, useRouterState } from "@tanstack/react-router";
 import { CommandPalette } from "@/components/command/palette";
 import { OrgSwitcher } from "@/components/org-switcher";
 import { isProjectSettingsPath } from "@/components/settings/settings-nav";
+import { AlertBell } from "@/components/shell/alert-bell";
+import { IngestDot } from "@/components/shell/ingest-dot";
 import { pageOf } from "@/components/shell/page-crumb";
 import { ProjectSwitcher } from "@/components/shell/project-switcher";
 import { TopBarSlotTarget } from "@/components/shell/top-bar-slot";
@@ -58,6 +60,12 @@ export function TopBar() {
         ) : null}
       </nav>
       <div className="flex-1" />
+      {project ? (
+        <>
+          <IngestDot org={project.params.org} project={project.params.project} />
+          <AlertBell org={project.params.org} project={project.params.project} />
+        </>
+      ) : null}
       {inOrg ? <CommandPalette /> : null}
       {sidebarHasAccount ? null : (
         <>
