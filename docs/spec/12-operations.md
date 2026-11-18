@@ -28,6 +28,9 @@ GitHub and Google also accept the split form (`CETRA_AUTH__GITHUB__CLIENT_ID`, `
 | `entitlements.defaults.<limit>` | | unset = unlimited, for each of `units_included`, `units_cap`, `ingest_spans_per_sec`, `ingest_burst`, `data_access_days`, `max_seats`, `max_projects`, `max_alert_rules`, `max_active_online_rules` (D-P-13) |
 | `orgs.user_create` | | `true`; `false` on a cloud cell: users cannot create orgs, the control plane does (D-P-31) |
 | `orgs.create_url` | | unset: where "New organization" links when `orgs.user_create` is false (D-P-31) |
+| `demo.org` | `CETRA_DEMO__ORG` | unset (no demo org). An org id: every signed-in user who is not an instance admin reads that org as an implicit viewer (08 § Demo org, D187). The org must exist and be active at startup, or startup fails |
+| `demo.requests_per_minute` / `demo.user_in_flight` / `demo.org_in_flight` | | `120` / `4` / `16`: limits of implicit visitors, per user and all together (08 § Demo org) |
+| `demo.sql_timeout` / `demo.sql_max_rows` | | `"10s"` / `1000`: the SQL console's caps for implicit visitors |
 | `entitlements.upgrade_url` | | unset: no Upgrade button. `{org}` is replaced by the org id (D-P-15) |
 | `entitlements.control_plane_provider` | | `"oidc:cloud"`: the identity provider whose subjects the control plane uses (D-P-39) |
 | `entitlements.control_plane` | | `false`; `true` on a cloud cell only: the cell accepts org tokens and control-plane requests. When false, `/api/internal/v1/*` answers 404, stored org tokens are ignored and only licence keys are trusted (D-P-50) |
@@ -136,6 +139,17 @@ What to back up: `meta.db` and `catalog.db` (taken together, in the same pause),
 - From the first public release tag (D185): a storage format change bumps a format version and migrates at open (D-R-12); the WAL carries a format header in each segment (03 § 12), and a new binary reads the previous format's segments (replays them before writing the new format). Before that tag there is no format constraint.
 - `meta.db`, `secret.key`, the backup manifest and the admin socket follow 04 § Format versions (D-R-33 to D-R-38): a `meta.db` format version beside the migrations, additive migrations, golden backups restored by CI (SF7).
 - Downgrades are not supported: a directory written by a newer format is refused by an older binary before anything is changed (03 § 12); restore the pre-upgrade backup.
+
+## Demo org (D187)
+
+The website's "Try demo" link opens `https://<cell>/demo` on the cloud cell that holds the demo org (today `eu1`). Setting it up (the cetra team, once per cell; `tools/demo/README.md` has the steps):
+
+1. Create the org through the control plane with a team account, so Q knows it like any org, and give it an override without a data-access window, units cap or ingest rate below the generator's (Q's request R-demo, see the plan).
+2. Set `demo.org` to its id in the cell's config and restart the cell.
+3. In the org, create the project, an `sk` key with `ingest, write`, the LLM connection to the generator's judge endpoint, the evaluators, online rules, score definitions, alert rules and dashboards the README lists.
+4. Run the `cetra-demo` generator next to the cell (a third container in the cell's compose stack) with that key; its judge endpoint is served on a public hostname through the cell's reverse proxy, so `security.allow_private_network_egress` stays `false`.
+
+The team's accounts are the demo org's only members, and every visitor sees their names and emails in the member list: use team addresses, not personal ones.
 
 ## Security checklist (MVP)
 
