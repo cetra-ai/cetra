@@ -370,13 +370,14 @@ impl TestApp {
             crate::ee::org_sso::dns::TxtResolver::fixed(),
         )
         .expect("org SSO state");
+        let limits = Limits::new(&config.demo);
         let state = AppState::new(AppInner {
             config,
             meta,
             storage: Arc::new(storage),
             ready: crate::http::health::ReadyCache::default(),
             clock: Clock::Manual(Arc::new(AtomicI64::new(MANUAL_NOW_NS))),
-            limits: Limits::new(),
+            limits,
             key_cache: crate::auth::principal::ApiKeyCache::new(),
             pat_cache: crate::auth::principal::PatCache::new(),
             last_used: crate::auth::last_used::LastUsed::new(),

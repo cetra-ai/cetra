@@ -461,13 +461,14 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
     }
     let storage = Arc::new(storage);
     let eval = crate::eval::EvalQueue::new(config.eval.workers);
+    let limits = Limits::new(&config.demo);
     let state = AppState::new(AppInner {
         config,
         meta,
         storage,
         ready: crate::http::health::ReadyCache::default(),
         clock: Clock::System,
-        limits: Limits::new(),
+        limits,
         key_cache: crate::auth::principal::ApiKeyCache::new(),
         pat_cache: crate::auth::principal::PatCache::new(),
         last_used: crate::auth::last_used::LastUsed::new(),

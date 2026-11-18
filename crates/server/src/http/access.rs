@@ -220,10 +220,26 @@ async fn enforce(
     let outcome = if hidden_without_control_plane(&state, path) {
         Err(ApiError::NotFound)
     } else {
-        prepare(state, access, request).await
+        prepare(state.clone(), access, request).await
     };
     match outcome {
         Ok(request) => {
+            // An implicit visitor of the demo org passes the demo limits (spec 08 § Demo org).
+            // The slots are held until the handler returns: an open stream keeps its own caps.
+            let _demo = match request.extensions().get::<DemoVisitor>().copied() {
+                Some(visitor) => match state.limits.demo.admit(visitor.0, state.clock.now_ns()) {
+                    Ok(guard) => Some(guard),
+                    Err(retry) => {
+                        let mut response = ApiError::RateLimited {
+                            retry_after_s: retry.0.as_secs().max(1),
+                        }
+                        .into_response();
+                        record_access(&mut response, "denied-other");
+                        return response;
+                    }
+                },
+                None => None,
+            };
             let mut response = next.run(request).await;
             // The handler's own 404 or 400 must not look like a denial.
             record_access(&mut response, "allowed");

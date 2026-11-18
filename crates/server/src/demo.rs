@@ -26,8 +26,6 @@ pub(crate) struct OrgRoleOf {
 /// Set on the request of an implicit visitor, for the demo limits (spec 08 § Demo org). The
 /// value is the user id.
 #[derive(Debug, Clone, Copy)]
-// The demo limits read it (DO3); until then only the insertion exists.
-#[allow(dead_code)]
 pub(crate) struct DemoVisitor(pub(crate) Uuid);
 
 /// Whether `org` is the demo org (`demo.org`). Its flag in the API is `true` for every caller,
@@ -99,6 +97,7 @@ pub(crate) mod tests {
     use serde_json::{Value, json};
 
     use crate::api::account::OrgRole;
+    use crate::config::DemoConfig;
     use crate::meta::members::{add_org_member, org_role};
     use crate::meta::orgs::insert_org;
     use crate::meta::projects::insert_project;
@@ -115,8 +114,17 @@ pub(crate) mod tests {
     }
 
     pub(crate) async fn world() -> World {
+        world_with(|_| {}).await
+    }
+
+    /// [`world`] with `tweak` applied to the demo config.
+    pub(crate) async fn world_with(tweak: impl FnOnce(&mut DemoConfig)) -> World {
         let demo = OrgId::new_v7();
-        let app = TestApp::with_config(|config| config.demo.org = Some(demo)).await;
+        let app = TestApp::with_config(|config| {
+            config.demo.org = Some(demo);
+            tweak(&mut config.demo);
+        })
+        .await;
         let now = app.state.clock.now_ns();
         let project = app
             .state
@@ -402,5 +410,77 @@ pub(crate) mod tests {
         let body: Value = lookup.json();
         assert_eq!(body["user_id"], visitor.id.to_string());
         assert_eq!(body["orgs"].as_array().unwrap().len(), 0, "{body}");
+    }
+
+    #[tokio::test]
+    async fn an_implicit_visitor_over_the_rate_gets_429_and_a_member_is_not_limited() {
+        let w = world_with(|demo| demo.requests_per_minute = 2).await;
+        let visitor = signed_in(&w.app, "visitor@example.com", false).await;
+        let path = format!("/api/v1/orgs/{}", w.demo);
+        for _ in 0..2 {
+            assert_eq!(get_as(&w.app, &path, &visitor).await.status, StatusCode::OK);
+        }
+        // Two tokens a minute: the next one is 30 s away.
+        let refused = get_as(&w.app, &path, &visitor).await;
+        assert_eq!(
+            refused.status,
+            StatusCode::TOO_MANY_REQUESTS,
+            "{}",
+            text(&refused)
+        );
+        assert_eq!(refused.header("retry-after"), Some("30"));
+        assert_eq!(refused.json::<Value>()["code"], "rate_limited");
+
+        for _ in 0..5 {
+            assert_eq!(
+                get_as(&w.app, &path, &w.member).await.status,
+                StatusCode::OK
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn held_slots_refuse_a_visitor_until_they_are_freed() {
+        let w = world_with(|demo| {
+            demo.user_in_flight = 1;
+            demo.org_in_flight = 1;
+        })
+        .await;
+        let visitor = signed_in(&w.app, "visitor@example.com", false).await;
+        let other = signed_in(&w.app, "other@example.com", false).await;
+        let path = format!("/api/v1/orgs/{}", w.demo);
+        let now = w.app.state.clock.now_ns();
+
+        // Another visitor holds the org's only slot.
+        let held = w.app.state.limits.demo.admit(other.id, now).unwrap();
+        let refused = get_as(&w.app, &path, &visitor).await;
+        assert_eq!(
+            refused.status,
+            StatusCode::TOO_MANY_REQUESTS,
+            "{}",
+            text(&refused)
+        );
+        assert_eq!(refused.json::<Value>()["code"], "rate_limited");
+        drop(held);
+
+        // Requests one after another each find the slot free again.
+        assert_eq!(get_as(&w.app, &path, &visitor).await.status, StatusCode::OK);
+        assert_eq!(get_as(&w.app, &path, &visitor).await.status, StatusCode::OK);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_implicit_visitors_mcp_call_takes_no_demo_slot() {
+        let w = world_with(|demo| {
+            demo.user_in_flight = 1;
+            demo.org_in_flight = 1;
+        })
+        .await;
+        let visitor = signed_in(&w.app, "visitor@example.com", false).await;
+        let now = w.app.state.clock.now_ns();
+        let _held = w.app.state.limits.demo.admit(visitor.id, now).unwrap();
+        let token = w.app.personal_token(visitor.id, false).await;
+        let list = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"});
+        let response = crate::mcp::test_helpers::rpc(&w.app, Some(token.as_str()), &list).await;
+        assert_eq!(response.status, StatusCode::OK, "{}", text(&response));
     }
 }
