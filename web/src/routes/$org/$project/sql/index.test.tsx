@@ -96,7 +96,7 @@ it("lists SQL in the sidebar and opens the console", async () => {
   await waitFor(() => {
     expect(router.state.location.pathname).toBe("/acme/support-bot/sql");
   });
-  expect(await screen.findByRole("heading", { name: "SQL" })).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: "Schema" })).toBeInTheDocument();
   expect(screen.getByText("Run a query to see results")).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "SQL" })).toHaveAttribute("aria-current", "page");
   expect(screen.getByRole("button", { name: "Run" })).toHaveAttribute("title", "Run (Ctrl↵)");

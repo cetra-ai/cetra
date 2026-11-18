@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { cn } from "cn";
-import { ArrowDown, ArrowUp, ListChecks, Loader2, Plus } from "lucide-react";
+import { ArrowDown, ArrowUp, Info, ListChecks, Loader2, Plus } from "lucide-react";
 import { type KeyboardEvent, useLayoutEffect, useRef, useState } from "react";
 import { $api } from "@/api/client";
 import { useEvaluatorPages } from "@/api/queries-evaluation";
@@ -302,7 +302,14 @@ function OnlineRulesPage() {
                 <div className="flex min-h-9 shrink-0 items-center gap-2 overflow-x-auto border-b px-3">
                   <Tooltip>
                     <TooltipTrigger asChild>
-                      <h1 className="shrink-0 text-ui font-medium">Online rules</h1>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-xs"
+                        aria-label="About online rules"
+                      >
+                        <Info />
+                      </Button>
                     </TooltipTrigger>
                     <TooltipContent>
                       {`A rule runs an evaluator on new traces or spans that match its filter.${

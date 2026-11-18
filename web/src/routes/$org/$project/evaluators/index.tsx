@@ -183,7 +183,6 @@ function EvaluatorsPage() {
     <div className="mx-auto flex w-full max-w-[1600px] flex-1 flex-col gap-6 overflow-auto px-4 py-6">
       <div className="flex items-start justify-between gap-4">
         <div className="flex items-baseline gap-3">
-          <h1 className="text-title font-medium">Evaluators</h1>
           {query.isPending ? null : (
             <span className="text-body text-muted-foreground">
               {rows.length === 1 ? "1 evaluator" : `${rows.length} evaluators`}

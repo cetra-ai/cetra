@@ -215,7 +215,6 @@ function ExperimentsPage() {
   const start = (
     <div className="flex h-full min-h-0 w-full flex-col">
       <div className="flex min-h-9 shrink-0 flex-wrap items-center gap-2 border-b px-3 py-1">
-        <h1 className="text-ui font-medium">Experiments</h1>
         <div className="flex flex-wrap items-center gap-1">
           <Button
             type="button"

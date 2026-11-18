@@ -163,7 +163,6 @@ function DatasetsPage() {
           start={
             <div className="flex h-full min-h-0 flex-col">
               <div className="flex min-h-9 shrink-0 items-center gap-3 border-b px-3">
-                <h1 className="text-ui font-medium">Datasets</h1>
                 <Input
                   aria-label="Search datasets"
                   placeholder="Search by name"

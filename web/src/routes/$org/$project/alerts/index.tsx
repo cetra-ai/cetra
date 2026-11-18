@@ -2,7 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { cn } from "cn";
 import type { LucideIcon } from "lucide-react";
-import { BellRing, Mail, MessageSquare, Plus, TriangleAlert, Webhook } from "lucide-react";
+import { BellRing, Info, Mail, MessageSquare, Plus, TriangleAlert, Webhook } from "lucide-react";
 import { type KeyboardEvent, useLayoutEffect, useRef } from "react";
 import { $api } from "@/api/client";
 import { problemMessage, problemOf } from "@/api/problem";
@@ -246,7 +246,14 @@ function AlertsPage() {
                 <div className="flex min-h-9 shrink-0 items-center gap-2 overflow-x-auto border-b px-3">
                   <Tooltip>
                     <TooltipTrigger asChild>
-                      <h1 className="shrink-0 text-body font-medium">Alerts</h1>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-xs"
+                        aria-label="How often rules are evaluated"
+                      >
+                        <Info />
+                      </Button>
                     </TooltipTrigger>
                     <TooltipContent>
                       Rules are evaluated every minute, or every 5 minutes for windows of 1 hour or
