@@ -83,14 +83,15 @@ it("gives a member on a custom dashboard Edit and the menu", async () => {
   expect(screen.getByRole("menuitem", { name: "Delete" })).toBeInTheDocument();
 });
 
-it("gives a member on the Overview Duplicate only", async () => {
+it("gives a member on the Overview Edit and Duplicate, but no rename, delete or reset", async () => {
   const { user } = await renderApp(OVERVIEW_URL);
   await screen.findByRole("heading", { level: 2, name: "Volume" });
-  expect(screen.queryByRole("button", { name: "Edit" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Edit" })).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "Dashboard actions" }));
   expect(screen.getByRole("menuitem", { name: "Duplicate" })).toBeInTheDocument();
   expect(screen.queryByRole("menuitem", { name: "Rename" })).not.toBeInTheDocument();
   expect(screen.queryByRole("menuitem", { name: "Delete" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("menuitem", { name: "Reset to default" })).not.toBeInTheDocument();
 });
 
 it("gives a viewer the switcher only", async () => {

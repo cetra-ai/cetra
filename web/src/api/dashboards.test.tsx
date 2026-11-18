@@ -3,14 +3,16 @@ import { renderHook, waitFor } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
 import type { ReactNode } from "react";
 import { expect, it } from "vitest";
-import { apiStore, localStore } from "@/lib/dashboards/store";
+import { apiStore, localStore, overviewKey } from "@/lib/dashboards/store";
 import { dashboardHandlers, seedDashboards } from "@/mocks/dashboards";
 import { server } from "@/mocks/node";
 import { problemResponse } from "@/test/problem";
 import dashboardDocument from "../../../fixtures/api/static/dashboard.json";
+import overviewDocument from "../../../fixtures/api/static/dashboard-overview.json";
 import {
   dashboardsQuery,
   isStaleDashboard,
+  overviewQuery,
   useCreateDashboard,
   useDeleteDashboard,
   useUpdateDashboard,
@@ -68,6 +70,37 @@ it("local and API dashboards use different query keys", () => {
   const local = dashboardsQuery(ORG, PROJECT, localStore(ORG, PROJECT)).queryKey;
   expect(local).not.toEqual(api);
   expect(local.slice(0, api.length)).toEqual(api);
+});
+
+it("reads the stored Overview, and maps its 404 to null", async () => {
+  server.use(...dashboardHandlers(seedDashboards()));
+  await expect(apiStore(ORG, PROJECT).getOverview()).resolves.toBeNull();
+  server.use(...dashboardHandlers(seedDashboards(), overviewDocument as never));
+  await expect(apiStore(ORG, PROJECT).getOverview()).resolves.toMatchObject({
+    name: "Overview",
+    version: 3,
+  });
+});
+
+it("omits an undefined version from the Overview save", async () => {
+  let sent: unknown;
+  server.use(
+    http.put("/api/v1/projects/:project/dashboards/overview", async ({ request }) => {
+      sent = await request.json();
+      return HttpResponse.json(overviewDocument, { status: 201 });
+    }),
+  );
+  await apiStore(ORG, PROJECT).saveOverview({ version: undefined, definition: { widgets: [] } });
+  expect(sent).toEqual({ definition: { widgets: [] } });
+  expect(sent).not.toHaveProperty("version");
+});
+
+it("keeps the stored Overview's query key apart in the browser's store", () => {
+  const api = overviewKey(ORG, PROJECT, false);
+  const local = overviewKey(ORG, PROJECT, true);
+  expect(local).not.toEqual(api);
+  expect(local.slice(0, api.length)).toEqual(api);
+  expect(overviewQuery(ORG, PROJECT, localStore(ORG, PROJECT)).queryKey).toEqual(local);
 });
 
 it("creates a dashboard and refreshes the list", async () => {

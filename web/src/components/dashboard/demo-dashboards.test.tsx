@@ -145,6 +145,23 @@ it("shows the browser-only banner in edit mode for a demo viewer", async () => {
   expect(screen.getByText(NOTICE)).toBeInTheDocument();
 });
 
+it("a demo viewer's Overview is the preset, with no Edit and no request for a stored one", async () => {
+  signedInAs("viewer", true);
+  const { user } = await renderApp("/acme/support-bot/dashboard");
+  await screen.findByRole("heading", { level: 2, name: "Volume" });
+  await user.click(await screen.findByRole("button", { name: "Switch dashboard" }));
+  await user.keyboard("{Escape}");
+  const requests = recordRequests();
+  try {
+    await user.click(await screen.findByRole("button", { name: "Dashboard actions" }));
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("button", { name: "Edit" })).toBeNull();
+    expect(requests.calls.some((call) => call.path.endsWith("/dashboards/overview"))).toBe(false);
+  } finally {
+    requests.stop();
+  }
+});
+
 it("uses the API for a demo member, not the browser", async () => {
   signedInAs("member", true);
   const requests = recordRequests();

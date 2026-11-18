@@ -3,12 +3,13 @@ import { HttpResponse, http } from "msw";
 import type { GridLayoutProps } from "react-grid-layout";
 import { expect, it, vi } from "vitest";
 import type { Dashboard, Definition } from "@/lib/dashboards/types";
-import { dashboardHandlers } from "@/mocks/dashboards";
+import { dashboardHandlers, seedDashboards } from "@/mocks/dashboards";
 import { server } from "@/mocks/node";
 import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
 import { recordRequests } from "@/test/requests";
 import dashboardDocument from "../../../../fixtures/api/static/dashboard.json";
+import overviewDocument from "../../../../fixtures/api/static/dashboard-overview.json";
 import staleDocument from "../../../../fixtures/api/static/dashboard-stale.json";
 import projectDocument from "../../../../fixtures/api/static/project.json";
 import { AUTOSAVE_DELAY_MS } from "./use-layout-autosave";
@@ -32,6 +33,10 @@ const STORED = dashboardDocument.definition as Definition;
 const ERROR_RATE = "Error rate";
 const REQUESTS = "Requests by model";
 const SLOWEST = "Slowest operations";
+const OVERVIEW_URL = "/acme/support-bot/dashboard";
+const OVERVIEW_PATH = "/api/v1/projects/:project/dashboards/overview";
+/** The Overview the project has stored: the fixture's copy, at version 3. */
+const STORED_OVERVIEW = overviewDocument as unknown as Dashboard;
 
 /** The PATCH body the page sent, once it has been sent. */
 async function savedBody(requests: ReturnType<typeof recordRequests>) {
@@ -761,4 +766,135 @@ it("Edit is disabled while a layout save is pending", async () => {
   expect(screen.getByRole("button", { name: "Edit" })).toBeEnabled();
   await user.click(screen.getByRole("button", { name: "Edit" }));
   expect(screen.getByRole("button", { name: "Save" })).toBeInTheDocument();
+});
+
+/** The PUT body the page sent to the Overview, once it has been sent. */
+async function overviewSaveBody(requests: ReturnType<typeof recordRequests>) {
+  await waitFor(() => {
+    expect(requests.calls.find((call) => call.method === "PUT")?.body).toBeDefined();
+  });
+  return requests.calls.find((call) => call.method === "PUT")?.body as {
+    version?: number;
+    definition: Definition;
+  };
+}
+
+it("a member edits the preset Overview, and its first save stores it with no version", async () => {
+  const requests = recordRequests();
+  try {
+    const { user } = await renderApp(OVERVIEW_URL);
+    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    await user.click(screen.getByRole("button", { name: "Add heading" }));
+    await user.type(screen.getByLabelText("Heading"), "Costs");
+    await user.click(screen.getByRole("button", { name: "Apply" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    const body = await overviewSaveBody(requests);
+    expect(body).not.toHaveProperty("version");
+    expect(body.definition.widgets.at(-1)).toMatchObject({ title: "Costs", kind: "heading" });
+    expect(await screen.findByRole("heading", { level: 2, name: "Costs" })).toBeInTheDocument();
+  } finally {
+    requests.stop();
+  }
+});
+
+it("a member saves the stored Overview at the version it read", async () => {
+  server.use(...dashboardHandlers(seedDashboards(), STORED_OVERVIEW));
+  const requests = recordRequests();
+  try {
+    const { user } = await renderApp(OVERVIEW_URL);
+    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    await user.click(screen.getByRole("button", { name: "Add heading" }));
+    await user.type(screen.getByLabelText("Heading"), "Costs");
+    await user.click(screen.getByRole("button", { name: "Apply" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    const body = await overviewSaveBody(requests);
+    expect(body.version).toBe(3);
+    expect(body.definition.widgets).toHaveLength(STORED_OVERVIEW.definition.widgets.length + 1);
+  } finally {
+    requests.stop();
+  }
+});
+
+it("a 409 on the Overview offers a reload, and Reload fetches the stored Overview again", async () => {
+  server.use(
+    http.put(OVERVIEW_PATH, () =>
+      problemResponse(409, "conflict", { detail: "the dashboard changed; current version is 4" }),
+    ),
+    ...dashboardHandlers(seedDashboards(), STORED_OVERVIEW),
+  );
+  const requests = recordRequests();
+  try {
+    const { user } = await renderApp(OVERVIEW_URL);
+    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    await user.click(screen.getByRole("button", { name: "Add heading" }));
+    await user.type(screen.getByLabelText("Heading"), "Costs");
+    await user.click(screen.getByRole("button", { name: "Apply" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByRole("alertdialog")).toBeInTheDocument();
+    const reads = () =>
+      requests.calls.filter(
+        (call) => call.method === "GET" && call.path.endsWith("/dashboards/overview"),
+      ).length;
+    const before = reads();
+    await user.click(screen.getByRole("button", { name: "Reload" }));
+    await waitFor(() => expect(reads()).toBeGreaterThan(before));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+  } finally {
+    requests.stop();
+  }
+});
+
+it("Reset to default shows only with a stored copy, asks first, and brings the preset back", async () => {
+  const bare = await renderApp(OVERVIEW_URL);
+  await bare.user.click(await screen.findByRole("button", { name: "Dashboard actions" }));
+  expect(screen.queryByRole("menuitem", { name: "Reset to default" })).not.toBeInTheDocument();
+  bare.unmount();
+
+  server.use(...dashboardHandlers(seedDashboards(), STORED_OVERVIEW));
+  const requests = recordRequests();
+  try {
+    const { user } = await renderApp(OVERVIEW_URL);
+    await user.click(await screen.findByRole("button", { name: "Dashboard actions" }));
+    expect(screen.queryByRole("menuitem", { name: "Rename" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Delete" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("menuitem", { name: "Reset to default" }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("Reset the Overview?")).toBeInTheDocument();
+    expect(requests.calls.some((call) => call.method === "DELETE")).toBe(false);
+    await user.click(within(dialog).getByRole("button", { name: "Reset" }));
+
+    expect(await screen.findByRole("heading", { level: 2, name: "Volume" })).toBeInTheDocument();
+    expect(requests.calls.some((call) => call.method === "DELETE")).toBe(true);
+  } finally {
+    requests.stop();
+  }
+});
+
+it("a viewer sees the stored Overview with no controls", async () => {
+  server.use(
+    http.get("/api/v1/projects/:project", () =>
+      HttpResponse.json({ ...projectDocument, role: "viewer" }),
+    ),
+    ...dashboardHandlers(seedDashboards(), STORED_OVERVIEW),
+  );
+  await renderApp(OVERVIEW_URL);
+  expect(await screen.findByRole("heading", { level: 2, name: "Traffic" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Edit" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Dashboard actions" })).not.toBeInTheDocument();
+});
+
+it("viewing the preset Overview saves nothing", async () => {
+  const requests = recordRequests();
+  try {
+    await renderApp(OVERVIEW_URL);
+    await screen.findByRole("heading", { level: 2, name: "Volume" });
+    await new Promise((resolve) => setTimeout(resolve, AUTOSAVE_DELAY_MS + 300));
+    expect(requests.calls.some((call) => call.method === "PUT")).toBe(false);
+  } finally {
+    requests.stop();
+  }
 });

@@ -2,7 +2,12 @@ import { useQueryClient } from "@tanstack/react-query";
 import { MoreHorizontal } from "lucide-react";
 import { type ComponentProps, type ReactNode, useEffect, useState } from "react";
 import type { Layout as GridLayout } from "react-grid-layout";
-import { dashboardQuery, isStaleDashboard, useUpdateDashboard } from "@/api/dashboards";
+import {
+  dashboardQuery,
+  isStaleDashboard,
+  useSaveOverview,
+  useUpdateDashboard,
+} from "@/api/dashboards";
 import { problemMessage, problemOf } from "@/api/problem";
 import { UnsavedChangesGuard } from "@/components/settings/unsaved-changes";
 import { useProject } from "@/components/shell/project-context";
@@ -36,7 +41,7 @@ import {
   withLayouts,
 } from "@/lib/dashboards/draft";
 import { OVERVIEW } from "@/lib/dashboards/overview";
-import { useDashboardStore } from "@/lib/dashboards/store";
+import { overviewKey, useDashboardStore } from "@/lib/dashboards/store";
 import type { Dashboard, Definition, Layout, Widget } from "@/lib/dashboards/types";
 import { type FieldIssue, validateDefinition } from "@/lib/dashboards/validate";
 import { canManageDashboards } from "@/lib/roles";
@@ -54,11 +59,20 @@ const NEW_CHART = { w: 6, h: 7 } as const;
 const NOTICE_MS = 10_000;
 
 /**
+ * What the body shows: the project's Overview (its stored copy, or null for the built-in preset),
+ * or a custom dashboard.
+ */
+export type DashboardTarget =
+  | { kind: "overview"; stored: Dashboard | null }
+  | { kind: "custom"; dashboard: Dashboard };
+
+/**
  * An edit session: a draft of the definition, started from the version it was read at. The
  * save names that version, so a change made elsewhere since then is a `409`, not an overwrite.
+ * The version is undefined only for the preset Overview, which nothing stores yet.
  */
 type Session = {
-  version: number;
+  version: number | undefined;
   base: Definition;
   draft: Definition;
   /** Client or server rule failures, by path. */
@@ -79,22 +93,22 @@ type Open =
   | null;
 
 /**
- * The grid of the open dashboard, with its header. Members on a custom dashboard can edit it:
- * the draft is kept here until it is saved or dropped. The Overview is stored or the preset.
- * Each dashboard gets a body of its own, so a layout save still pending for one goes to that one.
+ * The grid of the open dashboard, with its header. Members can edit the Overview and a custom
+ * dashboard: the draft is kept here until it is saved or dropped. Each dashboard gets a body of its
+ * own, so a layout save still pending for one goes to that one.
  */
 export function DashboardBody(props: ComponentProps<typeof DashboardGrid>) {
-  return <DashboardGrid key={props.dashboard?.id ?? "overview"} {...props} />;
+  const key = props.target.kind === "overview" ? "overview" : props.target.dashboard.id;
+  return <DashboardGrid key={key} {...props} />;
 }
 
 function DashboardGrid({
-  dashboard,
+  target,
   active,
   context,
   renderWidget,
 }: {
-  /** The custom dashboard, or undefined for the Overview. */
-  dashboard: Dashboard | undefined;
+  target: DashboardTarget;
   /** Whether the dashboard is the one on screen. A hidden dashboard drops its draft. */
   active: boolean;
   context: WidgetContext;
@@ -105,7 +119,16 @@ function DashboardGrid({
   const queryClient = useQueryClient();
   const narrow = useIsMobile();
   const { store, local } = useDashboardStore(org, project);
-  const update = useUpdateDashboard(org, project, dashboard?.id ?? "");
+  const custom = target.kind === "custom" ? target.dashboard : undefined;
+  const update = useUpdateDashboard(org, project, custom?.id ?? "");
+  const saveOverview = useSaveOverview(org, project);
+  // The definition and version the grid shows: the stored copy, the preset, or the custom dashboard.
+  const definition: Definition =
+    target.kind === "overview"
+      ? (target.stored?.definition ?? OVERVIEW)
+      : target.dashboard.definition;
+  const version: number | undefined =
+    target.kind === "overview" ? target.stored?.version : target.dashboard.version;
   const [session, setSession] = useState<Session | null>(null);
   const [open, setOpen] = useState<Open>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -127,15 +150,19 @@ function DashboardGrid({
     return () => clearTimeout(timer);
   }, [notice]);
 
-  // A demo-org viewer edits the dashboards kept in this browser (D-C-17).
-  const canEdit = dashboard !== undefined && (local || canManageDashboards(data.role)) && !narrow;
+  // A demo-org viewer edits the dashboards kept in this browser (D-C-17); the Overview is the
+  // project's own, so the demo viewer only reads it.
+  const canEdit =
+    target.kind === "overview"
+      ? !local && canManageDashboards(data.role) && !narrow
+      : (local || canManageDashboards(data.role)) && !narrow;
   const editing = canEdit && session !== null;
   const draft = editing ? session.draft : undefined;
   // Outside Edit, a moved or resized chart is saved by itself (D-C-18). Viewing saves nothing.
   const autosaving = canEdit && session === null && active;
   const autosave = useLayoutAutosave({
-    definition: dashboard?.definition ?? OVERVIEW,
-    version: dashboard?.version,
+    definition,
+    version,
     enabled: autosaving,
     persist,
     onConflict: () => {
@@ -144,7 +171,7 @@ function DashboardGrid({
     },
     onError: setNotice,
   });
-  const shown: Definition = draft ?? autosave.pending ?? dashboard?.definition ?? OVERVIEW;
+  const shown: Definition = draft ?? autosave.pending ?? definition;
   // A draft is kept while the grid is not shown (a narrow window), so it still guards the page.
   const dirty = session !== null && !sameDefinition(session.draft, session.base);
 
@@ -170,24 +197,33 @@ function DashboardGrid({
   }
 
   function startEditing() {
-    if (dashboard === undefined) {
+    if (!canEdit) {
       return;
     }
     // The grid packs the widgets upwards when it is shown, so the base is packed the same way:
     // the first drag then changes only what the user moved.
-    const definition = { widgets: compactWidgets(dashboard.definition.widgets) };
+    const packed = { widgets: compactWidgets(definition.widgets) };
     setSession({
-      version: dashboard.version,
-      base: definition,
-      draft: definition,
+      version,
+      base: packed,
+      draft: packed,
       issues: [],
       conflict: false,
     });
   }
 
-  /** Saves the open custom dashboard's definition at `version`. A stale version is a 409. */
-  async function persist(definition: Definition, version: number | undefined) {
-    await update.mutateAsync({ version: version ?? 0, definition });
+  /**
+   * Saves the definition, read at `at`. The Overview's first save names no version and creates
+   * the stored copy; a stale version is a 409.
+   */
+  async function persist(next: Definition, at: number | undefined) {
+    if (target.kind === "overview") {
+      await saveOverview.mutateAsync(
+        at === undefined ? { definition: next } : { version: at, definition: next },
+      );
+      return;
+    }
+    await update.mutateAsync({ version: at ?? 0, definition: next });
   }
 
   function cancelEditing() {
@@ -278,7 +314,7 @@ function DashboardGrid({
   }
 
   async function save() {
-    if (session === null || dashboard === undefined) {
+    if (session === null || !canEdit) {
       return;
     }
     const issues = validateDefinition(session.draft);
@@ -309,10 +345,12 @@ function DashboardGrid({
   function reload() {
     setSession(null);
     setOpen(null);
-    if (dashboard !== undefined) {
+    if (custom !== undefined) {
       void queryClient.invalidateQueries({
-        queryKey: dashboardQuery(org, project, dashboard.id, store).queryKey,
+        queryKey: dashboardQuery(org, project, custom.id, store).queryKey,
       });
+    } else {
+      void queryClient.invalidateQueries({ queryKey: overviewKey(org, project, false) });
     }
   }
 
@@ -324,7 +362,9 @@ function DashboardGrid({
   });
   const full = (draft?.widgets.length ?? 0) >= MAX_WIDGETS;
   // A save in flight locks the grid and its controls until the answer comes.
-  const busy = update.isPending;
+  const busy = update.isPending || saveOverview.isPending;
+  // A layout save still pending or running: Edit and Reset to default wait for it.
+  const layoutBusy = autosave.pending !== undefined || autosave.saving;
   const movable = editing && !busy;
   // The number a widget without a title is named by: its place in reading order, from 1.
   const places = new Map(
@@ -336,7 +376,7 @@ function DashboardGrid({
   return (
     <>
       <div className="flex flex-wrap items-center gap-2 pb-3">
-        <DashboardSwitcher dashboard={dashboard} />
+        <DashboardSwitcher dashboard={custom} />
         <div className="ml-auto flex flex-wrap items-center gap-2">
           {editing ? (
             <>
@@ -378,13 +418,13 @@ function DashboardGrid({
               type="button"
               variant="outline"
               size="sm"
-              disabled={autosave.pending !== undefined || autosave.saving}
+              disabled={layoutBusy}
               onClick={startEditing}
             >
               Edit
             </Button>
           ) : null}
-          {editing ? null : <DashboardMenu dashboard={dashboard} />}
+          {editing ? null : <DashboardMenu target={target} layoutBusy={layoutBusy} />}
         </div>
       </div>
 

@@ -3,6 +3,7 @@ import {
   isStaleDashboard,
   useCreateDashboard,
   useDeleteDashboard,
+  useResetOverview,
   useUpdateDashboard,
 } from "@/api/dashboards";
 import { fieldErrors, problemMessage } from "@/api/problem";
@@ -459,6 +460,78 @@ function DeleteForm({
           }}
         >
           Delete dashboard
+        </Button>
+      </DialogFooter>
+    </>
+  );
+}
+
+/** Resets the project's Overview to the built-in preset after a confirmation, then calls `onReset`. */
+export function ResetOverviewDialog({
+  org,
+  project,
+  open,
+  onOpenChange,
+  onReset,
+}: {
+  org: string;
+  project: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onReset: () => void;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <ResetForm
+          org={org}
+          project={project}
+          onCancel={() => onOpenChange(false)}
+          onReset={onReset}
+        />
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ResetForm({
+  org,
+  project,
+  onCancel,
+  onReset,
+}: {
+  org: string;
+  project: string;
+  onCancel: () => void;
+  onReset: () => void;
+}) {
+  const reset = useResetOverview(org, project);
+  return (
+    <>
+      <DialogHeader>
+        <DialogTitle>Reset the Overview?</DialogTitle>
+        <DialogDescription>
+          The project's Overview goes back to the built-in one. Changes made to it are lost.
+        </DialogDescription>
+      </DialogHeader>
+      {reset.error ? (
+        <p className="text-caption text-destructive">
+          {problemMessage(reset.error, "Could not reset the Overview.")}
+        </p>
+      ) : null}
+      <DialogFooter>
+        <Button type="button" variant="outline" onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button
+          type="button"
+          variant="destructive"
+          disabled={reset.isPending}
+          onClick={() => {
+            void reset.mutateAsync().then(onReset, () => undefined);
+          }}
+        >
+          Reset
         </Button>
       </DialogFooter>
     </>

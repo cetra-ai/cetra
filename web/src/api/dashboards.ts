@@ -3,8 +3,10 @@ import {
   type DashboardStore,
   dashboardKey,
   dashboardsKey,
+  overviewKey,
   useDashboardStore,
 } from "@/lib/dashboards/store";
+import type { SaveOverview } from "@/lib/dashboards/types";
 import { $api } from "./client";
 import { problemOf } from "./problem";
 import { projectRef } from "./project-ref";
@@ -23,6 +25,14 @@ export function dashboardQuery(org: string, project: string, id: string, store: 
   return queryOptions({
     queryKey: dashboardKey(org, project, id, store.local),
     queryFn: () => store.get(id),
+  });
+}
+
+/** The project's stored Overview, or null while it shows the built-in preset. */
+export function overviewQuery(org: string, project: string, store: DashboardStore) {
+  return queryOptions({
+    queryKey: overviewKey(org, project, store.local),
+    queryFn: () => store.getOverview(),
   });
 }
 
@@ -63,6 +73,37 @@ function useInvalidateDashboards(org: string, project: string, id?: string) {
       await queryClient.invalidateQueries({ queryKey: dashboardKey(org, project, id, false) });
     }
   };
+}
+
+/**
+ * Refreshes the stored Overview. The key without "local" is a prefix of the browser's key too, so
+ * both stores are refreshed.
+ */
+function useInvalidateOverview(org: string, project: string) {
+  const queryClient = useQueryClient();
+  return async (): Promise<void> => {
+    await queryClient.invalidateQueries({ queryKey: overviewKey(org, project, false) });
+  };
+}
+
+/** Saves the project's Overview: the first save creates it, a later one names the version read. */
+export function useSaveOverview(org: string, project: string) {
+  const { store } = useDashboardStore(org, project);
+  const invalidate = useInvalidateOverview(org, project);
+  return useMutation({
+    mutationFn: (body: SaveOverview) => store.saveOverview(body),
+    onSuccess: invalidate,
+  });
+}
+
+/** Deletes the project's stored Overview, so the built-in preset shows again. */
+export function useResetOverview(org: string, project: string) {
+  const { store } = useDashboardStore(org, project);
+  const invalidate = useInvalidateOverview(org, project);
+  return useMutation({
+    mutationFn: () => store.resetOverview(),
+    onSuccess: invalidate,
+  });
 }
 
 /** Creates a dashboard. Its body is `{name, description?, definition}`. */

@@ -2,8 +2,12 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
 import { expect, it } from "vitest";
 import type { Schema } from "@/api/types";
+import type { Dashboard } from "@/lib/dashboards/types";
+import { dashboardHandlers, seedDashboards } from "@/mocks/dashboards";
 import { server } from "@/mocks/node";
 import { renderApp } from "@/test/render";
+import { recordRequests } from "@/test/requests";
+import overviewDocument from "../../../../../../fixtures/api/static/dashboard-overview.json";
 
 const DASHBOARD = "/acme/support-bot/dashboard";
 
@@ -185,4 +189,21 @@ it("shows the message of an invalid dashboard filter in place of the widgets", a
   expect(await screen.findByRole("heading", { level: 2, name: "Bad Request" })).toBeInTheDocument();
   expect(screen.getAllByText("Unknown field in the dashboard filter.").length).toBeGreaterThan(0);
   expect(screen.queryByRole("region", { name: "Traces & errors" })).not.toBeInTheDocument();
+});
+
+it("shows the stored Overview, read from /dashboards/overview, when the project has one", async () => {
+  server.use(...dashboardHandlers(seedDashboards(), overviewDocument as unknown as Dashboard));
+  const requests = recordRequests();
+  try {
+    await renderApp(DASHBOARD);
+    expect(await screen.findByRole("heading", { level: 2, name: "Traffic" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { level: 2, name: "Volume" })).not.toBeInTheDocument();
+    expect(
+      requests.calls.some(
+        (call) => call.method === "GET" && call.path.endsWith("/dashboards/overview"),
+      ),
+    ).toBe(true);
+  } finally {
+    requests.stop();
+  }
 });

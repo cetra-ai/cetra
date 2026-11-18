@@ -16,11 +16,13 @@ import { OVERVIEW } from "@/lib/dashboards/overview";
 import { useDashboardStore } from "@/lib/dashboards/store";
 import type { Dashboard } from "@/lib/dashboards/types";
 import { canManageDashboards } from "@/lib/roles";
+import type { DashboardTarget } from "./dashboard-body";
 import {
   DeleteDashboardDialog,
   DuplicateDashboardDialog,
   NewDashboardDialog,
   RenameDashboardDialog,
+  ResetOverviewDialog,
 } from "./dashboard-dialogs";
 
 /** A custom dashboard's name is at most 100 characters; a copy's prefix must fit too. */
@@ -103,18 +105,32 @@ export function DashboardSwitcher({ dashboard }: { dashboard: Dashboard | undefi
 
 /**
  * The "⋯" menu of the open dashboard, for members. A custom dashboard can be renamed, duplicated
- * and deleted; the Overview only duplicated. Delete opens the Overview.
+ * and deleted. The Overview can be duplicated, and a stored one reset to the built-in preset; it
+ * is never renamed or deleted. Delete opens the Overview.
  */
-export function DashboardMenu({ dashboard }: { dashboard: Dashboard | undefined }) {
+export function DashboardMenu({
+  target,
+  layoutBusy,
+}: {
+  target: DashboardTarget;
+  /** A layout save is pending or running: a reset waits for it. */
+  layoutBusy: boolean;
+}) {
   const { org, project, data } = useProject();
   const open = useOpenDashboard();
   const { local } = useDashboardStore(org, project);
-  const [dialog, setDialog] = useState<"rename" | "duplicate" | "delete" | null>(null);
+  const [dialog, setDialog] = useState<"rename" | "duplicate" | "delete" | "reset" | null>(null);
   if (!local && !canManageDashboards(data.role)) {
     return null;
   }
-  const definition = dashboard?.definition ?? OVERVIEW;
+  const dashboard = target.kind === "custom" ? target.dashboard : undefined;
+  const definition =
+    target.kind === "custom"
+      ? target.dashboard.definition
+      : (target.stored?.definition ?? OVERVIEW);
   const defaultName = `Copy of ${dashboard?.name ?? "Overview"}`.slice(0, MAX_NAME_CHARS);
+  // Only a stored Overview can be reset, and a demo viewer never has one.
+  const canReset = target.kind === "overview" && target.stored !== null && !local;
 
   return (
     <>
@@ -129,6 +145,11 @@ export function DashboardMenu({ dashboard }: { dashboard: Dashboard | undefined 
             <DropdownMenuItem onSelect={() => setDialog("rename")}>Rename</DropdownMenuItem>
           ) : null}
           <DropdownMenuItem onSelect={() => setDialog("duplicate")}>Duplicate</DropdownMenuItem>
+          {canReset ? (
+            <DropdownMenuItem disabled={layoutBusy} onSelect={() => setDialog("reset")}>
+              Reset to default
+            </DropdownMenuItem>
+          ) : null}
           {dashboard ? (
             <DropdownMenuItem variant="destructive" onSelect={() => setDialog("delete")}>
               Delete
@@ -158,6 +179,15 @@ export function DashboardMenu({ dashboard }: { dashboard: Dashboard | undefined 
           open(copy.id);
         }}
       />
+      {canReset ? (
+        <ResetOverviewDialog
+          org={org}
+          project={project}
+          open={dialog === "reset"}
+          onOpenChange={(next) => setDialog(next ? "reset" : null)}
+          onReset={() => setDialog(null)}
+        />
+      ) : null}
       {dashboard ? (
         <DeleteDashboardDialog
           org={org}

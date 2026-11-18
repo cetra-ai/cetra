@@ -1,6 +1,6 @@
 import { type HttpHandler, HttpResponse, http } from "msw";
 import type { Dashboard, Definition } from "@/lib/dashboards/types";
-import { validateDashboard } from "@/lib/dashboards/validate";
+import { validateDashboard, validateDefinition } from "@/lib/dashboards/validate";
 import dashboardDocument from "../../../fixtures/api/static/dashboard.json";
 import staleDocument from "../../../fixtures/api/static/dashboard-stale.json";
 import dashboardsDocument from "../../../fixtures/api/static/dashboards.json";
@@ -8,12 +8,15 @@ import meDocument from "../../../fixtures/api/static/me.json";
 
 const LIST = "/api/v1/projects/:project/dashboards";
 const ONE = "/api/v1/projects/:project/dashboards/:id";
+const OVERVIEW = "/api/v1/projects/:project/dashboards/overview";
 /** The server keeps at most this many dashboards per project (spec 04). */
 const MAX_DASHBOARDS = 100;
 /** Mirrors the server's `DashboardSummary` page size default. */
 const DEFAULT_PAGE = 50;
 
 let dashboards: Dashboard[] = [];
+/** The project's stored Overview; undefined while it shows the built-in preset. */
+let storedOverview: Dashboard | undefined;
 
 /** The fixture dashboards: the list entries, with the definition of the one that has it. */
 export function seedDashboards(): Dashboard[] {
@@ -26,9 +29,16 @@ export function seedDashboards(): Dashboard[] {
   }));
 }
 
-/** Handlers for one in-memory store. Calling this replaces the store with `initial`. */
-export function dashboardHandlers(initial: readonly Dashboard[]): HttpHandler[] {
+/**
+ * Handlers for one in-memory store. Calling this replaces the store with `initial`, and the
+ * stored Overview with `overview` (absent: the project shows the preset).
+ */
+export function dashboardHandlers(
+  initial: readonly Dashboard[],
+  overview?: Dashboard,
+): HttpHandler[] {
   dashboards = initial.map((dashboard) => structuredClone(dashboard));
+  storedOverview = overview === undefined ? undefined : structuredClone(overview);
   return handlers;
 }
 
@@ -76,11 +86,55 @@ const handlers: HttpHandler[] = [
     dashboards.push(dashboard);
     return HttpResponse.json(dashboard, { status: 201 });
   }),
-  http.get(ONE, ({ params }) => {
-    // The project's Overview has its own routes; the manifest serves its GET until the overview mock exists.
-    if (params.id === "overview") {
-      return undefined;
+  // The Overview's routes come before `ONE`, so `overview` is never read as an id.
+  http.get(OVERVIEW, () => (storedOverview ? HttpResponse.json(storedOverview) : notFound())),
+  http.put(OVERVIEW, async ({ request }) => {
+    const body = await readJson(request);
+    if (!body || (body.version !== undefined && typeof body.version !== "number")) {
+      return problem(400, "bad_request", "Bad Request");
     }
+    const definition = asDefinition(body.definition);
+    if (!definition) {
+      return problem(400, "bad_request", "Bad Request");
+    }
+    const errors = validateDefinition(definition);
+    if (errors.length > 0) {
+      return problem(400, "bad_request", "Bad Request", errors);
+    }
+    // Without a stored Overview, the first save creates it at version 1 and names no version; a
+    // stored one is saved at the version the caller read. Anything else is a 409 with the stored one.
+    const stored = storedOverview?.version ?? 0;
+    if (storedOverview === undefined && body.version === undefined) {
+      const now = new Date().toISOString();
+      storedOverview = {
+        id: crypto.randomUUID(),
+        name: "Overview",
+        definition,
+        version: 1,
+        created_by: meDocument.user.id,
+        updated_by: meDocument.user.id,
+        created_at: now,
+        updated_at: now,
+      };
+      return HttpResponse.json(storedOverview, { status: 201 });
+    }
+    if (storedOverview === undefined || body.version !== stored) {
+      return staleOverview(stored);
+    }
+    storedOverview = {
+      ...storedOverview,
+      definition,
+      version: stored + 1,
+      updated_by: meDocument.user.id,
+      updated_at: new Date().toISOString(),
+    };
+    return HttpResponse.json(storedOverview);
+  }),
+  http.delete(OVERVIEW, () => {
+    storedOverview = undefined;
+    return new HttpResponse(null, { status: 204 });
+  }),
+  http.get(ONE, ({ params }) => {
     const dashboard = dashboards.find((item) => item.id === params.id);
     return dashboard ? HttpResponse.json(dashboard) : notFound();
   }),
@@ -175,6 +229,17 @@ async function readJson(request: Request): Promise<Record<string, unknown> | und
   } catch {
     return undefined;
   }
+}
+
+/** The 409 of a save at a version other than the stored one: 0 when nothing is stored. */
+function staleOverview(current: number): Response {
+  return HttpResponse.json(
+    {
+      ...staleDocument,
+      detail: `the dashboard changed; current version is ${current}`,
+    },
+    { status: 409, headers: { "Content-Type": "application/problem+json" } },
+  );
 }
 
 function notFound(): Response {

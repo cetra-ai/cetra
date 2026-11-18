@@ -166,6 +166,18 @@ describe("localStore", () => {
     expect(await store.get(id)).not.toHaveProperty("description");
   });
 
+  it("has no Overview: it reads as the preset, and refuses a save or a reset", async () => {
+    const store = localStore("acme", "store-tests");
+    expect(await store.getOverview()).toBeNull();
+    await expect(store.saveOverview({ definition: EMPTY })).rejects.toMatchObject({
+      status: 403,
+      code: "forbidden",
+      detail: "The Overview cannot be changed here.",
+    });
+    await expect(store.resetOverview()).rejects.toMatchObject({ status: 403, code: "forbidden" });
+    expect(localStorage.getItem(KEY)).toBeNull();
+  });
+
   it("reads a value that does not parse, or has the wrong shape, as an empty list", async () => {
     const store = localStore("acme", "store-tests");
     localStorage.setItem(KEY, "{not json");

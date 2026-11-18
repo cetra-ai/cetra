@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { type ReactNode, useState } from "react";
-import { dashboardQuery, WIDGET_QUERY_PATH } from "@/api/dashboards";
+import { dashboardQuery, overviewQuery, WIDGET_QUERY_PATH } from "@/api/dashboards";
 import { problemMessage, problemOf } from "@/api/problem";
 import { FilterBar } from "@/components/filter-bar/filter-bar";
 import { filterMessage } from "@/components/filter-bar/logic";
@@ -44,6 +44,10 @@ export function DashboardView({
   const dashboard = useQuery({
     ...dashboardQuery(org, project, dashboardId ?? "", store),
     enabled: dashboardId !== undefined,
+  });
+  const overview = useQuery({
+    ...overviewQuery(org, project, store),
+    enabled: dashboardId === undefined,
   });
   const range = rangeFromSearch(search);
   const rangeKey = range.kind === "preset" ? range.preset : `${range.from}\n${range.to}`;
@@ -175,10 +179,31 @@ export function DashboardView({
         <p className="text-destructive text-body">{filterMessage(filterError)}</p>
       </div>
     );
-  } else if (dashboardId === undefined || dashboard.data) {
+  } else if (dashboardId === undefined) {
+    // The body mounts once the stored Overview is known (a Dashboard, or null for the preset), so
+    // the preset never shows in its place and an autosave never runs on it.
+    if (overview.data !== undefined) {
+      content = (
+        <DashboardBody
+          target={{ kind: "overview", stored: overview.data }}
+          active={active}
+          context={context}
+          renderWidget={renderWidget}
+        />
+      );
+    } else if (overview.error) {
+      content = (
+        <p role="alert" className="text-destructive text-body">
+          {problemMessage(overview.error, "Could not load the dashboard.")}
+        </p>
+      );
+    } else {
+      content = <Skeleton className="h-64" />;
+    }
+  } else if (dashboard.data) {
     content = (
       <DashboardBody
-        dashboard={dashboard.data}
+        target={{ kind: "custom", dashboard: dashboard.data }}
         active={active}
         context={context}
         renderWidget={renderWidget}

@@ -30,3 +30,5 @@ export type WidgetSource = Schema<"WidgetSourceBody">;
 export type CreateDashboard = Schema<"CreateDashboard">;
 /** Body of `PATCH …/dashboards/{id}`. */
 export type UpdateDashboard = Schema<"UpdateDashboard">;
+/** Body of `PUT …/dashboards/overview`. */
+export type SaveOverview = Schema<"SaveOverview">;

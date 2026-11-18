@@ -10,6 +10,7 @@ import type {
   Dashboard,
   DashboardSummary,
   Definition,
+  SaveOverview,
   UpdateDashboard,
 } from "./types";
 import { type FieldIssue, validateDashboard } from "./validate";
@@ -34,6 +35,12 @@ export type DashboardStore = {
   /** `version` is the version the caller read. The local store has one writer, so it never refuses one. */
   update(id: string, body: UpdateDashboard): Promise<Dashboard>;
   remove(id: string): Promise<void>;
+  /** The project's stored Overview, or null while it shows the built-in preset. */
+  getOverview(): Promise<Dashboard | null>;
+  /** PUT `…/dashboards/overview`. The local store refuses: a demo viewer never edits the Overview. */
+  saveOverview(body: SaveOverview): Promise<Dashboard>;
+  /** DELETE `…/dashboards/overview`. The local store refuses, as `saveOverview` does. */
+  resetOverview(): Promise<void>;
 };
 
 /**
@@ -43,6 +50,14 @@ export type DashboardStore = {
 export function dashboardsKey(org: string, project: string, local: boolean) {
   const key = $api.queryOptions("get", "/api/v1/projects/{project}/dashboards", {
     params: { path: { project: projectRef(org, project) }, query: { limit: 100 } },
+  }).queryKey;
+  return local ? [...key, "local"] : key;
+}
+
+/** The query key of the stored Overview, with the same trailing "local" as `dashboardsKey`. */
+export function overviewKey(org: string, project: string, local: boolean) {
+  const key = $api.queryOptions("get", "/api/v1/projects/{project}/dashboards/overview", {
+    params: { path: { project: projectRef(org, project) } },
   }).queryKey;
   return local ? [...key, "local"] : key;
 }
@@ -132,6 +147,44 @@ export function apiStore(org: string, project: string): DashboardStore {
         throw error;
       }
     },
+    async getOverview() {
+      const { data, error, response } = await api.GET(
+        "/api/v1/projects/{project}/dashboards/overview",
+        { params: { path } },
+      );
+      if (error) {
+        // Without a stored Overview the server answers 404: the preset shows instead.
+        if (response.status === 404) {
+          return null;
+        }
+        throw error;
+      }
+      if (!data) {
+        throw new Error("Empty dashboard response");
+      }
+      return data;
+    },
+    async saveOverview(body) {
+      const { data, error } = await api.PUT("/api/v1/projects/{project}/dashboards/overview", {
+        params: { path },
+        body,
+      });
+      if (error) {
+        throw error;
+      }
+      if (!data) {
+        throw new Error("Empty dashboard response");
+      }
+      return data;
+    },
+    async resetOverview() {
+      const { error } = await api.DELETE("/api/v1/projects/{project}/dashboards/overview", {
+        params: { path },
+      });
+      if (error) {
+        throw error;
+      }
+    },
   };
 }
 
@@ -149,6 +202,7 @@ type Stored = Readable | { readable: false };
 
 const UNREADABLE = "Saved dashboards in this browser cannot be read; nothing was changed.";
 const FULL = "Could not save in this browser: its storage is full or unavailable.";
+const OVERVIEW_LOCKED = "The Overview cannot be changed here.";
 
 /** The last parsed text. Unchanged text is not validated again. */
 let parsed: { text: string; stored: Stored } | undefined;
@@ -386,6 +440,16 @@ export function localStore(org: string, project: string): DashboardStore {
         stored,
         dashboards.filter((item) => item.id !== id),
       );
+    },
+    async getOverview() {
+      // The browser never stores an Overview: a demo viewer sees the preset.
+      return null;
+    },
+    async saveOverview() {
+      throw problem(403, "forbidden", "Forbidden", OVERVIEW_LOCKED);
+    },
+    async resetOverview() {
+      throw problem(403, "forbidden", "Forbidden", OVERVIEW_LOCKED);
     },
   };
 }
