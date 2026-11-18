@@ -1,4 +1,4 @@
-# 05 — Query: filter DSL, SQL console, search, metrics
+# 05 — Query: filter DSL, SQL console, search, dashboard queries
 
 Everything compiles to DataFusion plans over the project-scoped providers of 03 §6. Those providers expose the stored schemas (binary IDs, `project_id`); the views below are built on top of them by the query layer (`cetra-storage` `filter/` and `sql/` modules, D89), which also rewrites hex-literal ID comparisons to binary ones and adds the default exclusions. `QueryContext::new` (in `cetra-storage`) builds the DataFusion session from the `ProjectQuery` that `Storage::query` returns (D91): the raw providers, the per-query runtime (memory pool, spill directory) and `target_partitions`.
 
@@ -117,7 +117,61 @@ Later (post-MVP): Tantivy index per partition built at compaction.
 - Average judge score per release.
 - Users by spend.
 
+## Dashboard queries
+
+Every dashboard chart, built-in or custom, is a **widget query** computed by one endpoint (D-C-16). `POST /api/v1/projects/{p}/dashboards/query` reads only, so a read-only PAT and a `read` key may call it, as for `POST /sql`.
+
+Request body:
+
+| Field | Type | Notes |
+|---|---|---|
+| `from`, `to` | RFC 3339 | required, `from < to` |
+| `bucket` | `auto` or a width | as below; ignored for `shape: total` |
+| `filter` | traces DSL | the dashboard's filter, optional |
+| `group_by` | `model` \| `environment` \| `release` | the dashboard's split, optional |
+| `include_eval`, `include_experiments` | bool | default `false` (§ Default exclusions) |
+| `query` | WidgetQuery | below |
+| `shape` | `series` \| `total` | `series` = one value per bucket; `total` = one value over `[from, to)` |
+| `compare` | bool | `total` only: also the value over the previous range of the same length |
+
+**WidgetQuery** `{source, filter?, measures, breakdown?}`:
+
+- `source`: `traces`, `spans` or `scores`. The rows are those of the view with that name (§ Logical views); scores are the live ones, and session-target scores are left out.
+- `filter`: a DSL expression on the source view.
+- `measures`: 1–6 items `{agg, field?, where?}`.
+  - `agg`: `count`, `count_distinct`, `sum`, `avg`, `min`, `max`, `p50`, `p75`, `p90`, `p95`, `p99` or `rate`.
+  - `field`: none for `count` and `rate`; a numeric field for `sum`, `avg`, `min`, `max` and the percentiles; any breakdown field, `trace_id`, `session_id` or `user_id` for `count_distinct`.
+  - `where`: a DSL expression on the source view. For `rate` it is required and the value is the share of the rows that match it (0 to 1). For every other aggregate it is optional and keeps only the matching rows for that measure.
+- `breakdown`: `{field, limit?, other?}`. `limit` is 1–20 (default 5): the groups kept are the `limit` values with the largest first measure over `[from, to)`, nulls last, then by value ascending. With `other` (default `true`) the rows of every other value form one more group, `other: true`, whose measures are computed over those rows (not summed from the groups). A list field (`tags`, `models`) counts a row once under each of its values. Rows whose value is null are left out.
+
+Fields by source:
+
+| Source | Numeric fields | Breakdown fields |
+|---|---|---|
+| traces | `duration_ns`, `span_count`, `error_count`, `llm_count`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens`, `total_tokens`, `cost_total` | `name`, `status`, `environment`, `release`, `user_id`, `tags`, `models`, `metadata['k']` |
+| spans | `duration_ns`, `ttft_ns`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens`, `total_tokens`, `cost_input`, `cost_output`, `cost_total` | `name`, `span_kind`, `status`, `service_name`, `environment`, `release`, `provider`, `model`, `operation`, `user_id`, `tags`, `metadata['k']`, `attributes['k']`, `resource_attributes['k']` |
+| scores | `value_num` | `name`, `source`, `data_type`, `target`, `value_str`, `metadata['k']` |
+
+A map key is 1–256 characters, written as in the DSL. Any other field, or a `field` that its `agg` does not take, is `400 bad_request` with the field's path in `errors` (e.g. `query.measures[1].field`).
+
+**Time and filters.** The time column is `start_time` for traces and spans and `created_at` for scores. The widget's `filter` and each measure's `where` apply to the source view. The dashboard's `filter` is a traces expression: it applies to traces directly, and to spans and scores through a semi-join on `trace_id` over traces with `start_time ∈ [from − 1 day, to)` and `end_time ≥ from`. The default exclusions apply as for the lists; "the filter explicitly constrains `environment`" looks at the dashboard filter, the widget filter and every `where`. Each expression follows the DSL limits; an invalid one is `400 invalid_filter` naming its path (`filter`, `query.filter`, `query.measures[i].where`) with a position.
+
+**Group by.** `group_by` acts as a breakdown with `limit: 20, other: false` on the traces field `models`, `environment` or `release` (spans: `model`, `environment`, `release`). It is ignored when the query has its own breakdown, and for scores.
+
+**Buckets** (`shape: series`). `bucket=auto` picks the smallest width in `1m, 5m, 10m, 15m, 30m, 1h, 6h, 12h, 1d` giving at most 120 buckets over `[from, to)`, else `1d`; past 2,000 daily buckets (aligned to midnight UTC, so a 2,000-day window that does not start at midnight already has 2,001) it is a 400, as for an explicit bucket (D-A2-3). Buckets are aligned to their width from the Unix epoch, UTC: a 10-minute bucket starts at :00, :10, …; a 1-day bucket at midnight UTC. The first bucket starts at `from` rounded down to the width, so it may cover part of its range only; the last one is the bucket containing `to − 1 ns`. An explicit bucket giving more than 2,000 buckets is a 400. Rows are bucketed with `date_bin` over the time column.
+
+**Answer.**
+
+- `series`: `{bucket_ns, series: [{measure, group, other, points: [{time, value, rows}]}]}`. `measure` is the measure's index; `group` is the breakdown value (null without a breakdown, and for the other group); `rows` is the number of source rows of the point's group in the bucket. A bucket with no rows for a series has no point; a point whose aggregate is null (e.g. a percentile over null values) has no `value`. Series come in breakdown order (largest first, other last), then measure order.
+- `total`: `{rows: [{group, other, values, previous?}]}`, one row per group in the same order (one row without a breakdown). `values[i]` is measure `i`, null when no row counted; `previous` is there with `compare`, over `[from − (to − from), from)`.
+
+Counts are integers; `rate` is 0 to 1; durations are nanoseconds; costs are summed as `Decimal128(38, 18)` and returned as numbers (D-A2-4). A non-finite or out-of-range trace cost fails the query with `query_failed`; it is not skipped.
+
+**Cost and caching.** One widget query is one scan of the window, plus one for the top groups of a breakdown and one for its other group, plus the trace semi-join for spans and scores. A query has the list reads' timeout (`422 query_timeout`). Answers are cached for 10 s per `(project, body)`, counted from the moment the query finishes. Concurrent requests for the same key share one query, and a failed query's error goes to every request waiting on it; nothing is cached for it.
+
 ## Dashboard metrics (fixed dashboard)
+
+Replaced by § Dashboard queries (D-C-16). This endpoint stays until the pages that read it move to the widget query (custom-dashboards plan, CD6), and is then removed.
 
 `GET /api/v1/projects/{p}/metrics?from&to&bucket=auto&filter=<dsl>&group_by=model|environment|release`
 
