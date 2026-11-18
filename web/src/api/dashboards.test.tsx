@@ -13,6 +13,7 @@ import {
   useCreateDashboard,
   useDeleteDashboard,
   useUpdateDashboard,
+  widgetQuery,
 } from "./dashboards";
 
 const ORG = "acme";
@@ -110,4 +111,14 @@ it("deletes a dashboard", async () => {
   });
   await result.current.mutateAsync();
   await expect(result.current.mutateAsync()).rejects.toBeDefined();
+});
+
+it("keeps a widget answer fresh for 10 s, the server's cache lifetime", () => {
+  const options = widgetQuery(ORG, PROJECT, {
+    from: "2026-01-01T00:00:00.000Z",
+    to: "2026-01-02T00:00:00.000Z",
+    shape: "total",
+    query: { source: "traces", measures: [{ agg: "count" }] },
+  });
+  expect(options.staleTime).toBe(10_000);
 });

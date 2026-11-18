@@ -8,12 +8,15 @@ import { kpiDelta } from "@/lib/metrics";
  * (its tooltip gives that value) and a sparkline of the buckets.
  */
 export function WidgetNumber({
+  label,
   kind,
   value,
   previous,
   tone,
   sparkline,
 }: {
+  /** The widget's title and value, read by screen readers: "<title>: <value>". */
+  label: string;
   kind: MeasureKind;
   value: number | null;
   previous: number | null;
@@ -25,7 +28,7 @@ export function WidgetNumber({
     previous: previous ?? undefined,
   });
   return (
-    <div className="flex min-h-0 flex-1 flex-col justify-center">
+    <figure aria-label={label} className="m-0 flex min-h-0 flex-1 flex-col justify-center">
       <Tooltip>
         <TooltipTrigger
           type="button"
@@ -37,6 +40,6 @@ export function WidgetNumber({
         <TooltipContent>Previous period: {formatValue(kind, previous)}</TooltipContent>
       </Tooltip>
       <Sparkline values={sparkline} />
-    </div>
+    </figure>
   );
 }

@@ -15,7 +15,8 @@ const RANKING_LIMIT = 10;
 export function useModelRanking(context: WidgetContext): {
   ranking: string[] | undefined;
   error: unknown;
-  updatedAt: number;
+  /** Epoch milliseconds of the answer on screen; undefined until the first one arrives. */
+  updatedAt: number | undefined;
 } {
   const query = useQuery(
     widgetQuery(context.org, context.project, {
@@ -34,7 +35,9 @@ export function useModelRanking(context: WidgetContext): {
     }),
   );
   const ranking = useMemo(() => rankedModels(query.data), [query.data]);
-  return { ranking, error: query.error, updatedAt: query.dataUpdatedAt };
+  // Before the first answer there is no time to show.
+  const updatedAt = query.dataUpdatedAt > 0 ? query.dataUpdatedAt : undefined;
+  return { ranking, error: query.error, updatedAt };
 }
 
 function rankedModels(answer: Schema<"WidgetQueryResponse"> | undefined): string[] | undefined {

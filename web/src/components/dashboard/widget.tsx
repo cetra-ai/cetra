@@ -7,10 +7,11 @@ import type { KpiTone } from "@/components/charts/kpi-tiles";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { type ChartBucket, chooseBucket } from "@/lib/chart-scale";
-import { measureKind } from "@/lib/dashboards/format";
+import { formatValue, measureKind } from "@/lib/dashboards/format";
 import {
   groupClause,
   isErrorMeasure,
+  type PlotColumn,
   seriesPlot,
   splitField,
   totalTable,
@@ -101,17 +102,14 @@ function ChartWidget({
 }) {
   const { org, project } = context;
   const totalShape = chart.type === "bar_h" || chart.type === "table" || chart.type === "number";
+  const isNumber = chart.type === "number";
   const answer = useQuery(
-    widgetQuery(
-      org,
-      project,
-      bodyOf(context, totalShape ? "total" : "series", query, chart.type === "number"),
-    ),
+    widgetQuery(org, project, bodyOf(context, totalShape ? "total" : "series", query, isNumber)),
   );
   // A number's sparkline is the series of the same query.
   const sparkline = useQuery({
-    ...widgetQuery(org, project, bodyOf(context, "series", query, false)),
-    enabled: chart.type === "number",
+    ...widgetQuery(org, project, bodyOf(context, "series", query, isNumber)),
+    enabled: isNumber,
   });
   const data = answer.data;
   const card = (children: ReactNode, busy = false) => (
@@ -163,6 +161,7 @@ function ChartWidget({
     }
     return card(
       <WidgetNumber
+        label={`${title}: ${formatValue(measure ? measureKind(measure) : "number", value)}`}
         kind={measure ? measureKind(measure) : "number"}
         value={value}
         previous={data.rows[0]?.previous?.[0] ?? null}
@@ -183,8 +182,9 @@ function ChartWidget({
     return card(
       <WidgetBarH
         plot={table}
-        colorOf={(group) => {
+        colorOf={(group, other) => {
           if (first && isErrorMeasure(first)) return "var(--chart-error)";
+          if (other) return "var(--muted-foreground)";
           if (!group || !byModel) return PALETTE[0];
           return PALETTE[(colors.get(group) ?? 0) % PALETTE.length] ?? PALETTE[0];
         }}
@@ -247,7 +247,7 @@ function SeriesBody({
       : undefined;
   const zoom = clickable ? onZoom : undefined;
   if (chart.type === "line" && chart.split) {
-    const groups = [...new Set(plot.columns.map((column) => column.group))];
+    const groups = sortedGroups(plot.columns);
     const shown = groups.slice(0, SPLIT_CHARTS);
     return (
       <div className="mt-2 grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-auto sm:grid-cols-2 xl:grid-cols-3">
@@ -258,7 +258,7 @@ function SeriesBody({
             <div key={name} className="flex h-40 min-w-0 flex-col">
               <span className="truncate text-caption font-medium">{name}</span>
               <WidgetPlot
-                title={name}
+                title={`${title} · ${name}`}
                 kind="line"
                 stacked={false}
                 columns={columns}
@@ -293,6 +293,18 @@ function SeriesBody({
   );
 }
 
+/**
+ * The groups of a split, sorted by name; the other group (`null`) comes last. The split charts
+ * and their "+N more" line follow this order.
+ */
+function sortedGroups(columns: readonly PlotColumn[]): (string | null | undefined)[] {
+  return [...new Set(columns.map((column) => column.group))].sort((left, right) => {
+    if (left === null) return right === null ? 0 : 1;
+    if (right === null) return -1;
+    return (left ?? "").localeCompare(right ?? "");
+  });
+}
+
 /** Split charts shown in a widget; more groups than this are a "+N more" line. */
 const SPLIT_CHARTS = 6;
 /** X-axis labels of a widget's chart, and of a split chart. */
@@ -304,11 +316,15 @@ function bucketOf(context: WidgetContext): ChartBucket {
   return chooseBucket(Date.parse(context.from), Date.parse(context.to));
 }
 
+/**
+ * The request of a widget. A number ignores the dashboard's split: it is the total, with the
+ * previous period, and its sparkline is the series of the same query without a split.
+ */
 function bodyOf(
   context: WidgetContext,
   shape: "series" | "total",
   query: WidgetQuery,
-  compare: boolean,
+  number: boolean,
 ): Schema<"WidgetQueryRequest"> {
   const base = {
     from: context.from,
@@ -318,12 +334,12 @@ function bodyOf(
     include_eval: context.includeEval,
     include_experiments: context.includeExperiments,
     ...(context.filter ? { filter: context.filter } : {}),
-    ...(context.groupBy ? { group_by: context.groupBy } : {}),
+    ...(context.groupBy && !number ? { group_by: context.groupBy } : {}),
   } satisfies Partial<Schema<"WidgetQueryRequest">>;
   if (shape === "series") {
     return { ...base, bucket: bucketOf(context) };
   }
-  return compare ? { ...base, compare: true } : base;
+  return number ? { ...base, compare: true } : base;
 }
 
 /** A number's tone: a rise of an error rate, a duration or a cost is bad news. */

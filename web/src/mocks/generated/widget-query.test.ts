@@ -137,3 +137,32 @@ it("refuses a filter it cannot evaluate, with invalid_filter", async () => {
     errors: [{ field: "query.filter" }],
   });
 });
+
+it("ranks a dashboard split's groups by the first measure, keeps 20 and has no other group", async () => {
+  // Six models are too few to pass the limit: every trace gets one of thirty.
+  const wide = {
+    ...dataset,
+    traces: dataset.traces.map((trace, index) => ({
+      ...trace,
+      models: [`model-${String(index % 30).padStart(2, "0")}`],
+    })),
+  };
+  server.use(...largeHandlers(wide));
+  const measures = [{ agg: "sum" as const, field: "cost_total" }];
+  const split = await ask({ group_by: "model", query: { source: "spans", measures } });
+  const rows = (split.json as { rows: { group?: string; other: boolean; values: number[] }[] })
+    .rows;
+  expect(rows).toHaveLength(20);
+  expect(rows.some((row) => row.other)).toBe(false);
+  // The split is the breakdown of the twenty largest groups, with no other group.
+  const breakdown = await ask({
+    query: {
+      source: "spans",
+      measures,
+      breakdown: { field: "model", limit: 20, other: false },
+    },
+  });
+  expect(rows).toEqual((breakdown.json as { rows: unknown[] }).rows);
+  const values = rows.map((row) => row.values[0] ?? 0);
+  expect([...values].sort((left, right) => right - left)).toEqual(values);
+});

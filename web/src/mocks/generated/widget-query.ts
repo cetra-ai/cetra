@@ -12,6 +12,8 @@ import {
 
 const PROJECT = "/api/v1/projects/:project";
 const MS_PER_NS = 1_000_000;
+/** The most groups a dashboard's split keeps (spec 05 § Dashboard queries). */
+const DASHBOARD_LIMIT = 20;
 
 type Body = Schema<"WidgetQueryRequest">;
 type Query = Schema<"WidgetQueryBody">;
@@ -486,33 +488,28 @@ type GroupSpec = { group?: string; other: boolean; match: (row: Row) => boolean 
 
 /**
  * The groups of a query. Without a split there is one group of every row. A breakdown keeps its
- * `limit` values with the largest first measure (nulls last, then by value), and `other` (default
- * true) is one more group of the rows having any other value. The dashboard's split (`group_by`)
- * has no limit and no other group; it is ignored for scores and for a query with its own split.
+ * `limit` values (default 5) and `other` (default true) is one more group of the rows having any
+ * other value. The dashboard's split (`group_by`) is a breakdown with `limit: 20, other: false`,
+ * and is ignored when the query has its own breakdown, and for scores. The kept values are the
+ * `limit` values with the largest first measure over the rows, nulls last, then by value
+ * ascending (spec 05 § Dashboard queries).
  */
 function groupsOf(body: Body, query: Query, rows: readonly Row[]): GroupSpec[] {
   const breakdown = query.breakdown;
-  const field =
-    breakdown?.field ??
-    (body.group_by && query.source !== "scores"
+  const dashboardSplit =
+    body.group_by && query.source !== "scores"
       ? groupColumn(body.group_by, query.source)
-      : undefined);
+      : undefined;
+  const field = breakdown?.field ?? dashboardSplit;
   if (field === undefined) {
     return [{ other: false, match: () => true }];
   }
   if (breakdown && !COLUMNS[query.source].has(field)) {
     throw new Unsupported("query.breakdown");
   }
+  const limit = breakdown ? (breakdown.limit ?? 5) : DASHBOARD_LIMIT;
+  const other = breakdown ? (breakdown.other ?? true) : false;
   const values = [...new Set(rows.flatMap((row) => valuesOf(row, field).map(String)))];
-  if (!breakdown) {
-    return values
-      .sort((left, right) => left.localeCompare(right))
-      .map((value) => ({
-        group: value,
-        other: false,
-        match: (row: Row) => valuesOf(row, field).some((item) => String(item) === value),
-      }));
-  }
   const first = query.measures[0];
   const firstWhere = first?.where
     ? compile(first.where, COLUMNS[query.source], "query.measures[0].where")
@@ -526,7 +523,6 @@ function groupsOf(body: Body, query: Query, rows: readonly Row[]): GroupSpec[] {
       return { value, total: total ?? Number.NEGATIVE_INFINITY };
     })
     .sort((left, right) => right.total - left.total || left.value.localeCompare(right.value));
-  const limit = breakdown.limit ?? 5;
   const kept = ranked.slice(0, limit).map((item) => item.value);
   const keptSet = new Set(kept);
   const specs: GroupSpec[] = kept.map((value) => ({
@@ -534,7 +530,7 @@ function groupsOf(body: Body, query: Query, rows: readonly Row[]): GroupSpec[] {
     other: false,
     match: (row: Row) => valuesOf(row, field).some((item) => String(item) === value),
   }));
-  if (breakdown.other ?? true) {
+  if (other) {
     specs.push({
       other: true,
       match: (row: Row) => valuesOf(row, field).some((item) => !keptSet.has(String(item))),

@@ -126,10 +126,11 @@ describe("time charts", () => {
     expect(opacities).toContain(null);
   });
 
-  it("splits a line into one small chart per group, at most six, then says how many more", async () => {
+  it("splits a line into one small chart per group, sorted by name, at most six, then says how many more", async () => {
+    // Seven groups in no particular order: the first six by name are drawn, the seventh is the "+1 more".
     answer(() =>
       seriesAnswer(
-        ["g1", "g2", "g3", "g4", "g5", "g6", "g7"].map((group) => ({
+        ["g7", "g3", "g1", "g6", "g2", "g5", "g4"].map((group) => ({
           measure: 0,
           group,
           other: false,
@@ -148,8 +149,19 @@ describe("time charts", () => {
       ),
     );
     await waitFor(() => {
-      expect(screen.getAllByRole("group", { name: /^g\d\. / })).toHaveLength(6);
+      expect(screen.getAllByRole("group", { name: /^Test · g\d\. / })).toHaveLength(6);
     });
+    const names = screen
+      .getAllByRole("group", { name: /^Test · g\d\. / })
+      .map((chart) => chart.getAttribute("aria-label")?.split(".")[0]);
+    expect(names).toEqual([
+      "Test · g1",
+      "Test · g2",
+      "Test · g3",
+      "Test · g4",
+      "Test · g5",
+      "Test · g6",
+    ]);
     expect(screen.getByText("+1 more")).toBeInTheDocument();
   });
 
@@ -205,6 +217,67 @@ describe("time charts", () => {
       from: "2026-01-01T10:00:00.000Z",
       to: "2026-01-01T10:10:00.000Z",
       clause: "name = 'alpha'",
+    });
+  });
+
+  it("opens a bucket of a two-group chart without a group, by click and by Enter", async () => {
+    answer(() =>
+      seriesAnswer([
+        { measure: 0, group: "alpha", other: false, points: [{ time: H1, value: 2, rows: 2 }] },
+        { measure: 0, group: "beta", other: false, points: [{ time: H1, value: 1, rows: 1 }] },
+      ]),
+    );
+    const onBucket = vi.fn();
+    renderWidget(
+      widget(
+        { type: "bar" },
+        { source: "traces", measures: [{ agg: "count" }], breakdown: { field: "name" } },
+      ),
+      { onBucket },
+    );
+    const buckets = await waitFor(() => {
+      const found = document.querySelectorAll(
+        '[aria-label="Open bucket 2026-01-01T10:00:00.000Z"]',
+      );
+      expect(found.length).toBe(2);
+      return [...found] as HTMLElement[];
+    });
+    fireEvent.click(buckets[0] as HTMLElement);
+    expect(onBucket).toHaveBeenLastCalledWith({
+      from: "2026-01-01T10:00:00.000Z",
+      to: "2026-01-01T10:10:00.000Z",
+    });
+    const chart = screen.getByRole("group", { name: /^Test\. Arrow keys/ });
+    chart.focus();
+    fireEvent.keyDown(chart, { key: "ArrowRight" });
+    fireEvent.keyDown(chart, { key: "Enter" });
+    expect(onBucket).toHaveBeenLastCalledWith({
+      from: "2026-01-01T10:00:00.000Z",
+      to: "2026-01-01T10:10:00.000Z",
+    });
+  });
+
+  it("opens an area's bucket without a group, even with one group", async () => {
+    answer(() =>
+      seriesAnswer([
+        { measure: 0, group: "alpha", other: false, points: [{ time: H1, value: 2, rows: 2 }] },
+      ]),
+    );
+    const onBucket = vi.fn();
+    renderWidget(
+      widget(
+        { type: "area" },
+        { source: "traces", measures: [{ agg: "count" }], breakdown: { field: "name" } },
+      ),
+      { onBucket },
+    );
+    const chart = await screen.findByRole("group", { name: /^Test\. Arrow keys/ });
+    chart.focus();
+    fireEvent.keyDown(chart, { key: "ArrowRight" });
+    fireEvent.keyDown(chart, { key: "Enter" });
+    expect(onBucket).toHaveBeenCalledWith({
+      from: "2026-01-01T10:00:00.000Z",
+      to: "2026-01-01T10:10:00.000Z",
     });
   });
 
@@ -264,9 +337,37 @@ describe("other widgets", () => {
       ),
     );
     expect(await screen.findByText("100%")).toBeInTheDocument();
+    expect(screen.getByRole("figure", { name: "Test: 10" })).toBeInTheDocument();
     expect(container.querySelector("polyline")).not.toBeNull();
     await user.hover(screen.getByRole("button", { name: /100%/ }));
     expect(await screen.findByText("Previous period: 5")).toBeInTheDocument();
+  });
+
+  it("sends a number without the dashboard's split, and a chart with it", async () => {
+    const bodies = answer((body) =>
+      body.shape === "total"
+        ? totalAnswer([{ other: false, values: [10], previous: [5] }])
+        : seriesAnswer([{ measure: 0, other: false, points: [{ time: H1, value: 1, rows: 1 }] }]),
+    );
+    const context = { ...CONTEXT, groupBy: "model" as const };
+    const { unmount } = renderWidget(
+      widget({ type: "number" }, { source: "traces", measures: [{ agg: "count" }] }),
+      {},
+      context,
+    );
+    expect(await screen.findByText("100%")).toBeInTheDocument();
+    await waitFor(() => expect(bodies.some((body) => body.shape === "series")).toBe(true));
+    expect(bodies.every((body) => body.group_by === undefined)).toBe(true);
+    expect(bodies.every((body) => body.compare === undefined || body.compare === true)).toBe(true);
+    unmount();
+    bodies.length = 0;
+    renderWidget(
+      widget({ type: "line" }, { source: "traces", measures: [{ agg: "count" }] }),
+      {},
+      context,
+    );
+    await waitFor(() => expect(bodies.length).toBeGreaterThan(0));
+    expect(bodies[0]).toMatchObject({ group_by: "model" });
   });
 
   it("badges a rise from zero as new, and a large rise as a ratio", async () => {
@@ -301,6 +402,62 @@ describe("other widgets", () => {
     );
     expect((await screen.findAllByText("alpha")).length).toBeGreaterThan(0);
     expect(screen.getAllByText("beta").length).toBeGreaterThan(0);
+  });
+
+  it("colours the other group's bar muted, and tolerates two measures with one label", async () => {
+    answer(() =>
+      totalAnswer([
+        { group: "model-a", other: false, values: [3, 1] },
+        { other: true, values: [4, 2] },
+      ]),
+    );
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const { container } = renderWidget(
+        widget(
+          { type: "bar_h" },
+          {
+            source: "spans",
+            measures: [
+              { agg: "count", label: "Calls" },
+              { agg: "count", label: "Calls" },
+            ],
+            breakdown: { field: "model", other: true },
+          },
+        ),
+      );
+      await screen.findAllByText("Other");
+      const fills = [...container.querySelectorAll(".recharts-bar-rectangle path")].map((bar) =>
+        bar.getAttribute("fill"),
+      );
+      expect(fills).toContain("var(--muted-foreground)");
+      expect(fills.filter((fill) => fill === "var(--muted-foreground)")).toHaveLength(1);
+      expect(errors.mock.calls.some((call) => String(call[0]).includes("same key"))).toBe(false);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it("shares a table row over every row of the answer, the other group included", async () => {
+    answer(() =>
+      totalAnswer([
+        { group: "model-a", other: false, values: [3] },
+        { group: "model-b", other: false, values: [1] },
+        { other: true, values: [4] },
+      ]),
+    );
+    renderWidget(
+      widget(
+        { type: "table", share: true },
+        {
+          source: "spans",
+          measures: [{ agg: "sum", field: "cost_total", label: "Cost" }],
+          breakdown: { field: "model" },
+        },
+      ),
+    );
+    const row = await screen.findByRole("row", { name: /model-a/ });
+    expect(row.querySelector("div[aria-hidden]")).toHaveStyle({ width: "37.5%" });
   });
 
   it("lists the groups of a table with a share bar, and opens a model's traces", async () => {

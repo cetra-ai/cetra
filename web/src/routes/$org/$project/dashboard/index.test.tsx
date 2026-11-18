@@ -1,4 +1,5 @@
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { HttpResponse, http } from "msw";
 import { expect, it } from "vitest";
 import type { Schema } from "@/api/types";
 import { server } from "@/mocks/node";
@@ -92,7 +93,7 @@ it("refetches when the range changes", async () => {
   }
 });
 
-it("sends group_by with every widget query when grouping by model", async () => {
+it("sends group_by with the charts when grouping by model, but not with the numbers", async () => {
   const queries = listenQueries();
   try {
     const { router } = await renderApp(DASHBOARD);
@@ -103,56 +104,85 @@ it("sends group_by with every widget query when grouping by model", async () => 
     await waitFor(() => {
       expect(queries.bodies.some((body) => body.group_by === "model")).toBe(true);
     });
+    // A number is the only widget that asks for the previous period (`compare`): it ignores the split.
+    const numbers = queries.bodies.filter((body) => body.compare === true);
+    expect(numbers.length).toBeGreaterThan(0);
+    expect(numbers.every((body) => body.group_by === undefined)).toBe(true);
     expect(router.state.location.search).toMatchObject({ group: "model" });
   } finally {
     queries.stop();
   }
 });
 
-it("opens the traces of a clicked bucket with the dashboard's filter and flags", async () => {
-  const { router } = await renderApp(
-    "/acme/support-bot/dashboard?filter=status%20%3D%20'error'&eval=1&exp=1",
+it("opens the spans of a bucket with the widget's filter and group, not the dashboard's filter", async () => {
+  // One model in the answer, so the bucket's group is that model.
+  server.use(
+    http.post("/api/v1/projects/:project/dashboards/query", async ({ request }) => {
+      const body = (await request.json()) as Schema<"WidgetQueryRequest">;
+      if (body.shape !== "series" || body.query.source !== "spans") {
+        return undefined;
+      }
+      return HttpResponse.json({
+        shape: "series",
+        bucket_ns: 600_000_000_000,
+        series: [
+          {
+            measure: 0,
+            group: "gpt-4.1",
+            other: false,
+            points: [{ time: "2026-01-01T10:00:00.000000000Z", value: 1, rows: 1 }],
+          },
+        ],
+      });
+    }),
   );
-  const card = await screen.findByRole("region", { name: "Traces & errors" });
-  // The page re-renders while its queries settle, so the bucket is looked up again on each try.
-  await waitFor(() => {
-    const bucket = card.querySelector('[aria-label="Open bucket 2026-01-01T10:00:00.000Z"]');
-    if (!(bucket instanceof Element)) {
-      throw new Error("bucket not rendered yet");
-    }
-    fireEvent.click(bucket);
-    expect(router.state.location.pathname).toContain("/traces");
-  });
-  expect(router.state.location.search).toMatchObject({
-    from: "2026-01-01T10:00:00.000Z",
-    to: "2026-01-01T10:10:00.000Z",
-    filter: "status = 'error'",
-    eval: 1,
-    exp: 1,
-  });
-  expect(router.state.location.search).not.toHaveProperty("range");
-});
-
-it("opens the last bucket from the keyboard", async () => {
-  const { router } = await renderApp(DASHBOARD);
-  const card = await screen.findByRole("region", { name: "Traces & errors" });
-  const chart = await within(card).findByRole("group", { name: /^Traces & errors\./ });
+  const { router } = await renderApp(
+    "/acme/support-bot/dashboard?filter=status%20%3D%20'error'&group=model&eval=1",
+  );
+  const card = await screen.findByRole("region", { name: "TTFT" });
+  const chart = await within(card).findByRole("group", { name: /^TTFT\./ });
   chart.focus();
-  fireEvent.keyDown(chart, { key: "End" });
+  fireEvent.keyDown(chart, { key: "ArrowRight" });
   fireEvent.keyDown(chart, { key: "Enter" });
   await waitFor(() => {
-    expect(router.state.location.search).toMatchObject({
-      from: "2026-01-01T10:30:00.000Z",
-      to: "2026-01-01T10:40:00.000Z",
-    });
+    expect(router.state.location.pathname).toContain("/spans");
+  });
+  expect(router.state.location.search).toEqual({
+    from: "2026-01-01T10:00:00.000Z",
+    to: "2026-01-01T10:10:00.000Z",
+    filter: "span_kind = 'llm' AND ttft_ns IS NOT NULL AND model = 'gpt-4.1'",
   });
 });
 
-it("gives a score chart no bucket to open", async () => {
-  await renderApp(DASHBOARD);
-  const card = await screen.findByRole("region", { name: "Scores" });
-  await within(card)
-    .findByRole("group", { name: /^Scores\./ })
-    .catch(() => undefined);
-  expect(card.querySelectorAll('[aria-label^="Open bucket"]')).toHaveLength(0);
+it("shows the message of an invalid dashboard filter in place of the widgets", async () => {
+  // The server refuses the dashboard's filter; the ranking query carries it, so the page shows why.
+  server.use(
+    http.post("/api/v1/projects/:project/dashboards/query", async ({ request }) => {
+      const body = (await request.json()) as Schema<"WidgetQueryRequest">;
+      if (body.filter === undefined) {
+        return undefined;
+      }
+      return HttpResponse.json(
+        {
+          type: "about:blank",
+          title: "Bad Request",
+          status: 400,
+          code: "invalid_filter",
+          detail: "The filter is not valid.",
+          errors: [
+            {
+              field: "filter",
+              message: "Unknown field in the dashboard filter.",
+              position: { line: 1, column: 1 },
+            },
+          ],
+        },
+        { status: 400, headers: { "Content-Type": "application/problem+json" } },
+      );
+    }),
+  );
+  await renderApp("/acme/support-bot/dashboard?filter=status%20%3D%20'error'");
+  expect(await screen.findByRole("heading", { level: 2, name: "Bad Request" })).toBeInTheDocument();
+  expect(screen.getAllByText("Unknown field in the dashboard filter.").length).toBeGreaterThan(0);
+  expect(screen.queryByRole("region", { name: "Traces & errors" })).not.toBeInTheDocument();
 });

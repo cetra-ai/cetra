@@ -62,16 +62,20 @@ export function dashboardQuery(org: string, project: string, id: string) {
 /** The path of the widget query endpoint (spec 05 § Dashboard queries). */
 export const WIDGET_QUERY_PATH = "/api/v1/projects/{project}/dashboards/query" as const;
 
+/** How long a widget answer is fresh: the server's cache lifetime. */
+const WIDGET_STALE_MS = 10_000;
+
 /**
  * One widget's answer. The previous answer stays on screen while a new one (another window or
- * filter) is loading, so a range change does not blank the chart.
+ * filter) is loading, so a range change does not blank the chart. An answer is fresh for 10 s,
+ * as the server caches it for as long (spec 05 § Dashboard queries).
  */
 export function widgetQuery(org: string, project: string, body: Schema<"WidgetQueryRequest">) {
   return $api.queryOptions(
     "post",
     WIDGET_QUERY_PATH,
     { params: { path: { project: projectRef(org, project) } }, body },
-    { placeholderData: keepPreviousData },
+    { placeholderData: keepPreviousData, staleTime: WIDGET_STALE_MS },
   );
 }
 

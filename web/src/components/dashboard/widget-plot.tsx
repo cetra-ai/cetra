@@ -68,7 +68,7 @@ export function WidgetPlot({
   maxTicks: number;
   /** Bars and areas: buckets with fewer rows than this are faded. */
   fadeBelow?: number;
-  /** A bucket was opened: its time, and its column's group (`null` for the other group). */
+  /** A bucket was opened: its time, and its group when the chart has exactly one (else undefined). */
   onBucket?: (timeMs: number, group: string | null | undefined) => void;
   onZoom?: (fromMs: number, toMs: number) => void;
 }) {
@@ -85,7 +85,10 @@ export function WidgetPlot({
   // Only the chart under the pointer shows its tooltip; the others share its cursor line.
   const [hovered, setHovered] = useState(false);
   const drag = useDragZoom({ rows, bucketNs, onZoom });
-  const firstGroup = columns[0]?.group;
+  // A bucket opens with its group only when the chart has one group (and is not an area): with
+  // several groups, the bucket is opened without a group, so it lists every group's rows.
+  const distinctGroups = new Set(columns.map((column) => column.group));
+  const bucketGroup = kind !== "area" && distinctGroups.size === 1 ? columns[0]?.group : undefined;
 
   function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
     if (rows.length === 0) return;
@@ -98,7 +101,7 @@ export function WidgetPlot({
     else if (event.key === "Escape") next = null;
     else if ((event.key === "Enter" || event.key === " ") && activeRow && onBucket) {
       event.preventDefault();
-      onBucket(activeRow.time, firstGroup);
+      onBucket(activeRow.time, bucketGroup);
       return;
     }
     if (next === undefined) return;
@@ -106,8 +109,7 @@ export function WidgetPlot({
     setActive(next);
   }
 
-  const bucketOf = (column: PlotColumn) =>
-    onBucket ? (timeMs: number) => onBucket(timeMs, column.group) : undefined;
+  const openBucket = onBucket ? (timeMs: number) => onBucket(timeMs, bucketGroup) : undefined;
   const fadeKey = (column: PlotColumn) =>
     fadeBelow === undefined ? undefined : `${column.key}__rows`;
 
@@ -205,7 +207,7 @@ export function WidgetPlot({
                   shape={(props: BarShapeProps) => (
                     <BucketBar
                       {...props}
-                      onBucket={bucketOf(column)}
+                      onBucket={openBucket}
                       fadeKey={fadeKey(column)}
                       fadeBelow={fadeBelow}
                     />
@@ -238,7 +240,7 @@ export function WidgetPlot({
                 stroke={column.color}
                 strokeWidth={1.5}
                 legendType="plainline"
-                dot={lineDot(column.key, bucketOf(column), solitary(rows, column.key))}
+                dot={lineDot(column.key, openBucket, solitary(rows, column.key))}
                 activeDot={{ r: 3, strokeWidth: 1.5 }}
                 connectNulls={false}
                 isAnimationActive={false}

@@ -22,8 +22,9 @@ export function WidgetTable({
         <thead className="text-muted-foreground">
           <tr>
             <th className="py-1 font-medium">{breakdownField ?? "Group"}</th>
-            {plot.columns.map((column) => (
-              <th key={column.label} className="py-1 text-right font-medium">
+            {plot.columns.map((column, index) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: measures are positional; labels can repeat
+              <th key={index} className="py-1 text-right font-medium">
                 {column.label}
               </th>
             ))}
@@ -49,7 +50,8 @@ export function WidgetTable({
                   )}
                 </td>
                 {plot.columns.map((column, position) => (
-                  <td key={column.label} className="py-1 text-right font-mono tabular-nums">
+                  // biome-ignore lint/suspicious/noArrayIndexKey: measures are positional; labels can repeat
+                  <td key={position} className="py-1 text-right font-mono tabular-nums">
                     {formatValue(column.kind, row.values[position] ?? null)}
                     {position === 0 && row.share !== undefined ? (
                       <div

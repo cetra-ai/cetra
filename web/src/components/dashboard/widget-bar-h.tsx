@@ -4,24 +4,32 @@ import { type ChartConfig, ChartContainer } from "@/components/ui/chart";
 import { axisTicks, formatValue } from "@/lib/dashboards/format";
 import type { TablePlot } from "@/lib/dashboards/plot";
 
-type BarRow = { name: string; value: number; color: string; values: (number | null)[] };
+type BarRow = {
+  name: string;
+  value: number;
+  color: string;
+  other: boolean;
+  values: (number | null)[];
+};
 
 /**
  * One horizontal bar per group, sized by the first measure. The tooltip lists every measure.
- * `colorOf` gives a group's colour (the model colours of the dashboard).
+ * `colorOf` gives a group's colour (the model colours of the dashboard); the other group, which
+ * has no colour of its own, is `other`.
  */
 export function WidgetBarH({
   plot,
   colorOf,
 }: {
   plot: TablePlot;
-  colorOf: (group: string | null | undefined) => string;
+  colorOf: (group: string | null | undefined, other: boolean) => string;
 }) {
   const first = plot.columns[0];
   const rows: BarRow[] = plot.rows.map((row) => ({
     name: row.other ? "Other" : (row.group ?? "Total"),
     value: row.values[0] ?? 0,
-    color: colorOf(row.group),
+    color: colorOf(row.group, row.other),
+    other: row.other,
     values: row.values,
   }));
   const largest = rows.reduce((max, row) => Math.max(max, row.value), 0);
@@ -63,8 +71,9 @@ export function WidgetBarH({
           )}
         />
         <Bar dataKey="value" isAnimationActive={false}>
-          {rows.map((row) => (
-            <Cell key={row.name} fill={row.color} />
+          {rows.map((row, index) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: rows are positional; names can repeat
+            <Cell key={index} fill={row.color} />
           ))}
         </Bar>
       </BarChart>
@@ -89,7 +98,8 @@ function BarTooltip({
     <div className="grid min-w-32 gap-1 rounded-md border bg-popover px-2.5 py-1.5 text-caption shadow-md">
       <div className="font-mono text-muted-foreground">{row.name}</div>
       {columns.map((column, index) => (
-        <div key={column.label} className="flex items-center justify-between gap-3">
+        // biome-ignore lint/suspicious/noArrayIndexKey: measures are positional; labels can repeat
+        <div key={index} className="flex items-center justify-between gap-3">
           <span className="text-muted-foreground">{column.label}</span>
           <span className="font-mono text-foreground tabular-nums">
             {formatValue(column.kind, row.values[index] ?? null)}

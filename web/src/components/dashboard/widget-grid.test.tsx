@@ -85,3 +85,61 @@ describe("below 768 px", () => {
     expect(screen.getByText("side")).toBeInTheDocument();
   });
 });
+
+describe("charts below the fold", () => {
+  const original = globalThis.IntersectionObserver;
+
+  afterEach(() => {
+    globalThis.IntersectionObserver = original;
+  });
+
+  /** Reports nothing as visible: a chart mounts only when a test says it is near the viewport. */
+  function offscreen() {
+    globalThis.IntersectionObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+      takeRecords() {
+        return [];
+      }
+    } as unknown as typeof IntersectionObserver;
+  }
+
+  function chart(id: string, x: number, y: number): WidgetModel {
+    return {
+      id,
+      title: id,
+      kind: "chart",
+      chart: { type: "line" },
+      query: undefined,
+      layout: { x, y, w: 6, h: 7 },
+    } as WidgetModel;
+  }
+
+  it("mounts the first four charts in reading order at once, and the rest when scrolled near", () => {
+    offscreen();
+    const charts = [
+      chart("c6", 6, 14),
+      chart("c5", 0, 14),
+      chart("c4", 6, 7),
+      chart("c3", 0, 7),
+      chart("c2", 6, 0),
+      chart("c1", 0, 0),
+    ];
+    render(
+      <WidgetGrid
+        widgets={[widget("h", 0, 21, 12, 1), ...charts]}
+        editing={false}
+        renderCell={(item) => <span>{item.id}</span>}
+      />,
+    );
+    for (const id of ["c1", "c2", "c3", "c4"]) {
+      expect(screen.getByText(id)).toBeInTheDocument();
+    }
+    for (const id of ["c5", "c6"]) {
+      expect(screen.queryByText(id)).not.toBeInTheDocument();
+    }
+    // A heading costs no query, so it mounts at once wherever it is.
+    expect(screen.getByText("h")).toBeInTheDocument();
+  });
+});
