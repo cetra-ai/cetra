@@ -146,7 +146,7 @@ The website's "Try demo" link opens `https://<cell>/demo` on the cloud cell that
 
 1. Create the org through the control plane with a team account, so Q knows it like any org, and give it an override without a data-access window, units cap or ingest rate below the generator's (Q's request R-demo, see the plan).
 2. Set `demo.org` to its id in the cell's config and restart the cell.
-3. In the org, create the project, an `sk` key with `ingest, write`, the LLM connection to the generator's judge endpoint, the evaluators, online rules, score definitions, alert rules and dashboards the README lists.
+3. In the org, create the project, an `sk` key with `ingest, read`, the LLM connection to the generator's judge endpoint, the evaluators, online rules, score definitions, alert rules and dashboards the README lists.
 4. Run the `cetra-demo` generator next to the cell (a third container in the cell's compose stack) with that key; its judge endpoint is served on a public hostname through the cell's reverse proxy, so `security.allow_private_network_egress` stays `false`.
 
 The team's accounts are the demo org's only members, and every visitor sees their names and emails in the member list: use team addresses, not personal ones.

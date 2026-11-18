@@ -47,18 +47,18 @@ Like Langfuse's demo project: every signed-in user of a cloud cell finds a **"ce
 
 ## DO1: config and the reserved slug (server)
 
-**Edit** `crates/server/src/config.rs`, `crates/server/src/serve.rs`, `crates/server/src/meta/orgs.rs`, `docs/self-hosting/configuration.md`, `CHANGELOG.md`.
+**Edit** `crates/server/Cargo.toml`, `crates/server/src/config.rs`, `crates/server/src/serve.rs`, `crates/server/src/meta/orgs.rs`, `CHANGELOG.md`.
 
 **Steps**
-1. `pub struct DemoConfig` with `#[serde(deny_unknown_fields, default)]`: `org: Option<OrgId>`, `requests_per_minute: u32` (120), `user_in_flight: u32` (4), `org_in_flight: u32` (16), `sql_timeout: Duration` (10 s), `sql_max_rows: usize` (1000). Parse `sql_timeout` with the same duration format and helper the existing config sections use (spec 12: strings like `"10s"`); if `config.rs` has no such helper for server sections, stop and ask. Add `pub demo: DemoConfig` to `ServerConfig` with `#[serde(default)]` and a doc comment citing D187.
+1. Add `humantime-serde = { workspace = true }` to `crates/server/Cargo.toml` (the root already declares it; `cetra-storage` uses it as `#[serde(with = "humantime_serde")]`, `crates/storage/src/config.rs`). `pub struct DemoConfig` with `#[serde(deny_unknown_fields, default)]`: `org: Option<OrgId>`, `requests_per_minute: u32` (120), `user_in_flight: u32` (4), `org_in_flight: u32` (16), `#[serde(with = "humantime_serde")] sql_timeout: Duration` (10 s; parses `"10s"`), `sql_max_rows: usize` (1000). Implement `Default` by hand, like `OrgsConfig`. Add `pub demo: DemoConfig` to `ServerConfig` with `#[serde(default)]` and a doc comment citing D187.
 2. In `validate`: each count ≥ 1; `user_in_flight ≤ org_in_flight`; `sql_timeout` within 1–60 s; `sql_max_rows` within 1–10,000. Errors name the key, never a value that could be secret (these are not secret, but follow the file's style).
-3. In `serve.rs`, after `meta.db` is open and migrated and before the listeners start: when `demo.org` is set, load it with `org_by_id`; missing or not `active` fails startup with an error naming the key and the id. Find the place where `serve.rs` first reads `meta.db` after migrations; if there is no clear one, stop and ask.
+3. In `serve::bind`, directly after `MetaDb::open` succeeds and before `open_secrets`: when `demo.org` is set, load it with `org_by_id`. Missing → `ServeError::Config(ConfigError::Invalid { key: "demo.org", reason: "no org has this id" })`; not `active` → the same with `reason: "the org is not active"` (`reason` is `&'static str`; never print the id). On failure call `release_storage(storage).await; meta.close().await;` first, as the neighbouring error arms do.
 4. Add `"demo"` to `RESERVED` in `meta/orgs.rs` (the UI route `/demo`).
-5. Document the keys in `docs/self-hosting/configuration.md` next to `[orgs]`, as spec 12 lists them. `CHANGELOG.md` `Added`: "A demo org that every signed-in user can read (`demo.org`)."
+5. Spec 12 already lists the keys; `docs/self-hosting/configuration.md` is not changed. `CHANGELOG.md` `Added`: "A demo org that every signed-in user can read (`demo.org`)."
 
 **Tests**
 - config: defaults; a full `[demo]` table from TOML; `CETRA_DEMO__ORG` from the environment; each validation error; an unknown key under `[demo]` is an error.
-- serve: startup fails when `demo.org` names no org, and when the org is not active; starts when it is active (use the existing startup test helpers in `serve.rs`).
+- serve: `bind(config, None).await.unwrap_err()` matches `ServeError::Config(ConfigError::Invalid { key: "demo.org", .. })` when `demo.org` names no org, and when the org is not active (model on `a_bad_init_secret_fails_startup`); `bind` succeeds when it is active.
 - orgs: creating an org with slug `demo` is refused like the other reserved slugs.
 
 **Done when** `just check-rust` passes.
@@ -67,20 +67,20 @@ Like Langfuse's demo project: every signed-in user of a cloud cell finds a **"ce
 
 ## DO2: the implicit viewer (server)
 
-**Edit** new `crates/server/src/demo.rs` (and `lib.rs` to declare it), `http/access.rs`, `routes/auth.rs`, `routes/orgs.rs`, `mcp/tools.rs`, `api/account.rs`, `crates/server/openapi.json` and `web/src/api/schema.gen.ts` (via `just openapi`), `fixtures/api/` responses that contain orgs, `CHANGELOG.md` only if DO1's line needs no change (it does not).
+**Edit** new `crates/server/src/demo.rs` (and `lib.rs` to declare it), `http/access.rs`, `http/access_suite.rs`, `routes/auth.rs`, `routes/orgs.rs`, `routes/invites.rs`, `mcp/tools.rs`, `api/account.rs`, `crates/server/openapi.json` and `web/src/api/schema.gen.ts` (via `just openapi`), the `fixtures/api/` responses that contain an org membership, and the web test and mock literals that `pnpm tsc` reports.
 
 **Steps**
 1. `demo.rs`:
    - `pub(crate) struct OrgRoleOf { pub(crate) role: OrgRole, pub(crate) implicit: bool }`.
    - `pub(crate) async fn org_role_for(state: &AppState, org_id: OrgId, user: &AuthUser) -> Result<Option<OrgRoleOf>, MetaError>`: the stored role (`implicit: false`) when `org_members` has one; else `Some(Viewer, implicit: true)` when `state.config.demo.org == Some(org_id)` and `!user.is_instance_admin`; else `None`.
-   - `pub(crate) async fn orgs_for(state: &AppState, user: &AuthUser) -> Result<Vec<(OrgRow, OrgRole, bool)>, MetaError>`: `orgs_of_user` with `demo = (Some(org.id) == demo.org)` on each, then, when `demo.org` is set, the user is not an instance admin and not already a member, the demo org (loaded with `org_by_id`, only if `active`) as `(row, Viewer, true)`; the demo org (member or not) is moved to the **end**.
-2. `access.rs`: `grant_org` and `user_project` use `org_role_for` instead of `org_role` (take `.role`). When the role is implicit, insert a `DemoVisitor` marker (`#[derive(Clone, Copy)] pub(crate) struct DemoVisitor;` in `demo.rs`) into `parts.extensions`. `user_project` is also called outside the middleware: check its callers and keep their behaviour (an implicit viewer is a viewer there too); if a caller needs the marker and cannot get it, stop and ask.
-3. `api/account.rs`: `OrgMembership` gains `pub demo: bool` with a doc comment (D187). `me_from` and `list_orgs` build it from `orgs_for`. `list_orgs` pages by name today (`page_named`); keep the demo org **last** across pages: page the non-demo orgs as today and append the demo org to the last page only. If `page_named` makes that awkward, stop and ask before changing it.
+   - `pub(crate) async fn orgs_for(state: &AppState, user_id: Uuid, is_instance_admin: bool) -> Result<Vec<(OrgRow, OrgRole, bool)>, MetaError>` (`me_from` has a `UserRow`, which has `id` and `is_instance_admin`; `list_orgs` and MCP pass the `AuthUser` fields): `orgs_of_user` with `demo = (Some(org.id) == demo.org)` on each, then, when `demo.org` is set, the user is not an instance admin and not already a member, the demo org (loaded with `org_by_id`, only if `active`) as `(row, Viewer, true)`; the demo org (member or not) is moved to the **end**.
+2. `access.rs`: `grant_org` and `user_project` use `org_role_for` instead of `org_role`. In `demo.rs`: `#[derive(Clone, Copy)] pub(crate) struct DemoVisitor(pub(crate) Uuid);` (the user id). `ProjectAccess` and `OrgAccess` gain `pub(crate) implicit: bool`: `true` when `org_role_for` said implicit, `false` for API-key access (`grant_key_project` and the key-only path). `grant_org` inserts `DemoVisitor(user.id)` into `parts.extensions` when its role is implicit; `grant_session_project` inserts it when `access.implicit`. `user_project`'s other callers (the MCP tools in `mcp/sql.rs`, `mcp/traces.rs`, `mcp/tools.rs`) only read `.role` and ignore the new field.
+3. `api/account.rs`: `OrgMembership` gains `pub demo: bool` with a doc comment (D187). **Every** constructor sets `demo = state.config.demo.org == Some(org.id)`: `me_from` and `list_orgs` (from `orgs_for`), the setup response in `routes/auth.rs`, `membership()` in `routes/orgs.rs` (used by create, get and update org), the invite accept in `routes/invites.rs`, and the test in `api/account.rs`. `list_orgs`: do not change `page_named` (its cursor assumes rows sorted by `(name, id)`); give the demo row the sort key `format!("\u{10ffff}{}", org.name)` as the first tuple element, so it sorts after every real name and paging stays valid.
 4. `mcp/tools.rs` `list_projects`: iterate `orgs_for` (the demo org last); update its doc comment.
 5. Leave `routes/internal_members.rs` and `routes/deletions.rs` on the raw `orgs_of_user` / `org_role`.
-6. `just openapi`; update every `fixtures/api` response that contains an `OrgMembership` with `"demo": false`; run `cargo test -p cetra-server --test api_examples`.
+6. `just openapi`. Add `"demo": false` to every org membership object (`id` + `slug` + `name` + `role`) in `fixtures/api/static/` (at least `me.json`, `orgs.json`, `org.json`, `setup-response.json`, `signup-response.json`; check `invite-created.json`, `invite-preview.json` and `project.json` and change them only if they hold such an object). Run `pnpm exec tsc --noEmit` in `web/` and add `demo: false` to every `OrgMembership` literal it reports (tests and `web/src/mocks`). Run `cargo test -p cetra-server --test api_examples`.
 
-**Tests** (in `demo.rs` and the access suite, with `TestApp`)
+**Tests** (in `demo.rs`, and in `http/access_suite.rs` with an implicit viewer added as a `Who` next to `org_membership(who)`)
 - with `demo.org` set: a user with no row gets `200` on `GET /api/v1/orgs/{demo}` and on a project read (`GET …/traces`), `200` on `POST …/sql`, `403` on a member route (e.g. creating a score definition) and on a SQL export (`Accept: text/csv`), `403` on a project-admin route;
 - a real member of the demo org keeps their role (`implicit: false`, no `DemoVisitor`);
 - an instance admin without a row gets `404`;
@@ -89,7 +89,9 @@ Like Langfuse's demo project: every signed-in user of a cloud cell finds a **"ce
 - `GET /api/v1/orgs/{demo}/members` lists the real members only;
 - `POST /api/internal/v1/memberships/lookup` does not return the demo org for a user without a row;
 - MCP `list_projects` includes the demo projects last;
-- `DELETE …/projects/{p}` by an implicit viewer is `403`.
+- `DELETE …/projects/{p}` by an implicit viewer is `403`;
+- `GET /api/v1/orgs/{demo}` answers `demo: true` (also for a real member); other orgs `demo: false`;
+- an implicit viewer's calls to the member routes (leave, change role) create and delete no `org_members` row (they are refused as for a viewer).
 
 **Done when** `just check-rust` passes and `cargo test -p cetra-server --test api_examples` passes.
 
@@ -101,16 +103,18 @@ Like Langfuse's demo project: every signed-in user of a cloud cell finds a **"ce
 
 **Steps**
 1. `limits.rs`: move the in-flight map of `McpLimits` into `pub(crate) struct InFlight<K>` (`admit(&self, key) -> Result<InFlightGuard<K>, RetryAfter>` with a per-key maximum, guard decrements on drop and removes zero entries). `McpLimits` uses it with `MCP_IN_FLIGHT`; its behaviour and tests stay the same. This generic removes the duplication the demo limits would add (AGENTS.md).
-2. `pub(crate) struct DemoLimits { rate: KeyedLimiter<Uuid>, users: InFlight<Uuid>, org: Arc<AtomicU32> or a Mutex<u32>, org_max: u32 }` built from `DemoConfig` (`Bucket { capacity: requests_per_minute, per: 60 s }`). `admit(user, now) -> Result<DemoGuard, RetryAfter>`: org count full → `RetryAfter(1 s)` without spending a token; user in flight full → `RetryAfter(1 s)`; then the rate check; the guard releases both slots on drop. `Limits::new` takes `&DemoConfig`; `Limits` gains `pub(crate) demo: DemoLimits`; `prune` prunes it.
-3. `access.rs` `enforce`: when `prepare` inserted `DemoVisitor`, call `state.limits.demo.admit(user.id, now)` before `next.run`; on `Err(RetryAfter)` answer `429 rate_limited` with `Retry-After` exactly as the MCP route does (reuse its helper; find it in `mcp/` or `http/error.rs`). Hold the guard across `next.run(request).await`. A streaming answer (SSE) releases its slot when the handler returns, so open streams are not counted; that is intended (the streams have their own caps).
-4. `routes/sql.rs`: `run_sql` takes `Option<Extension<DemoVisitor>>`; for a visitor, after `check_request`, lower `limit` to `demo.sql_max_rows` and `timeout` to `demo.sql_timeout` when they are larger. The field rules and their 400s are unchanged.
+2. `pub(crate) struct DemoLimits { rate: KeyedLimiter<Uuid>, users: InFlight<Uuid> /* max user_in_flight */, org: InFlight<()> /* max org_in_flight */ }`, rate `Bucket { capacity: requests_per_minute, per: 60 s }`. `admit(user, now) -> Result<DemoGuard, RetryAfter>`: `org.admit(())?` first, then `users.admit(user)?`, then `rate.check(&user, now)?`; each in-flight refusal is `RetryAfter(1 s)`; a later refusal drops the earlier guards, and an in-flight refusal spends no rate token (as `McpLimits::admit`). `DemoGuard` holds the two guards. `Limits::new` takes `&DemoConfig`; `Limits` gains `pub(crate) demo: DemoLimits`; `prune` prunes its rate limiter. `McpLimits::in_flight(token)` (a `#[cfg(test)]` helper used by MCP tests) stays.
+3. `access.rs` `enforce`: after `prepare` succeeds, read `request.extensions().get::<DemoVisitor>().copied()`; when present call `state.limits.demo.admit(visitor.0, now)` (the `now` the MCP route uses). On `Err(retry)` answer `ApiError::RateLimited { retry_after_s: retry.0.as_secs().max(1) }.into_response()` (its `IntoResponse` sets `Retry-After` and `RateLimit-*`, as `mcp/mod.rs` does) and `record_access(&mut response, "denied-other")`. On `Ok`, keep `let _guard = …;` alive across `next.run(request).await` (`enforce` is an async fn, so this compiles). A streaming answer (SSE) releases its slot when the handler returns, so open streams are not counted; that is intended (the streams have their own caps).
+4. `routes/sql.rs`: `run_sql` takes `Option<Extension<DemoVisitor>>` and passes `Option<&DemoConfig>` (`Some(&state.config.demo)` for a visitor) to `run_json`, which lowers `checked.limit` to `sql_max_rows` and `checked.timeout` to `sql_timeout` when they are larger. Exports are refused to viewers before that, so `start_export` is unchanged. The field rules and their 400s are unchanged.
+5. `POST /mcp` is not counted by the demo limits: it has no `{org}`, and it has its own per-token limits (D-H-10: 60 a minute, 4 in flight); MCP `query_sql` already caps rows at 1,000. Spec 08 § Demo org says so.
 
 **Tests**
 - `InFlight`: admit up to the max, refuse the next, a dropped guard frees a slot, the map is empty after all guards drop.
 - `McpLimits` tests unchanged and passing.
 - `DemoLimits`: org-wide cap across two users; per-user cap; rate refusal with the right `Retry-After`; a refused admission spends no rate token.
 - access: an implicit visitor over the rate gets `429` with `Retry-After`; a real member of the demo org with the same request count is not limited; the slot is released after the response (a second request after the first finishes is admitted with `user_in_flight = 1`).
-- sql: a visitor's `limit: 5000` returns at most `sql_max_rows` rows with `truncated: true` when more matched; a visitor's `timeout_ms: 60000` runs with `sql_timeout` (use a test config with a tiny `sql_timeout` and a query that the existing tests already use to provoke a timeout; if none exists, stop and ask); a member's request is unchanged.
+- sql: a visitor's `limit: 5000` returns at most `sql_max_rows` rows with `truncated: true` when more matched; a visitor's `timeout_ms: 60000` runs with `sql_timeout`: reuse the query of `a_query_past_its_timeout_is_422_query_timeout`, set `demo.sql_timeout = "1s"`, send `timeout_ms: 60000`, expect `422 query_timeout`; a member's request is unchanged.
+- an implicit visitor's `POST /mcp` call does not take a demo org slot.
 
 **Done when** `just check-rust` passes.
 
@@ -118,19 +122,19 @@ Like Langfuse's demo project: every signed-in user of a cloud cell finds a **"ce
 
 ## DO4: the web (switcher, landing, /demo, banner)
 
-**Edit** `web/src/routes/index.tsx`, new `web/src/routes/demo.tsx`, `web/src/components/org-switcher.tsx`, the org layout route that renders the top bar (find it from `web/src/components/shell/top-bar.tsx`'s users), a new `web/src/components/demo-banner.tsx`, tests next to each, the MSW handlers in `fixtures/api` only if a new example is needed.
+**Edit** `web/src/routes/index.tsx`, new `web/src/routes/demo.tsx`, `web/src/components/org-switcher.tsx`, `web/src/routes/$org/route.tsx` (`OrgLayout`, where `UsageBanner` is rendered), a new `web/src/components/demo-banner.tsx`, tests (extend `web/src/components/org-switcher.test.tsx`, `web/src/routes/home.test.tsx`, `web/src/routes/$org/$project/layout.test.tsx`; new tests next to new files), the MSW handlers in `fixtures/api` only if a new example is needed.
 
 **Steps**
-1. `index.tsx`: redirect to the first org with `demo === false`, else the first org (the demo).
-2. `demo.tsx` (`/demo`, needs a session like every non-public route): find the org with `demo === true` in `me.orgs`; load its projects with the existing projects query and redirect to the first by name (`/$org/$project`); no project → `/$org`; no demo org → `/`.
-3. `org-switcher.tsx`: render the demo org last, after a separator, with a small "Demo" badge (use the existing `Badge` component from `web/src/components/ui`).
-4. `demo-banner.tsx`: in an org whose membership has `demo: true` and `role: "viewer"`, a thin bar under the top bar: "You're exploring the cetra demo, read-only." and a link "Send your own traces" to `/`. Nothing for other orgs or for real members.
+1. `index.tsx`: `const org = me.orgs.find((o) => !o.demo) ?? me.orgs[0];`.
+2. `demo.tsx` (`/demo`; not a public path, so the existing `requireSession` sends a signed-out visitor to `/login?redirect=/demo`): find the org with `demo === true` in `me.orgs`; load `projectListOptions(org.slug)` from `web/src/api/queries.ts` with `ensureInfiniteQueryData` and redirect to `pages[0].data[0]` (the server sorts projects by name, then id) as `/$org/$project`; no project → `/$org`; no demo org → `/`.
+3. `org-switcher.tsx`: render the demo org last, after a separator, with `<Badge variant="secondary">Demo</Badge>` (`web/src/components/ui/badge.tsx`).
+4. `demo-banner.tsx`, rendered in `OrgLayout` next to `UsageBanner`: in an org whose membership has `demo: true` and `role: "viewer"`, a thin bar: "You're exploring the cetra demo, read-only." and a link "Send your own traces": to `/` when the user has another org; otherwise to `org_create_url` from `GET /api/auth/config` when set, else `/setup/workspace` when `org_create_allowed`, else no link. Nothing for other orgs or for real members.
 
 **Tests**
 - index: with orgs `[demo(first by name), own]` it opens `own`; with only the demo it opens the demo.
 - `/demo`: opens the demo org's first project; no demo org → `/`; signed out → `/login?redirect=/demo` (the existing auth gate).
 - switcher: the demo org is last and badged.
-- banner: shown for a demo viewer, hidden for an `admin` of the demo org and in a normal org.
+- banner: shown for a demo viewer, hidden for an `admin` of the demo org and in a normal org; the link target for a user with another org, and for a demo-only user with and without `org_create_url`.
 
 **Done when** `just check-web` passes.
 
@@ -138,14 +142,14 @@ Like Langfuse's demo project: every signed-in user of a cloud cell finds a **"ce
 
 ## DO5: the generator, ingest (tools/demo)
 
-**Edit** new crate `tools/demo/` (`Cargo.toml`, `src/main.rs`, `src/*.rs`), root `Cargo.toml` `[workspace] members` (and `[workspace.dependencies]` only if a needed crate is missing: look up the real version, never guess), `justfile` (a `demo` recipe running it), `deny.toml` only if a new crate needs it.
+**Edit** new crate `tools/demo/` (`Cargo.toml` modelled on `tools/capture/Cargo.toml`: `publish = false`, `[lints] workspace = true`; `src/main.rs`, `src/*.rs`), root `Cargo.toml` `members` (add `"tools/demo"`), `justfile` (a `demo` recipe running it). Use only workspace deps: axum (features `http1`, `json`, `tokio`), reqwest (`rustls-tls`, `json`), clap (`derive`, `env`), rand 0.10, serde, serde_json, tokio, thiserror, hex, chrono, tower. rand 0.10 renamed APIs from 0.8/0.9: read its docs; seeded tests use `StdRng` with `SeedableRng`, and if `StdRng` is not available, stop and ask.
 
 **Steps**
 1. Binary `cetra-demo`, `publish = false`, `[lints] workspace = true`, errors with `thiserror` (it is not `cetra-cli`, so no `anyhow`). Config by flags with env fallbacks (`clap` `env`): `--url` (`CETRA_DEMO_URL`, the cell's base URL), `--key` (`CETRA_DEMO_KEY`, an `sk` key; never logged), `--fixtures` (default `fixtures/otlp`), `--rate` (traces per minute at the daily peak, default 60), `--backfill-days` (default 30), `--seed` (optional, for tests).
 2. Load every `input.json` under `--fixtures` (skip groups `edge` and any case whose `case.json` `origin` is not `captured`; if that leaves fewer than 10 templates, stop and ask). A template is one fixture's `resourceSpans`.
-3. To emit a trace from a template: a new random trace id for every trace id of the request (keep the mapping so parent links stay valid), new span ids likewise; shift every `startTimeUnixNano`/`endTimeUnixNano` so the root starts at the target time, scaling all durations by a factor in 0.5–2.0 (one factor per trace); multiply integer token-count attributes (`gen_ai.usage.*`, `llm.token_count.*`) by 0.7–1.3; set resource or root attributes `user.id` (from a pool of 200 fake ids `user-0001`…), `session.id` (a session groups 1–8 consecutive traces of one user), `deployment.environment` (`production` 90%, `staging` 10%) and `service.version` (a release that changes every 7 days); mark 3% of traces as errors (root span `status.code = 2` with a fixed message). Only touch attributes that exist in spec 02's mapping tables; if a convention stores the user or session elsewhere, follow spec 02 and say which in a comment.
+3. To emit a trace from a template: a new random trace id for every trace id of the request (keep the mapping so parent links stay valid), new span ids likewise; shift every `startTimeUnixNano`/`endTimeUnixNano` so the root starts at the target time, scaling all durations by a factor in 0.5–2.0 (one factor per trace); multiply token counts by 0.7–1.3 (see below); set `user.id` (from a pool of 200 fake ids `user-0001`…) and `session.id` (a session groups 1–8 consecutive traces of one user) as attributes on **every span** (spec 02: span-level context fields, the SDK sets them on every span), and `deployment.environment` (`production` 90%, `staging` 10%) and `service.version` (a release that changes every 7 days) as **resource** attributes; mark 3% of traces as errors (root span `status.code = 2` with a fixed message). Token counts: one factor per trace (so `cache_read ≤ input` holds), applied to the `intValue` of the token keys spec 02 reads (`gen_ai.usage.*`, `llm.token_count.*`, `ai.usage.*`); in OTLP JSON `intValue` is a string.
 4. Daily curve: the rate follows a smooth day/night curve (peak at 14:00 UTC, trough at 25% of the peak at 03:00 UTC), with ±20% noise.
-5. Backfill: when the project has no trace in the last `--backfill-days` (ask `GET /api/v1/projects/current/traces?limit=1` with the key), emit that many days at the curve's rate, oldest first, in batches of at most 500 traces per request; then the live loop emits at the current rate.
+5. Backfill: when the project has no trace in the last `--backfill-days` (ask `GET /api/v1/projects/current/traces?limit=1&from=<now − backfill-days, RFC 3339>&to=<now>` with the key, which needs the `read` scope), emit that many days at the curve's rate, oldest first, in batches of at most 500 traces per request; then the live loop emits at the current rate.
 6. `POST {url}/v1/traces` with `Content-Type: application/json`, `Authorization: Bearer <key>`; on 429/503 wait the `Retry-After` (or 5 s) and retry; on 402 (units cap) log it and wait 10 minutes. Log counts only.
 
 **Tests** (unit, with `--seed`): ids are all new and links stay consistent; times land at the target and durations scale; token counts scale and stay integers; the curve's peak and trough; a batch never exceeds 500 traces; a wiremock-free HTTP test with a local `axum` server (as `tools/capture` tests do) receiving one batch with the bearer header and JSON content type, and the 429 retry.
@@ -161,9 +165,9 @@ Like Langfuse's demo project: every signed-in user of a cloud cell finds a **"ce
 **Steps**
 1. `--judge-addr` (`CETRA_DEMO_JUDGE_ADDR`, unset = off) and `--judge-key` (`CETRA_DEMO_JUDGE_KEY`, required when the address is set): an `axum` server with `POST /v1/chat/completions` that requires `Authorization: Bearer <judge-key>` (else 401), reads `response_format.json_schema.schema` and answers a Chat Completions body whose message content is a JSON object matching that schema: `explanation` (one of 20 canned sentences) when present, `value` a number in [0, 1] drawn from a beta-like spread centred near 0.8 or a boolean (80% `true`), or `label` the first enum value 70% of the time and the others otherwise. `usage` with plausible token counts. A request without that schema is `400`. Never log the request body.
 2. `Dockerfile`: multi-stage, builds `cetra-demo` from the workspace and copies `fixtures/otlp` into the image; runs as a non-root user. `just demo-image [tag]` builds it.
-3. `README.md`, the runbook of spec 12 § Demo org: create the org through the control plane with a team account; ask the control plane operator for its override (no data-access window, no units cap, an ingest rate above the generator's); set `demo.org`; in the org create the project `demo`, an `sk` key (`ingest, write`), an LLM connection (OpenAI-compatible, base URL `https://<judge-host>/v1`, the judge key, `structured_output = native`); the evaluators (two built-in judge templates and one `check`), two online rules (sampling 20%), score definitions, one alert rule, and two dashboards (names and settings listed in the README); the compose service and the reverse-proxy route for the judge host. Use team email addresses only.
+3. `README.md`, the runbook of spec 12 § Demo org: create the org through the control plane with a team account; ask the control plane operator for its override (no data-access window, no units cap, an ingest rate above the generator's); set `demo.org`; in the org create the project `demo`, an `sk` key (`ingest, read`), an LLM connection (OpenAI-compatible, base URL `https://<judge-host>/v1`, the judge key, `structured_output = native`); the evaluators (two built-in judge templates and one `check`), two online rules (sampling 20%), score definitions, one alert rule, and two dashboards (names and settings listed in the README); the compose service and the reverse-proxy route for the judge host. Use team email addresses only.
 
-**Tests**: the judge answers each schema kind (numeric, boolean, categorical, with and without `explanation`) and the answer parses with cetra's own judge parser (add `cetra-eval` as a dev-dependency only if it exposes that parser publicly; otherwise assert the JSON shape and say so in the report); 401 without the key; 400 without a schema.
+**Tests**: the judge answers each schema kind (numeric, boolean, categorical, with and without `explanation`), asserted against the requested schema's `type`, `required` and `enum` (`cetra-eval`'s parser is `pub(crate)`; do not depend on it); 401 without the key; 400 without a schema.
 
 **Done when** `just check-rust` passes and `just demo-image` builds (if Docker is unavailable, say so in the report).
 
