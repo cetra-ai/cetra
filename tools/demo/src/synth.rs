@@ -37,6 +37,28 @@ const ERROR_MESSAGE: &str = "simulated upstream failure";
 const STATUS_ERROR: i64 = 2;
 /// Attribute keys whose integer values are token counts (spec 02, Model, provider, usage).
 const TOKEN_PREFIXES: &[&str] = &["gen_ai.usage.", "llm.token_count.", "ai.usage."];
+/// The keys of a span's total tokens (spec 02, `total_tokens`).
+const TOTAL_KEYS: &[&str] = &[
+    "llm.token_count.total",
+    "gen_ai.usage.total_tokens",
+    "ai.usage.totalTokens",
+];
+/// The keys of a span's input tokens, in precedence order (spec 02, `input_tokens`).
+const INPUT_KEYS: &[&str] = &[
+    "gen_ai.usage.input_tokens",
+    "llm.token_count.prompt",
+    "gen_ai.usage.prompt_tokens",
+    "ai.usage.inputTokens",
+    "ai.usage.promptTokens",
+];
+/// The keys of a span's output tokens, in precedence order (spec 02, `output_tokens`).
+const OUTPUT_KEYS: &[&str] = &[
+    "gen_ai.usage.output_tokens",
+    "llm.token_count.completion",
+    "gen_ai.usage.completion_tokens",
+    "ai.usage.outputTokens",
+    "ai.usage.completionTokens",
+];
 
 /// Builds the trace for `plan` from `template`.
 pub(crate) fn synthesize(template: &Trace, plan: &Plan, rng: &mut StdRng) -> Trace {
@@ -193,27 +215,58 @@ fn root_start(trace: &Trace) -> Option<i64> {
 
 /// Scales the integer value of every token count. One factor per trace keeps the
 /// parts ordered (a cache read never exceeds its input) because rounding is monotone.
+/// A total is then the sum of the scaled input and output when the span has both
+/// (spec 02 `total_tokens`: cache is inside input and reasoning inside output, so
+/// neither is added again). A total on a span with only one of them just scales.
 fn scale_tokens(attrs: &mut [KeyValue], factor: f64) {
     for kv in attrs.iter_mut().filter(|kv| {
         TOKEN_PREFIXES
             .iter()
             .any(|prefix| kv.key.starts_with(prefix))
     }) {
-        let Some(int) = kv.value.get_mut("intValue") else {
-            continue;
-        };
-        let original = match &*int {
-            Value::String(text) => text.parse::<i64>().ok(),
-            _ => int.as_i64(),
-        };
-        let Some(count) = original else {
-            continue;
-        };
-        let scaled = scale(count, factor).max(0);
+        if let Some(count) = int_value(&kv.value) {
+            set_int_value(&mut kv.value, scale(count, factor).max(0));
+        }
+    }
+    if let (Some(input), Some(output)) = (
+        first_count(attrs, INPUT_KEYS),
+        first_count(attrs, OUTPUT_KEYS),
+    ) {
+        let total = input.saturating_add(output);
+        for kv in attrs
+            .iter_mut()
+            .filter(|kv| TOTAL_KEYS.contains(&kv.key.as_str()))
+        {
+            set_int_value(&mut kv.value, total);
+        }
+    }
+}
+
+/// The first of `keys` that is on the span with an integer value (spec 02 precedence).
+fn first_count(attrs: &[KeyValue], keys: &[&str]) -> Option<i64> {
+    keys.iter().find_map(|key| {
+        attrs
+            .iter()
+            .find(|kv| kv.key == *key)
+            .and_then(|kv| int_value(&kv.value))
+    })
+}
+
+/// The integer of an attribute's `intValue`, which OTLP/JSON writes as a string or a number.
+fn int_value(value: &Value) -> Option<i64> {
+    match value.get("intValue")? {
+        Value::String(text) => text.parse().ok(),
+        other => other.as_i64(),
+    }
+}
+
+/// Sets the `intValue`, keeping its JSON type (string or number).
+fn set_int_value(value: &mut Value, count: i64) {
+    if let Some(int) = value.get_mut("intValue") {
         *int = if int.is_string() {
-            Value::String(scaled.to_string())
+            Value::String(count.to_string())
         } else {
-            json!(scaled)
+            json!(count)
         };
     }
 }
@@ -388,5 +441,60 @@ mod tests {
         assert_eq!(root.code, STATUS_ERROR);
         assert_eq!(root.message.as_deref(), Some(ERROR_MESSAGE));
         assert!(spans[1].status.is_none());
+    }
+
+    fn span_with(attributes: &Value) -> Trace {
+        serde_json::from_value(json!([{"scopeSpans": [{"spans": [{
+            "traceId": "00000000000000000000000000000001",
+            "spanId": "0000000000000001",
+            "startTimeUnixNano": "1000",
+            "endTimeUnixNano": "2000",
+            "attributes": attributes
+        }]}]}]))
+        .expect("a valid trace")
+    }
+
+    #[test]
+    fn the_total_is_the_sum_of_the_scaled_input_and_output() {
+        let template = span_with(&json!([
+            {"key": "gen_ai.usage.input_tokens", "value": {"intValue": "101"}},
+            {"key": "gen_ai.usage.cache_read.input_tokens", "value": {"intValue": "80"}},
+            {"key": "gen_ai.usage.output_tokens", "value": {"intValue": 11}},
+            {"key": "gen_ai.usage.total_tokens", "value": {"intValue": "112"}},
+            {"key": "llm.token_count.total", "value": {"intValue": 112}}
+        ]));
+        for factor in [0.7, 1.0, 1.3] {
+            let mut rng = StdRng::seed_from_u64(6);
+            let built = synthesize(&template, &plan(5000, 1.0, factor, false), &mut rng);
+            let span = all_spans(&built)[0];
+            let int = |key: &str| {
+                let attr = span
+                    .attributes
+                    .iter()
+                    .find(|kv| kv.key == key)
+                    .expect("present");
+                int_value(&attr.value).expect("an integer")
+            };
+            let sum = int("gen_ai.usage.input_tokens") + int("gen_ai.usage.output_tokens");
+            assert_eq!(int("gen_ai.usage.total_tokens"), sum, "factor {factor}");
+            assert_eq!(int("llm.token_count.total"), sum, "factor {factor}");
+        }
+    }
+
+    #[test]
+    fn a_total_without_both_parts_only_scales() {
+        let template = span_with(&json!([
+            {"key": "gen_ai.usage.input_tokens", "value": {"intValue": "100"}},
+            {"key": "gen_ai.usage.total_tokens", "value": {"intValue": "110"}}
+        ]));
+        let mut rng = StdRng::seed_from_u64(7);
+        let built = synthesize(&template, &plan(5000, 1.0, 0.7, false), &mut rng);
+        let span = all_spans(&built)[0];
+        let total = span
+            .attributes
+            .iter()
+            .find(|kv| kv.key == "gen_ai.usage.total_tokens")
+            .expect("present");
+        assert_eq!(total.value["intValue"], "77");
     }
 }

@@ -6,8 +6,8 @@ Use team email addresses only. Every visitor sees the names and emails of the or
 
 ## What the generator does
 
-- `cetra-demo` sends traces to `POST {url}/v1/traces` with the demo project's `sk` key. If the project has no trace in the last 30 days, it first writes those 30 days at the daily curve's rate, then it sends live traces every 10 seconds.
-- With `--judge-addr`, it also serves `POST /v1/chat/completions` in the OpenAI-compatible shape. It answers in the form the request's JSON schema asks for (numeric or boolean `value`, or a categorical `label`, with an `explanation` when the schema has one). The answers are drawn, not computed, so the demo's scores are plausible, not meaningful. The judge never logs request bodies, and it refuses requests without the judge key (401) or without a schema (400).
+- `cetra-demo` sends traces to `POST {url}/v1/traces` with the demo project's `sk` key. At startup it writes the missing traces: from the newest trace of the last 30 days, or all 30 days when there is none, up to now, at the daily curve's rate. Then it sends live traces every 10 seconds.
+- With `--judge-addr`, it also serves `POST /v1/chat/completions` in the OpenAI-compatible shape. It answers in the form the request's JSON schema asks for (numeric or boolean `value`, or a categorical `label`, with an `explanation` when the schema has one). The answers are drawn, not computed, so the demo's scores are plausible, not meaningful. The judge returns numeric values in [0, 1] only, so numeric demo evaluators must use a 0 to 1 range. The judge never logs request bodies, and it refuses requests without the judge key (401) or without a schema (400).
 
 | Setting | Flag | Environment | Default |
 |---|---|---|---|
@@ -64,5 +64,5 @@ Nothing in this list is seeded automatically. Changing an evaluator, a rule or a
 
 - Restart the generator with a new key after the key is rotated. The generator does not reload configuration.
 - A `402` from the cell means the org's units cap is reached: the generator waits 10 minutes and sends the same batch again. Check the override from step 1.
-- The backfill runs once, at startup, and only when the project has no trace in the backfill window. A gap in a running generator is not refilled; live traces resume from the restart.
+- The backfill runs at each startup, from the newest trace in the backfill window (or the whole window when there is none), so a restart after a partial backfill fills the rest. A gap in a running generator is not refilled; live traces resume from the restart.
 - Logs print counts and ids only.

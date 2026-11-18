@@ -16,6 +16,8 @@ pub(crate) enum DemoError {
     Clock,
     #[error("HTTP request failed")]
     Http(#[from] reqwest::Error),
+    #[error("could not encode a trace as JSON")]
+    Encode(#[from] serde_json::Error),
     #[error("the server answered {status}")]
     Rejected { status: u16 },
     #[error("the judge endpoint could not bind or serve")]

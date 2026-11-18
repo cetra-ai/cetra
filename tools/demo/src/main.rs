@@ -1,11 +1,11 @@
 //! `cetra-demo`: the sidecar that keeps the cetra demo org busy (D187).
 //!
 //! It builds traces from the captured OTLP fixtures and sends them to a cell's
-//! `POST /v1/traces`. When the demo project has no trace in the backfill window it
-//! first writes that window, at the daily curve's rate, oldest first. Then it sends
-//! the live traces every tick. With `--judge-addr` it also serves the judge endpoint
-//! the demo's LLM connection uses (`judge.rs`). Lines go through `tracing`; the keys
-//! are never printed.
+//! `POST /v1/traces`. At startup it writes the traces the project is missing: from
+//! the newest trace in the backfill window, or the whole window when there is none,
+//! up to now, at the daily curve's rate, oldest first. Then it sends the live traces
+//! every tick. With `--judge-addr` it also serves the judge endpoint the demo's LLM
+//! connection uses (`judge.rs`). Lines go through `tracing`; the keys are never printed.
 
 mod curve;
 mod error;
@@ -110,15 +110,35 @@ async fn run(args: Args) -> Result<(), DemoError> {
     }
 
     let now = Utc::now();
-    let backfill_from = now - chrono::Duration::days(i64::from(args.backfill_days));
-    let last = if sink.has_trace_between(backfill_from, now).await? {
-        info!("the project has recent traces, no backfill");
-        now
-    } else {
-        info!(days = args.backfill_days, "no recent traces, backfilling");
-        backfill(&sink, &mut generator, backfill_from, now).await?
-    };
+    let from = backfill_start(&sink, now, args.backfill_days).await?;
+    let last = backfill(&sink, &mut generator, from, now).await?;
     live(&sink, &mut generator, last).await
+}
+
+/// Where the backfill starts: the newest trace in the window, so a run that stopped
+/// part way resumes there, or the window's start when the window has no trace.
+async fn backfill_start(
+    sink: &Sink,
+    now: DateTime<Utc>,
+    days: u32,
+) -> Result<DateTime<Utc>, DemoError> {
+    let window_start = now - chrono::Duration::days(i64::from(days));
+    match sink.newest_trace_start(window_start, now).await? {
+        Some(newest) => {
+            info!(
+                days,
+                "the project has traces in the backfill window, resuming from the newest"
+            );
+            Ok(newest.max(window_start))
+        }
+        None => {
+            info!(
+                days,
+                "no traces in the backfill window, backfilling all of it"
+            );
+            Ok(window_start)
+        }
+    }
 }
 
 /// Writes the traces of `[from, to)` in time order, one minute at a time, and
@@ -163,4 +183,49 @@ async fn live(
 
 fn nanos(at: DateTime<Utc>) -> Result<i64, DemoError> {
     at.timestamp_nanos_opt().ok_or(DemoError::Clock)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sink::fake_cell::{CellState, start};
+    use std::sync::Arc;
+
+    fn now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-11-18T12:00:00Z")
+            .expect("a valid time")
+            .with_timezone(&Utc)
+    }
+
+    #[tokio::test]
+    async fn a_partial_backfill_resumes_at_the_newest_trace() {
+        let cell = Arc::new(CellState::default());
+        // The newest trace of the window is ten days old: the backfill must start there.
+        *cell.newest_start.lock().expect("lock") = Some("2026-11-08T12:00:00Z".to_owned());
+        let base = start(cell.clone()).await;
+        let sink = Sink::new(&base, "sk-cetra-test".to_owned()).expect("client");
+        let from = backfill_start(&sink, now(), 30).await.expect("planned");
+        let ten_days_ago = DateTime::parse_from_rfc3339("2026-11-08T12:00:00Z")
+            .expect("a valid time")
+            .with_timezone(&Utc);
+        assert_eq!(from, ten_days_ago);
+        let query = cell
+            .last_query
+            .lock()
+            .expect("lock")
+            .clone()
+            .unwrap_or_default();
+        assert!(query.contains("sort=start_time"), "query was {query}");
+        assert!(query.contains("order=desc"), "query was {query}");
+        assert!(query.contains("limit=1"), "query was {query}");
+    }
+
+    #[tokio::test]
+    async fn an_empty_window_backfills_the_whole_window() {
+        let cell = Arc::new(CellState::default());
+        let base = start(cell.clone()).await;
+        let sink = Sink::new(&base, "sk-cetra-test".to_owned()).expect("client");
+        let from = backfill_start(&sink, now(), 30).await.expect("planned");
+        assert_eq!(from, now() - chrono::Duration::days(30));
+    }
 }
