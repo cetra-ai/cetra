@@ -1,21 +1,21 @@
-import { useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
-import { WIDGET_QUERY_PATH } from "@/api/dashboards";
-import { problemOf } from "@/api/problem";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link, useNavigate } from "@tanstack/react-router";
+import { type ReactNode, useState } from "react";
+import { dashboardQuery, WIDGET_QUERY_PATH } from "@/api/dashboards";
+import { problemMessage, problemOf } from "@/api/problem";
 import { FilterBar } from "@/components/filter-bar/filter-bar";
 import { filterMessage } from "@/components/filter-bar/logic";
 import { ListToolbar } from "@/components/list-toolbar";
 import { useProject } from "@/components/shell/project-context";
+import { Skeleton } from "@/components/ui/skeleton";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { OVERVIEW } from "@/lib/dashboards/overview";
 import type { Widget as WidgetModel } from "@/lib/dashboards/types";
 import { hasTopLevelOr, serializeChip } from "@/lib/dsl/dsl";
 import type { DashboardSearch } from "@/lib/search/dashboard";
 import { type RangeState, rangeFromSearch, resolveRange } from "@/lib/time-range";
+import { DashboardBody } from "./dashboard-body";
 import { useModelRanking } from "./use-model-ranking";
 import { type BucketTarget, Widget, type WidgetContext } from "./widget";
-import { WidgetGrid } from "./widget-grid";
 
 /** The window's end is rounded down to the minute, so visits within one minute share a cache key. */
 function minuteAnchor(now = Date.now()): number {
@@ -23,13 +23,26 @@ function minuteAnchor(now = Date.now()): number {
 }
 
 /**
- * The dashboard for the given URL search. The project layout renders it and keeps it mounted
- * (hidden) on other project pages; the dashboard route itself renders nothing.
+ * The dashboard for the given URL search: the Overview, or the custom dashboard `dashboardId`.
+ * The project layout renders it and keeps it mounted (hidden) on other project pages; the
+ * dashboard routes themselves render nothing. `active` is whether it is the one on screen.
  */
-export function DashboardView({ search }: { search: DashboardSearch }) {
+export function DashboardView({
+  search,
+  dashboardId,
+  active,
+}: {
+  search: DashboardSearch;
+  dashboardId?: string;
+  active: boolean;
+}) {
   const { org, project } = useProject();
-  const navigate = useNavigate({ from: "/$org/$project/dashboard/" });
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const dashboard = useQuery({
+    ...dashboardQuery(org, project, dashboardId ?? ""),
+    enabled: dashboardId !== undefined,
+  });
   const range = rangeFromSearch(search);
   const rangeKey = range.kind === "preset" ? range.preset : `${range.from}\n${range.to}`;
   const [anchor, setAnchor] = useState(() => minuteAnchor());
@@ -55,14 +68,23 @@ export function DashboardView({ search }: { search: DashboardSearch }) {
   const filterError = rankingProblem?.code === "invalid_filter" ? rankingProblem : undefined;
   const context: WidgetContext = { ...base, ranking: ranking.ranking };
 
+  /** Changes the URL search of the open dashboard. Its id stays, so the switch keeps the dashboard. */
+  function goDashboard(updater: (prev: DashboardSearch) => DashboardSearch) {
+    if (dashboardId === undefined) {
+      void navigate({ to: "/$org/$project/dashboard", params: { org, project }, search: updater });
+      return;
+    }
+    void navigate({
+      to: "/$org/$project/dashboard/$dashboardId",
+      params: { org, project, dashboardId },
+      search: updater,
+    });
+  }
+
   /** Shows another window: the toolbar's range picker and a zoom drag both come here. */
   function changeRange(next: RangeState) {
     setAnchor(minuteAnchor());
-    void navigate({
-      to: "/$org/$project/dashboard",
-      params: { org, project },
-      search: (prev) => withRange(prev, next),
-    });
+    goDashboard((prev) => withRange(prev, next));
   }
 
   function zoomTo(fromMs: number, toMs: number) {
@@ -125,6 +147,62 @@ export function DashboardView({ search }: { search: DashboardSearch }) {
     });
   }
 
+  const renderWidget = (widget: WidgetModel) => (
+    <Widget
+      widget={widget}
+      context={context}
+      onBucket={
+        widget.query?.source === "scores" ? undefined : (target) => openBucket(widget, target)
+      }
+      onZoom={widget.query?.source === "scores" ? undefined : zoomTo}
+      onModel={openModel}
+    />
+  );
+
+  let content: ReactNode;
+  if (filterError) {
+    content = (
+      <div className="mx-auto flex max-w-md flex-col gap-2 px-4 py-16">
+        <h2 className="text-body font-medium">{filterError.title}</h2>
+        <p className="text-destructive text-body">{filterMessage(filterError)}</p>
+      </div>
+    );
+  } else if (dashboardId === undefined || dashboard.data) {
+    content = (
+      <DashboardBody
+        dashboard={dashboard.data}
+        active={active}
+        context={context}
+        renderWidget={renderWidget}
+      />
+    );
+  } else if (problemOf(dashboard.error)?.status === 404) {
+    content = (
+      <div className="mx-auto flex max-w-md flex-col gap-2 px-4 py-16">
+        <h2 className="text-body font-medium">Dashboard not found</h2>
+        <p className="text-muted-foreground text-body">
+          It may have been deleted. Open the Overview instead.
+        </p>
+        <Link
+          to="/$org/$project/dashboard"
+          params={{ org, project }}
+          search={(prev) => prev}
+          className="text-primary text-body underline-offset-4 hover:underline"
+        >
+          Go to the Overview
+        </Link>
+      </div>
+    );
+  } else if (dashboard.error) {
+    content = (
+      <p role="alert" className="text-destructive text-body">
+        {problemMessage(dashboard.error, "Could not load the dashboard.")}
+      </p>
+    );
+  } else {
+    content = <Skeleton className="h-64" />;
+  }
+
   return (
     <div className="flex h-full min-h-0 flex-1 flex-col">
       <TooltipProvider>
@@ -145,21 +223,9 @@ export function DashboardView({ search }: { search: DashboardSearch }) {
           }}
           updatedAt={filterError ? undefined : ranking.updatedAt}
           evalOn={search.eval === 1}
-          onEval={(on) => {
-            void navigate({
-              to: "/$org/$project/dashboard",
-              params: { org, project },
-              search: (prev) => withFlag(prev, "eval", on),
-            });
-          }}
+          onEval={(on) => goDashboard((prev) => withFlag(prev, "eval", on))}
           expOn={search.exp === 1}
-          onExp={(on) => {
-            void navigate({
-              to: "/$org/$project/dashboard",
-              params: { org, project },
-              search: (prev) => withFlag(prev, "exp", on),
-            });
-          }}
+          onExp={(on) => goDashboard((prev) => withFlag(prev, "exp", on))}
           filter={
             <div className="flex min-w-0 items-center gap-2">
               <div className="min-w-0 flex-1">
@@ -173,53 +239,17 @@ export function DashboardView({ search }: { search: DashboardSearch }) {
                     includeEval: search.eval === 1,
                     includeExperiments: search.exp === 1,
                   }}
-                  onApply={(text) => {
-                    void navigate({
-                      to: "/$org/$project/dashboard",
-                      params: { org, project },
-                      search: (prev) => withFilter(prev, text),
-                    });
-                  }}
+                  onApply={(text) => goDashboard((prev) => withFilter(prev, text))}
                 />
               </div>
               <GroupBy
                 value={search.group}
-                onChange={(group) => {
-                  void navigate({
-                    to: "/$org/$project/dashboard",
-                    params: { org, project },
-                    search: (prev) => withGroup(prev, group),
-                  });
-                }}
+                onChange={(group) => goDashboard((prev) => withGroup(prev, group))}
               />
             </div>
           }
         />
-        <div className="min-h-0 flex-1 overflow-auto p-3">
-          {filterError ? (
-            <div className="mx-auto flex max-w-md flex-col gap-2 px-4 py-16">
-              <h2 className="text-body font-medium">{filterError.title}</h2>
-              <p className="text-destructive text-body">{filterMessage(filterError)}</p>
-            </div>
-          ) : (
-            <WidgetGrid
-              widgets={OVERVIEW.widgets}
-              render={(widget) => (
-                <Widget
-                  widget={widget}
-                  context={context}
-                  onBucket={
-                    widget.query?.source === "scores"
-                      ? undefined
-                      : (target) => openBucket(widget, target)
-                  }
-                  onZoom={widget.query?.source === "scores" ? undefined : zoomTo}
-                  onModel={openModel}
-                />
-              )}
-            />
-          )}
-        </div>
+        <div className="min-h-0 flex-1 overflow-auto p-3">{content}</div>
       </TooltipProvider>
     </div>
   );

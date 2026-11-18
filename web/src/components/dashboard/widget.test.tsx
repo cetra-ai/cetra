@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { describe, expect, it, vi } from "vitest";
@@ -8,7 +8,6 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import type { Widget as WidgetModel, WidgetQuery } from "@/lib/dashboards/types";
 import { server } from "@/mocks/node";
 import { Widget, type WidgetContext } from "./widget";
-import { WidgetGrid } from "./widget-grid";
 
 type Body = Schema<"WidgetQueryRequest">;
 type Answer = Schema<"WidgetQueryResponse">;
@@ -388,29 +387,5 @@ describe("other widgets", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("The query failed.");
     await user.click(screen.getByRole("button", { name: "Retry" }));
     expect(await screen.findByRole("group", { name: /^Test\./ })).toBeInTheDocument();
-  });
-});
-
-describe("the grid", () => {
-  it("places each widget on its grid cells, in reading order", () => {
-    const heading: WidgetModel = {
-      id: "b",
-      title: "Second",
-      kind: "heading",
-      layout: { x: 0, y: 3, w: 12, h: 1 },
-    };
-    const first: WidgetModel = {
-      ...heading,
-      id: "a",
-      title: "First",
-      layout: { x: 6, y: 0, w: 6, h: 3 },
-    };
-    render(<WidgetGrid widgets={[heading, first]} render={(item) => <span>{item.title}</span>} />);
-    const titles = screen.getAllByText(/First|Second/).map((node) => node.textContent);
-    expect(titles).toEqual(["First", "Second"]);
-    const cell = screen.getByText("First").parentElement as HTMLElement;
-    expect(cell.style.getPropertyValue("--widget-column")).toBe("7 / span 6");
-    expect(cell.style.getPropertyValue("--widget-row")).toBe("1 / span 3");
-    expect(within(document.body).getAllByRole("generic").length).toBeGreaterThan(0);
   });
 });

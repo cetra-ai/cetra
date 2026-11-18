@@ -110,20 +110,29 @@ function RememberOpenItem() {
 
 /**
  * Keeps the dashboard mounted once it has been opened: hidden while another project page is
- * shown, visible again (with its charts already drawn) when the user comes back.
+ * shown, visible again (with its charts already drawn) when the user comes back. The Overview
+ * and a custom dashboard share this view; switching dashboards remounts it.
  */
 function KeptDashboard() {
-  const match = useMatch({ from: "/$org/$project/dashboard/", shouldThrow: false });
-  const kept = useRef<DashboardSearch | undefined>(undefined);
+  const overview = useMatch({ from: "/$org/$project/dashboard/", shouldThrow: false });
+  const custom = useMatch({ from: "/$org/$project/dashboard/$dashboardId", shouldThrow: false });
+  const match = overview ?? custom;
+  const kept = useRef<{ search: DashboardSearch; dashboardId?: string } | undefined>(undefined);
   if (match) {
-    kept.current = match.search;
+    kept.current = { search: match.search, dashboardId: custom?.params.dashboardId };
   }
   if (!kept.current) {
     return null;
   }
+  const { search, dashboardId } = kept.current;
   return (
     <Activity mode={match ? "visible" : "hidden"}>
-      <DashboardView search={kept.current} />
+      <DashboardView
+        key={dashboardId ?? "overview"}
+        search={search}
+        dashboardId={dashboardId}
+        active={match !== undefined}
+      />
     </Activity>
   );
 }
