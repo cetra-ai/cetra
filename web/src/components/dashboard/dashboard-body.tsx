@@ -379,6 +379,26 @@ function DashboardGrid({
       <div className="flex flex-wrap items-center gap-2 pb-3">
         <DashboardSwitcher dashboard={custom} />
         <div className="ml-auto flex flex-wrap items-center gap-2">
+          {/* In the header row, so it never moves the grid when it shows or hides. */}
+          {!editing && (autosave.saving || autosave.undo || notice) ? (
+            <div
+              role="status"
+              className="flex items-center gap-2 text-caption text-muted-foreground"
+            >
+              {autosave.saving ? (
+                <span>Saving layout…</span>
+              ) : autosave.undo ? (
+                <>
+                  <span>Layout saved.</span>
+                  <Button type="button" variant="link" size="sm" onClick={autosave.undo.run}>
+                    Undo
+                  </Button>
+                </>
+              ) : (
+                <span>{notice}</span>
+              )}
+            </div>
+          ) : null}
           {editing ? (
             <>
               <Button
@@ -433,26 +453,6 @@ function DashboardGrid({
         <p role="status" className="pb-3 text-caption text-muted-foreground">
           These dashboards are stored in this browser only.
         </p>
-      ) : null}
-
-      {!editing && (autosave.saving || autosave.undo || notice) ? (
-        <div
-          role="status"
-          className="flex flex-wrap items-center gap-2 pb-3 text-caption text-muted-foreground"
-        >
-          {autosave.saving ? (
-            <span>Saving layout…</span>
-          ) : autosave.undo ? (
-            <>
-              <span>Layout saved.</span>
-              <Button type="button" variant="link" size="sm" onClick={autosave.undo.run}>
-                Undo
-              </Button>
-            </>
-          ) : (
-            <span>{notice}</span>
-          )}
-        </div>
       ) : null}
 
       {editing && (topIssues.length > 0 || session.message) ? (

@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { cn } from "cn";
-import type { ReactNode } from "react";
+import { memo, type ReactNode, useCallback, useLayoutEffect, useRef } from "react";
 import { widgetQuery } from "@/api/dashboards";
 import { problemMessage } from "@/api/problem";
 import type { Schema } from "@/api/types";
@@ -49,20 +49,7 @@ export type BucketTarget = { from: string; to: string; clause?: string };
 /** The class of a widget's title bar: the drag handle of the grid in edit mode. */
 export const DRAG_HANDLE = "widget-drag-handle";
 
-/**
- * One widget of a dashboard: a card with a time chart, a horizontal bar chart, a number, or a
- * table, or a heading. A chart fetches its answer and shows a skeleton while it loads, the error
- * with a retry when the query fails, and the reason when there is no data. `actions` sits in the
- * title bar, at its end.
- */
-export function Widget({
-  widget,
-  context,
-  actions,
-  onBucket,
-  onZoom,
-  onModel,
-}: {
+type WidgetProps = {
   widget: WidgetModel;
   context: WidgetContext;
   /** Controls of the title bar, such as a widget's menu. */
@@ -71,7 +58,75 @@ export function Widget({
   onBucket?: (target: BucketTarget) => void;
   onZoom?: (fromMs: number, toMs: number) => void;
   onModel?: (model: string) => void;
-}) {
+};
+
+/**
+ * One widget, redrawn only when what it shows changes. A dashboard re-renders on every layout
+ * change (a drop, a save, its answer), and its callbacks are new each time; the widget keeps the
+ * latest ones in a ref, so a move or a save does not redraw every chart.
+ */
+export function Widget({ onBucket, onZoom, onModel, ...props }: WidgetProps) {
+  const latest = useRef({ onBucket, onZoom, onModel });
+  useLayoutEffect(() => {
+    latest.current = { onBucket, onZoom, onModel };
+  });
+  const bucket = useCallback((target: BucketTarget) => latest.current.onBucket?.(target), []);
+  const zoom = useCallback(
+    (fromMs: number, toMs: number) => latest.current.onZoom?.(fromMs, toMs),
+    [],
+  );
+  const model = useCallback((name: string) => latest.current.onModel?.(name), []);
+  return (
+    <MemoWidgetCard
+      {...props}
+      onBucket={onBucket ? bucket : undefined}
+      onZoom={onZoom ? zoom : undefined}
+      onModel={onModel ? model : undefined}
+    />
+  );
+}
+
+/** Whether two widgets show the same thing: everything but their place on the grid. */
+function sameContent(left: WidgetModel, right: WidgetModel): boolean {
+  if (left === right) return true;
+  const { layout: _left, ...leftRest } = left;
+  const { layout: _right, ...rightRest } = right;
+  return JSON.stringify(leftRest) === JSON.stringify(rightRest);
+}
+
+function sameContext(left: WidgetContext, right: WidgetContext): boolean {
+  return (
+    left.org === right.org &&
+    left.project === right.project &&
+    left.from === right.from &&
+    left.to === right.to &&
+    left.filter === right.filter &&
+    JSON.stringify(left.groupBy) === JSON.stringify(right.groupBy) &&
+    left.includeEval === right.includeEval &&
+    left.includeExperiments === right.includeExperiments &&
+    (left.ranking === right.ranking ||
+      JSON.stringify(left.ranking) === JSON.stringify(right.ranking))
+  );
+}
+
+const MemoWidgetCard = memo(
+  WidgetCard,
+  (prev, next) =>
+    sameContent(prev.widget, next.widget) &&
+    sameContext(prev.context, next.context) &&
+    prev.actions === next.actions &&
+    prev.onBucket === next.onBucket &&
+    prev.onZoom === next.onZoom &&
+    prev.onModel === next.onModel,
+);
+
+/**
+ * One widget of a dashboard: a card with a time chart, a horizontal bar chart, a number, or a
+ * table, or a heading. A chart fetches its answer and shows a skeleton while it loads, the error
+ * with a retry when the query fails, and the reason when there is no data. `actions` sits in the
+ * title bar, at its end.
+ */
+function WidgetCard({ widget, context, actions, onBucket, onZoom, onModel }: WidgetProps) {
   if (widget.kind === "heading") {
     return (
       <TitleBar actions={actions}>

@@ -1,8 +1,8 @@
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import type { GridLayoutProps } from "react-grid-layout";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Widget as WidgetModel } from "@/lib/dashboards/types";
-import { compactWidgets, layoutItems, nudgeWidgets, WidgetGrid } from "./widget-grid";
+import { CELL_BODY, compactWidgets, layoutItems, nudgeWidgets, WidgetGrid } from "./widget-grid";
 
 /** The props the grid last rendered react-grid-layout with; the grid itself is the real one. */
 const grid = vi.hoisted(() => ({ last: undefined as GridLayoutProps | undefined }));
@@ -157,6 +157,25 @@ describe("charts below the fold", () => {
   });
 });
 
+describe("the grid's drag", () => {
+  it("lets a dragged widget follow the pointer past the grid's edges", () => {
+    render(<WidgetGrid widgets={widgets} editing renderCell={(item) => <span>{item.id}</span>} />);
+    expect(grid.last?.dragConfig).toMatchObject({ enabled: true, bounded: false });
+  });
+
+  it("renders new cells on every drag and resize move, so the item follows the pointer", () => {
+    render(<WidgetGrid widgets={widgets} editing renderCell={(item) => <span>{item.id}</span>} />);
+    const layout = layoutItems(widgets);
+    const tall = layout.find((item) => item.i === "tall") ?? null;
+    const before = grid.last?.children;
+    act(() => grid.last?.onDrag?.(layout, tall, tall, tall, new Event("mousemove"), null));
+    const afterDrag = grid.last?.children;
+    expect(afterDrag).not.toBe(before);
+    act(() => grid.last?.onResize?.(layout, tall, tall, tall, new Event("mousemove"), null));
+    expect(grid.last?.children).not.toBe(afterDrag);
+  });
+});
+
 describe("the grid's finished moves", () => {
   it("forwards onDragStop and onResizeStop to react-grid-layout", () => {
     const onDragStop = vi.fn();
@@ -171,7 +190,34 @@ describe("the grid's finished moves", () => {
       />,
     );
     expect(grid.last?.onDragStop).toBe(onDragStop);
-    expect(grid.last?.onResizeStop).toBe(onResizeStop);
+    const layout = layoutItems(widgets);
+    act(() => grid.last?.onResizeStop?.(layout, null, null, null, new Event("mouseup"), null));
+    expect(onResizeStop).toHaveBeenCalledWith(layout);
+  });
+
+  it("keeps a resized cell's content at its starting size until the resize ends", () => {
+    const { container } = render(
+      <WidgetGrid widgets={widgets} editing renderCell={(item) => <span>{item.id}</span>} />,
+    );
+    const body = (id: string) => screen.getByText(id).closest<HTMLElement>(`.${CELL_BODY}`);
+    expect(body("tall")?.style.width).toBe("100%");
+    const element = cells(container)[1];
+    if (!element) throw new Error("the tall cell is missing");
+    Object.defineProperty(element, "offsetWidth", { configurable: true, value: 480 });
+    Object.defineProperty(element, "offsetHeight", { configurable: true, value: 144 });
+    const layout = layoutItems(widgets);
+    const tall = layout.find((item) => item.i === "tall") ?? null;
+    const start = new Event("mousedown");
+
+    act(() => grid.last?.onResizeStart?.(layout, tall, tall, null, start, element));
+    expect(body("tall")?.style.width).toBe("480px");
+    expect(body("tall")?.style.height).toBe("144px");
+    // The others follow their cells.
+    expect(body("side")?.style.width).toBe("100%");
+
+    act(() => grid.last?.onResizeStop?.(layout, tall, tall, null, new Event("mouseup"), element));
+    expect(body("tall")?.style.width).toBe("100%");
+    expect(body("tall")?.style.height).toBe("100%");
   });
 });
 
