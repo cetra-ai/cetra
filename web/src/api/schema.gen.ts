@@ -6538,6 +6538,13 @@ export interface components {
             genai_log_events?: number;
             /** @description Project id. */
             id: components["schemas"]["ProjectId"];
+            /**
+             * Format: date-time
+             * @description When the server last committed spans sent over OTLP to this project (D-C-20). Kept in
+             *     memory: absent until the first batch after the server starts. Present only when one
+             *     project is read.
+             */
+            last_ingest_at?: string;
             /** @description Display name. */
             name: string;
             /** @description Owning org. */

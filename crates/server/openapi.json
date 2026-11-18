@@ -26323,6 +26323,11 @@
             "$ref": "#/components/schemas/ProjectId",
             "description": "Project id."
           },
+          "last_ingest_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the server last committed spans sent over OTLP to this project (D-C-20). Kept in\nmemory: absent until the first batch after the server starts. Present only when one\nproject is read."
+          },
           "name": {
             "type": "string",
             "description": "Display name."

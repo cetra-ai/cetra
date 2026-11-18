@@ -479,6 +479,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         providers,
         oauth_key,
         ingest,
+        last_ingest: crate::ingest::last_ingest::LastIngest::default(),
         live: crate::live::LiveBus::new(crate::live::StreamTiming::DEFAULT),
         widget_cache: crate::routes::dashboards::WidgetCache::default(),
         usage: crate::usage::Usage::default(),

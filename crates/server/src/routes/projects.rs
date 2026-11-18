@@ -171,6 +171,7 @@ async fn get_project(
     let mut project = project_json(&access.project, access.role);
     project.genai_log_events =
         Some(genai_log_events(state.meta.reader(), access.project.id).await?);
+    project.last_ingest_at = state.last_ingest.get(access.project.id);
     Ok(error::Json(project))
 }
 
@@ -250,6 +251,7 @@ fn project_json(project: &ProjectRow, role: Option<Role>) -> Project {
         retention_days: project.retention_days,
         trace_completion_timeout_s: project.completion_timeout_s(),
         genai_log_events: None,
+        last_ingest_at: None,
         role: role.map(api_role),
         created_at: project.created_at,
     }
@@ -1145,5 +1147,70 @@ mod tests {
         let changed = patch_with(Some(&[]), Some(7), body).await;
         assert_eq!(changed.status, 403);
         assert_eq!(changed.problem().code, ProblemCode::PlanRequired);
+    }
+
+    #[tokio::test]
+    async fn get_project_has_no_last_ingest_at_before_spans_arrive() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let created = support_bot(&app, &ada).await;
+        let path = format!("/api/v1/projects/{}", created.id);
+        let response = app
+            .request(Method::GET, &path)
+            .header(header::COOKIE.as_str(), &ada)
+            .send()
+            .await;
+        let body: serde_json::Value = response.json();
+        assert!(body.get("last_ingest_at").is_none());
+    }
+
+    #[tokio::test]
+    async fn get_project_shows_last_ingest_at_after_a_batch() {
+        const T: i64 = 1_767_225_600_123_456_789; // 2026-01-01T00:00:00.123456789Z
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let created = support_bot(&app, &ada).await;
+        app.state.last_ingest.record(created.id, T);
+        let path = format!("/api/v1/projects/{}", created.id);
+        let response = app
+            .request(Method::GET, &path)
+            .header(header::COOKIE.as_str(), &ada)
+            .send()
+            .await;
+        let body: serde_json::Value = response.json();
+        assert_eq!(body["last_ingest_at"], "2026-01-01T00:00:00.123456789Z");
+        let fetched: Project = response.json();
+        assert_eq!(fetched.last_ingest_at, Some(T));
+    }
+
+    #[tokio::test]
+    async fn lists_never_show_last_ingest_at() {
+        const T: i64 = 1_767_225_600_123_456_789;
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let created = support_bot(&app, &ada).await;
+        app.state.last_ingest.record(created.id, T);
+        let response = app
+            .request(Method::GET, "/api/v1/orgs/acme/projects")
+            .header(header::COOKIE.as_str(), &ada)
+            .send()
+            .await;
+        assert_eq!(response.status, 200);
+        let body: serde_json::Value = response.json();
+        assert_eq!(body["data"].as_array().map(Vec::len), Some(1));
+        assert!(body["data"][0].get("last_ingest_at").is_none());
+    }
+
+    #[tokio::test]
+    async fn internal_commits_do_not_count() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let created = support_bot(&app, &ada).await;
+        let row = projects::project_by_id(app.state.meta.reader(), created.id)
+            .await
+            .unwrap()
+            .expect("the project exists");
+        app.commit_spans(&row, vec![dataset_span(0)]).await;
+        assert_eq!(app.state.last_ingest.get(created.id), None);
     }
 }
