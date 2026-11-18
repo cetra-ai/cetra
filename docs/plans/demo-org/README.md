@@ -1,5 +1,7 @@
 # Demo org
 
+Status: DO1–DO6 implemented on 2026-11-18 on three branches: `claude/demo-org-impl` (DO1–DO3), `claude/demo-web` (DO4, cut from DO2), `claude/demo-gen` (DO5–DO6), not merged. Reviewed (Sonnet): no blocker; the minors are fixed. Not verified: the demo image (no Docker on the build machine), a run against a real cell, the UI in a browser. The control-plane requests below are pending.
+
 Cross-cutting (server, web, tools). Plan for 7 phases, DO1–DO7, each one commit, done in order. Do one phase, nothing more. Decision **D187**; spec 08 § Demo org, spec 09 (`GET /api/auth/me`, `GET /api/v1/orgs`, 429), spec 11 § Navigation → Demo org, spec 12 § Configuration (`demo.*`) and § Demo org.
 
 ## Goal
@@ -126,7 +128,7 @@ Like Langfuse's demo project: every signed-in user of a cloud cell finds a **"ce
 
 **Steps**
 1. `index.tsx`: `const org = me.orgs.find((o) => !o.demo) ?? me.orgs[0];`.
-2. `demo.tsx` (`/demo`; not a public path, so the existing `requireSession` sends a signed-out visitor to `/login?redirect=/demo`): find the org with `demo === true` in `me.orgs`; load `projectListOptions(org.slug)` from `web/src/api/queries.ts` with `ensureInfiniteQueryData` and redirect to `pages[0].data[0]` (the server sorts projects by name, then id) as `/$org/$project`; no project → `/$org`; no demo org → `/`.
+2. `demo.tsx` (`/demo`; not a public path, so the existing `requireSession` sends a signed-out visitor to `/login?redirect=/demo`): find the org with `demo === true` in `me.orgs`; load `projectListOptions(org.slug)` from `web/src/api/queries.ts` with `ensureInfiniteQueryData` and redirect to `pages[0].data[0]` (the server sorts projects by name, then id) as `/$org/$project/traces` (the project root's own target; a redirect to the layout route stayed on `/demo`); no project → `/$org`; no demo org → `/`.
 3. `org-switcher.tsx`: render the demo org last, after a separator, with `<Badge variant="secondary">Demo</Badge>` (`web/src/components/ui/badge.tsx`).
 4. `demo-banner.tsx`, rendered in `OrgLayout` next to `UsageBanner`: in an org whose membership has `demo: true` and `role: "viewer"`, a thin bar: "You're exploring the cetra demo, read-only." and a link "Send your own traces": to `/` when the user has another org; otherwise to `org_create_url` from `GET /api/auth/config` when set, else `/setup/workspace` when `org_create_allowed`, else no link. Nothing for other orgs or for real members.
 
@@ -164,7 +166,7 @@ Like Langfuse's demo project: every signed-in user of a cloud cell finds a **"ce
 
 **Steps**
 1. `--judge-addr` (`CETRA_DEMO_JUDGE_ADDR`, unset = off) and `--judge-key` (`CETRA_DEMO_JUDGE_KEY`, required when the address is set): an `axum` server with `POST /v1/chat/completions` that requires `Authorization: Bearer <judge-key>` (else 401), reads `response_format.json_schema.schema` and answers a Chat Completions body whose message content is a JSON object matching that schema: `explanation` (one of 20 canned sentences) when present, `value` a number in [0, 1] drawn from a beta-like spread centred near 0.8 or a boolean (80% `true`), or `label` the first enum value 70% of the time and the others otherwise. `usage` with plausible token counts. A request without that schema is `400`. Never log the request body.
-2. `Dockerfile`: multi-stage, builds `cetra-demo` from the workspace and copies `fixtures/otlp` into the image; runs as a non-root user. `just demo-image [tag]` builds it.
+2. `just demo-image [tag]` builds `cetra-demo` for `x86_64-unknown-linux-musl` on the host (as `tools/packaging/dist.sh` does), stages it with `fixtures/otlp` in `target/demo-image/`, and builds `tools/demo/Dockerfile`, which only copies them onto the distroless static nonroot base pinned by the same digest as `deploy/docker/Dockerfile` (`USER 65532:65532`). No Rust builder image: the repo pins none.
 3. `README.md`, the runbook of spec 12 § Demo org: create the org through the control plane with a team account; ask the control plane operator for its override (no data-access window, no units cap, an ingest rate above the generator's); set `demo.org`; in the org create the project `demo`, an `sk` key (`ingest, read`), an LLM connection (OpenAI-compatible, base URL `https://<judge-host>/v1`, the judge key, `structured_output = native`); the evaluators (two built-in judge templates and one `check`), two online rules (sampling 20%), score definitions, one alert rule, and two dashboards (names and settings listed in the README); the compose service and the reverse-proxy route for the judge host. Use team email addresses only.
 
 **Tests**: the judge answers each schema kind (numeric, boolean, categorical, with and without `explanation`), asserted against the requested schema's `type`, `required` and `enum` (`cetra-eval`'s parser is `pub(crate)`; do not depend on it); 401 without the key; 400 without a schema.
