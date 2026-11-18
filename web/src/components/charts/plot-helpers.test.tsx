@@ -13,11 +13,13 @@ function rowsEvery(stepMinutes: number, count: number): ChartRow[] {
 }
 
 describe("tickBudget", () => {
-  it("allows one X-axis label per 90 px of plot width, and at least two", () => {
+  it("allows one X-axis label per 90 px of plot width, and at least one", () => {
     expect(tickBudget(640)).toBe(7);
-    expect(tickBudget(216)).toBe(2);
-    expect(tickBudget(90)).toBe(2);
-    expect(tickBudget(10)).toBe(2);
+    expect(tickBudget(180)).toBe(2);
+    expect(tickBudget(105)).toBe(1);
+    expect(tickBudget(90)).toBe(1);
+    expect(tickBudget(10)).toBe(1);
+    expect(tickBudget(0)).toBe(1);
   });
 });
 
@@ -41,7 +43,20 @@ describe("xAxisTicks", () => {
     }
   });
 
+  it("returns the one row nearest the middle when the budget is one", () => {
+    // 144 rows: the middle is between rows 71 and 72, and the round-up one is row 72.
+    const rows = rowsEvery(10, 144);
+    expect(xAxisTicks(rows, true, 1)).toEqual([rows[72]?.time]);
+    // Five rows: the middle row is row 2.
+    const five = rowsEvery(10, 5);
+    expect(xAxisTicks(five, true, 1)).toEqual([five[2]?.time]);
+    // A single row is its own middle.
+    const one = rowsEvery(10, 1);
+    expect(xAxisTicks(one, true, 1)).toEqual([one[0]?.time]);
+  });
+
   it("returns no ticks for no rows", () => {
     expect(xAxisTicks([], true, 4)).toEqual([]);
+    expect(xAxisTicks([], true, 1)).toEqual([]);
   });
 });

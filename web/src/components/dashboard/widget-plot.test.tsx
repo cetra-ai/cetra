@@ -27,7 +27,7 @@ class FixedWidthObserver {
 }
 
 describe("WidgetPlot", () => {
-  it("labels a 160 px mini chart with at most two X-axis ticks", async () => {
+  it("labels a 160 px mini chart with exactly one X-axis tick", async () => {
     vi.stubGlobal(
       "ResizeObserver",
       class extends FixedWidthObserver {
@@ -55,9 +55,8 @@ describe("WidgetPlot", () => {
         />,
       );
       const selector = ".recharts-xAxis .recharts-cartesian-axis-tick";
-      await waitFor(() => expect(container.querySelectorAll(selector)).not.toHaveLength(0));
-      // 160 px less the 84 px of the value axis and its margin: 76 px, so two labels at most.
-      expect(container.querySelectorAll(selector).length).toBeLessThanOrEqual(2);
+      // 160 px less the 84 px of the value axis and its margin: 76 px, so one label.
+      await waitFor(() => expect(container.querySelectorAll(selector)).toHaveLength(1));
     } finally {
       vi.unstubAllGlobals();
     }
