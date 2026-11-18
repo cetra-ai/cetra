@@ -42,7 +42,7 @@ gh secret set S3_CACHE_SECRET_ACCESS_KEY --repo cetra-ai/cetra --env s3-cache
 `CI_CACHE_ALLOWED` checks GitHub's event metadata before the Rust jobs receive
 the S3 credentials. The composite action skips kache when caching is disabled
 or credentials are missing. Whenever caching is enabled, kache saves its
-results. Jobs with `cache: "false"` (rust-deny) do not install kache or access
+results. Jobs with `cache: "false"` (rust-policy) do not install kache or access
 S3.
 
 Kache 2.0 enforces a separate CI write policy: only protected-branch pushes may
