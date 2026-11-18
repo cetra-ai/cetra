@@ -24,8 +24,8 @@ use crate::hot::Layer;
 use crate::io::ScanKind;
 use crate::narrow::{BlockEntry, Dictionary, decode_chunk_view};
 use crate::payload::{
-    FrameBodies, FrameEntry, PayloadHeader, build_values, decode_fetched_frame, frame_segments,
-    ids_of, payload_contains, read_header, refs_segments,
+    FrameBodies, FrameEntry, PayloadHeader, build_value_pieces, frame_segments, ids_of,
+    payload_contains, read_header, refs_segments,
 };
 use crate::predicate::{
     Bound, MaskSource, Predicate, bind, bound_columns, chunk_may_match, evaluate, layout_of,
@@ -472,12 +472,11 @@ fn build_batches(
     selection: &[u32],
     infos: &HashMap<usize, ColumnInfo>,
     decoded: &Decoded,
-    payloads: &HashMap<usize, ArrayRef>,
+    payloads: &HashMap<usize, Vec<ArrayRef>>,
     output: &SchemaRef,
 ) -> Result<Vec<RecordBatch>> {
     let mut batches = Vec::new();
     for (index, batch_rows) in selection.chunks(BATCH_ROWS).enumerate() {
-        let start = index * BATCH_ROWS;
         let mut columns: Vec<ArrayRef> = Vec::with_capacity(projection.len());
         for &column in projection {
             let layer = file.directory().get(column).map(|record| record.layer);
@@ -486,10 +485,15 @@ fn build_batches(
                     take_rows(decoded, info_of(infos, column)?, column, batch_rows)?
                 }
                 Some(Layer::Payload) => {
-                    let full = payloads.get(&column).ok_or_else(|| StrataError::Schema {
-                        reason: format!("internal: no values of column {column}"),
-                    })?;
-                    full.slice(start, batch_rows.len())
+                    // The values come in pieces of `BATCH_ROWS` rows: one per batch.
+                    let piece = payloads
+                        .get(&column)
+                        .and_then(|pieces| pieces.get(index))
+                        .filter(|piece| piece.len() == batch_rows.len())
+                        .ok_or_else(|| StrataError::Schema {
+                            reason: format!("internal: no values of column {column}"),
+                        })?;
+                    Arc::clone(piece)
                 }
                 Some(Layer::MapParent) => {
                     let layout = layout_of(file, column)?;
@@ -730,7 +734,9 @@ impl StrataFile {
         self.decode_wave(&infos, &wanted, req.kind, &mut decoded)
             .await?;
         let payload = payload_projection(self, &req.projection);
-        let payloads = self.payload_values(&payload, &selection, req.kind).await?;
+        let payloads = self
+            .payload_values(&payload, &selection, req.kind, req.views)
+            .await?;
         build_batches(
             self,
             &req.projection,
@@ -926,7 +932,7 @@ impl StrataFile {
         }
 
         // W2 (warm) or W3 (cold): the frames of the payload columns.
-        let payloads = self.finish_payloads(&mut reads, kind).await?;
+        let payloads = self.finish_payloads(&mut reads, kind, views).await?;
         build_batches(
             self, projection, &exact, &infos, &decoded, &payloads, &output,
         )
@@ -1186,29 +1192,31 @@ impl StrataFile {
         Ok((segments, entries))
     }
 
-    /// Decodes the fetched frames (`bodies`, in the order of `entries`), and rebuilds the values
-    /// of each column from them.
+    /// Rebuilds the values of each column of `reads` from the fetched frames (`stored`, in the
+    /// order of `entries`), in pieces of `BATCH_ROWS` rows: one per output batch. The frames
+    /// are decoded as the pieces need them. With `views`, Utf8 columns come out as `Utf8View`.
     fn build_payloads(
         &self,
         reads: &[PayloadRead],
-        entries: &[FrameEntry],
-        bodies: Vec<Vec<u8>>,
-    ) -> Result<HashMap<usize, ArrayRef>> {
-        if entries.len() != bodies.len() {
-            return Err(StrataError::Corrupt {
-                what: "payload frame",
-                offset: 0,
-            });
-        }
-        let mut frames: FrameBodies = HashMap::with_capacity(entries.len());
-        for (entry, raw) in entries.iter().zip(bodies) {
-            frames.insert(entry.offset, decode_fetched_frame(entry, raw)?);
-        }
+        entries: Vec<FrameEntry>,
+        stored: Vec<Vec<u8>>,
+        views: bool,
+    ) -> Result<HashMap<usize, Vec<ArrayRef>>> {
+        let dicts = entries.iter().map(|e| self.frame_dict(e.offset)).collect();
+        let frames = FrameBodies::stored(entries, stored, dicts)?;
         let mut out = HashMap::with_capacity(reads.len());
         for read in reads {
             let field = self.field_of(read.column)?;
-            let array = build_values(&read.header, &frames, &read.ids, &field, read.at)?;
-            out.insert(read.column, array);
+            let pieces = build_value_pieces(
+                &read.header,
+                &frames,
+                &read.ids,
+                &field,
+                read.at,
+                BATCH_ROWS,
+                views,
+            )?;
+            out.insert(read.column, pieces);
         }
         Ok(out)
     }
@@ -1218,10 +1226,11 @@ impl StrataFile {
         &self,
         reads: &mut [PayloadRead],
         kind: ScanKind,
-    ) -> Result<HashMap<usize, ArrayRef>> {
+        views: bool,
+    ) -> Result<HashMap<usize, Vec<ArrayRef>>> {
         let (segments, entries) = Self::plan_frames(reads)?;
-        let bodies = self.fetch(&segments, kind).await?;
-        self.build_payloads(reads, &entries, bodies)
+        let stored = self.fetch_stored(&segments, kind).await?;
+        self.build_payloads(reads, entries, stored, views)
     }
 
     /// The values of the payload columns `columns` over `rows` (sorted, unique): the refs pages
@@ -1231,11 +1240,12 @@ impl StrataFile {
         columns: &[usize],
         rows: &[u32],
         kind: ScanKind,
-    ) -> Result<HashMap<usize, ArrayRef>> {
+        views: bool,
+    ) -> Result<HashMap<usize, Vec<ArrayRef>>> {
         let (mut reads, segments) = self.plan_refs(columns, rows).await?;
         let bodies = self.fetch(&segments, kind).await?;
         Self::take_ids(&mut reads, bodies, rows)?;
-        self.finish_payloads(&mut reads, kind).await
+        self.finish_payloads(&mut reads, kind, views).await
     }
 }
 

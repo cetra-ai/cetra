@@ -24,6 +24,27 @@ use crate::payload::{PayloadHeader, PayloadStore, decode_header};
 use crate::postings::ChunkPostings;
 use crate::segment::{Kind, SegmentRef, decode_segment, decode_segment_with};
 
+/// Fewest stored bytes in one wave for its segments to be decoded on several threads. A
+/// lookup's wave stays under it; a scan's frames go over it.
+const PARALLEL_DECODE_BYTES: usize = 4 << 20;
+
+/// Decodes `slices` with `f`, in order. Above `PARALLEL_DECODE_BYTES`, they are decoded on
+/// several threads, grouped by stored bytes.
+fn decode_all<T: Send>(
+    slices: &[(&[u8], &SegmentRef, Kind)],
+    f: &(impl Fn(&[u8], &SegmentRef, Kind) -> Result<T> + Sync),
+) -> Result<Vec<T>> {
+    let total: usize = slices.iter().map(|(slice, _, _)| slice.len()).sum();
+    if total < PARALLEL_DECODE_BYTES {
+        return slices.iter().map(|&(slice, r, k)| f(slice, r, k)).collect();
+    }
+    crate::parallel::map_in_order(
+        slices,
+        |(slice, _, _)| slice.len(),
+        |&(slice, r, k)| f(slice, r, k),
+    )
+}
+
 #[cfg(test)]
 #[path = "../tests/common/counting.rs"]
 mod counting;
@@ -486,7 +507,7 @@ impl StrataFile {
         self.fetch_with(segments, kind, |slice, r, k| {
             if k == Kind::PayloadFrame {
                 let dict = self.frame_dict(r.offset);
-                decode_segment_with(slice, r.offset, k, dict.as_deref().map(|d| &d.decoder))
+                decode_segment_with(slice, r.offset, k, dict.as_deref())
             } else {
                 decode_segment(slice, r.offset, k)
             }
@@ -494,13 +515,25 @@ impl StrataFile {
         .await
     }
 
-    /// The body of `fetch`, with the decoding step given by `f`. `f` gets the slice of the
-    /// whole segment, header included, and is called once per segment, in input order.
-    async fn fetch_with<T>(
+    /// Reads and slices `segments` as one wave, like [`Self::fetch`], but returns each segment
+    /// as stored, header included, for the caller to check and decode when it needs it.
+    pub(crate) async fn fetch_stored(
         &self,
         segments: &[(SegmentRef, Kind)],
         kind: ScanKind,
-        f: impl Fn(&[u8], &SegmentRef, Kind) -> Result<T>,
+    ) -> Result<Vec<Vec<u8>>> {
+        self.fetch_with(segments, kind, |slice, _, _| Ok(slice.to_vec()))
+            .await
+    }
+
+    /// The body of `fetch`, with the decoding step given by `f`. `f` gets the slice of the
+    /// whole segment, header included, and is called once per segment. The results are in
+    /// input order. A wave of more than `PARALLEL_DECODE_BYTES` is decoded on several threads.
+    async fn fetch_with<T: Send>(
+        &self,
+        segments: &[(SegmentRef, Kind)],
+        kind: ScanKind,
+        f: impl Fn(&[u8], &SegmentRef, Kind) -> Result<T> + Sync,
     ) -> Result<Vec<T>> {
         if segments.is_empty() {
             return Ok(Vec::new());
@@ -519,7 +552,7 @@ impl StrataFile {
             .try_collect()
             .await?;
 
-        let mut bodies = Vec::with_capacity(segments.len());
+        let mut slices = Vec::with_capacity(segments.len());
         for (((r, segment_kind), range), &m) in segments.iter().zip(&ranges).zip(&owner) {
             let corrupt = || StrataError::Corrupt {
                 what: "segment range",
@@ -540,10 +573,13 @@ impl StrataFile {
             let slice = part
                 .get(at..at.checked_add(len).ok_or_else(corrupt)?)
                 .ok_or_else(corrupt)?;
+            slices.push((slice, r, *segment_kind));
+        }
+        let bodies = decode_all(&slices, &f)?;
+        for (_, r, segment_kind) in &slices {
             if let Some(counter) = self.kind_bytes.get(*segment_kind as usize) {
                 counter.fetch_add(u64::from(r.len), Ordering::Relaxed);
             }
-            bodies.push(f(slice, r, *segment_kind)?);
         }
 
         let fetched_bytes: u64 = merged
@@ -793,7 +829,7 @@ impl StrataFile {
 
     /// The dictionary of the payload run whose frame starts at `offset`, if a cached store holds
     /// that frame and its run has one.
-    fn frame_dict(&self, offset: u64) -> Option<Arc<crate::payload::Dict>> {
+    pub(crate) fn frame_dict(&self, offset: u64) -> Option<Arc<crate::payload::Dict>> {
         let stores = self
             .payload_stores
             .lock()
@@ -1103,6 +1139,41 @@ mod tests {
     use object_store::memory::InMemory;
     use proptest::prelude::*;
     use xxhash_rust::xxh3::xxh3_128;
+
+    #[test]
+    fn decode_all_keeps_the_order_and_the_first_error() {
+        // 64 segments of 128 KiB: 8 MiB, over the parallel threshold.
+        let bodies: Vec<Vec<u8>> = (0..64u8).map(|k| vec![k; 128 << 10]).collect();
+        let refs: Vec<SegmentRef> = (0..64u64)
+            .map(|k| SegmentRef { offset: k, len: 0 })
+            .collect();
+        let slices: Vec<(&[u8], &SegmentRef, Kind)> = bodies
+            .iter()
+            .zip(&refs)
+            .map(|(b, r)| (b.as_slice(), r, Kind::PayloadFrame))
+            .collect();
+        let got = decode_all(&slices, &|slice: &[u8], r: &SegmentRef, _| {
+            Ok((r.offset, slice.first().copied()))
+        })
+        .unwrap();
+        let want: Vec<(u64, Option<u8>)> = (0..64u8).map(|k| (u64::from(k), Some(k))).collect();
+        assert_eq!(got, want);
+
+        let failed = decode_all(&slices, &|_: &[u8], r: &SegmentRef, _| {
+            if r.offset >= 40 {
+                Err(StrataError::Corrupt {
+                    what: "test",
+                    offset: r.offset,
+                })
+            } else {
+                Ok(())
+            }
+        });
+        assert!(matches!(
+            failed,
+            Err(StrataError::Corrupt { offset: 40, .. })
+        ));
+    }
 
     fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread()

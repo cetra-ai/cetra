@@ -37,6 +37,7 @@ mod hot;
 mod index;
 mod io;
 mod narrow;
+mod parallel;
 mod payload;
 mod postings;
 mod predicate;

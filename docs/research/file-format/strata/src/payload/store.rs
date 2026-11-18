@@ -47,12 +47,19 @@ pub(crate) struct FrameEntry {
 pub(crate) struct Dict {
     pub raw: Vec<u8>,
     pub decoder: DecoderDictionary<'static>,
+    /// Unique in the process: a thread keeps a decompressor loaded with the last dictionary
+    /// it used, keyed by this id.
+    pub id: u64,
 }
+
+/// The id of the next [`Dict`].
+static NEXT_DICT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl Dict {
     fn new(raw: Vec<u8>) -> Self {
         let decoder = DecoderDictionary::copy(&raw);
-        Self { raw, decoder }
+        let id = NEXT_DICT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self { raw, decoder, id }
     }
 }
 
@@ -729,10 +736,7 @@ mod tests {
         let mut out = Vec::new();
         for (f, e) in store.frames.iter().enumerate() {
             let seg = &file[e.offset as usize..(e.offset + u64::from(e.len)) as usize];
-            let dict = store.runs[store.run_of(f)]
-                .dict
-                .as_ref()
-                .map(|d| &d.decoder);
+            let dict = store.runs[store.run_of(f)].dict.as_deref();
             let raw = decode_segment_with(seg, e.offset, Kind::PayloadFrame, dict).unwrap();
             let (raw, ranges) = decode_fetched_frame(e, raw).unwrap();
             out.extend(ranges.into_iter().map(|r| raw[r].to_vec()));
@@ -788,6 +792,52 @@ mod tests {
             index.pages.len(),
             index.rows.div_ceil(index.rows_per_page) as usize
         );
+    }
+
+    #[test]
+    fn frames_of_two_dictionaries_decode_alternately_on_one_thread() {
+        // Two stores with dictionaries trained on different text, decoded frame by frame in
+        // turn: each frame must be decoded with its own dictionary, not the last one loaded.
+        let make = |tag: &str, seed: u64| -> Vec<Vec<u8>> {
+            (0..3_000)
+                .map(|i| {
+                    format!(
+                        "{{\"{tag}\":\"{}\",\"n\":{i}}}",
+                        String::from_utf8(noise(seed + i, 2_000)).unwrap()
+                    )
+                    .into_bytes()
+                })
+                .collect()
+        };
+        let (a, b) = (make("alpha", 1), make("beta", 99_999));
+        let (file_a, store_a, _) = written(&a);
+        let (file_b, store_b, _) = written(&b);
+        let (dict_a, dict_b) = (
+            store_a.runs[0].dict.as_deref().unwrap(),
+            store_b.runs[0].dict.as_deref().unwrap(),
+        );
+        assert_ne!(dict_a.id, dict_b.id);
+        let frame = |file: &[u8], store: &PayloadStore, f: usize, dict: &Dict| {
+            let e = &store.frames[f];
+            let seg = &file[e.offset as usize..(e.offset + u64::from(e.len)) as usize];
+            decode_segment_with(seg, e.offset, Kind::PayloadFrame, Some(dict)).unwrap()
+        };
+        let mut got_a = Vec::new();
+        let mut got_b = Vec::new();
+        for f in 0..store_a.frames.len().max(store_b.frames.len()) {
+            if f < store_a.frames.len() {
+                let raw = frame(&file_a, &store_a, f, dict_a);
+                let (raw, ranges) = decode_fetched_frame(&store_a.frames[f], raw).unwrap();
+                got_a.extend(ranges.into_iter().map(|r| raw[r].to_vec()));
+            }
+            if f < store_b.frames.len() {
+                let raw = frame(&file_b, &store_b, f, dict_b);
+                let (raw, ranges) = decode_fetched_frame(&store_b.frames[f], raw).unwrap();
+                got_b.extend(ranges.into_iter().map(|r| raw[r].to_vec()));
+            }
+        }
+        assert_eq!(got_a, a);
+        assert_eq!(got_b, b);
     }
 
     #[test]

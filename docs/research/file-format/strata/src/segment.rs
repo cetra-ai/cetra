@@ -7,10 +7,15 @@ use std::cell::RefCell;
 
 use crate::error::{Result, StrataError};
 use crate::format::{Cursor, MAX_SEGMENT_RAW, Out, SEGMENT_HEADER_LEN, SEGMENT_MAGIC, checksum32};
+use crate::payload::Dict;
 
 thread_local! {
     /// The decompressor of this thread, created on first use and reused.
     static DECOMPRESSOR: RefCell<Option<zstd::bulk::Decompressor<'static>>> =
+        const { RefCell::new(None) };
+    /// The decompressor of this thread for dictionary frames, loaded with the dictionary of id
+    /// `.0`. It is loaded again only when a frame of another dictionary comes.
+    static DICT_DECOMPRESSOR: RefCell<Option<(u64, zstd::bulk::Decompressor<'static>)>> =
         const { RefCell::new(None) };
 }
 
@@ -196,6 +201,30 @@ fn decompress(stored: &[u8], raw_len: usize) -> std::io::Result<Vec<u8>> {
     })
 }
 
+/// Decompresses one zstd frame compressed with `dict`, with this thread's dictionary
+/// decompressor (loaded with `dict` first, unless it already is). When that decompressor is
+/// busy or cannot be created, it decompresses with a fresh one on the prepared dictionary.
+fn decompress_with_dict(stored: &[u8], raw_len: usize, dict: &Dict) -> std::io::Result<Vec<u8>> {
+    let fresh = || {
+        zstd::bulk::Decompressor::with_prepared_dictionary(&dict.decoder)?
+            .decompress(stored, raw_len)
+    };
+    DICT_DECOMPRESSOR.with(|cell| match cell.try_borrow_mut() {
+        Ok(mut slot) => {
+            if slot.as_ref().is_none_or(|(id, _)| *id != dict.id) {
+                *slot = zstd::bulk::Decompressor::with_dictionary(&dict.raw)
+                    .ok()
+                    .map(|d| (dict.id, d));
+            }
+            match slot.as_mut() {
+                Some((_, decompressor)) => decompressor.decompress(stored, raw_len),
+                None => fresh(),
+            }
+        }
+        Err(_) => fresh(),
+    })
+}
+
 /// Checks and decodes the segment whose `bytes` (exactly its `len` bytes) start at
 /// file offset `offset`, and returns the raw body.
 pub fn decode_segment(bytes: &[u8], offset: u64, expect: Kind) -> Result<Vec<u8>> {
@@ -208,7 +237,7 @@ pub(crate) fn decode_segment_with(
     bytes: &[u8],
     offset: u64,
     expect: Kind,
-    dict: Option<&zstd::dict::DecoderDictionary<'static>>,
+    dict: Option<&Dict>,
 ) -> Result<Vec<u8>> {
     let corrupt = |what: &'static str| StrataError::Corrupt { what, offset };
     let mut c = Cursor::new(bytes, offset);
@@ -250,10 +279,7 @@ pub(crate) fn decode_segment_with(
         }
         Codec::ZstdDict => {
             let dict = dict.ok_or_else(|| corrupt("segment dictionary"))?;
-            let mut decompressor = zstd::bulk::Decompressor::with_prepared_dictionary(dict)
-                .map_err(|_| corrupt("segment decompress"))?;
-            let body = decompressor
-                .decompress(stored, raw_len as usize)
+            let body = decompress_with_dict(stored, raw_len as usize, dict)
                 .map_err(|_| corrupt("segment decompress"))?;
             if body.len() != raw_len as usize {
                 return Err(corrupt("segment decompress"));

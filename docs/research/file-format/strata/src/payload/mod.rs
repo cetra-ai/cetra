@@ -18,11 +18,11 @@ pub(crate) use chunk::chunk_value;
 pub(crate) use copy::{MergeCopy, copy_stores, same_stores};
 pub(crate) use header::PayloadHeader;
 pub(crate) use read::{
-    FrameBodies, build_values, decode_header, frame_segments, ids_of, read_header,
+    FrameBodies, build_value_pieces, decode_header, frame_segments, ids_of, read_header,
     read_payload_column, refs_segments,
 };
 pub(crate) use search::payload_contains;
-pub(crate) use store::{Dict, FrameEntry, PayloadStore, decode_fetched_frame};
+pub(crate) use store::{Dict, FrameEntry, PayloadStore};
 pub use write::PayloadStats;
 pub(crate) use write::{is_payload, write_payload_columns};
 
