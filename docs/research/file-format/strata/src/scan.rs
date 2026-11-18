@@ -24,8 +24,8 @@ use crate::hot::Layer;
 use crate::io::ScanKind;
 use crate::narrow::{BlockEntry, Dictionary, decode_chunk_view};
 use crate::payload::{
-    FrameBodies, FrameEntry, PayloadHeader, build_value_pieces, frame_segments, ids_of,
-    payload_contains, read_header, refs_segments,
+    FrameBodies, FrameEntry, PayloadHeader, build_payload_values, ids_of, payload_contains,
+    read_header, refs_segments,
 };
 use crate::predicate::{
     Bound, MaskSource, Predicate, bind, bound_columns, chunk_may_match, evaluate, layout_of,
@@ -463,73 +463,194 @@ fn payload_projection(file: &StrataFile, projection: &[usize]) -> Vec<usize> {
         .collect()
 }
 
-/// Builds the output batches of `selection` (ascending rows) for `projection`. Narrow columns
-/// are taken from the decoded chunks, payload columns from their full-selection arrays, and a
-/// map is rebuilt from its children and residual.
-fn build_batches(
+/// How one output column of a scan is built.
+enum OutputColumn {
+    /// A narrow column: taken from its decoded chunks.
+    Narrow(usize),
+    /// A payload column: built from the frames, by its index in [`PayloadValues::reads`].
+    Payload(usize),
+    /// A map: rebuilt from its key children and its residual.
+    Map {
+        keys: Vec<Vec<u8>>,
+        children: Vec<usize>,
+        residual: usize,
+        field: Field,
+    },
+}
+
+/// How each column of `projection` is built. `reads` are the payload reads of the scan.
+fn output_columns(
     file: &StrataFile,
     projection: &[usize],
-    selection: &[u32],
-    infos: &HashMap<usize, ColumnInfo>,
-    decoded: &Decoded,
-    payloads: &HashMap<usize, Vec<ArrayRef>>,
-    output: &SchemaRef,
-) -> Result<Vec<RecordBatch>> {
-    let mut batches = Vec::new();
-    for (index, batch_rows) in selection.chunks(BATCH_ROWS).enumerate() {
-        let mut columns: Vec<ArrayRef> = Vec::with_capacity(projection.len());
-        for &column in projection {
+    reads: &[PayloadRead],
+) -> Result<Vec<OutputColumn>> {
+    projection
+        .iter()
+        .map(|&column| {
             let layer = file.directory().get(column).map(|record| record.layer);
-            let array = match layer {
-                Some(Layer::Narrow) => {
-                    take_rows(decoded, info_of(infos, column)?, column, batch_rows)?
-                }
+            Ok(match layer {
+                Some(Layer::Narrow) => OutputColumn::Narrow(column),
                 Some(Layer::Payload) => {
-                    // The values come in pieces of `BATCH_ROWS` rows: one per batch.
-                    let piece = payloads
-                        .get(&column)
-                        .and_then(|pieces| pieces.get(index))
-                        .filter(|piece| piece.len() == batch_rows.len())
+                    let index = reads
+                        .iter()
+                        .position(|read| read.column == column)
                         .ok_or_else(|| StrataError::Schema {
                             reason: format!("internal: no values of column {column}"),
                         })?;
-                    Arc::clone(piece)
+                    OutputColumn::Payload(index)
                 }
                 Some(Layer::MapParent) => {
                     let layout = layout_of(file, column)?;
-                    let mut children = Vec::with_capacity(layout.keys.len());
-                    for key in &layout.keys {
-                        let child = index_of(key.child)?;
-                        children.push(take_rows(
-                            decoded,
-                            info_of(infos, child)?,
-                            child,
-                            batch_rows,
-                        )?);
+                    OutputColumn::Map {
+                        keys: layout.keys.iter().map(|key| key.key.clone()).collect(),
+                        children: layout
+                            .keys
+                            .iter()
+                            .map(|key| index_of(key.child))
+                            .collect::<Result<_>>()?,
+                        residual: index_of(layout.residual)?,
+                        field: file.field_of(column)?,
                     }
-                    let residual = index_of(layout.residual)?;
-                    let residual =
-                        take_rows(decoded, info_of(infos, residual)?, residual, batch_rows)?;
-                    // The scan decodes Utf8 children as dictionary arrays; `unshred` takes Utf8.
-                    let children = children
-                        .iter()
-                        .map(|child| match child.data_type() {
-                            DataType::Dictionary(..) => Ok(cast(child, &DataType::Utf8)?),
-                            _ => Ok(Arc::clone(child)),
-                        })
-                        .collect::<Result<Vec<_>>>()?;
-                    let keys: Vec<Vec<u8>> =
-                        layout.keys.iter().map(|key| key.key.clone()).collect();
-                    let field = file.field_of(column)?;
-                    unshred(field.data_type(), &keys, &children, &residual)?
                 }
                 _ => {
                     return Err(StrataError::Schema {
                         reason: format!("internal: projection of column {column}"),
                     });
                 }
+            })
+        })
+        .collect()
+}
+
+/// The payload columns of a scan: their chunk ids, and their frames as fetched, decoded when a
+/// batch first needs them and dropped after the last batch that does.
+struct PayloadValues {
+    reads: Vec<PayloadRead>,
+    fields: Vec<Field>,
+    frames: FrameBodies,
+    /// For each batch, the frames (by offset) that no later batch uses.
+    release: Vec<Vec<u64>>,
+    views: bool,
+}
+
+/// The batches of a scan whose reads are done, built as they are asked for: a few at a time,
+/// one per thread, at most 8,192 rows each, in file order. The frames that no later batch
+/// needs are dropped after each step, so a scan holds the frames of the batches being built and
+/// of those that share them, not the whole file's. Building needs no I/O.
+pub struct ScanBatches {
+    columns: Vec<OutputColumn>,
+    selection: Vec<u32>,
+    infos: HashMap<usize, ColumnInfo>,
+    decoded: Decoded,
+    payloads: Option<PayloadValues>,
+    output: SchemaRef,
+    /// The index of the next batch to build.
+    next: usize,
+    ready: std::collections::VecDeque<RecordBatch>,
+    /// Batches built at a time, each on its own thread.
+    threads: usize,
+}
+
+impl ScanBatches {
+    fn empty(output: SchemaRef) -> Self {
+        Self {
+            columns: Vec::new(),
+            selection: Vec::new(),
+            infos: HashMap::new(),
+            decoded: HashMap::new(),
+            payloads: None,
+            output,
+            next: 0,
+            ready: std::collections::VecDeque::new(),
+            threads: 1,
+        }
+    }
+
+    /// Builds at most `threads` batches at a time (at least one). The default is one per core;
+    /// a caller that runs several scans at once gives each a share of the cores.
+    #[must_use]
+    pub fn with_threads(mut self, threads: usize) -> Self {
+        self.threads = threads.max(1);
+        self
+    }
+
+    /// The schema of the batches.
+    pub fn schema(&self) -> SchemaRef {
+        Arc::clone(&self.output)
+    }
+
+    /// The frames held for the batches not built yet.
+    #[cfg(test)]
+    fn frames_held(&self) -> usize {
+        self.payloads
+            .as_ref()
+            .map_or(0, |values| values.frames.len())
+    }
+
+    fn batch_count(&self) -> usize {
+        self.selection.len().div_ceil(BATCH_ROWS)
+    }
+
+    /// Builds batch `index`: the rows of `selection` from `index * BATCH_ROWS`.
+    fn build(&self, index: usize) -> Result<RecordBatch> {
+        let start = index * BATCH_ROWS;
+        let end = (start + BATCH_ROWS).min(self.selection.len());
+        let rows = self.selection.get(start..end).unwrap_or_default();
+        let mut columns: Vec<ArrayRef> = Vec::with_capacity(self.columns.len());
+        for column in &self.columns {
+            let array = match column {
+                OutputColumn::Narrow(column) => {
+                    take_rows(&self.decoded, info_of(&self.infos, *column)?, *column, rows)?
+                }
+                OutputColumn::Payload(read) => {
+                    let missing = || StrataError::Schema {
+                        reason: "internal: no payload values".to_string(),
+                    };
+                    let values = self.payloads.as_ref().ok_or_else(missing)?;
+                    let read_ = values.reads.get(*read).ok_or_else(missing)?;
+                    let field = values.fields.get(*read).ok_or_else(missing)?;
+                    let ids = read_.ids.get(start..end).ok_or_else(missing)?;
+                    build_payload_values(
+                        &read_.header,
+                        &values.frames,
+                        ids,
+                        field,
+                        read_.at,
+                        values.views,
+                    )?
+                }
+                OutputColumn::Map {
+                    keys,
+                    children,
+                    residual,
+                    field,
+                } => {
+                    // The scan decodes Utf8 children as dictionary arrays; `unshred` takes Utf8.
+                    let children = children
+                        .iter()
+                        .map(|&child| {
+                            let array = take_rows(
+                                &self.decoded,
+                                info_of(&self.infos, child)?,
+                                child,
+                                rows,
+                            )?;
+                            match array.data_type() {
+                                DataType::Dictionary(..) => Ok(cast(&array, &DataType::Utf8)?),
+                                _ => Ok(array),
+                            }
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    let residual = take_rows(
+                        &self.decoded,
+                        info_of(&self.infos, *residual)?,
+                        *residual,
+                        rows,
+                    )?;
+                    unshred(field.data_type(), keys, &children, &residual)?
+                }
             };
-            let field = output.field(columns.len());
+            let field = self.output.field(columns.len());
             let array = if array.data_type() == field.data_type() {
                 array
             } else {
@@ -537,14 +658,65 @@ fn build_batches(
             };
             columns.push(array);
         }
-        let options = RecordBatchOptions::new().with_row_count(Some(batch_rows.len()));
-        batches.push(RecordBatch::try_new_with_options(
-            Arc::clone(output),
+        let options = RecordBatchOptions::new().with_row_count(Some(rows.len()));
+        Ok(RecordBatch::try_new_with_options(
+            Arc::clone(&self.output),
             columns,
             &options,
-        )?);
+        )?)
     }
-    Ok(batches)
+
+    /// Builds the batches `range` on several threads, then drops the frames that no later
+    /// batch needs.
+    fn build_step(&mut self, range: Range<usize>) -> Result<Vec<RecordBatch>> {
+        let indexes: Vec<usize> = range.clone().collect();
+        let batches = if indexes.len() < 2 {
+            indexes
+                .iter()
+                .map(|&i| self.build(i))
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            crate::parallel::map_in_order(&indexes, |_| 1, |&i| self.build(i))?
+        };
+        if let Some(values) = &mut self.payloads {
+            for index in range {
+                for offset in values
+                    .release
+                    .get_mut(index)
+                    .map(std::mem::take)
+                    .unwrap_or_default()
+                {
+                    values.frames.release(offset);
+                }
+            }
+        }
+        Ok(batches)
+    }
+}
+
+impl Iterator for ScanBatches {
+    type Item = Result<RecordBatch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.ready.is_empty() {
+            let count = self.batch_count();
+            if self.next >= count {
+                return None;
+            }
+            let end = self.next.saturating_add(self.threads).min(count);
+            let step = self.next..end;
+            self.next = end;
+            match self.build_step(step) {
+                Ok(batches) => self.ready.extend(batches),
+                Err(e) => {
+                    // A failed scan ends with its error.
+                    self.next = count;
+                    return Some(Err(e));
+                }
+            }
+        }
+        self.ready.pop_front().map(Ok)
+    }
 }
 
 impl StrataFile {
@@ -561,6 +733,12 @@ impl StrataFile {
     /// bounds the evaluation and the output, but not the bytes fetched: the filter wave still
     /// fetches every surviving predicate chunk.
     pub async fn scan(&self, req: &ScanRequest) -> Result<Vec<RecordBatch>> {
+        self.scan_batches(req).await?.collect()
+    }
+
+    /// The reads of [`Self::scan`], with the batches left to build as they are asked for. All
+    /// the I/O is done when it returns; see [`ScanBatches`].
+    pub async fn scan_batches(&self, req: &ScanRequest) -> Result<ScanBatches> {
         // 1. Validate. Every error is found before any read.
         self.check_projection(&req.projection)?;
         let (bound, sources) = match &req.predicate {
@@ -573,7 +751,7 @@ impl StrataFile {
         self.check_row_ranges(req.row_ranges.as_deref())?;
         let output: SchemaRef = scan_schema(self.schema().project(&req.projection)?, req.views);
         if req.limit == Some(0) {
-            return Ok(Vec::new());
+            return Ok(ScanBatches::empty(output));
         }
 
         // 2. Metadata wave: the block tables, dictionaries and payload headers that the scan
@@ -626,7 +804,7 @@ impl StrataFile {
         if let Some(b) = &bound
             && never_true(b)
         {
-            return Ok(Vec::new());
+            return Ok(ScanBatches::empty(output));
         }
         if let Some(b) = &bound {
             for column in pruned_columns(b) {
@@ -671,7 +849,7 @@ impl StrataFile {
                 }
                 candidates = subtract_all(&candidates, &pruned);
                 if candidates.is_empty() {
-                    return Ok(Vec::new());
+                    return Ok(ScanBatches::empty(output));
                 }
             }
         }
@@ -719,7 +897,7 @@ impl StrataFile {
             selection.truncate(limit);
         }
         if selection.is_empty() {
-            return Ok(Vec::new());
+            return Ok(ScanBatches::empty(output));
         }
 
         // 7. Projection: the narrow chunks, then the payload columns (two waves).
@@ -737,15 +915,7 @@ impl StrataFile {
         let payloads = self
             .payload_values(&payload, &selection, req.kind, req.views)
             .await?;
-        build_batches(
-            self,
-            &req.projection,
-            &selection,
-            &infos,
-            &decoded,
-            &payloads,
-            &output,
-        )
+        self.batches(&req.projection, selection, infos, decoded, payloads, output)
     }
 
     /// Whether some row of the file may satisfy `predicate`, from the zones, dictionaries and
@@ -932,10 +1102,9 @@ impl StrataFile {
         }
 
         // W2 (warm) or W3 (cold): the frames of the payload columns.
-        let payloads = self.finish_payloads(&mut reads, kind, views).await?;
-        build_batches(
-            self, projection, &exact, &infos, &decoded, &payloads, &output,
-        )
+        let payloads = self.finish_payloads(reads, kind, views).await?;
+        self.batches(projection, exact, infos, decoded, payloads, output)?
+            .collect()
     }
 
     /// Checks that every projected column is a narrow, payload or map column of the file.
@@ -1160,92 +1329,124 @@ impl StrataFile {
 
     /// Plans the frames that the chunk ids of `reads` need. A frame is fetched and decoded once
     /// even when several columns share its store. Returns the frames' segments and entries, by
-    /// file offset.
-    fn plan_frames(reads: &[PayloadRead]) -> Result<(Segments, Vec<FrameEntry>)> {
-        let mut unique: BTreeMap<u64, FrameEntry> = BTreeMap::new();
+    /// file offset, and for each output batch the frames that no later batch uses.
+    fn plan_frames(reads: &[PayloadRead]) -> Result<(Segments, Vec<FrameEntry>, Vec<Vec<u64>>)> {
+        // The last batch that uses each frame, by offset.
+        let mut last: BTreeMap<u64, (usize, FrameEntry)> = BTreeMap::new();
         for read in reads {
-            let (_, frames) = frame_segments(&read.header, &read.ids)?;
-            for index in frames {
-                let entry =
-                    read.header
-                        .store
-                        .frames
-                        .get(index)
-                        .ok_or_else(|| StrataError::Corrupt {
-                            what: "payload frame",
-                            offset: read.at,
-                        })?;
-                unique.entry(entry.offset).or_insert_with(|| entry.clone());
+            let corrupt = || StrataError::Corrupt {
+                what: "payload chunk id",
+                offset: read.at,
+            };
+            let store = &read.header.store;
+            for (batch, rows) in read.ids.chunks(BATCH_ROWS).enumerate() {
+                // Most ids fall in the frame of the id before them: that frame is tried first,
+                // and recorded once per batch.
+                let mut current: Option<(u32, u32)> = None;
+                for &id in rows.iter().flatten().flatten() {
+                    if let Some((first, n)) = current
+                        && id >= first
+                        && id - first < n
+                    {
+                        continue;
+                    }
+                    let index = store.frame_of(id).ok_or_else(corrupt)?;
+                    let entry = store.frames.get(index).ok_or_else(corrupt)?;
+                    current = Some((entry.first_chunk, entry.n_chunks));
+                    last.entry(entry.offset)
+                        .and_modify(|(used, _)| *used = (*used).max(batch))
+                        .or_insert_with(|| (batch, entry.clone()));
+                }
             }
         }
-        let entries: Vec<FrameEntry> = unique.into_values().collect();
-        let segments = entries
+        let batches = reads
             .iter()
-            .map(|e| {
-                let segment = SegmentRef {
-                    offset: e.offset,
-                    len: e.len,
-                };
-                (segment, Kind::PayloadFrame)
-            })
-            .collect();
-        Ok((segments, entries))
-    }
-
-    /// Rebuilds the values of each column of `reads` from the fetched frames (`stored`, in the
-    /// order of `entries`), in pieces of `BATCH_ROWS` rows: one per output batch. The frames
-    /// are decoded as the pieces need them. With `views`, Utf8 columns come out as `Utf8View`.
-    fn build_payloads(
-        &self,
-        reads: &[PayloadRead],
-        entries: Vec<FrameEntry>,
-        stored: Vec<Vec<u8>>,
-        views: bool,
-    ) -> Result<HashMap<usize, Vec<ArrayRef>>> {
-        let dicts = entries.iter().map(|e| self.frame_dict(e.offset)).collect();
-        let frames = FrameBodies::stored(entries, stored, dicts)?;
-        let mut out = HashMap::with_capacity(reads.len());
-        for read in reads {
-            let field = self.field_of(read.column)?;
-            let pieces = build_value_pieces(
-                &read.header,
-                &frames,
-                &read.ids,
-                &field,
-                read.at,
-                BATCH_ROWS,
-                views,
-            )?;
-            out.insert(read.column, pieces);
+            .map(|read| read.ids.len().div_ceil(BATCH_ROWS))
+            .max()
+            .unwrap_or(0);
+        let mut release: Vec<Vec<u64>> = vec![Vec::new(); batches];
+        let mut entries = Vec::with_capacity(last.len());
+        let mut segments = Vec::with_capacity(last.len());
+        for (offset, (batch, entry)) in last {
+            if let Some(slot) = release.get_mut(batch) {
+                slot.push(offset);
+            }
+            segments.push((
+                SegmentRef {
+                    offset: entry.offset,
+                    len: entry.len,
+                },
+                Kind::PayloadFrame,
+            ));
+            entries.push(entry);
         }
-        Ok(out)
+        Ok((segments, entries, release))
     }
 
-    /// The frame wave of `reads`: one fetch for the frames their chunk ids need, then the values.
+    /// The frame wave of `reads`: one fetch for the frames their chunk ids need, kept as stored
+    /// until a batch needs them.
     async fn finish_payloads(
         &self,
-        reads: &mut [PayloadRead],
+        reads: Vec<PayloadRead>,
         kind: ScanKind,
         views: bool,
-    ) -> Result<HashMap<usize, Vec<ArrayRef>>> {
-        let (segments, entries) = Self::plan_frames(reads)?;
+    ) -> Result<PayloadValues> {
+        let (segments, entries, release) = Self::plan_frames(&reads)?;
         let stored = self.fetch_stored(&segments, kind).await?;
-        self.build_payloads(reads, entries, stored, views)
+        let dicts = entries.iter().map(|e| self.frame_dict(e.offset)).collect();
+        let frames = FrameBodies::stored(entries, stored, dicts)?;
+        let fields = reads
+            .iter()
+            .map(|read| self.field_of(read.column))
+            .collect::<Result<_>>()?;
+        Ok(PayloadValues {
+            reads,
+            fields,
+            frames,
+            release,
+            views,
+        })
     }
 
-    /// The values of the payload columns `columns` over `rows` (sorted, unique): the refs pages
-    /// in one wave, then the frames in one wave.
+    /// The payload columns `columns` over `rows` (sorted, unique): the refs pages in one wave,
+    /// then the frames in one wave.
     async fn payload_values(
         &self,
         columns: &[usize],
         rows: &[u32],
         kind: ScanKind,
         views: bool,
-    ) -> Result<HashMap<usize, Vec<ArrayRef>>> {
+    ) -> Result<PayloadValues> {
         let (mut reads, segments) = self.plan_refs(columns, rows).await?;
         let bodies = self.fetch(&segments, kind).await?;
         Self::take_ids(&mut reads, bodies, rows)?;
-        self.finish_payloads(&mut reads, kind, views).await
+        self.finish_payloads(reads, kind, views).await
+    }
+
+    /// The batches of `selection` (ascending rows) for `projection`, from the decoded narrow
+    /// chunks and the payload values.
+    fn batches(
+        &self,
+        projection: &[usize],
+        selection: Vec<u32>,
+        infos: HashMap<usize, ColumnInfo>,
+        decoded: Decoded,
+        payloads: PayloadValues,
+        output: SchemaRef,
+    ) -> Result<ScanBatches> {
+        let columns = output_columns(self, projection, &payloads.reads)?;
+        let threads = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        Ok(ScanBatches {
+            columns,
+            selection,
+            infos,
+            decoded,
+            payloads: Some(payloads),
+            output,
+            next: 0,
+            ready: std::collections::VecDeque::new(),
+            threads,
+        })
     }
 }
 
@@ -1455,6 +1656,89 @@ mod tests {
         assert_eq!(chunks_with_rows(&entries, &[10, 11, 12, 30]), vec![1, 3]);
         let all: Vec<u32> = (0..125).collect();
         assert_eq!(chunks_with_rows(&entries, &all), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn scan_batches_stream_and_drop_frames_after_their_last_batch() {
+        runtime().block_on(async {
+            // 30,000 rows: four batches. Values repeat or extend values of earlier batches, so
+            // frames are shared across batches.
+            let n = 30_000usize;
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("trace_id", DataType::FixedSizeBinary(16), false),
+                Field::new("text", DataType::Utf8, true),
+            ]));
+            let ids: Vec<[u8; 16]> = (0..n).map(|i| (i as u128).to_be_bytes()).collect();
+            let mut text: Vec<Option<String>> = Vec::with_capacity(n);
+            for i in 0..n {
+                let value = match i % 5 {
+                    0 if i > 9_000 => text[i - 8_999].clone(),
+                    1 if i > 20_000 => text[i - 19_001].clone().map(|v| format!("{v} and {i}")),
+                    2 => None,
+                    _ => Some(format!("row {i} {}", "é".repeat(200 + i % 300))),
+                };
+                text.push(value);
+            }
+            let batch = RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![
+                    Arc::new(
+                        arrow::array::FixedSizeBinaryArray::try_from_iter(ids.iter()).unwrap(),
+                    ),
+                    Arc::new(StringArray::from(text.clone())),
+                ],
+            )
+            .unwrap();
+            let mut w = StrataWriter::new(schema, &["trace_id"], Config::default()).unwrap();
+            w.write(&batch).unwrap();
+            let (bytes, _) = w.finish().unwrap();
+            let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let path = Path::from("text.strata");
+            store.put(&path, PutPayload::from(bytes)).await.unwrap();
+            let file = StrataFile::open(store, path, None, &Config::default())
+                .await
+                .unwrap();
+            assert_eq!(
+                file.directory()[1].layer,
+                Layer::Payload,
+                "the text column is a payload column"
+            );
+
+            for views in [false, true] {
+                for threads in [1, 2, 3, 8] {
+                    let req = ScanRequest {
+                        projection: vec![1, 0],
+                        predicate: None,
+                        row_ranges: None,
+                        limit: None,
+                        kind: ScanKind::Scan,
+                        views,
+                    };
+                    let mut batches = file.scan_batches(&req).await.unwrap().with_threads(threads);
+                    let all = batches.frames_held();
+                    let mut got: Vec<Option<String>> = Vec::with_capacity(n);
+                    let mut held = Vec::new();
+                    while let Some(batch) = batches.next() {
+                        let batch = batch.unwrap();
+                        let values = cast(batch.column(0), &DataType::Utf8).unwrap();
+                        let values = arrow::array::AsArray::as_string::<i32>(values.as_ref());
+                        got.extend(values.iter().map(|v| v.map(str::to_string)));
+                        held.push(batches.frames_held());
+                    }
+                    assert_eq!(got, text, "views {views}, {threads} threads");
+                    assert_eq!(held.len(), 4);
+                    assert_eq!(batches.frames_held(), 0);
+                    if threads == 1 {
+                        // Each batch drops the frames no later batch uses. The first batch's
+                        // frames are almost all used again by the second.
+                        assert!(
+                            held.windows(2).all(|w| w[0] > w[1]) && held[0] <= all,
+                            "{all} then {held:?}"
+                        );
+                    }
+                }
+            }
+        });
     }
 
     #[test]

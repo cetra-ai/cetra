@@ -743,7 +743,7 @@ impl StrataExec {
             )]);
         }
         let partitions = parts.len().max(1);
-        // Prototype shortcut: the single-future stream does not consume DataFusion's cooperative
+        // Prototype shortcut: the batch stream does not consume DataFusion's cooperative
         // budget. `Cooperative` avoids the `CooperativeExec` wrapper.
         let props = PlanProperties::new(
             eq,
@@ -855,15 +855,25 @@ impl ExecutionPlan for StrataExec {
         let lookup = self.lookup.clone();
         let limit = self.limit;
         let schema = Arc::clone(&self.schema);
+        // Partitions run at once: each builds its batches on its share of the cores.
+        let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        let threads = cores.div_ceil(self.partitions()).max(1);
+        type Batches = Box<dyn Iterator<Item = Result<RecordBatch>> + Send>;
         let fut = async move {
             let Some(file) = file else {
-                return Ok::<Vec<RecordBatch>, DataFusionError>(Vec::new());
+                return Ok::<Batches, DataFusionError>(Box::new(std::iter::empty()));
             };
             let before = file.io_stats();
-            let batches = match lookup {
-                Some(key) => file.lookup_scan(&key, &projection, true).await,
-                None => {
-                    file.scan(&ScanRequest {
+            let batches: Batches = match lookup {
+                Some(key) => Box::new(
+                    file.lookup_scan(&key, &projection, true)
+                        .await
+                        .map_err(df)?
+                        .into_iter()
+                        .map(Ok),
+                ),
+                None => Box::new(
+                    file.scan_batches(&ScanRequest {
                         projection,
                         predicate,
                         row_ranges,
@@ -872,9 +882,10 @@ impl ExecutionPlan for StrataExec {
                         views: true,
                     })
                     .await
-                }
-            }
-            .map_err(df)?;
+                    .map_err(df)?
+                    .with_threads(threads),
+                ),
+            };
             let after = file.io_stats();
             bytes.add(
                 usize::try_from(after.bytes.saturating_sub(before.bytes)).unwrap_or(usize::MAX),
@@ -886,22 +897,24 @@ impl ExecutionPlan for StrataExec {
             waves.add(
                 usize::try_from(after.waves.saturating_sub(before.waves)).unwrap_or(usize::MAX),
             );
-
-            let converted = {
-                let _timer = elapsed.timer();
-                let converted = batches
-                    .iter()
-                    .map(|batch| to_table_batch(batch, &schema))
-                    .collect::<Result<Vec<_>>>()
-                    .map_err(df)?;
-                let rows: usize = converted.iter().map(RecordBatch::num_rows).sum();
-                output_rows.add(rows);
-                converted
-            };
-            Ok(converted)
+            // The batches are built as DataFusion asks for them, so a partition holds a few
+            // batches and the frames they share, not the whole file's values.
+            Ok(batches)
         };
         let stream = futures::stream::once(fut)
-            .map_ok(|batches| futures::stream::iter(batches.into_iter().map(Ok)))
+            .map_ok(move |batches| {
+                // `map_ok` takes an `FnMut`; it runs once.
+                let (elapsed, output_rows, schema) =
+                    (elapsed.clone(), output_rows.clone(), Arc::clone(&schema));
+                futures::stream::iter(batches.map(move |batch| {
+                    let _timer = elapsed.timer();
+                    let batch = batch
+                        .and_then(|b| to_table_batch(&b, &schema))
+                        .map_err(df)?;
+                    output_rows.add(batch.num_rows());
+                    Ok(batch)
+                }))
+            })
             .try_flatten();
         Ok(Box::pin(RecordBatchStreamAdapter::new(
             Arc::clone(&self.schema),

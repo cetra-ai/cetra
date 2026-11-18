@@ -20,8 +20,15 @@ use crate::hot::DirectoryRecord;
 use crate::io::ScanKind;
 use crate::segment::{Kind, SegmentRef, Segments, decode_segment_with};
 
-/// The raw body of a frame, and the ranges of its chunks in it.
-pub(crate) type FrameBody = (Vec<u8>, Vec<Range<usize>>);
+/// The raw body of a frame, and the ranges of its chunks in it. The body is an Arrow buffer so
+/// that a `Utf8View` array can point into it instead of copying its values.
+pub(crate) type FrameBody = (Buffer, Vec<Range<usize>>);
+
+/// Checks and decodes a fetched frame body into a [`FrameBody`].
+fn frame_body(entry: &FrameEntry, raw: Vec<u8>) -> Result<FrameBody> {
+    let (raw, ranges) = decode_fetched_frame(entry, raw)?;
+    Ok((Buffer::from_vec(raw), ranges))
+}
 
 /// Largest total of value bytes in one column: Arrow's string and binary offsets are `i32`.
 const MAX_VALUE_BYTES: u64 = i32::MAX as u64;
@@ -212,7 +219,9 @@ pub(crate) fn frame_segments_of(
 }
 
 /// The frames that hold at least one id of `ids`: their segments, and their indexes in
-/// `header.frames`, ascending.
+/// `header.frames`, ascending. Scans plan their frames with the batches that use them; tests
+/// read whole columns with this.
+#[cfg(test)]
 pub(crate) fn frame_segments(
     header: &PayloadHeader,
     ids: &[Option<Vec<u32>>],
@@ -260,7 +269,7 @@ pub(crate) struct FrameBodies {
 struct FrameSlot {
     entry: FrameEntry,
     /// The fetched segment, header included; empty once decoded up front.
-    stored: Vec<u8>,
+    stored: bytes::Bytes,
     dict: Option<Arc<Dict>>,
     /// The decoded frame; `None` when it failed to decode.
     body: OnceLock<Option<FrameBody>>,
@@ -284,10 +293,10 @@ impl FrameBodies {
         for (&index, raw) in indexes.iter().zip(bodies) {
             let entry = header.store.frames.get(index).ok_or_else(corrupt)?;
             let body = OnceLock::new();
-            let _ = body.set(Some(decode_fetched_frame(entry, raw)?));
+            let _ = body.set(Some(frame_body(entry, raw)?));
             let slot = FrameSlot {
                 entry: entry.clone(),
-                stored: Vec::new(),
+                stored: bytes::Bytes::new(),
                 dict: None,
                 body,
             };
@@ -300,7 +309,7 @@ impl FrameBodies {
     /// order), each with the dictionary of its run, decoded on first use.
     pub(crate) fn stored(
         entries: Vec<FrameEntry>,
-        stored: Vec<Vec<u8>>,
+        stored: Vec<bytes::Bytes>,
         dicts: Vec<Option<Arc<Dict>>>,
     ) -> Result<Self> {
         if entries.len() != stored.len() || entries.len() != dicts.len() {
@@ -326,6 +335,18 @@ impl FrameBodies {
         Ok(Self { slots })
     }
 
+    /// The frames held.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Drops the frame whose segment starts at `offset`. Arrays that share its body keep it
+    /// alive until they are dropped.
+    pub(crate) fn release(&mut self, offset: u64) {
+        self.slots.remove(&offset);
+    }
+
     /// The decoded frame whose segment starts at `offset`, decoded now if it is not yet.
     fn get(&self, offset: u64) -> Result<&FrameBody> {
         let corrupt = || StrataError::Corrupt {
@@ -342,7 +363,7 @@ impl FrameBodies {
                     slot.dict.as_deref(),
                 )
                 .ok()?;
-                decode_fetched_frame(&slot.entry, raw).ok()
+                frame_body(&slot.entry, raw).ok()
             })
             .as_ref()
             .ok_or_else(corrupt)
@@ -377,7 +398,46 @@ impl<'a> ChunkReader<'a> {
         };
         let (raw, ranges) = body;
         let range = ranges.get((id - first) as usize).ok_or_else(corrupt)?;
-        raw.get(range.clone()).ok_or_else(corrupt)
+        raw.as_slice().get(range.clone()).ok_or_else(corrupt)
+    }
+
+    /// The frame body and byte range of a value made of `ids`, when they are consecutive chunks
+    /// of one frame: a frame's chunks are stored back to back, so their bytes are contiguous.
+    /// `None` for an empty value or one whose chunks are elsewhere.
+    fn span(&mut self, ids: &[u32]) -> Result<Option<(&'a Buffer, Range<usize>)>> {
+        let (Some(&first_id), Some(&last_id)) = (ids.first(), ids.last()) else {
+            return Ok(None);
+        };
+        let consecutive = ids
+            .windows(2)
+            .all(|pair| matches!(pair, [a, b] if a.checked_add(1) == Some(*b)));
+        if !consecutive {
+            return Ok(None);
+        }
+        // Resolves the frame of the first id into `last`.
+        self.chunk(first_id)?;
+        let Some((first, n, (raw, ranges))) = self.last else {
+            return Ok(None);
+        };
+        if last_id - first >= n {
+            return Ok(None);
+        }
+        let corrupt = || StrataError::Corrupt {
+            what: "payload chunk id",
+            offset: self.at,
+        };
+        let start = ranges
+            .get((first_id - first) as usize)
+            .ok_or_else(corrupt)?
+            .start;
+        let end = ranges
+            .get((last_id - first) as usize)
+            .ok_or_else(corrupt)?
+            .end;
+        if start > end || end > raw.len() {
+            return Err(corrupt());
+        }
+        Ok(Some((raw, start..end)))
     }
 }
 
@@ -442,8 +502,10 @@ pub(crate) fn build_values(
 const VIEW_BLOCK_BYTES: usize = 256 << 10;
 
 /// The values of `ids` (one entry per row, `None` for a null row) of a Utf8 column, as a
-/// `Utf8View` array. Values are copied into blocks of about `VIEW_BLOCK_BYTES`, and each value
-/// is checked as UTF-8 when its view is added, right after its block is filled.
+/// `Utf8View` array. A value whose chunks are consecutive in one frame is a view into that
+/// frame's body, which the array then shares. Other values are copied into blocks of about
+/// `VIEW_BLOCK_BYTES`, and checked as UTF-8 when their view is added, right after their block
+/// is filled.
 fn build_string_views(
     header: &PayloadHeader,
     frames: &FrameBodies,
@@ -451,6 +513,7 @@ fn build_string_views(
     at: u64,
 ) -> Result<ArrayRef> {
     let corrupt = |what: &'static str| StrataError::Corrupt { what, offset: at };
+    let to_u32 = |v: usize| u32::try_from(v).map_err(|_| corrupt("payload size"));
     let mut reader = ChunkReader {
         header,
         frames,
@@ -458,16 +521,34 @@ fn build_string_views(
         at,
     };
     let mut builder = StringViewBuilder::with_capacity(ids.len());
-    // The bytes of the values not copied yet.
+    // The block id of each frame body the array shares, by the body's address.
+    let mut shared: HashMap<*const u8, u32> = HashMap::new();
+    // The bytes of the copied values not copied yet.
     let mut left = 0usize;
-    for &id in ids.iter().flatten().flatten() {
-        left += reader.chunk(id)?.len();
+    for row in ids.iter().flatten() {
+        if reader.span(row)?.is_none() {
+            for &id in row {
+                left += reader.chunk(id)?.len();
+            }
+        }
     }
     let mut block: Vec<u8> = Vec::new();
-    // The rows of the block being filled: `(start, len)` in the block, `None` for a null row.
-    let mut rows: Vec<Option<(u32, u32)>> = Vec::new();
+    // The rows since the first value copied into the block being filled, in order: `None`
+    // for a null row. While it is empty, rows are added to the array at once.
+    let mut rows: Vec<Option<View>> = Vec::new();
+    let append = |builder: &mut StringViewBuilder, row: Option<(u32, u32, u32)>| -> Result<()> {
+        match row {
+            Some((block, start, len)) => builder
+                .try_append_view(block, start, len)
+                .map_err(|_| corrupt("payload utf8")),
+            None => {
+                builder.append_null();
+                Ok(())
+            }
+        }
+    };
     let flush = |block: &mut Vec<u8>,
-                 rows: &mut Vec<Option<(u32, u32)>>,
+                 rows: &mut Vec<Option<View>>,
                  builder: &mut StringViewBuilder|
      -> Result<()> {
         if block.len() >= u32::MAX as usize {
@@ -475,20 +556,43 @@ fn build_string_views(
         }
         let id = builder.append_block(Buffer::from_vec(std::mem::take(block)));
         for row in rows.drain(..) {
-            match row {
-                Some((start, len)) => builder
-                    .try_append_view(id, start, len)
-                    .map_err(|_| corrupt("payload utf8"))?,
-                None => builder.append_null(),
-            }
+            let row = row.map(|view| match view {
+                View::Copied(start, len) => (id, start, len),
+                View::Shared(block, start, len) => (block, start, len),
+            });
+            append(builder, row)?;
         }
         Ok(())
     };
     for row in ids {
         let Some(row) = row else {
-            rows.push(None);
+            if rows.is_empty() {
+                append(&mut builder, None)?;
+            } else {
+                rows.push(None);
+            }
             continue;
         };
+        if let Some((body, range)) = reader.span(row)? {
+            let id = match shared.get(&body.as_ptr()) {
+                Some(&id) => id,
+                None => {
+                    if body.len() >= u32::MAX as usize {
+                        return Err(corrupt("payload size"));
+                    }
+                    let id = builder.append_block(body.clone());
+                    shared.insert(body.as_ptr(), id);
+                    id
+                }
+            };
+            let (start, len) = (to_u32(range.start)?, to_u32(range.len())?);
+            if rows.is_empty() {
+                append(&mut builder, Some((id, start, len)))?;
+            } else {
+                rows.push(Some(View::Shared(id, start, len)));
+            }
+            continue;
+        }
         // The value is sized first, so that a block is allocated once at its final size and
         // never grows: a value that does not fit closes the block and starts the next one. A
         // block is no bigger than the values left need, so a small read allocates little.
@@ -508,41 +612,39 @@ fn build_string_views(
             block.extend_from_slice(reader.chunk(id)?);
         }
         let len = block.len() - start;
-        let to_u32 = |v: usize| u32::try_from(v).map_err(|_| corrupt("payload size"));
-        rows.push(Some((to_u32(start)?, to_u32(len)?)));
+        rows.push(Some(View::Copied(to_u32(start)?, to_u32(len)?)));
         if block.len() >= VIEW_BLOCK_BYTES {
             flush(&mut block, &mut rows, &mut builder)?;
         }
     }
-    flush(&mut block, &mut rows, &mut builder)?;
+    if !rows.is_empty() {
+        flush(&mut block, &mut rows, &mut builder)?;
+    }
     Ok(Arc::new(builder.finish()))
 }
 
-/// The values of `ids` in pieces of `rows` rows each (the last one may be shorter), built on
-/// several threads. With `views`, a Utf8 column comes out as `Utf8View`
-/// ([`build_string_views`]); otherwise as [`build_values`] builds it.
-pub(crate) fn build_value_pieces(
+/// Where the bytes of a value of [`build_string_views`] are: copied into the block being
+/// filled (start, length), or in a shared frame body (block id, start, length).
+enum View {
+    Copied(u32, u32),
+    Shared(u32, u32, u32),
+}
+
+/// The values of `ids` (one entry per row, `None` for a null row). With `views`, a Utf8 column
+/// comes out as `Utf8View` ([`build_string_views`]); otherwise as [`build_values`] builds it.
+pub(crate) fn build_payload_values(
     header: &PayloadHeader,
     frames: &FrameBodies,
     ids: &[Option<Vec<u32>>],
     field: &Field,
     at: u64,
-    rows: usize,
     views: bool,
-) -> Result<Vec<ArrayRef>> {
-    let pieces: Vec<&[Option<Vec<u32>>]> = ids.chunks(rows.max(1)).collect();
-    let as_views = views && field.data_type() == &DataType::Utf8;
-    crate::parallel::map_in_order(
-        &pieces,
-        |piece| piece.iter().flatten().map(Vec::len).sum::<usize>() + 1,
-        |piece| {
-            if as_views {
-                build_string_views(header, frames, piece, at)
-            } else {
-                build_values(header, frames, piece, field, at)
-            }
-        },
-    )
+) -> Result<ArrayRef> {
+    if views && field.data_type() == &DataType::Utf8 {
+        build_string_views(header, frames, ids, at)
+    } else {
+        build_values(header, frames, ids, field, at)
+    }
 }
 
 /// Reads every row of payload column `column`. The header is read first (a wave of its own,
@@ -668,6 +770,92 @@ mod tests {
                 plain.as_ref(),
                 &StringArray::from(text) as &dyn arrow::array::Array
             );
+        });
+    }
+
+    #[test]
+    fn string_views_mix_shared_frames_and_copied_values() {
+        runtime().block_on(async {
+            // New values, repeats and extensions of earlier values (whose chunk ids are not
+            // consecutive), empty values and nulls, in a mixed order.
+            let n = 2_000usize;
+            let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+                Field::new("trace_id", DataType::FixedSizeBinary(16), false),
+                Field::new("text", DataType::Utf8, true),
+            ]));
+            let ids: Vec<[u8; 16]> = (0..n).map(|i| (i as u128).to_be_bytes()).collect();
+            let mut text: Vec<Option<String>> = Vec::with_capacity(n);
+            for i in 0..n {
+                let value = match i % 6 {
+                    0 => Some(format!("ünïque {i} {}", "ab".repeat(i % 900))),
+                    1 if i > 40 => text[i - 37].clone(),
+                    2 if i > 40 => text[i - 29]
+                        .clone()
+                        .map(|v| format!("{v} then {i} {}", "é".repeat(400))),
+                    3 => Some(String::new()),
+                    4 => None,
+                    _ => Some(format!("short {i}")),
+                };
+                text.push(value);
+            }
+            let batch = arrow::record_batch::RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(
+                        arrow::array::FixedSizeBinaryArray::try_from_iter(ids.iter()).unwrap(),
+                    ),
+                    Arc::new(StringArray::from(text.clone())),
+                ],
+            )
+            .unwrap();
+            let mut w = StrataWriter::new(schema, &["trace_id"], Config::default()).unwrap();
+            w.write(&batch).unwrap();
+            let (bytes, _) = w.finish().unwrap();
+            let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let path = Path::from("mixed.strata");
+            store.put(&path, PutPayload::from(bytes)).await.unwrap();
+            let file = StrataFile::open(store, path, None, &Config::default())
+                .await
+                .unwrap();
+
+            let rows: Vec<u32> = (0..n as u32).collect();
+            let header = read_header(&file, 1).await.unwrap();
+            let (segments, pages) = refs_segments(&header, &rows).unwrap();
+            let bodies = file.fetch(&segments, ScanKind::Scan).await.unwrap();
+            let ids = ids_of(&header, &pages, &bodies, &rows, 0).unwrap();
+            let (segments, frames) = frame_segments(&header, &ids).unwrap();
+            let bodies = file.fetch(&segments, ScanKind::Scan).await.unwrap();
+            let decoded = FrameBodies::decoded(&header, &frames, bodies).unwrap();
+
+            let mut reader = ChunkReader {
+                header: &header,
+                frames: &decoded,
+                last: None,
+                at: 0,
+            };
+            let (mut shared, mut copied) = (0, 0);
+            for row in ids.iter().flatten() {
+                match reader.span(row).unwrap() {
+                    Some(_) => shared += 1,
+                    None if !row.is_empty() => copied += 1,
+                    None => {}
+                }
+            }
+            assert!(
+                shared > 100 && copied > 100,
+                "{shared} shared, {copied} copied"
+            );
+
+            // Pieces that start anywhere: with a null, a shared or a copied value first.
+            for piece in [n, 7, 64, 333] {
+                let mut got: Vec<Option<String>> = Vec::with_capacity(n);
+                for part in ids.chunks(piece) {
+                    let views = build_string_views(&header, &decoded, part, 0).unwrap();
+                    let views = arrow::array::AsArray::as_string_view(views.as_ref());
+                    got.extend(views.iter().map(|v| v.map(str::to_string)));
+                }
+                assert_eq!(got, text, "pieces of {piece}");
+            }
         });
     }
 
