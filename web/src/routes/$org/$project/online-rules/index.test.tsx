@@ -88,7 +88,7 @@ it("lists the rules with their evaluator, status, sample, spend and jobs", async
 it("counts the active rules in the title's tooltip", async () => {
   const { user } = await renderApp(PAGE);
 
-  await user.hover(await screen.findByRole("heading", { name: "Online rules" }));
+  await user.hover(await screen.findByRole("button", { name: "About online rules" }));
 
   expect(
     await screen.findByText(
@@ -106,7 +106,7 @@ it("says singular for one active rule", async () => {
 
   const { user } = await renderApp(PAGE);
 
-  await user.hover(await screen.findByRole("heading", { name: "Online rules" }));
+  await user.hover(await screen.findByRole("button", { name: "About online rules" }));
 
   expect(await screen.findByText(/1 active rule in this organization\.$/)).toBeInTheDocument();
 });

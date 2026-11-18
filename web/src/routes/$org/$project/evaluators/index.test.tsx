@@ -272,7 +272,7 @@ it("opens after the online rules page, which reads the same evaluator list", asy
     to: "/$org/$project/evaluators",
     params: { org: "acme", project: "support-bot" },
   });
-  expect(await screen.findByRole("heading", { name: "Evaluators" })).toBeInTheDocument();
+  expect(await screen.findByRole("table", { name: "Evaluators" })).toBeInTheDocument();
   expect(screen.queryByText("Something went wrong")).not.toBeInTheDocument();
   await waitFor(() => expect(router.state.status).toBe("idle"));
 });
