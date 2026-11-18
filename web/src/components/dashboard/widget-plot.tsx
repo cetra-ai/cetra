@@ -189,6 +189,7 @@ export function WidgetPlot({
             tick={AXIS_TICK}
             ticks={xAxisTicks(rows, zone === "utc", tickBudget(plotWidth))}
             interval={0}
+            padding={{ left: 8, right: 8 }}
             tickFormatter={(value) => formatTick(value, zone, style)}
             minTickGap={28}
             axisLine={false}

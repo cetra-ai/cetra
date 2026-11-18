@@ -32,7 +32,7 @@ export function WidgetNumber({
       <Tooltip>
         <TooltipTrigger
           type="button"
-          className="focus-ring flex items-baseline gap-2 self-start rounded-sm text-left"
+          className="focus-ring flex flex-wrap items-baseline gap-x-2 self-start rounded-sm text-left"
         >
           <span className="font-mono text-title tabular-nums">{formatValue(kind, value)}</span>
           {value === null ? null : <Delta tone={tone} delta={delta} />}
