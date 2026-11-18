@@ -178,7 +178,7 @@ pub struct SaveOverview {
    - Add `reset_overview` to the `delete_dashboard` error-set branch, and `save_overview` to the `create_dashboard` one.
 
 9. **Examples:**
-   - Add ONE example, `save_overview` (PUT, status 200, body `static/dashboard-overview.json`). Add no `get_overview` example: the web mocks mount every GET manifest entry, and the dashboard mock would then answer it. Add no `reset_overview` example: a 204 has no content type.
+   - Add two examples: `get_overview` (GET, no params, status 200, `static/dashboard-overview.json`) — `tests/api_examples.rs::manifest_covers_the_read_operations` requires every GET to have one; the web mocks stay safe because `dashboardHandlers` are installed before the manifest handlers and `sortBySpecificity` puts `/dashboards/overview` before `/dashboards/:id` — and `save_overview` (PUT, status 200, same file). Add no `reset_overview` example: a 204 has no content type.
    - `fixtures/api/static/dashboard-overview.json`:
      - id `01900000-0000-7000-8000-000000000f02`;
      - name `Overview`, no description, version 3;
@@ -186,7 +186,8 @@ pub struct SaveOverview {
      - Add the id to `fixtures/api/README.md`'s table of ids.
    - In `tests/api_examples.rs`:
      - add `roundtrip::<Dashboard>("static/dashboard-overview.json")` next to the other dashboard roundtrips;
-     - add `"save_overview"` to the arm that skips the PUT/PATCH operations.
+     - add `"get_overview"` and `"save_overview"` to the arm that handles `get_dashboard` and the PUT/PATCH operations (next to `get_dashboard`).
+   - In `fixtures/api/README.md`, also mention `dashboard-overview.json` where `dashboard.json` is described.
 
 **Tests** (route and store modules, following the CD3 tests):
 - `overview_is_absent_until_saved`: GET gives 404.
@@ -230,6 +231,7 @@ pub struct SaveOverview {
 - `web/src/components/dashboard/widget-grid.tsx`
 - `web/src/components/dashboard/dashboard-edit.test.tsx`
 - `web/src/components/dashboard/widget-grid.test.tsx`
+- `web/src/components/dashboard/widget.tsx` (one comment only)
 
 **Contracts:**
 
@@ -299,7 +301,9 @@ onResizeStop?: (layout: Layout) => void;
    - **`undo.run()`:**
      - Clear the undo timer and `undo`.
      - Set `pending = beforeRef`, then save it through the same in-flight rule as the timer, with the same handling, but no new undo.
-   - **When `enabled` turns false** (Edit is disabled while anything is pending, so this means a hidden dashboard, a narrow window or a role change): if something is pending, save it at once (flush), then stop.
+   - **When `enabled` turns false** (Edit starting, a hidden dashboard, a narrow window, a role change): clear `undo` and its timer (an Undo after an Edit save would revert it); if something is pending, save it at once (flush), then stop. Edit itself is disabled while anything is pending or saving, so a flush never races an Edit session.
+   - `pending` is both React state (for rendering) and a ref (read by the timer and callbacks).
+   - **Accepted:** after a successful save `pending` is cleared once the mutation's invalidation has resolved, so the cache already holds the new definition; a one-frame flicker is accepted if it happens.
    - **On unmount:** flush the same way, then clear every timer.
 
 3. **`DashboardBody`.**
@@ -317,7 +321,7 @@ onResizeStop?: (layout: Layout) => void;
    - In Edit: `editing={movable}`, `onLayoutChange={applyLayout}` as today, with no stop handlers.
    - Outside Edit, when the autosave is enabled: `editing={true}`, no `onLayoutChange`, and `onDragStop` and `onResizeStop` set to `autosave.onMoveEnd`.
    - Otherwise: static.
-   - Drag starts only from the title bar: `TitleBar` in `widget.tsx` already carries `DRAG_HANDLE`, and buttons and links cancel a drag. Chart clicks, bucket clicks and zoom keep working.
+   - Drag starts only from the title bar: `TitleBar` in `widget.tsx` already carries `DRAG_HANDLE`, and buttons and links cancel a drag. Chart clicks, bucket clicks and zoom keep working. Update `TitleBar`'s comment ("In edit mode it drags the widget") to say it drags the widget wherever the grid is movable (add `web/src/components/dashboard/widget.tsx` to this phase's edits for that comment only).
 
 5. **Status bar** under the header, outside Edit, `role="status"`, showing the first that applies:
    1. "Saving layout…" while `saving`;
@@ -335,13 +339,15 @@ onResizeStop?: (layout: Layout) => void;
   - `a new move clears the undo`.
   - `a 409 drops the move and calls onConflict`.
   - `another error drops the move and reports the message`.
-  - `disabling flushes a pending move`.
+  - `disabling flushes a pending move and clears the undo`.
   - `unmount flushes and clears the timers`.
 - `dashboard-edit.test.tsx`:
   - `a member's grid is movable outside edit mode`: no `.react-resizable-hide` handles, and `.react-draggable` items.
   - `a viewer's grid stays static`.
   - `viewing a non-compact layout saves nothing`: render the existing gapped fixture, wait, and assert no PATCH.
   - `a bucket click still opens the list outside edit mode for a member`.
+  - `Edit then Save hides Undo` (drag, wait for the save, Edit, Save: no Undo bar afterwards).
+  - Existing assertions that a member's grid is static outside Edit (in `dashboard-edit.test.tsx` and `widget-grid.test.tsx`) are updated to the new rule.
   - `Edit is disabled while a layout save is pending`. If this is not reachable without module mocks, test the rule at hook level and say so.
 - `widget-grid.test.tsx`: `forwards onDragStop and onResizeStop`. Assert the props reach react-grid-layout by rendering and checking that the handlers are wired. If jsdom cannot fire them, check that they are passed (a shallow prop assertion), and say so.
 
@@ -420,7 +426,7 @@ export function dashboardHandlers(initial: readonly Dashboard[], overview?: Dash
 3. **`DashboardView`:**
    - Without `dashboardId`, read `overviewQuery` and pass `target = { kind: "overview", stored }`.
    - With one, pass `target = { kind: "custom", dashboard }`.
-   - Loading and error states stay as they are today.
+   - While `overviewQuery` is pending, show `<Skeleton className="h-64" />` (as the custom dashboard loading state). A failure (any error other than the 404, which `getOverview` maps to null) shows the existing `role="alert"` paragraph with `problemMessage(error, "Could not load the dashboard.")`. `DashboardBody` mounts only once `stored` is resolved (a Dashboard or null), so the preset never flashes and autosave never runs on a preset about to be replaced.
 
 4. **`DashboardBody`** takes `target` in place of `dashboard`:
    - **Base:** `target.kind === "overview" ? target.stored?.definition ?? OVERVIEW : target.dashboard.definition`.
@@ -437,7 +443,12 @@ export function dashboardHandlers(initial: readonly Dashboard[], overview?: Dash
    - **Children:**
      - `DashboardSwitcher` gets `target.kind === "custom" ? target.dashboard : undefined`.
      - `DashboardMenu` gets `target`.
-   - Edit, save, cancel, the 409 dialog and the OE2 autosave then work on the Overview unchanged.
+   - Internals to change for a preset Overview (where `dashboard === undefined` used to mean "not editable"):
+     - `startEditing()` and `save()` guard on `canEdit`, not on `dashboard !== undefined`.
+     - `Session.version` becomes `number | undefined`; `save()` calls `persist(session.draft, session.version)`.
+     - `busy = update.isPending || saveOverview.isPending` (call `useSaveOverview` in `DashboardBody`).
+     - `useUpdateDashboard` is still called unconditionally (hooks order) with `target.kind === "custom" ? target.dashboard.id : ""` and only used for custom targets.
+   - Edit, save, cancel, the 409 dialog and the OE2 autosave then work on the Overview.
 
 5. **`DashboardMenu`** takes `target`.
    - **Overview:** members get "Duplicate" (from the shown definition) and, only when `target.stored !== null`, "Reset to default".
@@ -446,6 +457,7 @@ export function dashboardHandlers(initial: readonly Dashboard[], overview?: Dash
      - text "The project's Overview goes back to the built-in one. Changes made to it are lost.";
      - buttons Cancel and Reset (destructive);
      - Reset calls `useResetOverview`.
+   - "Reset to default" is disabled while a layout autosave is pending or saving (pass the flag from `DashboardBody`).
    - **Custom dashboards:** Rename and Delete, as today.
 
 6. **Mocks** (`mocks/dashboards.ts`):
