@@ -57,19 +57,21 @@ No new dependency.
 ## Phases and dependencies
 
 ```
-TB1 (server: last_ingest_at)  ──────────────┐
-TB2a (bar breadcrumb + headings) ─┬─────────┴─►  TB2b (ingestion dot + bell)
-                                  ├─►  TB3a (switchers into the bar)
-                                  └─►  TB3b (detail crumbs)
+TB1 (server: last_ingest_at) ─────────────────────────────┐
+TB2a-1 (demote item headings) ─┐                          │
+TB2a-2 (drop list headings)   ─┴─► TB2a-3 (the bar) ─┬────┴─► TB2b (dot + bell)
+                                                     ├─► TB3a (switchers into the bar)
+                                                     └─► TB3b (detail crumbs)
 ```
 
-- TB1 and TB2a run in parallel: no shared file.
-- TB2b needs TB1 (the `last_ingest_at` type in `schema.gen.ts`) and TB2a (`top-bar.tsx`). TB3a and TB3b need TB2a (`TopBarCrumb`).
-- TB2b, TB3a and TB3b run in parallel: their Edit lists do not overlap. Each worktree branches from the plan branch after TB1 and TB2a are merged into it.
-- Every commit leaves `just check-web` green: the bar's heading and the removal of the toolbar headings land together in TB2a.
+- TB1, TB2a-1 and TB2a-2 run in parallel: no shared file.
+- TB2a-3 needs TB2a-1 and TB2a-2 merged. Between them and TB2a-3, pages briefly have no `<h1>`; nothing asserts a level-1 heading until TB2a-3 adds the bar's.
+- TB2b needs TB1 (the `last_ingest_at` type in `schema.gen.ts`) and TB2a-3 (`top-bar.tsx`). TB3a and TB3b need TB2a-3 (`TopBarCrumb`).
+- TB2b, TB3a and TB3b run in parallel: their Edit lists do not overlap. Each worktree branches from the plan branch once TB1 and TB2a-3 are merged into it.
+- Every commit leaves `just check-web` green.
 - `schema.gen.ts` and `openapi.json` belong to TB1 only.
 
-**Finding the tests to update.** A phase that changes headings or moves a control first runs `grep -rn 'getByRole("heading"\|findByRole("heading"\|getByRole("link", { name:' web/src --include=*.test.tsx` (and the `queryBy`/`getAllBy` forms) over the pages it touches, updates the ones its change breaks, and lists each updated test in its report.
+**Finding the tests to update.** A phase that changes headings or moves a control first runs `grep -rn 'getByRole("heading"\|findByRole("heading"\|getByRole("link", { name:' web/src --include=*.test.tsx` (and the `queryBy`/`getAllBy` forms, plus `getByText` of the page names and `getByRole("button", { name: "Search" })`) over the pages it touches, updates the ones its change breaks, and lists each updated test in its report.
 
 ---
 
@@ -146,40 +148,110 @@ impl LastIngest {
   - `projects_are_kept_apart`.
 - `routes/otlp.rs`:
   - `an_export_with_spans_sets_last_ingest_at`: like `protobuf_export_is_stored_and_answers_an_empty_body` (`post_traces` with `plain_export(2)`), then `app.state.last_ingest.get(seeded.project.id) == Some(app.state.clock.now_ns())`. The test clock is manual, so read it after the request.
-  - `an_export_whose_only_span_is_rejected_leaves_last_ingest_at_unset`: the request of `a_request_whose_only_span_is_rejected_stores_nothing`, then `get` is `None`. If that request turns out to reach `commit_in_task` with `accepted == 0`, the test covers the guard. If it is refused before the commit, the test still holds; say which in the report.
+  - `an_export_whose_only_span_is_rejected_leaves_last_ingest_at_unset`: the request of `a_request_whose_only_span_is_rejected_stores_nothing`, then `get` is `None`. That request reaches `commit_in_task` with `accepted == 0`, so the test covers the guard.
 - `routes/projects.rs`:
   - `get_project_has_no_last_ingest_at_before_spans_arrive`: no `last_ingest_at` key in the JSON.
-  - `get_project_shows_last_ingest_at_after_a_batch`: `app.state.last_ingest.record(project.id, T)` with a fixed `T`, then the GET has `last_ingest_at` equal to `T` written as the server writes times (compare with `cetra_core` time formatting, or with the string the serializer gives `T` in another field, for example by reusing the helper the existing `created_at` assertions use).
+  - `get_project_shows_last_ingest_at_after_a_batch`, in the style of the `genai_log_events` test (~787, with `signed_in`, `support_bot` and its `read(Method::GET)` request):
+    ```rust
+    const T: i64 = 1_767_225_600_123_456_789; // 2026-01-01T00:00:00.123456789Z
+    app.state.last_ingest.record(created.id, T);
+    let response = read(Method::GET).send().await;
+    let body: serde_json::Value = response.json();
+    assert_eq!(body["last_ingest_at"], "2026-01-01T00:00:00.123456789Z");
+    let fetched: Project = response.json();
+    assert_eq!(fetched.last_ingest_at, Some(T));
+    ```
+    The absence tests assert `body.get("last_ingest_at").is_none()`.
   - `lists_never_show_last_ingest_at`.
   - `internal_commits_do_not_count`: `app.commit_spans(...)` (the path evaluation uses) leaves `get` as `None`.
 
 **Done when:**
 - `cargo test -p cetra-server --lib -- ingest::last_ingest routes::otlp routes::projects routes::auth api::account` passes.
-- `cargo test -p cetra-server --test openapi` passes.
+- `cargo test -p cetra-server --test openapi --test api_examples` passes.
 - `cargo clippy -p cetra-server --all-targets -- -D warnings` and `cargo fmt --check` pass.
 - `just openapi` leaves no further diff.
 - `cd web && pnpm exec vitest run src/mocks --maxWorkers=8` passes, then `rm -rf web/.vitest`.
+- These targeted runs replace `just check-rust` for this phase (machine load); the full `just check` runs once after the merges.
 
 **Commit:** `Record when each project last received spans`
 
 ---
 
-## TB2a: The bar is a breadcrumb and holds the page heading
+## TB2a-1: Demote the item pages' headings
 
-**Goal:** the bar shows `mark cetra / org / project / Page` with the page name as the page's only `<h1>`, and a slot for the page's item. Every project page's own page heading goes or becomes `<h2>`.
+**Goal:** form, detail and compare pages use `<h2>` for their own heading, so the bar's page heading will be their only `<h1>`.
+
+**Edit:**
+- `<h1>` → `<h2>`, same classes:
+  - `routes/$org/$project/alerts/new.tsx:21`, `alerts/$ruleId/edit.tsx:46`;
+  - `online-rules/new.tsx:33`, `online-rules/$ruleId/edit.tsx:90`;
+  - `evaluators/new.tsx:44`, `evaluators/$evaluatorId.tsx:132`;
+  - `datasets/$datasetId.tsx:195`;
+  - `experiments/compare.tsx:172`;
+  - `components/experiments/experiment-detail.tsx:130`.
+- The tests this breaks: see "Finding the tests to update". A `getByRole("heading", { name })` without a level keeps working; one with `level: 1` becomes `level: 2`.
+
+**Steps:** change the tag only. Change nothing else on these pages.
+
+**Tests:** the updated ones. Add one assertion to `datasets/$datasetId.test.tsx`: the dataset's name is a level-2 heading.
+
+**Done when:**
+- The touched tests pass (`--maxWorkers=8`).
+- `tsc` and Biome pass.
+- `just check-web` passes.
+- `rm -rf web/.vitest`.
+
+**Commit:** `Demote form and detail headings to second level`
+
+---
+
+## TB2a-2: Drop the list pages' headings
+
+**Goal:** the list pages lose the page heading the top bar will hold.
+
+**Edit:**
+- Remove the `<h1>`:
+  - `routes/$org/$project/alerts/index.tsx:249`;
+  - `online-rules/index.tsx:305`;
+  - `datasets/index.tsx:166`;
+  - `experiments/index.tsx:218`;
+  - `evaluators/index.tsx:186`;
+  - `components/sql/sql-console.tsx:170`.
+- The tests this breaks.
+
+**Steps:**
+1. Delete each element. A removed heading that was its row's only left-hand item leaves the row's layout as is: no empty spacer, and do not restyle the row.
+2. `ListToolbar` is not touched here (TB2a-3).
+
+**Tests:** the updated ones. A test that found the page by its heading finds it by another element of the page instead, such as its main button or table.
+
+**Done when:**
+- The touched tests pass (`--maxWorkers=8`).
+- `tsc` and Biome pass.
+- `just check-web` passes.
+- `rm -rf web/.vitest`.
+
+**Commit:** `Drop the list page headings the top bar will hold`
+
+---
+
+## TB2a-3: The bar is a breadcrumb and holds the page heading
+
+**Goal:** the bar shows `mark cetra / org / project / Page`, with the page name as the page's only `<h1>`, and a slot for the page's item. `ListToolbar` loses its title.
 
 **Edit:**
 - `web/src/components/shell/top-bar.tsx`, `top-bar-layout.tsx`
 - `web/src/components/shell/top-bar-slot.tsx` (new), `web/src/components/shell/page-crumb.ts` (new)
 - `web/src/components/shell/project-switcher.tsx`, `web/src/components/org-switcher.tsx`
 - `web/src/components/command/palette.tsx` (trigger only, ~157-170)
-- `web/src/components/list-toolbar.tsx` and its five callers: `routes/$org/$project/traces/index.tsx`, `spans/index.tsx`, `sessions/index.tsx`, `users/index.tsx`, `components/dashboard/dashboard-view.tsx` (~242): drop `title` only
-- Headings removed: `alerts/index.tsx:249`, `online-rules/index.tsx:305`, `datasets/index.tsx:166`, `experiments/index.tsx:218`, `evaluators/index.tsx:186`, `components/sql/sql-console.tsx:170`
-- Headings demoted to `<h2>` (same classes): `alerts/new.tsx:21`, `alerts/$ruleId/edit.tsx:46`, `online-rules/new.tsx:33`, `online-rules/$ruleId/edit.tsx:90`, `evaluators/new.tsx:44`, `evaluators/$evaluatorId.tsx:132`, `datasets/$datasetId.tsx:195`, `experiments/compare.tsx:172`, `components/experiments/experiment-detail.tsx:130`
+- `web/src/components/list-toolbar.tsx` and `list-toolbar.test.tsx` (its cases pass `title`)
+- The five callers, dropping `title` only:
+  - `routes/$org/$project/traces/index.tsx`, `spans/index.tsx`, `sessions/index.tsx`, `users/index.tsx`;
+  - `components/dashboard/dashboard-view.tsx` (~242).
 - `web/src/components/shell/top-bar.test.tsx` (new)
-- The tests these changes break (see "Finding the tests to update")
+- The tests these changes break (see "Finding the tests to update"), plus one `level: 1` assertion per list page's route test (below)
 
-Not changed: `error-state.tsx`, `not-found.tsx`, `forbidden.tsx` and `auth-layout.tsx` keep their `<h1>` (shared with pages outside a project); `markdown.tsx` renders user content.
+Not changed: `error-state.tsx`, `not-found.tsx`, `forbidden.tsx` and `auth-layout.tsx` keep their `<h1>`, since they are shared with pages outside a project. A project page showing one of them (a missing dataset, say) therefore has two `<h1>`s. This is accepted (D-C-20 is about pages, not error screens). `markdown.tsx` renders user content.
 
 **Contracts:**
 
@@ -212,7 +284,7 @@ export function pageOf(
 ): (typeof projectNav)[number] | undefined;
 ```
 
-- Each entry's `to` with `$org` and `$project` replaced by the (URL-encoded, as the router writes them) params; match the exact path or a path starting with it plus `/`.
+- Each entry's `to` with `$org` and `$project` interpolated (slugs need no encoding, as in `isProjectSettingsPath` in `settings-nav.ts`); match the exact path or a path starting with it plus `/`.
 - Settings paths match nothing, since no nav entry is `/settings`.
 - Item pages under a page (`/alerts/new`, `/online-rules/$ruleId/edit`) match their page: the bar says "Alerts" and the page's own heading (now `<h2>`) names the form.
 
@@ -223,14 +295,13 @@ export function pageOf(
    3. On a project page where `pageOf(...)` finds an entry: `/`, then `<h1 className="truncate text-body font-medium">{entry.label}</h1>` (plain text, no link: the sidebar has it), then `<TopBarSlotTarget />`.
    4. After the nav: the `flex-1` spacer, the command palette, then the theme toggle and user menu as today.
 2. `ProjectSwitcher` and `OrgSwitcher` triggers:
-   - `variant="ghost" size="sm"`, with the class `h-7 gap-1 px-1.5 font-medium`.
+   - `variant="ghost" size="sm"` (a background on hover), with the class `h-7 gap-1 px-1.5 font-medium`.
    - Content: the name in `<span className="max-w-48 truncate">`, then `<ChevronsUpDown className="size-3.5 text-muted-foreground" aria-hidden />`.
    - The org trigger also shows `<Badge variant="secondary">Demo</Badge>` before the chevron when the current membership has `demo: true` (`org-switcher.tsx` already finds it).
    - Keep the `aria-label`s.
 3. Palette trigger: width `w-56`, text "Search or jump to…". Keep the `⌘K` kbd and the trigger's `aria-label`.
-4. `ListToolbar`: remove the `title` prop and its `<h1>`. Update the five callers.
-5. Remove and demote the headings listed in Edit. A removed heading that was the row's only left-hand item leaves the row's layout as is: no empty spacer.
-6. `CHANGELOG.md` is not touched here (TB2b adds the line).
+4. `ListToolbar`: remove the `title` prop and its `<h1>`. Update the five callers and `list-toolbar.test.tsx`.
+5. `CHANGELOG.md` is not touched here (TB2b adds the line).
 
 **Tests:**
 - `top-bar.test.tsx`:
@@ -330,19 +401,20 @@ export function firingRules(rules: readonly Schema<"AlertRule">[]): Schema<"Aler
 **Goal:** Traces, Spans, Sessions and Users show their saved-views menu as the breadcrumb's last part, and the dashboard shows its switcher there.
 
 **Edit:**
-- `web/src/components/list-toolbar.tsx` (where `views` renders) and its test (create `list-toolbar.test.tsx` if none exists)
+- `web/src/components/list-toolbar.tsx` (where `views` renders) and `list-toolbar.test.tsx`
+- `web/src/routes/$org/$project/traces/index.test.tsx` and `web/src/routes/$org/$project/dashboard/$dashboardId.test.tsx` (new tests)
 - `web/src/components/dashboard/dashboard-body.tsx`, `dashboard-header.tsx` (the switcher's trigger style only)
 - The tests this breaks
 
 **Steps:**
 1. `ListToolbar`: where it rendered `{views}`, render `{views ? <TopBarCrumb>{views}</TopBarCrumb> : null}`.
-2. `DashboardBody`: render `<DashboardSwitcher dashboard={custom} />` inside `<TopBarCrumb>` instead of the toolbar row, and only when its `active` prop is true: `{active ? <TopBarCrumb>…</TopBarCrumb> : null}`. The kept dashboard lives in a hidden `Activity` on other pages, and a hidden portal would still sit in the slot. The row keeps Edit, the menu and the status.
+2. In `DashboardGrid` (`dashboard-body.tsx`, where `active` is a destructured prop and the switcher renders at ~381): render `<DashboardSwitcher dashboard={custom} />` inside `<TopBarCrumb>` instead of the toolbar row, and only when `active` is true: `{active ? <TopBarCrumb>…</TopBarCrumb> : null}`. The kept dashboard lives in a hidden `Activity` on other pages, and a hidden portal would still sit in the slot. The row keeps Edit, the menu and the status.
 3. `DashboardSwitcher` trigger: `variant="ghost" size="sm"` with `h-7 gap-1 px-1.5 font-medium`. Keep `aria-label="Switch dashboard"`.
 
 **Tests:**
 - `list-toolbar.test.tsx`: `renders the views menu in the top bar slot`. Render `TopBarLayout` around a `ListToolbar` with `views={<span>Views</span>}`, and check "Views" is inside the Breadcrumb navigation.
 - Traces route test: `the saved views menu sits in the breadcrumb`.
-- Dashboard route test (the closest existing one, for example `dashboard/$dashboardId.test.tsx`):
+- `dashboard/$dashboardId.test.tsx`:
   - `the dashboard switcher sits in the breadcrumb on the dashboard`.
   - `the breadcrumb has no dashboard switcher on Traces after visiting the dashboard`: no element named "Switch dashboard" inside the Breadcrumb.
 - Update the broken tests and list them.
@@ -362,7 +434,7 @@ export function firingRules(rules: readonly Schema<"AlertRule">[]): Schema<"Aler
 **Goal:** detail pages name their item in the breadcrumb.
 
 **Edit:**
-- `web/src/routes/$org/$project/datasets/$datasetId.tsx`, `evaluators/$evaluatorId.tsx`, `users/$userId.tsx`, `sessions/$sessionId.tsx`, `experiments/compare.tsx`
+- `web/src/routes/$org/$project/datasets/$datasetId.tsx`, `evaluators/$evaluatorId.tsx`, `users/$userId.tsx`, `sessions/$sessionId.tsx`
 - Their route tests
 
 **Steps:**
@@ -370,12 +442,11 @@ export function firingRules(rules: readonly Schema<"AlertRule">[]): Schema<"Aler
    - **dataset:** `dataset.name`, once loaded;
    - **evaluator:** `evaluator.name`, once loaded;
    - **user:** `identity.name ?? userId`, where `identity` is the page's existing `userIdentity(user?.metadata)` value (~237);
-   - **session:** the `sessionId` route param, in `font-mono` with `max-w-48`, at once, since the page loads nothing itself;
-   - **compare:** the text "Compare".
+   - **session:** the `sessionId` route param, in `font-mono` with `max-w-48`, at once, since the page loads nothing itself.
 2. Their own `<h2>` headings (demoted in TB2a) stay.
 
 **Tests:**
-- In each route test: `<item> names itself in the breadcrumb` (the dataset, the evaluator, the user, the session and compare). The text is inside the Breadcrumb navigation.
+- In each route test: `<item> names itself in the breadcrumb` (the dataset, the evaluator, the user and the session). The text is inside the Breadcrumb navigation.
 
 **Done when:**
 - The touched tests pass (`--maxWorkers=8`).
@@ -390,6 +461,7 @@ export function firingRules(rules: readonly Schema<"AlertRule">[]): Schema<"Aler
 ## After the phases
 
 - Merge TB2b, TB3a and TB3b into the plan branch one at a time, running `just check-web` after each.
+- Update `docs/roadmap.md` (track C's row: the top bar, D-C-20) in the branch.
 - A Sonnet review covers the whole branch, then fixes go through a Haiku brief.
 - Finally run `just check` and look at the bar in the dev server:
   - on Traces with a saved view, the dashboard, a dataset, the SQL page and an org page;
