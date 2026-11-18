@@ -635,14 +635,14 @@ List the remaining C minors with an owner in the roadmap row.
   - .github/workflows/release.yml:62-68, 121, 131 (the linux matrix includes ubuntu-24.04-arm and the macos-15 job; all use ./.github/actions/rust)
   - .github/actions/packaging/action.yml:37-46 (kubeconform: the repo's own pattern of a pinned sha256 checked with `sha256sum -c`)
   - docs/plans/phase-0/06-ci-and-closeout.md § Versions and pinning (tools via taiki-e/install-action; Swatinem/rust-cache; 'Add no others unless …'; every `run:` is a just recipe or a one-line setup command)
-  - docs/mvp-decisions.md:134 (D81 says nothing about the kache/Garage S3 cache, its secrets and the `s3-cache` environment, or mold; these live only in .github/README.md)
+  - docs/mvp-decisions.md:134 (D81 says nothing about the kache/Garage S3 cache, its secrets and the `s3-cache` environment, or mold; these live only in .github/CI.md)
 
 **Problem.** Phase 0 installed every CI tool through taiki-e/install-action, which verifies checksums. Later commits (e5bd358, 7828691, 4891edf) changed this.
 - The shared `rust` composite action now curls a mold release tarball and unpacks it as root into /usr/local with no checksum check.
 - The `workflows` job curls actionlint the same way.
 - Because the composite action is shared, the mold step also runs in release.yml: on the arm64 Linux runner and on macOS it installs an x86_64 Linux binary that is never used, since release builds do not set the mold RUSTFLAGS.
 - The CI design also moved from Swatinem/rust-cache (save on main only) to a kache S3 cache. Jobs hold write credentials and owner PRs write to a PR prefix.
-- None of this is in D81 or any decision. It is documented only in .github/README.md.
+- None of this is in D81 or any decision. It is documented only in .github/CI.md.
 
 **Verifier correction.** Release jobs install mold but never invoke it. The main exposure is in the CI jobs that link with mold and hold the kache S3 credentials. In the release jobs it is a wasted step, and a tampered binary there could still land on PATH.
 

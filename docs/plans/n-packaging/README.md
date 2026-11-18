@@ -330,7 +330,7 @@ crates/cli/src/health.rs                  cetra health                          
 ```
 
 N edits only these files plus `justfile`, `AGENTS.md`, `.gitignore`, `biome.json`,
-`crates/cli/src/main.rs`, `.github/README.md` and `docs/roadmap.md`, as each sub-phase says.
+`crates/cli/src/main.rs`, `.github/CI.md` and `docs/roadmap.md`, as each sub-phase says.
 Nothing else in `crates/`, `web/` or `sdks/` changes.
 
 ## Sub-phases
