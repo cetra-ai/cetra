@@ -301,6 +301,29 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
             return Err(error.into());
         }
     };
+    if let Some(demo_org) = config.demo.org {
+        let row = match crate::meta::orgs::org_by_id(meta.reader(), demo_org).await {
+            Ok(row) => row,
+            Err(error) => {
+                release_storage(storage).await;
+                meta.close().await;
+                return Err(ServeError::Meta(error));
+            }
+        };
+        let reason = match row {
+            None => Some("no org has this id"),
+            Some(row) if row.state != "active" => Some("the org is not active"),
+            Some(_) => None,
+        };
+        if let Some(reason) = reason {
+            release_storage(storage).await;
+            meta.close().await;
+            return Err(ServeError::Config(ConfigError::Invalid {
+                key: "demo.org",
+                reason,
+            }));
+        }
+    }
     let secrets = match open_secrets(&config, &meta).await {
         Ok(secrets) => secrets,
         Err(error) => {
@@ -1050,8 +1073,74 @@ mod tests {
     use crate::config::Secret;
     use crate::crypto::{decode_key, encode_key, random_key, write_key_file};
     use crate::meta::instance_settings::put_setting;
+    use crate::meta::orgs::{insert_org, mark_org_deleting};
     use crate::test_support::{OTLP_KEY, config, with_init};
     use cetra_core::ids::OrgId;
+
+    /// Writes one org into `meta.db` under `dir` before `bind` opens it. `deleting` takes it out of `active`.
+    async fn org_in_meta(dir: &Path, deleting: bool) -> OrgId {
+        let meta = MetaDb::open(dir).await.unwrap();
+        let id = OrgId::new_v7();
+        meta.write(move |conn| {
+            Box::pin(async move {
+                insert_org(conn, id, "Cetra demo", "cetra-demo", 1).await?;
+                if deleting {
+                    mark_org_deleting(conn, id, 2).await?;
+                }
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+        meta.close().await;
+        id
+    }
+
+    #[tokio::test]
+    async fn a_demo_org_that_names_no_org_fails_startup() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = config(dir.path());
+        config.demo.org = Some(OrgId::new_v7());
+        let error = bind(config, None).await.unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ServeError::Config(ConfigError::Invalid {
+                    key: "demo.org",
+                    reason: "no org has this id",
+                })
+            ),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_demo_org_that_is_not_active_fails_startup() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = org_in_meta(dir.path(), true).await;
+        let mut config = config(dir.path());
+        config.demo.org = Some(id);
+        let error = bind(config, None).await.unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ServeError::Config(ConfigError::Invalid {
+                    key: "demo.org",
+                    reason: "the org is not active",
+                })
+            ),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_active_demo_org_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = org_in_meta(dir.path(), false).await;
+        let mut config = config(dir.path());
+        config.demo.org = Some(id);
+        bind(config, None).await.unwrap().shutdown().await.unwrap();
+    }
 
     #[test]
     fn restore_mode_uses_no_dns() {

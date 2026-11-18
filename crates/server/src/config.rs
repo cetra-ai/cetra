@@ -14,8 +14,10 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use bytesize::ByteSize;
+use cetra_core::ids::OrgId;
 use cetra_otel::IngestLimits;
 use cetra_storage::config::StorageConfig;
 use figment::providers::{Format, Serialized, Toml};
@@ -584,6 +586,38 @@ impl Default for OrgsConfig {
     }
 }
 
+/// `[demo]`: the demo org every signed-in user can read, and the limits of its visitors (08 § Demo org, D187).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct DemoConfig {
+    /// The demo org's id. Unset: no demo org. The org must exist and be active at startup.
+    pub org: Option<OrgId>,
+    /// Requests a minute per implicit visitor.
+    pub requests_per_minute: u32,
+    /// Requests in flight at once per implicit visitor.
+    pub user_in_flight: u32,
+    /// Requests in flight at once across all implicit visitors.
+    pub org_in_flight: u32,
+    /// Longest SQL console query for an implicit visitor. Longer `timeout_ms` is lowered.
+    #[serde(with = "humantime_serde")]
+    pub sql_timeout: Duration,
+    /// Most rows a SQL console answer returns to an implicit visitor.
+    pub sql_max_rows: usize,
+}
+
+impl Default for DemoConfig {
+    fn default() -> Self {
+        Self {
+            org: None,
+            requests_per_minute: 120,
+            user_in_flight: 4,
+            org_in_flight: 16,
+            sql_timeout: Duration::from_secs(10),
+            sql_max_rows: 1_000,
+        }
+    }
+}
+
 /// Everything `cetra serve` reads from the environment and `cetra.toml`.
 ///
 /// Keys that spec 12 lists for later work (telemetry, compaction, gc, deletion,
@@ -648,6 +682,9 @@ pub struct ServerConfig {
     /// `[orgs]` settings (D-P-31).
     #[serde(default)]
     pub orgs: OrgsConfig,
+    /// `[demo]` settings: the demo org and the limits of its visitors (08 § Demo org, D187).
+    #[serde(default)]
+    pub demo: DemoConfig,
     /// 32 bytes in standard base64. Unset: `<data_dir>/secret.key` (D-I-1).
     #[serde(default)]
     pub encryption_key: Option<Secret<String>>,
@@ -935,6 +972,7 @@ fn validate(config: &mut ServerConfig) -> Result<(), ConfigError> {
     validate_email(config)?;
     validate_entitlements(&mut config.entitlements)?;
     validate_orgs(&config.orgs)?;
+    validate_demo(&config.demo)?;
     if config
         .license_key
         .as_ref()
@@ -1494,6 +1532,43 @@ fn validate_upgrade_url(template: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// `[demo]`: each count is at least 1, the user cap does not exceed the org cap, and the SQL caps
+/// stay within the console's own bounds.
+fn validate_demo(demo: &DemoConfig) -> Result<(), ConfigError> {
+    let counts = [
+        ("demo.requests_per_minute", demo.requests_per_minute),
+        ("demo.user_in_flight", demo.user_in_flight),
+        ("demo.org_in_flight", demo.org_in_flight),
+    ];
+    for (key, value) in counts {
+        if value == 0 {
+            return Err(ConfigError::Invalid {
+                key,
+                reason: "must be at least 1",
+            });
+        }
+    }
+    if demo.user_in_flight > demo.org_in_flight {
+        return Err(ConfigError::Invalid {
+            key: "demo.user_in_flight",
+            reason: "must not exceed demo.org_in_flight",
+        });
+    }
+    if !(Duration::from_secs(1)..=Duration::from_secs(60)).contains(&demo.sql_timeout) {
+        return Err(ConfigError::Invalid {
+            key: "demo.sql_timeout",
+            reason: "must be 1 to 60 seconds",
+        });
+    }
+    if !(1..=10_000).contains(&demo.sql_max_rows) {
+        return Err(ConfigError::Invalid {
+            key: "demo.sql_max_rows",
+            reason: "must be 1 to 10000",
+        });
+    }
+    Ok(())
+}
+
 fn validate_orgs(orgs: &OrgsConfig) -> Result<(), ConfigError> {
     let Some(url) = orgs.create_url.as_deref() else {
         return Ok(());
@@ -1798,11 +1873,12 @@ mod tests {
     use std::time::Duration;
 
     use bytesize::ByteSize;
+    use cetra_core::ids::OrgId;
     use cetra_storage::config::{ObjectStoreUrl, WalSync};
 
     use super::{
-        ConfigError, IngestConfig, LogFormat, MediaConfig, OrgsConfig, Secret, ServerConfig,
-        SmtpUrl, Tls, issuer_problem, load_from, oidc_env_name,
+        ConfigError, DemoConfig, IngestConfig, LogFormat, MediaConfig, OrgsConfig, Secret,
+        ServerConfig, SmtpUrl, Tls, issuer_problem, load_from, oidc_env_name,
     };
     use crate::api::account::SignupPolicy;
 
@@ -2428,6 +2504,67 @@ mod tests {
     #[test]
     fn orgs_refuses_unknown_keys() {
         let error = load_from(Some("[orgs]\nallow_all = true\n"), &[]).unwrap_err();
+        assert!(error.to_string().contains("allow_all"), "{error}");
+    }
+
+    const DEMO_ORG: &str = "0195f0a0-0000-7000-8000-000000000001";
+
+    #[test]
+    fn demo_defaults_are_off_with_the_spec_limits() {
+        let config = load_from(None, &[]).unwrap();
+        assert_eq!(config.demo, DemoConfig::default());
+        assert_eq!(config.demo.org, None);
+        assert_eq!(config.demo.requests_per_minute, 120);
+        assert_eq!(config.demo.user_in_flight, 4);
+        assert_eq!(config.demo.org_in_flight, 16);
+        assert_eq!(config.demo.sql_timeout, Duration::from_secs(10));
+        assert_eq!(config.demo.sql_max_rows, 1_000);
+    }
+
+    #[test]
+    fn demo_table_parses_from_toml() {
+        let toml = format!(
+            "[demo]\norg = \"{DEMO_ORG}\"\nrequests_per_minute = 60\nuser_in_flight = 2\n\
+             org_in_flight = 8\nsql_timeout = \"5s\"\nsql_max_rows = 500\n"
+        );
+        let config = load_from(Some(&toml), &[]).unwrap();
+        assert_eq!(config.demo.org, Some(DEMO_ORG.parse::<OrgId>().unwrap()));
+        assert_eq!(config.demo.requests_per_minute, 60);
+        assert_eq!(config.demo.user_in_flight, 2);
+        assert_eq!(config.demo.org_in_flight, 8);
+        assert_eq!(config.demo.sql_timeout, Duration::from_secs(5));
+        assert_eq!(config.demo.sql_max_rows, 500);
+    }
+
+    #[test]
+    fn demo_org_from_env() {
+        let config = load_from(None, &[("CETRA_DEMO__ORG", DEMO_ORG)]).unwrap();
+        assert_eq!(config.demo.org, Some(DEMO_ORG.parse::<OrgId>().unwrap()));
+    }
+
+    #[test]
+    fn demo_limits_refuse_out_of_range_values() {
+        for (line, key) in [
+            ("requests_per_minute = 0", "demo.requests_per_minute"),
+            ("user_in_flight = 0", "demo.user_in_flight"),
+            ("org_in_flight = 0", "demo.org_in_flight"),
+            ("user_in_flight = 17", "demo.user_in_flight"),
+            ("sql_timeout = \"0s\"", "demo.sql_timeout"),
+            ("sql_timeout = \"61s\"", "demo.sql_timeout"),
+            ("sql_max_rows = 0", "demo.sql_max_rows"),
+            ("sql_max_rows = 10001", "demo.sql_max_rows"),
+        ] {
+            let toml = format!("[demo]\n{line}\n");
+            match load_from(Some(&toml), &[]).unwrap_err() {
+                ConfigError::Invalid { key: found, .. } => assert_eq!(found, key, "{line}"),
+                other => panic!("{line}: {other}"),
+            }
+        }
+    }
+
+    #[test]
+    fn demo_refuses_unknown_keys() {
+        let error = load_from(Some("[demo]\nallow_all = true\n"), &[]).unwrap_err();
         assert!(error.to_string().contains("allow_all"), "{error}");
     }
 
