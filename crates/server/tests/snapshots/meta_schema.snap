@@ -114,7 +114,10 @@ CREATE TABLE dashboards (
   created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
   updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-)
+, kind TEXT NOT NULL DEFAULT 'custom' CHECK (kind IN ('custom', 'overview')))
+
+index dashboards_overview
+CREATE UNIQUE INDEX dashboards_overview ON dashboards(project_id) WHERE kind = 'overview'
 
 index dashboards_project
 CREATE INDEX dashboards_project ON dashboards(project_id, name)

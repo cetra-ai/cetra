@@ -13,6 +13,9 @@ use crate::api::dashboards::{Dashboard, DashboardSummary, Definition};
 /// Most dashboards per project (spec 04 § Dashboards).
 pub(crate) const MAX_DASHBOARDS_PER_PROJECT: i64 = 100;
 
+/// Display name of a project's stored Overview.
+pub(crate) const OVERVIEW_NAME: &str = "Overview";
+
 /// Columns of a dashboard without its definition, in the order [`InfoRecord`] declares them.
 const INFO_COLUMNS: &str =
     "id, name, description, version, created_by, updated_by, created_at, updated_at";
@@ -91,6 +94,15 @@ pub(crate) enum UpdateOutcome {
     Stale(i64),
     /// There is no such dashboard in the project.
     Missing,
+}
+
+/// What [`save_overview`] did.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum OverviewSave {
+    /// Stored. `created` is true when this save made the project's copy.
+    Saved { row: DashboardRow, created: bool },
+    /// The expected version is not the stored one (0 when nothing is stored). Carries the stored version.
+    Stale(i64),
 }
 
 /// A `dashboards` row without its definition, as SQLite returns it.
@@ -180,7 +192,8 @@ pub(crate) async fn list(
     let project_text = project.to_string();
     let after_id = after.map(|(_, id)| id.to_string());
 
-    let mut sql = format!("SELECT {INFO_COLUMNS} FROM dashboards WHERE project_id = ?");
+    let mut sql =
+        format!("SELECT {INFO_COLUMNS} FROM dashboards WHERE project_id = ? AND kind = 'custom'");
     if after.is_some() {
         sql.push_str(" AND (name > ? OR (name = ? AND id > ?))");
     }
@@ -215,7 +228,8 @@ pub(crate) async fn get(
     id: Uuid,
 ) -> Result<Option<DashboardRow>, MetaError> {
     let sql = format!(
-        "SELECT {INFO_COLUMNS}, definition FROM dashboards WHERE project_id = ? AND id = ?"
+        "SELECT {INFO_COLUMNS}, definition FROM dashboards \
+         WHERE project_id = ? AND id = ? AND kind = 'custom'"
     );
     let record: Option<FullRecord> = sqlx::query_as(AssertSqlSafe(sql))
         .bind(project.to_string())
@@ -234,10 +248,12 @@ pub(crate) async fn count(
     conn: &mut SqliteConnection,
     project: ProjectId,
 ) -> Result<i64, MetaError> {
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM dashboards WHERE project_id = ?")
-        .bind(project.to_string())
-        .fetch_one(&mut *conn)
-        .await?;
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM dashboards WHERE project_id = ? AND kind = 'custom'",
+    )
+    .bind(project.to_string())
+    .fetch_one(&mut *conn)
+    .await?;
     Ok(count)
 }
 
@@ -317,7 +333,7 @@ pub(crate) async fn update(
          description = CASE WHEN ? THEN ? ELSE description END, \
          definition = COALESCE(?, definition), \
          version = version + 1, updated_at = ?, updated_by = ? \
-         WHERE project_id = ? AND id = ? AND version = ?",
+         WHERE project_id = ? AND id = ? AND version = ? AND kind = 'custom'",
     )
     .bind(changes.name.as_deref())
     .bind(changes.description.is_some())
@@ -334,12 +350,13 @@ pub(crate) async fn update(
         let row = get_on(conn, project, id).await?;
         return Ok(row.map_or(UpdateOutcome::Missing, UpdateOutcome::Updated));
     }
-    let stored: Option<i64> =
-        sqlx::query_scalar("SELECT version FROM dashboards WHERE project_id = ? AND id = ?")
-            .bind(project.to_string())
-            .bind(id.to_string())
-            .fetch_optional(&mut *conn)
-            .await?;
+    let stored: Option<i64> = sqlx::query_scalar(
+        "SELECT version FROM dashboards WHERE project_id = ? AND id = ? AND kind = 'custom'",
+    )
+    .bind(project.to_string())
+    .bind(id.to_string())
+    .fetch_optional(&mut *conn)
+    .await?;
     Ok(stored.map_or(UpdateOutcome::Missing, UpdateOutcome::Stale))
 }
 
@@ -350,7 +367,8 @@ async fn get_on(
     id: Uuid,
 ) -> Result<Option<DashboardRow>, MetaError> {
     let sql = format!(
-        "SELECT {INFO_COLUMNS}, definition FROM dashboards WHERE project_id = ? AND id = ?"
+        "SELECT {INFO_COLUMNS}, definition FROM dashboards \
+         WHERE project_id = ? AND id = ? AND kind = 'custom'"
     );
     let record: Option<FullRecord> = sqlx::query_as(AssertSqlSafe(sql))
         .bind(project.to_string())
@@ -370,9 +388,125 @@ pub(crate) async fn delete(
     project: ProjectId,
     id: Uuid,
 ) -> Result<bool, MetaError> {
-    let result = sqlx::query("DELETE FROM dashboards WHERE project_id = ? AND id = ?")
+    let result =
+        sqlx::query("DELETE FROM dashboards WHERE project_id = ? AND id = ? AND kind = 'custom'")
+            .bind(project.to_string())
+            .bind(id.to_string())
+            .execute(&mut *conn)
+            .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// The stored Overview of the project behind `conn`: the row of kind `overview`.
+async fn overview_on(
+    conn: &mut SqliteConnection,
+    project: ProjectId,
+) -> Result<Option<DashboardRow>, MetaError> {
+    let sql = format!(
+        "SELECT {INFO_COLUMNS}, definition FROM dashboards \
+         WHERE project_id = ? AND kind = 'overview'"
+    );
+    let record: Option<FullRecord> = sqlx::query_as(AssertSqlSafe(sql))
         .bind(project.to_string())
-        .bind(id.to_string())
+        .fetch_optional(&mut *conn)
+        .await?;
+    record.map(row_from).transpose()
+}
+
+/// The project's stored Overview, if a member saved one. Reads like [`get`].
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or a stored value does not decode.
+pub(crate) async fn get_overview(
+    pool: &SqlitePool,
+    project: ProjectId,
+) -> Result<Option<DashboardRow>, MetaError> {
+    let mut conn = pool.acquire().await?;
+    overview_on(&mut conn, project).await
+}
+
+/// Creates (`expected` `None`, nothing stored) or updates (`expected` is the stored version) the
+/// project's Overview. Writes like [`update`]: a stale or missing expectation comes back as
+/// [`OverviewSave::Stale`] with the stored version, 0 when nothing is stored.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when a query fails or a stored value does not decode.
+pub(crate) async fn save_overview(
+    conn: &mut SqliteConnection,
+    project: ProjectId,
+    expected: Option<i64>,
+    definition: &Definition,
+    user: Uuid,
+    now: i64,
+) -> Result<OverviewSave, MetaError> {
+    let stored: Option<i64> = sqlx::query_scalar(
+        "SELECT version FROM dashboards WHERE project_id = ? AND kind = 'overview'",
+    )
+    .bind(project.to_string())
+    .fetch_optional(&mut *conn)
+    .await?;
+    let text = definition_text(definition)?;
+    match (stored, expected) {
+        (None, None) => {
+            let id = Uuid::now_v7();
+            sqlx::query(
+                "INSERT INTO dashboards \
+                 (id, project_id, name, description, definition, version, kind, created_by, \
+                  updated_by, created_at, updated_at) \
+                 VALUES (?, ?, ?, NULL, ?, 1, 'overview', ?, ?, ?, ?)",
+            )
+            .bind(id.to_string())
+            .bind(project.to_string())
+            .bind(OVERVIEW_NAME)
+            .bind(text)
+            .bind(user.to_string())
+            .bind(user.to_string())
+            .bind(now)
+            .bind(now)
+            .execute(&mut *conn)
+            .await?;
+            let row = overview_on(conn, project)
+                .await?
+                .ok_or_else(|| corrupt("id"))?;
+            Ok(OverviewSave::Saved { row, created: true })
+        }
+        (Some(version), Some(expected)) if version == expected => {
+            sqlx::query(
+                "UPDATE dashboards SET definition = ?, version = version + 1, updated_at = ?, \
+                 updated_by = ? WHERE project_id = ? AND kind = 'overview'",
+            )
+            .bind(text)
+            .bind(now)
+            .bind(user.to_string())
+            .bind(project.to_string())
+            .execute(&mut *conn)
+            .await?;
+            let row = overview_on(conn, project)
+                .await?
+                .ok_or_else(|| corrupt("id"))?;
+            Ok(OverviewSave::Saved {
+                row,
+                created: false,
+            })
+        }
+        (None, Some(_)) => Ok(OverviewSave::Stale(0)),
+        (Some(version), _) => Ok(OverviewSave::Stale(version)),
+    }
+}
+
+/// Deletes the project's Overview, so the preset shows again. Returns whether a row was deleted.
+///
+/// # Errors
+///
+/// Returns [`MetaError::Db`] when the delete fails.
+pub(crate) async fn reset_overview(
+    conn: &mut SqliteConnection,
+    project: ProjectId,
+) -> Result<bool, MetaError> {
+    let result = sqlx::query("DELETE FROM dashboards WHERE project_id = ? AND kind = 'overview'")
+        .bind(project.to_string())
         .execute(&mut *conn)
         .await?;
     Ok(result.rows_affected() > 0)

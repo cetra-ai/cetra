@@ -77,6 +77,10 @@ const handlers: HttpHandler[] = [
     return HttpResponse.json(dashboard, { status: 201 });
   }),
   http.get(ONE, ({ params }) => {
+    // The project's Overview has its own routes; the manifest serves its GET until the overview mock exists.
+    if (params.id === "overview") {
+      return undefined;
+    }
     const dashboard = dashboards.find((item) => item.id === params.id);
     return dashboard ? HttpResponse.json(dashboard) : notFound();
   }),

@@ -438,6 +438,17 @@ pub struct UpdateDashboard {
     pub definition: Option<Definition>,
 }
 
+/// The body of `PUT /api/v1/projects/{project}/dashboards/overview`.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SaveOverview {
+    /// The version the caller read; absent when the project shows the built-in preset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<i64>,
+    /// The widgets.
+    pub definition: Definition,
+}
+
 /// Query parameters of `GET /api/v1/projects/{project}/dashboards`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, IntoParams)]
 #[serde(deny_unknown_fields)]

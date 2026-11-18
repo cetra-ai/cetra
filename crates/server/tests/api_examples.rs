@@ -415,6 +415,7 @@ fn static_files_match_their_types() {
     roundtrip::<Page<SavedView>>("static/saved-views.json");
     roundtrip::<Page<DashboardSummary>>("static/dashboards.json");
     roundtrip::<Dashboard>("static/dashboard.json");
+    roundtrip::<Dashboard>("static/dashboard-overview.json");
     roundtrip::<Problem>("static/dashboard-stale.json");
     roundtrip::<SqlQueryResult>("static/sql-result.json");
     roundtrip::<Page<Deletion>>("static/deletions.json");
@@ -632,7 +633,8 @@ fn generated_files_roundtrip() {
             "list_deletions" => roundtrip::<Page<Deletion>>(&example.file),
             "list_org_deletions" => roundtrip::<Page<Deletion>>(&example.file),
             "get_org_usage" => roundtrip::<OrgUsage>(&example.file),
-            "get_dashboard" | "list_dashboards" | "create_dashboard" | "update_dashboard" => {}
+            "get_dashboard" | "list_dashboards" | "create_dashboard" | "update_dashboard"
+            | "get_overview" | "save_overview" => {}
             "get_deletion" | "create_deletion" | "delete_project" | "delete_org" => {
                 roundtrip::<Deletion>(&example.file);
             }
