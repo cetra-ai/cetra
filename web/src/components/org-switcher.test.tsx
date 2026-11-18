@@ -51,6 +51,27 @@ it("creates an organization and opens it", async () => {
   expect(await screen.findByRole("heading", { name: "Beta" })).toBeInTheDocument();
 });
 
+it("lists the demo org last, badged", async () => {
+  const demo = {
+    id: "01900000-0000-7000-8000-000000000020",
+    slug: "cetra-demo",
+    name: "cetra Demo",
+    role: "viewer",
+    demo: true,
+  };
+  server.use(
+    http.get("/api/auth/me", () =>
+      HttpResponse.json({ user: meFixture.user, orgs: [demo, ...meFixture.orgs] }),
+    ),
+  );
+
+  const { user } = await renderApp("/acme");
+  await user.click(screen.getByRole("button", { name: "Acme" }));
+  const items = screen.getAllByRole("menuitemradio");
+  expect(items.map((item) => item.textContent)).toEqual(["Acme", "cetra DemoDemo"]);
+  expect(items[1]).toHaveTextContent("Demo");
+});
+
 it("links to the create URL when users may not create orgs", async () => {
   server.use(
     http.get("/api/auth/config", () =>

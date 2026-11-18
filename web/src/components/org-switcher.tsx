@@ -5,6 +5,7 @@ import { type ReactNode, useState } from "react";
 import { authConfigQuery } from "@/api/auth";
 import { $api } from "@/api/client";
 import { NewOrgDialog } from "@/components/settings/new-org-dialog";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -21,6 +22,7 @@ export function OrgSwitcher() {
   const navigate = useNavigate();
   const { data: me } = $api.useSuspenseQuery("get", "/api/auth/me");
   const membership = me.orgs.find((org) => org.slug === current);
+  const demo = me.orgs.find((org) => org.demo);
   const [creating, setCreating] = useState(false);
   const { data: config } = useQuery(authConfigQuery);
   // While the config loads, creating is offered. Off on a cloud cell (D-P-31).
@@ -60,11 +62,22 @@ export function OrgSwitcher() {
               void navigate({ to: "/$org", params: { org: slug } });
             }}
           >
-            {me.orgs.map((org) => (
-              <DropdownMenuRadioItem key={org.id} value={org.slug}>
-                {org.name}
-              </DropdownMenuRadioItem>
-            ))}
+            {me.orgs
+              .filter((org) => !org.demo)
+              .map((org) => (
+                <DropdownMenuRadioItem key={org.id} value={org.slug}>
+                  {org.name}
+                </DropdownMenuRadioItem>
+              ))}
+            {demo === undefined ? null : (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuRadioItem value={demo.slug}>
+                  {demo.name}
+                  <Badge variant="secondary">Demo</Badge>
+                </DropdownMenuRadioItem>
+              </>
+            )}
           </DropdownMenuRadioGroup>
           {createItem === null ? null : (
             <>

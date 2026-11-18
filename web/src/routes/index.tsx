@@ -8,7 +8,8 @@ import { Button } from "@/components/ui/button";
 export const Route = createFileRoute("/")({
   loader: async ({ context }) => {
     const me = await context.queryClient.ensureQueryData(meQuery);
-    const org = me.orgs[0];
+    // The demo org opens only when the user has no other org (D187).
+    const org = me.orgs.find((item) => !item.demo) ?? me.orgs[0];
     if (org) {
       throw redirect({ to: "/$org", params: { org: org.slug } });
     }
