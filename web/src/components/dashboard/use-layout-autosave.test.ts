@@ -33,13 +33,13 @@ type Props = {
 
 function setup(
   options: {
-    persist?: (definition: Definition, version: number | undefined) => Promise<unknown>;
+    persist?: (definition: Definition, version: number | undefined) => Promise<{ version: number }>;
     onConflict?: () => void;
     onError?: (message: string) => void;
     props?: Partial<Props>;
   } = {},
 ) {
-  const persist = vi.fn(options.persist ?? (async () => undefined));
+  const persist = vi.fn(options.persist ?? (async () => ({ version: 2 })));
   const onConflict = vi.fn(options.onConflict ?? (() => undefined));
   const onError = vi.fn(options.onError ?? (() => undefined));
   const initial: Props = { definition: SAVED, version: 1, enabled: true, ...options.props };
@@ -115,9 +115,9 @@ describe("the layout autosave", () => {
       release = resolve;
     });
     const persist = vi
-      .fn<(definition: Definition, version: number | undefined) => Promise<unknown>>()
-      .mockImplementationOnce(() => gate)
-      .mockImplementation(async () => undefined);
+      .fn<(definition: Definition, version: number | undefined) => Promise<{ version: number }>>()
+      .mockImplementationOnce(() => gate.then(() => ({ version: 2 })))
+      .mockImplementation(async () => ({ version: 3 }));
     const { result, rerender } = setup({ persist });
 
     act(() => result.current.onMoveEnd(moved(2)));
@@ -138,6 +138,94 @@ describe("the layout autosave", () => {
     expect(persist).toHaveBeenCalledTimes(2);
     expect(persist.mock.calls[1]?.[1]).toBe(2);
     expect(persist.mock.calls[1]?.[0].widgets[1]?.layout.x).toBe(4);
+  });
+
+  it("a move during the first Overview save is saved next with version 1", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const persist = vi
+      .fn<(definition: Definition, version: number | undefined) => Promise<{ version: number }>>()
+      .mockImplementationOnce(() => gate.then(() => ({ version: 1 })))
+      .mockImplementation(async () => ({ version: 2 }));
+    // The Overview is not stored yet: its first save names no version.
+    const { result } = setup({ persist, props: { version: undefined } });
+
+    act(() => result.current.onMoveEnd(moved(2)));
+    advance(AUTOSAVE_DELAY_MS);
+    expect(persist.mock.calls[0]?.[1]).toBeUndefined();
+
+    act(() => result.current.onMoveEnd(moved(4)));
+    release();
+    await settle();
+    // The prop still shows no version: the follow-up save names the one the first save stored.
+    advance(AUTOSAVE_DELAY_MS);
+    await settle();
+
+    expect(persist).toHaveBeenCalledTimes(2);
+    expect(persist.mock.calls[1]?.[1]).toBe(1);
+  });
+
+  it("a flush while a save is in flight uses the saved version", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const persist = vi
+      .fn<(definition: Definition, version: number | undefined) => Promise<{ version: number }>>()
+      .mockImplementationOnce(() => gate.then(() => ({ version: 2 })))
+      .mockImplementation(async () => ({ version: 3 }));
+    const { result, rerender } = setup({ persist });
+
+    act(() => result.current.onMoveEnd(moved(2)));
+    advance(AUTOSAVE_DELAY_MS);
+    act(() => result.current.onMoveEnd(moved(4)));
+    // Leaving Edit's quiet mode flushes: the move waits for the running save.
+    rerender({ definition: SAVED, version: 1, enabled: false });
+    expect(persist).toHaveBeenCalledTimes(1);
+
+    release();
+    await settle();
+    await settle();
+
+    expect(persist).toHaveBeenCalledTimes(2);
+    expect(persist.mock.calls[1]?.[1]).toBe(2);
+  });
+
+  it("a move after reset saves without a version", async () => {
+    const { result, rerender, persist } = setup();
+    act(() => result.current.onMoveEnd(moved(6)));
+    advance(AUTOSAVE_DELAY_MS);
+    await settle();
+    expect(persist.mock.calls[0]?.[1]).toBe(1);
+
+    // The prop still shows version 1 (it lags the save), then Reset makes it undefined.
+    rerender({ definition: SAVED, version: undefined, enabled: true });
+    act(() => result.current.onMoveEnd(moved(2)));
+    advance(AUTOSAVE_DELAY_MS);
+    await settle();
+
+    expect(persist).toHaveBeenCalledTimes(2);
+    expect(persist.mock.calls[1]?.[1]).toBeUndefined();
+  });
+
+  it("an undo is dropped when the stored version changes (reset)", async () => {
+    const { result, rerender } = setup();
+    act(() => result.current.onMoveEnd(moved(6)));
+    advance(AUTOSAVE_DELAY_MS);
+    await settle();
+    expect(result.current.undo).not.toBeNull();
+
+    // The prop arrives at the saved version: the Undo stays.
+    rerender({ definition: SAVED, version: 2, enabled: true });
+    expect(result.current.undo).not.toBeNull();
+
+    // Reset: the Overview has no version.
+    rerender({ definition: SAVED, version: undefined, enabled: true });
+    expect(result.current.undo).toBeNull();
+    advance(UNDO_MS * 2);
+    expect(result.current.undo).toBeNull();
   });
 
   it("offers undo for 10 s, and undo saves the layout before the moves", async () => {

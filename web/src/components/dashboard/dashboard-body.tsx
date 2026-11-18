@@ -98,7 +98,9 @@ type Open =
  * own, so a layout save still pending for one goes to that one.
  */
 export function DashboardBody(props: ComponentProps<typeof DashboardGrid>) {
-  const key = props.target.kind === "overview" ? "overview" : props.target.dashboard.id;
+  const { org, project } = useProject();
+  const id = props.target.kind === "overview" ? "overview" : props.target.dashboard.id;
+  const key = `${org}/${project}/${id}`;
   return <DashboardGrid key={key} {...props} />;
 }
 
@@ -169,7 +171,7 @@ function DashboardGrid({
       reload();
       setNotice("Someone else changed this dashboard. It was reloaded.");
     },
-    onError: setNotice,
+    onError: (message) => setNotice(`${message} The layout change was not saved.`),
   });
   const shown: Definition = draft ?? autosave.pending ?? definition;
   // A draft is kept while the grid is not shown (a narrow window), so it still guards the page.
@@ -216,14 +218,13 @@ function DashboardGrid({
    * Saves the definition, read at `at`. The Overview's first save names no version and creates
    * the stored copy; a stale version is a 409.
    */
-  async function persist(next: Definition, at: number | undefined) {
+  async function persist(next: Definition, at: number | undefined): Promise<Dashboard> {
     if (target.kind === "overview") {
-      await saveOverview.mutateAsync(
+      return saveOverview.mutateAsync(
         at === undefined ? { definition: next } : { version: at, definition: next },
       );
-      return;
     }
-    await update.mutateAsync({ version: at ?? 0, definition: next });
+    return update.mutateAsync({ version: at ?? 0, definition: next });
   }
 
   function cancelEditing() {

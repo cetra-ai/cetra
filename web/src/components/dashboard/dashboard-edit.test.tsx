@@ -762,7 +762,9 @@ it("Edit is disabled while a layout save is pending", async () => {
   expect(screen.getByRole("button", { name: "Edit" })).toBeDisabled();
 
   release();
-  expect(await screen.findByText("Try again later.")).toBeInTheDocument();
+  expect(
+    await screen.findByText("Try again later. The layout change was not saved."),
+  ).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Edit" })).toBeEnabled();
   await user.click(screen.getByRole("button", { name: "Edit" }));
   expect(screen.getByRole("button", { name: "Save" })).toBeInTheDocument();
@@ -869,6 +871,28 @@ it("Reset to default shows only with a stored copy, asks first, and brings the p
 
     expect(await screen.findByRole("heading", { level: 2, name: "Volume" })).toBeInTheDocument();
     expect(requests.calls.some((call) => call.method === "DELETE")).toBe(true);
+  } finally {
+    requests.stop();
+  }
+});
+
+it("Reset after an autosaved move hides the Undo bar", async () => {
+  server.use(...dashboardHandlers(seedDashboards(), STORED_OVERVIEW));
+  const requests = recordRequests();
+  try {
+    const { user } = await renderApp(OVERVIEW_URL);
+    await screen.findByRole("region", { name: REQUESTS });
+    dropWidget(REQUESTS, 1);
+    await overviewSaveBody(requests);
+    expect(await screen.findByRole("button", { name: "Undo" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Dashboard actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Reset to default" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Reset" }));
+
+    expect(await screen.findByRole("heading", { level: 2, name: "Volume" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
   } finally {
     requests.stop();
   }

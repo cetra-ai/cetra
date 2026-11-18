@@ -28,8 +28,11 @@ type Args = {
   version: number | undefined;
   /** A member (or a demo-org viewer on a browser dashboard), not in Edit, not narrow. */
   enabled: boolean;
-  /** Saves a definition with the version read; resolves once the query cache holds the saved version. */
-  persist: (definition: Definition, version: number | undefined) => Promise<unknown>;
+  /**
+   * Saves a definition at the version given; resolves with the saved version once the query cache
+   * holds it.
+   */
+  persist: (definition: Definition, version: number | undefined) => Promise<{ version: number }>;
   /** A 409: the move is dropped; reload. */
   onConflict: () => void;
   /** Another failure: the move is dropped; show the message. */
@@ -59,6 +62,13 @@ export function useLayoutAutosave({
   const latest = useRef({ definition, version, persist, onConflict, onError });
   latest.current = { definition, version, persist, onConflict, onError };
 
+  /**
+   * The version the last save of this hook left stored. It is used for the next save until the
+   * `version` prop changes: the prop may still show the version read before that save.
+   */
+  const savedVersionRef = useRef<number | undefined>(undefined);
+  /** The version the offered Undo was saved at; a `version` prop that differs drops the Undo. */
+  const undoVersionRef = useRef<number | undefined>(undefined);
   const pendingRef = useRef<Definition | undefined>(undefined);
   /** The saved definition from before the first of the pending moves; Undo restores it. */
   const beforeRef = useRef<Definition | undefined>(undefined);
@@ -115,13 +125,17 @@ export function useLayoutAutosave({
   async function run(next: Definition) {
     setSaving(true);
     try {
-      await latest.current.persist(next, latest.current.version);
+      const saved = await latest.current.persist(
+        next,
+        savedVersionRef.current ?? latest.current.version,
+      );
+      savedVersionRef.current = saved.version;
       // A move made during the save stays pending: it is saved next, with the version the grid
       // then holds.
       if (pendingRef.current === next) {
         setPending(undefined);
         if (undoableRef.current) {
-          offerUndo();
+          offerUndo(saved.version);
         }
       }
     } catch (error) {
@@ -146,10 +160,11 @@ export function useLayoutAutosave({
     flushRef.current = false;
   }
 
-  function offerUndo() {
+  function offerUndo(version: number) {
     if (undoTimer.current !== undefined) {
       clearTimeout(undoTimer.current);
     }
+    undoVersionRef.current = version;
     setUndoState({ run: undoSave });
     undoTimer.current = setTimeout(() => {
       undoTimer.current = undefined;
@@ -202,6 +217,17 @@ export function useLayoutAutosave({
     }
     drain();
   }
+
+  // A changed version: the save it answers for is no longer ahead of the grid, so the kept version
+  // goes. An Undo offered at another version (a Reset, or a change made elsewhere) goes with it.
+  // A prop that still shows the old version runs no effect, so the Undo survives a lagging read.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: clearUndo reads refs and stable setters only
+  useEffect(() => {
+    savedVersionRef.current = undefined;
+    if (undoTimer.current !== undefined && version !== undoVersionRef.current) {
+      clearUndo();
+    }
+  }, [version]);
 
   // Edit starting, a hidden dashboard, a narrow window or a role change: an Undo would revert a
   // later Edit save, so it goes, and a pending move is saved now.

@@ -114,6 +114,7 @@ function RememberOpenItem() {
  * and a custom dashboard share this view; switching dashboards remounts it.
  */
 function KeptDashboard() {
+  const { org, project } = useProject();
   const overview = useMatch({ from: "/$org/$project/dashboard/", shouldThrow: false });
   const custom = useMatch({ from: "/$org/$project/dashboard/$dashboardId", shouldThrow: false });
   const match = overview ?? custom;
@@ -128,7 +129,7 @@ function KeptDashboard() {
   return (
     <Activity mode={match ? "visible" : "hidden"}>
       <DashboardView
-        key={dashboardId ?? "overview"}
+        key={`${org}/${project}/${dashboardId ?? "overview"}`}
         search={search}
         dashboardId={dashboardId}
         active={match !== undefined}
