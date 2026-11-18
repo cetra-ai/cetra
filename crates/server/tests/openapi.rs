@@ -309,6 +309,31 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/projects/{project}/saved-views/{id}",
         "delete_saved_view",
     ),
+    (
+        "get",
+        "/api/v1/projects/{project}/dashboards",
+        "list_dashboards",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/dashboards",
+        "create_dashboard",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/dashboards/{id}",
+        "get_dashboard",
+    ),
+    (
+        "patch",
+        "/api/v1/projects/{project}/dashboards/{id}",
+        "update_dashboard",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/dashboards/{id}",
+        "delete_dashboard",
+    ),
     ("post", "/api/v1/projects/{project}/sql", "run_sql"),
     (
         "get",
@@ -736,6 +761,8 @@ const QUERY_OR_BODY: &[&str] = &[
     "list_scores",
     "list_saved_views",
     "get_saved_view",
+    "list_dashboards",
+    "get_dashboard",
     "get_metrics",
     "get_facets",
     "list_deletions",
@@ -800,6 +827,7 @@ const TAGS: &[&str] = &[
     "model_prices",
     "schema",
     "saved_views",
+    "dashboards",
     "sql",
     "metrics",
     "media",
@@ -1024,10 +1052,14 @@ fn document_lint() {
             // The handler always answers 204. CSRF is the shared origin check.
         } else if *id == "create_scores" || *id == "create_key_scores" {
             expected_errors.extend(["400", "401", "402", "403", "404", "413", "429"]);
-        } else if *id == "delete_score" || *id == "delete_saved_view" {
+        } else if *id == "delete_score" || *id == "delete_saved_view" || *id == "delete_dashboard" {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
-        } else if *id == "create_saved_view" || *id == "update_saved_view" {
-            // 409: unsharing a view whose owner was deleted.
+        } else if *id == "create_saved_view"
+            || *id == "update_saved_view"
+            || *id == "create_dashboard"
+            || *id == "update_dashboard"
+        {
+            // 409: unsharing a view whose owner was deleted, a dashboard past its limit, or a stale version.
             expected_errors.extend(["400", "401", "403", "404", "409", "413", "415", "429"]);
         } else if *id == "post_feedback" {
             expected_errors.extend(["400", "401", "402", "403", "404", "413", "429"]);
@@ -1195,6 +1227,7 @@ fn document_lint() {
         ("ApiKeyPage", "ApiKey"),
         ("PersonalTokenPage", "PersonalToken"),
         ("SavedViewPage", "SavedView"),
+        ("DashboardPage", "DashboardSummary"),
         ("LlmConnectionPage", "LlmConnection"),
         ("DeletionPage", "Deletion"),
         ("EvaluatorPage", "Evaluator"),
@@ -1479,6 +1512,7 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "ApiKeyPage",
         "PersonalTokenPage",
         "SavedViewPage",
+        "DashboardPage",
         "LlmConnectionPage",
         "DeletionPage",
         "EvaluatorPage",

@@ -1309,6 +1309,58 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{project}/dashboards": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List dashboards
+         * @description Dashboards of the project, by name then id. Leaves out the definition; get one dashboard for its widgets. Readable with a read key and a read-only token.
+         */
+        get: operations["list_dashboards"];
+        put?: never;
+        /**
+         * Create a dashboard
+         * @description Creates a dashboard at version 1. Every widget query is checked, and every filter is parsed, before the write. A project holds at most 100 dashboards (409). A session or a read-write personal access token with role member or above; API keys cannot write dashboards.
+         */
+        post: operations["create_dashboard"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/dashboards/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get a dashboard
+         * @description One dashboard with its definition. Any other id is 404.
+         */
+        get: operations["get_dashboard"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete a dashboard
+         * @description Deletes the dashboard. Same roles as create.
+         */
+        delete: operations["delete_dashboard"];
+        options?: never;
+        head?: never;
+        /**
+         * Update a dashboard
+         * @description Changes the fields given; omitted fields are unchanged. `version` must be the stored version, else 409 with the stored version in `detail`. A successful update raises the version by one. Same roles as create.
+         */
+        patch: operations["update_dashboard"];
+        trace?: never;
+    };
     "/api/v1/projects/{project}/dataset-trends": {
         parameters: {
             query?: never;
@@ -2849,6 +2901,11 @@ export interface components {
             next_cursor: string | null;
         };
         /**
+         * @description How a measure aggregates its rows.
+         * @enum {string}
+         */
+        AggBody: "count" | "count_distinct" | "sum" | "avg" | "min" | "max" | "p50" | "p75" | "p90" | "p95" | "p99" | "rate";
+        /**
          * @description What a rule measures and when it breaches (D-K-2).
          *
          *     Fields that do not apply to `metric` must be absent. A stored or returned
@@ -3284,6 +3341,15 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** @description The split of a widget query by one field. */
+        BreakdownBody: {
+            /** @description The field the rows are grouped by. */
+            field: string;
+            /** @description Groups kept, 1 to 20. Default 5. */
+            limit?: number;
+            /** @description Whether the rows of every other value form one more group. Default true. */
+            other?: boolean;
+        };
         /**
          * @description The period of a rule budget, in UTC.
          * @enum {string}
@@ -3343,6 +3409,27 @@ export interface components {
             /** @description The channel accepted the message. */
             ok: boolean;
         };
+        /** @description How a chart widget draws its data. */
+        Chart: {
+            /**
+             * Format: int64
+             * @description Fades the buckets with fewer rows than this, 1 to 1000. Bar only.
+             */
+            fade_below?: number;
+            /** @description Shows each row's share of the first measure's total. Table only. */
+            share?: boolean;
+            /** @description One small chart per group. Line only. */
+            split?: boolean;
+            /** @description Stacks the series. Bar and area only. */
+            stacked?: boolean;
+            /** @description The chart type. */
+            type: components["schemas"]["ChartType"];
+        };
+        /**
+         * @description Type of a chart widget.
+         * @enum {string}
+         */
+        ChartType: "line" | "bar" | "area" | "bar_h" | "number" | "table";
         /**
          * @description One column of a logical view.
          *
@@ -3521,6 +3608,15 @@ export interface components {
             secret?: string;
             /** @description `slack` and `webhook`: the URL. */
             url?: string;
+        };
+        /** @description Body of `POST /api/v1/projects/{project}/dashboards`. */
+        CreateDashboard: {
+            /** @description The widgets. */
+            definition: components["schemas"]["Definition"];
+            /** @description Free text, 0 to 500 characters. */
+            description?: string;
+            /** @description Display name, 1 to 100 characters after trimming. */
+            name: string;
         };
         /** @description `POST /api/v1/projects/{project}/datasets` body. */
         CreateDatasetRequest: {
@@ -3804,6 +3900,89 @@ export interface components {
             /** @description The stored token, without the secret. */
             token: components["schemas"]["PersonalToken"];
         };
+        /** @description A dashboard with its definition. */
+        Dashboard: {
+            /**
+             * Format: date-time
+             * @description Creation time, nanoseconds since the Unix epoch. JSON is RFC 3339.
+             */
+            created_at: string;
+            /**
+             * Format: uuid
+             * @description Creator. Omitted when the user is gone.
+             */
+            created_by?: string;
+            /** @description The widgets. */
+            definition: components["schemas"]["Definition"];
+            /** @description Free text, 0 to 500 characters. */
+            description?: string;
+            /**
+             * Format: uuid
+             * @description Dashboard id.
+             */
+            id: string;
+            /** @description Display name. Names are not unique. */
+            name: string;
+            /**
+             * Format: date-time
+             * @description Last update, nanoseconds since the Unix epoch. JSON is RFC 3339.
+             */
+            updated_at: string;
+            /**
+             * Format: uuid
+             * @description Last editor. Omitted when the user is gone.
+             */
+            updated_by?: string;
+            /**
+             * Format: int64
+             * @description Incremented by every change. A `PATCH` names the version it read.
+             */
+            version: number;
+        };
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        DashboardPage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["DashboardSummary"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+        };
+        /** @description A dashboard without its definition, as the list returns it. */
+        DashboardSummary: {
+            /**
+             * Format: date-time
+             * @description Creation time, nanoseconds since the Unix epoch. JSON is RFC 3339.
+             */
+            created_at: string;
+            /**
+             * Format: uuid
+             * @description Creator. Omitted when the user is gone.
+             */
+            created_by?: string;
+            /** @description Free text. */
+            description?: string;
+            /**
+             * Format: uuid
+             * @description Dashboard id.
+             */
+            id: string;
+            /** @description Display name. */
+            name: string;
+            /**
+             * Format: date-time
+             * @description Last update, nanoseconds since the Unix epoch. JSON is RFC 3339.
+             */
+            updated_at: string;
+            /**
+             * Format: uuid
+             * @description Last editor. Omitted when the user is gone.
+             */
+            updated_by?: string;
+            /**
+             * Format: int64
+             * @description Incremented by every change.
+             */
+            version: number;
+        };
         /** @description A dataset (D-J-2, D-J-3). */
         Dataset: {
             /**
@@ -3943,6 +4122,11 @@ export interface components {
             data: components["schemas"]["DatasetVersion"][];
             /** @description Opaque cursor for the next page, or null when this is the last page. */
             next_cursor: string | null;
+        };
+        /** @description The stored definition of a dashboard: the widgets, in order. */
+        Definition: {
+            /** @description Up to 50 widgets. */
+            widgets: components["schemas"]["Widget"][];
         };
         /** @description `POST …/datasets/{dataset}/items/delete` body (D-J-23): 1 to 1 000 distinct live item ids. */
         DeleteItemsRequest: {
@@ -5376,6 +5560,29 @@ export interface components {
          * @enum {string}
          */
         LatencyTarget: "trace" | "llm_span";
+        /** @description Position and size of a widget on the 12-column grid. */
+        Layout: {
+            /**
+             * Format: int64
+             * @description Height in rows, 1 to 40.
+             */
+            h: number;
+            /**
+             * Format: int64
+             * @description Width in columns, 1 to 12; `x + w` is at most 12.
+             */
+            w: number;
+            /**
+             * Format: int64
+             * @description Column, 0 to 11.
+             */
+            x: number;
+            /**
+             * Format: int64
+             * @description Row, 0 to 1000.
+             */
+            y: number;
+        };
         /**
          * @description Where the instance licence stands (D-P-7).
          * @enum {string}
@@ -5504,6 +5711,17 @@ export interface components {
             orgs: components["schemas"]["OrgMembership"][];
             /** @description The signed-in user. */
             user: components["schemas"]["User"];
+        };
+        /** @description One measure of a widget query. */
+        MeasureBody: {
+            /** @description How the rows aggregate. */
+            agg: components["schemas"]["AggBody"];
+            /** @description The field aggregated. Absent for `count` and `rate`. */
+            field?: string;
+            /** @description Name shown in the legend, 0 to 60 characters. Not part of the query. */
+            label?: string;
+            /** @description A filter over the source view. Required for `rate`. */
+            where?: string;
         };
         /** @description A user as seen by the other members of an org. */
         MemberUser: {
@@ -7995,6 +8213,20 @@ export interface components {
             /** @description `slack` and `webhook`: a new URL. */
             url?: string;
         };
+        /** @description Body of `PATCH /api/v1/projects/{project}/dashboards/{id}`. Omitted fields are unchanged. */
+        UpdateDashboard: {
+            /** @description The widgets. */
+            definition?: components["schemas"]["Definition"];
+            /** @description Free text, 0 to 500 characters. Omitted: unchanged. `""`: cleared (stored as none). */
+            description?: string;
+            /** @description Display name, 1 to 100 characters after trimming. */
+            name?: string;
+            /**
+             * Format: int64
+             * @description The version the caller read. Must be the stored one, else `409`.
+             */
+            version: number;
+        };
         /**
          * @description `PATCH /api/v1/projects/{project}/datasets/{dataset}` body. An absent field is unchanged;
          *     `null` clears `description` or a schema.
@@ -8304,6 +8536,42 @@ export interface components {
             /** @description View name. */
             name: components["schemas"]["ViewName"];
         };
+        /** @description One widget of a dashboard. */
+        Widget: {
+            /** @description Chart settings. Chart widgets only. */
+            chart?: components["schemas"]["Chart"];
+            /** @description 1 to 64 characters of `[A-Za-z0-9_-]`, unique in the dashboard. */
+            id: string;
+            /** @description Chart or heading. */
+            kind: components["schemas"]["WidgetKind"];
+            /** @description Position and size. */
+            layout: components["schemas"]["Layout"];
+            /** @description The data. Chart widgets only. */
+            query?: components["schemas"]["WidgetQueryBody"];
+            /** @description Title, 0 to 100 characters (1 to 100 for a heading). */
+            title: string;
+        };
+        /**
+         * @description Kind of a widget.
+         * @enum {string}
+         */
+        WidgetKind: "chart" | "heading";
+        /** @description A widget's query: one source, its measures and an optional breakdown. */
+        WidgetQueryBody: {
+            /** @description The split, if any. */
+            breakdown?: components["schemas"]["BreakdownBody"];
+            /** @description A filter over the source view. */
+            filter?: string;
+            /** @description One to six measures. */
+            measures: components["schemas"]["MeasureBody"][];
+            /** @description The view the query reads. */
+            source: components["schemas"]["WidgetSourceBody"];
+        };
+        /**
+         * @description The view a widget query reads.
+         * @enum {string}
+         */
+        WidgetSourceBody: "traces" | "spans" | "scores";
     };
     responses: never;
     parameters: never;
@@ -14242,6 +14510,417 @@ export interface operations {
             };
             /** @description The resource does not exist. */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_dashboards: {
+        parameters: {
+            query?: {
+                /** @description Maximum number of items to return (1–1000, default 50). */
+                limit?: components["schemas"]["Limit"];
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of dashboards. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DashboardPage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    create_dashboard: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateDashboard"];
+            };
+        };
+        responses: {
+            /** @description The created dashboard. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Dashboard"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is not JSON. */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_dashboard: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dashboard id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The dashboard. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Dashboard"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_dashboard: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dashboard id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    update_dashboard: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dashboard id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateDashboard"];
+            };
+        };
+        responses: {
+            /** @description The updated dashboard. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Dashboard"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is not JSON. */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };

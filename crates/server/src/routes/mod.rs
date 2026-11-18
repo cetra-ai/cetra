@@ -8,6 +8,7 @@ pub(crate) mod auth;
 pub(crate) mod backfills;
 pub(crate) mod channels;
 pub(crate) mod connections;
+pub(crate) mod dashboards;
 pub(crate) mod datasets;
 pub(crate) mod deletions;
 pub(crate) mod entitlements;

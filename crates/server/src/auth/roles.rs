@@ -114,6 +114,9 @@ pub(crate) enum ProjectPerm {
     /// Datasets and experiments: create, edit, delete, items, import, add from trace, experiment
     /// results (D-J-5). Member and above; a `write` API key; a read-write personal access token.
     ManageDatasets,
+    /// Create, edit and delete dashboards (D-C-16). Member and above; no API key; a read-only
+    /// personal access token cannot write (the access layer).
+    ManageDashboards,
     /// Read project data through a POST with a body, such as the SQL console (D-H-4).
     /// Same holders as `View`; a read-only PAT and a `read` key may use it on POST.
     Query,
@@ -220,9 +223,11 @@ impl ProjectPerm {
     pub(crate) fn min_role(self) -> Role {
         match self {
             Self::View | Self::Query | Self::ViewMembers => Role::Viewer,
-            Self::Annotate | Self::ManageEvaluation | Self::ManageAlerts | Self::ManageDatasets => {
-                Role::Member
-            }
+            Self::Annotate
+            | Self::ManageEvaluation
+            | Self::ManageAlerts
+            | Self::ManageDatasets
+            | Self::ManageDashboards => Role::Member,
             Self::ManageSettings | Self::ManageMembers | Self::Delete | Self::Drop => Role::Admin,
         }
     }
@@ -236,6 +241,7 @@ impl ProjectPerm {
             | Self::ManageSettings
             | Self::ManageMembers
             | Self::ManageAlerts
+            | Self::ManageDashboards
             | Self::ViewMembers
             | Self::Drop => None,
         }
@@ -324,6 +330,9 @@ mod tests {
             ProjectPerm::ManageDatasets.key_scope(),
             Some(KeyScope::Write)
         );
+        // Dashboards: member and above; an API key cannot manage them (D-C-16).
+        assert_eq!(ProjectPerm::ManageDashboards.min_role(), Role::Member);
+        assert!(ProjectPerm::ManageDashboards.key_scope().is_none());
         let viewer =
             effective_project_role(OrgRole::Viewer, None).expect("viewer sees the project");
         assert!(viewer < ProjectPerm::Annotate.min_role());

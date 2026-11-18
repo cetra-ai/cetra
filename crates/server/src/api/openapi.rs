@@ -46,6 +46,11 @@ use super::connections::{
     LlmConnectionTestError, LlmConnectionTestResult, StructuredOutputMode, TestErrorClass,
     TestLlmConnectionRequest, UpdateLlmConnectionRequest,
 };
+use super::dashboards::{
+    AggBody, BreakdownBody, Chart, ChartType, CreateDashboard, Dashboard, DashboardListParams,
+    DashboardSummary, Definition, Layout, MeasureBody, UpdateDashboard, Widget, WidgetKind,
+    WidgetQueryBody, WidgetSourceBody,
+};
 use super::datasets::{
     AddItemsRequest, AddItemsResponse, ChangeLimit, CreateDatasetRequest, Dataset, DatasetItem,
     DatasetItemListParams, DatasetItemParams, DatasetListParams, DatasetTrend, DatasetVersion,
@@ -280,6 +285,21 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<SavedView>();
     set.insert::<CreateSavedView>();
     set.insert::<UpdateSavedView>();
+    set.insert::<Dashboard>();
+    set.insert::<DashboardSummary>();
+    set.insert::<CreateDashboard>();
+    set.insert::<UpdateDashboard>();
+    set.insert::<Definition>();
+    set.insert::<Widget>();
+    set.insert::<Layout>();
+    set.insert::<Chart>();
+    set.insert::<ChartType>();
+    set.insert::<WidgetKind>();
+    set.insert::<WidgetQueryBody>();
+    set.insert::<WidgetSourceBody>();
+    set.insert::<MeasureBody>();
+    set.insert::<AggBody>();
+    set.insert::<BreakdownBody>();
     set.insert::<MetricsResponse>();
     set.insert::<FacetsResponse>();
     set.insert::<SqlQueryRequest>();
@@ -297,6 +317,7 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert_page::<ProjectApiKey>("ApiKeyPage");
     set.insert_page::<PersonalToken>("PersonalTokenPage");
     set.insert_page::<SavedView>("SavedViewPage");
+    set.insert_page::<DashboardSummary>("DashboardPage");
     set.insert::<EvaluatorKind>();
     set.insert::<OutputScoreBody>();
     set.insert::<Evaluator>();
@@ -525,6 +546,10 @@ pub fn openapi() -> OpenApi {
             tag("model_prices", "Custom and built-in model prices"),
             tag("schema", "Filter and SQL catalog."),
             tag("saved_views", "Saved list views and SQL queries."),
+            tag(
+                "dashboards",
+                "Custom dashboards and their widget definitions.",
+            ),
             tag("sql", "SQL console over the project's views."),
             tag("metrics", "Dashboard metrics."),
             tag("media", "Extracted media blobs."),
@@ -852,6 +877,7 @@ fn paths() -> Paths {
     let paths = model_price_paths(paths);
     let paths = org_model_price_paths(paths);
     let paths = saved_view_paths(paths);
+    let paths = dashboard_paths(paths);
     let paths = sql_paths(paths);
     let paths = deletion_paths(paths);
     let paths = channel_paths(paths);
@@ -3814,6 +3840,96 @@ fn saved_view_paths(paths: PathsBuilder) -> PathsBuilder {
         )
         .path(
             format!("{PROJECT}/saved-views/{{id}}"),
+            PathItem::new(HttpMethod::Delete, delete),
+        )
+}
+
+fn dashboard_paths(paths: PathsBuilder) -> PathsBuilder {
+    let list = operation("list_dashboards", "dashboards", "List dashboards")
+        .description(Some(
+            "Dashboards of the project, by name then id. Leaves out the definition; get one dashboard for its widgets. Readable with a read key and a read-only token.",
+        ))
+        .parameters(Some(with_query::<DashboardListParams>(vec![
+            project_param(),
+        ])))
+        .responses(responses(
+            "200",
+            json_named("DashboardPage", "One page of dashboards."),
+            QUERY_ERRORS,
+        ))
+        .build();
+    let create = operation("create_dashboard", "dashboards", "Create a dashboard")
+        .description(Some(
+            "Creates a dashboard at version 1. Every widget query is checked, and every filter is parsed, before the write. A project holds at most 100 dashboards (409). A session or a read-write personal access token with role member or above; API keys cannot write dashboards.",
+        ))
+        .parameters(Some(vec![project_param()]))
+        .request_body(Some(json_body("CreateDashboard")))
+        .responses(responses(
+            "201",
+            json_of::<Dashboard>("The created dashboard."),
+            &[400, 401, 403, 404, 409, 413, 415, 429],
+        ))
+        .build();
+    let get = operation("get_dashboard", "dashboards", "Get a dashboard")
+        .description(Some(
+            "One dashboard with its definition. Any other id is 404.",
+        ))
+        .parameters(Some(vec![
+            project_param(),
+            path_uuid("id", "Dashboard id."),
+        ]))
+        .responses(responses(
+            "200",
+            json_of::<Dashboard>("The dashboard."),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    let update = operation("update_dashboard", "dashboards", "Update a dashboard")
+        .description(Some(
+            "Changes the fields given; omitted fields are unchanged. `version` must be the stored version, else 409 with the stored version in `detail`. A successful update raises the version by one. Same roles as create.",
+        ))
+        .parameters(Some(vec![
+            project_param(),
+            path_uuid("id", "Dashboard id."),
+        ]))
+        .request_body(Some(json_body("UpdateDashboard")))
+        .responses(responses(
+            "200",
+            json_of::<Dashboard>("The updated dashboard."),
+            &[400, 401, 403, 404, 409, 413, 415, 429],
+        ))
+        .build();
+    let delete = operation("delete_dashboard", "dashboards", "Delete a dashboard")
+        .description(Some("Deletes the dashboard. Same roles as create."))
+        .parameters(Some(vec![
+            project_param(),
+            path_uuid("id", "Dashboard id."),
+        ]))
+        .responses(responses(
+            "204",
+            ResponseBuilder::new().description("Deleted.").build(),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    paths
+        .path(
+            format!("{PROJECT}/dashboards"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/dashboards"),
+            PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/dashboards/{{id}}"),
+            PathItem::new(HttpMethod::Get, get),
+        )
+        .path(
+            format!("{PROJECT}/dashboards/{{id}}"),
+            PathItem::new(HttpMethod::Patch, update),
+        )
+        .path(
+            format!("{PROJECT}/dashboards/{{id}}"),
             PathItem::new(HttpMethod::Delete, delete),
         )
 }

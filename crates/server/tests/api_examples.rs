@@ -17,10 +17,11 @@ use cetra_server::api::account::{
 use cetra_server::api::admin::{AdminLicense, AdminSettings, AdminUser, CreatedAdminUser};
 use cetra_server::api::alerts::{AlertEvent, AlertRule, NotificationChannel};
 use cetra_server::api::backfills::{Backfill, BackfillEstimate, CreateBackfillRequest};
-use cetra_server::api::common::Page;
+use cetra_server::api::common::{Page, Problem};
 use cetra_server::api::connections::{
     CreateLlmConnectionRequest, LlmConnection, LlmConnectionTestResult,
 };
+use cetra_server::api::dashboards::{Dashboard, DashboardSummary};
 use cetra_server::api::datasets::{
     AddItemsRequest, CreateDatasetRequest, Dataset, DatasetItem, DatasetVersion, EditItemsResponse,
     ExperimentTrends, FromTraceRequest, FromTracesResult, ImportMapping, ImportPreview,
@@ -413,6 +414,9 @@ fn static_files_match_their_types() {
     roundtrip::<CreatedPersonalToken>("static/personal-token-created.json");
     roundtrip::<SchemaResponse>("static/schema.json");
     roundtrip::<Page<SavedView>>("static/saved-views.json");
+    roundtrip::<Page<DashboardSummary>>("static/dashboards.json");
+    roundtrip::<Dashboard>("static/dashboard.json");
+    roundtrip::<Problem>("static/dashboard-stale.json");
     roundtrip::<SqlQueryResult>("static/sql-result.json");
     roundtrip::<Page<Deletion>>("static/deletions.json");
     roundtrip::<Deletion>("static/deletion.json");
@@ -629,6 +633,7 @@ fn generated_files_roundtrip() {
             "list_deletions" => roundtrip::<Page<Deletion>>(&example.file),
             "list_org_deletions" => roundtrip::<Page<Deletion>>(&example.file),
             "get_org_usage" => roundtrip::<OrgUsage>(&example.file),
+            "get_dashboard" | "list_dashboards" | "create_dashboard" | "update_dashboard" => {}
             "get_deletion" | "create_deletion" | "delete_project" | "delete_org" => {
                 roundtrip::<Deletion>(&example.file);
             }

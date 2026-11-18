@@ -1,0 +1,105 @@
+{
+  "id": "01900000-0000-7000-8000-000000000f01",
+  "name": "Support overview",
+  "description": "Traffic, errors and latency of the support bot.",
+  "definition": {
+    "widgets": [
+      {
+        "id": "heading-traffic",
+        "title": "Traffic",
+        "layout": {
+          "x": 0,
+          "y": 0,
+          "w": 12,
+          "h": 1
+        },
+        "kind": "heading"
+      },
+      {
+        "id": "requests-by-model",
+        "title": "Requests by model",
+        "layout": {
+          "x": 0,
+          "y": 1,
+          "w": 8,
+          "h": 6
+        },
+        "kind": "chart",
+        "chart": {
+          "type": "line"
+        },
+        "query": {
+          "source": "traces",
+          "measures": [
+            {
+              "agg": "count",
+              "label": "Requests"
+            }
+          ],
+          "breakdown": {
+            "field": "models",
+            "limit": 5
+          }
+        }
+      },
+      {
+        "id": "error-rate",
+        "title": "Error rate",
+        "layout": {
+          "x": 8,
+          "y": 1,
+          "w": 4,
+          "h": 3
+        },
+        "kind": "chart",
+        "chart": {
+          "type": "number"
+        },
+        "query": {
+          "source": "traces",
+          "measures": [
+            {
+              "agg": "rate",
+              "where": "error_count > 0",
+              "label": "Errors"
+            }
+          ]
+        }
+      },
+      {
+        "id": "slowest-operations",
+        "title": "Slowest operations",
+        "layout": {
+          "x": 0,
+          "y": 7,
+          "w": 12,
+          "h": 5
+        },
+        "kind": "chart",
+        "chart": {
+          "type": "table",
+          "share": true
+        },
+        "query": {
+          "source": "traces",
+          "measures": [
+            {
+              "agg": "p95",
+              "field": "duration_ns",
+              "label": "p95 duration"
+            }
+          ],
+          "breakdown": {
+            "field": "name",
+            "limit": 10
+          }
+        }
+      }
+    ]
+  },
+  "version": 3,
+  "created_by": "01900000-0000-7000-8000-000000000100",
+  "updated_by": "01900000-0000-7000-8000-000000000100",
+  "created_at": "2026-01-01T09:00:00.000000000Z",
+  "updated_at": "2026-01-01T10:30:00.000000000Z"
+}

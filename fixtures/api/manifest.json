@@ -10,6 +10,14 @@
     "file": "static/experiment-comparison.json"
   },
   {
+    "operation_id": "create_dashboard",
+    "path_params": {},
+    "query": {},
+    "status": 201,
+    "content_type": "application/json",
+    "file": "static/dashboard.json"
+  },
+  {
     "operation_id": "create_deletion",
     "path_params": {},
     "query": {},
@@ -88,6 +96,16 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/auth-config.json"
+  },
+  {
+    "operation_id": "get_dashboard",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000f01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/dashboard.json"
   },
   {
     "operation_id": "get_dataset",
@@ -878,6 +896,14 @@
     "file": "static/channels.json"
   },
   {
+    "operation_id": "list_dashboards",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/dashboards.json"
+  },
+  {
     "operation_id": "list_dataset_items",
     "path_params": {
       "dataset": "01900000-0000-7000-8000-000000000c01"
@@ -1463,5 +1489,25 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/sql-result.json"
+  },
+  {
+    "operation_id": "update_dashboard",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000f01"
+    },
+    "query": {},
+    "status": 409,
+    "content_type": "application/problem+json",
+    "file": "static/dashboard-stale.json"
+  },
+  {
+    "operation_id": "update_dashboard",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000f01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/dashboard.json"
   }
 ]
