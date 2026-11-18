@@ -37,6 +37,8 @@ use crate::routes::read::{READ_TIMEOUT, open_query, page_limit};
 
 /// A 256 KiB definition plus the rest of the body fits (spec 04).
 const DASHBOARD_BODY_LIMIT: usize = 300 * 1024;
+/// A widget query is a few filters and six measures; the cache keys on the body.
+const WIDGET_QUERY_BODY_LIMIT: usize = 64 * 1024;
 /// Longest serialized `definition`, in bytes (spec 04).
 const MAX_DEFINITION_BYTES: usize = 256 * 1024;
 /// Most widgets in one dashboard (spec 04).
@@ -95,7 +97,7 @@ pub(crate) fn routes() -> Vec<RouteDef> {
                 session_only: false,
             },
             documented: true,
-            handler: post(query_widget),
+            handler: post(query_widget).layer(DefaultBodyLimit::max(WIDGET_QUERY_BODY_LIMIT)),
         },
         RouteDef {
             method: Method::PATCH,
@@ -131,8 +133,35 @@ pub(crate) struct WidgetKey {
     project: ProjectId,
     /// The org's data window in days (D-P-21).
     data_access_days: Option<u64>,
-    /// The request body as JSON. The field order is the struct's, so equal bodies give equal text.
+    /// The range start and end in nanoseconds, so equal instants share a key whatever their text.
+    from: i64,
+    to: i64,
+    /// The rest of the request body as JSON, with `from` and `to` cleared. The field order is the
+    /// struct's, so equal bodies give equal text.
     body: String,
+}
+
+impl WidgetKey {
+    /// The key of `body`, a request over `[from, to)` in nanoseconds (see [`query_range`]).
+    fn new(
+        project: ProjectId,
+        data_access_days: Option<u64>,
+        from: i64,
+        to: i64,
+        body: &WidgetQueryRequest,
+    ) -> Result<Self, ApiError> {
+        let mut rest = body.clone();
+        rest.from.clear();
+        rest.to.clear();
+        Ok(Self {
+            project,
+            data_access_days,
+            from,
+            to,
+            body: serde_json::to_string(&rest)
+                .map_err(|error| ApiError::Internal(Box::new(error)))?,
+        })
+    }
 }
 
 impl ProjectKey for WidgetKey {
@@ -639,13 +668,18 @@ async fn query_widget(
     error::Json(body): error::Json<WidgetQueryRequest>,
 ) -> Result<error::Json<WidgetQueryResponse>, SharedError> {
     let (from, to) = query_range(&body)?;
-    let key = WidgetKey {
-        project: access.project.id,
-        data_access_days: crate::entitlements::of(&state, access.project.org_id)
+    // The shape is checked before the cache, so a refused query never takes a cache slot.
+    let query = body.query.to_storage();
+    storage::validate_shape(&query).map_err(widget_error)?;
+    let key = WidgetKey::new(
+        access.project.id,
+        crate::entitlements::of(&state, access.project.org_id)
             .limits
             .data_access_days,
-        body: serde_json::to_string(&body).map_err(|error| ApiError::Internal(Box::new(error)))?,
-    };
+        from,
+        to,
+        &body,
+    )?;
     let (org, project) = (access.project.org_id, access.project.id);
     let clock = &state.clock;
     let response = state
@@ -656,7 +690,6 @@ async fn query_widget(
             || async {
                 let window = storage::TimeWindow::new(from, to)?;
                 let ctx = open_query(&state, org, project, None).await?;
-                let query = body.query.to_storage();
                 let data = storage::widget_query(
                     &ctx,
                     storage::WidgetRequest {
@@ -730,6 +763,7 @@ fn expression_field(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     use base64::Engine;
@@ -738,6 +772,7 @@ mod tests {
 
     use super::*;
     use crate::api::common::ProblemCode;
+    use crate::api::dashboards::WidgetTotalResponse;
     use crate::auth::roles::OrgRole;
     use crate::meta::projects::delete_project;
     use crate::test_support::{Seeded, TestApp, set_limits};
@@ -2006,5 +2041,114 @@ mod tests {
         );
         let (_, limited) = post_query(&app, &seeded, &body).await;
         assert_eq!(limited["rows"][0]["values"], json!([1.0]));
+    }
+
+    /// The key the endpoint gives `body`, built as the endpoint builds it.
+    fn key_of(app: &TestApp, seeded: &Seeded, body: &Value) -> WidgetKey {
+        let request: WidgetQueryRequest =
+            serde_json::from_value(body.clone()).expect("a request body");
+        let (from, to) = query_range(&request).expect("a valid range");
+        let days = crate::entitlements::of(&app.state, seeded.org_id)
+            .limits
+            .data_access_days;
+        WidgetKey::new(seeded.project.id, days, from, to, &request).expect("the key serializes")
+    }
+
+    /// Asks the widget cache for `key`. The computation counts its runs and answers an empty
+    /// total. True when the key was not cached, so the computation ran.
+    async fn computed(app: &TestApp, key: WidgetKey) -> bool {
+        let ran = AtomicBool::new(false);
+        let clock = &app.state.clock;
+        let answer = app
+            .state
+            .widget_cache
+            .get_or_compute(
+                key,
+                || clock.now_ns(),
+                || async {
+                    ran.store(true, Ordering::SeqCst);
+                    Ok(WidgetQueryResponse::Total(WidgetTotalResponse {
+                        rows: Vec::new(),
+                    }))
+                },
+            )
+            .await;
+        assert!(answer.is_ok(), "the probe answers");
+        ran.load(Ordering::SeqCst)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dashboards_query_body_over_64_kib_is_too_large() {
+        let (app, seeded) = loaded().await;
+        let mut body = total_body();
+        body["filter"] = json!("x".repeat(70 * 1024));
+        let response = send(
+            &app,
+            Method::POST,
+            &query_path(seeded.project.id),
+            &seeded.cookie,
+            Some(body),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    /// The shape is checked before the cache: a cached answer under the refused body's key is
+    /// not served, and the refusal does not touch the cache.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refused_shape_is_checked_before_the_cache() {
+        let (app, seeded) = loaded().await;
+        let mut body = series_body();
+        body["query"]["measures"] = json!([{"agg": "sum", "field": "name"}]);
+        assert!(computed(&app, key_of(&app, &seeded, &body)).await);
+
+        let (status, answer) = post_query(&app, &seeded, &body).await;
+        assert_refused_at(status, &answer, "bad_request", "query.measures[0].field");
+        assert!(
+            !computed(&app, key_of(&app, &seeded, &body)).await,
+            "the seeded entry is still cached"
+        );
+    }
+
+    /// Equal instants share one answer, whatever the text of `from` and `to`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_range_is_keyed_by_its_instants() {
+        let (app, seeded) = loaded().await;
+        let (status, answer) = post_query(&app, &seeded, &total_body()).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+
+        let mut same = total_body();
+        same["from"] = json!("2026-01-01T10:00:00.000+00:00");
+        same["to"] = json!("2026-01-01T11:00:00.000+00:00");
+        assert!(
+            !computed(&app, key_of(&app, &seeded, &same)).await,
+            "the same instants are one computation"
+        );
+    }
+
+    /// Bodies that differ only in an answer-changing field each compute under their own key.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bodies_differing_in_an_answer_field_have_different_keys() {
+        let (app, seeded) = loaded().await;
+        let base = total_body();
+        let mut with_eval = total_body();
+        with_eval["include_eval"] = json!(true);
+        let mut with_experiments = total_body();
+        with_experiments["include_experiments"] = json!(true);
+        let mut filtered = total_body();
+        filtered["filter"] = json!("name = 'x'");
+        let mut grouped = total_body();
+        grouped["group_by"] = json!("model");
+
+        for body in [base.clone(), with_eval, with_experiments, filtered, grouped] {
+            assert!(
+                computed(&app, key_of(&app, &seeded, &body)).await,
+                "a new key: {body}"
+            );
+        }
+        assert!(
+            !computed(&app, key_of(&app, &seeded, &base)).await,
+            "the base body is still cached"
+        );
     }
 }
