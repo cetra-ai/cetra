@@ -4,13 +4,16 @@ import {
   createRootRoute,
   createRoute,
   createRouter,
+  Outlet,
   RouterProvider,
 } from "@tanstack/react-router";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, Suspense, useState } from "react";
 import { expect, it } from "vitest";
 import { ListToolbar } from "@/components/list-toolbar";
+import { TopBarLayout } from "@/components/shell/top-bar-layout";
+import { ThemeProvider } from "@/components/theme-provider";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
 /** The toolbar under a `/$org` route, which the time range picker reads. */
@@ -141,4 +144,58 @@ it("names the Include trigger without a count when nothing is included", async (
     name: "Include evaluation and experiment traces",
   });
   expect(trigger).toHaveTextContent(/^Include$/);
+});
+
+/** Renders `page` on a project's traces route, inside the top bar layout, so the bar has a slot. */
+async function renderInTopBar(page: ReactNode) {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const root = createRootRoute({ component: () => <Outlet /> });
+  const org = createRoute({
+    getParentRoute: () => root,
+    path: "$org",
+    component: () => <Outlet />,
+  });
+  const project = createRoute({
+    getParentRoute: () => org,
+    path: "$project",
+    component: () => <Outlet />,
+  });
+  const traces = createRoute({
+    getParentRoute: () => project,
+    path: "traces",
+    component: () => <TopBarLayout>{page}</TopBarLayout>,
+  });
+  const router = createRouter({
+    routeTree: root.addChildren([org.addChildren([project.addChildren([traces])])]),
+    history: createMemoryHistory({ initialEntries: ["/acme/support-bot/traces"] }),
+  });
+  render(
+    <QueryClientProvider client={queryClient}>
+      <ThemeProvider>
+        <Suspense fallback={null}>
+          <RouterProvider router={router} />
+        </Suspense>
+      </ThemeProvider>
+    </QueryClientProvider>,
+  );
+  await router.load();
+}
+
+it("renders the views menu in the top bar slot", async () => {
+  await renderInTopBar(
+    <TooltipProvider>
+      <ListToolbar
+        range={{ kind: "preset", preset: "15m" }}
+        onRange={() => undefined}
+        onRefresh={() => undefined}
+        evalOn={false}
+        onEval={() => undefined}
+        expOn={false}
+        onExp={() => undefined}
+        views={<span>Views</span>}
+      />
+    </TooltipProvider>,
+  );
+  const crumb = await screen.findByRole("navigation", { name: "Breadcrumb" });
+  expect(await within(crumb).findByText("Views")).toBeInTheDocument();
 });

@@ -1,6 +1,7 @@
 import { RefreshCw } from "lucide-react";
 import { type ReactNode, type RefObject, useEffect, useRef, useState } from "react";
 import { useShortcut } from "@/components/command/use-shortcut";
+import { TopBarCrumb } from "@/components/shell/top-bar-slot";
 import { TimeRangePicker } from "@/components/time-range/time-range-picker";
 import { Button } from "@/components/ui/button";
 import {
@@ -106,7 +107,7 @@ export function ListToolbar({
           onExp={onExp}
         />
         {columns}
-        {views}
+        {views ? <TopBarCrumb>{views}</TopBarCrumb> : null}
         {loaded !== undefined ? (
           <span className="shrink-0 text-caption text-muted-foreground">{loaded} loaded</span>
         ) : null}

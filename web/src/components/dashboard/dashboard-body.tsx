@@ -11,6 +11,7 @@ import {
 import { problemMessage, problemOf } from "@/api/problem";
 import { UnsavedChangesGuard } from "@/components/settings/unsaved-changes";
 import { useProject } from "@/components/shell/project-context";
+import { TopBarCrumb } from "@/components/shell/top-bar-slot";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -378,7 +379,11 @@ function DashboardGrid({
   return (
     <>
       <div className="flex flex-wrap items-center gap-2 pb-3">
-        <DashboardSwitcher dashboard={custom} />
+        {active ? (
+          <TopBarCrumb>
+            <DashboardSwitcher dashboard={custom} />
+          </TopBarCrumb>
+        ) : null}
         <div className="ml-auto flex flex-wrap items-center gap-2">
           {/* In the header row, so it never moves the grid when it shows or hides. */}
           {!editing && (autosave.saving || autosave.undo || notice) ? (
