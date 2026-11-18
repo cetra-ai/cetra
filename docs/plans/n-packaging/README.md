@@ -330,7 +330,7 @@ crates/cli/src/health.rs                  cetra health                          
 ```
 
 N edits only these files plus `justfile`, `AGENTS.md`, `.gitignore`, `biome.json`,
-`crates/cli/src/main.rs`, `.github/README.md` and `docs/roadmap.md`, as each sub-phase says.
+`crates/cli/src/main.rs`, `.github/CI.md` and `docs/roadmap.md`, as each sub-phase says.
 Nothing else in `crates/`, `web/` or `sdks/` changes.
 
 ## Sub-phases
@@ -450,7 +450,7 @@ Each sub-phase lists the tools it needs. If one is missing, stop and report whic
    until the rename.
 5. Delete the draft release, or keep it as a record. Tags of drafts stay.
 
-**First public release (after D46's rename):** `just release-prep 0.1.0`, merge, tag `v0.1.0`.
+**First public release (after D46's rename):** re-enable cargo deny (D188: `deny` back in `check-rust` and CI's `rust-policy` job, the weekly schedule in `advisories.yml`, `just deny` green), then `just release-prep 0.1.0`, merge, tag `v0.1.0`.
 Make the two GHCR packages public, then publish. That release is not a draft.
 
 ## Requests for Q

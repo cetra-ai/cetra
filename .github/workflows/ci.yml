@@ -72,7 +72,7 @@ jobs:
       - run: just test
       - run: just assert-clean
 
-  rust-deny:
+  rust-policy:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -84,7 +84,8 @@ jobs:
       - uses: ./.github/actions/rust # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
         with:
           cache: "false"
-      - run: just deny check-ee check-golden
+      # cargo deny is off until the first release (D188).
+      - run: just check-ee check-golden
       - run: just assert-clean
 
   web:
@@ -233,7 +234,7 @@ jobs:
       [
         rust-lint,
         rust-test,
-        rust-deny,
+        rust-policy,
         web,
         ts-sdk,
         ts-sdk-min-node,
