@@ -1,4 +1,5 @@
 import { type HttpHandler, HttpResponse, http } from "msw";
+import { uuidv7 } from "@/lib/uuid";
 import meDocument from "../../../fixtures/api/static/me.json";
 import seedDocument from "../../../fixtures/api/static/saved-views.json";
 
@@ -70,7 +71,7 @@ const handlers: HttpHandler[] = [
     }
     const now = new Date().toISOString();
     const view: StoredView = {
-      id: crypto.randomUUID(),
+      id: uuidv7(),
       kind,
       name,
       state: body.state,

@@ -1,6 +1,7 @@
 import { type HttpHandler, HttpResponse, http } from "msw";
 import type { Dashboard, Definition } from "@/lib/dashboards/types";
 import { validateDashboard, validateDefinition } from "@/lib/dashboards/validate";
+import { uuidv7 } from "@/lib/uuid";
 import dashboardDocument from "../../../fixtures/api/static/dashboard.json";
 import staleDocument from "../../../fixtures/api/static/dashboard-stale.json";
 import dashboardsDocument from "../../../fixtures/api/static/dashboards.json";
@@ -73,7 +74,7 @@ const handlers: HttpHandler[] = [
     const now = new Date().toISOString();
     const trimmed = description?.trim() ?? "";
     const dashboard: Dashboard = {
-      id: crypto.randomUUID(),
+      id: uuidv7(),
       name: name.trim(),
       ...(trimmed === "" ? {} : { description: trimmed }),
       definition,
@@ -107,7 +108,7 @@ const handlers: HttpHandler[] = [
     if (storedOverview === undefined && body.version === undefined) {
       const now = new Date().toISOString();
       storedOverview = {
-        id: crypto.randomUUID(),
+        id: uuidv7(),
         name: "Overview",
         definition,
         version: 1,

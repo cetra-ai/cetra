@@ -1,3 +1,4 @@
+import { uuidv7 } from "@/lib/uuid";
 import { breakdownFields, fieldsForAgg, isMapKeyField, mapColumns } from "./fields";
 import type {
   Agg,
@@ -125,9 +126,7 @@ export function blankForm(): WidgetForm {
   return {
     title: "",
     source: "traces",
-    measures: [
-      { rowId: crypto.randomUUID(), agg: "count", field: "", mapKey: "", where: "", label: "" },
-    ],
+    measures: [{ rowId: uuidv7(), agg: "count", field: "", mapKey: "", where: "", label: "" }],
     breakdown: false,
     breakdownField: "",
     breakdownMapKey: "",
@@ -157,7 +156,7 @@ export function formOf(widget: Widget): WidgetForm {
     measures: query.measures.map((measure) => {
       const key = measure.field !== undefined && isMapKeyField(source, measure.field);
       return {
-        rowId: crypto.randomUUID(),
+        rowId: uuidv7(),
         agg: measure.agg,
         field: key ? "" : (measure.field ?? defaultField(source, measure.agg)),
         mapKey: key ? (measure.field ?? "") : "",

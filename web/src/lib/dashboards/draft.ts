@@ -1,3 +1,4 @@
+import { uuidv7 } from "@/lib/uuid";
 import { formOf, widgetOf } from "./editor";
 import type { Definition, Layout, Widget } from "./types";
 
@@ -20,7 +21,7 @@ export function bottomOf(widgets: readonly Widget[]): number {
 
 /** A new id for a widget: `w-` and a UUID, which is 38 characters of `[A-Za-z0-9_-]`. */
 export function newWidgetId(): string {
-  return `w-${crypto.randomUUID()}`;
+  return `w-${uuidv7()}`;
 }
 
 /** The widget index an issue path names, or undefined for a dashboard-level path. */

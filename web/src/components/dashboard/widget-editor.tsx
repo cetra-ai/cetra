@@ -32,6 +32,7 @@ import {
 import { breakdownFields, fieldsForAgg, mapColumns } from "@/lib/dashboards/fields";
 import type { Definition, Widget as WidgetModel } from "@/lib/dashboards/types";
 import { validateDefinition } from "@/lib/dashboards/validate";
+import { uuidv7 } from "@/lib/uuid";
 import { Widget, type WidgetContext } from "./widget";
 
 /** How long the preview waits after the last change before it queries. */
@@ -189,7 +190,7 @@ function EditorForm({
                   measures: [
                     ...current.measures,
                     {
-                      rowId: crypto.randomUUID(),
+                      rowId: uuidv7(),
                       agg: "count",
                       field: "",
                       mapKey: "",
