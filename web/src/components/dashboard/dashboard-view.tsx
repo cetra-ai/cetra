@@ -9,6 +9,7 @@ import { ListToolbar } from "@/components/list-toolbar";
 import { useProject } from "@/components/shell/project-context";
 import { Skeleton } from "@/components/ui/skeleton";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { useDashboardStore } from "@/lib/dashboards/store";
 import type { Widget as WidgetModel } from "@/lib/dashboards/types";
 import { hasTopLevelOr, serializeChip } from "@/lib/dsl/dsl";
 import type { DashboardSearch } from "@/lib/search/dashboard";
@@ -39,8 +40,9 @@ export function DashboardView({
   const { org, project } = useProject();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const { store } = useDashboardStore(org, project);
   const dashboard = useQuery({
-    ...dashboardQuery(org, project, dashboardId ?? ""),
+    ...dashboardQuery(org, project, dashboardId ?? "", store),
     enabled: dashboardId !== undefined,
   });
   const range = rangeFromSearch(search);

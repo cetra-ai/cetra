@@ -13,6 +13,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { OVERVIEW } from "@/lib/dashboards/overview";
+import { useDashboardStore } from "@/lib/dashboards/store";
 import type { Dashboard } from "@/lib/dashboards/types";
 import { canManageDashboards } from "@/lib/roles";
 import {
@@ -53,9 +54,11 @@ function useOpenDashboard() {
 export function DashboardSwitcher({ dashboard }: { dashboard: Dashboard | undefined }) {
   const { org, project, data } = useProject();
   const open = useOpenDashboard();
-  const list = useQuery(dashboardsQuery(org, project));
+  const { store, local } = useDashboardStore(org, project);
+  const list = useQuery(dashboardsQuery(org, project, store));
   const [creating, setCreating] = useState(false);
-  const canManage = canManageDashboards(data.role);
+  // A demo-org viewer manages the dashboards kept in this browser (D-C-17).
+  const canManage = local || canManageDashboards(data.role);
   const current = dashboard?.name ?? "Overview";
 
   return (
@@ -69,7 +72,7 @@ export function DashboardSwitcher({ dashboard }: { dashboard: Dashboard | undefi
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="min-w-56">
           <DropdownMenuItem onSelect={() => open(undefined)}>Overview</DropdownMenuItem>
-          {(list.data?.data ?? []).map((item) => (
+          {(list.data ?? []).map((item) => (
             <DropdownMenuItem key={item.id} onSelect={() => open(item.id)}>
               {item.name}
             </DropdownMenuItem>
@@ -105,8 +108,9 @@ export function DashboardSwitcher({ dashboard }: { dashboard: Dashboard | undefi
 export function DashboardMenu({ dashboard }: { dashboard: Dashboard | undefined }) {
   const { org, project, data } = useProject();
   const open = useOpenDashboard();
+  const { local } = useDashboardStore(org, project);
   const [dialog, setDialog] = useState<"rename" | "duplicate" | "delete" | null>(null);
-  if (!canManageDashboards(data.role)) {
+  if (!local && !canManageDashboards(data.role)) {
     return null;
   }
   const definition = dashboard?.definition ?? OVERVIEW;

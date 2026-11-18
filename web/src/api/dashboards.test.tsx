@@ -3,6 +3,7 @@ import { renderHook, waitFor } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
 import type { ReactNode } from "react";
 import { expect, it } from "vitest";
+import { apiStore } from "@/lib/dashboards/store";
 import { dashboardHandlers, seedDashboards } from "@/mocks/dashboards";
 import { server } from "@/mocks/node";
 import { problemResponse } from "@/test/problem";
@@ -51,21 +52,21 @@ it("reads every page of the list until next_cursor is null", async () => {
     }),
   );
   const queryClient = clientFor();
-  const { result } = renderHook(() => useQuery(dashboardsQuery(ORG, PROJECT)), {
-    wrapper: wrapperFor(queryClient),
-  });
+  const { result } = renderHook(
+    () => useQuery(dashboardsQuery(ORG, PROJECT, apiStore(ORG, PROJECT))),
+    {
+      wrapper: wrapperFor(queryClient),
+    },
+  );
   await waitFor(() => expect(result.current.isSuccess).toBe(true));
   expect(seen).toEqual([null, "p2"]);
-  expect(result.current.data?.data.map((item) => item.name)).toEqual([
-    "Support overview",
-    "Second",
-  ]);
+  expect(result.current.data?.map((item) => item.name)).toEqual(["Support overview", "Second"]);
 });
 
 it("creates a dashboard and refreshes the list", async () => {
   server.use(...dashboardHandlers(seedDashboards()));
   const queryClient = clientFor();
-  const list = dashboardsQuery(ORG, PROJECT);
+  const list = dashboardsQuery(ORG, PROJECT, apiStore(ORG, PROJECT));
   // An observed query is refetched by invalidation; the cache holds the new list.
   renderHook(() => useQuery(list), { wrapper: wrapperFor(queryClient) });
   await waitFor(() => expect(queryClient.getQueryData(list.queryKey)).toBeDefined());
@@ -74,7 +75,7 @@ it("creates a dashboard and refreshes the list", async () => {
   });
   await result.current.mutateAsync({ name: "Costs", definition: { widgets: [] } });
   const names = queryClient.getQueryData(list.queryKey);
-  expect(names?.data.map((item) => item.name)).toContain("Costs");
+  expect(names?.map((item) => item.name)).toContain("Costs");
 });
 
 it("sends the version it read and detects a 409 as stale", async () => {

@@ -36,6 +36,7 @@ import {
   withLayouts,
 } from "@/lib/dashboards/draft";
 import { OVERVIEW } from "@/lib/dashboards/overview";
+import { useDashboardStore } from "@/lib/dashboards/store";
 import type { Dashboard, Definition, Layout, Widget } from "@/lib/dashboards/types";
 import { type FieldIssue, validateDefinition } from "@/lib/dashboards/validate";
 import { canManageDashboards } from "@/lib/roles";
@@ -95,6 +96,7 @@ export function DashboardBody({
   const { org, project, data } = useProject();
   const queryClient = useQueryClient();
   const narrow = useIsMobile();
+  const { store, local } = useDashboardStore(org, project);
   const update = useUpdateDashboard(org, project, dashboard?.id ?? "");
   const [session, setSession] = useState<Session | null>(null);
   const [open, setOpen] = useState<Open>(null);
@@ -108,7 +110,8 @@ export function DashboardBody({
     }
   }, [active]);
 
-  const canEdit = dashboard !== undefined && canManageDashboards(data.role) && !narrow;
+  // A demo-org viewer edits the dashboards kept in this browser (D-C-17).
+  const canEdit = dashboard !== undefined && (local || canManageDashboards(data.role)) && !narrow;
   const editing = canEdit && session !== null;
   const draft = editing ? session.draft : undefined;
   const shown: Definition = draft ?? dashboard?.definition ?? OVERVIEW;
@@ -273,7 +276,7 @@ export function DashboardBody({
     setOpen(null);
     if (dashboard !== undefined) {
       void queryClient.invalidateQueries({
-        queryKey: dashboardQuery(org, project, dashboard.id).queryKey,
+        queryKey: dashboardQuery(org, project, dashboard.id, store).queryKey,
       });
     }
   }
@@ -343,6 +346,12 @@ export function DashboardBody({
           {editing ? null : <DashboardMenu dashboard={dashboard} />}
         </div>
       </div>
+
+      {editing && local ? (
+        <p role="status" className="pb-3 text-caption text-muted-foreground">
+          These dashboards are stored in this browser only.
+        </p>
+      ) : null}
 
       {editing && (topIssues.length > 0 || session.message) ? (
         <div role="alert" className="flex flex-col gap-1 pb-3 text-caption text-destructive">
