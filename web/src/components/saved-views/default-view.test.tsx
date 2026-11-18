@@ -1,9 +1,54 @@
+import type { QueryClient } from "@tanstack/react-query";
 import { screen, waitFor, within } from "@testing-library/react";
-import { expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { server } from "@/mocks/node";
+import { savedViewHandlers, seedWithDefaultView } from "@/mocks/saved-views";
 import { renderApp } from "@/test/render";
 
 const ERRORS = "01900000-0000-7000-8000-000000000210";
 const CONTEXT = "cetra.list-context.acme/support-bot";
+
+const stops: (() => void)[] = [];
+
+// "Errors" is the shared default of Traces here; the fixture has no default.
+beforeEach(() => {
+  savedViewHandlers(seedWithDefaultView());
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  for (const stop of stops.splice(0)) {
+    stop();
+  }
+});
+
+/** The list and facet requests the page makes for `list`, as URLs. Stopped after the test. */
+function recordList(list: "traces" | "spans"): { rows: URL[]; facets: URL[] } {
+  const seen = { rows: [] as URL[], facets: [] as URL[] };
+  const listener = ({ request }: { request: Request }) => {
+    const url = new URL(request.url);
+    if (url.pathname.endsWith(`/support-bot/${list}`)) {
+      seen.rows.push(url);
+    } else if (url.pathname.endsWith("/facets") && url.searchParams.get("field") === "name") {
+      seen.facets.push(url);
+    }
+  };
+  server.events.on("request:start", listener);
+  stops.push(() => server.events.removeListener("request:start", listener));
+  return seen;
+}
+
+/**
+ * A navigation updates the location at once and the route's search only after its loaders, as in
+ * the browser. Slow loaders widen that gap so a render falls inside it.
+ */
+function slowLoaders(queryClient: QueryClient) {
+  const ensure = queryClient.ensureQueryData.bind(queryClient);
+  vi.spyOn(queryClient, "ensureQueryData").mockImplementation(async (options) => {
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    return ensure(options);
+  });
+}
 
 function setContext(context: object) {
   window.sessionStorage.setItem(CONTEXT, JSON.stringify(context));
@@ -126,4 +171,63 @@ it("does not read a context written for another project", async () => {
   await screen.findByRole("grid", { name: "Spans" });
   expect(router.state.location.search).toEqual({});
   expect(screen.queryByRole("status")).not.toBeInTheDocument();
+});
+
+it("asks for the default view's rows and facets only", async () => {
+  const seen = recordList("traces");
+  const { router, queryClient } = await renderApp("/acme/support-bot/traces");
+  slowLoaders(queryClient);
+  await waitFor(() => {
+    expect(router.state.location.search).toMatchObject({ view: ERRORS });
+  });
+  await screen.findByRole("grid", { name: "Traces" });
+  await waitFor(() => {
+    expect(seen.facets.length).toBeGreaterThan(0);
+  });
+  const filters = [...seen.rows, ...seen.facets].map((url) => url.searchParams.get("filter"));
+  expect(filters).not.toContain(null);
+  expect(new Set(filters)).toEqual(new Set(["status = 'error'"]));
+});
+
+it("asks for the carried filter's rows and facets only", async () => {
+  setContext({ source: "traces", filter: "user_id = 'u-1'" });
+  const seen = recordList("spans");
+  const { router, queryClient } = await renderApp("/acme/support-bot/spans");
+  slowLoaders(queryClient);
+  await waitFor(() => {
+    expect(router.state.location.search).toMatchObject({ filter: "user_id = 'u-1'" });
+  });
+  await screen.findByRole("grid", { name: "Spans" });
+  await waitFor(() => {
+    expect(seen.facets.length).toBeGreaterThan(0);
+  });
+  const filters = [...seen.rows, ...seen.facets].map((url) => url.searchParams.get("filter"));
+  expect(new Set(filters)).toEqual(new Set(["user_id = 'u-1'"]));
+});
+
+it("asks for the default view's rows only when coming back from another list", async () => {
+  const { router, queryClient } = await renderApp("/acme/support-bot/traces");
+  await waitFor(() => {
+    expect(router.state.location.search).toMatchObject({ view: ERRORS });
+  });
+  await screen.findByRole("grid", { name: "Traces" });
+  await router.navigate({
+    to: "/$org/$project/spans",
+    params: { org: "acme", project: "support-bot" },
+  });
+  await screen.findByRole("grid", { name: "Spans" });
+  slowLoaders(queryClient);
+  const seen = recordList("traces");
+  await router.navigate({
+    to: "/$org/$project/traces",
+    params: { org: "acme", project: "support-bot" },
+    state: (current) => ({ ...current, applyDefaultView: true }),
+  });
+  await waitFor(() => {
+    expect(router.state.location.search).toMatchObject({ view: ERRORS });
+  });
+  await screen.findByRole("grid", { name: "Traces" });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const filters = [...seen.rows, ...seen.facets].map((url) => url.searchParams.get("filter"));
+  expect(filters).not.toContain(null);
 });

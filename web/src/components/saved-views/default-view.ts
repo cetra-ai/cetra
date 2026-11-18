@@ -53,6 +53,10 @@ export function useDefaultSavedView(
   const mountKey = useRef(entryKey);
   const appliedKey = useRef<string | undefined>(undefined);
   const [notice, setNotice] = useState<Notice | undefined>(undefined);
+  // The entry search a default view was applied to. The list holds until the search moves off it:
+  // until then a render may see the entry search with nothing pending (the router has changed the
+  // location but not yet the search), which would start the unfiltered queries.
+  const [applying, setApplying] = useState<string | undefined>(undefined);
   const views = useQuery(savedViewsQuery(org, project, kind));
   const me = useQuery(meQuery);
   const searchKey = JSON.stringify(search);
@@ -79,6 +83,7 @@ export function useDefaultSavedView(
     }
     appliedKey.current = entryKey;
     if (match) {
+      setApplying(searchKey);
       onApply({ ...searchFromViewState(match.state), view: match.id });
       return;
     }
@@ -117,7 +122,13 @@ export function useDefaultSavedView(
     }
   }, [notice, searchKey]);
 
-  const awaiting = notice !== undefined && notice.landed === undefined;
+  useEffect(() => {
+    if (applying !== undefined && applying !== searchKey) {
+      setApplying(undefined);
+    }
+  }, [applying, searchKey]);
+
+  const awaiting = (notice !== undefined && notice.landed === undefined) || applying === searchKey;
   const visible =
     notice !== undefined &&
     (notice.kept || notice.dropped > 0) &&
