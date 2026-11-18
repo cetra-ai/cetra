@@ -206,7 +206,7 @@ mod tests {
             Err(ToolError::BadKid)
         ));
         assert!(matches!(
-            sign(&seed, "prod-1", &json!([1])),
+            sign(&seed, "license-offline-1", &json!([1])),
             Err(ToolError::NotObject)
         ));
     }

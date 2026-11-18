@@ -18,12 +18,27 @@ pub struct BuiltInKey {
     pub kinds: &'static [Kind],
 }
 
-/// Keys every build trusts. `prod-1` signs licences only and stays offline (D-P-27).
-/// `cloud-1` and `cloud-2` sign org and control-plane tokens and never licences.
+/// Keys every build trusts. `license-offline-1`, `license-1` and `license-2` sign licences only
+/// (D-P-27, D-P-73). `cloud-1` and `cloud-2` sign org and control-plane tokens and never
+/// licences.
 const RELEASE_KEYS: &[BuiltInKey] = &[
+    // Offline, kept by the operator (D-P-6).
     BuiltInKey {
-        kid: "prod-1",
+        kid: "license-offline-1",
         public: "AvIxTEduiC/amifl8QFxLYjXjPYON8LsreI7sL7UDWE=",
+        kinds: &[Kind::License],
+    },
+    // Online: the control plane signs licence keys with it as they are sold (D-P-73).
+    BuiltInKey {
+        kid: "license-1",
+        public: "YpuqTbhJ70yENEDjby5g2s2kIVqiAWpm5ja6yk3fs5k=",
+        kinds: &[Kind::License],
+    },
+    // Offline spare (D-P-73): the control plane switches to it if `license-1` leaks; a later
+    // release then removes `license-1`.
+    BuiltInKey {
+        kid: "license-2",
+        public: "OLLaZqmdRMbinKTR5MmZfB5r6K+vSgNNstOU8Ccrdec=",
         kinds: &[Kind::License],
     },
     BuiltInKey {

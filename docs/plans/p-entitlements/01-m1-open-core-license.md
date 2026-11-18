@@ -269,8 +269,8 @@ pub(crate) const TOKEN_TAG: &str = "cetra1";
 pub(crate) const MAX_TOKEN_BYTES: usize = 16 * 1024;
 
 /// Keys every build trusts: `(kid, ed25519 public key in standard base64)`.
-/// `prod-1`'s private half is kept outside the repository (generated 2026-11-14).
-const RELEASE_KEYS: &[(&str, &str)] = &[("prod-1", "AvIxTEduiC/amifl8QFxLYjXjPYON8LsreI7sL7UDWE=")];
+/// `license-offline-1`'s private half is kept outside the repository (generated 2026-11-14).
+const RELEASE_KEYS: &[(&str, &str)] = &[("license-offline-1", "AvIxTEduiC/amifl8QFxLYjXjPYON8LsreI7sL7UDWE=")];
 
 /// Keys only debug builds trust. The private half is `fixtures/license/dev-1.key`.
 const DEV_KEYS: &[(&str, &str)] = &[("dev-1", "kMTjOGaR2ry6zgwZ2p2nk0kMsOoyisgt3qfRm4JH36Y=")];
@@ -388,7 +388,7 @@ Mc43yiMNElJJ35mngBOSJw/v0zOVDZ07ssoN2uyU3rA=
 
 `dev-1.key` is the **development** ed25519 private key (32-byte seed, standard base64). It is
 public on purpose: only debug builds trust its public half (`DEV_KEYS` in
-`crates/server/src/ee/token.rs`, D-P-6). Release builds trust only `prod-1`, whose private
+`crates/server/src/ee/token.rs`, D-P-6). Release builds trust only `license-offline-1`, whose private
 key is never in this repository.
 
 `payloads/*.json` are token payloads; `tokens/*.token` are those payloads signed with
@@ -430,7 +430,7 @@ Count the `../` in `include_str!` from `crates/server/src/test_support/mod.rs` t
 4. `tampering_is_refused`: changing one character of the payload part (re-encode a different JSON body but keep the old signature) → `BadSignature`; changing the signature's last character to another base64url character that decodes to different bytes → `BadSignature` or `Malformed` (assert it is one of the two).
 5. `malformed_tokens`: `""`, `"cetra1.dev-1.abc"` (three parts), five parts, tag `cetra2`, kid `Dev-1` (uppercase), kid of 33 characters, payload `"!!"` (bad base64), signature of 10 bytes → `Malformed`; a 16 KiB + 1 byte string → `TooLarge`.
 6. `unknown_key`: a token built like `sign_token` but with kid `nope-1` → `UnknownKey`.
-7. `release_key_needs_prod_signature`: a dev-signed token whose kid is rewritten to `prod-1` → `BadSignature`.
+7. `release_key_needs_prod_signature`: a dev-signed token whose kid is rewritten to `license-offline-1` → `BadSignature`.
 8. `error_text_never_quotes_the_token`: for each `TokenError`, `to_string()` does not contain `cetra1.`.
 
 ### Done
@@ -499,7 +499,7 @@ Structure:
 - Paths for `fixtures` are relative to the workspace root: `concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/license")`.
 - clap derive with subcommands `Sign { key, kid, payload }`, `PublicKey { key }`, `Fixtures { check: bool }`.
 
-To make a production licence (documented, not run by you): convert the PEM to a seed with `openssl pkey -in cetra-signing-1.pem -outform DER | tail -c 32 | base64 > seed`, then `cetra-license sign --key seed --kid prod-1 --payload licence.json`, then delete `seed`.
+To make a production licence (documented, not run by you): convert the PEM to a seed with `openssl pkey -in cetra-signing-1.pem -outform DER | tail -c 32 | base64 > seed`, then `cetra-license sign --key seed --kid license-offline-1 --payload licence.json`, then delete `seed`.
 
 **`fixtures/license/payloads/`** (new), three files:
 
