@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use axum::extract::{DefaultBodyLimit, Extension, State};
 use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{delete, get, patch, post, put};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
@@ -26,8 +26,8 @@ use crate::api::common::{FieldError, Page};
 use crate::api::convert;
 use crate::api::dashboards::{
     ChartType, CreateDashboard, Dashboard, DashboardListParams, DashboardSummary, Definition,
-    UpdateDashboard, Widget, WidgetKind, WidgetQueryBody, WidgetQueryRequest, WidgetQueryResponse,
-    WidgetShape,
+    SaveOverview, UpdateDashboard, Widget, WidgetKind, WidgetQueryBody, WidgetQueryRequest,
+    WidgetQueryResponse, WidgetShape,
 };
 use crate::api::metrics::{MetricsBucket, MetricsGroupBy};
 use crate::auth::principal::{self, Principal};
@@ -35,7 +35,9 @@ use crate::auth::roles::ProjectPerm;
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError, field_error};
-use crate::meta::dashboards::{self as store, DashboardChanges, NewDashboard, UpdateOutcome};
+use crate::meta::dashboards::{
+    self as store, DashboardChanges, NewDashboard, OverviewSave, UpdateOutcome,
+};
 use crate::routes::read::{READ_TIMEOUT, open_query, page_limit};
 
 /// A 256 KiB definition plus the rest of the body fits (spec 04).
@@ -97,6 +99,36 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             },
             documented: true,
             handler: get(get_dashboard),
+        },
+        RouteDef {
+            method: Method::GET,
+            path: "/api/v1/projects/{project}/dashboards/overview",
+            access: Access::Project {
+                perm: ProjectPerm::View,
+                session_only: false,
+            },
+            documented: true,
+            handler: get(get_overview),
+        },
+        RouteDef {
+            method: Method::PUT,
+            path: "/api/v1/projects/{project}/dashboards/overview",
+            access: Access::Project {
+                perm: ProjectPerm::ManageDashboards,
+                session_only: false,
+            },
+            documented: true,
+            handler: put(save_overview).layer(DefaultBodyLimit::max(DASHBOARD_BODY_LIMIT)),
+        },
+        RouteDef {
+            method: Method::DELETE,
+            path: "/api/v1/projects/{project}/dashboards/overview",
+            access: Access::Project {
+                perm: ProjectPerm::ManageDashboards,
+                session_only: false,
+            },
+            documented: true,
+            handler: delete(reset_overview),
         },
         RouteDef {
             method: Method::POST,
@@ -445,6 +477,76 @@ async fn delete_dashboard(
     } else {
         Err(ApiError::NotFound)
     }
+}
+
+/// `GET /dashboards/overview`: the project's stored Overview. Without one, the preset shows and
+/// the answer is 404.
+async fn get_overview(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+) -> Result<error::Json<Dashboard>, ApiError> {
+    store::get_overview(state.meta.reader(), access.project.id)
+        .await?
+        .map(|row| error::Json(Dashboard::from(row)))
+        .ok_or(ApiError::NotFound)
+}
+
+/// `PUT /dashboards/overview`: stores the project's Overview. The first save (no `version`, and
+/// nothing stored) creates it at version 1 and answers 201; a save with the stored version
+/// updates it and answers 200. Any other version is 409 with the stored one.
+async fn save_overview(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Json(body): error::Json<SaveOverview>,
+) -> Result<Response, ApiError> {
+    let user = principal::session_user(&principal)?.id;
+    let project = access.project.id;
+    let mut errors = Vec::new();
+    check_definition(&body.definition, "definition", &mut errors);
+    refuse_if_any(errors)?;
+    check_expressions(&state, &access, &body.definition, "definition").await?;
+
+    let expected = body.version;
+    let now = state.clock.now_ns();
+    let saved = state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                store::save_overview(conn, project, expected, &body.definition, user, now).await
+            })
+        })
+        .await?;
+    match saved {
+        OverviewSave::Saved { row, created } => {
+            let dashboard_id = row.info.id;
+            tracing::info!(project_id = %project, dashboard_id = %dashboard_id, "overview saved");
+            let status = if created {
+                StatusCode::CREATED
+            } else {
+                StatusCode::OK
+            };
+            Ok((status, error::Json(Dashboard::from(row))).into_response())
+        }
+        OverviewSave::Stale(current) => Err(ApiError::StaleVersion { current }),
+    }
+}
+
+/// `DELETE /dashboards/overview`: removes the project's stored Overview, so the preset shows
+/// again. Answers 204 whether or not one was stored.
+async fn reset_overview(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+) -> Result<StatusCode, ApiError> {
+    let project = access.project.id;
+    let deleted = state
+        .meta
+        .write(move |conn| Box::pin(async move { store::reset_overview(conn, project).await }))
+        .await?;
+    if deleted {
+        tracing::info!(project_id = %project, "overview reset");
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// The position a cursor names: the `(name, id)` of the previous page's last dashboard.
@@ -2516,5 +2618,308 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cached_keys(&cache), vec![key_at(project, -1)]);
+    }
+
+    // The project's Overview (D-C-18). Stored by the first save; the custom routes never see it.
+
+    fn overview_path(seeded: &Seeded) -> String {
+        format!("/api/v1/projects/{}/dashboards/overview", seeded.project.id)
+    }
+
+    async fn save_overview_as(
+        app: &TestApp,
+        path: &str,
+        cookie: &str,
+        version: Option<i64>,
+    ) -> crate::test_support::TestResponse {
+        let mut body = json!({"definition": valid_definition()});
+        if let Some(version) = version {
+            body["version"] = json!(version);
+        }
+        send(app, Method::PUT, path, cookie, Some(body)).await
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn overview_is_absent_until_saved() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let response = send(
+            &app,
+            Method::GET,
+            &overview_path(&seeded),
+            &seeded.cookie,
+            None,
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn first_save_creates_the_overview_at_version_1() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let path = overview_path(&seeded);
+        let created = save_overview_as(&app, &path, &seeded.cookie, None).await;
+        assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+        let created: Dashboard = created.json();
+        assert_eq!(created.name, "Overview");
+        assert_eq!(created.version, 1);
+        assert_eq!(created.definition.widgets.len(), 4);
+        let read: Dashboard = send(&app, Method::GET, &path, &seeded.cookie, None)
+            .await
+            .json();
+        assert_eq!(read.id, created.id);
+        assert_eq!(read.version, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn save_with_the_read_version_updates_the_overview() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let path = overview_path(&seeded);
+        save_overview_as(&app, &path, &seeded.cookie, None).await;
+        let updated = save_overview_as(&app, &path, &seeded.cookie, Some(1)).await;
+        assert_eq!(updated.status, StatusCode::OK, "{:?}", updated.body);
+        let updated: Dashboard = updated.json();
+        assert_eq!(updated.version, 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn save_with_a_stale_version_is_409() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let path = overview_path(&seeded);
+        save_overview_as(&app, &path, &seeded.cookie, None).await;
+        save_overview_as(&app, &path, &seeded.cookie, Some(1)).await;
+        let stale = save_overview_as(&app, &path, &seeded.cookie, Some(1)).await;
+        assert_eq!(stale.status, StatusCode::CONFLICT);
+        assert_eq!(
+            stale.problem().detail.as_deref(),
+            Some("the dashboard changed; current version is 2")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn save_with_a_version_when_none_is_stored_is_409_with_0() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let refused =
+            save_overview_as(&app, &overview_path(&seeded), &seeded.cookie, Some(1)).await;
+        assert_eq!(refused.status, StatusCode::CONFLICT);
+        assert_eq!(
+            refused.problem().detail.as_deref(),
+            Some("the dashboard changed; current version is 0")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn save_without_a_version_when_one_is_stored_is_409() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let path = overview_path(&seeded);
+        save_overview_as(&app, &path, &seeded.cookie, None).await;
+        let refused = save_overview_as(&app, &path, &seeded.cookie, None).await;
+        assert_eq!(refused.status, StatusCode::CONFLICT);
+        assert_eq!(
+            refused.problem().detail.as_deref(),
+            Some("the dashboard changed; current version is 1")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_invalid_overview_definition_is_400_with_paths() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let mut widget = heading("heading-traffic");
+        widget["layout"]["x"] = json!(20);
+        let response = send(
+            &app,
+            Method::PUT,
+            &overview_path(&seeded),
+            &seeded.cookie,
+            Some(json!({"definition": {"widgets": [widget]}})),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::BAD_REQUEST);
+        let problem = response.problem();
+        assert!(
+            problem
+                .errors
+                .iter()
+                .any(|error| error.field == "definition.widgets[0].layout.x"),
+            "{problem:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reset_deletes_the_overview_and_is_idempotent() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let path = overview_path(&seeded);
+        save_overview_as(&app, &path, &seeded.cookie, None).await;
+        for _ in 0..2 {
+            let reset = send(&app, Method::DELETE, &path, &seeded.cookie, None).await;
+            assert_eq!(reset.status, StatusCode::NO_CONTENT);
+        }
+        let gone = send(&app, Method::GET, &path, &seeded.cookie, None).await;
+        assert_eq!(gone.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_overview_is_not_in_the_list_nor_counted() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let user = seeded.user_id;
+        let overview = save_overview_as(&app, &overview_path(&seeded), &seeded.cookie, None)
+            .await
+            .json::<Dashboard>();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    for index in 0..store::MAX_DASHBOARDS_PER_PROJECT {
+                        store::insert(
+                            conn,
+                            NewDashboard {
+                                project_id: project,
+                                name: format!("d{index}"),
+                                description: None,
+                                definition: definition(json!({"widgets": []})),
+                                user,
+                            },
+                            0,
+                        )
+                        .await?;
+                    }
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        let refused = send(
+            &app,
+            Method::POST,
+            &base(&seeded),
+            &seeded.cookie,
+            Some(json!({"name": "One more", "definition": {"widgets": []}})),
+        )
+        .await;
+        assert_eq!(refused.status, StatusCode::CONFLICT);
+        let page = store::list(app.state.meta.reader(), project, 1000, None)
+            .await
+            .unwrap();
+        assert_eq!(page.rows.len(), 100);
+        assert!(page.rows.iter().all(|row| row.id != overview.id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_overview_id_is_404_on_the_custom_routes() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let overview = save_overview_as(&app, &overview_path(&seeded), &seeded.cookie, None)
+            .await
+            .json::<Dashboard>();
+        let item = format!("{}/{}", base(&seeded), overview.id);
+        let read = send(&app, Method::GET, &item, &seeded.cookie, None).await;
+        assert_eq!(read.status, StatusCode::NOT_FOUND);
+        let patched = send(
+            &app,
+            Method::PATCH,
+            &item,
+            &seeded.cookie,
+            Some(json!({"version": 1, "name": "x"})),
+        )
+        .await;
+        assert_eq!(patched.status, StatusCode::NOT_FOUND);
+        let deleted = send(&app, Method::DELETE, &item, &seeded.cookie, None).await;
+        assert_eq!(deleted.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn overview_static_segment_wins_over_id() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        save_overview_as(&app, &overview_path(&seeded), &seeded.cookie, None).await;
+        let read = send(
+            &app,
+            Method::GET,
+            &overview_path(&seeded),
+            &seeded.cookie,
+            None,
+        )
+        .await;
+        assert_eq!(read.status, StatusCode::OK);
+        let read: Dashboard = read.json();
+        assert_eq!(read.name, "Overview");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn overview_access_follows_the_roles_and_keys() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let path = overview_path(&seeded);
+        let viewer = app
+            .add_member(&seeded, "viewer@example.com", OrgRole::Viewer)
+            .await;
+        let member = app
+            .add_member(&seeded, "member@example.com", OrgRole::Member)
+            .await;
+        save_overview_as(&app, &path, &seeded.cookie, None).await;
+
+        let read = send(&app, Method::GET, &path, &viewer.cookie, None).await;
+        assert_eq!(read.status, StatusCode::OK);
+        let refused = save_overview_as(&app, &path, &viewer.cookie, Some(1)).await;
+        assert_eq!(refused.status, StatusCode::FORBIDDEN);
+        let refused = send(&app, Method::DELETE, &path, &viewer.cookie, None).await;
+        assert_eq!(refused.status, StatusCode::FORBIDDEN);
+
+        let read_key = app
+            .request(Method::GET, &path)
+            .header("authorization", &format!("Bearer {}", seeded.read_key))
+            .send()
+            .await;
+        assert_eq!(read_key.status, StatusCode::OK);
+        let key_write = app
+            .request(Method::PUT, &path)
+            .header("authorization", &format!("Bearer {}", seeded.read_key))
+            .json(&json!({"version": 1, "definition": {"widgets": []}}))
+            .send()
+            .await;
+        assert_eq!(key_write.status, StatusCode::FORBIDDEN);
+
+        let allowed = save_overview_as(&app, &path, &member.cookie, Some(1)).await;
+        assert_eq!(allowed.status, StatusCode::OK);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn project_deletion_removes_its_overview() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let (other, _key) = app.add_project(&seeded, "other", None).await;
+        let project = other.id;
+        let path = format!("/api/v1/projects/{project}/dashboards/overview");
+        let saved = send(
+            &app,
+            Method::PUT,
+            &path,
+            &seeded.cookie,
+            Some(json!({"definition": valid_definition()})),
+        )
+        .await;
+        assert_eq!(saved.status, StatusCode::CREATED);
+        app.state
+            .meta
+            .write(move |conn| Box::pin(async move { delete_project(conn, project).await }))
+            .await
+            .unwrap();
+        let stored: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM dashboards WHERE project_id = ? AND kind = 'overview'",
+        )
+        .bind(project.to_string())
+        .fetch_one(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(stored, 0);
     }
 }

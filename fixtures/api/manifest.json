@@ -502,6 +502,14 @@
     "file": "static/org-usage.json"
   },
   {
+    "operation_id": "get_overview",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/dashboard-overview.json"
+  },
+  {
     "operation_id": "get_project",
     "path_params": {},
     "query": {},
@@ -1497,6 +1505,14 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/sql-result.json"
+  },
+  {
+    "operation_id": "save_overview",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/dashboard-overview.json"
   },
   {
     "operation_id": "update_dashboard",

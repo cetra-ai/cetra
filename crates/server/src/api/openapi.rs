@@ -48,8 +48,8 @@ use super::connections::{
 };
 use super::dashboards::{
     AggBody, BreakdownBody, Chart, ChartType, CreateDashboard, Dashboard, DashboardListParams,
-    DashboardSummary, Definition, Layout, MeasureBody, TotalRow, UpdateDashboard, Widget,
-    WidgetKind, WidgetPoint, WidgetQueryBody, WidgetQueryRequest, WidgetQueryResponse,
+    DashboardSummary, Definition, Layout, MeasureBody, SaveOverview, TotalRow, UpdateDashboard,
+    Widget, WidgetKind, WidgetPoint, WidgetQueryBody, WidgetQueryRequest, WidgetQueryResponse,
     WidgetSeries, WidgetSeriesResponse, WidgetShape, WidgetSourceBody, WidgetTotalResponse,
 };
 use super::datasets::{
@@ -290,6 +290,7 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<DashboardSummary>();
     set.insert::<CreateDashboard>();
     set.insert::<UpdateDashboard>();
+    set.insert::<SaveOverview>();
     set.insert::<Definition>();
     set.insert::<Widget>();
     set.insert::<Layout>();
@@ -3903,6 +3904,42 @@ fn dashboard_paths(paths: PathsBuilder) -> PathsBuilder {
             &[400, 401, 403, 404, 413, 415, 422, 429, 503],
         ))
         .build();
+    let get_overview = operation("get_overview", "dashboards", "Get the project's Overview")
+        .description(Some(
+            "The Overview the project stored with a save: its widgets and version. Without a stored one, 404, and the client shows the built-in preset. Readable with a read key and a read-only token.",
+        ))
+        .parameters(Some(vec![project_param()]))
+        .responses(responses(
+            "200",
+            json_of::<Dashboard>("The stored Overview."),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    let save_overview = operation("save_overview", "dashboards", "Save the project's Overview")
+        .description(Some(
+            "Stores the widgets as the project's Overview. With nothing stored and no `version`, creates it at version 1 (201). Otherwise `version` must be the stored version: the save updates it (200) and raises the version by one. Any other `version` is 409 with the stored version in `detail`; without a stored Overview, a `version` is also 409 with 0. Every widget query is checked before the write. Same roles as create.",
+        ))
+        .parameters(Some(vec![project_param()]))
+        .request_body(Some(json_body("SaveOverview")))
+        .responses(responses_with(
+            [
+                ("200", json_of::<Dashboard>("The updated Overview.")),
+                ("201", json_of::<Dashboard>("The created Overview.")),
+            ],
+            &[400, 401, 403, 404, 409, 413, 415, 429],
+        ))
+        .build();
+    let reset_overview = operation("reset_overview", "dashboards", "Reset the project's Overview")
+        .description(Some(
+            "Deletes the project's stored Overview, so the built-in preset shows again. Answers 204 whether or not one was stored. Same roles as create.",
+        ))
+        .parameters(Some(vec![project_param()]))
+        .responses(responses(
+            "204",
+            ResponseBuilder::new().description("Reset.").build(),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
     let delete = operation("delete_dashboard", "dashboards", "Delete a dashboard")
         .description(Some("Deletes the dashboard. Same roles as create."))
         .parameters(Some(vec![
@@ -3939,6 +3976,18 @@ fn dashboard_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/dashboards/query"),
             PathItem::new(HttpMethod::Post, query),
+        )
+        .path(
+            format!("{PROJECT}/dashboards/overview"),
+            PathItem::new(HttpMethod::Get, get_overview),
+        )
+        .path(
+            format!("{PROJECT}/dashboards/overview"),
+            PathItem::new(HttpMethod::Put, save_overview),
+        )
+        .path(
+            format!("{PROJECT}/dashboards/overview"),
+            PathItem::new(HttpMethod::Delete, reset_overview),
         )
 }
 

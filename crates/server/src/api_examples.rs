@@ -989,6 +989,20 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
             file: "static/dashboard-stale.json".to_owned(),
         },
         example(
+            "get_overview",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "static/dashboard-overview.json",
+            "application/json",
+        ),
+        example(
+            "save_overview",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "static/dashboard-overview.json",
+            "application/json",
+        ),
+        example(
             "list_deletions",
             BTreeMap::new(),
             BTreeMap::new(),

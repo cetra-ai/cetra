@@ -339,6 +339,21 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/projects/{project}/dashboards/query",
         "query_widget",
     ),
+    (
+        "get",
+        "/api/v1/projects/{project}/dashboards/overview",
+        "get_overview",
+    ),
+    (
+        "put",
+        "/api/v1/projects/{project}/dashboards/overview",
+        "save_overview",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/dashboards/overview",
+        "reset_overview",
+    ),
     ("post", "/api/v1/projects/{project}/sql", "run_sql"),
     (
         "get",
@@ -767,6 +782,7 @@ const QUERY_OR_BODY: &[&str] = &[
     "get_saved_view",
     "list_dashboards",
     "get_dashboard",
+    "get_overview",
     "get_facets",
     "list_deletions",
     "get_deletion",
@@ -1053,12 +1069,17 @@ fn document_lint() {
             // The handler always answers 204. CSRF is the shared origin check.
         } else if *id == "create_scores" || *id == "create_key_scores" {
             expected_errors.extend(["400", "401", "402", "403", "404", "413", "429"]);
-        } else if *id == "delete_score" || *id == "delete_saved_view" || *id == "delete_dashboard" {
+        } else if *id == "delete_score"
+            || *id == "delete_saved_view"
+            || *id == "delete_dashboard"
+            || *id == "reset_overview"
+        {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "create_saved_view"
             || *id == "update_saved_view"
             || *id == "create_dashboard"
             || *id == "update_dashboard"
+            || *id == "save_overview"
         {
             // 409: unsharing a view whose owner was deleted, a dashboard past its limit, or a stale version.
             expected_errors.extend(["400", "401", "403", "404", "409", "413", "415", "429"]);
