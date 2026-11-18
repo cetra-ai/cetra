@@ -127,7 +127,7 @@ export function ExperimentDetail({
   return (
     <div className={compact ? "flex w-full flex-col gap-5" : "flex w-full flex-col gap-6"}>
       <header className="flex flex-col gap-2">
-        {compact ? null : <h1 className="text-title font-medium">{experiment.name}</h1>}
+        {compact ? null : <h2 className="text-title font-medium">{experiment.name}</h2>}
         {experiment.description ? (
           <p className="text-body text-muted-foreground">{experiment.description}</p>
         ) : null}

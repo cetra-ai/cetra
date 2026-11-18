@@ -129,7 +129,7 @@ function EvaluatorPage() {
             <span aria-hidden="true" className="text-muted-foreground/60">
               /
             </span>
-            <h1 className="text-title font-medium">{evaluator.name}</h1>
+            <h2 className="text-title font-medium">{evaluator.name}</h2>
           </div>
           <p className="text-caption text-muted-foreground">
             {KIND_LABELS[evaluator.kind]} · version {evaluator.version} · score{" "}

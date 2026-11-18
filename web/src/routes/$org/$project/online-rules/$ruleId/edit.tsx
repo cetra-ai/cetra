@@ -87,7 +87,7 @@ function EditOnlineRulePage() {
           <span aria-hidden="true" className="text-muted-foreground/60">
             /
           </span>
-          <h1 className="text-title font-medium">{rule.name}</h1>
+          <h2 className="text-title font-medium">{rule.name}</h2>
         </div>
         <DisabledReason reason={canManage ? undefined : "Only members can edit online rules"}>
           <Button

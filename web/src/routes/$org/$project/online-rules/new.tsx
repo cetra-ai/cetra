@@ -30,7 +30,7 @@ function NewOnlineRulePage() {
         <span aria-hidden="true" className="text-muted-foreground/60">
           /
         </span>
-        <h1 className="text-title font-medium">New rule</h1>
+        <h2 className="text-title font-medium">New rule</h2>
       </div>
       <RuleForm org={org} project={project} />
     </div>

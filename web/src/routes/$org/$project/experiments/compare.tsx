@@ -169,7 +169,7 @@ function CompareView() {
     <div className="flex h-full min-h-0 w-full flex-col">
       <div className="flex min-h-9 shrink-0 flex-wrap items-center gap-2 border-b px-3 py-1">
         {backLink}
-        <h1 className="text-ui font-medium">Compare experiments</h1>
+        <h2 className="text-ui font-medium">Compare experiments</h2>
         {failed ? null : (
           <>
             <fieldset
