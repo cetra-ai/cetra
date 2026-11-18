@@ -192,7 +192,7 @@ function DatasetPage() {
           <span aria-hidden="true" className="text-muted-foreground/60">
             /
           </span>
-          <h1 className="truncate text-ui font-medium">{dataset.name}</h1>
+          <h2 className="truncate text-ui font-medium">{dataset.name}</h2>
         </nav>
         <div className="flex flex-wrap items-center gap-1.5">
           <MetricChip icon={Rows3} label="Items">

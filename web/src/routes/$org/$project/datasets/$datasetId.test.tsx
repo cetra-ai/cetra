@@ -29,6 +29,7 @@ it("shows the dataset and its items", async () => {
   await renderApp(DATASET_URL);
 
   expect(await screen.findByRole("heading", { name: datasetFixture.name })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { level: 2, name: datasetFixture.name })).toBeInTheDocument();
   const grid = await screen.findByRole("grid", { name: "Items" });
   // One header row and one row per item.
   expect(grid).toHaveAttribute("aria-rowcount", String(itemsFixture.data.length + 1));
