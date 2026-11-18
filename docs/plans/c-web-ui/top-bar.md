@@ -221,6 +221,7 @@ impl LastIngest {
 
 **Steps:**
 1. Delete each element. A removed heading that was its row's only left-hand item leaves the row's layout as is: no empty spacer, and do not restyle the row.
+   - Exception, Alerts: its heading is the trigger of the cadence tooltip ("Rules are evaluated every minute, …"). Keep the `Tooltip` and its content, and replace the `<h1>` trigger with `<Button type="button" variant="ghost" size="icon-xs" aria-label="How often rules are evaluated"><Info /></Button>` (`Info` from `lucide-react`), at the same place in the row.
 2. `ListToolbar` is not touched here (TB2a-3).
 
 **Tests:** the updated ones. A test that found the page by its heading finds it by another element of the page instead, such as its main button or table.
