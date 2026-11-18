@@ -20,7 +20,8 @@ import type { ReactNode } from "react";
 import type { Schema } from "@/api/types";
 import type { ColumnSpec } from "@/components/data-table/column-layout";
 import type { DataTableColumn } from "@/components/data-table/data-table";
-import { stringContains, stringEquals } from "@/components/filter-bar/logic";
+import { stringContains } from "@/components/filter-bar/logic";
+import { FilterHit, filterIdCell } from "@/components/filter-hit";
 import { LazyTooltip } from "@/components/lazy-tooltip";
 import { ScoreBadge } from "@/components/score-badge";
 import { StatusDot } from "@/components/status-dot";
@@ -138,7 +139,8 @@ function traceColumnDefs(
       cell: ({ row }) => (
         <FilterHit
           label={`Filter by status ${row.original.status}`}
-          conjunct={stringEquals("status", row.original.status)}
+          field={{ column: "status" }}
+          value={row.original.status}
           onFilter={onFilter}
         >
           <StatusDot status={row.original.status} />
@@ -161,7 +163,8 @@ function traceColumnDefs(
       cell: ({ row }) => (
         <FilterHit
           label={`Filter by name ${row.original.name}`}
-          conjunct={stringEquals("name", row.original.name)}
+          field={{ column: "name" }}
+          value={row.original.name}
           onFilter={onFilter}
         >
           {row.original.name}
@@ -225,7 +228,9 @@ function traceColumnDefs(
         return (
           <FilterHit
             label={`Filter by models ${first}`}
-            conjunct={stringContains("models", first)}
+            field={{ column: "models" }}
+            value={first}
+            list
             onFilter={onFilter}
           >
             <span className="inline-flex min-w-0 items-center gap-1.5">
@@ -244,14 +249,15 @@ function traceColumnDefs(
       size: 120,
       header: "Session",
       meta: { mono: true, icon: MessagesSquare },
-      cell: ({ row }) => filterText(row.original.session_id, "session", "session_id", onFilter),
+      cell: ({ row }) =>
+        filterIdCell(row.original.session_id, "session", "session_id", "session", onFilter),
     },
     {
       id: "user",
       size: 100,
       header: "User",
       meta: { mono: true, icon: User },
-      cell: ({ row }) => filterText(row.original.user_id, "user", "user_id", onFilter),
+      cell: ({ row }) => filterIdCell(row.original.user_id, "user", "user_id", "user", onFilter),
     },
     {
       id: "tags",
@@ -327,7 +333,8 @@ function envPill(env: string | undefined, onFilter?: (conjunct: string) => void)
   return (
     <FilterHit
       label={`Filter by env ${env}`}
-      conjunct={stringEquals("environment", env)}
+      field={{ column: "environment" }}
+      value={env}
       onFilter={onFilter}
     >
       <span
@@ -437,57 +444,6 @@ function Tags({ tags, onFilter }: { tags: string[]; onFilter?: (conjunct: string
         </span>
       ))}
       {rest > 0 ? <span className="text-muted-foreground">+{rest}</span> : null}
-    </span>
-  );
-}
-
-function filterText(
-  value: string | undefined,
-  label: string,
-  column: string,
-  onFilter?: (conjunct: string) => void,
-): ReactNode {
-  if (!value) {
-    return "—";
-  }
-  return (
-    <FilterHit
-      label={`Filter by ${label} ${value}`}
-      conjunct={stringEquals(column, value)}
-      onFilter={onFilter}
-    >
-      {value}
-    </FilterHit>
-  );
-}
-
-function FilterHit({
-  label,
-  conjunct,
-  onFilter,
-  children,
-}: {
-  label: string;
-  conjunct: string;
-  onFilter?: (conjunct: string) => void;
-  children: ReactNode;
-}) {
-  return (
-    <span className="group flex min-w-0 items-center gap-1">
-      <span className="min-w-0 truncate">{children}</span>
-      {onFilter ? (
-        <button
-          type="button"
-          aria-label={label}
-          className="inline-flex size-4 shrink-0 items-center justify-center text-muted-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
-          onClick={(event) => {
-            event.stopPropagation();
-            onFilter(conjunct);
-          }}
-        >
-          <Plus className="size-3" />
-        </button>
-      ) : null}
     </span>
   );
 }

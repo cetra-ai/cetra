@@ -6,37 +6,59 @@ import type { Problem } from "@/api/problem";
 import { schemaQuery } from "@/api/queries";
 import type { Schema } from "@/api/types";
 import { useShortcut } from "@/components/command/use-shortcut";
+import type { FacetScope } from "@/components/facets/facet-panel";
 import { FilterEditor } from "@/components/filter-bar/editor";
+import { FieldPicker } from "@/components/filter-bar/field-picker";
 import {
   chipFromDraft,
   chipOperators,
   type Draft,
   draftFromChip,
+  facetTarget,
+  facetViewOf,
+  fieldOf,
   filterErrorRange,
   filterMessage,
+  isListOp,
   keepsName,
+  listTokens,
+  listValueText,
   needsValue,
   targetKind,
 } from "@/components/filter-bar/logic";
+import { type Suggest, ValueInput } from "@/components/filter-bar/value-input";
 import { useProject } from "@/components/shell/project-context";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { type Chip, parseChip, serializeFilter, splitConjuncts } from "@/lib/dsl/dsl";
+import {
+  appendFilter,
+  type Chip,
+  parseChip,
+  serializeChip,
+  serializeFilter,
+  splitConjuncts,
+} from "@/lib/dsl/dsl";
 
 type ViewName = Schema<"ViewName">;
 
+/**
+ * The filter text of a list as chips, with the text editor behind them. `scope` is the list's
+ * window and flags: value suggestions are fetched with it. Without it there are none (D7).
+ */
 export function FilterBar({
   view,
   value,
   onApply,
   error,
   placeholder,
+  scope,
 }: {
   view: ViewName;
   value: string;
   onApply: (text: string) => void;
   error?: Problem;
   placeholder?: string;
+  scope?: FacetScope;
 }) {
   const { org, project } = useProject();
   const schema = useQuery(schemaQuery(org, project));
@@ -68,7 +90,7 @@ export function FilterBar({
     <div className="flex min-w-0 flex-col">
       <div
         className={cn(
-          "flex h-7 min-w-0 items-center gap-1 rounded-md border bg-background px-1",
+          "flex min-h-7 min-w-0 items-center gap-1 rounded-md border bg-background px-1 py-0.5",
           error ? "border-destructive" : "border-input",
         )}
       >
@@ -79,6 +101,7 @@ export function FilterBar({
             errorRange={errorRange}
             viewName={view}
             schema={schema.data}
+            scope={scope}
             placeholder={placeholder}
             onApply={apply}
             onCancel={() => {
@@ -89,9 +112,11 @@ export function FilterBar({
           />
         ) : (
           <Chips
+            value={value}
             conjuncts={conjuncts}
             columns={columns}
             view={view}
+            scope={scope}
             onApply={apply}
             placeholder={placeholder}
             onEditText={(range) => setTextMode(range ?? {})}
@@ -106,16 +131,20 @@ export function FilterBar({
 }
 
 function Chips({
+  value,
   conjuncts,
   columns,
   view,
+  scope,
   onApply,
   placeholder = "Filter…",
   onEditText,
 }: {
+  value: string;
   conjuncts: { text: string; start: number; end: number; chip: Chip }[];
   columns: Schema<"ColumnSchema">[];
   view: ViewName;
+  scope?: FacetScope;
   onApply: (text: string) => void;
   placeholder?: string;
   onEditText: (range?: { from: number; to: number }) => void;
@@ -127,7 +156,7 @@ function Chips({
     onApply(serializeFilter(conjuncts.filter((_, i) => i !== index).map((part) => part.chip)));
   }
   return (
-    <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+    <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
       {conjuncts.map((part, index) =>
         part.chip.kind === "raw" ? (
           <ChipShell
@@ -150,6 +179,7 @@ function Chips({
             chip={part.chip}
             columns={columns}
             view={view}
+            scope={scope}
             onRemove={() => remove(index)}
             onApply={(chip) => replace(index, chip)}
           />
@@ -163,6 +193,7 @@ function Chips({
       >
         {conjuncts.length === 0 ? placeholder : ""}
       </button>
+      <AddChip value={value} columns={columns} view={view} scope={scope} onApply={onApply} />
       <button
         type="button"
         className="focus-ring shrink-0 rounded-sm px-1 text-caption text-muted-foreground"
@@ -171,6 +202,47 @@ function Chips({
         Edit as text
       </button>
     </div>
+  );
+}
+
+/** "+ Filter": an empty chip form in a popover; its chip is appended to the filter text (D7). */
+function AddChip({
+  value,
+  columns,
+  view,
+  scope,
+  onApply,
+}: {
+  value: string;
+  columns: Schema<"ColumnSchema">[];
+  view: ViewName;
+  scope?: FacetScope;
+  onApply: (text: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className="focus-ring shrink-0 rounded-sm px-1 text-caption text-muted-foreground"
+        >
+          + Filter
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-72 gap-2 p-3">
+        <ChipForm
+          initial={{ target: columns[0]?.name ?? "", name: "", op: "=", value: "" }}
+          columns={columns}
+          view={view}
+          scope={scope}
+          onApply={(chip) => {
+            onApply(appendFilter(value, serializeChip(chip)));
+            setOpen(false);
+          }}
+        />
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -206,6 +278,7 @@ function ChipEditor({
   chip,
   columns,
   view,
+  scope,
   onRemove,
   onApply,
 }: {
@@ -213,6 +286,7 @@ function ChipEditor({
   chip: Chip;
   columns: Schema<"ColumnSchema">[];
   view: ViewName;
+  scope?: FacetScope;
   onRemove: () => void;
   onApply: (chip: Chip) => void;
 }) {
@@ -235,6 +309,7 @@ function ChipEditor({
           initial={initial}
           columns={columns}
           view={view}
+          scope={scope}
           onApply={(next) => {
             onApply(next);
             setOpen(false);
@@ -249,62 +324,69 @@ function ChipForm({
   initial,
   columns,
   view,
+  scope,
   onApply,
 }: {
   initial: Draft;
   columns: Schema<"ColumnSchema">[];
   view: ViewName;
+  scope?: FacetScope;
   onApply: (chip: Chip) => void;
 }) {
   const [draft, setDraft] = useState(initial);
+  // The token being typed in a list. Apply adds it, so a typed but not entered token is not lost.
+  const [typed, setTyped] = useState("");
   const kind = targetKind(draft.target, columns);
   const operators = chipOperators(kind);
   const op = operators.includes(draft.op) ? draft.op : (operators[0] ?? draft.op);
-  const next = chipFromDraft({ ...draft, op }, kind);
+  const quoted = !["integer", "float", "timestamp", "boolean"].includes(kind);
+  const listMode = isListOp(op);
+  const tokens = listMode ? listTokens(op, draft.value) : [];
+  const pending = typed.trim();
+  const value =
+    listMode && pending.length > 0 && !tokens.includes(pending)
+      ? listValueText([...tokens, pending], quoted)
+      : draft.value;
+  const next = chipFromDraft({ ...draft, op, value }, kind);
+  const emptyList = listMode && tokens.length === 0 && pending.length === 0;
   const names = columns.map((column) => column.name);
   if (!names.includes(draft.target) && !isCall(draft.target)) {
     names.unshift(draft.target);
   }
   const calls = view === "traces" || view === "spans" || view === "sessions";
+  const fields = calls ? [...names, "score", "score_label", "has_score"] : names;
+  const field = isCall(draft.target) ? null : fieldOf(draft.target, draft.name, kind);
+  const facetView = facetViewOf(view);
+  const select = field && facetView ? facetTarget(facetView, field) : undefined;
+  const suggest: Suggest | undefined =
+    field && facetView && select !== undefined && scope
+      ? { view: facetView, field, scope }
+      : undefined;
   return (
     <form
       className="flex flex-col gap-2"
       onSubmit={(event: FormEvent) => {
         event.preventDefault();
-        if (next) {
+        if (next && !emptyList) {
           onApply(next);
         }
       }}
     >
-      <label className="flex flex-col gap-1 text-caption">
+      <span className="flex flex-col gap-1 text-caption">
         Field
-        <select
-          aria-label="Field"
-          className="h-7 rounded-md border border-input bg-transparent px-1"
+        <FieldPicker
           value={draft.target}
-          onChange={(event) => {
-            const target = event.target.value;
+          options={fields}
+          onChange={(target) => {
+            setTyped("");
             setDraft((current) => ({
               ...current,
               target,
               name: keepsName(current.target, target) ? current.name : "",
             }));
           }}
-        >
-          {names.map((name) => (
-            <option key={name} value={name}>
-              {name}
-            </option>
-          ))}
-          {calls ? (
-            <>
-              <option value="score">score</option>
-              <option value="score_label">score_label</option>
-              <option value="has_score">has_score</option>
-            </>
-          ) : null}
-        </select>
-      </label>
+        />
+      </span>
       {kind === "string_map" || isCall(draft.target) ? (
         <label className="flex flex-col gap-1 text-caption">
           {kind === "string_map" ? "Key" : "Score"}
@@ -327,6 +409,7 @@ function ChipForm({
           value={op}
           onChange={(event) => {
             const chosen = event.target.value;
+            setTyped("");
             setDraft((current) => ({ ...current, op: chosen }));
           }}
         >
@@ -338,20 +421,22 @@ function ChipForm({
         </select>
       </label>
       {needsValue(op) ? (
-        <label className="flex flex-col gap-1 text-caption">
+        <span className="flex flex-col gap-1 text-caption">
           Value
-          <input
-            aria-label="Value"
-            className="h-7 rounded-md border border-input bg-transparent px-2 font-mono"
+          <ValueInput
+            op={op}
             value={draft.value}
-            onChange={(event) => {
-              const input = event.target.value;
+            quoted={quoted}
+            typed={typed}
+            suggest={suggest}
+            onChange={(input) => {
               setDraft((current) => ({ ...current, value: input }));
             }}
+            onTyped={setTyped}
           />
-        </label>
+        </span>
       ) : null}
-      <Button type="submit" size="xs" disabled={next === null}>
+      <Button type="submit" size="xs" disabled={next === null || emptyList}>
         Apply
       </Button>
     </form>

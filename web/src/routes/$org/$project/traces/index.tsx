@@ -24,8 +24,16 @@ import {
 } from "@/components/datasets/add-traces-to-dataset-dialog";
 import { DeleteMatchingDialog } from "@/components/deletions/delete-matching-dialog";
 import { DisabledReason } from "@/components/disabled-reason";
+import { CarriedNotice } from "@/components/facets/carried-notice";
+import {
+  FacetPanel,
+  type FacetScope,
+  FiltersToggle,
+  useFacetsOpen,
+} from "@/components/facets/facet-panel";
+import { PresetChips } from "@/components/facets/preset-chips";
 import { FilterBar } from "@/components/filter-bar/filter-bar";
-import { appendFilter, filterMessage } from "@/components/filter-bar/logic";
+import { filterMessage } from "@/components/filter-bar/logic";
 import { TraceLayoutControls } from "@/components/layout-switcher";
 import { ListToolbar } from "@/components/list-toolbar";
 import { LiveToggle } from "@/components/live-toggle";
@@ -48,7 +56,9 @@ import {
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { appendFilter } from "@/lib/dsl/dsl";
 import { formatDuration } from "@/lib/format";
+import { rangeOnly, writeListContext } from "@/lib/list-context";
 import { getTraceMaximized, setTraceMaximized, useListLayout } from "@/lib/list-layout";
 import {
   anchorOf,
@@ -121,7 +131,20 @@ function TracesPage() {
     },
     [navigate, org, project],
   );
-  const { hold } = useDefaultSavedView("traces", search, applyDefault);
+  const { hold, carried } = useDefaultSavedView("traces", search, applyDefault, "traces");
+  useEffect(() => {
+    if (!hold) {
+      writeListContext(org, project, "traces", search);
+    }
+  }, [hold, org, project, search]);
+  function clearCarried() {
+    void navigate({
+      to: "/$org/$project/traces",
+      params: { org, project },
+      search: (prev) => rangeOnly(prev),
+    });
+  }
+  const [facetsOpen, setFacetsOpen] = useFacetsOpen();
   const range = rangeFromSearch(search);
   const rangeKey = range.kind === "preset" ? range.preset : `${range.from}\n${range.to}`;
   const [anchor, setAnchor] = useState(() => Date.now());
@@ -134,6 +157,14 @@ function TracesPage() {
     setAnchor(Date.now());
   }, [rangeKey]);
   const resolved = resolveRange(range, anchor);
+  /** The list's window and flags: the facet panel, its presets and the filter bar fetch with it. */
+  const facetScope: FacetScope = {
+    from: resolved.from,
+    to: resolved.to,
+    includeEval: search.eval === 1,
+    includeExperiments: search.exp === 1,
+    search: search.search,
+  };
   // Checked traces belong to the list they were checked in: a new filter, search, range or
   // eval/experiment flag clears them.
   const selectionKey = JSON.stringify([
@@ -458,11 +489,22 @@ function TracesPage() {
                       search: (prev) => withFlag(prev, "exp", on),
                     });
                   }}
+                  notice={
+                    carried ? (
+                      <CarriedNotice
+                        from={carried.from}
+                        dropped={carried.dropped}
+                        kept={carried.kept}
+                        onClear={clearCarried}
+                      />
+                    ) : null
+                  }
                   filter={
                     <FilterBar
                       view="traces"
                       value={search.filter ?? ""}
                       error={filterError}
+                      scope={facetScope}
                       onApply={(text) => {
                         void navigate({
                           to: "/$org/$project/traces",
@@ -470,6 +512,27 @@ function TracesPage() {
                           search: (prev) => withFilter(prev, text),
                         });
                       }}
+                    />
+                  }
+                  filtersToggle={
+                    <FiltersToggle
+                      open={facetsOpen}
+                      onOpenChange={setFacetsOpen}
+                      filter={search.filter ?? ""}
+                    />
+                  }
+                  presets={
+                    <PresetChips
+                      view="traces"
+                      filter={search.filter ?? ""}
+                      onFilter={(text) => {
+                        void navigate({
+                          to: "/$org/$project/traces",
+                          params: { org, project },
+                          search: (prev) => withFilter(prev, text),
+                        });
+                      }}
+                      scope={facetScope}
                     />
                   }
                   columns={
@@ -534,118 +597,141 @@ function TracesPage() {
                     setSelection({ key: selectionKey, ids: NO_TRACES });
                   }}
                 />
-                {filterError ? (
-                  <div className="mx-auto flex max-w-md flex-col gap-2 px-4 py-16">
-                    <h2 className="text-body font-medium">{filterError.title}</h2>
-                    <p className="text-body text-destructive">{filterMessage(filterError)}</p>
-                  </div>
-                ) : probing ? (
-                  <div className="flex flex-col gap-2 p-4">
-                    <Skeleton className="h-8 w-full" />
-                    <Skeleton className="h-8 w-full" />
-                    <Skeleton className="h-8 w-full" />
-                  </div>
-                ) : onboarding ? (
-                  <div className="min-h-0 flex-1 overflow-auto">
-                    <OnboardingPanel origin={window.location.origin} />
-                  </div>
-                ) : !hold && list.data && !probing ? (
-                  <>
-                    <TracesHistogram
-                      org={org}
-                      project={project}
-                      from={resolved.from}
-                      to={resolved.to}
-                      filter={search.filter}
-                      includeEval={search.eval === 1}
-                      includeExperiments={search.exp === 1}
-                      onRange={(fromIso, toIso) => {
-                        changeRange({ kind: "absolute", from: fromIso, to: toIso });
+                <div className="flex min-h-0 flex-1">
+                  {facetsOpen && !hold && !onboarding ? (
+                    <FacetPanel
+                      view="traces"
+                      filter={search.filter ?? ""}
+                      onFilter={(text) => {
+                        void navigate({
+                          to: "/$org/$project/traces",
+                          params: { org, project },
+                          search: (prev) => withFilter(prev, text),
+                        });
                       }}
+                      scope={facetScope}
                     />
-                    <DataTable
-                      tableId="traces"
-                      ariaLabel="Traces"
-                      rowTone={traceRowTone}
-                      onReorder={onColumns}
-                      lockedColumnIds={lockedIds}
-                      columns={tableColumns}
-                      rows={rows}
-                      getRowId={(row) => row.trace_id}
-                      selectedRowId={search.trace}
-                      onActivate={(row) => {
-                        void navigate({
-                          to: "/$org/$project/traces",
-                          params: { org, project },
-                          search: (prev) => ({ ...withoutSpan(prev), trace: row.trace_id }),
-                        });
-                      }}
-                      onRowHover={prefetchTrace}
-                      checkedIds={checkedIds}
-                      onCheckedChange={(ids) => {
-                        setSelection({ key: selectionKey, ids });
-                      }}
-                      onScrollAnchor={onScrollAnchor}
-                      restoreAnchor={restoreAnchor}
-                      onSelectionMove={(row) => {
-                        void navigate({
-                          to: "/$org/$project/traces",
-                          params: { org, project },
-                          search: (prev) => ({ ...withoutSpan(prev), trace: row.trace_id }),
-                          replace: true,
-                        });
-                      }}
-                      hasNextPage={list.hasNextPage}
-                      isFetchingNextPage={list.isFetchingNextPage}
-                      fetchNextPage={fetchNextPage}
-                      sorting={{
-                        id: SORT_COLUMN[search.sort ?? "start_time"],
-                        desc: (search.order ?? "desc") === "desc",
-                      }}
-                      onSortingChange={(next) => {
-                        void navigate({
-                          to: "/$org/$project/traces",
-                          params: { org, project },
-                          search: (prev) => {
-                            const sorted = withSort(prev, next);
-                            return traceLiveReason(sorted) ? withoutLive(sorted) : sorted;
-                          },
-                        });
-                      }}
-                      highlightedRowIds={highlighted}
-                      notice={
-                        live.pending > 0 ? (
-                          <Button type="button" size="xs" variant="secondary" onClick={live.reveal}>
-                            {live.overflowed ? `${live.pending}+` : live.pending} new traces ↑
-                          </Button>
-                        ) : null
-                      }
-                      emptyState={
-                        needsOnboarding ? (
-                          <div className="flex flex-col items-center gap-3 px-4 py-16 text-center">
-                            <Waypoints className="size-8 text-muted-foreground" />
-                            <h2 className="text-title font-medium">
-                              No traces in this time range.
-                            </h2>
-                          </div>
-                        ) : (
-                          <div className="flex flex-col items-center gap-3 px-4 py-16 text-center">
-                            <Waypoints className="size-8 text-muted-foreground" />
-                            <h2 className="text-title font-medium">No traces match</h2>
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              onClick={clearConstraints}
-                            >
-                              Clear filters
-                            </Button>
-                          </div>
-                        )
-                      }
-                    />
-                  </>
-                ) : null}
+                  ) : null}
+                  <div className="flex min-w-0 flex-1 flex-col">
+                    {filterError ? (
+                      <div className="mx-auto flex max-w-md flex-col gap-2 px-4 py-16">
+                        <h2 className="text-body font-medium">{filterError.title}</h2>
+                        <p className="text-body text-destructive">{filterMessage(filterError)}</p>
+                      </div>
+                    ) : probing ? (
+                      <div className="flex flex-col gap-2 p-4">
+                        <Skeleton className="h-8 w-full" />
+                        <Skeleton className="h-8 w-full" />
+                        <Skeleton className="h-8 w-full" />
+                      </div>
+                    ) : onboarding ? (
+                      <div className="min-h-0 flex-1 overflow-auto">
+                        <OnboardingPanel origin={window.location.origin} />
+                      </div>
+                    ) : !hold && list.data && !probing ? (
+                      <>
+                        <TracesHistogram
+                          org={org}
+                          project={project}
+                          from={resolved.from}
+                          to={resolved.to}
+                          filter={search.filter}
+                          includeEval={search.eval === 1}
+                          includeExperiments={search.exp === 1}
+                          onRange={(fromIso, toIso) => {
+                            changeRange({ kind: "absolute", from: fromIso, to: toIso });
+                          }}
+                        />
+                        <DataTable
+                          tableId="traces"
+                          ariaLabel="Traces"
+                          rowTone={traceRowTone}
+                          onReorder={onColumns}
+                          lockedColumnIds={lockedIds}
+                          columns={tableColumns}
+                          rows={rows}
+                          getRowId={(row) => row.trace_id}
+                          selectedRowId={search.trace}
+                          onActivate={(row) => {
+                            void navigate({
+                              to: "/$org/$project/traces",
+                              params: { org, project },
+                              search: (prev) => ({ ...withoutSpan(prev), trace: row.trace_id }),
+                            });
+                          }}
+                          onRowHover={prefetchTrace}
+                          checkedIds={checkedIds}
+                          onCheckedChange={(ids) => {
+                            setSelection({ key: selectionKey, ids });
+                          }}
+                          onScrollAnchor={onScrollAnchor}
+                          restoreAnchor={restoreAnchor}
+                          onSelectionMove={(row) => {
+                            void navigate({
+                              to: "/$org/$project/traces",
+                              params: { org, project },
+                              search: (prev) => ({ ...withoutSpan(prev), trace: row.trace_id }),
+                              replace: true,
+                            });
+                          }}
+                          hasNextPage={list.hasNextPage}
+                          isFetchingNextPage={list.isFetchingNextPage}
+                          fetchNextPage={fetchNextPage}
+                          sorting={{
+                            id: SORT_COLUMN[search.sort ?? "start_time"],
+                            desc: (search.order ?? "desc") === "desc",
+                          }}
+                          onSortingChange={(next) => {
+                            void navigate({
+                              to: "/$org/$project/traces",
+                              params: { org, project },
+                              search: (prev) => {
+                                const sorted = withSort(prev, next);
+                                return traceLiveReason(sorted) ? withoutLive(sorted) : sorted;
+                              },
+                            });
+                          }}
+                          highlightedRowIds={highlighted}
+                          notice={
+                            live.pending > 0 ? (
+                              <Button
+                                type="button"
+                                size="xs"
+                                variant="secondary"
+                                onClick={live.reveal}
+                              >
+                                {live.overflowed ? `${live.pending}+` : live.pending} new traces ↑
+                              </Button>
+                            ) : null
+                          }
+                          emptyState={
+                            needsOnboarding ? (
+                              <div className="flex flex-col items-center gap-3 px-4 py-16 text-center">
+                                <Waypoints className="size-8 text-muted-foreground" />
+                                <h2 className="text-title font-medium">
+                                  No traces in this time range.
+                                </h2>
+                              </div>
+                            ) : (
+                              <div className="flex flex-col items-center gap-3 px-4 py-16 text-center">
+                                <Waypoints className="size-8 text-muted-foreground" />
+                                <h2 className="text-title font-medium">No traces match</h2>
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={clearConstraints}
+                                >
+                                  Clear filters
+                                </Button>
+                              </div>
+                            )
+                          }
+                        />
+                      </>
+                    ) : null}
+                  </div>
+                </div>
               </TooltipProvider>
             </div>
           }

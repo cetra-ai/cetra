@@ -173,7 +173,7 @@ pub(crate) async fn search(
 }
 
 /// `%<escaped>%`, with `\`, `%` and `_` escaped for `ESCAPE '\'`.
-fn like_pattern(query: &str) -> String {
+pub(crate) fn like_pattern(query: &str) -> String {
     let mut escaped = String::with_capacity(query.len());
     for character in query.chars() {
         if matches!(character, '\\' | '%' | '_') {

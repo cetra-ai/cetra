@@ -583,7 +583,11 @@ it("sorts by cost, then ascending, then back to the default", async () => {
       urls.find((url) => url.searchParams.get("sort") === "cost_total")?.searchParams.get("order"),
     ).toBe("desc");
     expect(router.state.location.search).toMatchObject({ sort: "cost_total", order: "desc" });
-    fireEvent.click(screen.getByRole("button", { name: "Cost" }));
+    fireEvent.click(
+      within(screen.getByRole("columnheader", { name: "Cost" })).getByRole("button", {
+        name: "Cost",
+      }),
+    );
     await waitFor(() => {
       expect(router.state.location.search).toMatchObject({ sort: "cost_total", order: "asc" });
       expect(screen.getByRole("columnheader", { name: "Cost" })).toHaveAttribute(
@@ -591,7 +595,11 @@ it("sorts by cost, then ascending, then back to the default", async () => {
         "ascending",
       );
     });
-    fireEvent.click(screen.getByRole("button", { name: "Cost" }));
+    fireEvent.click(
+      within(screen.getByRole("columnheader", { name: "Cost" })).getByRole("button", {
+        name: "Cost",
+      }),
+    );
     await waitFor(() => {
       expect(router.state.location.search.sort).toBeUndefined();
       expect(router.state.location.search.order).toBeUndefined();
@@ -961,7 +969,9 @@ it("replaces a known trace in place", async () => {
   const { emit } = await openLive("/acme/support-bot/traces?live=1");
   emit.trace(liveTrace(FIRST, "renamed in place", "2026-01-01T10:30:00.000000000Z"));
   expect(await screen.findByText("renamed in place")).toBeInTheDocument();
-  expect(screen.queryByText("chat claude-sonnet-4-5")).not.toBeInTheDocument();
+  // The facet panel lists the same name as a value, so the check is scoped to the table.
+  const table = screen.getByRole("grid", { name: "Traces" });
+  expect(within(table).queryByText("chat claude-sonnet-4-5")).not.toBeInTheDocument();
   expect(screen.getByText("renamed in place").closest("[role=row]")).not.toHaveClass("live-row");
   expect(screen.getByText("5 loaded")).toBeInTheDocument();
 });
@@ -1608,4 +1618,39 @@ it("clears the checked traces when the search changes", async () => {
   await waitFor(() =>
     expect(screen.queryByRole("button", { name: "Add 1 to dataset" })).not.toBeInTheDocument(),
   );
+});
+
+it("keeps the facet panel and its typed value search when the filter changes", async () => {
+  server.use(
+    http.get("/api/v1/projects/:project/facets", ({ request }) => {
+      const url = new URL(request.url);
+      const field = url.searchParams.get("field");
+      const values =
+        field === "status"
+          ? [
+              { value: "ok", count: 100 },
+              { value: "error", count: 17 },
+            ]
+          : [];
+      return HttpResponse.json({
+        view: url.searchParams.get("view"),
+        field,
+        kind: "values",
+        total: values.reduce((sum, item) => sum + item.count, 0),
+        missing: 0,
+        values,
+        more: false,
+      });
+    }),
+  );
+  const { router, user } = await renderApp("/acme/support-bot/traces?range=15m");
+  const panel = await screen.findByRole("complementary", { name: "Filter facets" });
+  await user.type(within(panel).getByRole("searchbox", { name: "Search Status values" }), "er");
+  await user.click(await within(panel).findByRole("checkbox", { name: "error" }));
+  await waitFor(() => {
+    expect(router.state.location.search.filter).toBe("status = 'error'");
+  });
+  // The same panel node, with the typed text still in its value search.
+  expect(screen.getByRole("complementary", { name: "Filter facets" })).toBe(panel);
+  expect(within(panel).getByRole("searchbox", { name: "Search Status values" })).toHaveValue("er");
 });

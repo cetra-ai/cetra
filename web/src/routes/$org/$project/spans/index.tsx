@@ -16,8 +16,16 @@ import {
 } from "@/components/data-table/column-layout";
 import { DataTable } from "@/components/data-table/data-table";
 import { EmptyState } from "@/components/empty-state";
+import { CarriedNotice } from "@/components/facets/carried-notice";
+import {
+  FacetPanel,
+  type FacetScope,
+  FiltersToggle,
+  useFacetsOpen,
+} from "@/components/facets/facet-panel";
+import { PresetChips } from "@/components/facets/preset-chips";
 import { FilterBar } from "@/components/filter-bar/filter-bar";
-import { appendFilter, filterMessage } from "@/components/filter-bar/logic";
+import { filterMessage } from "@/components/filter-bar/logic";
 import { TraceLayoutControls } from "@/components/layout-switcher";
 import { ListToolbar } from "@/components/list-toolbar";
 import { useDefaultSavedView } from "@/components/saved-views/default-view";
@@ -28,7 +36,9 @@ import { Filmstrip } from "@/components/trace/filmstrip";
 import { SplitPane } from "@/components/trace/split-pane";
 import { TraceView } from "@/components/trace/trace-view";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { appendFilter } from "@/lib/dsl/dsl";
 import { formatDuration } from "@/lib/format";
+import { rangeOnly, writeListContext } from "@/lib/list-context";
 import { getTraceMaximized, setTraceMaximized, useListLayout } from "@/lib/list-layout";
 import { parseSpansSearch, type SpansSearch } from "@/lib/search/spans";
 import { type RangeState, rangeFromSearch, resolveRange } from "@/lib/time-range";
@@ -79,7 +89,20 @@ function SpansPage() {
     },
     [navigate, org, project],
   );
-  const { hold } = useDefaultSavedView("spans", search, applyDefault);
+  const { hold, carried } = useDefaultSavedView("spans", search, applyDefault, "spans");
+  useEffect(() => {
+    if (!hold) {
+      writeListContext(org, project, "spans", search);
+    }
+  }, [hold, org, project, search]);
+  function clearCarried() {
+    void navigate({
+      to: "/$org/$project/spans",
+      params: { org, project },
+      search: (prev) => rangeOnly(prev),
+    });
+  }
+  const [facetsOpen, setFacetsOpen] = useFacetsOpen();
   const range = rangeFromSearch(search);
   const rangeKey = range.kind === "preset" ? range.preset : `${range.from}\n${range.to}`;
   const [anchor, setAnchor] = useState(() => Date.now());
@@ -92,6 +115,14 @@ function SpansPage() {
     setAnchor(Date.now());
   }, [rangeKey]);
   const resolved = resolveRange(range, anchor);
+  /** The list's window and flags: the facet panel, its presets and the filter bar fetch with it. */
+  const facetScope: FacetScope = {
+    from: resolved.from,
+    to: resolved.to,
+    includeEval: search.eval === 1,
+    includeExperiments: search.exp === 1,
+    search: search.search,
+  };
   const list = useInfiniteQuery({
     ...spanListOptions(org, project, {
       from: resolved.from,
@@ -126,7 +157,7 @@ function SpansPage() {
     },
     [navigate, org, project],
   );
-  const tableColumns = useMemo(() => orderedSpanColumns(visible), [visible]);
+  const tableColumns = useMemo(() => orderedSpanColumns(visible, onFilter), [visible, onFilter]);
   function onColumns(ids: string[]) {
     const choice = sameColumnIds(ids, defaults) ? undefined : ids;
     writeColumnChoice(TABLE_ID, choice);
@@ -259,11 +290,22 @@ function SpansPage() {
                       search: (prev) => withFlag(prev, "exp", on),
                     });
                   }}
+                  notice={
+                    carried ? (
+                      <CarriedNotice
+                        from={carried.from}
+                        dropped={carried.dropped}
+                        kept={carried.kept}
+                        onClear={clearCarried}
+                      />
+                    ) : null
+                  }
                   filter={
                     <FilterBar
                       view="spans"
                       value={search.filter ?? ""}
                       error={filterError}
+                      scope={facetScope}
                       onApply={(text) => {
                         void navigate({
                           to: "/$org/$project/spans",
@@ -273,68 +315,107 @@ function SpansPage() {
                       }}
                     />
                   }
+                  filtersToggle={
+                    <FiltersToggle
+                      open={facetsOpen}
+                      onOpenChange={setFacetsOpen}
+                      filter={search.filter ?? ""}
+                    />
+                  }
+                  presets={
+                    <PresetChips
+                      view="spans"
+                      filter={search.filter ?? ""}
+                      onFilter={(text) => {
+                        void navigate({
+                          to: "/$org/$project/spans",
+                          params: { org, project },
+                          search: (prev) => withFilter(prev, text),
+                        });
+                      }}
+                      scope={facetScope}
+                    />
+                  }
                   columns={
                     <ColumnChooser columns={specs} visible={visible} onVisible={onColumns} />
                   }
                   views={<SavedViewsMenu kind="spans" search={search} onApply={applyView} />}
                   loaded={list.data ? rows.length : undefined}
                 />
-                {filterError ? (
-                  <div className="mx-auto flex max-w-md flex-col gap-2 px-4 py-16">
-                    <h2 className="text-body font-medium">{filterError.title}</h2>
-                    <p className="text-body text-destructive">{filterMessage(filterError)}</p>
+                <div className="flex min-h-0 flex-1">
+                  {facetsOpen && !hold ? (
+                    <FacetPanel
+                      view="spans"
+                      filter={search.filter ?? ""}
+                      onFilter={(text) => {
+                        void navigate({
+                          to: "/$org/$project/spans",
+                          params: { org, project },
+                          search: (prev) => withFilter(prev, text),
+                        });
+                      }}
+                      scope={facetScope}
+                    />
+                  ) : null}
+                  <div className="flex min-w-0 flex-1 flex-col">
+                    {filterError ? (
+                      <div className="mx-auto flex max-w-md flex-col gap-2 px-4 py-16">
+                        <h2 className="text-body font-medium">{filterError.title}</h2>
+                        <p className="text-body text-destructive">{filterMessage(filterError)}</p>
+                      </div>
+                    ) : !hold && list.data ? (
+                      <DataTable
+                        tableId="spans"
+                        ariaLabel="Spans"
+                        columns={tableColumns}
+                        rows={rows}
+                        getRowId={(row) => `${row.trace_id}:${row.span_id}`}
+                        selectedRowId={selectedRowId}
+                        rowTone={spanRowTone}
+                        onReorder={onColumns}
+                        lockedColumnIds={lockedIds}
+                        onActivate={(row) => {
+                          void navigate({
+                            to: "/$org/$project/spans",
+                            params: { org, project },
+                            search: (prev) => ({
+                              ...prev,
+                              trace: row.trace_id,
+                              span: row.span_id,
+                            }),
+                          });
+                        }}
+                        onSelectionMove={(row) => {
+                          void navigate({
+                            to: "/$org/$project/spans",
+                            params: { org, project },
+                            search: (prev) => ({
+                              ...prev,
+                              trace: row.trace_id,
+                              span: row.span_id,
+                            }),
+                            replace: true,
+                          });
+                        }}
+                        hasNextPage={list.hasNextPage}
+                        isFetchingNextPage={list.isFetchingNextPage}
+                        fetchNextPage={fetchNextPage}
+                        sorting={{
+                          id: SORT_COLUMN[search.sort ?? "start_time"],
+                          desc: (search.order ?? "desc") === "desc",
+                        }}
+                        onSortingChange={(next) => {
+                          void navigate({
+                            to: "/$org/$project/spans",
+                            params: { org, project },
+                            search: (prev) => withSort(prev, next),
+                          });
+                        }}
+                        emptyState={<EmptyState icon={Rows3} title="No spans" />}
+                      />
+                    ) : null}
                   </div>
-                ) : !hold && list.data ? (
-                  <DataTable
-                    tableId="spans"
-                    ariaLabel="Spans"
-                    columns={tableColumns}
-                    rows={rows}
-                    getRowId={(row) => `${row.trace_id}:${row.span_id}`}
-                    selectedRowId={selectedRowId}
-                    rowTone={spanRowTone}
-                    onReorder={onColumns}
-                    lockedColumnIds={lockedIds}
-                    onActivate={(row) => {
-                      void navigate({
-                        to: "/$org/$project/spans",
-                        params: { org, project },
-                        search: (prev) => ({
-                          ...prev,
-                          trace: row.trace_id,
-                          span: row.span_id,
-                        }),
-                      });
-                    }}
-                    onSelectionMove={(row) => {
-                      void navigate({
-                        to: "/$org/$project/spans",
-                        params: { org, project },
-                        search: (prev) => ({
-                          ...prev,
-                          trace: row.trace_id,
-                          span: row.span_id,
-                        }),
-                        replace: true,
-                      });
-                    }}
-                    hasNextPage={list.hasNextPage}
-                    isFetchingNextPage={list.isFetchingNextPage}
-                    fetchNextPage={fetchNextPage}
-                    sorting={{
-                      id: SORT_COLUMN[search.sort ?? "start_time"],
-                      desc: (search.order ?? "desc") === "desc",
-                    }}
-                    onSortingChange={(next) => {
-                      void navigate({
-                        to: "/$org/$project/spans",
-                        params: { org, project },
-                        search: (prev) => withSort(prev, next),
-                      });
-                    }}
-                    emptyState={<EmptyState icon={Rows3} title="No spans" />}
-                  />
-                ) : null}
+                </div>
               </TooltipProvider>
             </div>
           }

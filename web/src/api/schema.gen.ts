@@ -2012,6 +2012,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{project}/facets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get facets
+         * @description Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. A facet describes one field over the rows the list would show: the window, the default exclusions, `search` and `filter`, but not the list's cursor, sort or limit. The field is a column of the view, or `map['key']` of a map column; a bare map column facets its keys. `kind` is `values` (strings, booleans, lists and `map['key']`), `keys` (a bare map) or `histogram` (numbers: min, max, approximate p50, p95 and p99, and 20 equal buckets below p99 plus one bucket from p99 to max). `total` counts rows, `missing` the rows with no value (null, or an empty list or map). Values are counted per row: a list counts a row once under each distinct element. Keys starting with `cetra.` are left out. `q` keeps values containing it, ignoring case. Spans count stored copies separately. Sessions take no `search`. Nothing is cached on the server; a facet is computed on each call.
+         */
+        get: operations["get_facets"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{project}/media/{sha256}": {
         parameters: {
             query?: never;
@@ -4824,6 +4844,104 @@ export interface components {
          * @enum {string}
          */
         ExportFormat: "jsonl" | "csv";
+        /** @description One histogram bucket. `[lo, hi)`, except the last bucket, which is `[lo, hi]`. */
+        FacetBucket: {
+            /**
+             * Format: int64
+             * @description Rows in the bucket.
+             */
+            count: number;
+            /**
+             * Format: double
+             * @description Upper bound.
+             */
+            hi: number;
+            /**
+             * Format: double
+             * @description Lower bound.
+             */
+            lo: number;
+        };
+        /** @description A histogram of a number field. `min` and `max` are exact; the percentiles are approximate. */
+        FacetHistogram: {
+            /** @description Every bucket, empty ones included. */
+            buckets: components["schemas"]["FacetBucket"][];
+            /**
+             * Format: double
+             * @description Largest value.
+             */
+            max: number;
+            /**
+             * Format: double
+             * @description Smallest value.
+             */
+            min: number;
+            /**
+             * Format: double
+             * @description Median.
+             */
+            p50: number;
+            /**
+             * Format: double
+             * @description 95th percentile.
+             */
+            p95: number;
+            /**
+             * Format: double
+             * @description 99th percentile.
+             */
+            p99: number;
+        };
+        /**
+         * @description What a facet describes.
+         * @enum {string}
+         */
+        FacetKind: "values" | "keys" | "histogram";
+        /** @description One value or key and the rows under it. */
+        FacetValue: {
+            /**
+             * Format: int64
+             * @description Rows counted under it.
+             */
+            count: number;
+            /** @description The value or key. Booleans are `true` or `false`. */
+            value: string;
+        };
+        /**
+         * @description The list a facet describes.
+         * @enum {string}
+         */
+        FacetView: "traces" | "spans" | "sessions";
+        /**
+         * @description The answer of a facet request.
+         *
+         *     `values` and `more` are present for kinds `values` and `keys`. `histogram` is present for
+         *     kind `histogram` when at least one row has a value.
+         */
+        FacetsResponse: {
+            /** @description The field, as requested. */
+            field: string;
+            /** @description The histogram of a number field. */
+            histogram?: components["schemas"]["FacetHistogram"];
+            /** @description What the answer describes. */
+            kind: components["schemas"]["FacetKind"];
+            /**
+             * Format: int64
+             * @description Rows with no value: null, or an empty list or map.
+             */
+            missing: number;
+            /** @description True when more distinct values matched than `limit`. */
+            more?: boolean;
+            /**
+             * Format: int64
+             * @description Rows counted.
+             */
+            total: number;
+            /** @description At most `limit` values or keys, by count descending then value ascending. */
+            values?: components["schemas"]["FacetValue"][];
+            /** @description The list the facet describes. */
+            view: components["schemas"]["FacetView"];
+        };
         /**
          * @description A feature an org may be entitled to. Names are append-only (D-P-12).
          * @enum {string}
@@ -17801,6 +17919,116 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ExperimentResults"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_facets: {
+        parameters: {
+            query: {
+                /** @description The list the facet describes. */
+                view: components["schemas"]["FacetView"];
+                /** @description `column` or `map['key']`. A bare map column facets its keys. */
+                field: string;
+                /** @description Filter DSL expression over `view`. Blank means no filter. */
+                filter?: string;
+                /** @description Full-text search. `traces` and `spans` only. At most 1,024 bytes. */
+                search?: string;
+                /** @description Inclusive range start. RFC 3339 or epoch milliseconds. */
+                from?: components["schemas"]["TimeParam"];
+                /** @description Exclusive range end. RFC 3339 or epoch milliseconds. */
+                to?: components["schemas"]["TimeParam"];
+                /** @description Include traces from the evaluation environment. Default false. */
+                include_eval?: boolean;
+                /** @description Include experiment traces. Default false. */
+                include_experiments?: boolean;
+                /**
+                 * @description Case-insensitive substring the value or key must contain. 1 to 200 characters after
+                 *     trimming. Ignored by histograms.
+                 */
+                q?: string;
+                /** @description Most values or keys returned (1 to 100, default 10). */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A facet: values, keys or a histogram. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FacetsResponse"];
                 };
             };
             /** @description The request is malformed or a filter is invalid. */

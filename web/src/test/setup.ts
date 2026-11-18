@@ -82,6 +82,7 @@ afterEach(() => {
   server.resetHandlers();
   cleanup();
   localStorage.clear();
+  sessionStorage.clear();
   document.documentElement.className = "";
   document.documentElement.style.colorScheme = "";
   resetMatchMedia();

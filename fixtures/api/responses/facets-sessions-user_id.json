@@ -1,0 +1,18 @@
+{
+  "view": "sessions",
+  "field": "user_id",
+  "kind": "values",
+  "total": 2,
+  "missing": 0,
+  "values": [
+    {
+      "value": "user-42",
+      "count": 1
+    },
+    {
+      "value": "user-7",
+      "count": 1
+    }
+  ],
+  "more": false
+}

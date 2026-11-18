@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import type { Schema } from "@/api/types";
-import { createDataset, type Dataset } from "@/mocks/generated/dataset";
+import { createDataset, type Dataset, visibleTraces } from "@/mocks/generated/dataset";
 import { compareUsers, largeHandlers, userIdOfFilter } from "@/mocks/generated/handlers";
 import { server } from "@/mocks/node";
 
@@ -399,5 +399,118 @@ it("counts only the traces in the range on the users list, as the user detail do
     const detail = (await response.json()) as Schema<"EndUserDetail">;
     expect(detail.user.trace_count).toBe(row.trace_count);
     expect(detail.user.session_count).toBe(row.session_count);
+  }
+});
+
+it("counts a values facet over the rows the list shows", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 300 });
+  server.use(...largeHandlers(dataset));
+  const body = (await (
+    await fetch(`${PROJECT}/facets?view=traces&field=status&limit=50`)
+  ).json()) as Schema<"FacetsResponse">;
+
+  const visible = visibleTraces(dataset.traces, false, false);
+  const expected = new Map<string, number>();
+  for (const trace of visible) {
+    expected.set(trace.status, (expected.get(trace.status) ?? 0) + 1);
+  }
+  expect(body.kind).toBe("values");
+  expect(body.total).toBe(visible.length);
+  expect(body.missing).toBe(0);
+  expect(body.more).toBe(false);
+  expect(new Map((body.values ?? []).map((row) => [row.value, row.count]))).toEqual(expected);
+});
+
+it("counts a list field once per distinct element, and facets metadata keys", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 300 });
+  server.use(...largeHandlers(dataset));
+  const visible = visibleTraces(dataset.traces, false, false);
+
+  const tags = (await (
+    await fetch(`${PROJECT}/facets?view=traces&field=tags&limit=100`)
+  ).json()) as Schema<"FacetsResponse">;
+  const tagCounts = new Map<string, number>();
+  let untagged = 0;
+  for (const trace of visible) {
+    if (trace.tags.length === 0) {
+      untagged += 1;
+    }
+    for (const tag of new Set(trace.tags)) {
+      tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
+    }
+  }
+  expect(tags.missing).toBe(untagged);
+  expect(new Map((tags.values ?? []).map((row) => [row.value, row.count]))).toEqual(tagCounts);
+
+  const keys = (await (
+    await fetch(`${PROJECT}/facets?view=traces&field=metadata&limit=100`)
+  ).json()) as Schema<"FacetsResponse">;
+  expect(keys.kind).toBe("keys");
+  const keyNames = new Set<string>();
+  for (const trace of visible) {
+    for (const key of Object.keys(trace.metadata)) {
+      if (!key.startsWith("cetra.")) {
+        keyNames.add(key);
+      }
+    }
+  }
+  expect(new Set((keys.values ?? []).map((row) => row.value))).toEqual(keyNames);
+  expect((keys.values ?? []).some((row) => row.value.startsWith("cetra."))).toBe(false);
+});
+
+it("answers a histogram whose buckets cover every row with a value", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 300 });
+  server.use(...largeHandlers(dataset));
+  const body = (await (
+    await fetch(`${PROJECT}/facets?view=traces&field=duration_ms`)
+  ).json()) as Schema<"FacetsResponse">;
+
+  const durations = visibleTraces(dataset.traces, false, false).map(
+    (trace) => trace.duration_ns / 1e6,
+  );
+  expect(body.kind).toBe("histogram");
+  expect(body.total).toBe(durations.length);
+  expect(body.values).toBeUndefined();
+  const histogram = body.histogram;
+  expect(histogram?.min).toBe(Math.min(...durations));
+  expect(histogram?.max).toBe(Math.max(...durations));
+  const buckets = histogram?.buckets ?? [];
+  expect([1, 20, 21]).toContain(buckets.length);
+  expect(buckets.reduce((sum, bucket) => sum + bucket.count, 0)).toBe(durations.length);
+  for (const [index, bucket] of buckets.entries()) {
+    expect(bucket.hi).toBeGreaterThanOrEqual(bucket.lo);
+    if (index > 0) {
+      expect(bucket.lo).toBeGreaterThanOrEqual(buckets[index - 1]?.lo ?? 0);
+    }
+  }
+});
+
+it("narrows values by q, case-insensitively, and answers the limit", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 300 });
+  server.use(...largeHandlers(dataset));
+  const first = visibleTraces(dataset.traces, false, false)[0];
+  const needle = (first?.name ?? "").slice(0, 3);
+  const body = (await (
+    await fetch(
+      `${PROJECT}/facets?view=traces&field=name&q=${encodeURIComponent(needle.toUpperCase())}&limit=1`,
+    )
+  ).json()) as Schema<"FacetsResponse">;
+  expect(body.values?.length).toBe(1);
+  expect(body.values?.[0]?.value.toLowerCase()).toContain(needle.toLowerCase());
+  expect(typeof body.more).toBe("boolean");
+});
+
+it("answers 400 for a field it cannot facet, a bad limit, and search on sessions", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 5 });
+  server.use(...largeHandlers(dataset));
+  for (const query of [
+    "view=traces&field=input",
+    "view=traces&field=metadata[",
+    "view=traces&field=trace_id",
+    "view=traces&field=status&limit=101",
+    "view=sessions&field=user_id&search=x",
+  ]) {
+    const response = await fetch(`${PROJECT}/facets?${query}`);
+    expect(response.status, query).toBe(400);
   }
 });

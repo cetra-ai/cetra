@@ -15,6 +15,7 @@ import {
 import type { Schema } from "@/api/types";
 import type { ColumnSpec } from "@/components/data-table/column-layout";
 import type { DataTableColumn } from "@/components/data-table/data-table";
+import { FilterHit, filterIdCell } from "@/components/filter-hit";
 import { KindIcon } from "@/components/kind-icon";
 import { LazyTooltip } from "@/components/lazy-tooltip";
 import { StatusDot } from "@/components/status-dot";
@@ -92,21 +93,33 @@ export function spanRowTone(row: Schema<"SpanSummary">) {
 
 export function orderedSpanColumns(
   visible: readonly string[],
+  onFilter?: (conjunct: string) => void,
 ): DataTableColumn<Schema<"SpanSummary">>[] {
-  const byId = new Map(spanColumnDefs().map((column) => [column.id, column]));
+  const byId = new Map(spanColumnDefs(onFilter).map((column) => [column.id, column]));
   return visible.flatMap((id) => {
     const column = byId.get(id);
     return column ? [column] : [];
   });
 }
 
-function spanColumnDefs(): DataTableColumn<Schema<"SpanSummary">>[] {
+function spanColumnDefs(
+  onFilter?: (conjunct: string) => void,
+): DataTableColumn<Schema<"SpanSummary">>[] {
   return [
     {
       id: "status",
       size: 28,
       header: () => <span className="sr-only">Status</span>,
-      cell: ({ row }) => <StatusDot status={row.original.status} />,
+      cell: ({ row }) => (
+        <FilterHit
+          label={`Filter by status ${row.original.status}`}
+          field={{ column: "status" }}
+          value={row.original.status}
+          onFilter={onFilter}
+        >
+          <StatusDot status={row.original.status} />
+        </FilterHit>
+      ),
     },
     {
       id: "start",
@@ -122,17 +135,33 @@ function spanColumnDefs(): DataTableColumn<Schema<"SpanSummary">>[] {
       size: 104,
       header: "Kind",
       cell: ({ row }) => (
-        <span className="flex min-w-0 items-center gap-1">
-          <KindIcon kind={row.original.span_kind} />
-          <span className="truncate">{KIND_LABEL[row.original.span_kind]}</span>
-        </span>
+        <FilterHit
+          label={`Filter by kind ${row.original.span_kind}`}
+          field={{ column: "span_kind" }}
+          value={row.original.span_kind}
+          onFilter={onFilter}
+        >
+          <span className="flex min-w-0 items-center gap-1">
+            <KindIcon kind={row.original.span_kind} />
+            <span className="truncate">{KIND_LABEL[row.original.span_kind]}</span>
+          </span>
+        </FilterHit>
       ),
     },
     {
       id: "name",
       size: 200,
       header: "Name",
-      cell: ({ row }) => row.original.name,
+      cell: ({ row }) => (
+        <FilterHit
+          label={`Filter by name ${row.original.name}`}
+          field={{ column: "name" }}
+          value={row.original.name}
+          onFilter={onFilter}
+        >
+          {row.original.name}
+        </FilterHit>
+      ),
     },
     {
       id: "model",
@@ -145,13 +174,20 @@ function spanColumnDefs(): DataTableColumn<Schema<"SpanSummary">>[] {
           return "—";
         }
         return (
-          <span className="flex min-w-0 items-center gap-1.5">
-            <span
-              aria-hidden
-              className={cn("size-2 shrink-0 rounded-full", providerClasses(model).dot)}
-            />
-            <span className="truncate">{model}</span>
-          </span>
+          <FilterHit
+            label={`Filter by model ${model}`}
+            field={{ column: "model" }}
+            value={model}
+            onFilter={onFilter}
+          >
+            <span className="flex min-w-0 items-center gap-1.5">
+              <span
+                aria-hidden
+                className={cn("size-2 shrink-0 rounded-full", providerClasses(model).dot)}
+              />
+              <span className="truncate">{model}</span>
+            </span>
+          </FilterHit>
         );
       },
     },
@@ -209,14 +245,15 @@ function spanColumnDefs(): DataTableColumn<Schema<"SpanSummary">>[] {
       size: 120,
       header: "Session",
       meta: { mono: true, icon: MessagesSquare },
-      cell: ({ row }) => row.original.session_id ?? "—",
+      cell: ({ row }) =>
+        filterIdCell(row.original.session_id, "session", "session_id", "session", onFilter),
     },
     {
       id: "user",
       size: 100,
       header: "User",
       meta: { mono: true, icon: User },
-      cell: ({ row }) => row.original.user_id ?? "—",
+      cell: ({ row }) => filterIdCell(row.original.user_id, "user", "user_id", "user", onFilter),
     },
     {
       id: "env",
@@ -244,7 +281,19 @@ function spanColumnDefs(): DataTableColumn<Schema<"SpanSummary">>[] {
       id: "provider",
       size: 100,
       header: "Provider",
-      cell: ({ row }) => row.original.provider ?? "—",
+      cell: ({ row }) =>
+        row.original.provider ? (
+          <FilterHit
+            label={`Filter by provider ${row.original.provider}`}
+            field={{ column: "provider" }}
+            value={row.original.provider}
+            onFilter={onFilter}
+          >
+            {row.original.provider}
+          </FilterHit>
+        ) : (
+          "—"
+        ),
     },
     {
       id: "service",

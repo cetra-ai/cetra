@@ -477,7 +477,7 @@ function wrapped(
   return undefined;
 }
 
-function serializeField(field: Field): string {
+export function serializeField(field: Field): string {
   if ("key" in field) {
     return `${field.column.toLowerCase()}[${quoteString(field.key)}]`;
   }
@@ -497,6 +497,15 @@ function serializeValue(value: ChipValue): string {
 
 export function quoteString(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
+}
+
+/** The filter text with `conjunct` appended by AND; a top-level OR in `current` is parenthesized. */
+export function appendFilter(current: string, conjunct: string): string {
+  const base = current.trim();
+  if (base.length === 0) {
+    return conjunct;
+  }
+  return hasTopLevelOr(base) ? `(${base}) AND ${conjunct}` : `${base} AND ${conjunct}`;
 }
 
 export function hasTopLevelOr(text: string): boolean {

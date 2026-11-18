@@ -19,7 +19,7 @@ use datafusion::prelude::DataFrame;
 
 use super::cursor::{after, assemble, decode, order_by};
 use super::{ListScope, MAX_PAGE, Page, SortOrder, present, scoped_traces};
-use crate::filter::FilterView;
+use crate::filter::{Filter, FilterView};
 use crate::query_error::{RunError, classify};
 use crate::views::{QueryContext, sessions_from_traces};
 
@@ -252,6 +252,22 @@ fn ranked_value(rank: &str, column: &str) -> Result<Expr, RunError> {
     Ok(max(value))
 }
 
+/// The sessions of the window, one row per session, with `filter` applied. No cursor, sort or
+/// limit: the facets read these rows too.
+pub(crate) async fn session_rows(
+    ctx: &QueryContext,
+    scope: ListScope,
+    filter: Option<Filter>,
+) -> Result<DataFrame, RunError> {
+    let scoped = scoped_traces(ctx, scope, false).await?;
+    let plan = sessions_from_traces(scoped.into_unoptimized_plan()).map_err(RunError::Internal)?;
+    let mut frame = DataFrame::new(ctx.session().state(), plan);
+    if let Some(filter) = filter {
+        frame = filter.apply(frame, ctx).await.map_err(classify)?;
+    }
+    Ok(frame)
+}
+
 async fn list(ctx: &QueryContext, request: &SessionListRequest<'_>) -> Result<Page, RunError> {
     let filter = match present(request.filter) {
         Some(text) => Some(ctx.parse_filter(FilterView::Sessions, text)?),
@@ -267,12 +283,7 @@ async fn list(ctx: &QueryContext, request: &SessionListRequest<'_>) -> Result<Pa
         }
         None => None,
     };
-    let scoped = scoped_traces(ctx, request.scope, false).await?;
-    let plan = sessions_from_traces(scoped.into_unoptimized_plan()).map_err(RunError::Internal)?;
-    let mut frame = DataFrame::new(ctx.session().state(), plan);
-    if let Some(filter) = filter {
-        frame = filter.apply(frame, ctx).await.map_err(classify)?;
-    }
+    let mut frame = session_rows(ctx, request.scope, filter).await?;
     if let Some(cursor) = &cursor {
         frame = frame
             .filter(after(cursor, request.sort.column(), TIES))

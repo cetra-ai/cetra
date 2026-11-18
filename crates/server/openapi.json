@@ -12787,6 +12787,203 @@
         }
       }
     },
+    "/api/v1/projects/{project}/facets": {
+      "get": {
+        "tags": [
+          "traces"
+        ],
+        "summary": "Get facets",
+        "description": "Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. A facet describes one field over the rows the list would show: the window, the default exclusions, `search` and `filter`, but not the list's cursor, sort or limit. The field is a column of the view, or `map['key']` of a map column; a bare map column facets its keys. `kind` is `values` (strings, booleans, lists and `map['key']`), `keys` (a bare map) or `histogram` (numbers: min, max, approximate p50, p95 and p99, and 20 equal buckets below p99 plus one bucket from p99 to max). `total` counts rows, `missing` the rows with no value (null, or an empty list or map). Values are counted per row: a list counts a row once under each distinct element. Keys starting with `cetra.` are left out. `q` keeps values containing it, ignoring case. Spans count stored copies separately. Sessions take no `search`. Nothing is cached on the server; a facet is computed on each call.",
+        "operationId": "get_facets",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "view",
+            "in": "query",
+            "description": "The list the facet describes.",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/FacetView"
+            }
+          },
+          {
+            "name": "field",
+            "in": "query",
+            "description": "`column` or `map['key']`. A bare map column facets its keys.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "filter",
+            "in": "query",
+            "description": "Filter DSL expression over `view`. Blank means no filter.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Full-text search. `traces` and `spans` only. At most 1,024 bytes.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Inclusive range start. RFC 3339 or epoch milliseconds.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/TimeParam"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Exclusive range end. RFC 3339 or epoch milliseconds.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/TimeParam"
+            }
+          },
+          {
+            "name": "include_eval",
+            "in": "query",
+            "description": "Include traces from the evaluation environment. Default false.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "include_experiments",
+            "in": "query",
+            "description": "Include experiment traces. Default false.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Case-insensitive substring the value or key must contain. 1 to 200 characters after\ntrimming. Ignored by histograms.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Most values or keys returned (1 to 100, default 10).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 10,
+              "maximum": 100,
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A facet: values, keys or a histogram.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FacetsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is busy or a dependency is unavailable. Retry later.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{project}/media/{sha256}": {
       "get": {
         "tags": [
@@ -22250,6 +22447,169 @@
           "jsonl",
           "csv"
         ]
+      },
+      "FacetBucket": {
+        "type": "object",
+        "description": "One histogram bucket. `[lo, hi)`, except the last bucket, which is `[lo, hi]`.",
+        "required": [
+          "lo",
+          "hi",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows in the bucket.",
+            "minimum": 0
+          },
+          "hi": {
+            "type": "number",
+            "format": "double",
+            "description": "Upper bound."
+          },
+          "lo": {
+            "type": "number",
+            "format": "double",
+            "description": "Lower bound."
+          }
+        }
+      },
+      "FacetHistogram": {
+        "type": "object",
+        "description": "A histogram of a number field. `min` and `max` are exact; the percentiles are approximate.",
+        "required": [
+          "min",
+          "max",
+          "p50",
+          "p95",
+          "p99",
+          "buckets"
+        ],
+        "properties": {
+          "buckets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FacetBucket"
+            },
+            "description": "Every bucket, empty ones included."
+          },
+          "max": {
+            "type": "number",
+            "format": "double",
+            "description": "Largest value."
+          },
+          "min": {
+            "type": "number",
+            "format": "double",
+            "description": "Smallest value."
+          },
+          "p50": {
+            "type": "number",
+            "format": "double",
+            "description": "Median."
+          },
+          "p95": {
+            "type": "number",
+            "format": "double",
+            "description": "95th percentile."
+          },
+          "p99": {
+            "type": "number",
+            "format": "double",
+            "description": "99th percentile."
+          }
+        }
+      },
+      "FacetKind": {
+        "type": "string",
+        "description": "What a facet describes.",
+        "enum": [
+          "values",
+          "keys",
+          "histogram"
+        ]
+      },
+      "FacetValue": {
+        "type": "object",
+        "description": "One value or key and the rows under it.",
+        "required": [
+          "value",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows counted under it.",
+            "minimum": 0
+          },
+          "value": {
+            "type": "string",
+            "description": "The value or key. Booleans are `true` or `false`."
+          }
+        }
+      },
+      "FacetView": {
+        "type": "string",
+        "description": "The list a facet describes.",
+        "enum": [
+          "traces",
+          "spans",
+          "sessions"
+        ]
+      },
+      "FacetsResponse": {
+        "type": "object",
+        "description": "The answer of a facet request.\n\n`values` and `more` are present for kinds `values` and `keys`. `histogram` is present for\nkind `histogram` when at least one row has a value.",
+        "required": [
+          "view",
+          "field",
+          "kind",
+          "total",
+          "missing"
+        ],
+        "properties": {
+          "field": {
+            "type": "string",
+            "description": "The field, as requested."
+          },
+          "histogram": {
+            "$ref": "#/components/schemas/FacetHistogram",
+            "description": "The histogram of a number field."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/FacetKind",
+            "description": "What the answer describes."
+          },
+          "missing": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows with no value: null, or an empty list or map.",
+            "minimum": 0
+          },
+          "more": {
+            "type": "boolean",
+            "description": "True when more distinct values matched than `limit`."
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows counted.",
+            "minimum": 0
+          },
+          "values": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FacetValue"
+            },
+            "description": "At most `limit` values or keys, by count descending then value ascending."
+          },
+          "view": {
+            "$ref": "#/components/schemas/FacetView",
+            "description": "The list the facet describes."
+          }
+        }
       },
       "Feature": {
         "type": "string",

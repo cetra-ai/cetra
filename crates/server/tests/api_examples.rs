@@ -37,6 +37,7 @@ use cetra_server::api::experiments::{
     CreateExperimentResponse, Experiment, ExperimentComparison, ExperimentResults,
     ExperimentResultsRequest, ExperimentSummaries,
 };
+use cetra_server::api::facets::FacetsResponse;
 use cetra_server::api::invites::{CreatedInvite, Invite, InvitePreview};
 use cetra_server::api::keys::{ApiKey, CreatedApiKey, CreatedPersonalToken, PersonalToken};
 use cetra_server::api::members::{OrgMember, ProjectMember};
@@ -623,6 +624,7 @@ fn generated_files_roundtrip() {
             "list_personal_tokens" => roundtrip::<Page<PersonalToken>>(&example.file),
             "post_personal_token" => roundtrip::<CreatedPersonalToken>(&example.file),
             "get_metrics" => roundtrip::<MetricsResponse>(&example.file),
+            "get_facets" => roundtrip::<FacetsResponse>(&example.file),
             "run_sql" => roundtrip::<SqlQueryResult>(&example.file),
             "list_deletions" => roundtrip::<Page<Deletion>>(&example.file),
             "list_org_deletions" => roundtrip::<Page<Deletion>>(&example.file),
