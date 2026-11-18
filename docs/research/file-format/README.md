@@ -554,6 +554,24 @@ Two gaps remain:
 - **Size.** Strata has no run-length or delta encoding of sorted columns, so its files stay 1–137% bigger than the smallest.
 - **Full reads.** The per-chunk decode cost keeps them 1.3–5× slower than Parquet.
 
+## More real data: Open-SWE, Toucan and WildChat
+
+[real-data.md](real-data.md) runs the bench on three more public datasets, converted to OTel GenAI messages with reasoning, tool calls and tool definitions. Strata, best Parquet and Vortex compact sizes, in MiB:
+
+| Dataset | What it is | Strata | Parquet | Vortex compact |
+|---|---|---|---|---|
+| openswe | Coding agents (Claude Code and OpenHands harnesses), 2.4 GB of payloads | **29** | 47 | 158 |
+| toucan | Tool-calling agents on 495 MCP servers | **196** | 246 | 233 |
+| wildchat | Real users chatting with ChatGPT | 594 | 592 | **584** |
+
+- **On agent data** Strata has the smallest files, lookups about 2× faster than Parquet's, and search 10–32× faster.
+- **On chat data**, with many short conversations, it loses:
+  - files are the same size as the others';
+  - a full payload scan takes 1.4× Parquet's time;
+  - `list_llm_1h` takes 1.45× Parquet's time.
+
+  This is the per-chunk decode cost that is still open.
+
 ## What each format gets right and wrong
 
 The full analysis is in [parquet.md](parquet.md) and [vortex.md](vortex.md).

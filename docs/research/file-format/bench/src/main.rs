@@ -77,13 +77,13 @@ async fn run() -> R<()> {
             let files: usize = args[4].parse()?;
             let swe = match args.get(5).map(String::as_str) {
                 None => None,
-                Some("--swe") => {
+                Some(flag @ ("--swe" | "--convo")) => {
                     let max: usize = args.get(6).ok_or(USAGE)?.parse()?;
                     let shards = args.get(7..).unwrap_or_default();
                     if shards.is_empty() {
                         return Err(USAGE.into());
                     }
-                    Some((max, shards))
+                    Some((flag == "--convo", max, shards))
                 }
                 Some(_) => return Err(USAGE.into()),
             };
@@ -123,7 +123,7 @@ async fn run() -> R<()> {
     }
 }
 
-const USAGE: &str = "usage: fmtbench gen <dir> <traces> <files> [--swe <max_trajectories> <shard>...] | query <dir|s3://bucket/key> [runs] [only] | profile <dir|s3://bucket/key> [runs] | merge <dir> (local only) | restrata <dir> [out] (local only) | series <data> <out> [runs] [datasets...] (local only)\n  s3 needs AWS_ENDPOINT, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION and AWS_ALLOW_HTTP=true";
+const USAGE: &str = "usage: fmtbench gen <dir> <traces> <files> [--swe <max_trajectories> <shard>... | --convo <max_conversations> <file>...] | query <dir|s3://bucket/key> [runs] [only] | profile <dir|s3://bucket/key> [runs] | merge <dir> (local only) | restrata <dir> [out] (local only) | series <data> <out> [runs] [datasets...] (local only)\n  s3 needs AWS_ENDPOINT, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION and AWS_ALLOW_HTTP=true";
 
 // ------------------------------------------------------------------ generate
 
@@ -141,17 +141,22 @@ fn strip_payloads(s: &mut Span) {
     }
 }
 
-/// `swe` = (maximum trajectories, shard paths): spans come from the SWE-agent
-/// shards instead of synthetic traces, and `traces` is ignored.
-async fn generate(dir: &Path, traces: usize, files: usize, swe: Option<(usize, &[String])>) -> R<()> {
+/// `swe` = (convo, maximum traces, input paths): spans come from the SWE-agent
+/// shards, or from files written by `convert_convos.py` when `convo` is set,
+/// instead of synthetic traces, and `traces` is ignored.
+async fn generate(dir: &Path, traces: usize, files: usize, swe: Option<(bool, usize, &[String])>) -> R<()> {
     let t0 = Instant::now();
     let world = datagen::World::new(7);
     let mut rng = datagen::Rng::new(42);
     let (mut spans, needles) = match swe {
-        Some((max, shards)) => {
-            println!("traces argument ignored: spans come from {} SWE shards", shards.len());
+        Some((convo, max, shards)) => {
+            println!("traces argument ignored: spans come from {} input files", shards.len());
             let paths: Vec<PathBuf> = shards.iter().map(PathBuf::from).collect();
-            let spans = fmt_testdata::swe::spans(&paths, max, &world, &mut rng)?;
+            let spans = if convo {
+                fmt_testdata::convo::spans(&paths, max, &world, &mut rng)?
+            } else {
+                fmt_testdata::swe::spans(&paths, max, &world, &mut rng)?
+            };
             let needles = pick_needles(&spans);
             (spans, needles)
         }

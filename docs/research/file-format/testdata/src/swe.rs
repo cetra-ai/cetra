@@ -148,7 +148,8 @@ pub fn spans(
                         steps.push(Step::Llm {
                             input: serde_json::to_string(&history)?,
                             output: serde_json::to_string(&serde_json::json!([{"role":"assistant","parts":[{"type":"text","content":txt}],"finish_reason":"stop"}]))?,
-                            system_instructions: serde_json::to_string(&serde_json::json!([{"type":"text","content":system}]))?,
+                            system_instructions: Some(serde_json::to_string(&serde_json::json!([{"type":"text","content":system}]))?),
+                            tool_definitions: None,
                             text: txt.to_owned(),
                         });
                         last_ai = Some(txt.to_owned());
@@ -156,7 +157,7 @@ pub fn spans(
                         if first_user.is_none() {
                             first_user = Some(txt.to_owned());
                         } else {
-                            steps.push(Step::Tool { text: txt.to_owned() });
+                            steps.push(Step::Tool { input: None, text: txt.to_owned() });
                         }
                     }
                     let role_out = if r == "ai" { "assistant" } else { r };
@@ -171,15 +172,15 @@ pub fn spans(
 }
 
 /// One step of a trajectory, after the root. Steps are numbered in message order.
-enum Step {
-    /// An `ai`/`assistant` message: the LLM call that produced `text`.
-    Llm { input: String, output: String, system_instructions: String, text: String },
-    /// A `user` message after the first one: the tool result `text`.
-    Tool { text: String },
+pub(crate) enum Step {
+    /// An assistant message: the LLM call that produced it. `text` is its preview source.
+    Llm { input: String, output: String, system_instructions: Option<String>, tool_definitions: Option<String>, text: String },
+    /// A tool result `text`, called with the JSON arguments `input` when known.
+    Tool { input: Option<String>, text: String },
 }
 
 /// Appends one trace: the root, then one span per step, in order.
-fn trace_spans(
+pub(crate) fn trace_spans(
     index: usize,
     world: &datagen::World,
     rng: &mut datagen::Rng,
@@ -276,8 +277,8 @@ fn trace_spans(
         let s0 = step_start(k);
         let e0 = s0 + datagen::NS;
         match step {
-            Step::Llm { input, output, system_instructions, text } => {
-                let in_tokens = ((input.len() + system_instructions.len()) / 4) as i64;
+            Step::Llm { input, output, system_instructions, tool_definitions, text } => {
+                let in_tokens = ((input.len() + system_instructions.as_ref().map_or(0, String::len)) / 4) as i64;
                 let out_tokens = (output.len() / 4) as i64;
                 let cost_input = in_tokens as f64 * 2.5e-6;
                 let cost_output = out_tokens as f64 * 1e-5;
@@ -301,17 +302,20 @@ fn trace_spans(
                 s.output = Some(output);
                 s.output_format = Some(PayloadFormat::Messages);
                 s.output_preview = Some(datagen::preview(&text));
-                s.system_instructions = Some(system_instructions);
-                s.tool_definitions = None;
+                s.system_instructions = system_instructions;
+                s.tool_definitions = tool_definitions;
                 out.push(s);
             }
-            Step::Tool { text } => {
+            Step::Tool { input, text } => {
                 let mut s = tool_t.clone();
                 s.trace_id = trace_id;
                 s.span_id = span_id(j);
                 s.parent_span_id = Some(root_id);
                 s.start_time = s0;
                 s.end_time = e0;
+                s.input_preview = input.as_deref().map(datagen::preview);
+                s.input_format = input.as_ref().map(|_| PayloadFormat::Json);
+                s.input = input;
                 s.output_preview = Some(datagen::preview(&text));
                 s.output = Some(text);
                 s.output_format = Some(PayloadFormat::Text);
