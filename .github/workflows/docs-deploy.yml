@@ -41,9 +41,13 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           BRANCH: ${{ github.event_name == 'push' && 'main' || format('pr-{0}', github.event.pull_request.number) }}
         # The recipe's last line is `url=<deployed URL>`; the docs live under docs/.
+        # pipefail: the default `bash -e` would let `tee` hide a failed deploy.
         run: |
+          set -o pipefail
           just docs-deploy "$BRANCH" | tee deploy.log
-          echo "url=$(tail -n1 deploy.log | sed 's/^url=//')docs/" >> "$GITHUB_OUTPUT"
+          url="$(tail -n1 deploy.log | sed -n 's/^url=//p')"
+          test -n "$url"
+          echo "url=${url}docs/" >> "$GITHUB_OUTPUT"
       - name: Summary
         env:
           URL: ${{ steps.deploy.outputs.url }}
