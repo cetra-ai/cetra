@@ -11,8 +11,11 @@ const SITE = dirname(dirname(fileURLToPath(import.meta.url)));
 const ROOT = dirname(SITE);
 const ORIGIN = "http://localhost:5199";
 const OUT = join(SITE, "src/assets/screenshots");
-// The fixtures are on 2026-01-01 between 10:00 and 10:59 UTC; the clock stands just after.
-const NOW = new Date("2026-01-01T11:00:00Z");
+// The page clock is pinned so each run draws the same pictures. The dev server serves the large
+// generated dataset, built from the page's clock; its experiments start on 2026-11-02, so the
+// default stands a week after them. A shot of a page still on the small fixtures (dated
+// 2026-01-01, 10:00 to 10:59 UTC) sets its own `now` just after them.
+const NOW = "2026-11-19T12:00:00Z";
 
 async function startServer() {
   const server = spawn("pnpm", ["--dir", "web", "exec", "vite", "--port", "5199", "--strictPort"], {
@@ -43,11 +46,16 @@ async function startServer() {
 async function shoot(context, shot) {
   const page = await context.newPage();
   try {
-    await page.clock.setFixedTime(NOW);
+    await page.clock.setFixedTime(new Date(shot.now ?? NOW));
     await page.goto(ORIGIN + shot.path);
     await page.getByText(shot.waitFor).first().waitFor();
     for (const action of shot.actions ?? []) {
       await page.locator(action.click).first().click();
+      // `type` replaces the text of the element just clicked (an editor).
+      if (action.type !== undefined) {
+        await page.keyboard.press("ControlOrMeta+a");
+        await page.keyboard.insertText(action.type);
+      }
     }
     if (shot.waitAfter) await page.getByText(shot.waitAfter).first().waitFor();
     await page.waitForLoadState("networkidle");
@@ -88,9 +96,11 @@ try {
     locale: "en-US",
     timezoneId: "UTC",
   });
-  // The UI defaults to the dark theme; the docs show the light one.
+  // Each shot starts from empty storage (no "Recent" items from an earlier shot). The UI
+  // defaults to the dark theme; the docs show the light one.
   await context.addInitScript(() => {
     try {
+      localStorage.clear();
       localStorage.setItem("cetra.theme", "light");
     } catch {
       // storage unavailable: the default theme stays

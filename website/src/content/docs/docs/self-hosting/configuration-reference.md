@@ -125,6 +125,21 @@ These settings decide what an organization gets without a licence key or a plan 
 | `orgs.user_create` | | boolean | `true` | Members may create organizations. `false` on a cloud cell, where the control plane creates them. |
 | `orgs.create_url` | | URL | unset | Where "New organization" leads when `orgs.user_create` is `false`. Unset: no link. |
 
+## `[demo]`
+
+A demo org is an organization every signed-in user can read as a viewer without being a member. The limits apply only to these visitors, not to the org's real members.
+
+| Key | Environment | Type | Default | Description |
+|---|---|---|---|---|
+| `demo.org` | | string | unset | ID of the demo org. It must exist and be active when cetra starts. Unset: no demo org. |
+| `demo.requests_per_minute` | | integer | `120` | Requests a minute per visitor; above it the answer is `429`. At least 1. |
+| `demo.user_in_flight` | | integer | `4` | Requests in progress at once per visitor. At least 1, and at most `demo.org_in_flight`. |
+| `demo.org_in_flight` | | integer | `16` | Requests in progress at once across all visitors. At least 1. |
+| `demo.sql_timeout` | | duration | `"10s"` | Longest SQL console query for a visitor, from 1 to 60 seconds. A longer timeout is lowered. |
+| `demo.sql_max_rows` | | integer | `1000` | Most rows a SQL console answer returns to a visitor, from 1 to 10,000. |
+
+These keys also take the split form, such as `CETRA_DEMO__ORG`.
+
 ## `[auth]`
 
 | Key | Environment | Type | Default | Description |
