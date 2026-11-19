@@ -224,7 +224,10 @@ function NewForm({
                 aria-label={choice.name}
                 className="mt-1"
               />
-              <Label htmlFor={`dashboard-start-${choice.id}`} className="flex flex-col items-start gap-0.5">
+              <Label
+                htmlFor={`dashboard-start-${choice.id}`}
+                className="flex flex-col items-start gap-0.5"
+              >
                 <span className="text-ui font-medium">{choice.name}</span>
                 <span className="text-caption text-muted-foreground">{choice.description}</span>
               </Label>
