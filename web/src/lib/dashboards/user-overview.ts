@@ -4,14 +4,14 @@ import type { Definition, Widget } from "./types";
 
 /**
  * The user page's Usage: the Overview's numbers and charts, without its headings and without the
- * evaluation cost. Numbers keep their places; the charts follow them in reading order, two per row
- * (6 columns by 7 rows each), as the Overview lays out its charts.
+ * evaluation cost and the top users (they rank users). Numbers keep their places; the charts follow
+ * them in reading order, two per row (6 columns by 7 rows each), as the Overview lays out its charts.
  */
 
 const CHART_WIDTH = COLUMNS / 2;
 const CHART_HEIGHT = 7;
 
-const EXCLUDED = new Set(["ov-18"]);
+const EXCLUDED = new Set(["ov-18", "ov-20"]);
 
 function isChart(widget: Widget): boolean {
   return widget.kind === "chart";

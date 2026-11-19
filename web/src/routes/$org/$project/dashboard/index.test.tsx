@@ -23,6 +23,8 @@ const CHARTS = [
   "Cost by model",
   "Evaluation cost",
   "Top models by cost",
+  "Top users by cost",
+  "Top trace names by cost",
 ];
 
 /** Records the bodies of the widget queries the page sends. */

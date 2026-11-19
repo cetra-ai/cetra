@@ -1,5 +1,6 @@
 import { COLUMNS } from "./draft";
-import type { Chart, Definition, Measure, Widget, WidgetQuery, WidgetSource } from "./types";
+import { chartAt, ERROR, HALF, LLM, numberAt, query } from "./preset";
+import type { Definition } from "./types";
 
 /**
  * The built-in Overview (spec 11 § Dashboard): fixed widgets in this order, with their queries.
@@ -7,75 +8,42 @@ import type { Chart, Definition, Measure, Widget, WidgetQuery, WidgetSource } fr
  * 7 rows, two to a row. The Overview is not stored; it is not edited.
  */
 
-const CHART_HEIGHT = 7;
-const HALF = COLUMNS / 2;
 /** The five number tiles share the first row. */
 const TILE = COLUMNS / 5;
 
-/** A number tile in slot `slot` (0 to 4) of the first row. */
-function number(id: string, title: string, slot: number, query: WidgetQuery): Widget {
-  return {
-    id,
-    title,
-    kind: "chart",
-    chart: { type: "number" },
-    query,
-    layout: { x: slot * TILE, y: 0, w: TILE, h: 4 },
-  };
-}
-
-function chart(
-  id: string,
-  title: string,
-  x: number,
-  y: number,
-  settings: Chart,
-  query: WidgetQuery,
-): Widget {
-  return {
-    id,
-    title,
-    kind: "chart",
-    chart: settings,
-    query,
-    layout: { x, y, w: HALF, h: CHART_HEIGHT },
-  };
-}
-
-/** A query over one source: its measures, an optional filter and split. */
-function query(
-  source: WidgetSource,
-  measures: Measure[],
-  options: {
-    filter?: string;
-    breakdown?: WidgetQuery["breakdown"];
-  } = {},
-): WidgetQuery {
-  return {
-    source,
-    measures,
-    ...(options.filter ? { filter: options.filter } : {}),
-    ...(options.breakdown ? { breakdown: options.breakdown } : {}),
-  };
-}
-
-const LLM = "span_kind = 'llm' AND model IS NOT NULL";
-const ERROR = "status = 'error'";
-
 export const OVERVIEW: Definition = {
   widgets: [
-    number("ov-1", "Traces", 0, query("traces", [{ agg: "count" }])),
-    number(
+    numberAt("ov-1", "Traces", 0 * TILE, TILE, query("traces", [{ agg: "count" }])),
+    numberAt(
       "ov-2",
       "Error rate",
-      1,
+      1 * TILE,
+      TILE,
       query("traces", [{ agg: "rate", where: ERROR, label: "Error rate" }]),
     ),
-    number("ov-3", "p95 latency", 2, query("traces", [{ agg: "p95", field: "duration_ns" }])),
-    number("ov-4", "Cost", 3, query("traces", [{ agg: "sum", field: "cost_total" }])),
-    number("ov-5", "Tokens", 4, query("traces", [{ agg: "sum", field: "total_tokens" }])),
+    numberAt(
+      "ov-3",
+      "p95 latency",
+      2 * TILE,
+      TILE,
+      query("traces", [{ agg: "p95", field: "duration_ns" }]),
+    ),
+    numberAt(
+      "ov-4",
+      "Cost",
+      3 * TILE,
+      TILE,
+      query("traces", [{ agg: "sum", field: "cost_total" }]),
+    ),
+    numberAt(
+      "ov-5",
+      "Tokens",
+      4 * TILE,
+      TILE,
+      query("traces", [{ agg: "sum", field: "total_tokens" }]),
+    ),
 
-    chart(
+    chartAt(
       "ov-7",
       "Traces & errors",
       0,
@@ -86,7 +54,7 @@ export const OVERVIEW: Definition = {
         { agg: "count", where: ERROR, label: "Errors" },
       ]),
     ),
-    chart(
+    chartAt(
       "ov-8",
       "Tokens by type",
       HALF,
@@ -104,7 +72,7 @@ export const OVERVIEW: Definition = {
       ),
     ),
 
-    chart(
+    chartAt(
       "ov-10",
       "Error rate",
       0,
@@ -112,7 +80,7 @@ export const OVERVIEW: Definition = {
       { type: "bar", fade_below: 5 },
       query("traces", [{ agg: "rate", where: ERROR, label: "Error rate" }]),
     ),
-    chart(
+    chartAt(
       "ov-11",
       "Scores",
       HALF,
@@ -124,7 +92,7 @@ export const OVERVIEW: Definition = {
       }),
     ),
 
-    chart(
+    chartAt(
       "ov-13",
       "Latency",
       0,
@@ -136,7 +104,7 @@ export const OVERVIEW: Definition = {
         { agg: "p99", field: "duration_ns", label: "p99" },
       ]),
     ),
-    chart(
+    chartAt(
       "ov-14",
       "LLM latency by model",
       HALF,
@@ -147,7 +115,7 @@ export const OVERVIEW: Definition = {
         breakdown: { field: "model", limit: 5, other: false },
       }),
     ),
-    chart(
+    chartAt(
       "ov-15",
       "TTFT",
       0,
@@ -163,7 +131,7 @@ export const OVERVIEW: Definition = {
       ),
     ),
 
-    chart(
+    chartAt(
       "ov-17",
       "Cost by model",
       0,
@@ -174,7 +142,7 @@ export const OVERVIEW: Definition = {
         breakdown: { field: "model", limit: 3, other: true },
       }),
     ),
-    chart(
+    chartAt(
       "ov-18",
       "Evaluation cost",
       HALF,
@@ -184,12 +152,13 @@ export const OVERVIEW: Definition = {
         filter: "environment = 'cetra-eval'",
       }),
     ),
-    {
-      id: "ov-19",
-      title: "Top models by cost",
-      kind: "chart",
-      chart: { type: "table", share: true },
-      query: query(
+    chartAt(
+      "ov-19",
+      "Top models by cost",
+      0,
+      39,
+      { type: "table", share: true },
+      query(
         "spans",
         [
           { agg: "sum", field: "cost_total", label: "Cost" },
@@ -201,7 +170,27 @@ export const OVERVIEW: Definition = {
           breakdown: { field: "model", limit: 10, other: false },
         },
       ),
-      layout: { x: 0, y: 39, w: HALF, h: CHART_HEIGHT },
-    },
+    ),
+    chartAt(
+      "ov-20",
+      "Top users by cost",
+      HALF,
+      39,
+      { type: "bar_h" },
+      query("traces", [{ agg: "sum", field: "cost_total", label: "Cost" }], {
+        filter: "user_id IS NOT NULL",
+        breakdown: { field: "user_id", limit: 10, other: false },
+      }),
+    ),
+    chartAt(
+      "ov-21",
+      "Top trace names by cost",
+      0,
+      46,
+      { type: "bar_h" },
+      query("traces", [{ agg: "sum", field: "cost_total", label: "Cost" }], {
+        breakdown: { field: "name", limit: 10, other: false },
+      }),
+    ),
   ],
 };
