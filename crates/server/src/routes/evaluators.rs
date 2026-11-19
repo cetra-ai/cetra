@@ -2474,7 +2474,7 @@ mod tests {
         .await;
         let response = get_versions(&app, &seeded, &id, "").await;
         let body = text(&response);
-        for secret in [
+        for (index, secret) in [
             WEBHOOK_SECRET,
             WEBHOOK_HEADER_VALUE,
             MOVED_SECRET,
@@ -2486,8 +2486,14 @@ mod tests {
             "secret_enc",
             "signing_secret",
             "has_signing_secret",
-        ] {
-            assert!(!body.contains(secret), "{secret} in {body}");
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(
+                !body.contains(secret),
+                "forbidden value #{index} in the versions page"
+            );
         }
         let page: Value = response.json();
         let evaluator: Value = app
@@ -2503,13 +2509,16 @@ mod tests {
         .fetch_one(app.state.meta.reader())
         .await
         .unwrap();
-        for secret in [
+        for (index, secret) in [
             WEBHOOK_SECRET,
             MOVED_SECRET,
             WEBHOOK_HEADER_VALUE,
             MOVED_HEADER,
-        ] {
-            assert!(!stored.contains(secret), "{secret} in the history");
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(!stored.contains(secret), "secret #{index} in the history");
         }
     }
 

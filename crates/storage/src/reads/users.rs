@@ -782,7 +782,7 @@ mod tests {
             let detail = user_detail(&ctx, user_id, scope(include_eval), TIMEOUT)
                 .await
                 .expect("detail")
-                .unwrap_or_else(|| panic!("missing {user_id}"));
+                .unwrap_or_else(|| panic!("no user for {file}"));
             let fixture = fixture_file(file);
             assert_rows(
                 &json_rows(std::slice::from_ref(&detail.user)),

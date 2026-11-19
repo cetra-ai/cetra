@@ -1462,7 +1462,7 @@ async fn edit_items(
         .map(|(index, item)| (format!("items[{index}].id"), item.id))
         .collect();
     let mut errors = repeated_ids(&ids);
-    let mut patches = Vec::with_capacity(body.items.len());
+    let mut patches = Vec::new();
     for (index, item) in body.items.into_iter().enumerate() {
         let id = item.id;
         let request = UpdateItemRequest {
@@ -2465,7 +2465,7 @@ async fn add_from_traces(
             format!("must hold 1 to {MAX_TRACE_BATCH} items"),
         )]));
     }
-    let mut refs = Vec::with_capacity(body.items.len());
+    let mut refs = Vec::new();
     let mut errors = Vec::new();
     for (index, item) in body.items.iter().enumerate() {
         let trace = item.trace_id.parse::<TraceId>();
