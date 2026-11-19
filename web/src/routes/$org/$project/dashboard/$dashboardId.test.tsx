@@ -108,7 +108,7 @@ it("gives a member on a custom dashboard Edit and the menu", async () => {
 
 it("gives a member on the Overview Edit and Duplicate, but no rename, delete or reset", async () => {
   const { user } = await renderApp(OVERVIEW_URL);
-  await screen.findByRole("heading", { level: 2, name: "Volume" });
+  await screen.findByRole("region", { name: "Traces & errors" });
   expect(screen.getByRole("button", { name: "Edit" })).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "Dashboard actions" }));
   expect(screen.getByRole("menuitem", { name: "Duplicate" })).toBeInTheDocument();
@@ -132,7 +132,7 @@ it("duplicates the Overview into a dashboard with its widgets", async () => {
   const requests = recordRequests();
   try {
     const { router, user } = await renderApp(OVERVIEW_URL);
-    await screen.findByRole("heading", { level: 2, name: "Volume" });
+    await screen.findByRole("region", { name: "Traces & errors" });
     await user.click(screen.getByRole("button", { name: "Dashboard actions" }));
     await user.click(screen.getByRole("menuitem", { name: "Duplicate" }));
     await user.click(screen.getByRole("button", { name: "Duplicate" }));
@@ -145,7 +145,7 @@ it("duplicates the Overview into a dashboard with its widgets", async () => {
       name: "Copy of Overview",
       definition: { widgets: OVERVIEW.widgets },
     });
-    expect(await screen.findByRole("heading", { level: 2, name: "Volume" })).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: "Traces & errors" })).toBeInTheDocument();
   } finally {
     requests.stop();
   }

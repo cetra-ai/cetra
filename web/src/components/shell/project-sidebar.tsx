@@ -15,6 +15,8 @@ import { NAV_SECTIONS, projectNav } from "@/components/shell/nav";
 import { useProject } from "@/components/shell/project-context";
 import { type RecentItem, useRecentItems } from "@/components/shell/recent-items";
 import { SidebarAccount } from "@/components/shell/sidebar-account";
+import { SidebarTheme } from "@/components/shell/sidebar-theme";
+import { TopBarStart } from "@/components/shell/top-bar-slot";
 import { type NavBadge, type NavBadgeHref, useNavBadges } from "@/components/shell/use-nav-badges";
 import {
   Sidebar,
@@ -23,7 +25,6 @@ import {
   SidebarGroup,
   SidebarGroupContent,
   SidebarGroupLabel,
-  SidebarHeader,
   SidebarInset,
   SidebarMenu,
   SidebarMenuBadge,
@@ -304,13 +305,15 @@ export function ProjectSidebar({ children }: { children: ReactNode }) {
         }}
         className="h-[calc(100dvh-40px)] overflow-hidden"
       >
+        {/* The toggle sits at the top bar's far left, in the same place open or collapsed. */}
+        <TopBarStart>
+          <SidebarTrigger />
+        </TopBarStart>
         <Sidebar collapsible="icon">
-          <SidebarHeader>
-            <SidebarTrigger />
-          </SidebarHeader>
           <NavSections org={org} project={project} />
           <SidebarFooter>
             <SidebarMenu>
+              <SidebarTheme />
               <SidebarMenuItem>
                 <SidebarMenuButton asChild tooltip="Settings">
                   <Link to="/$org/$project/settings/general" params={{ org, project }}>
@@ -324,9 +327,6 @@ export function ProjectSidebar({ children }: { children: ReactNode }) {
           </SidebarFooter>
         </Sidebar>
         <SidebarInset className="min-h-0 overflow-hidden">
-          <div className="flex shrink-0 items-center border-b px-2 py-1 md:hidden">
-            <SidebarTrigger />
-          </div>
           <GenAiLogsHint />
           {children}
         </SidebarInset>

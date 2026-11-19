@@ -854,6 +854,15 @@
   body {
     @apply bg-background text-foreground;
   }
+  /*
+   * A native select draws its list with the select's background; a transparent select gets a white
+   * list, where the theme's light text is unreadable in dark mode. Options take the popover colours.
+   */
+  select option,
+  select optgroup {
+    background-color: var(--popover);
+    color: var(--popover-foreground);
+  }
   html {
     font-size: 13px;
     @apply font-sans;

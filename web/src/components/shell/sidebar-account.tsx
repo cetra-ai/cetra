@@ -1,15 +1,10 @@
-import { BookOpen, ChevronsUpDown, ExternalLink, Moon, Sun } from "lucide-react";
+import { BookOpen, ChevronsUpDown, ExternalLink } from "lucide-react";
 import { $api } from "@/api/client";
-import { useTheme } from "@/components/theme-provider";
-import { restoreSavedPaletteOnClose, ThemeMenuItems } from "@/components/theme-toggle";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuSeparator,
-  DropdownMenuSub,
-  DropdownMenuSubContent,
-  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
@@ -34,17 +29,15 @@ import { APP_VERSION, DOCS_URL } from "@/product";
 export function SidebarAccount() {
   const { isMobile, state } = useSidebar();
   const { data: me } = $api.useSuspenseQuery("get", "/api/auth/me");
-  const { resolvedTheme } = useTheme();
   const name = me.user.name?.trim() ? me.user.name : undefined;
   const label = name ?? me.user.email;
   const letters = initials(me.user.name, me.user.email);
   const collapsed = state === "collapsed" && !isMobile;
-  const ThemeIcon = resolvedTheme === "dark" ? Moon : Sun;
 
   return (
     <SidebarMenu>
       <SidebarMenuItem>
-        <DropdownMenu onOpenChange={restoreSavedPaletteOnClose}>
+        <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <SidebarMenuButton size="lg" tooltip={label} aria-label={label}>
               <Avatar size="sm">
@@ -70,15 +63,6 @@ export function SidebarAccount() {
             <DropdownMenuSeparator />
             <UserMenuAccountLinks />
             <DropdownMenuSeparator />
-            <DropdownMenuSub>
-              <DropdownMenuSubTrigger>
-                <ThemeIcon aria-hidden="true" />
-                Theme
-              </DropdownMenuSubTrigger>
-              <DropdownMenuSubContent className="w-48">
-                <ThemeMenuItems />
-              </DropdownMenuSubContent>
-            </DropdownMenuSub>
             <UserMenuTimeZoneItem />
             <DropdownMenuSeparator />
             <UserMenuSignOutItem />

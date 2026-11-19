@@ -1,4 +1,5 @@
 import { Link, useMatch, useRouterState } from "@tanstack/react-router";
+import { CetraMark } from "@/components/brand/cetra-mark";
 import { CommandPalette } from "@/components/command/palette";
 import { OrgSwitcher } from "@/components/org-switcher";
 import { isProjectSettingsPath } from "@/components/settings/settings-nav";
@@ -6,7 +7,7 @@ import { AlertBell } from "@/components/shell/alert-bell";
 import { IngestDot } from "@/components/shell/ingest-dot";
 import { pageOf } from "@/components/shell/page-crumb";
 import { ProjectSwitcher } from "@/components/shell/project-switcher";
-import { TopBarSlotTarget } from "@/components/shell/top-bar-slot";
+import { TopBarSlotTarget, TopBarStartTarget } from "@/components/shell/top-bar-slot";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { UserMenu } from "@/components/user-menu";
 import { PRODUCT_NAME } from "@/product";
@@ -27,13 +28,14 @@ export function TopBar() {
       : pageOf(pathname, project.params.org, project.params.project);
   return (
     <header className="flex h-[40px] shrink-0 items-center gap-2 border-b px-3">
+      <TopBarStartTarget />
       <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5">
         <Link
           to="/"
           className="rounded-sm font-medium outline-none focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 focus-visible:outline-solid"
         >
           <span className="inline-flex items-center gap-1.5">
-            <img src="/favicon.svg" alt="" className="size-4" />
+            <CetraMark />
             {PRODUCT_NAME}
           </span>
         </Link>

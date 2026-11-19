@@ -25,7 +25,7 @@ describe("the user Usage", () => {
     expect(validateDefinition(USER_OVERVIEW)).toEqual([]);
   });
 
-  it("has the five numbers, then every Overview chart but the evaluation cost, with no headings", () => {
+  it("has the five numbers, then every Overview chart but the evaluation cost and the top users, with no headings", () => {
     const titles = USER_OVERVIEW.widgets.map((widget) => widget.title);
     expect(titles).toEqual([
       "Traces",
@@ -42,6 +42,7 @@ describe("the user Usage", () => {
       "TTFT",
       "Cost by model",
       "Top models by cost",
+      "Top trace names by cost",
     ]);
     expect(USER_OVERVIEW.widgets.some((widget) => widget.kind === "heading")).toBe(false);
   });
@@ -60,6 +61,7 @@ describe("the user Usage", () => {
       [0, 25, 30, 7],
       [30, 25, 30, 7],
       [0, 32, 30, 7],
+      [30, 32, 30, 7],
     ]);
   });
 

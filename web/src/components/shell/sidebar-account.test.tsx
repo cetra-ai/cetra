@@ -5,12 +5,12 @@ import {
   createRouter,
   RouterProvider,
 } from "@tanstack/react-router";
-import { act, render, screen } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Suspense } from "react";
 import { describe, expect, it } from "vitest";
 import { SidebarAccount } from "@/components/shell/sidebar-account";
-import { PALETTE_STORAGE_KEY, ThemeProvider } from "@/components/theme-provider";
+import { ThemeProvider } from "@/components/theme-provider";
 import { Sidebar, SidebarFooter, SidebarProvider } from "@/components/ui/sidebar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { DOCS_URL } from "@/product";
@@ -60,7 +60,7 @@ describe("SidebarAccount", () => {
     expect(screen.getByText("ada@example.com")).toBeInTheDocument();
   });
 
-  it("opens the account menu with the account links, the theme submenu and sign out", async () => {
+  it("opens the account menu with the account links, the time zone and sign out", async () => {
     const { user } = await renderAccount();
 
     await user.click(await screen.findByRole("button", { name: "Ada Example" }));
@@ -68,42 +68,8 @@ describe("SidebarAccount", () => {
     expect(screen.getByRole("menuitem", { name: "Admin" })).toBeInTheDocument();
     expect(screen.getByRole("menuitemcheckbox", { name: "Show times in UTC" })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: "Sign out" })).toBeInTheDocument();
-
-    await user.click(screen.getByRole("menuitem", { name: "Theme" }));
-    expect(screen.getByRole("menuitemradio", { name: "Light" })).toBeInTheDocument();
-    expect(screen.getByRole("menuitemradio", { name: "Dark" })).toBeInTheDocument();
-    expect(screen.getByRole("menuitemradio", { name: "System" })).toBeInTheDocument();
-    expect(screen.getByRole("menuitemradio", { name: "Nord" })).toBeInTheDocument();
-    expect(screen.getByRole("menuitemradio", { name: "Comfortable" })).toBeInTheDocument();
-  });
-
-  it("sets the theme from the theme submenu", async () => {
-    const { user } = await renderAccount();
-
-    await user.click(await screen.findByRole("button", { name: "Ada Example" }));
-    await user.click(screen.getByRole("menuitem", { name: "Theme" }));
-    await user.click(screen.getByRole("menuitemradio", { name: "Dark" }));
-
-    expect(document.documentElement).toHaveClass("dark");
-  });
-
-  it("restores the saved palette when the whole menu closes", async () => {
-    const { user } = await renderAccount();
-
-    await user.click(await screen.findByRole("button", { name: "Ada Example" }));
-    await user.click(screen.getByRole("menuitem", { name: "Theme" }));
-    // Radix moves focus to an item on hover: focusing it here previews the palette.
-    act(() => {
-      screen.getByRole("menuitemradio", { name: "Tokyo Night" }).focus();
-    });
-    expect(document.documentElement.dataset.palette).toBe("tokyo");
-
-    // The first Escape closes the submenu, the second closes the menu.
-    await user.keyboard("{Escape}{Escape}");
-
-    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
-    expect(document.documentElement.dataset.palette).toBeUndefined();
-    expect(localStorage.getItem(PALETTE_STORAGE_KEY)).toBeNull();
+    // The theme has its own entry in the sidebar footer.
+    expect(screen.queryByRole("menuitem", { name: "Theme" })).not.toBeInTheDocument();
   });
 
   it("shows the version and a docs link", async () => {

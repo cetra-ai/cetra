@@ -45,7 +45,7 @@ export function ProjectSwitcher() {
           <ChevronsUpDown className="size-3.5 text-muted-foreground" aria-hidden />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start">
+      <DropdownMenuContent align="start" className="min-w-48 whitespace-nowrap">
         <DropdownMenuRadioGroup
           value={project ?? ""}
           onValueChange={(slug) => {
