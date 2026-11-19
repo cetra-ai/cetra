@@ -17,6 +17,8 @@ mod write;
 pub(crate) use chunk::chunk_value;
 pub(crate) use copy::{MergeCopy, copy_stores, same_stores};
 pub(crate) use header::PayloadHeader;
+#[cfg(test)]
+pub(crate) use read::frame_segments_of;
 pub(crate) use read::{
     FrameBodies, build_payload_values, decode_header, ids_of, read_header, read_payload_column,
     refs_segments,

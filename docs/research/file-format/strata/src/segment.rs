@@ -6,7 +6,9 @@
 use std::cell::RefCell;
 
 use crate::error::{Result, StrataError};
-use crate::format::{Cursor, MAX_SEGMENT_RAW, Out, SEGMENT_HEADER_LEN, SEGMENT_MAGIC, checksum32};
+use crate::format::{
+    Cursor, MAX_SEGMENT_RAW, Out, SEGMENT_HEADER_LEN, SEGMENT_MAGIC, checksum_matches, checksum32,
+};
 use crate::payload::Dict;
 
 thread_local! {
@@ -264,7 +266,7 @@ pub(crate) fn decode_segment_with(
     }
     let prefix = bytes.get(..12).ok_or_else(|| corrupt("segment length"))?;
     let stored = c.bytes(stored_len, "segment length")?;
-    if checksum32(&[prefix, stored]) != sum {
+    if !checksum_matches(checksum32(&[prefix, stored]), sum) {
         return Err(corrupt("segment checksum"));
     }
     match codec {

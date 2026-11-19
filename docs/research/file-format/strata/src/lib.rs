@@ -55,9 +55,14 @@ mod fast;
 mod file;
 mod merge;
 mod reader;
-#[cfg(test)]
+#[cfg(any(test, fuzzing))]
 mod testgen;
 mod writer;
+
+/// Fuzz entry points (`fuzz/`). Not part of the API.
+#[cfg(any(test, fuzzing))]
+#[doc(hidden)]
+pub mod fuzz_entry;
 
 pub use config::Config;
 pub use datafusion::{StrataExec, StrataTable, table_schema};

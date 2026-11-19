@@ -20,6 +20,10 @@ datafusion = { version = "55.2", default-features = false, features = ["sql", "n
 async-trait = "0.1.92"
 simdutf8 = "0.1.5"
 
+# cargo-fuzz sets `--cfg fuzzing` (fuzz/).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+
 [dev-dependencies]
 tokio = { version = "1.54", features = ["rt-multi-thread", "macros"] }
 proptest = "1.12.0"

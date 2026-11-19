@@ -8,7 +8,6 @@ use arrow::array::{
 };
 use arrow::buffer::{BooleanBuffer, Buffer, NullBuffer, OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{ArrowNativeType, DataType, Field, UInt32Type};
-use arrow::ipc::reader::StreamReader;
 
 use super::bitpack::{for_each_packed, unpack, unpack_u32};
 use super::lengths::{decode_lengths, offsets_of, total_of};
@@ -17,7 +16,9 @@ use super::{
     unsupported,
 };
 use crate::error::{Result, StrataError};
-use crate::format::{Cursor, MAX_CHUNK_ELEMENTS, MAX_CHUNK_OUTPUT, MAX_CHUNK_ROWS, le_u64};
+use crate::format::{
+    Cursor, MAX_CHUNK_ELEMENTS, MAX_CHUNK_OUTPUT, MAX_CHUNK_ROWS, le_u64, read_ipc_stream,
+};
 
 /// Decodes `entry` with its body (`None` for `Const` and `ConstNull`) into an array of
 /// `field`'s type. `dict` is the column's dictionary when it has one: `Dict` and `ListDict`
@@ -99,14 +100,10 @@ fn decode_ipc(
     if entry.flags & flags::HAS_NULLS != 0 {
         return Err(corrupt("ipc flags"));
     }
-    let mut reader = StreamReader::try_new(body, None).map_err(|_| corrupt("ipc chunk"))?;
-    let batch = match reader.next() {
-        Some(Ok(batch)) => batch,
-        _ => return Err(corrupt("ipc chunk")),
-    };
-    if reader.next().is_some() {
+    let batches = read_ipc_stream(body).map(|(_, batches)| batches);
+    let [batch] = batches.as_deref().unwrap_or_default() else {
         return Err(corrupt("ipc chunk"));
-    }
+    };
     match batch.columns() {
         [column] if batch.num_rows() == n && column.data_type() == field.data_type() => {
             Ok(Arc::clone(column))

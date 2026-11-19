@@ -8,13 +8,12 @@
 use std::collections::HashSet;
 
 use arrow::datatypes::SchemaRef;
-use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
 
 use crate::error::{Result, StrataError};
 use crate::format::{
     BLOCK_ENTRY_LEN, Cursor, DIRECTORY_RECORD_LEN, FILE_MAGIC, HOT_SECTIONS, MAX_PROMOTED_KEY_LEN,
-    MAX_PROMOTED_KEYS, Out, PAGE_REF_LEN, VERSION,
+    MAX_PROMOTED_KEYS, Out, PAGE_REF_LEN, VERSION, read_ipc_stream,
 };
 use crate::segment::SegmentRef;
 
@@ -503,18 +502,15 @@ impl HotTail {
         let mut c = Cursor::new(bytes, offset);
 
         let (schema_base, schema_bytes) = read_section(&mut c)?;
-        let hot_schema = |_: arrow::error::ArrowError| StrataError::Corrupt {
-            what: "hot schema",
-            offset: schema_base,
+        let schema = match read_ipc_stream(schema_bytes) {
+            Some((schema, batches)) if batches.is_empty() => schema,
+            _ => {
+                return Err(StrataError::Corrupt {
+                    what: "hot schema",
+                    offset: schema_base,
+                });
+            }
         };
-        let mut reader = StreamReader::try_new(schema_bytes, None).map_err(hot_schema)?;
-        let schema = reader.schema();
-        if reader.next().is_some() {
-            return Err(StrataError::Corrupt {
-                what: "hot schema",
-                offset: schema_base,
-            });
-        }
 
         let (dir_base, dir_bytes) = read_section(&mut c)?;
         if !dir_bytes.len().is_multiple_of(DIRECTORY_RECORD_LEN) {

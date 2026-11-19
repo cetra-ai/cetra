@@ -14,7 +14,8 @@ use object_store::{GetOptions, GetRange, ObjectStore, ObjectStoreExt};
 use crate::config::Config;
 use crate::error::{Result, StrataError};
 use crate::format::{
-    Cursor, HEADER_LEN, MAX_PAGE_ENTRIES, MAX_ROWS, POSTSCRIPT_LEN, SEGMENT_HEADER_LEN, checksum32,
+    Cursor, HEADER_LEN, MAX_PAGE_ENTRIES, MAX_ROWS, POSTSCRIPT_LEN, SEGMENT_HEADER_LEN,
+    checksum_matches, checksum32,
 };
 use crate::hot::{DirectoryRecord, HotTail, Layer, PageRef, Postscript};
 use crate::index::{KeyFilter, merge_rows, zone_may_hold};
@@ -317,7 +318,7 @@ impl StrataFile {
             tail.get(skip..ps_start).ok_or_else(hot_corrupt)?.to_vec()
         };
 
-        if checksum32(&[hot.as_slice()]) != postscript.hot_checksum {
+        if !checksum_matches(checksum32(&[hot.as_slice()]), postscript.hot_checksum) {
             return Err(StrataError::Corrupt {
                 what: "hot checksum",
                 offset: postscript.hot_offset,
@@ -1203,6 +1204,35 @@ mod tests {
 
     fn is_corrupt<T>(result: &Result<T>) -> bool {
         matches!(result, Err(StrataError::Corrupt { .. }))
+    }
+
+    /// Fuzz finding `fuzz/regressions/file/hot-schema-unknown-type`: a hot schema with an
+    /// unknown Arrow type id made arrow's IPC reader panic (`unimplemented!`). With its hot
+    /// checksum fixed, the file reaches that reader outside fuzzing too, and is corrupt.
+    #[test]
+    fn a_hot_schema_that_makes_arrow_panic_is_corrupt() {
+        let mut bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("fuzz/regressions/file/hot-schema-unknown-type"),
+        )
+        .unwrap();
+        refresh_hot_checksum(&mut bytes);
+        runtime().block_on(async {
+            let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            put(store.as_ref(), bytes).await;
+            let opened = StrataFile::open(store, path(), None, &Config::default()).await;
+            assert!(
+                matches!(
+                    opened,
+                    Err(StrataError::Corrupt {
+                        what: "hot schema",
+                        ..
+                    })
+                ),
+                "{:?}",
+                opened.err()
+            );
+        });
     }
 
     #[test]

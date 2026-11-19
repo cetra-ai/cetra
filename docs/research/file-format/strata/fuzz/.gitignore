@@ -1,0 +1,7 @@
+target/
+# Scratch corpora: new inputs from a run, and minimization leftovers.
+corpus-*/
+artifacts/
+coverage/
+# Copied from ../Cargo.lock before a run, so the fuzzed versions are Strata's.
+Cargo.lock
