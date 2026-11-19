@@ -54,6 +54,15 @@ it("keeps a span and a mode on the trace page", () => {
   expect(parseTracePageSearch({ span: "B".repeat(16), mode: "chat" })).toEqual({});
 });
 
+it("accepts the timeline mode and rejects unknown modes", () => {
+  expect(parseTracePageSearch({ mode: "timeline" })).toEqual({ mode: "timeline" });
+  expect(parseTracesSearch({ mode: "timeline", trace: "a".repeat(32) })).toEqual({
+    mode: "timeline",
+    trace: "a".repeat(32),
+  });
+  expect(parseTracePageSearch({ mode: "gantt" })).toEqual({});
+});
+
 it("keeps live=1 and drops any other value", () => {
   expect(parseTracesSearch({ live: 1 })).toEqual({ live: 1 });
   expect(parseTracesSearch({ live: "1" })).toEqual({ live: 1 });

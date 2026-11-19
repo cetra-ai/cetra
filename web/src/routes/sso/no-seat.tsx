@@ -22,7 +22,7 @@ function NoSeatPage() {
     : "No seat available in this organization; ask an owner.";
   return (
     <AuthLayout title="No seat available">
-      <p role="status" className="text-sm">
+      <p role="status" className="text-body">
         {message}
       </p>
       <Button asChild className="self-start">

@@ -1,6 +1,6 @@
 name: Advisories
 
-# Manual only until the first release (D187); then restore the weekly schedule:
+# Manual only until the first release (D188); then restore the weekly schedule:
 #   schedule:
 #     - cron: "17 6 * * 1" # Mondays 06:17 UTC; off the hour to avoid the scheduler rush
 on:

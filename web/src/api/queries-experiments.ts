@@ -42,7 +42,7 @@ export function compareInit(
   project: string,
   ids: readonly string[],
   threshold: number,
-  regressionsOnly: boolean,
+  only: "regressed" | "improved" | "changed" | undefined,
 ) {
   return {
     params: {
@@ -51,8 +51,15 @@ export function compareInit(
         ids: ids.join(","),
         threshold,
         limit: 100,
-        ...(regressionsOnly ? { regressions_only: true } : {}),
+        ...(only ? { only } : {}),
       },
     },
   };
+}
+
+/** The summaries of up to 25 experiments, in the order of `ids` (`get_experiment_summaries`). */
+export function experimentSummariesQuery(org: string, project: string, ids: readonly string[]) {
+  return $api.queryOptions("get", "/api/v1/projects/{project}/experiments/summaries", {
+    params: { path: { project: projectRef(org, project) }, query: { ids: ids.join(",") } },
+  });
 }

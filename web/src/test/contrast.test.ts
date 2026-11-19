@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 // @ts-expect-error node builtin, available under Vitest
 import { fileURLToPath } from "node:url";
 import { expect, it } from "vitest";
+import { PALETTES } from "@/components/theme-provider";
 
 const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../styles.css"), "utf8");
 
@@ -32,25 +33,55 @@ const DOT_PAIRS = [
   ["status-unset", "background"],
 ] as const;
 
-it("keeps text tokens at WCAG AA in light and dark", () => {
+it.each(PALETTES)("keeps the %s palette's text tokens at WCAG AA in light and dark", (palette) => {
   for (const theme of ["light", "dark"] as const) {
-    const tokens = themeTokens(css, theme);
+    const tokens = paletteTokens(css, palette, theme);
     for (const [front, back] of TEXT_PAIRS) {
-      expect(contrast(tokens, front, back), `${theme} ${front} on ${back}`).toBeGreaterThanOrEqual(
-        4.5,
-      );
+      expect(
+        contrast(tokens, front, back),
+        `${palette} ${theme} ${front} on ${back}`,
+      ).toBeGreaterThanOrEqual(4.5);
     }
     for (const [front, back] of DOT_PAIRS) {
-      expect(contrast(tokens, front, back), `${theme} ${front} on ${back}`).toBeGreaterThanOrEqual(
-        3,
-      );
+      expect(
+        contrast(tokens, front, back),
+        `${palette} ${theme} ${front} on ${back}`,
+      ).toBeGreaterThanOrEqual(3);
     }
   }
 });
 
+/** The tokens a palette ends up with: the theme's, then the palette's blocks in CSS order. */
+function paletteTokens(
+  source: string,
+  palette: string,
+  theme: "light" | "dark",
+): Map<string, Oklch> {
+  const tokens = themeTokens(source, theme);
+  if (palette === "github") {
+    return tokens;
+  }
+  const headers = [`:root[data-palette="${palette}"]`];
+  if (theme === "dark") {
+    headers.push(`.dark[data-palette="${palette}"]`);
+  }
+  for (const header of headers) {
+    for (const [name, value] of blockTokens(source, header)) {
+      tokens.set(name, value);
+    }
+  }
+  return tokens;
+}
+
 function themeTokens(source: string, theme: "light" | "dark"): Map<string, Oklch> {
-  const header = theme === "light" ? ":root" : ".dark";
+  return blockTokens(source, theme === "light" ? ":root" : ".dark");
+}
+
+function blockTokens(source: string, header: string): Map<string, Oklch> {
   const start = source.indexOf(`${header} {`);
+  if (start < 0) {
+    return new Map();
+  }
   const open = source.indexOf("{", start);
   const close = source.indexOf("}", open);
   const body = source.slice(open + 1, close);

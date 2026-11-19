@@ -235,6 +235,7 @@ CREATE TABLE score_definitions (
   categories TEXT,                    -- JSON [{label, value?}]
   min_value REAL, max_value REAL,
   description TEXT,
+  direction TEXT NOT NULL DEFAULT 'none',  -- higher | lower | none
   archived_at INTEGER,
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );
@@ -262,6 +263,39 @@ CREATE INDEX saved_views_owner ON saved_views(project_id, owner_user_id);   -- t
 ```
 
 Names are not unique: several visible views may share a name. Visibility, sharing, moderation, the two default scopes and the limits (names 1–200 characters, state ≤ 64 KiB, 1,000 views per project and owner) are D-H-6. Preset ranges are stored relative (`range: "24h"`). A view whose filter no longer validates (column removed) still loads; the filter shows as a raw chip with the error.
+
+## Dashboards
+
+Custom dashboards (D-C-16) and each project's edited Overview (D-C-18). The built-in Overview preset is defined by the UI; a project stores its own Overview only once a member saves a change to it.
+
+```sql
+CREATE TABLE dashboards (
+  id TEXT PRIMARY KEY,                -- UUIDv7
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  description TEXT,
+  definition TEXT NOT NULL,           -- JSON: {widgets: [Widget]}, validated by the server
+  version INTEGER NOT NULL DEFAULT 1, -- +1 on every update; a PATCH names the version it read
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'custom' CHECK (kind IN ('custom', 'overview'))  -- added by migration 0022 (D-C-18)
+);
+CREATE INDEX dashboards_project ON dashboards(project_id, name);
+CREATE UNIQUE INDEX dashboards_overview ON dashboards(project_id) WHERE kind = 'overview';
+```
+
+A row of kind `overview` is the project's edited Overview: at most one per project, named `Overview`, with no description. It is read and written only through the `/dashboards/overview` endpoints (09): the list, the 100-dashboard cap and `/dashboards/{id}` ignore it (a `GET`, `PATCH` or `DELETE` of its id is a 404). Deleting it ("Reset to default") brings the built-in preset back.
+
+A **Widget** is `{id, title, layout: {x, y, w, h}, kind, chart?, query?}`:
+- `id`: 1–64 characters of `[A-Za-z0-9_-]`, unique in the dashboard.
+- `title`: 0–100 characters (a heading needs 1–100). `description` of the dashboard: 0–500.
+- `layout`: integers on the 60-column grid (D-C-19), `0 ≤ x ≤ 59`, `1 ≤ w ≤ 60`, `x + w ≤ 60`, `0 ≤ y ≤ 1000`, `1 ≤ h ≤ 40`.
+- `kind`: `chart` or `heading`. A heading has no `chart` and no `query`.
+- `chart`: `{type, stacked?, split?, fade_below?, share?}`. `type` is `line`, `bar`, `area`, `bar_h`, `number` or `table`. `stacked` applies to `bar` and `area`; `split` (one small chart per group; needs a breakdown with `limit` at most 6) to `line`; `fade_below` (1–1,000: buckets with fewer rows are faded) to `bar`; `share` (each row's share of the first measure's total, as a bar) to `table`.
+- `query`: a WidgetQuery (05 § Dashboard queries), checked with the same rules, plus a `label` (0–60 characters) on each measure. `line`, `bar` and `area` read the `series` shape; `bar_h`, `number` and `table` read `total`. `bar_h` needs a breakdown; `number` has one measure and no breakdown.
+
+Limits: names 1–100 characters (not unique), 50 widgets per dashboard, `definition` at most 256 KiB, 100 dashboards per project. An invalid definition is `400 bad_request` with the path of each error in `errors` (e.g. `widgets[3].query.measures[0].field`). A definition stored before a column was removed still loads; the widget's query answers its own 400.
 
 ## Datasets & experiments
 
@@ -367,6 +401,18 @@ CREATE TABLE evaluators (
 );
 CREATE INDEX evaluators_connection ON evaluators(connection_id) WHERE connection_id IS NOT NULL;
 
+CREATE TABLE evaluator_versions (
+  evaluator_id TEXT NOT NULL REFERENCES evaluators(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  config TEXT NOT NULL,               -- as evaluators.config: no sealed value
+  output_score TEXT NOT NULL,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (evaluator_id, version)
+);
+
 CREATE TABLE online_rules (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -460,6 +506,8 @@ CREATE TABLE backfills (
 CREATE UNIQUE INDEX backfills_running ON backfills(rule_id) WHERE status = 'running';
 CREATE INDEX backfills_rule ON backfills(rule_id, created_at);
 ```
+
+Every create, and every update that changes `version`, writes one `evaluator_versions` row in the same transaction, copied from the stored row: name, kind, the redacted config, the output score, the author and the time. It holds no sealed value. A rename alone does not change `version`, so it writes no row. The history lives as long as the evaluator and is deleted with it (cascade); it has no retention cap and no per-version delete, so text removed from a prompt stays readable in it until the evaluator is deleted (D-I-49).
 
 `pending_traces` is the persisted copy of the trigger's in-memory map (spec 06 § Online rules › Triggering, D-I-8): the flusher writes the changed entries every 5 s and at shutdown, and startup loads them. `first_seen` and `last_seen` are ingest times; `min_start` is the earliest span `start_time` seen.
 

@@ -147,7 +147,7 @@ Run everything through `just`:
 | Command | What it does |
 |---|---|
 | `just check` | Rust, web, Python SDK, and TypeScript SDK (D79); **must pass before every commit** |
-| `just check-rust` | format check, clippy (`-D warnings`), tests, `ee` licence headers, golden directories (cargo-deny is off until the first release, D187) |
+| `just check-rust` | format check, clippy (`-D warnings`), tests, `ee` licence headers, golden directories (cargo-deny is off until the first release, D188) |
 | `just check-web` | web lint, types, tests, production build |
 | `just check-release` | build-release, then check the UI is embedded |
 | `just check-py` | Python SDK format, lint, types, tests |
@@ -163,7 +163,7 @@ Run everything through `just`:
 | `just stress [secs]` | the storage's concurrent model stress test, release mode (track R M6) |
 | `just golden-dir <name>` | write a golden data directory from the current build into `fixtures/storage/golden/<name>` (track R M8, D-R-29); `scratch` for a look, a version at a release |
 | `just check-golden` | fail a branch that deletes a released golden directory or a `RELEASES` line, against `origin/main` (spec 03 § 12, D-R-30); skipped without `origin/main`; in `check-rust` |
-| `just deny` | supply-chain checks (advisories, bans, licences, sources; D-P-3); not in `just check` or CI until the first release (D187) |
+| `just deny` | supply-chain checks (advisories, bans, licences, sources; D-P-3); not in `just check` or CI until the first release (D188) |
 | `just check-ee` | the `ee` licence files and SPDX headers (D-P-2) |
 | `just deny-advisories` | RustSec advisories only |
 | `just assert-clean` | fail if the working tree changed; CI runs it after each job |

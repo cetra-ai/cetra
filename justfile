@@ -233,7 +233,7 @@ nightly-issue:
 eval-live:
     cargo test -p cetra-eval --test live -- --ignored --test-threads 1
 
-# Supply-chain checks: advisories, bans, licences, sources (D-P-3), for the root graph and the fuzz graph (track R M3). Run by hand until the first release (D187)
+# Supply-chain checks: advisories, bans, licences, sources (D-P-3), for the root graph and the fuzz graph (track R M3). Run by hand until the first release (D188)
 deny: fuzz-lock
     cargo deny check advisories bans licenses sources
     cargo deny --manifest-path fuzz/Cargo.toml check advisories bans licenses sources
@@ -255,7 +255,20 @@ check-release: build-release
 run *args:
     cargo run -p cetra-cli -- {{args}}
 
-# Rust checks: format, lint, tests, licence headers, golden directories. `just deny` is off until the first release (D187)
+# Run the demo data generator (tools/demo), e.g. `just demo -- --help`
+demo *args:
+    cargo run -q -p cetra-demo -- {{args}}
+
+# Build the cetra-demo image (D187): a static musl binary and the fixtures, staged in target/demo-image, then the image from that directory (tools/demo/Dockerfile)
+demo-image tag="cetra-demo:dev":
+    CC_x86_64_unknown_linux_musl=musl-gcc cargo build --release --locked -p cetra-demo --target x86_64-unknown-linux-musl
+    rm -rf target/demo-image
+    mkdir -p target/demo-image/fixtures
+    cp "${CARGO_TARGET_DIR:-target}/x86_64-unknown-linux-musl/release/cetra-demo" target/demo-image/
+    cp -r fixtures/otlp target/demo-image/fixtures/otlp
+    docker build -f tools/demo/Dockerfile -t {{tag}} target/demo-image
+
+# Rust checks: format, lint, tests, licence headers, golden directories. `just deny` is off until the first release (D188)
 check-rust: fmt-check lint test check-ee check-golden
 
 # Install JS dependencies from the lockfile

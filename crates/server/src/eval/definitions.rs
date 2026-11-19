@@ -177,6 +177,7 @@ mod tests {
             min_value,
             max_value,
             description: None,
+            direction: crate::api::score_definitions::ScoreDirection::None,
             archived_at: None,
             created_at: NOW,
             updated_at: NOW,
@@ -303,6 +304,7 @@ mod tests {
             min_value: Some(0.0),
             max_value: Some(max),
             description: None,
+            direction: crate::api::score_definitions::ScoreDirection::None,
             archived_at: None,
         };
         db.write(move |conn| {

@@ -1,12 +1,31 @@
 import { screen, waitFor } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
-import { expect, it } from "vitest";
+import { beforeEach, expect, it } from "vitest";
 import { server } from "@/mocks/node";
-import { savedViewHandlers, seedSavedViews } from "@/mocks/saved-views";
+import { savedViewHandlers, seedSavedViews, seedWithDefaultView } from "@/mocks/saved-views";
 import { renderApp } from "@/test/render";
 
 const ERRORS = "01900000-0000-7000-8000-000000000210";
 const REFUNDS = "01900000-0000-7000-8000-000000000299";
+
+// These tests use "Errors" as the shared default of Traces; the fixture has no default.
+beforeEach(() => {
+  savedViewHandlers(seedWithDefaultView());
+});
+
+/**
+ * The saved-view trigger named `name`. It is the menu button: a preset chip of the same name is a
+ * toggle, not a menu, so the two are told apart by `aria-haspopup`.
+ */
+function viewTrigger(name: string): HTMLElement {
+  const match = screen
+    .getAllByRole("button", { name })
+    .find((node) => node.getAttribute("aria-haspopup") === "menu");
+  if (!match) {
+    throw new Error(`saved-view trigger "${name}" not found`);
+  }
+  return match;
+}
 
 it("lists trace views and marks the shared default", async () => {
   const { user } = await renderApp("/acme/support-bot/traces?range=1h");
@@ -87,7 +106,7 @@ it("submits the rename dialog with Enter in the name field", async () => {
   const { user } = await renderApp("/acme/support-bot/traces?range=1h");
   await user.click(await screen.findByRole("button", { name: "Default view" }));
   await user.click(screen.getByRole("menuitem", { name: /Errors/ }));
-  await user.click(await screen.findByRole("button", { name: "Errors" }));
+  await user.click(await waitFor(() => viewTrigger("Errors")));
   await user.click(screen.getByRole("menuitem", { name: "Rename…" }));
   const field = screen.getByRole("textbox", { name: "Name" });
   await user.clear(field);
@@ -99,8 +118,8 @@ it("deletes the loaded view", async () => {
   const { router, user } = await renderApp("/acme/support-bot/traces?range=1h");
   await user.click(await screen.findByRole("button", { name: "Default view" }));
   await user.click(screen.getByRole("menuitem", { name: /Errors/ }));
-  await screen.findByRole("button", { name: "Errors" });
-  await user.click(screen.getByRole("button", { name: "Errors" }));
+  await waitFor(() => viewTrigger("Errors"));
+  await user.click(viewTrigger("Errors"));
   await user.click(screen.getByRole("menuitem", { name: "Delete" }));
   await user.click(screen.getByRole("button", { name: "Delete view" }));
   await waitFor(() => {
@@ -120,7 +139,7 @@ it("applies the default view when the page opens with no search", async () => {
     });
   });
   expect(router.history.length).toBe(1);
-  expect(await screen.findByRole("button", { name: "Errors" })).toBeInTheDocument();
+  expect(await waitFor(() => viewTrigger("Errors"))).toBeInTheDocument();
 });
 
 it("shows a failed save in the menu", async () => {
@@ -133,7 +152,7 @@ it("shows a failed save in the menu", async () => {
     ),
   );
   const { user } = await renderApp("/acme/support-bot/traces");
-  await user.click(await screen.findByRole("button", { name: "Errors" }));
+  await user.click(await waitFor(() => viewTrigger("Errors")));
   await user.click(screen.getByRole("menuitem", { name: "Save" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("Not Found");
 });
@@ -141,7 +160,10 @@ it("shows a failed save in the menu", async () => {
 it("keeps the search empty after an in-page change", async () => {
   const { router, user } = await renderApp("/acme/support-bot/traces?eval=1");
   await screen.findByRole("grid", { name: "Traces" });
-  await user.click(screen.getByRole("switch", { name: "Eval" }));
+  await user.click(
+    screen.getByRole("button", { name: /^Include evaluation and experiment traces/ }),
+  );
+  await user.click(await screen.findByRole("menuitemcheckbox", { name: "Evaluation traces" }));
   await waitFor(() => {
     expect(router.state.location.search).toEqual({});
   });

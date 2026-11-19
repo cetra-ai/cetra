@@ -198,3 +198,17 @@ function clamp(value: number, min: number, max: number): number {
   }
   return Math.min(max, Math.max(min, value));
 }
+
+/** The arrowed ends of a bar that continues past the view. */
+export function barClipPath(bar: BarGeometry): string | undefined {
+  if (bar.clipStart && bar.clipEnd) {
+    return "polygon(6px 0, calc(100% - 6px) 0, 100% 50%, calc(100% - 6px) 100%, 6px 100%, 0 50%)";
+  }
+  if (bar.clipStart) {
+    return "polygon(6px 0, 100% 0, 100% 100%, 6px 100%, 0 50%)";
+  }
+  if (bar.clipEnd) {
+    return "polygon(0 0, calc(100% - 6px) 0, 100% 50%, calc(100% - 6px) 100%, 0 100%)";
+  }
+  return undefined;
+}

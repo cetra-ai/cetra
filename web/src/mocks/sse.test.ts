@@ -110,6 +110,17 @@ it("emits three child spans for a recent trace and only pings for an old one", a
     const live = detail?.spans.filter((row) => row.span.name === "live span") ?? [];
     expect(live).toHaveLength(3);
     expect(live.every((row) => row.depth === 1 && row.detached === false)).toBe(true);
+    const root = detail?.spans.find((row) => row.span.parent_span_id === undefined)?.span;
+    if (root && root.duration_ns > 0) {
+      const from = Date.parse(root.start_time);
+      const to = Date.parse(root.end_time);
+      expect(
+        live.every((row) => {
+          const start = Date.parse(row.span.start_time);
+          return start >= from && Date.parse(row.span.end_time) <= to;
+        }),
+      ).toBe(true);
+    }
     expect(oldSpans).toHaveLength(0);
     await vi.advanceTimersByTimeAsync(12_000);
     expect(pings).toEqual([1]);

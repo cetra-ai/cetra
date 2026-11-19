@@ -5,7 +5,7 @@ import { type FormEvent, useEffect, useState } from "react";
 import { $api } from "@/api/client";
 import { fieldErrors, problemMessage, problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
-import { evaluatorsInit } from "@/api/queries-evaluation";
+import { useEvaluatorPages } from "@/api/queries-evaluation";
 import { evalJobQuery } from "@/api/queries-online-rules";
 import type { Schema } from "@/api/types";
 import { DisabledReason } from "@/components/disabled-reason";
@@ -149,11 +149,7 @@ function RunEvaluatorForm({
 }: RunFormProps) {
   const { org, project } = useProject();
   const ref = projectRef(org, project);
-  const evaluators = $api.useQuery(
-    "get",
-    "/api/v1/projects/{project}/evaluators",
-    evaluatorsInit(org, project),
-  );
+  const evaluators = useEvaluatorPages(org, project);
   const [evaluatorId, setEvaluatorId] = useState("");
   const [target, setTarget] = useState<Target>("trace");
   const [mapping, setMapping] = useState<MappingRow[]>([]);
@@ -163,7 +159,7 @@ function RunEvaluatorForm({
     gcTime: 0,
   });
   const busy = job?.status === "queued" || job?.status === "running";
-  const list = evaluators.data?.data ?? [];
+  const list = evaluators.data?.pages.flatMap((page) => page.data) ?? [];
   const picked = list.find((item) => item.id === evaluatorId);
   // A span run needs a selected span that is not a root; otherwise the whole trace is the target.
   const spanTargetable = spanId !== undefined && !selectedIsRoot;
@@ -259,7 +255,7 @@ function RunEvaluatorForm({
 
       {spanTargetable ? (
         <div className="flex flex-col gap-2">
-          <span className="text-sm leading-none font-medium">Target</span>
+          <span className="text-body leading-none font-medium">Target</span>
           <RadioGroup
             aria-label="Target"
             value={shownTarget}
@@ -288,7 +284,7 @@ function RunEvaluatorForm({
           errorFor={(variable) => fieldMessages[`variable_mapping.${variable}`]}
         />
         {fieldMessages.variable_mapping ? (
-          <p role="alert" className="text-xs text-destructive">
+          <p role="alert" className="text-caption text-destructive">
             {fieldMessages.variable_mapping}
           </p>
         ) : null}
@@ -325,7 +321,7 @@ function RunOutcome({
   }
   if (jobError) {
     return (
-      <p role="alert" className="text-sm text-destructive">
+      <p role="alert" className="text-body text-destructive">
         Could not read the run's status.{" "}
         <Link to="/$org/$project/online-rules" params={{ org, project }} className="underline">
           View jobs
@@ -334,11 +330,11 @@ function RunOutcome({
     );
   }
   if (job === undefined || job.status === "queued") {
-    return <p className="text-sm">Queued</p>;
+    return <p className="text-body">Queued</p>;
   }
   if (job.status === "running") {
     return (
-      <p className="flex items-center gap-2 text-sm">
+      <p className="flex items-center gap-2 text-body">
         <Loader2 className="size-4 animate-spin" aria-hidden="true" />
         Running
       </p>
@@ -346,13 +342,13 @@ function RunOutcome({
   }
   if (job.status === "done") {
     return (
-      <div className="flex flex-col gap-1 text-sm">
+      <div className="flex flex-col gap-1 text-body">
         <p className="font-medium">Score written</p>
         {job.judge_trace_id ? (
           <Link
             to="/$org/$project/traces/$traceId"
             params={{ org, project, traceId: job.judge_trace_id }}
-            className="w-fit text-xs underline underline-offset-4"
+            className="w-fit text-caption underline underline-offset-4"
           >
             View judge trace
           </Link>
@@ -362,14 +358,14 @@ function RunOutcome({
   }
   if (job.status === "failed") {
     return (
-      <div className="flex flex-col gap-1 text-sm">
+      <div className="flex flex-col gap-1 text-body">
         <p className="font-medium text-destructive">Run failed</p>
         {job.error ? <p>{job.error}</p> : null}
         {job.error_class ? (
-          <p className="text-xs text-muted-foreground">{ERROR_HINTS[job.error_class]}</p>
+          <p className="text-caption text-muted-foreground">{ERROR_HINTS[job.error_class]}</p>
         ) : null}
       </div>
     );
   }
-  return <p className="text-sm">{`Skipped: ${job.error ?? "no reason given"}`}</p>;
+  return <p className="text-body">{`Skipped: ${job.error ?? "no reason given"}`}</p>;
 }

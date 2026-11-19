@@ -240,13 +240,13 @@ function InviteResult({
       <div className="flex items-center gap-2">
         <Input
           aria-label="Invitation link"
-          className="font-mono text-xs"
+          className="font-mono text-caption"
           value={created.accept_url}
           readOnly
         />
         <CopyButton value={created.accept_url} label="invitation link" />
       </div>
-      <p className="text-xs text-muted-foreground">
+      <p className="text-caption text-muted-foreground">
         The link expires <TimeText value={created.invite.expires_at} style="datetime" />.
       </p>
       <DialogFooter>

@@ -2,10 +2,12 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { HttpResponse, http, passthrough } from "msw";
 import { beforeEach, expect, it } from "vitest";
 import { PAYLOAD_FORMAT_KEY } from "@/components/payload/format-switch";
+import { formatDuration } from "@/lib/format";
 import { server } from "@/mocks/node";
 import { STORAGE_PREFIX } from "@/product";
 import { renderApp } from "@/test/render";
 import { serveAnnotationDefinitions } from "@/test/score-definitions";
+import rootSpan from "../../../../fixtures/api/responses/spans/a1000000000000000000000000000001/b100000000000011.json";
 import llmSpan from "../../../../fixtures/api/responses/spans/a1000000000000000000000000000001/b100000000000012.json";
 import errorSpan from "../../../../fixtures/api/responses/spans/a1000000000000000000000000000003/b100000000000032.json";
 
@@ -13,6 +15,7 @@ const TRACE_1 = "a1000000000000000000000000000001";
 const LLM_SPAN = "b100000000000012";
 const TRACE_3 = "a1000000000000000000000000000003";
 const ERROR_SPAN = "b100000000000032";
+const ROOT_SPAN = "b100000000000011";
 const SPAN_URL = "/api/v1/projects/:project/traces/:trace_id/spans/:span_id";
 
 beforeEach(() => {
@@ -32,6 +35,44 @@ it("shows the fixture span input on the input output tab", async () => {
   expect(
     within(panel).getByText("You are a support agent. Use tools to look up orders."),
   ).toBeInTheDocument();
+});
+
+it("labels a root span as Root span and a child span with its kind", async () => {
+  const { unmount } = await renderApp(
+    `/acme/support-bot/traces?trace=${TRACE_1}&span=b100000000000011`,
+  );
+  let header = (await screen.findByRole("region", { name: "Span" })).querySelector("header");
+  expect(header).toBeInstanceOf(HTMLElement);
+  expect(within(header as HTMLElement).getByText("Root span")).toBeInTheDocument();
+  unmount();
+
+  await renderApp(`/acme/support-bot/traces?trace=${TRACE_1}&span=${LLM_SPAN}`);
+  header = (await screen.findByRole("region", { name: "Span" })).querySelector("header");
+  expect(header).toBeInstanceOf(HTMLElement);
+  expect(within(header as HTMLElement).getByText("LLM")).toBeInTheDocument();
+  expect(within(header as HTMLElement).queryByText("Root span")).not.toBeInTheDocument();
+});
+
+it("shows the span header's name, status, metric chips and links", async () => {
+  await renderApp(`/acme/support-bot/traces?trace=${TRACE_1}&span=${LLM_SPAN}`);
+  const panel = await screen.findByRole("region", { name: "Span" });
+  expect(within(panel).getByText("chat claude-sonnet-4-5")).toBeInTheDocument();
+  expect(within(panel).getByText("OK")).toBeInTheDocument();
+  expect(within(panel).queryByText("Error")).not.toBeInTheDocument();
+  expect(within(panel).getByText(formatDuration(llmSpan.duration_ns))).toBeInTheDocument();
+  expect(within(panel).getByText("in 1.2k · out 40 · cache 1.0k")).toBeInTheDocument();
+  expect(within(panel).getByText("$0.0015")).toBeInTheDocument();
+  expect(within(panel).getByText("production")).toBeInTheDocument();
+  expect(within(panel).getByRole("link", { name: "sess-001" })).toBeInTheDocument();
+  expect(within(panel).getByRole("link", { name: "user-42" })).toBeInTheDocument();
+});
+
+it("shows an Error pill and the status message on a failed span", async () => {
+  await renderApp(`/acme/support-bot/traces?trace=${TRACE_3}&span=${ERROR_SPAN}`);
+  const panel = await screen.findByRole("region", { name: "Span" });
+  expect(within(panel).getByText("Error")).toBeInTheDocument();
+  expect(within(panel).queryByText("OK")).not.toBeInTheDocument();
+  expect(within(panel).getByText("429 Too Many Requests")).toBeInTheDocument();
 });
 
 it("shows the fixture span's model, tokens and cost source", async () => {
@@ -229,4 +270,70 @@ it("appends an attribute filter on the traces page", async () => {
       filter: "attributes['customer'] = 'acme'",
     });
   });
+});
+
+it("keeps the previous span's body, and shows the new header, while the next span loads", async () => {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  server.use(
+    http.get(SPAN_URL, ({ params }) => {
+      if (params.span_id === ROOT_SPAN) {
+        return gate.then(() => HttpResponse.json(rootSpan));
+      }
+      return HttpResponse.json(llmSpan);
+    }),
+  );
+  await renderApp(`/acme/support-bot/traces?trace=${TRACE_1}&span=${LLM_SPAN}`);
+  const panel = await screen.findByRole("region", { name: "Span" });
+  fireEvent.mouseDown(within(panel).getByRole("tab", { name: "Input / Output" }));
+  expect(within(panel).getByText("My order 1234 hasn't arrived.")).toBeInTheDocument();
+
+  const grid = await screen.findByRole("grid", { name: "Trace" });
+  fireEvent.click(within(grid).getByText("support-agent"));
+
+  // The header shows the selected row's summary at once, and the body keeps the previous span.
+  await waitFor(() => expect(within(panel).getByText("support-agent")).toBeInTheDocument());
+  expect(within(panel).queryByText("chat claude-sonnet-4-5")).not.toBeInTheDocument();
+  expect(within(panel).getByText("My order 1234 hasn't arrived.")).toBeInTheDocument();
+  expect(panel.querySelector('[data-slot="skeleton"]')).toBeNull();
+  expect(within(panel).queryByRole("progressbar", { name: "Loading span" })).toBeNull();
+
+  // Past 200ms the body dims and a progress bar shows.
+  const bar = await within(panel).findByRole("progressbar", { name: "Loading span" });
+  expect(bar).toHaveClass("h-0.5", "bg-primary/60", "animate-pulse");
+  expect(within(panel).getByRole("tablist").parentElement).toHaveClass("opacity-60");
+
+  release();
+  await waitFor(() => {
+    expect(within(panel).queryByRole("progressbar", { name: "Loading span" })).toBeNull();
+  });
+  expect(within(panel).getByText("support-agent")).toBeInTheDocument();
+  expect(within(panel).getByRole("tablist").parentElement).not.toHaveClass("opacity-60");
+});
+
+it("shows the header at once on a first load, and the skeleton only after 200ms", async () => {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  server.use(
+    http.get(SPAN_URL, ({ params }) => {
+      if (params.span_id === ROOT_SPAN) {
+        return gate.then(() => HttpResponse.json(rootSpan));
+      }
+      return HttpResponse.json(llmSpan);
+    }),
+  );
+  await renderApp(`/acme/support-bot/traces?trace=${TRACE_1}&span=${ROOT_SPAN}`);
+  const loading = await screen.findByRole("region", { name: "Loading span" });
+  expect(within(loading).getByText("support-agent")).toBeInTheDocument();
+  expect(loading.querySelector('[data-slot="skeleton"]')).toBeNull();
+
+  await waitFor(() => expect(loading.querySelector('[data-slot="skeleton"]')).not.toBeNull());
+
+  release();
+  const panel = await screen.findByRole("region", { name: "Span" });
+  expect(within(panel).getByText("support-agent")).toBeInTheDocument();
 });

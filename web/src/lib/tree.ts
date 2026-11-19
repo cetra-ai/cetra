@@ -221,3 +221,38 @@ export function ancestorsOf(spans: readonly { depth: number }[], index: number):
   ancestors.reverse();
   return ancestors;
 }
+
+// Rough widths of a name cell's parts at the grid's font size.
+const NAME_CHAR_PX = 7;
+const NAME_BASE_PX = 4 + 16 + 4 + 16 + 4 + 8;
+const NAME_INDENT_PX = 12;
+const NAME_ERROR_DOT_PX = 12;
+const NAME_DETACHED_BADGE_PX = 64;
+export const NAME_AUTO_MIN_PX = 220;
+export const NAME_AUTO_MAX_PX = 360;
+
+/** The Name column width that fits the longest visible name, kept between 220px and 360px. */
+export function autoNameWidth(
+  spans: readonly {
+    depth: number;
+    detached?: boolean;
+    span: { name: string; status: string };
+  }[],
+  visible: readonly number[],
+): number {
+  let widest = 0;
+  for (const index of visible) {
+    const row = spans[index];
+    if (!row) {
+      continue;
+    }
+    const width =
+      NAME_BASE_PX +
+      row.depth * NAME_INDENT_PX +
+      row.span.name.length * NAME_CHAR_PX +
+      (row.span.status === "error" ? NAME_ERROR_DOT_PX : 0) +
+      (row.detached ? NAME_DETACHED_BADGE_PX : 0);
+    widest = Math.max(widest, width);
+  }
+  return Math.min(NAME_AUTO_MAX_PX, Math.max(NAME_AUTO_MIN_PX, Math.round(widest)));
+}

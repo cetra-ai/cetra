@@ -8,6 +8,7 @@ import type { Schema } from "@/api/types";
 import { useShortcut } from "@/components/command/use-shortcut";
 import { ColumnChooser } from "@/components/data-table/column-chooser";
 import {
+  lockedColumnIds,
   readColumnChoice,
   sameColumnIds,
   visibleColumnIds,
@@ -15,16 +16,30 @@ import {
 } from "@/components/data-table/column-layout";
 import { DataTable } from "@/components/data-table/data-table";
 import { EmptyState } from "@/components/empty-state";
+import { CarriedNotice } from "@/components/facets/carried-notice";
+import {
+  FacetPanel,
+  type FacetScope,
+  FiltersToggle,
+  useFacetsOpen,
+} from "@/components/facets/facet-panel";
+import { PresetChips } from "@/components/facets/preset-chips";
 import { FilterBar } from "@/components/filter-bar/filter-bar";
-import { appendFilter, filterMessage } from "@/components/filter-bar/logic";
+import { filterMessage } from "@/components/filter-bar/logic";
+import { TraceLayoutControls } from "@/components/layout-switcher";
 import { ListToolbar } from "@/components/list-toolbar";
 import { useDefaultSavedView } from "@/components/saved-views/default-view";
 import { SavedViewsMenu } from "@/components/saved-views/saved-views-menu";
 import { useProject } from "@/components/shell/project-context";
-import { orderedSpanColumns, spanColumnSpecs } from "@/components/span-columns";
+import { orderedSpanColumns, spanColumnSpecs, spanRowTone } from "@/components/span-columns";
+import { Filmstrip } from "@/components/trace/filmstrip";
 import { SplitPane } from "@/components/trace/split-pane";
 import { TraceView } from "@/components/trace/trace-view";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { appendFilter } from "@/lib/dsl/dsl";
+import { formatDuration } from "@/lib/format";
+import { rangeOnly, writeListContext } from "@/lib/list-context";
+import { getTraceMaximized, setTraceMaximized, useListLayout } from "@/lib/list-layout";
 import { parseSpansSearch, type SpansSearch } from "@/lib/search/spans";
 import { type RangeState, rangeFromSearch, resolveRange } from "@/lib/time-range";
 
@@ -74,7 +89,20 @@ function SpansPage() {
     },
     [navigate, org, project],
   );
-  const { hold } = useDefaultSavedView("spans", search, applyDefault);
+  const { hold, carried } = useDefaultSavedView("spans", search, applyDefault, "spans");
+  useEffect(() => {
+    if (!hold) {
+      writeListContext(org, project, "spans", search);
+    }
+  }, [hold, org, project, search]);
+  function clearCarried() {
+    void navigate({
+      to: "/$org/$project/spans",
+      params: { org, project },
+      search: (prev) => rangeOnly(prev),
+    });
+  }
+  const [facetsOpen, setFacetsOpen] = useFacetsOpen();
   const range = rangeFromSearch(search);
   const rangeKey = range.kind === "preset" ? range.preset : `${range.from}\n${range.to}`;
   const [anchor, setAnchor] = useState(() => Date.now());
@@ -87,6 +115,14 @@ function SpansPage() {
     setAnchor(Date.now());
   }, [rangeKey]);
   const resolved = resolveRange(range, anchor);
+  /** The list's window and flags: the facet panel, its presets and the filter bar fetch with it. */
+  const facetScope: FacetScope = {
+    from: resolved.from,
+    to: resolved.to,
+    includeEval: search.eval === 1,
+    includeExperiments: search.exp === 1,
+    search: search.search,
+  };
   const list = useInfiniteQuery({
     ...spanListOptions(org, project, {
       from: resolved.from,
@@ -105,6 +141,7 @@ function SpansPage() {
   }, [list.fetchNextPage]);
   const rows = useMemo(() => list.data?.pages.flatMap((page) => page.data) ?? [], [list.data]);
   const specs = useMemo(() => spanColumnSpecs(), []);
+  const lockedIds = useMemo(() => lockedColumnIds(specs), [specs]);
   const defaults = useMemo(() => visibleColumnIds(specs, undefined), [specs]);
   const visible = useMemo(() => {
     const fromUrl = search.cols?.split(",");
@@ -120,7 +157,7 @@ function SpansPage() {
     },
     [navigate, org, project],
   );
-  const tableColumns = useMemo(() => orderedSpanColumns(visible), [visible]);
+  const tableColumns = useMemo(() => orderedSpanColumns(visible, onFilter), [visible, onFilter]);
   function onColumns(ids: string[]) {
     const choice = sameColumnIds(ids, defaults) ? undefined : ids;
     writeColumnChoice(TABLE_ID, choice);
@@ -130,6 +167,7 @@ function SpansPage() {
       search: (prev) => withCols(prev, choice?.join(",")),
     });
   }
+  const layout = useListLayout();
   const traceOpen = search.trace !== undefined;
   const listScroll = useRef(0);
   const wasOpen = useRef(traceOpen);
@@ -151,6 +189,10 @@ function SpansPage() {
   }, [traceOpen]);
 
   useShortcut("dismiss", () => {
+    if (getTraceMaximized()) {
+      setTraceMaximized(false);
+      return;
+    }
     if (!search.trace) {
       return;
     }
@@ -174,12 +216,43 @@ function SpansPage() {
       <div className="absolute inset-0">
         <SplitPane
           name="traces"
+          mode={layout}
+          filmstrip={
+            <Filmstrip
+              items={rows.map((row) => ({
+                id: `${row.trace_id}:${row.span_id}`,
+                label: row.name,
+                detail: formatDuration(row.duration_ns),
+                status: row.status,
+              }))}
+              selectedId={selectedRowId}
+              onSelect={(id) => {
+                const row = rows.find(
+                  (candidate) => `${candidate.trace_id}:${candidate.span_id}` === id,
+                );
+                if (!row) {
+                  return;
+                }
+                void navigate({
+                  to: "/$org/$project/spans",
+                  params: { org, project },
+                  search: (prev) => ({ ...prev, trace: row.trace_id, span: row.span_id }),
+                });
+              }}
+              onBack={() => {
+                void navigate({
+                  to: "/$org/$project/spans",
+                  params: { org, project },
+                  search: (prev) => withoutTrace(prev),
+                });
+              }}
+            />
+          }
           open={traceOpen}
           start={
             <div className="flex h-full min-h-0 flex-col">
               <TooltipProvider>
                 <ListToolbar
-                  title="Spans"
                   range={range}
                   onRange={(next) => {
                     seenRange.current =
@@ -216,11 +289,22 @@ function SpansPage() {
                       search: (prev) => withFlag(prev, "exp", on),
                     });
                   }}
+                  notice={
+                    carried ? (
+                      <CarriedNotice
+                        from={carried.from}
+                        dropped={carried.dropped}
+                        kept={carried.kept}
+                        onClear={clearCarried}
+                      />
+                    ) : null
+                  }
                   filter={
                     <FilterBar
                       view="spans"
                       value={search.filter ?? ""}
                       error={filterError}
+                      scope={facetScope}
                       onApply={(text) => {
                         void navigate({
                           to: "/$org/$project/spans",
@@ -230,65 +314,107 @@ function SpansPage() {
                       }}
                     />
                   }
+                  filtersToggle={
+                    <FiltersToggle
+                      open={facetsOpen}
+                      onOpenChange={setFacetsOpen}
+                      filter={search.filter ?? ""}
+                    />
+                  }
+                  presets={
+                    <PresetChips
+                      view="spans"
+                      filter={search.filter ?? ""}
+                      onFilter={(text) => {
+                        void navigate({
+                          to: "/$org/$project/spans",
+                          params: { org, project },
+                          search: (prev) => withFilter(prev, text),
+                        });
+                      }}
+                      scope={facetScope}
+                    />
+                  }
                   columns={
                     <ColumnChooser columns={specs} visible={visible} onVisible={onColumns} />
                   }
                   views={<SavedViewsMenu kind="spans" search={search} onApply={applyView} />}
                   loaded={list.data ? rows.length : undefined}
                 />
-                {filterError ? (
-                  <div className="mx-auto flex max-w-md flex-col gap-2 px-4 py-16">
-                    <h2 className="text-sm font-medium">{filterError.title}</h2>
-                    <p className="text-sm text-destructive">{filterMessage(filterError)}</p>
+                <div className="flex min-h-0 flex-1">
+                  {facetsOpen && !hold ? (
+                    <FacetPanel
+                      view="spans"
+                      filter={search.filter ?? ""}
+                      onFilter={(text) => {
+                        void navigate({
+                          to: "/$org/$project/spans",
+                          params: { org, project },
+                          search: (prev) => withFilter(prev, text),
+                        });
+                      }}
+                      scope={facetScope}
+                    />
+                  ) : null}
+                  <div className="flex min-w-0 flex-1 flex-col">
+                    {filterError ? (
+                      <div className="mx-auto flex max-w-md flex-col gap-2 px-4 py-16">
+                        <h2 className="text-body font-medium">{filterError.title}</h2>
+                        <p className="text-body text-destructive">{filterMessage(filterError)}</p>
+                      </div>
+                    ) : !hold && list.data ? (
+                      <DataTable
+                        tableId="spans"
+                        ariaLabel="Spans"
+                        columns={tableColumns}
+                        rows={rows}
+                        getRowId={(row) => `${row.trace_id}:${row.span_id}`}
+                        selectedRowId={selectedRowId}
+                        rowTone={spanRowTone}
+                        onReorder={onColumns}
+                        lockedColumnIds={lockedIds}
+                        onActivate={(row) => {
+                          void navigate({
+                            to: "/$org/$project/spans",
+                            params: { org, project },
+                            search: (prev) => ({
+                              ...prev,
+                              trace: row.trace_id,
+                              span: row.span_id,
+                            }),
+                          });
+                        }}
+                        onSelectionMove={(row) => {
+                          void navigate({
+                            to: "/$org/$project/spans",
+                            params: { org, project },
+                            search: (prev) => ({
+                              ...prev,
+                              trace: row.trace_id,
+                              span: row.span_id,
+                            }),
+                            replace: true,
+                          });
+                        }}
+                        hasNextPage={list.hasNextPage}
+                        isFetchingNextPage={list.isFetchingNextPage}
+                        fetchNextPage={fetchNextPage}
+                        sorting={{
+                          id: SORT_COLUMN[search.sort ?? "start_time"],
+                          desc: (search.order ?? "desc") === "desc",
+                        }}
+                        onSortingChange={(next) => {
+                          void navigate({
+                            to: "/$org/$project/spans",
+                            params: { org, project },
+                            search: (prev) => withSort(prev, next),
+                          });
+                        }}
+                        emptyState={<EmptyState icon={Rows3} title="No spans" />}
+                      />
+                    ) : null}
                   </div>
-                ) : !hold && list.data ? (
-                  <DataTable
-                    tableId="spans"
-                    ariaLabel="Spans"
-                    columns={tableColumns}
-                    rows={rows}
-                    getRowId={(row) => `${row.trace_id}:${row.span_id}`}
-                    selectedRowId={selectedRowId}
-                    onActivate={(row) => {
-                      void navigate({
-                        to: "/$org/$project/spans",
-                        params: { org, project },
-                        search: (prev) => ({
-                          ...prev,
-                          trace: row.trace_id,
-                          span: row.span_id,
-                        }),
-                      });
-                    }}
-                    onSelectionMove={(row) => {
-                      void navigate({
-                        to: "/$org/$project/spans",
-                        params: { org, project },
-                        search: (prev) => ({
-                          ...prev,
-                          trace: row.trace_id,
-                          span: row.span_id,
-                        }),
-                        replace: true,
-                      });
-                    }}
-                    hasNextPage={list.hasNextPage}
-                    isFetchingNextPage={list.isFetchingNextPage}
-                    fetchNextPage={fetchNextPage}
-                    sorting={{
-                      id: SORT_COLUMN[search.sort ?? "start_time"],
-                      desc: (search.order ?? "desc") === "desc",
-                    }}
-                    onSortingChange={(next) => {
-                      void navigate({
-                        to: "/$org/$project/spans",
-                        params: { org, project },
-                        search: (prev) => withSort(prev, next),
-                      });
-                    }}
-                    emptyState={<EmptyState icon={Rows3} title="No spans" />}
-                  />
-                ) : null}
+                </div>
               </TooltipProvider>
             </div>
           }
@@ -298,6 +424,7 @@ function SpansPage() {
                 traceId={search.trace}
                 spanId={search.span}
                 onAddFilter={onFilter}
+                layout={<TraceLayoutControls />}
                 onClose={() => {
                   return navigate({
                     to: "/$org/$project/spans",
@@ -310,6 +437,14 @@ function SpansPage() {
                     to: "/$org/$project/spans",
                     params: { org, project },
                     search: (prev) => ({ ...prev, span: spanId }),
+                    replace: true,
+                  });
+                }}
+                onShowSummary={() => {
+                  void navigate({
+                    to: "/$org/$project/spans",
+                    params: { org, project },
+                    search: (prev) => withoutSpanParam(prev),
                     replace: true,
                   });
                 }}
@@ -362,6 +497,11 @@ function withSort(search: SpansSearch, next: { id: string; desc: boolean } | nul
     return rest;
   }
   return { ...rest, sort, order: next.desc ? "desc" : "asc" };
+}
+
+function withoutSpanParam(search: SpansSearch): SpansSearch {
+  const { span: _span, ...rest } = search;
+  return rest;
 }
 
 function withoutTrace(search: SpansSearch): SpansSearch {

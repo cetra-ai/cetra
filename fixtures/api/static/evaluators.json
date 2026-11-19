@@ -27,6 +27,44 @@
       "created_by": "01900000-0000-7000-8000-000000000100",
       "created_at": "2026-01-01T09:00:00.000000000Z",
       "updated_at": "2026-01-01T09:00:00.000000000Z"
+    },
+    {
+      "id": "01900000-0000-7000-8000-000000000501",
+      "name": "Answer is JSON",
+      "kind": "check",
+      "config": {
+        "check": "json_valid"
+      },
+      "output_score": {
+        "name": "answer_is_json",
+        "data_type": "boolean"
+      },
+      "has_signing_secret": false,
+      "version": 1,
+      "created_by": "01900000-0000-7000-8000-000000000100",
+      "created_at": "2026-01-02T09:00:00.000000000Z",
+      "updated_at": "2026-01-02T09:00:00.000000000Z"
+    },
+    {
+      "id": "01900000-0000-7000-8000-000000000502",
+      "name": "Toxicity webhook",
+      "kind": "webhook",
+      "config": {
+        "url_host": "moderation.example.com",
+        "timeout_ms": 10000,
+        "header_names": [
+          "authorization"
+        ]
+      },
+      "output_score": {
+        "name": "toxicity",
+        "data_type": "numeric"
+      },
+      "has_signing_secret": true,
+      "version": 1,
+      "created_by": "01900000-0000-7000-8000-000000000100",
+      "created_at": "2026-01-03T09:00:00.000000000Z",
+      "updated_at": "2026-01-03T09:00:00.000000000Z"
     }
   ],
   "next_cursor": null

@@ -8,6 +8,7 @@
       "min_value": 0.0,
       "max_value": 1.0,
       "description": "How relevant the answer is, from 0 to 1.",
+      "direction": "higher",
       "created_at": "2026-01-01T09:00:00.000000000Z",
       "updated_at": "2026-01-01T09:00:00.000000000Z"
     }

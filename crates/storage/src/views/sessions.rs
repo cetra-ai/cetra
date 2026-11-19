@@ -35,7 +35,7 @@ pub(crate) fn sessions_from_traces(
                 count(lit(1_i64)).alias(TRACE_COUNT),
                 sum(col(traces::ERROR_COUNT)).alias(traces::ERROR_COUNT),
                 sum(col(traces::TOTAL_TOKENS)).alias(traces::TOTAL_TOKENS),
-                exact_cost_sum().alias(traces::COST_TOTAL),
+                exact_cost_sum(col(traces::COST_TOTAL)).alias(traces::COST_TOTAL),
                 user_id()?.alias(traces::USER_ID),
                 array_agg(col(traces::TAGS)).alias(traces::TAGS),
             ],
@@ -74,11 +74,12 @@ pub(crate) fn sessions_from_traces(
         .build()
 }
 
-/// `sum(cost_total)` in `Decimal128(38, 18)`, back to `Float64`: an exact sum
-/// whose result does not depend on the partitioning (D-A2-4).
-pub(crate) fn exact_cost_sum() -> Expr {
+/// `sum(value)` in `Decimal128(38, 18)`, back to `Float64`: an exact sum whose
+/// result does not depend on the partitioning (D-A2-4). `value` is a cost column or
+/// a `CASE` over one.
+pub(crate) fn exact_cost_sum(value: Expr) -> Expr {
     cast(
-        sum(cast(col(traces::COST_TOTAL), DataType::Decimal128(38, 18))),
+        sum(cast(value, DataType::Decimal128(38, 18))),
         DataType::Float64,
     )
 }

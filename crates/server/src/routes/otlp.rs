@@ -227,6 +227,9 @@ async fn export_body(
         now_ns,
     };
     let receipt = commit_in_task(state, target, normalized, reservation).await?;
+    if receipt.accepted > 0 {
+        state.last_ingest.record(project.id, now_ns);
+    }
     state.telemetry.accept_ingest(
         Protocol::otlp_http,
         u64::try_from(receipt.accepted).unwrap_or(u64::MAX),
@@ -467,6 +470,21 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn an_export_with_spans_sets_last_ingest_at() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let body = protobuf(&plain_export(2));
+        let response = post_traces(&app, &seeded.ingest_key, "application/x-protobuf", body)
+            .send()
+            .await;
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(
+            app.state.last_ingest.get(seeded.project.id),
+            Some(app.state.clock.now_ns())
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn json_export_answers_an_empty_object() {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
@@ -593,6 +611,25 @@ mod tests {
         assert_eq!(response.status, StatusCode::OK);
         assert_eq!(json_body(&response)["partialSuccess"]["rejectedSpans"], "1");
         assert_eq!(stored_spans(&app, seeded.project.id).await, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_export_whose_only_span_is_rejected_leaves_last_ingest_at_unset() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let zero = format!(
+            "{{\"traceId\":\"00000000000000000000000000000000\",\"spanId\":\"0000000000000001\",\"name\":\"zero\",{RESOURCE_TIMES}}}"
+        );
+        let response = post_traces(
+            &app,
+            &seeded.ingest_key,
+            "application/json",
+            export_json("", &[zero]),
+        )
+        .send()
+        .await;
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(app.state.last_ingest.get(seeded.project.id), None);
     }
 
     #[tokio::test(flavor = "multi_thread")]

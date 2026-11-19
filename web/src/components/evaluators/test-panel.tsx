@@ -263,7 +263,7 @@ export function TestPanel({
 
   return (
     <section aria-labelledby="test-panel-title" className="flex flex-col gap-4 border-t pt-6">
-      <h2 id="test-panel-title" className="text-base font-medium">
+      <h2 id="test-panel-title" className="text-ui font-medium">
         Test
       </h2>
       <form noValidate className="flex flex-col gap-4" onSubmit={onSubmit}>
@@ -297,7 +297,7 @@ export function TestPanel({
           </TabsContent>
           <TabsContent value="variables" className="flex flex-col gap-4">
             <div className="flex flex-col gap-2">
-              <span className="text-sm leading-none font-medium">Variables</span>
+              <span className="text-body leading-none font-medium">Variables</span>
               {variables.map((row, index) => (
                 <div key={row.id} className="flex items-center gap-2">
                   <Input
@@ -351,13 +351,13 @@ export function TestPanel({
           </TabsContent>
         </Tabs>
         {sectionError ? (
-          <p role="alert" className="text-xs text-destructive">
+          <p role="alert" className="text-caption text-destructive">
             {sectionError}
           </p>
         ) : null}
         <FormError message={test.error ? failureMessage(test.error) : undefined} />
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <p className="text-xs text-muted-foreground">{note}</p>
+          <p className="text-caption text-muted-foreground">{note}</p>
           <SubmitButton pending={test.isPending} disabled={body === null}>
             {test.isPending ? "Running…" : "Run test"}
           </SubmitButton>
@@ -372,10 +372,10 @@ export function TestPanel({
 export function TestPanelLocked() {
   return (
     <section aria-labelledby="test-panel-title" className="flex flex-col gap-2 border-t pt-6">
-      <h2 id="test-panel-title" className="text-base font-medium">
+      <h2 id="test-panel-title" className="text-ui font-medium">
         Test
       </h2>
-      <p className="text-sm text-muted-foreground">Only members can run tests.</p>
+      <p className="text-body text-muted-foreground">Only members can run tests.</p>
     </section>
   );
 }
@@ -392,9 +392,12 @@ function TestResult({
   const usage = result.usage ? usageLine(result.usage) : "";
   const variables = Object.entries(result.variables);
   return (
-    <section aria-label="Test result" className="flex flex-col gap-3 rounded-lg border p-4 text-sm">
+    <section
+      aria-label="Test result"
+      className="flex flex-col gap-3 rounded-lg border p-4 text-body"
+    >
       {result.ok && result.value ? (
-        <p className="text-lg font-medium">{formatValue(result.value)}</p>
+        <p className="text-title font-medium">{formatValue(result.value)}</p>
       ) : null}
       {result.ok && result.reason ? <p>{result.reason}</p> : null}
       {!result.ok ? (
@@ -402,11 +405,11 @@ function TestResult({
           <p className="font-medium text-destructive">Test failed</p>
           <p>{result.error?.message}</p>
           {result.error ? (
-            <p className="text-xs text-muted-foreground">{ERROR_HINTS[result.error.class]}</p>
+            <p className="text-caption text-muted-foreground">{ERROR_HINTS[result.error.class]}</p>
           ) : null}
         </div>
       ) : null}
-      <p className="text-xs text-muted-foreground">
+      <p className="text-caption text-muted-foreground">
         {[usage, `${result.latency_ms} ms`, result.trace_truncated ? "Trace truncated" : ""]
           .filter((part) => part.length > 0)
           .join(" · ")}
@@ -414,7 +417,7 @@ function TestResult({
       {result.prompt !== undefined ? (
         <details>
           <summary className="cursor-pointer font-medium">Prompt</summary>
-          <pre className="mt-2 font-mono text-xs break-words whitespace-pre-wrap">
+          <pre className="mt-2 font-mono text-caption break-words whitespace-pre-wrap">
             {result.prompt}
           </pre>
         </details>
@@ -425,8 +428,8 @@ function TestResult({
           <dl className="mt-2 flex flex-col gap-2">
             {variables.map(([name, value]) => (
               <div key={name} className="flex flex-col gap-0.5">
-                <dt className="font-mono text-xs">{name}</dt>
-                <dd className="font-mono text-xs break-words whitespace-pre-wrap">{value}</dd>
+                <dt className="font-mono text-caption">{name}</dt>
+                <dd className="font-mono text-caption break-words whitespace-pre-wrap">{value}</dd>
               </div>
             ))}
           </dl>
@@ -436,7 +439,7 @@ function TestResult({
         <Link
           to="/$org/$project/traces/$traceId"
           params={{ org, project, traceId: result.judge_trace_id }}
-          className="w-fit text-xs underline underline-offset-4"
+          className="w-fit text-caption underline underline-offset-4"
         >
           View judge trace
         </Link>

@@ -75,17 +75,17 @@ export function BackfillsTable({
   }, [data, queryClient, org, project, ruleId]);
   if (query.isError) {
     return (
-      <p role="alert" className="text-xs text-destructive">
+      <p role="alert" className="text-caption text-destructive">
         The backfills could not be loaded.
       </p>
     );
   }
   if (query.isPending) {
-    return <p className="text-xs text-muted-foreground">Loading backfills…</p>;
+    return <p className="text-caption text-muted-foreground">Loading backfills…</p>;
   }
   const backfills = query.data.data;
   if (backfills.length === 0) {
-    return <p className="text-xs text-muted-foreground">No backfills yet.</p>;
+    return <p className="text-caption text-muted-foreground">No backfills yet.</p>;
   }
   return (
     <Table aria-label="Backfills">
@@ -120,7 +120,7 @@ export function BackfillsTable({
                   {STATUS_LABELS[backfill.status]}
                 </Badge>
                 {backfill.status === "failed" && backfill.error ? (
-                  <span className="text-xs text-muted-foreground">
+                  <span className="text-caption text-muted-foreground">
                     {ERROR_TEXT[backfill.error] ?? backfill.error}
                   </span>
                 ) : null}

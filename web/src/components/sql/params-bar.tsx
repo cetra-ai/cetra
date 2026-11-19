@@ -33,14 +33,14 @@ export function ParamsBar({
         const described = error ? { "aria-invalid": true, "aria-describedby": `${id}-error` } : {};
         return (
           <div key={param.name} className="flex flex-col gap-1">
-            <Label htmlFor={id} className="font-mono text-xs">
+            <Label htmlFor={id} className="font-mono text-caption">
               {`${param.name} (${param.type})`}
             </Label>
             {param.type === "Bool" ? (
               <select
                 id={id}
                 {...described}
-                className="focus-ring h-7 rounded-md border border-border bg-background px-1.5 text-xs"
+                className="focus-ring h-7 rounded-md border border-border bg-background px-1.5 text-caption"
                 value={value}
                 onChange={(event) => onChange(param.name, event.target.value)}
               >
@@ -53,13 +53,13 @@ export function ParamsBar({
                 id={id}
                 {...described}
                 value={value}
-                className="h-7 w-48 font-mono text-xs"
+                className="h-7 w-48 font-mono text-caption"
                 placeholder={PLACEHOLDERS[param.type] ?? ""}
                 onChange={(event) => onChange(param.name, event.target.value)}
               />
             )}
             {error ? (
-              <p id={`${id}-error`} className="text-destructive text-xs">
+              <p id={`${id}-error`} className="text-destructive text-caption">
                 {error}
               </p>
             ) : null}

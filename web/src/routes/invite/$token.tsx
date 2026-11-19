@@ -140,7 +140,7 @@ function InvitePage() {
     );
   } else if (signedOut && config.data.signup === "disabled") {
     children = (
-      <p className="text-sm">
+      <p className="text-body">
         Sign-up is disabled on this server, so a new account can't be created. Ask an instance admin
         to create your account, then open this link again.
       </p>
@@ -171,14 +171,12 @@ function InvitePage() {
         </>
       }
     >
-      <>
-        {signedOutHere && signedOut && only !== undefined ? (
-          <p className="text-sm text-muted-foreground">
-            {`You're signed out here. If ${only.display_name} signs you back in as the other account, sign out there first.`}
-          </p>
-        ) : null}
-        {children}
-      </>
+      {signedOutHere && signedOut && only !== undefined ? (
+        <p className="text-body text-muted-foreground">
+          {`You're signed out here. If ${only.display_name} signs you back in as the other account, sign out there first.`}
+        </p>
+      ) : null}
+      {children}
     </AuthLayout>
   );
 }
@@ -256,7 +254,7 @@ function SignedInAsOther({
 
   return (
     <>
-      <p className="text-sm">
+      <p className="text-body">
         You're signed in as <strong>{signedInAs}</strong>, but this invitation is for{" "}
         <strong>{invitedEmail}</strong>. Sign out to continue with this invitation.
       </p>
@@ -306,7 +304,7 @@ function SignInToAccept({
 }) {
   return (
     <>
-      <p className="text-sm">
+      <p className="text-body">
         Sign in as <strong>{email}</strong> to accept the invitation.
       </p>
       <Button asChild className="w-full">
@@ -474,7 +472,7 @@ function SignupToJoin({
         </form>
       ) : null}
       {!hasProviders && !config.password_enabled ? (
-        <p className="text-sm">{NO_SIGN_IN_METHOD}</p>
+        <p className="text-body">{NO_SIGN_IN_METHOD}</p>
       ) : null}
     </>
   );

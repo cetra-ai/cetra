@@ -48,18 +48,18 @@ export function JobsTable({
   );
   if (query.isError) {
     return (
-      <p role="alert" className="text-xs text-destructive">
+      <p role="alert" className="text-caption text-destructive">
         Could not load the jobs.
       </p>
     );
   }
   if (query.isPending) {
-    return <p className="text-xs text-muted-foreground">Loading jobs…</p>;
+    return <p className="text-caption text-muted-foreground">Loading jobs…</p>;
   }
   const jobs = query.data.pages.flatMap((page) => page.data);
 
   if (jobs.length === 0) {
-    return <p className="text-xs text-muted-foreground">No jobs yet.</p>;
+    return <p className="text-caption text-muted-foreground">No jobs yet.</p>;
   }
   return (
     <div className="flex flex-col gap-3">
@@ -125,7 +125,7 @@ function JobRow({ org, project, job }: { org: string; project: string; job: Job 
         {job.error ? (
           <div className="flex max-w-64 flex-col gap-0.5">
             {job.error_class ? (
-              <span className="text-xs text-muted-foreground">{job.error_class}</span>
+              <span className="text-caption text-muted-foreground">{job.error_class}</span>
             ) : null}
             <TooltipProvider>
               <Tooltip>

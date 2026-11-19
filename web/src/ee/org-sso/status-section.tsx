@@ -6,6 +6,7 @@ import { problemMessage } from "@/api/problem";
 import type { Schema } from "@/api/types";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { FormError } from "@/components/form/form-error";
+import { SettingsCard } from "@/components/settings/settings-card";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { storeOrgSso } from "@/ee/org-sso/cache";
@@ -52,10 +53,7 @@ export function StatusSection({
   const switchesDisabled = provider === undefined || patch.isPending;
 
   return (
-    <section aria-labelledby="sso-status-heading" className="flex flex-col gap-4">
-      <h2 id="sso-status-heading" className="text-base font-medium">
-        Status
-      </h2>
+    <SettingsCard title="Status">
       <div className="flex flex-col gap-3">
         <div className="flex items-center gap-2">
           <Switch
@@ -68,7 +66,7 @@ export function StatusSection({
           />
           <Label htmlFor="sso-enabled">Enabled</Label>
         </div>
-        <p className="text-xs text-muted-foreground">
+        <p className="text-caption text-muted-foreground">
           Send people with these domains to the identity provider when they sign in.
         </p>
         <div className="flex items-center gap-2">
@@ -87,12 +85,12 @@ export function StatusSection({
           />
           <Label htmlFor="sso-enforced">Enforced</Label>
         </div>
-        <p className="text-xs text-muted-foreground">
+        <p className="text-caption text-muted-foreground">
           Require it: password sign-in and personal access tokens stop working for these domains.
           API keys keep working.
         </p>
         {provider ? null : (
-          <p className="text-xs text-muted-foreground">Save an identity provider first.</p>
+          <p className="text-caption text-muted-foreground">Save an identity provider first.</p>
         )}
         <FormError message={enforceOpen ? undefined : patchError} />
       </div>
@@ -100,11 +98,11 @@ export function StatusSection({
         <div className="flex flex-col gap-1">
           <a
             href={ssoAuthorizeHref(firstVerified, `/${org}/settings/sso`)}
-            className="w-fit text-sm underline underline-offset-4"
+            className="w-fit text-body underline underline-offset-4"
           >
             Test sign-in
           </a>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-caption text-muted-foreground">
             Sign in through the provider once before you enforce it.
           </p>
         </div>
@@ -135,6 +133,6 @@ export function StatusSection({
           update({ enforced: true });
         }}
       />
-    </section>
+    </SettingsCard>
   );
 }

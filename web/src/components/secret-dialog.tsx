@@ -83,7 +83,7 @@ function SecretDialogBody({
                 id="secret-value"
                 value={secret}
                 readOnly
-                className="font-mono text-xs"
+                className="font-mono text-caption"
                 onFocus={(event) => {
                   event.currentTarget.select();
                 }}
@@ -93,14 +93,14 @@ function SecretDialogBody({
           </div>
           {showSnippets && secret.startsWith("sk-") ? (
             <>
-              <p className="text-sm">Send traces with this key:</p>
+              <p className="text-body">Send traces with this key:</p>
               <SnippetTabs origin={window.location.origin} apiKey={secret} />
             </>
           ) : null}
           {confirmingClose ? (
             <div
               role="alert"
-              className="flex flex-col gap-2 rounded-md border border-destructive/40 p-3 text-sm"
+              className="flex flex-col gap-2 rounded-md border border-destructive/40 p-3 text-body"
             >
               <p>You haven't copied the secret. Close without copying?</p>
               <div className="flex gap-2">

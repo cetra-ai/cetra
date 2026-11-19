@@ -25,7 +25,7 @@ const createdBody = (name: string) =>
 it("lists the user's tokens", async () => {
   await renderApp("/account");
 
-  const table = await screen.findByRole("table", { name: "Personal access tokens" });
+  const table = await screen.findByRole("grid", { name: "Personal access tokens" });
   const row = within(table).getByRole("row", { name: /CLI/ });
   expect(within(row).getByText("pat-cetra-EXAMPL")).toBeInTheDocument();
   expect(within(row).getByText("Read and write")).toBeInTheDocument();
@@ -65,7 +65,7 @@ it("loads the next page", async () => {
   );
 
   const { user } = await renderApp("/account");
-  await screen.findByRole("table", { name: "Personal access tokens" });
+  await screen.findByRole("grid", { name: "Personal access tokens" });
 
   await user.click(screen.getByRole("button", { name: "Load more" }));
 
@@ -88,11 +88,11 @@ it("creates a read-only token and shows the secret once", async () => {
   );
 
   const { user, queryClient } = await renderApp("/account");
-  await screen.findByRole("table", { name: "Personal access tokens" });
+  await screen.findByRole("grid", { name: "Personal access tokens" });
   const callsAfterLoad = listCalls;
 
   await user.click(screen.getByRole("button", { name: "New token" }));
-  await user.type(screen.getByLabelText("Name"), "Laptop");
+  await user.type(screen.getByRole("textbox", { name: "Name" }), "Laptop");
   await user.click(screen.getByRole("combobox", { name: "Expires" }));
   await user.click(screen.getByRole("option", { name: "Never" }));
   expect(screen.getByRole("combobox", { name: "Expires" })).toHaveTextContent("Never");
@@ -134,7 +134,7 @@ it("sends read and write scopes with a 90-day expiry by default", async () => {
   await screen.findByRole("button", { name: "New token" });
 
   await user.click(screen.getByRole("button", { name: "New token" }));
-  await user.type(screen.getByLabelText("Name"), "Laptop");
+  await user.type(screen.getByRole("textbox", { name: "Name" }), "Laptop");
   await user.click(screen.getByLabelText("Read and write"));
   await user.click(screen.getByRole("button", { name: "Create token" }));
 
@@ -154,7 +154,7 @@ it("requires a name", async () => {
   );
 
   const { user } = await renderApp("/account");
-  await screen.findByRole("table", { name: "Personal access tokens" });
+  await screen.findByRole("grid", { name: "Personal access tokens" });
 
   await user.click(screen.getByRole("button", { name: "New token" }));
   await user.click(screen.getByRole("button", { name: "Create token" }));
@@ -173,10 +173,10 @@ it("shows the server's name error", async () => {
   );
 
   const { user } = await renderApp("/account");
-  await screen.findByRole("table", { name: "Personal access tokens" });
+  await screen.findByRole("grid", { name: "Personal access tokens" });
 
   await user.click(screen.getByRole("button", { name: "New token" }));
-  await user.type(screen.getByLabelText("Name"), "Laptop");
+  await user.type(screen.getByRole("textbox", { name: "Name" }), "Laptop");
   await user.click(screen.getByRole("button", { name: "Create token" }));
 
   expect(await screen.findByText("must be 1 to 100 characters")).toBeInTheDocument();
@@ -195,24 +195,24 @@ it("submits with Enter", async () => {
   );
 
   const { user } = await renderApp("/account");
-  await screen.findByRole("table", { name: "Personal access tokens" });
+  await screen.findByRole("grid", { name: "Personal access tokens" });
 
   await user.click(screen.getByRole("button", { name: "New token" }));
-  await user.type(screen.getByLabelText("Name"), "Laptop{Enter}");
+  await user.type(screen.getByRole("textbox", { name: "Name" }), "Laptop{Enter}");
 
   await waitFor(() => expect(body).toMatchObject({ name: "Laptop" }));
 });
 
 it("starts a new token from a clean form", async () => {
   const { user } = await renderApp("/account");
-  await screen.findByRole("table", { name: "Personal access tokens" });
+  await screen.findByRole("grid", { name: "Personal access tokens" });
 
   await user.click(screen.getByRole("button", { name: "New token" }));
-  await user.type(screen.getByLabelText("Name"), "Draft");
+  await user.type(screen.getByRole("textbox", { name: "Name" }), "Draft");
   await user.click(screen.getByRole("button", { name: "Cancel" }));
 
   await user.click(screen.getByRole("button", { name: "New token" }));
-  expect(screen.getByLabelText("Name")).toHaveValue("");
+  expect(screen.getByRole("textbox", { name: "Name" })).toHaveValue("");
 });
 
 it("revokes a token after confirming", async () => {
@@ -230,13 +230,14 @@ it("revokes a token after confirming", async () => {
   );
 
   const { user } = await renderApp("/account");
-  await screen.findByRole("table", { name: "Personal access tokens" });
+  await screen.findByRole("grid", { name: "Personal access tokens" });
 
   await user.click(screen.getByRole("button", { name: "Actions for CLI" }));
   await user.click(screen.getByRole("menuitem", { name: "Revoke" }));
   const dialog = await screen.findByRole("alertdialog", { name: "Revoke token?" });
   await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
 
+  await user.type(within(dialog).getByRole("textbox"), "CLI");
   await user.click(within(dialog).getByRole("button", { name: "Revoke" }));
 
   expect(await screen.findByText("No personal access tokens")).toBeInTheDocument();
@@ -247,13 +248,14 @@ it("keeps the dialog open with the error when revoking fails", async () => {
   server.use(http.delete("/api/v1/me/tokens/:id", () => problemResponse(500, "internal")));
 
   const { user } = await renderApp("/account");
-  await screen.findByRole("table", { name: "Personal access tokens" });
+  await screen.findByRole("grid", { name: "Personal access tokens" });
 
   await user.click(screen.getByRole("button", { name: "Actions for CLI" }));
   await user.click(screen.getByRole("menuitem", { name: "Revoke" }));
   const dialog = await screen.findByRole("alertdialog", { name: "Revoke token?" });
   await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
 
+  await user.type(within(dialog).getByRole("textbox"), "CLI");
   await user.click(within(dialog).getByRole("button", { name: "Revoke" }));
 
   const alert = await within(dialog).findByRole("alert");
@@ -271,7 +273,7 @@ it("Cancel keeps the token", async () => {
   );
 
   const { user } = await renderApp("/account");
-  await screen.findByRole("table", { name: "Personal access tokens" });
+  await screen.findByRole("grid", { name: "Personal access tokens" });
 
   await user.click(screen.getByRole("button", { name: "Actions for CLI" }));
   await user.click(screen.getByRole("menuitem", { name: "Revoke" }));
@@ -297,13 +299,14 @@ it("treats an already revoked token as revoked", async () => {
   );
 
   const { user } = await renderApp("/account");
-  await screen.findByRole("table", { name: "Personal access tokens" });
+  await screen.findByRole("grid", { name: "Personal access tokens" });
 
   await user.click(screen.getByRole("button", { name: "Actions for CLI" }));
   await user.click(screen.getByRole("menuitem", { name: "Revoke" }));
   const dialog = await screen.findByRole("alertdialog", { name: "Revoke token?" });
   await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
 
+  await user.type(within(dialog).getByRole("textbox"), "CLI");
   await user.click(within(dialog).getByRole("button", { name: "Revoke" }));
 
   expect(await screen.findByText("No personal access tokens")).toBeInTheDocument();
@@ -330,10 +333,10 @@ it("keeps the secret reachable when the dialog is closed while creating", async 
   );
 
   const { user } = await renderApp("/account");
-  await screen.findByRole("table", { name: "Personal access tokens" });
+  await screen.findByRole("grid", { name: "Personal access tokens" });
 
   await user.click(screen.getByRole("button", { name: "New token" }));
-  await user.type(screen.getByLabelText("Name"), "Laptop");
+  await user.type(screen.getByRole("textbox", { name: "Name" }), "Laptop");
   const form = await screen.findByRole("dialog", { name: "New personal access token" });
   await user.click(within(form).getByRole("button", { name: "Create token" }));
   expect(within(form).getByRole("button", { name: "Create token" })).toBeDisabled();
@@ -364,11 +367,132 @@ it("shows an inline error when loading more fails", async () => {
   );
 
   const { user } = await renderApp("/account");
-  await screen.findByRole("table", { name: "Personal access tokens" });
+  await screen.findByRole("grid", { name: "Personal access tokens" });
 
   await user.click(screen.getByRole("button", { name: "Load more" }));
 
   expect(await screen.findByRole("alert")).toHaveTextContent("Could not load more tokens.");
-  expect(screen.getByRole("table", { name: "Personal access tokens" })).toBeInTheDocument();
+  expect(screen.getByRole("grid", { name: "Personal access tokens" })).toBeInTheDocument();
   expect(screen.getByRole("row", { name: /CLI/ })).toBeInTheDocument();
+});
+
+it("marks tokens that are expired or expire within a week", async () => {
+  const day = 86_400_000;
+  const token = (id: string, name: string, expires?: number) => ({
+    id,
+    name,
+    prefix: `pat-cetra-${name.toUpperCase()}`,
+    scopes: ["read"],
+    created_at: "2026-01-01T00:00:00.000000000Z",
+    ...(expires === undefined ? {} : { expires_at: new Date(expires).toISOString() }),
+  });
+  server.use(
+    http.get("/api/v1/me/tokens", () =>
+      HttpResponse.json({
+        data: [
+          token("01900000-0000-7000-8000-000000000301", "Forever"),
+          token("01900000-0000-7000-8000-000000000302", "Soon", Date.now() + 3 * day),
+          token("01900000-0000-7000-8000-000000000303", "Old", Date.now() - day),
+        ],
+        next_cursor: null,
+      }),
+    ),
+  );
+
+  await renderApp("/account");
+  const table = await screen.findByRole("grid", { name: "Personal access tokens" });
+
+  expect(within(table).getByRole("row", { name: /Forever/ })).toHaveTextContent("Active");
+  expect(within(table).getByRole("row", { name: /Soon/ })).toHaveTextContent("Expires soon");
+  expect(within(table).getByRole("row", { name: /Old/ })).toHaveTextContent("Expired");
+});
+
+it("filters the tokens by name as the user types", async () => {
+  server.use(
+    http.get("/api/v1/me/tokens", () =>
+      HttpResponse.json({
+        data: [
+          ...personalTokensFixture.data,
+          {
+            id: "01900000-0000-7000-8000-000000000220",
+            name: "Laptop",
+            prefix: "pat-cetra-LAPTOP",
+            scopes: ["read"],
+            created_at: "2026-01-02T00:00:00.000000000Z",
+          },
+        ],
+        next_cursor: null,
+      }),
+    ),
+  );
+
+  const { user, router } = await renderApp("/account");
+  const table = await screen.findByRole("grid", { name: "Personal access tokens" });
+  expect(within(table).getAllByRole("row")).toHaveLength(3);
+
+  await user.type(screen.getByRole("searchbox", { name: "Search tokens" }), "lap");
+
+  expect(within(table).getByRole("row", { name: /Laptop/ })).toBeInTheDocument();
+  expect(within(table).queryByRole("row", { name: /CLI/ })).toBeNull();
+  expect(router.state.location.search).toMatchObject({ q: "lap" });
+});
+
+it("sorts the tokens by name, descending first, and keeps the sort in the URL", async () => {
+  server.use(
+    http.get("/api/v1/me/tokens", () =>
+      HttpResponse.json({
+        data: [
+          {
+            id: "01900000-0000-7000-8000-000000000230",
+            name: "Zeta",
+            prefix: "pat-cetra-ZETA00",
+            scopes: ["read"],
+            created_at: "2026-01-02T00:00:00.000000000Z",
+          },
+          ...personalTokensFixture.data,
+        ],
+        next_cursor: null,
+      }),
+    ),
+  );
+
+  const { user, router } = await renderApp("/account");
+  const table = await screen.findByRole("grid", { name: "Personal access tokens" });
+
+  // The first click sorts a column descending.
+  await user.click(within(table).getByRole("button", { name: /^Name/ }));
+
+  expect(router.state.location.search).toMatchObject({ sort: "name", desc: true });
+  const names = within(table)
+    .getAllByRole("row")
+    .slice(1)
+    .map((row) => row.textContent ?? "");
+  expect(names[0]).toMatch(/^Zeta/);
+  expect(names[1]).toMatch(/^CLI/);
+});
+
+it("keeps Revoke disabled until the token name is typed", async () => {
+  const deletes: string[] = [];
+  server.use(
+    http.delete("/api/v1/me/tokens/:id", ({ params }) => {
+      deletes.push(String(params.id));
+      return new HttpResponse(null, { status: 204 });
+    }),
+  );
+
+  const { user } = await renderApp("/account");
+  await screen.findByRole("grid", { name: "Personal access tokens" });
+
+  await user.click(screen.getByRole("button", { name: "Actions for CLI" }));
+  await user.click(screen.getByRole("menuitem", { name: "Revoke" }));
+  const dialog = await screen.findByRole("alertdialog", { name: "Revoke token?" });
+  await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+
+  const revoke = within(dialog).getByRole("button", { name: "Revoke" });
+  expect(revoke).toBeDisabled();
+  await user.type(within(dialog).getByRole("textbox"), "CL");
+  expect(revoke).toBeDisabled();
+  await user.type(within(dialog).getByRole("textbox"), "I");
+  expect(revoke).toBeEnabled();
+  expect(deletes).toEqual([]);
 });

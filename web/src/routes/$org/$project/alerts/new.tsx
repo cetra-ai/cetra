@@ -18,14 +18,15 @@ function NewRulePage() {
 
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-6 overflow-auto px-4 py-6">
-      <h1 className="text-lg font-medium">New alert rule</h1>
+      <h2 className="text-title font-medium">New alert rule</h2>
       <RuleForm
         org={org}
         project={project}
         onSaved={(rule) => {
           void navigate({
-            to: "/$org/$project/alerts/$ruleId",
-            params: { org, project, ruleId: rule.id },
+            to: "/$org/$project/alerts",
+            params: { org, project },
+            search: { rule: rule.id },
           });
         }}
         onCancel={() => {

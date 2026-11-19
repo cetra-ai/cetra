@@ -141,7 +141,7 @@ export function SavedViewsMenu({
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="min-w-56">
           {problem ? (
-            <p role="alert" className="px-2 py-1 text-xs text-destructive">
+            <p role="alert" className="px-2 py-1 text-caption text-destructive">
               {problem}
             </p>
           ) : null}
@@ -246,7 +246,7 @@ export function SavedViewsMenu({
               checked={makeDefault}
               onChecked={setMakeDefault}
             />
-            {problem ? <p className="text-xs text-destructive">{problem}</p> : null}
+            {problem ? <p className="text-caption text-destructive">{problem}</p> : null}
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => setDialog(null)}>
                 Cancel
@@ -275,7 +275,7 @@ export function SavedViewsMenu({
               <DialogDescription>Change the name shown in the views menu.</DialogDescription>
             </DialogHeader>
             <NameField name={name} onName={setName} />
-            {problem ? <p className="text-xs text-destructive">{problem}</p> : null}
+            {problem ? <p className="text-caption text-destructive">{problem}</p> : null}
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => setDialog(null)}>
                 Cancel
@@ -296,7 +296,7 @@ export function SavedViewsMenu({
               Delete {current?.name ?? "this view"}? This cannot be undone.
             </DialogDescription>
           </DialogHeader>
-          {problem ? <p className="text-xs text-destructive">{problem}</p> : null}
+          {problem ? <p className="text-caption text-destructive">{problem}</p> : null}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setDialog(null)}>
               Cancel

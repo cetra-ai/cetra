@@ -38,7 +38,7 @@ export function GenAiLogsHint() {
   return (
     <div
       role="status"
-      className="flex shrink-0 items-start gap-3 border-b bg-muted px-4 py-2 text-sm"
+      className="flex shrink-0 items-start gap-3 border-b bg-muted px-4 py-2 text-body"
     >
       <p className="flex-1">
         <strong className="font-medium">GenAI content was sent as log events.</strong> This project

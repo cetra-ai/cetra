@@ -79,6 +79,31 @@ pub(crate) fn any_json() -> RefOr<utoipa::openapi::schema::Schema> {
         .into()
 }
 
+/// The OpenAPI schema of a JSON object field whose keys are free (D-J-27): an object with
+/// `additionalProperties: true`, so a generated client types it as an open object. Use it with
+/// `#[schema(schema_with = open_object)]`.
+pub(crate) fn open_object() -> RefOr<utoipa::openapi::schema::Schema> {
+    ObjectBuilder::new()
+        .additional_properties(Some(
+            utoipa::openapi::schema::AdditionalProperties::FreeForm(true),
+        ))
+        .into()
+}
+
+/// [`open_object`] that also takes `null`, for a PATCH field where `null` is a value (it clears
+/// the field, `NULL_IS_A_VALUE` in `api/openapi.rs`).
+pub(crate) fn nullable_open_object() -> RefOr<utoipa::openapi::schema::Schema> {
+    ObjectBuilder::new()
+        .schema_type(SchemaType::from_iter([
+            utoipa::openapi::schema::Type::Object,
+            utoipa::openapi::schema::Type::Null,
+        ]))
+        .additional_properties(Some(
+            utoipa::openapi::schema::AdditionalProperties::FreeForm(true),
+        ))
+        .into()
+}
+
 /// RFC 7807 problem document.
 ///
 /// Spec 09 § Conventions.
@@ -347,7 +372,7 @@ pub struct PageParams {
     pub cursor: Option<String>,
 }
 
-/// Query parameters of the session and user detail endpoints. Spec 05 § Default exclusions.
+/// Query parameters of the session detail endpoint. Spec 05 § Default exclusions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct ExclusionParams {

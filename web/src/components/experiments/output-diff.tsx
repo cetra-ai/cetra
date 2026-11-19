@@ -24,7 +24,7 @@ function clip(text: string, max: number): string {
 }
 
 function noOutput(): ReactNode {
-  return <p className="text-xs text-muted-foreground">No output</p>;
+  return <p className="text-body text-muted-foreground">No output</p>;
 }
 
 /**
@@ -65,7 +65,7 @@ function diffNodes(before: unknown, after: unknown): ReactNode {
   const afterText = textOf(after);
   if (before === undefined) {
     return (
-      <p className="whitespace-pre-wrap font-mono text-xs">
+      <p className="whitespace-pre-wrap font-mono text-body">
         {clip(afterText, MAX_RENDERED_CHARS)}
         <span className="block text-muted-foreground">No baseline output</span>
       </p>
@@ -74,7 +74,7 @@ function diffNodes(before: unknown, after: unknown): ReactNode {
   const beforeText = textOf(before);
   if (beforeText === afterText) {
     return (
-      <p className="whitespace-pre-wrap font-mono text-xs text-muted-foreground">
+      <p className="whitespace-pre-wrap font-mono text-body text-muted-foreground">
         <span className="sr-only">same as baseline</span>
         {clip(afterText, MAX_RENDERED_CHARS)}
       </p>
@@ -84,7 +84,7 @@ function diffNodes(before: unknown, after: unknown): ReactNode {
   const parts = wordDiff(beforeText, afterText);
   if (parts === undefined) {
     return (
-      <p className="whitespace-pre-wrap font-mono text-xs">
+      <p className="whitespace-pre-wrap font-mono text-body">
         {clip(afterText, TOO_LONG_CHARS)}
         <span className="block text-muted-foreground">Too long to diff</span>
       </p>
@@ -127,7 +127,7 @@ function diffNodes(before: unknown, after: unknown): ReactNode {
   }
 
   return (
-    <p className="whitespace-pre-wrap font-mono text-xs">
+    <p className="whitespace-pre-wrap font-mono text-body">
       {nodes}
       {truncated ? "…" : null}
     </p>

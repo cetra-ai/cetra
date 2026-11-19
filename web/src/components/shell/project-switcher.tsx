@@ -1,5 +1,5 @@
 import { useMatch, useNavigate, useParams } from "@tanstack/react-router";
-import { Loader2 } from "lucide-react";
+import { ChevronsUpDown, Loader2 } from "lucide-react";
 import { $api } from "@/api/client";
 import { projectListInit } from "@/api/queries";
 import { Button } from "@/components/ui/button";
@@ -35,8 +35,14 @@ export function ProjectSwitcher() {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="outline" aria-label={label}>
-          {label}
+        <Button
+          variant="ghost"
+          size="sm"
+          aria-label={label}
+          className="h-7 gap-1 px-1.5 font-medium"
+        >
+          <span className="max-w-48 truncate">{label}</span>
+          <ChevronsUpDown className="size-3.5 text-muted-foreground" aria-hidden />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start">

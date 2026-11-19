@@ -4,8 +4,8 @@ import { type FormEvent, useState } from "react";
 import { $api } from "@/api/client";
 import { problemMessage, problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
-import { evaluatorQuery, evaluatorsInit } from "@/api/queries-evaluation";
-import { onlineRuleKey, onlineRulesKey } from "@/api/queries-online-rules";
+import { evaluatorQuery, useEvaluatorPages } from "@/api/queries-evaluation";
+import { onlineRuleKey, onlineRuleStatsKey, onlineRulesKey } from "@/api/queries-online-rules";
 import type { Schema } from "@/api/types";
 import { DisabledReason } from "@/components/disabled-reason";
 import {
@@ -279,7 +279,7 @@ function SectionError({ message }: { message: string | undefined }) {
     return null;
   }
   return (
-    <p role="alert" className="text-xs text-destructive">
+    <p role="alert" className="text-caption text-destructive">
       {message}
     </p>
   );
@@ -296,17 +296,14 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
   const [errors, setErrors] = useState<Errors>({});
   const [formError, setFormError] = useState<FormProblem | undefined>();
   const upgradeUrl = useOrgEntitlements(org).upgradeUrl;
-  const evaluators = $api.useQuery(
-    "get",
-    "/api/v1/projects/{project}/evaluators",
-    evaluatorsInit(org, project),
-  );
+  const evaluators = useEvaluatorPages(org, project);
+  const evaluatorItems = evaluators.data?.pages.flatMap((page) => page.data);
   // A saved rule's evaluator may be past the first page of the list: fetch it by id then.
   const savedEvaluatorId = rule?.evaluator_id ?? "";
   const fetchMissing =
     saved &&
-    evaluators.data !== undefined &&
-    !evaluators.data.data.some((item) => item.id === savedEvaluatorId);
+    evaluatorItems !== undefined &&
+    !evaluatorItems.some((item) => item.id === savedEvaluatorId);
   const missing = useQuery({
     ...evaluatorQuery(org, project, savedEvaluatorId),
     enabled: fetchMissing,
@@ -331,7 +328,9 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
   }
 
   const evaluatorList =
-    fetchMissing && missing.data ? [...evaluators.data.data, missing.data] : evaluators.data.data;
+    fetchMissing && missing.data
+      ? [...(evaluatorItems ?? []), missing.data]
+      : (evaluatorItems ?? []);
   const evaluator = evaluatorList.find((item) => item.id === values.evaluatorId);
   const judge = evaluator?.kind === "llm_judge";
 
@@ -396,9 +395,11 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
         {
           onSuccess: (created) => {
             void queryClient.invalidateQueries({ queryKey: onlineRulesKey(org, project) });
+            void queryClient.invalidateQueries({ queryKey: onlineRuleStatsKey(org, project) });
             void navigate({
-              to: "/$org/$project/online-rules/$ruleId",
-              params: { org, project, ruleId: created.id },
+              to: "/$org/$project/online-rules",
+              params: { org, project },
+              search: { rule: created.id },
             });
           },
           onError,
@@ -409,8 +410,9 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
     const body = patchBodyOf(values, rule, judge, sample);
     if (Object.keys(body).length === 0) {
       void navigate({
-        to: "/$org/$project/online-rules/$ruleId",
-        params: { org, project, ruleId: rule.id },
+        to: "/$org/$project/online-rules",
+        params: { org, project },
+        search: { rule: rule.id },
       });
       return;
     }
@@ -422,10 +424,12 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
       {
         onSuccess: () => {
           void queryClient.invalidateQueries({ queryKey: onlineRulesKey(org, project) });
+          void queryClient.invalidateQueries({ queryKey: onlineRuleStatsKey(org, project) });
           void queryClient.invalidateQueries({ queryKey: onlineRuleKey(org, project, rule.id) });
           void navigate({
-            to: "/$org/$project/online-rules/$ruleId",
-            params: { org, project, ruleId: rule.id },
+            to: "/$org/$project/online-rules",
+            params: { org, project },
+            search: { rule: rule.id },
           });
         },
         onError,
@@ -470,7 +474,7 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
             </SelectContent>
           </Select>
           {saved ? (
-            <p id="rule-evaluator-help" className="text-xs text-muted-foreground">
+            <p id="rule-evaluator-help" className="text-caption text-muted-foreground">
               The evaluator cannot change after the rule is created.
             </p>
           ) : null}
@@ -478,7 +482,7 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
         </div>
 
         <div className="flex flex-col gap-2">
-          <span className="text-sm leading-none font-medium">Target</span>
+          <span className="text-body leading-none font-medium">Target</span>
           <RadioGroup
             aria-label="Target"
             value={values.target}
@@ -496,7 +500,7 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
             ))}
           </RadioGroup>
           {saved ? (
-            <p className="text-xs text-muted-foreground">
+            <p className="text-caption text-muted-foreground">
               The target cannot change after the rule is created.
             </p>
           ) : null}
@@ -516,7 +520,7 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
               set({ filter: event.target.value });
             }}
           />
-          <p id="rule-filter-help" className="text-xs text-muted-foreground">
+          <p id="rule-filter-help" className="text-caption text-muted-foreground">
             {filterHelp}
           </p>
           <SectionError message={errors.filter} />
@@ -558,7 +562,7 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
               set({ samplePercent: event.target.value });
             }}
           />
-          <p id="rule-sample-help" className="text-xs text-muted-foreground">
+          <p id="rule-sample-help" className="text-caption text-muted-foreground">
             {sampleHelp}
           </p>
           <SectionError message={errors.sample_rate} />
@@ -594,7 +598,7 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
                       <Link
                         to="/$org/$project/settings/models"
                         params={{ org, project }}
-                        className="text-sm underline"
+                        className="text-body underline"
                       >
                         Add a model price
                       </Link>
@@ -625,7 +629,7 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
               ) : null}
             </>
           ) : evaluator === undefined ? null : (
-            <p className="text-sm text-muted-foreground">
+            <p className="text-body text-muted-foreground">
               Budgets apply to LLM judge evaluators only.
             </p>
           )}
@@ -644,7 +648,7 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
         </div>
 
         {formError ? (
-          <div role="alert" className="flex flex-col gap-1 text-sm text-destructive">
+          <div role="alert" className="flex flex-col gap-1 text-body text-destructive">
             <p>{formError.message}</p>
             {formError.hint ? <p>{formError.hint}</p> : null}
             {formError.upgrade ? (
@@ -658,8 +662,9 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
           {saved ? (
             <Button asChild variant="outline">
               <Link
-                to="/$org/$project/online-rules/$ruleId"
-                params={{ org, project, ruleId: rule.id }}
+                to="/$org/$project/online-rules"
+                params={{ org, project }}
+                search={{ rule: rule.id }}
               >
                 Cancel
               </Link>

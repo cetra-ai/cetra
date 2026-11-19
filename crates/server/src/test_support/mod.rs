@@ -22,9 +22,10 @@ use axum::extract::ConnectInfo;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode};
 use bytesize::ByteSize;
 use cetra_core::batch::{scores_to_record_batch, spans_to_record_batch};
+use cetra_core::enums::ScoreSource;
 use cetra_core::ids::{OrgId, ProjectId, SpanId, TraceId};
 use cetra_core::names::PRODUCT;
-use cetra_core::score::Score;
+use cetra_core::score::{Score, ScoreTarget, ScoreValue};
 use cetra_core::span::Span;
 use cetra_storage::config::{
     AnchorConfig, FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
@@ -45,8 +46,8 @@ use crate::auth::secret::{self, KeyKind, NewKey};
 use crate::auth::session::{SessionOrigin, start_session};
 use crate::clock::Clock;
 use crate::config::{
-    AuthSettings, EntitlementsConfig, EvalConfig, IngestConfig, InitConfig, LogConfig, MediaConfig,
-    OrgsConfig, PublicUrl, SecurityConfig, ServerConfig,
+    AuthSettings, DemoConfig, EntitlementsConfig, EvalConfig, IngestConfig, InitConfig, LogConfig,
+    MediaConfig, OrgsConfig, PublicUrl, SecurityConfig, ServerConfig,
 };
 use crate::http::access::RouteDef;
 use crate::http::{AppInner, AppState, router, router_with, serve_router};
@@ -369,13 +370,14 @@ impl TestApp {
             crate::ee::org_sso::dns::TxtResolver::fixed(),
         )
         .expect("org SSO state");
+        let limits = Limits::new(&config.demo);
         let state = AppState::new(AppInner {
             config,
             meta,
             storage: Arc::new(storage),
             ready: crate::http::health::ReadyCache::default(),
             clock: Clock::Manual(Arc::new(AtomicI64::new(MANUAL_NOW_NS))),
-            limits: Limits::new(),
+            limits,
             key_cache: crate::auth::principal::ApiKeyCache::new(),
             pat_cache: crate::auth::principal::PatCache::new(),
             last_used: crate::auth::last_used::LastUsed::new(),
@@ -386,8 +388,9 @@ impl TestApp {
             providers,
             oauth_key: crate::auth::oidc::random_key().expect("oauth key"),
             ingest,
+            last_ingest: crate::ingest::last_ingest::LastIngest::default(),
             live: crate::live::LiveBus::new(crate::live::StreamTiming::TEST),
-            metrics_cache: crate::routes::metrics::MetricsCache::default(),
+            widget_cache: crate::routes::dashboards::WidgetCache::default(),
             usage: crate::usage::Usage::default(),
             alert_email_count: crate::alerts::quota::DailyEmailCount::default(),
             deletions: crate::deletion::Deletions::new(),
@@ -1036,6 +1039,7 @@ fn default_config(data_dir: &std::path::Path) -> ServerConfig {
             ..EntitlementsConfig::default()
         },
         orgs: OrgsConfig::default(),
+        demo: DemoConfig::default(),
         encryption_key: None,
         license_key: None,
         auth: AuthSettings::default(),
@@ -1584,6 +1588,7 @@ pub(crate) fn config(data_dir: &std::path::Path) -> ServerConfig {
         security: SecurityConfig::default(),
         entitlements: EntitlementsConfig::default(),
         orgs: OrgsConfig::default(),
+        demo: DemoConfig::default(),
         encryption_key: None,
         license_key: None,
         auth: AuthSettings::default(),
@@ -1592,4 +1597,52 @@ pub(crate) fn config(data_dir: &std::path::Path) -> ServerConfig {
         init: InitConfig::default(),
         log: LogConfig::default(),
     }
+}
+
+/// A score for [`put_score`]. It is on a fixed trace.
+pub(crate) struct TestScore {
+    pub(crate) name: &'static str,
+    pub(crate) value: ScoreValue,
+    pub(crate) evaluator_id: Option<Uuid>,
+    pub(crate) experiment_id: Option<Uuid>,
+    pub(crate) created_at: i64,
+    pub(crate) deleted: bool,
+    /// Scores with the same id replace each other by `(updated_at, ingest_time)`; `None` for a
+    /// new id.
+    pub(crate) score_id: Option<Uuid>,
+    /// Write time of the version. `None` takes `created_at`.
+    pub(crate) updated_at: Option<i64>,
+}
+
+/// Appends `score` to `project` through storage, as the ingest path does.
+pub(crate) async fn put_score(app: &TestApp, project: ProjectId, score: TestScore) {
+    let score = Score {
+        project_id: project,
+        score_id: score.score_id.unwrap_or_else(Uuid::now_v7),
+        target: ScoreTarget::Trace {
+            trace_id: "0102030405060708090a0b0c0d0e0f10".parse().unwrap(),
+        },
+        session_id: None,
+        user_id: None,
+        name: score.name.to_owned(),
+        value: score.value,
+        reason: None,
+        source: ScoreSource::LlmJudge,
+        evaluator_id: score.evaluator_id,
+        rule_id: None,
+        experiment_id: score.experiment_id,
+        dataset_item_id: score.experiment_id.map(|_| Uuid::now_v7()),
+        author_user_id: None,
+        metadata: Default::default(),
+        created_at: score.created_at,
+        updated_at: score.updated_at.unwrap_or(score.created_at),
+        deleted: score.deleted,
+        ingest_time: score.created_at,
+    };
+    let batch = scores_to_record_batch(&[score]).unwrap();
+    app.state
+        .storage
+        .append_scores(project, batch)
+        .await
+        .unwrap();
 }

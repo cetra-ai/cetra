@@ -55,7 +55,7 @@ it("shows the provider, the callback URL, the domains and the switches to an own
   );
   expect(screen.getByText(ssoFixture.callback_url)).toBeInTheDocument();
 
-  const table = screen.getByRole("table", { name: "Domains" });
+  const table = screen.getByRole("grid", { name: "Domains" });
   const rows = within(table).getAllByRole("row");
   expect(rows).toHaveLength(3);
   expect(within(table).getByText("acme.com")).toBeInTheDocument();
@@ -76,21 +76,27 @@ it("shows the provider, the callback URL, the domains and the switches to an own
 });
 
 it("sends the secret only when one is typed", async () => {
-  const bodies: unknown[] = [];
+  const bodies: Record<string, unknown>[] = [];
   server.use(
     http.put("/api/v1/orgs/:org/sso/provider", async ({ request }) => {
-      bodies.push(await request.json());
-      return HttpResponse.json(ssoFixture);
+      const body = (await request.json()) as Record<string, unknown>;
+      bodies.push(body);
+      // Echo the saved name, so the form is clean again after the save.
+      return HttpResponse.json({
+        ...ssoFixture,
+        provider: { ...ssoFixture.provider, display_name: body.display_name },
+      });
     }),
   );
 
   const { user } = await openPage();
-  await user.click(await screen.findByRole("button", { name: "Save" }));
+  await user.type(await screen.findByLabelText("Display name"), " EMEA");
+  await user.click(screen.getByRole("button", { name: "Save" }));
   await waitFor(() => {
     expect(bodies).toHaveLength(1);
   });
   expect(bodies[0]).toEqual({
-    display_name: "Acme Okta",
+    display_name: "Acme Okta EMEA",
     issuer: "https://acme.okta.com",
     client_id: "0oa1b2c3d4",
     jit_role: "viewer",
@@ -102,7 +108,7 @@ it("sends the secret only when one is typed", async () => {
     expect(bodies).toHaveLength(2);
   });
   expect(bodies[1]).toEqual({
-    display_name: "Acme Okta",
+    display_name: "Acme Okta EMEA",
     issuer: "https://acme.okta.com",
     client_id: "0oa1b2c3d4",
     jit_role: "viewer",
@@ -121,7 +127,8 @@ it("shows a field error under its field", async () => {
   );
 
   const { user } = await openPage();
-  await user.click(await screen.findByRole("button", { name: "Save" }));
+  await user.type(await screen.findByLabelText("Issuer URL"), "/x");
+  await user.click(screen.getByRole("button", { name: "Save" }));
 
   expect(await screen.findByText("issuer must be an https URL")).toBeInTheDocument();
   expect(screen.getByLabelText("Issuer URL")).toHaveAttribute("aria-invalid", "true");
@@ -149,13 +156,13 @@ it("adds, verifies and removes domains", async () => {
   );
 
   const { user } = await openPage();
-  await user.type(await screen.findByLabelText("Domain"), "example.org");
+  await user.type(await screen.findByRole("textbox", { name: "Domain" }), "example.org");
   await user.click(screen.getByRole("button", { name: "Add domain" }));
   await waitFor(() => {
     expect(added).toEqual({ domain: "example.org" });
   });
 
-  const table = screen.getByRole("table", { name: "Domains" });
+  const table = screen.getByRole("grid", { name: "Domains" });
   await user.click(within(table).getByRole("button", { name: "Verify" }));
   await waitFor(() => {
     expect(verifyFailed).toBe(true);
@@ -171,7 +178,10 @@ it("adds, verifies and removes domains", async () => {
     within(dialog).getByText(/no longer be sent to your identity provider/),
   ).toBeInTheDocument();
   expect(removedId).toBeUndefined();
-  await user.click(within(dialog).getByRole("button", { name: "Remove domain" }));
+  const confirm = within(dialog).getByRole("button", { name: "Remove domain" });
+  expect(confirm).toBeDisabled();
+  await user.type(within(dialog).getByRole("textbox"), "acme.com");
+  await user.click(confirm);
   await waitFor(() => {
     expect(removedId).toBe(ACME_DOMAIN_ID);
   });
@@ -211,10 +221,10 @@ it("locks the changes without the feature and keeps removal", async () => {
   expect(note).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
   expect(screen.getByRole("button", { name: "Add domain" })).toBeDisabled();
-  const table = screen.getByRole("table", { name: "Domains" });
+  const table = screen.getByRole("grid", { name: "Domains" });
   expect(within(table).getByRole("button", { name: "Verify" })).toBeDisabled();
   expect(within(table).getAllByRole("button", { name: "Remove" })[0]).toBeEnabled();
-  expect(screen.getByRole("button", { name: "Remove provider" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Remove provider…" })).toBeEnabled();
   expect(screen.getByRole("switch", { name: "Enforced" })).toBeDisabled();
 });
 
@@ -225,4 +235,16 @@ it("tells an admin that only owners can manage single sign-on", async () => {
   expect(router.state.location.pathname).toBe("/acme/settings/sso");
   expect(screen.queryByRole("switch", { name: "Enabled" })).not.toBeInTheDocument();
   expect(orgNav().queryByRole("link", { name: "Single sign-on" })).not.toBeInTheDocument();
+});
+
+it("asks before leaving the provider form with unsaved changes", async () => {
+  const { user, router } = await openPage();
+  await user.type(await screen.findByLabelText("Display name"), " EMEA");
+
+  void router.navigate({ to: "/$org/settings/general", params: { org: "acme" } });
+
+  const dialog = await screen.findByRole("alertdialog", { name: "Discard unsaved changes?" });
+  await user.click(within(dialog).getByRole("button", { name: "Keep editing" }));
+  expect(router.state.location.pathname).toBe("/acme/settings/sso");
+  expect(screen.getByLabelText("Display name")).toHaveValue("Acme Okta EMEA");
 });

@@ -268,7 +268,7 @@ function BackfillBody({
               ))}
             </SelectContent>
           </Select>
-          {windowError ? <p className="text-xs text-destructive">{windowError}</p> : null}
+          {windowError ? <p className="text-caption text-destructive">{windowError}</p> : null}
         </div>
 
         <div className="flex flex-col gap-2">
@@ -288,7 +288,7 @@ function BackfillBody({
               });
             }}
           />
-          <p className="text-xs text-destructive">
+          <p className="text-caption text-destructive">
             {clientErrors.max_targets ?? serverErrors.max_targets}
           </p>
         </div>
@@ -310,12 +310,12 @@ function BackfillBody({
               });
             }}
           />
-          <p className="text-xs text-destructive">
+          <p className="text-caption text-destructive">
             {clientErrors.sample_rate ?? serverErrors.sample_rate}
           </p>
         </div>
 
-        <div role="status" className="flex flex-col gap-1 text-sm">
+        <div role="status" className="flex flex-col gap-1 text-body">
           {summary.map((line) => (
             <p key={line}>{line}</p>
           ))}

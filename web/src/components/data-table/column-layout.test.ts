@@ -1,6 +1,8 @@
 import { expect, it } from "vitest";
 import {
   columnChoiceKey,
+  lockedColumnIds,
+  moveColumn,
   readColumnChoice,
   reorderVisible,
   visibleColumnIds,
@@ -53,4 +55,34 @@ it("reads and writes the table's column choice", () => {
   expect(readColumnChoice("traces")).toEqual(["env", "name"]);
   writeColumnChoice("traces", undefined);
   expect(localStorage.getItem(columnChoiceKey("traces"))).toBeNull();
+});
+
+it("collects the locked ids", () => {
+  expect([...lockedColumnIds(specs)]).toEqual(["status", "name"]);
+});
+
+const ids = ["a", "b", "c", "d"];
+const none: ReadonlySet<string> = new Set();
+
+it("moves an unlocked column right and left, clamping the index to the array", () => {
+  expect(moveColumn(ids, "a", 2, none)).toEqual(["b", "c", "a", "d"]);
+  expect(moveColumn(ids, "d", 0, none)).toEqual(["d", "a", "b", "c"]);
+  expect(moveColumn(ids, "a", 99, none)).toEqual(["b", "c", "d", "a"]);
+  expect(moveColumn(ids, "b", -5, none)).toEqual(["b", "a", "c", "d"]);
+});
+
+it("never moves a locked id", () => {
+  expect(moveColumn(ids, "a", 2, new Set(["a"]))).toBeUndefined();
+});
+
+it("never lands a column before the leading locked ids", () => {
+  const locked = new Set(["a"]);
+  expect(moveColumn(ids, "c", 0, locked)).toEqual(["a", "c", "b", "d"]);
+  expect(moveColumn(ids, "d", 1, new Set(["a", "b"]))).toEqual(["a", "b", "d", "c"]);
+});
+
+it("returns undefined when the order would not change or the id is unknown", () => {
+  expect(moveColumn(ids, "b", 1, none)).toBeUndefined();
+  expect(moveColumn(ids, "a", -3, new Set(["b"]))).toBeUndefined();
+  expect(moveColumn(ids, "zzz", 0, none)).toBeUndefined();
 });

@@ -1,14 +1,14 @@
 import { History } from "lucide-react";
-import { useId } from "react";
 import { $api } from "@/api/client";
 import { problemMessage } from "@/api/problem";
 import { deletionsInit } from "@/api/queries-settings";
 import { EmptyState } from "@/components/empty-state";
 import { FormError } from "@/components/form/form-error";
 import { IdText } from "@/components/id-text";
+import { SettingsCard } from "@/components/settings/settings-card";
+import { type PillTone, StatusPill } from "@/components/settings/status-pill";
 import { useProject } from "@/components/shell/project-context";
 import { TimeText } from "@/components/time-text";
-import { Badge } from "@/components/ui/badge";
 import {
   Table,
   TableBody,
@@ -50,10 +50,23 @@ function actorIdKind(kind: "user" | "api_key" | "control_plane"): string {
   }
 }
 
+/** Pill colour per status: finished work is ok, failed is an error, the rest are in progress. */
+function statusTone(status: "resolving" | "pending" | "applied" | "failed"): PillTone {
+  switch (status) {
+    case "applied":
+      return "ok";
+    case "failed":
+      return "error";
+    case "pending":
+      return "warn";
+    case "resolving":
+      return "info";
+  }
+}
+
 /** The project's deletions, newest first. Refetches while one is open. */
 export function DeletionHistory() {
   const { org, project } = useProject();
-  const headingId = useId();
   const list = $api.useQuery(
     "get",
     "/api/v1/projects/{project}/deletions",
@@ -67,10 +80,7 @@ export function DeletionHistory() {
   const rows = list.data?.data ?? [];
 
   return (
-    <section aria-labelledby={headingId} className="flex flex-col gap-3">
-      <h2 id={headingId} className="text-base font-medium">
-        Deletion history
-      </h2>
+    <SettingsCard title="Deletion history">
       {list.data === undefined && list.error ? (
         <FormError message={problemMessage(list.error, "Could not load the deletions.")} />
       ) : null}
@@ -101,26 +111,18 @@ export function DeletionHistory() {
                     <TableCell>
                       <div className="flex flex-col">
                         <span>{deletionKindLabel(deletion.kind)}</span>
-                        <span className="text-xs text-muted-foreground">
+                        <span className="text-caption text-muted-foreground">
                           {deletionSubject(deletion)}
                         </span>
                       </div>
                     </TableCell>
                     <TableCell>
                       <div className="flex flex-col items-start gap-1">
-                        <Badge
-                          variant={
-                            deletion.status === "failed"
-                              ? "destructive"
-                              : deletion.status === "applied"
-                                ? "secondary"
-                                : "outline"
-                          }
-                        >
+                        <StatusPill tone={statusTone(deletion.status)}>
                           {deletionStatusLabel(deletion.status)}
-                        </Badge>
+                        </StatusPill>
                         {deletion.error ? (
-                          <span className="text-xs text-muted-foreground">
+                          <span className="text-caption text-muted-foreground">
                             {deletionErrorLabel(deletion.error)}
                           </span>
                         ) : null}
@@ -149,6 +151,6 @@ export function DeletionHistory() {
           )}
         </>
       )}
-    </section>
+    </SettingsCard>
   );
 }

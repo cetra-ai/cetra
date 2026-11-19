@@ -84,7 +84,7 @@ jobs:
       - uses: ./.github/actions/rust # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
         with:
           cache: "false"
-      # cargo deny is off until the first release (D187).
+      # cargo deny is off until the first release (D188).
       - run: just check-ee check-golden
       - run: just assert-clean
 

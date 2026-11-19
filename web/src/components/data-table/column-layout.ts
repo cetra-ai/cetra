@@ -53,6 +53,35 @@ export function reorderVisible(
   return next;
 }
 
+/** Ids of the columns marked `locked`: they stay put and nothing moves before them. */
+export function lockedColumnIds(specs: readonly ColumnSpec[]): ReadonlySet<string> {
+  return new Set(specs.filter((spec) => spec.locked).map((spec) => spec.id));
+}
+
+/**
+ * Returns `ids` with `id` moved to `toIndex`, an index into the resulting array.
+ * `toIndex` is clamped to the array, then raised past the leading run of locked ids.
+ * Returns undefined when `id` is locked or absent, or when the order would not change.
+ */
+export function moveColumn(
+  ids: readonly string[],
+  id: string,
+  toIndex: number,
+  locked: ReadonlySet<string>,
+): string[] | undefined {
+  const from = ids.indexOf(id);
+  if (from < 0 || locked.has(id)) {
+    return undefined;
+  }
+  // `id` is unlocked and in `ids`, so this index is at most `from`.
+  const firstMovable = ids.findIndex((item) => !locked.has(item));
+  const inRange = Math.min(ids.length - 1, Math.max(0, toIndex));
+  const target = Math.max(firstMovable, inRange);
+  const next = ids.filter((_, index) => index !== from);
+  next.splice(target, 0, id);
+  return sameColumnIds(next, ids) ? undefined : next;
+}
+
 export function readColumnChoice(tableId: string): string[] | undefined {
   try {
     const raw = localStorage.getItem(columnChoiceKey(tableId));

@@ -101,13 +101,13 @@ Setting an override needs the `project_roles` entitlement (Teams add-on or an en
 |---|:-:|:-:|:-:|:-:|
 | View traces, sessions, dashboards, datasets, experiments, SQL console | ✓ | ✓ | ✓ | ✓ |
 | Annotate (human scores), add to dataset, edit datasets, run SQL exports (an `sk` key with `read` may export, D-H-5), share saved views (D-H-6) | | ✓ | ✓ | ✓ |
-| Manage evaluators, online rules, alert rules, channels, score definitions | | ✓ | ✓ | ✓ |
+| Manage evaluators, online rules, alert rules, channels, score definitions, dashboards (D-C-16) | | ✓ | ✓ | ✓ |
 | Manage API keys, LLM connections, project settings (retention), GDPR deletions | | | ✓ | ✓ |
 | Create/delete projects, manage members & invites, org limits | | | ✓ | ✓ |
 | Delete org, transfer ownership, change owners | | | | ✓ |
 | Instance settings (instance admins only) | — | — | — | — |
 
-Evaluators, online rules and score definitions: project `member` and above; API keys cannot manage them (D-I-24).
+Evaluators, online rules and score definitions: project `member` and above; API keys cannot manage them (D-I-24). Dashboards: project `member` and above through a session or a read-write PAT; a `read` key and a read-only PAT read them and run their queries (D-C-16).
 
 Annotations: a member changes or deletes only their own `human` scores; a project admin may change or delete anyone's (D-I-26, D-I-36). API keys keep their scope rules.
 
@@ -122,6 +122,16 @@ Enforced in one place: every route is declared with its access (public, any sign
 **Session-only** (a session cookie; a PAT or an API key is refused): creating, listing or revoking API keys and personal access tokens, changing members, roles, overrides or invites, the password and the account name, and dropping a project or an org (D-P-70). Exception: a PAT may revoke itself with `DELETE /api/v1/me/tokens/current` (D140). A PAT with scope `read` may call safe methods (GET, HEAD) only, plus the two reads that use POST: `POST /api/v1/projects/{project}/sql` and `POST /mcp` (D-H-4); `read, write` may call everything except those session-only routes.
 
 API keys are project-bound and their scopes map onto permissions: `ingest` (OTLP + scores write), `read` (safe methods of project-scoped routes, and `POST …/sql`, D-H-4), `write` (datasets, experiments, scores, deletions by trace), `feedback` (public feedback only). Track D enforces `read`; later tracks map `ingest`, `write` and `feedback` (D140). Deletion by user or by filter requires project `admin` with a session or a `read, write` PAT, never an API key; deleting a project requires the **org** role `admin` or `owner` (a project-admin override is not enough), and deleting an org requires `owner`; both need a session, so a stolen PAT cannot drop them (D-M-4, D-P-70). No API key reads the project member list (D-P-67). An `sk` key needs `write`, not `read`, even for `GET …/deletions`: the history names the people whose data was erased.
+
+### Demo org (D187)
+
+`demo.org` (spec 12) names one org of the instance by id. Every signed-in user who is not an instance admin, through a session or a PAT, reads that org as an **implicit `viewer`** when `org_members` has no row for them. A real row wins: the people who run the demo (owners, admins, members) keep their role. Nothing is written: no `org_members` row, no seat (D176), no invitation. API keys are project-bound and are not affected; the control plane's membership calls (`/api/internal/v1/memberships/lookup`, `…/orgs/{org}/members`, the users calls) see real rows only.
+
+- **Where the role is read.** The one function that returns a user's org role for access (`http::access`, MCP's project list, `GET /api/auth/me`, `GET /api/v1/orgs`) returns `viewer` for an implicit visitor, so every route's existing check applies: reads and the read POSTs (`…/sql`, `/mcp`, dashboard queries) work; annotating, sharing, managing anything and SQL exports are `403` as for any viewer. A visitor's own private saved views and saved SQL queries are allowed, as for any viewer.
+- **What a visitor sees of people.** The org's member and invite lists show the real members only. A visitor never appears in any list, so visitors never see each other.
+- **Not a member.** An implicit visitor cannot leave the org (there is nothing to leave) and does not count anywhere a membership counts (seats, owners, alert recipients, the usage page's members).
+- **Limits.** Requests of implicit visitors to the demo org's routes pass a per-user rate of `demo.requests_per_minute` (default 120) and at most `demo.user_in_flight` (default 4) at once per user, and at most `demo.org_in_flight` (default 16) at once across all visitors; above them the answer is `429 rate_limited` with `Retry-After`. Their SQL console requests run with at most `demo.sql_timeout` (default `"10s"`) and `demo.sql_max_rows` (default 1,000) rows; a larger `timeout_ms` or `limit` is lowered, not refused, and `truncated` says when rows were cut. Real members of the demo org are not limited this way. `POST /mcp` is not counted by these limits: it has its own per-token limits (D-H-10), and its `query_sql` returns at most 1,000 rows. Live streams (SSE) take a slot only while their handler runs, not while they stream; each visitor keeps the per-owner stream cap of the live updates, and there is no cap on all visitors' streams together. Accepted for the demo: many accounts holding streams open is what the cell's own connection limits and the operators' monitoring cover.
+- **Instance admins** keep no implicit access to org data (§ above), the demo org included.
 
 ## API keys
 

@@ -1,13 +1,33 @@
-import { Plus } from "lucide-react";
+import { cn } from "cn";
+import {
+  Clock,
+  Coins,
+  DollarSign,
+  Gauge,
+  Layers,
+  ListTree,
+  MessageSquare,
+  MessageSquareText,
+  MessagesSquare,
+  Plus,
+  Sparkles,
+  Tag,
+  Timer,
+  TriangleAlert,
+  User,
+} from "lucide-react";
 import type { ReactNode } from "react";
 import type { Schema } from "@/api/types";
 import type { ColumnSpec } from "@/components/data-table/column-layout";
 import type { DataTableColumn } from "@/components/data-table/data-table";
-import { stringContains, stringEquals } from "@/components/filter-bar/logic";
+import { stringContains } from "@/components/filter-bar/logic";
+import { FilterHit, filterIdCell } from "@/components/filter-hit";
+import { LazyTooltip } from "@/components/lazy-tooltip";
+import { ScoreBadge } from "@/components/score-badge";
 import { StatusDot } from "@/components/status-dot";
 import { TimeText } from "@/components/time-text";
 import { Badge } from "@/components/ui/badge";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { categoryClasses, environmentClasses, providerClasses } from "@/lib/colors";
 import { formatCost, formatDuration, formatTokens } from "@/lib/format";
 import { TRACE_COLUMN_IDS, type TraceColumnId } from "@/lib/search/traces";
 
@@ -88,6 +108,11 @@ export function traceColumnSpecs(names: readonly string[]): TraceColumn[] {
   return [...fixed.slice(0, costAt + 1), ...scores, ...fixed.slice(costAt + 1)];
 }
 
+/** Traces that failed get a red edge, unless they are selected (the selected style wins). */
+export function traceRowTone(row: Schema<"TraceSummary">) {
+  return row.status === "error" ? ("error" as const) : undefined;
+}
+
 export function orderedTraceColumns(
   rows: readonly Schema<"TraceSummary">[],
   visible: readonly string[],
@@ -114,7 +139,8 @@ function traceColumnDefs(
       cell: ({ row }) => (
         <FilterHit
           label={`Filter by status ${row.original.status}`}
-          conjunct={stringEquals("status", row.original.status)}
+          field={{ column: "status" }}
+          value={row.original.status}
           onFilter={onFilter}
         >
           <StatusDot status={row.original.status} />
@@ -126,6 +152,7 @@ function traceColumnDefs(
       accessorFn: (row) => row.start_time,
       size: 132,
       header: "Start",
+      meta: { icon: Clock },
       enableSorting: true,
       cell: ({ row }) => <TimeText value={row.original.start_time} style="datetime" />,
     },
@@ -136,7 +163,8 @@ function traceColumnDefs(
       cell: ({ row }) => (
         <FilterHit
           label={`Filter by name ${row.original.name}`}
-          conjunct={stringEquals("name", row.original.name)}
+          field={{ column: "name" }}
+          value={row.original.name}
           onFilter={onFilter}
         >
           {row.original.name}
@@ -147,13 +175,17 @@ function traceColumnDefs(
       id: "input",
       size: 280,
       header: "Input",
+      meta: { icon: MessageSquare },
       cell: ({ row }) => <Preview text={row.original.input_preview} />,
     },
     {
       id: "output",
       size: 280,
       header: "Output",
-      cell: ({ row }) => <Preview text={row.original.output_preview} />,
+      meta: { icon: MessageSquareText },
+      cell: ({ row }) => (
+        <Preview text={row.original.output_preview} failed={row.original.status === "error"} />
+      ),
     },
     {
       id: "duration",
@@ -161,7 +193,7 @@ function traceColumnDefs(
       size: 80,
       header: "Duration",
       enableSorting: true,
-      meta: { align: "right" },
+      meta: { align: "right", icon: Timer },
       cell: ({ row }) => <span className="num">{formatDuration(row.original.duration_ns)}</span>,
     },
     {
@@ -170,7 +202,7 @@ function traceColumnDefs(
       size: 72,
       header: "Tokens",
       enableSorting: true,
-      meta: { align: "right" },
+      meta: { align: "right", icon: Coins },
       cell: ({ row }) => <TokenCount trace={row.original} />,
     },
     {
@@ -179,13 +211,14 @@ function traceColumnDefs(
       size: 80,
       header: "Cost",
       enableSorting: true,
-      meta: { align: "right" },
+      meta: { align: "right", icon: DollarSign },
       cell: ({ row }) => <span className="num">{formatCost(row.original.cost_total)}</span>,
     },
     {
       id: "models",
       size: 140,
       header: "Models",
+      meta: { icon: Sparkles },
       cell: ({ row }) => {
         const first = row.original.models[0];
         const label = modelsLabel(row.original.models);
@@ -195,10 +228,18 @@ function traceColumnDefs(
         return (
           <FilterHit
             label={`Filter by models ${first}`}
-            conjunct={stringContains("models", first)}
+            field={{ column: "models" }}
+            value={first}
+            list
             onFilter={onFilter}
           >
-            {label}
+            <span className="inline-flex min-w-0 items-center gap-1.5">
+              <span
+                aria-hidden
+                className={cn("size-2 shrink-0 rounded-full", providerClasses(first).dot)}
+              />
+              <span className="truncate">{label}</span>
+            </span>
           </FilterHit>
         );
       },
@@ -207,27 +248,30 @@ function traceColumnDefs(
       id: "session",
       size: 120,
       header: "Session",
-      meta: { mono: true },
-      cell: ({ row }) => filterText(row.original.session_id, "session", "session_id", onFilter),
+      meta: { mono: true, icon: MessagesSquare },
+      cell: ({ row }) =>
+        filterIdCell(row.original.session_id, "session", "session_id", "session", onFilter),
     },
     {
       id: "user",
       size: 100,
       header: "User",
-      meta: { mono: true },
-      cell: ({ row }) => filterText(row.original.user_id, "user", "user_id", onFilter),
+      meta: { mono: true, icon: User },
+      cell: ({ row }) => filterIdCell(row.original.user_id, "user", "user_id", "user", onFilter),
     },
     {
       id: "tags",
       size: 140,
       header: "Tags",
+      meta: { icon: Tag },
       cell: ({ row }) => <Tags tags={row.original.tags} onFilter={onFilter} />,
     },
     {
       id: "env",
-      size: 88,
+      size: 112,
       header: "Env",
-      cell: ({ row }) => filterText(row.original.environment, "env", "environment", onFilter),
+      meta: { icon: Layers },
+      cell: ({ row }) => envPill(row.original.environment, onFilter),
     },
     {
       id: "release",
@@ -240,7 +284,7 @@ function traceColumnDefs(
       accessorFn: (row) => row.span_count,
       size: 64,
       header: "Spans",
-      meta: { align: "right" },
+      meta: { align: "right", icon: ListTree },
       cell: ({ row }) => <span className="num">{row.original.span_count}</span>,
     },
     {
@@ -248,7 +292,7 @@ function traceColumnDefs(
       accessorFn: (row) => row.error_count,
       size: 64,
       header: "Errors",
-      meta: { align: "right" },
+      meta: { align: "right", icon: TriangleAlert },
       cell: ({ row }) => <span className="num">{row.original.error_count}</span>,
     },
     {
@@ -277,8 +321,32 @@ function scoreColumn(name: string): DataTableColumn<Schema<"TraceSummary">> {
     id: `score:${name}`,
     size: 96,
     header: name,
+    meta: { icon: Gauge },
     cell: ({ row }) => <ScoreCell trace={row.original} name={name} />,
   };
+}
+
+function envPill(env: string | undefined, onFilter?: (conjunct: string) => void): ReactNode {
+  if (!env) {
+    return "—";
+  }
+  return (
+    <FilterHit
+      label={`Filter by env ${env}`}
+      field={{ column: "environment" }}
+      value={env}
+      onFilter={onFilter}
+    >
+      <span
+        className={cn(
+          "inline-flex rounded-sm border px-1.5 text-caption",
+          environmentClasses(env).pill,
+        )}
+      >
+        {env}
+      </span>
+    </FilterHit>
+  );
 }
 
 function ScoreCell({ trace, name }: { trace: Schema<"TraceSummary">; name: string }) {
@@ -288,43 +356,48 @@ function ScoreCell({ trace, name }: { trace: Schema<"TraceSummary">; name: strin
   }
   const numeric = score.value.data_type === "numeric" || score.value.data_type === "boolean";
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span className={numeric ? "num" : "block truncate"}>{formatScore(score.value)}</span>
-      </TooltipTrigger>
-      <TooltipContent>{SOURCE_LABEL[score.source]}</TooltipContent>
-    </Tooltip>
+    <LazyTooltip content={SOURCE_LABEL[score.source]}>
+      <ScoreBadge
+        name={name}
+        value={score.value}
+        text={formatScore(score.value)}
+        className={numeric ? "num" : "block truncate"}
+      />
+    </LazyTooltip>
   );
 }
 
-function Preview({ text }: { text?: string }) {
+/** A one-line, truncated text preview with the full text in a tooltip. */
+export function Preview({ text, failed = false }: { text?: string; failed?: boolean }) {
   if (!text) {
     return <span className="text-muted-foreground">—</span>;
   }
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span className="block truncate text-muted-foreground">{text}</span>
-      </TooltipTrigger>
-      <TooltipContent>{text}</TooltipContent>
-    </Tooltip>
+    <LazyTooltip content={text}>
+      <span
+        className={cn("block truncate", failed ? "text-status-error" : "text-muted-foreground")}
+      >
+        {text}
+      </span>
+    </LazyTooltip>
   );
 }
 
 function TokenCount({ trace }: { trace: Schema<"TraceSummary"> }) {
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span className="num">{formatTokens(trace.total_tokens)}</span>
-      </TooltipTrigger>
-      <TooltipContent className="flex-col items-start">
-        <span>Input {formatTokens(trace.input_tokens)}</span>
-        <span>Output {formatTokens(trace.output_tokens)}</span>
-        <span>Cache read {formatTokens(trace.cache_read_tokens)}</span>
-        <span>Cache write {formatTokens(trace.cache_write_tokens)}</span>
-        <span>Reasoning {formatTokens(trace.reasoning_tokens)}</span>
-      </TooltipContent>
-    </Tooltip>
+    <LazyTooltip
+      content={
+        <span className="flex flex-col items-start">
+          <span>Input {formatTokens(trace.input_tokens)}</span>
+          <span>Output {formatTokens(trace.output_tokens)}</span>
+          <span>Cache read {formatTokens(trace.cache_read_tokens)}</span>
+          <span>Cache write {formatTokens(trace.cache_write_tokens)}</span>
+          <span>Reasoning {formatTokens(trace.reasoning_tokens)}</span>
+        </span>
+      }
+    >
+      <span className="num">{formatTokens(trace.total_tokens)}</span>
+    </LazyTooltip>
   );
 }
 
@@ -349,7 +422,10 @@ function Tags({ tags, onFilter }: { tags: string[]; onFilter?: (conjunct: string
     <span className="flex min-w-0 items-center gap-1">
       {shown.map((tag) => (
         <span key={tag} className="group/tag inline-flex min-w-0 items-center">
-          <Badge variant="secondary" className="h-4 px-1.5 text-[10px]">
+          <Badge
+            variant="secondary"
+            className={cn("h-4 px-1.5 text-caption", categoryClasses(tag).pill)}
+          >
             {tag}
           </Badge>
           {onFilter ? (
@@ -368,57 +444,6 @@ function Tags({ tags, onFilter }: { tags: string[]; onFilter?: (conjunct: string
         </span>
       ))}
       {rest > 0 ? <span className="text-muted-foreground">+{rest}</span> : null}
-    </span>
-  );
-}
-
-function filterText(
-  value: string | undefined,
-  label: string,
-  column: string,
-  onFilter?: (conjunct: string) => void,
-): ReactNode {
-  if (!value) {
-    return "—";
-  }
-  return (
-    <FilterHit
-      label={`Filter by ${label} ${value}`}
-      conjunct={stringEquals(column, value)}
-      onFilter={onFilter}
-    >
-      {value}
-    </FilterHit>
-  );
-}
-
-function FilterHit({
-  label,
-  conjunct,
-  onFilter,
-  children,
-}: {
-  label: string;
-  conjunct: string;
-  onFilter?: (conjunct: string) => void;
-  children: ReactNode;
-}) {
-  return (
-    <span className="group flex min-w-0 items-center gap-1">
-      <span className="min-w-0 truncate">{children}</span>
-      {onFilter ? (
-        <button
-          type="button"
-          aria-label={label}
-          className="inline-flex size-4 shrink-0 items-center justify-center text-muted-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
-          onClick={(event) => {
-            event.stopPropagation();
-            onFilter(conjunct);
-          }}
-        >
-          <Plus className="size-3" />
-        </button>
-      ) : null}
     </span>
   );
 }

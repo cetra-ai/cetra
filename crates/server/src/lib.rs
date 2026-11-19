@@ -18,6 +18,7 @@ pub mod config;
 pub(crate) mod crypto;
 pub(crate) mod datasets;
 pub(crate) mod deletion;
+pub(crate) mod demo;
 pub(crate) mod ee;
 pub(crate) mod email;
 pub(crate) mod entitlements;

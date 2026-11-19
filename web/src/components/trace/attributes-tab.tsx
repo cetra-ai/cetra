@@ -30,7 +30,7 @@ export function AttributesTab({
         value={query}
         aria-label="Search attributes"
         placeholder="Search"
-        className="h-7 text-xs"
+        className="h-7 text-caption"
         onChange={(event) => setQuery(event.target.value)}
       />
       <MapSection
@@ -119,7 +119,7 @@ function Section({
     <section className="flex flex-col">
       <button
         type="button"
-        className="flex h-6 items-center gap-1 text-left text-xs font-medium"
+        className="flex h-6 items-center gap-1 text-left text-caption font-medium"
         aria-expanded={open}
         onClick={() => setOpen((current) => !current)}
       >
@@ -150,9 +150,9 @@ function KvRow({
   const json = jsonContainer(value);
   return (
     <li className="grid min-h-6 grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_auto] items-center gap-2 border-b">
-      <span className="truncate font-mono text-xs">{name}</span>
+      <span className="truncate font-mono text-caption">{name}</span>
       {json === undefined ? (
-        <span className="truncate font-mono text-xs">{text}</span>
+        <span className="truncate font-mono text-caption">{text}</span>
       ) : (
         <JsonView value={json} />
       )}

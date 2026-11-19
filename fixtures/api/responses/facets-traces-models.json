@@ -1,0 +1,18 @@
+{
+  "view": "traces",
+  "field": "models",
+  "kind": "values",
+  "total": 5,
+  "missing": 0,
+  "values": [
+    {
+      "value": "claude-sonnet-4-5",
+      "count": 3
+    },
+    {
+      "value": "gpt-4o-mini",
+      "count": 2
+    }
+  ],
+  "more": false
+}

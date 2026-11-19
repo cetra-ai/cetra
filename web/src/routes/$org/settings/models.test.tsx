@@ -1,4 +1,5 @@
 import { screen, waitFor, within } from "@testing-library/react";
+import type { UserEvent } from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { expect, it } from "vitest";
 import { server } from "@/mocks/node";
@@ -10,6 +11,7 @@ import orgPricesFixture from "../../../../../fixtures/api/static/org-model-price
 
 const PRICE_ID = "01900000-0000-7000-8000-000000000c00";
 const PRICE = orgPricesFixture.data[0];
+const PRICE_NAME = "Llama 3.1 8B (local)";
 const RULE_ID = "01900000-0000-7000-8000-000000000d00";
 
 const orgNav = () => within(screen.getByRole("list", { name: "Organization settings" }));
@@ -23,22 +25,41 @@ function meAs(role: string) {
   );
 }
 
-async function openAddDialog() {
-  const { user } = await renderApp("/acme/settings/models");
-  await screen.findByRole("table", { name: "Organization prices" });
+/** The Save or Add price button of the open panel. The page's own Add price button is not one. */
+function panelButton(name: string): HTMLElement {
+  const button = screen
+    .getAllByRole("button", { name })
+    .find((item) => item.getAttribute("form") === "price-form");
+  if (button === undefined) {
+    throw new Error(`No ${name} button in the panel`);
+  }
+  return button;
+}
+
+async function openAdd(user: UserEvent) {
+  await renderedGrid();
   await user.click(screen.getByRole("button", { name: "Add price" }));
-  const dialog = await screen.findByRole("dialog");
-  return { user, dialog };
+  return await screen.findByRole("form", { name: "Add model price" });
+}
+
+async function renderedGrid() {
+  return await screen.findByRole("grid", { name: "Organization prices" });
+}
+
+async function openRow(user: UserEvent, name: string) {
+  const grid = await renderedGrid();
+  await user.click(within(grid).getByText(name));
+  return await screen.findByRole("form", { name: "Edit model price" });
 }
 
 it("lists organization prices", async () => {
   await renderApp("/acme/settings/models");
 
-  const table = await screen.findByRole("table", { name: "Organization prices" });
-  expect(within(table).getByText("Llama 3.1 8B (local)")).toBeInTheDocument();
-  expect(within(table).getByText("llama3\\.1:8b")).toBeInTheDocument();
-  expect(within(table).getByText("Any")).toBeInTheDocument();
-  expect(within(table).getAllByText("$0")).toHaveLength(2);
+  const grid = await renderedGrid();
+  expect(within(grid).getByText(PRICE_NAME)).toBeInTheDocument();
+  expect(within(grid).getByText("llama3\\.1:8b")).toBeInTheDocument();
+  expect(within(grid).getByText("Any")).toBeInTheDocument();
+  expect(within(grid).getAllByText("$0")).toHaveLength(2);
   expect(orgNav().getByRole("link", { name: "Model prices" })).toHaveAttribute(
     "aria-current",
     "page",
@@ -60,6 +81,55 @@ it("shows the empty state", async () => {
   ).toBeInTheDocument();
 });
 
+it("searches the organization prices by name, pattern or provider", async () => {
+  const { user } = await renderApp("/acme/settings/models");
+  await renderedGrid();
+
+  await user.type(screen.getByRole("searchbox", { name: "Search organization prices" }), "zzz");
+
+  expect(await screen.findByText("No organization prices match.")).toBeInTheDocument();
+});
+
+it("sorts the organization prices by a price column", async () => {
+  server.use(
+    http.get("/api/v1/orgs/:org/models", () =>
+      HttpResponse.json({
+        data: [
+          PRICE,
+          {
+            ...PRICE,
+            id: "01900000-0000-7000-8000-000000000c05",
+            model_name: "Big model",
+            match_pattern: "big",
+            price_input: 5,
+          },
+        ],
+        next_cursor: null,
+      }),
+    ),
+  );
+
+  const { user } = await renderApp("/acme/settings/models");
+  const grid = await renderedGrid();
+  const names = () =>
+    within(grid)
+      .getAllByText(/^(Big model|Llama 3\.1 8B \(local\))$/)
+      .map((element) => element.textContent);
+
+  expect(names()).toEqual([PRICE_NAME, "Big model"]);
+  await user.click(within(grid).getByRole("button", { name: "Input" }));
+  expect(names()).toEqual(["Big model", PRICE_NAME]);
+  await user.click(within(grid).getByRole("button", { name: "Input" }));
+  expect(names()).toEqual([PRICE_NAME, "Big model"]);
+});
+
+it("opens the price named by the URL in the panel", async () => {
+  await renderApp(`/acme/settings/models?open=${PRICE_ID}`);
+
+  const form = await screen.findByRole("form", { name: "Edit model price" });
+  expect(within(form).getByLabelText("Model name")).toHaveValue(PRICE_NAME);
+});
+
 it("adds a price with an exact name", async () => {
   let body: unknown;
   server.use(
@@ -69,11 +139,12 @@ it("adds a price with an exact name", async () => {
     }),
   );
 
-  const { user, dialog } = await openAddDialog();
-  await user.type(within(dialog).getByLabelText("Model name"), "llama3.1:8b");
-  await user.type(within(dialog).getByLabelText("Input", { exact: true }), "0");
-  await user.type(within(dialog).getByLabelText("Output", { exact: true }), "0");
-  await user.click(within(dialog).getByRole("button", { name: "Add price" }));
+  const { user } = await renderApp("/acme/settings/models");
+  const form = await openAdd(user);
+  await user.type(within(form).getByLabelText("Model name"), "llama3.1:8b");
+  await user.type(within(form).getByLabelText("Input", { exact: true }), "0");
+  await user.type(within(form).getByLabelText("Output", { exact: true }), "0");
+  await user.click(panelButton("Add price"));
 
   await waitFor(() =>
     expect(body).toEqual({
@@ -83,7 +154,7 @@ it("adds a price with an exact name", async () => {
       tiers: [],
     }),
   );
-  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  await waitFor(() => expect(screen.queryByRole("form", { name: "Add model price" })).toBeNull());
 });
 
 it("adds a regex price with a tier", async () => {
@@ -95,17 +166,18 @@ it("adds a regex price with a tier", async () => {
     }),
   );
 
-  const { user, dialog } = await openAddDialog();
-  await user.type(within(dialog).getByLabelText("Model name"), "llama3");
-  await user.click(within(dialog).getByRole("radio", { name: "Regular expression" }));
-  await user.type(within(dialog).getByLabelText("Pattern"), "llama3.*");
-  await user.type(within(dialog).getByLabelText("Input", { exact: true }), "0.1");
-  await user.type(within(dialog).getByLabelText("Output", { exact: true }), "0.2");
-  await user.click(within(dialog).getByRole("button", { name: "Add tier" }));
-  const tier = within(within(dialog).getByRole("group", { name: "Tier 1" }));
+  const { user } = await renderApp("/acme/settings/models");
+  const form = await openAdd(user);
+  await user.type(within(form).getByLabelText("Model name"), "llama3");
+  await user.click(within(form).getByRole("radio", { name: "Regular expression" }));
+  await user.type(within(form).getByLabelText("Pattern"), "llama3.*");
+  await user.type(within(form).getByLabelText("Input", { exact: true }), "0.1");
+  await user.type(within(form).getByLabelText("Output", { exact: true }), "0.2");
+  await user.click(within(form).getByRole("button", { name: "Add tier" }));
+  const tier = within(within(form).getByRole("group", { name: "Tier 1" }));
   await user.type(tier.getByLabelText("From input tokens"), "128000");
   await user.type(tier.getByLabelText("Input", { exact: true }), "0.2");
-  await user.click(within(dialog).getByRole("button", { name: "Add price" }));
+  await user.click(panelButton("Add price"));
 
   await waitFor(() =>
     expect(body).toEqual({
@@ -118,7 +190,7 @@ it("adds a regex price with a tier", async () => {
   );
 });
 
-it("checks the form before sending", async () => {
+it("holds Save until the price is valid, and shows the error once a price field changed", async () => {
   let calls = 0;
   server.use(
     http.post("/api/v1/orgs/:org/models", () => {
@@ -127,11 +199,18 @@ it("checks the form before sending", async () => {
     }),
   );
 
-  const { user, dialog } = await openAddDialog();
-  await user.type(within(dialog).getByLabelText("Model name"), "llama3.1:8b");
-  await user.click(within(dialog).getByRole("button", { name: "Add price" }));
+  const { user } = await renderApp("/acme/settings/models");
+  const form = await openAdd(user);
+  await user.type(within(form).getByLabelText("Model name"), "llama3.1:8b");
+  expect(within(form).queryByText("Enter an input or an output price.")).toBeNull();
+  expect(panelButton("Add price")).toBeDisabled();
 
-  expect(await within(dialog).findByText("Enter an input or an output price.")).toBeInTheDocument();
+  const input = within(form).getByLabelText("Input", { exact: true });
+  await user.type(input, "0");
+  await user.clear(input);
+
+  expect(await within(form).findByText("Enter an input or an output price.")).toBeInTheDocument();
+  expect(panelButton("Add price")).toBeDisabled();
   expect(calls).toBe(0);
 });
 
@@ -144,14 +223,15 @@ it("places server field errors", async () => {
     ),
   );
 
-  const { user, dialog } = await openAddDialog();
-  await user.type(within(dialog).getByLabelText("Model name"), "llama3");
-  await user.click(within(dialog).getByRole("radio", { name: "Regular expression" }));
-  await user.type(within(dialog).getByLabelText("Pattern"), "(");
-  await user.type(within(dialog).getByLabelText("Input", { exact: true }), "1");
-  await user.click(within(dialog).getByRole("button", { name: "Add price" }));
+  const { user } = await renderApp("/acme/settings/models");
+  const form = await openAdd(user);
+  await user.type(within(form).getByLabelText("Model name"), "llama3");
+  await user.click(within(form).getByRole("radio", { name: "Regular expression" }));
+  await user.type(within(form).getByLabelText("Pattern"), "(");
+  await user.type(within(form).getByLabelText("Input", { exact: true }), "1");
+  await user.click(panelButton("Add price"));
 
-  expect(await within(dialog).findByText("is not a valid regular expression")).toBeInTheDocument();
+  expect(await within(form).findByText("is not a valid regular expression")).toBeInTheDocument();
 });
 
 it("explains a price that budgeted rules need", async () => {
@@ -169,9 +249,10 @@ it("explains a price that budgeted rules need", async () => {
   );
 
   const { user } = await renderApp("/acme/settings/models");
-  const table = await screen.findByRole("table", { name: "Organization prices" });
-  await user.click(within(table).getByRole("button", { name: "Delete" }));
+  await openRow(user, PRICE_NAME);
+  await user.click(screen.getByRole("button", { name: "Delete" }));
   const confirm = await screen.findByRole("alertdialog");
+  await user.type(within(confirm).getByRole("textbox"), PRICE_NAME);
   await user.click(within(confirm).getByRole("button", { name: "Delete" }));
 
   expect(
@@ -182,11 +263,14 @@ it("explains a price that budgeted rules need", async () => {
 it("members can read but not change", async () => {
   server.use(meAs("member"));
 
-  await renderApp("/acme/settings/models");
+  const { user } = await renderApp("/acme/settings/models");
 
-  const table = await screen.findByRole("table", { name: "Organization prices" });
-  expect(within(table).getByText("Llama 3.1 8B (local)")).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "Edit" })).toBeNull();
+  const form = await openRow(user, PRICE_NAME);
+  expect(within(form).getByLabelText("Model name")).toBeDisabled();
+  expect(
+    screen.getByText("Only admins and owners can change prices", { selector: "p" }),
+  ).toBeVisible();
+  expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
   const add = screen.getByRole("button", { name: "Add price" });
   expect(add).toBeDisabled();
@@ -205,19 +289,17 @@ it("edits a row", async () => {
   );
 
   const { user } = await renderApp("/acme/settings/models");
-  const table = await screen.findByRole("table", { name: "Organization prices" });
-  await user.click(within(table).getByRole("button", { name: "Edit" }));
-  const dialog = await screen.findByRole("dialog");
+  const form = await openRow(user, PRICE_NAME);
 
-  expect(within(dialog).getByRole("radio", { name: "Regular expression" })).toBeChecked();
-  expect(within(dialog).getByLabelText("Pattern")).toHaveValue("llama3\\.1:8b");
-  await user.clear(within(dialog).getByLabelText("Output", { exact: true }));
-  await user.type(within(dialog).getByLabelText("Output", { exact: true }), "0.5");
-  await user.click(within(dialog).getByRole("button", { name: "Save" }));
+  expect(within(form).getByRole("radio", { name: "Regular expression" })).toBeChecked();
+  expect(within(form).getByLabelText("Pattern")).toHaveValue("llama3\\.1:8b");
+  await user.clear(within(form).getByLabelText("Output", { exact: true }));
+  await user.type(within(form).getByLabelText("Output", { exact: true }), "0.5");
+  await user.click(panelButton("Save"));
 
   await waitFor(() =>
     expect(body).toMatchObject({
-      model_name: "Llama 3.1 8B (local)",
+      model_name: PRICE_NAME,
       match_pattern: "llama3\\.1:8b",
       price_output: 0.5,
     }),

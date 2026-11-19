@@ -12,21 +12,27 @@ import {
 } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { previewJson } from "@/lib/datasets";
-import { scoreValueText } from "@/lib/experiments";
-import { formatCost, formatDuration, shortId } from "@/lib/format";
+import { itemKey, itemShortId, scoreValueText } from "@/lib/experiments";
+import { formatCost, formatDuration } from "@/lib/format";
 
-/** The full JSON of a cell is shown in a tooltip up to this many characters. */
-const TOOLTIP_CHARS = 2000;
+/** Cells that are a link or control: a click there does not open the item. */
+const INTERACTIVE = "a, button, input, [role='checkbox'], [role='menu'], [role='menuitem']";
 
 export function ResultsTable({
   rows,
   scoreNames,
   repetitions,
+  activeKey,
+  onOpen,
 }: {
   rows: Schema<"ResultRow">[];
   /** The summary's score names, in order. */
   scoreNames: string[];
   repetitions: number;
+  /** The item key (`itemKey`) of the open item view, if any. */
+  activeKey?: string;
+  /** A click on a row (not on its links or controls) opens the item view. */
+  onOpen: (row: Schema<"ResultRow">) => void;
 }) {
   const { org, project } = useProject();
   return (
@@ -49,11 +55,22 @@ export function ResultsTable({
       </TableHeader>
       <TableBody>
         {rows.map((row) => (
-          <TableRow key={`${row.dataset_item_id}-${row.repetition}`}>
+          <TableRow
+            key={itemKey(row)}
+            data-item-key={itemKey(row)}
+            aria-selected={activeKey === itemKey(row)}
+            className="cursor-pointer"
+            onClick={(event) => {
+              if (event.target instanceof Element && event.target.closest(INTERACTIVE) !== null) {
+                return;
+              }
+              onOpen(row);
+            }}
+          >
             <TableCell>
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <span className="font-mono text-xs">{shortId(row.dataset_item_id)}</span>
+                  <span className="font-mono text-body">{itemShortId(row.dataset_item_id)}</span>
                 </TooltipTrigger>
                 <TooltipContent>{row.dataset_item_id}</TooltipContent>
               </Tooltip>
@@ -101,7 +118,7 @@ export function ResultsTable({
                 <Link
                   to="/$org/$project/traces/$traceId"
                   params={{ org, project, traceId: row.trace_id }}
-                  className="rounded-sm text-xs underline-offset-4 outline-none hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 focus-visible:outline-solid"
+                  className="rounded-sm text-body underline-offset-4 outline-none hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 focus-visible:outline-solid"
                 >
                   trace
                 </Link>
@@ -114,15 +131,7 @@ export function ResultsTable({
   );
 }
 
+/** A cell's truncated preview; the item view shows the whole value. */
 function JsonCell({ value }: { value: unknown }) {
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span className="block max-w-xs truncate font-mono text-xs">{previewJson(value)}</span>
-      </TooltipTrigger>
-      <TooltipContent className="max-w-lg break-all font-mono text-xs">
-        <span className="block whitespace-pre-wrap">{previewJson(value, TOOLTIP_CHARS)}</span>
-      </TooltipContent>
-    </Tooltip>
-  );
+  return <span className="block max-w-xs truncate font-mono text-body">{previewJson(value)}</span>;
 }

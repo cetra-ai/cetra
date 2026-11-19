@@ -121,7 +121,7 @@ function CreateTokenForm({
           onChange={setName}
         />
         <div className="flex flex-col gap-2">
-          <span id="token-access-label" className="text-sm font-medium">
+          <span id="token-access-label" className="text-body font-medium">
             Access
           </span>
           <RadioGroup
@@ -141,7 +141,7 @@ function CreateTokenForm({
               <Label htmlFor="token-access-read-write">Read and write</Label>
             </div>
           </RadioGroup>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-caption text-muted-foreground">
             Read only tokens can't change anything. Neither kind can manage keys, tokens or members.
           </p>
         </div>

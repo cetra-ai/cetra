@@ -1,30 +1,35 @@
-import { keepPreviousData } from "@tanstack/react-query";
-import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { Loader2, Table2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { keepPreviousData, useQueries } from "@tanstack/react-query";
+import { createFileRoute } from "@tanstack/react-router";
+import { Table2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { $api } from "@/api/client";
+import { datasetTrendsInit } from "@/api/queries-dataset-trends";
 import { datasetsInit } from "@/api/queries-datasets";
+import { useShortcut } from "@/components/command/use-shortcut";
+import { DataTable } from "@/components/data-table/data-table";
+import { DATASET_COLUMNS } from "@/components/datasets/dataset-columns";
 import { DatasetDialog } from "@/components/datasets/dataset-dialog";
+import { DatasetPanel } from "@/components/datasets/dataset-panel";
+import { collectTrends, DatasetTrendsContext } from "@/components/datasets/dataset-trend";
+import { DatasetsListEmpty } from "@/components/datasets/datasets-empty";
+import { DatasetsSummary } from "@/components/datasets/datasets-summary";
 import { DisabledReason } from "@/components/disabled-reason";
 import { EmptyState } from "@/components/empty-state";
+import { TraceLayoutControls } from "@/components/layout-switcher";
 import { useProject } from "@/components/shell/project-context";
-import { TimeText } from "@/components/time-text";
+import { Filmstrip } from "@/components/trace/filmstrip";
+import { SplitPane } from "@/components/trace/split-pane";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+import { getTraceMaximized, setTraceMaximized, useListLayout } from "@/lib/list-layout";
+import { useBackState } from "@/lib/list-return";
 import { canManageDatasets } from "@/lib/roles";
 
 export const Route = createFileRoute("/$org/$project/datasets/")({
   validateSearch: (search) => ({
     q: typeof search.q === "string" && search.q.trim() ? search.q.trim() : undefined,
+    dataset: typeof search.dataset === "string" && search.dataset ? search.dataset : undefined,
   }),
   component: DatasetsPage,
 });
@@ -33,8 +38,11 @@ const SEARCH_DEBOUNCE_MS = 300;
 
 function DatasetsPage() {
   const { org, project, data } = useProject();
-  const { q } = Route.useSearch();
-  const navigate = useNavigate();
+  const search = Route.useSearch();
+  const { q, dataset: openId } = search;
+  const navigate = Route.useNavigate();
+  const backState = useBackState("Datasets");
+  const layout = useListLayout();
   const canManage = canManageDatasets(data.role);
   const [creating, setCreating] = useState(false);
   const [text, setText] = useState(q ?? "");
@@ -52,7 +60,7 @@ function DatasetsPage() {
         void navigate({
           to: "/$org/$project/datasets",
           params: { org, project },
-          search: { q: next },
+          search: (prev) => ({ ...prev, q: next }),
           replace: true,
         });
       }
@@ -76,102 +84,169 @@ function DatasetsPage() {
     throw query.error;
   }
 
-  const rows = query.data?.pages.flatMap((page) => page.data) ?? [];
+  const rows = useMemo(() => query.data?.pages.flatMap((page) => page.data) ?? [], [query.data]);
+  // One trends request per loaded page, keyed on the page's dataset ids.
+  const pageIds = useMemo(
+    () => query.data?.pages.map((page) => page.data.map((row) => row.id)) ?? [],
+    [query.data],
+  );
+  const trendAnswers = useQueries({
+    queries: pageIds.map((ids) => ({
+      ...$api.queryOptions(
+        "get",
+        "/api/v1/projects/{project}/dataset-trends",
+        datasetTrendsInit(org, project, ids),
+      ),
+      enabled: ids.length > 0,
+    })),
+  });
+  const trends = collectTrends(
+    pageIds.map((ids, index) => ({
+      ids,
+      answer: { data: trendAnswers[index]?.data, isError: trendAnswers[index]?.isError ?? false },
+    })),
+  );
+  const fetchNextPage = useCallback(() => {
+    void query.fetchNextPage();
+  }, [query.fetchNextPage]);
+
+  function openDataset(id: string, replace = false) {
+    void navigate({
+      to: "/$org/$project/datasets",
+      params: { org, project },
+      search: (prev) => ({ ...prev, dataset: id }),
+      replace,
+    });
+  }
+
+  function closeDataset() {
+    void navigate({
+      to: "/$org/$project/datasets",
+      params: { org, project },
+      search: (prev) => ({ ...prev, dataset: undefined }),
+    });
+  }
+
+  useShortcut("dismiss", () => {
+    if (getTraceMaximized()) {
+      setTraceMaximized(false);
+      return;
+    }
+    if (openId === undefined) {
+      return;
+    }
+    closeDataset();
+  });
 
   return (
-    <div className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 overflow-auto px-4 py-6">
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex flex-col gap-1">
-          <h1 className="text-lg font-medium">Datasets</h1>
-          <p className="text-xs text-muted-foreground">
-            Versioned sets of inputs and expected outputs for experiments.
-          </p>
-        </div>
-        <DisabledReason reason={canManage ? undefined : "Only members can create datasets"}>
-          <Button
-            type="button"
-            disabled={!canManage}
-            onClick={() => {
-              setCreating(true);
-            }}
-          >
-            New dataset
-          </Button>
-        </DisabledReason>
-      </div>
-      <Input
-        aria-label="Search datasets"
-        placeholder="Search by name"
-        value={text}
-        onChange={(event) => {
-          setText(event.target.value);
-        }}
-        className="max-w-xs"
-      />
-      {query.isPending ? (
-        <>
-          <Skeleton className="h-8 w-full" />
-          <Skeleton className="h-8 w-full" />
-          <Skeleton className="h-8 w-full" />
-        </>
-      ) : rows.length === 0 ? (
-        q === undefined ? (
-          <EmptyState
-            icon={Table2}
-            title="No datasets"
-            description="Create one, import a CSV or JSONL file, or add items from a trace."
-          />
-        ) : (
-          <EmptyState icon={Table2} title="No dataset matches" />
-        )
-      ) : (
-        <Table aria-label="Datasets">
-          <TableHeader>
-            <TableRow>
-              <TableHead>Name</TableHead>
-              <TableHead>Items</TableHead>
-              <TableHead>Version</TableHead>
-              <TableHead>Experiments</TableHead>
-              <TableHead>Updated</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {rows.map((dataset) => (
-              <TableRow key={dataset.id}>
-                <TableCell>
-                  <Link
-                    to="/$org/$project/datasets/$datasetId"
-                    params={{ org, project, datasetId: dataset.id }}
-                    className="rounded-sm underline-offset-4 outline-none hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 focus-visible:outline-solid"
+    <div className="relative h-full min-h-0 flex-1">
+      <div className="absolute inset-0">
+        <SplitPane
+          name="datasets"
+          mode={layout}
+          open={openId !== undefined}
+          filmstrip={
+            <Filmstrip
+              items={rows.map((row) => ({
+                id: row.id,
+                label: row.name,
+                detail: `${row.item_count} items`,
+                status: "ok" as const,
+              }))}
+              selectedId={openId}
+              onSelect={(id) => {
+                openDataset(id);
+              }}
+              onBack={closeDataset}
+            />
+          }
+          start={
+            <div className="flex h-full min-h-0 flex-col">
+              <div className="flex min-h-9 shrink-0 items-center gap-3 border-b px-3">
+                <Input
+                  aria-label="Search datasets"
+                  placeholder="Search by name"
+                  value={text}
+                  onChange={(event) => {
+                    setText(event.target.value);
+                  }}
+                  className="h-7 max-w-xs text-body"
+                />
+                <div className="ml-auto">
+                  <DisabledReason
+                    reason={canManage ? undefined : "Only members can create datasets"}
                   >
-                    {dataset.name}
-                  </Link>
-                </TableCell>
-                <TableCell>{dataset.item_count}</TableCell>
-                <TableCell>v{dataset.current_version}</TableCell>
-                <TableCell>{dataset.experiment_count}</TableCell>
-                <TableCell>
-                  <TimeText value={dataset.updated_at} style="datetime" />
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      )}
-      {query.hasNextPage ? (
-        <Button
-          type="button"
-          variant="outline"
-          className="w-fit"
-          disabled={query.isFetchingNextPage}
-          onClick={() => {
-            void query.fetchNextPage();
-          }}
-        >
-          {query.isFetchingNextPage ? <Loader2 className="animate-spin" /> : null}
-          Load more
-        </Button>
-      ) : null}
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={!canManage}
+                      onClick={() => {
+                        setCreating(true);
+                      }}
+                    >
+                      New dataset
+                    </Button>
+                  </DisabledReason>
+                </div>
+              </div>
+              {query.isPending ? (
+                <div className="flex flex-col gap-2 p-3">
+                  <Skeleton className="h-7 w-full" />
+                  <Skeleton className="h-7 w-full" />
+                  <Skeleton className="h-7 w-full" />
+                </div>
+              ) : (
+                <>
+                  <DatasetsSummary datasets={rows} more={query.hasNextPage} />
+                  {rows.length === 0 ? (
+                    q === undefined ? (
+                      <DatasetsListEmpty
+                        canCreate={canManage}
+                        onCreate={() => {
+                          setCreating(true);
+                        }}
+                      />
+                    ) : (
+                      <EmptyState icon={Table2} title="No dataset matches" />
+                    )
+                  ) : (
+                    <DatasetTrendsContext value={trends}>
+                      <DataTable
+                        tableId="datasets"
+                        ariaLabel="Datasets"
+                        columns={DATASET_COLUMNS}
+                        rows={rows}
+                        getRowId={(row) => row.id}
+                        selectedRowId={openId}
+                        onActivate={(row) => {
+                          openDataset(row.id);
+                        }}
+                        onSelectionMove={(row) => {
+                          openDataset(row.id, true);
+                        }}
+                        hasNextPage={query.hasNextPage}
+                        isFetchingNextPage={query.isFetchingNextPage}
+                        fetchNextPage={fetchNextPage}
+                        emptyState={null}
+                      />
+                    </DatasetTrendsContext>
+                  )}
+                </>
+              )}
+            </div>
+          }
+          end={
+            openId !== undefined ? (
+              <DatasetPanel
+                datasetId={openId}
+                row={rows.find((row) => row.id === openId)}
+                layout={<TraceLayoutControls />}
+                onClose={closeDataset}
+              />
+            ) : null
+          }
+        />
+      </div>
       <DatasetDialog
         open={creating}
         onOpenChange={setCreating}
@@ -180,6 +255,7 @@ function DatasetsPage() {
           void navigate({
             to: "/$org/$project/datasets/$datasetId",
             params: { org, project, datasetId: saved.id },
+            state: backState,
           });
         }}
       />

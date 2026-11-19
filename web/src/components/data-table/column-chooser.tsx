@@ -98,7 +98,7 @@ function ColumnRow({
 }) {
   return (
     <li className="flex items-center gap-1">
-      <label className="flex min-w-0 flex-1 items-center gap-2 text-xs">
+      <label className="flex min-w-0 flex-1 items-center gap-2 text-caption">
         <input
           type="checkbox"
           className="size-3.5 accent-primary"

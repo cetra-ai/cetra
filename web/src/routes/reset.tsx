@@ -103,7 +103,7 @@ function ForgotPassword({ smtpEnabled }: { smtpEnabled: boolean }) {
             <>
               Email is not configured on this server, so we can't send you a reset link. Ask an
               instance admin for a reset link (Admin → Users), or have them run{" "}
-              <code className="font-mono text-xs">
+              <code className="font-mono text-caption">
                 {"cetra admin reset-password --email <your email>"}
               </code>{" "}
               on the server.

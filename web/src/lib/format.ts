@@ -56,6 +56,11 @@ export function formatDuration(ns: number): string {
     return `${minutes}m ${String(rest).padStart(2, "0")}s`;
   }
   const totalMinutes = Math.round(seconds / 60);
+  if (totalMinutes >= 48 * 60) {
+    const days = Math.floor(totalMinutes / (24 * 60));
+    const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
+    return `${days}d ${hours}h`;
+  }
   const hours = Math.floor(totalMinutes / 60);
   const minutes = totalMinutes % 60;
   return `${hours}h ${String(minutes).padStart(2, "0")}m`;

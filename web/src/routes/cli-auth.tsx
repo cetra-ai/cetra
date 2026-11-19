@@ -98,14 +98,14 @@ function CliAuthPage() {
         </>
       }
     >
-      <p role="note" className="rounded-md border p-3 text-sm font-medium">
+      <p role="note" className="rounded-md border p-3 text-body font-medium">
         Only continue if you just ran <code>{`${PRODUCT_NAME} login`}</code> on this computer.
         Someone who sent you this link could otherwise get access to your account.
       </p>
-      <p className="text-sm">
+      <p className="text-body">
         Computer name reported by the CLI: <code>{request.host ?? "not reported"}</code>
       </p>
-      <p className="text-sm">
+      <p className="text-body">
         The CLI will get a personal access token named <strong>{cliTokenName(request)}</strong> with
         read and write access. It expires in 90 days. You can revoke it on your account page.
       </p>

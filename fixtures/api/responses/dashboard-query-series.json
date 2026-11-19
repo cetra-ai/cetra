@@ -1,0 +1,100 @@
+{
+  "shape": "series",
+  "bucket_ns": 600000000000,
+  "series": [
+    {
+      "measure": 0,
+      "group": "support-agent",
+      "other": false,
+      "points": [
+        {
+          "time": "2026-01-01T10:00:00.000000000Z",
+          "value": 2.0,
+          "rows": 2
+        }
+      ]
+    },
+    {
+      "measure": 1,
+      "group": "support-agent",
+      "other": false,
+      "points": [
+        {
+          "time": "2026-01-01T10:00:00.000000000Z",
+          "value": 0.0,
+          "rows": 2
+        }
+      ]
+    },
+    {
+      "measure": 0,
+      "group": "answer-question",
+      "other": false,
+      "points": [
+        {
+          "time": "2026-01-01T10:10:00.000000000Z",
+          "value": 1.0,
+          "rows": 1
+        }
+      ]
+    },
+    {
+      "measure": 1,
+      "group": "answer-question",
+      "other": false,
+      "points": [
+        {
+          "time": "2026-01-01T10:10:00.000000000Z",
+          "value": 1.0,
+          "rows": 1
+        }
+      ]
+    },
+    {
+      "measure": 0,
+      "group": "chat claude-sonnet-4-5",
+      "other": false,
+      "points": [
+        {
+          "time": "2026-01-01T10:30:00.000000000Z",
+          "value": 1.0,
+          "rows": 1
+        }
+      ]
+    },
+    {
+      "measure": 1,
+      "group": "chat claude-sonnet-4-5",
+      "other": false,
+      "points": [
+        {
+          "time": "2026-01-01T10:30:00.000000000Z",
+          "value": 0.0,
+          "rows": 1
+        }
+      ]
+    },
+    {
+      "measure": 0,
+      "other": true,
+      "points": [
+        {
+          "time": "2026-01-01T10:20:00.000000000Z",
+          "value": 1.0,
+          "rows": 1
+        }
+      ]
+    },
+    {
+      "measure": 1,
+      "other": true,
+      "points": [
+        {
+          "time": "2026-01-01T10:20:00.000000000Z",
+          "value": 0.0,
+          "rows": 1
+        }
+      ]
+    }
+  ]
+}

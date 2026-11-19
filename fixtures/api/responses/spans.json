@@ -83,7 +83,10 @@
       "environment": "staging",
       "release": "v1.4.0",
       "tags": [],
-      "metadata": {},
+      "metadata": {
+        "user.name": "\"Ada Example\"",
+        "user.plan": "\"pro\""
+      },
       "input_preview": "What does this shipping label say?",
       "output_preview": "It is addressed to warehouse 7."
     },

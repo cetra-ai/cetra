@@ -1,6 +1,7 @@
-import { expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   ancestorsOf,
+  autoNameWidth,
   defaultCollapsed,
   filterRows,
   hasChildren,
@@ -216,3 +217,33 @@ function stamp(index: number): string {
 function idOf(index: number): string {
   return `s${String(index).padStart(5, "0")}`;
 }
+
+describe("autoNameWidth", () => {
+  const row = (name: string, depth = 0, extra: object = {}) => ({
+    depth,
+    span: { name, status: "ok" },
+    ...extra,
+  });
+
+  it("never goes below 220px or above 360px", () => {
+    expect(autoNameWidth([row("a")], [0])).toBe(220);
+    expect(autoNameWidth([row("x".repeat(200))], [0])).toBe(360);
+    expect(autoNameWidth([], [])).toBe(220);
+  });
+
+  it("grows with the longest visible name and its depth", () => {
+    const spans = [row("short"), row("a_medium_length_name", 3)];
+    const both = autoNameWidth(spans, [0, 1]);
+    const first = autoNameWidth(spans, [0]);
+    expect(both).toBeGreaterThan(first);
+    expect(both).toBeGreaterThan(220);
+  });
+
+  it("only measures the visible rows and counts the error dot and detached badge", () => {
+    const hidden = row("x".repeat(60));
+    const plain = row("n".repeat(25));
+    expect(autoNameWidth([hidden, plain], [1])).toBe(autoNameWidth([plain], [0]));
+    const flagged = { depth: 0, detached: true, span: { name: "n".repeat(25), status: "error" } };
+    expect(autoNameWidth([flagged], [0])).toBeGreaterThan(autoNameWidth([plain], [0]));
+  });
+});

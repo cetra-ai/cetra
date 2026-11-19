@@ -2,11 +2,13 @@ import { useMatch, useNavigate, useParams } from "@tanstack/react-router";
 import { Home, Search } from "lucide-react";
 import { useEffect, useState } from "react";
 import { $api } from "@/api/client";
-import { projectListInit } from "@/api/queries";
+import { projectInit, projectListInit } from "@/api/queries";
 import { readRecent } from "@/components/command/recent-traces";
 import { ShortcutsHelp } from "@/components/command/shortcuts-help";
+import { visibleOrgNav, visibleProjectNav } from "@/components/settings/settings-home";
 import { projectNav } from "@/components/shell/nav";
 import { useTheme } from "@/components/theme-provider";
+import { DENSITY_OPTIONS, PALETTE_OPTIONS } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import {
   Command,
@@ -51,7 +53,14 @@ export function CommandPalette() {
   const navigate = useNavigate();
   const { org } = useParams({ from: "/$org" });
   const project = useMatch({ from: "/$org/$project", shouldThrow: false })?.params.project;
-  const { theme, setTheme } = useTheme();
+  const {
+    theme,
+    setTheme,
+    palette: colours,
+    setPalette: setColours,
+    density,
+    setDensity,
+  } = useTheme();
   const zone = useTimeZone();
   const projects = $api.useInfiniteQuery(
     "get",
@@ -64,6 +73,15 @@ export function CommandPalette() {
     },
   );
   const projectRows = projects.data?.pages[0]?.data ?? [];
+  const me = $api.useQuery("get", "/api/auth/me");
+  const orgRole = me.data?.orgs.find((candidate) => candidate.slug === org)?.role;
+  // Only read inside a project: the project route has already loaded it.
+  const projectRole = $api.useQuery(
+    "get",
+    "/api/v1/projects/{project}",
+    projectInit(org, project ?? ""),
+    { enabled: project !== undefined },
+  ).data?.role;
   const traceId = project ? hexId(query, 32) : undefined;
   const spanId = project && !traceId ? hexId(query, 16) : undefined;
   const recent = project ? readRecent(org, project) : [];
@@ -139,16 +157,16 @@ export function CommandPalette() {
       <Button
         type="button"
         variant="outline"
-        className="h-7 w-36 justify-between px-2 text-xs font-normal text-muted-foreground"
+        className="h-7 w-56 justify-between px-2 text-caption font-normal text-muted-foreground"
         aria-label="Command palette"
         aria-keyshortcuts="Meta+K Control+K"
         onClick={() => setPalette(true)}
       >
         <span className="inline-flex items-center gap-1.5">
           <Search />
-          Search
+          Search or jump to…
         </span>
-        <kbd className="font-mono text-[10px]">⌘K</kbd>
+        <kbd className="font-mono text-caption">⌘K</kbd>
       </Button>
       <CommandDialog
         open={palette}
@@ -275,6 +293,34 @@ export function CommandPalette() {
                 ))}
               </CommandGroup>
             ) : null}
+            <CommandGroup heading="Settings">
+              {visibleOrgNav(orgRole).map((item) => (
+                <CommandItem
+                  key={item.to}
+                  value={`Organization settings: ${item.label} ${item.keywords.join(" ")}`}
+                  onSelect={() => {
+                    closePalette();
+                    void navigate({ to: item.to, params: { org } });
+                  }}
+                >
+                  {`Organization settings: ${item.label}`}
+                </CommandItem>
+              ))}
+              {project
+                ? visibleProjectNav(projectRole).map((item) => (
+                    <CommandItem
+                      key={item.to}
+                      value={`Project settings: ${item.label} ${item.keywords.join(" ")}`}
+                      onSelect={() => {
+                        closePalette();
+                        void navigate({ to: item.to, params: { org, project } });
+                      }}
+                    >
+                      {`Project settings: ${item.label}`}
+                    </CommandItem>
+                  ))
+                : null}
+            </CommandGroup>
             <CommandGroup heading="Theme">
               {THEMES.map((option) => (
                 <CommandItem
@@ -287,6 +333,36 @@ export function CommandPalette() {
                   }}
                 >
                   {option.label}
+                </CommandItem>
+              ))}
+            </CommandGroup>
+            <CommandGroup heading="Palette">
+              {PALETTE_OPTIONS.map((option) => (
+                <CommandItem
+                  key={option.value}
+                  value={`${option.label} palette`}
+                  data-checked={colours === option.value}
+                  onSelect={() => {
+                    setColours(option.value);
+                    closePalette();
+                  }}
+                >
+                  {option.label}
+                </CommandItem>
+              ))}
+            </CommandGroup>
+            <CommandGroup heading="Density">
+              {DENSITY_OPTIONS.map((option) => (
+                <CommandItem
+                  key={option.value}
+                  value={`Density: ${option.label}`}
+                  data-checked={density === option.value}
+                  onSelect={() => {
+                    setDensity(option.value);
+                    closePalette();
+                  }}
+                >
+                  {`Density: ${option.label}`}
                 </CommandItem>
               ))}
             </CommandGroup>

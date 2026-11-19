@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
-import { useId } from "react";
 import { DisabledReason } from "@/components/disabled-reason";
+import { SettingsCard } from "@/components/settings/settings-card";
 import { Button } from "@/components/ui/button";
 
 /** A destructive action set apart at the foot of a settings page. */
@@ -26,34 +26,25 @@ export function DangerZone({
   /** The confirmation dialog. */
   children?: ReactNode;
 }) {
-  const headingId = useId();
   return (
-    <section
-      aria-labelledby={headingId}
-      className="flex max-w-md flex-col gap-3 rounded-md border border-destructive/50 p-4"
-    >
-      <h2 id={headingId} className="text-base font-medium">
-        Danger zone
-      </h2>
-      <div className="flex flex-col gap-3">
+    <SettingsCard tone="danger" title="Danger zone">
+      <div className="flex items-center justify-between gap-4">
         <div className="flex flex-col gap-1">
           <p className="font-medium">{title}</p>
-          <p className="text-sm text-muted-foreground">{description}</p>
+          <div className="text-body text-muted-foreground">{description}</div>
         </div>
-        <div>
-          <DisabledReason reason={disabledReason}>
-            <Button
-              type="button"
-              variant="destructive"
-              disabled={disabled === true || disabledReason !== undefined}
-              onClick={onOpen}
-            >
-              {buttonLabel}
-            </Button>
-          </DisabledReason>
-        </div>
+        <DisabledReason reason={disabledReason}>
+          <Button
+            type="button"
+            variant="destructive"
+            disabled={disabled === true || disabledReason !== undefined}
+            onClick={onOpen}
+          >
+            {buttonLabel}
+          </Button>
+        </DisabledReason>
       </div>
       {children}
-    </section>
+    </SettingsCard>
   );
 }

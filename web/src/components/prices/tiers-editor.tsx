@@ -3,6 +3,9 @@ import { TextField } from "@/components/form/text-field";
 import { Button } from "@/components/ui/button";
 import { MAX_TIERS, newTierForm, type TierForm } from "@/lib/prices";
 
+/** The unit of every price field: prices are USD per one million tokens. */
+export const PRICE_UNIT = "USD / 1M tokens";
+
 /** Each band field and the server's name for its error (`tiers[i].<name>`). */
 const PRICE_PARTS: {
   key: keyof Omit<TierForm, "id" | "minInputTokens">;
@@ -16,18 +19,29 @@ const PRICE_PARTS: {
   { key: "reasoning", label: "Reasoning", name: "price_reasoning" },
 ];
 
+/** The server's error name for a changed field of tier `index`. */
+function errorName(index: number, key: string): string {
+  const part = PRICE_PARTS.find((item) => item.key === key);
+  return `tiers[${index}].${part?.name ?? "min_input_tokens"}`;
+}
+
 export function TiersEditor({
   tiers,
   onChange,
+  onTouch,
   errors,
   disabled,
 }: {
   tiers: TierForm[];
   onChange: (tiers: TierForm[]) => void;
+  /** Called with the error names of the fields a user changed. */
+  onTouch?: (names: string[]) => void;
   errors: Record<string, string>;
   disabled?: boolean;
 }) {
   function update(id: number, change: Partial<TierForm>) {
+    const index = tiers.findIndex((tier) => tier.id === id);
+    onTouch?.(Object.keys(change).map((key) => errorName(index, key)));
     onChange(tiers.map((tier) => (tier.id === id ? { ...tier, ...change } : tier)));
   }
 
@@ -47,6 +61,8 @@ export function TiersEditor({
                   value={tier.minInputTokens}
                   error={errors[`tiers[${index}].min_input_tokens`]}
                   disabled={disabled}
+                  min={1}
+                  step={1}
                   onChange={(value) => {
                     update(tier.id, { minInputTokens: value });
                   }}
@@ -65,13 +81,15 @@ export function TiersEditor({
                 <X />
               </Button>
             </div>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+            <div className="grid grid-cols-2 gap-3">
               {PRICE_PARTS.map((part) => (
                 <TextField
                   key={part.key}
                   id={`tier-${tier.id}-${part.key}`}
                   type="number"
                   label={part.label}
+                  unit={PRICE_UNIT}
+                  min={0}
                   value={tier[part.key]}
                   error={errors[`tiers[${index}].${part.name}`]}
                   disabled={disabled}
@@ -82,7 +100,7 @@ export function TiersEditor({
               ))}
             </div>
             {rowError ? (
-              <p role="alert" className="text-xs text-destructive">
+              <p role="alert" className="text-caption text-destructive">
                 {rowError}
               </p>
             ) : null}
@@ -102,7 +120,7 @@ export function TiersEditor({
           Add tier
         </Button>
         {tiers.length >= MAX_TIERS ? (
-          <p className="text-xs text-muted-foreground">At most {MAX_TIERS} tiers.</p>
+          <p className="text-caption text-muted-foreground">At most {MAX_TIERS} tiers.</p>
         ) : null}
       </div>
     </div>
