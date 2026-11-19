@@ -1,0 +1,47 @@
+---
+interface Props {
+  title?: string;
+  href?: string;
+  tone?: "surface" | "outline";
+}
+const { title, href, tone = "surface" } = Astro.props;
+---
+<article class:list={["card", `card--${tone}`, href && "card--link"]}>
+  {title && (
+    <h3>{href ? <a href={href}>{title}</a> : title}</h3>
+  )}
+  <div class="body">
+    <slot />
+  </div>
+</article>
+<style>
+  .card {
+    padding: var(--space-6);
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--line);
+  }
+  .card--surface {
+    background: var(--surface);
+  }
+  .card--outline {
+    background: transparent;
+  }
+  .card--link {
+    position: relative;
+  }
+  .card--link:hover {
+    border-color: var(--line-strong);
+  }
+  h3 {
+    font-size: var(--text-lg);
+  }
+  h3 a::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+  }
+  .body {
+    color: var(--fg-muted);
+    margin-top: var(--space-2);
+  }
+</style>
