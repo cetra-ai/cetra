@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { CetraMark } from "@/components/brand/cetra-mark";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { PRODUCT_NAME } from "@/product";
 
@@ -18,7 +19,10 @@ export function AuthLayout({
   return (
     <div className="flex min-h-dvh flex-col">
       <header className="flex h-[40px] shrink-0 items-center justify-between px-3">
-        <span className="font-medium">{PRODUCT_NAME}</span>
+        <span className="inline-flex items-center gap-1.5 font-medium">
+          <CetraMark />
+          {PRODUCT_NAME}
+        </span>
         <ThemeToggle />
       </header>
       <main

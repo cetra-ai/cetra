@@ -1,4 +1,5 @@
 import { Link, useMatch, useRouterState } from "@tanstack/react-router";
+import { CetraMark } from "@/components/brand/cetra-mark";
 import { CommandPalette } from "@/components/command/palette";
 import { OrgSwitcher } from "@/components/org-switcher";
 import { isProjectSettingsPath } from "@/components/settings/settings-nav";
@@ -34,7 +35,7 @@ export function TopBar() {
           className="rounded-sm font-medium outline-none focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 focus-visible:outline-solid"
         >
           <span className="inline-flex items-center gap-1.5">
-            <img src="/favicon.svg" alt="" className="size-4" />
+            <CetraMark />
             {PRODUCT_NAME}
           </span>
         </Link>
