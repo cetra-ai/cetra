@@ -64,7 +64,7 @@ export const LLM = "span_kind = 'llm' AND model IS NOT NULL";
 export const ERROR = "status = 'error'";
 
 /** A number tile `w` columns wide at column `x` of the first row. */
-export function numberAt(id: string, title: string, x: number, w: number, query: WidgetQuery): Widget;
+export function numberAt(id: string, title: string, x: number, w: number, q: WidgetQuery): Widget;
 /** A chart half the width and `CHART_HEIGHT` rows tall, at column `x` and row `y`. */
 export function chartAt(
   id: string,
@@ -82,13 +82,13 @@ export function query(
 ): WidgetQuery;
 ```
 
-- `numberAt` returns `{ id, title, kind: "chart", chart: { type: "number" }, query, layout: { x, y: 0, w, h: NUMBER_HEIGHT } }`.
-- `chartAt` returns `{ id, title, kind: "chart", chart: settings, query, layout: { x, y, w: HALF, h: CHART_HEIGHT } }`.
+- `numberAt` returns `{ id, title, kind: "chart", chart: { type: "number" }, query: q, layout: { x, y: 0, w, h: NUMBER_HEIGHT } }`.
+- `chartAt` takes its query parameter as `q` too and returns `{ id, title, kind: "chart", chart: settings, query: q, layout: { x, y, w: HALF, h: CHART_HEIGHT } }`.
 - `query` is moved unchanged from `overview.ts` (omits `filter` and `breakdown` when not given).
 
 **Steps:**
 1. Create `preset.ts` as above.
-2. In `overview.ts`: delete its local `CHART_HEIGHT`, `HALF`, `LLM`, `ERROR`, `chart` and `query`, and import them from `./preset` (`chart` becomes `chartAt`). Keep `TILE = COLUMNS / 5` and turn its local `number(id, title, slot, q)` into calls of `numberAt(id, title, slot * TILE, TILE, q)` (delete the local `number`). Rewrite the "Top models by cost" literal as `chartAt("ov-19", "Top models by cost", 0, 39, { type: "table", share: true }, query(…same…))`. The resulting `OVERVIEW` must be equal to today's (a test checks it, step 4).
+2. In `overview.ts`: delete its local `CHART_HEIGHT`, `HALF`, `LLM`, `ERROR`, `chart` and `query`, and import them from `./preset` (`chart` becomes `chartAt`). Keep `TILE = COLUMNS / 5` and turn its local `number(id, title, slot, q)` into calls of `numberAt(id, title, slot * TILE, TILE, q)` (delete the local `number`). Rewrite the "Top models by cost" literal as `chartAt("ov-19", "Top models by cost", 0, 39, { type: "table", share: true }, query(…same…))`. The resulting `OVERVIEW` must be equal to today's (a test checks it). Afterwards `overview.ts` imports only `COLUMNS` (for `TILE`), the `Definition` type and what it uses from `./preset`; remove the type imports that become unused (`Chart`, `Measure`, `Widget`, `WidgetQuery`, `WidgetSource`) so Biome passes.
 3. Append, after `ov-19`:
    ```ts
    chartAt(
@@ -117,14 +117,15 @@ export function query(
 
 **Tests:**
 - `overview.test.ts`:
-  - the existing order test ends with `"Top users by cost", "Top trace names by cost"` (update `titles.at(-1)` and add the two before it as needed);
+  - the existing order test: replace `expect(titles.at(-1)).toBe("Top models by cost")` with `expect(titles.slice(-3)).toEqual(["Top models by cost", "Top users by cost", "Top trace names by cost"])`;
   - `the two cost bars are horizontal bars of the 10 largest, by user and by trace name` (chart type, breakdown field and limit, the user one filters `user_id IS NOT NULL`);
   - existing `validateDefinition(OVERVIEW)` and "no two widgets overlap" tests keep passing (they cover the new widgets).
-  - `the refactor keeps the earlier widgets`: snapshot-free check — the first 15 widgets' ids, titles and layouts equal this list: copy them from the current `OVERVIEW` before editing (write the expected `[id, title, x, y, w, h]` tuples literally in the test).
+  - `the refactor keeps the earlier widgets`: the first 15 widgets as `[id, title, x, y, w, h]` equal, literally:
+    `["ov-1","Traces",0,0,12,4]`, `["ov-2","Error rate",12,0,12,4]`, `["ov-3","p95 latency",24,0,12,4]`, `["ov-4","Cost",36,0,12,4]`, `["ov-5","Tokens",48,0,12,4]`, `["ov-7","Traces & errors",0,4,30,7]`, `["ov-8","Tokens by type",30,4,30,7]`, `["ov-10","Error rate",0,11,30,7]`, `["ov-11","Scores",30,11,30,7]`, `["ov-13","Latency",0,18,30,7]`, `["ov-14","LLM latency by model",30,18,30,7]`, `["ov-15","TTFT",0,25,30,7]`, `["ov-17","Cost by model",0,32,30,7]`, `["ov-18","Evaluation cost",30,32,30,7]`, `["ov-19","Top models by cost",0,39,30,7]`.
 - `user-overview.test.ts`: the titles list gains `"Top trace names by cost"` at the end (not "Top users by cost"); the layout list gains one entry `[30, 32, 30, 7]`.
 - `dashboard/index.test.tsx`: add both titles to `CHARTS`.
 
-**Done when:** `cd web && pnpm exec vitest run src/lib/dashboards src/routes/'$org'/'$project'/dashboard src/routes/'$org'/'$project'/users --maxWorkers=8` passes; `pnpm exec tsc -b --noEmit`; `node_modules/.bin/biome check web/src` (repo root); `just check-web`; `rm -rf web/.vitest`.
+**Done when:** `cd web && pnpm exec vitest run src/lib/dashboards src/routes/'$org'/'$project'/dashboard src/routes/'$org'/'$project'/users --maxWorkers=8` passes; `pnpm exec tsc -b --noEmit` (in `web/`); `node_modules/.bin/biome check web/src` (from the repo root); `just check-web`; `rm -rf web/.vitest`.
 
 **Commit:** `Add top users and trace names by cost to the Overview`
 
@@ -208,7 +209,7 @@ export const TEMPLATES: readonly DashboardTemplate[] = [
         chartAt("lat-6", "LLM latency by model", 0, 4 + CHART_HEIGHT, { type: "line" },
           query("spans", [{ agg: "p95", field: "duration_ns", label: "p95" }], { filter: LLM, breakdown: { field: "model", limit: 5, other: false } })),
         chartAt("lat-7", "TTFT by model", HALF, 4 + CHART_HEIGHT, { type: "line" },
-          query("spans", [{ agg: "p95", field: "ttft_ns", label: "p95" }], { filter: `${LLM_TTFT} AND model IS NOT NULL`, breakdown: { field: "model", limit: 5, other: false } })),
+          query("spans", [{ agg: "p95", field: "ttft_ns", label: "p95" }], { filter: `${LLM} AND ttft_ns IS NOT NULL`, breakdown: { field: "model", limit: 5, other: false } })),
       ],
     },
   },
@@ -241,7 +242,7 @@ export const TEMPLATES: readonly DashboardTemplate[] = [
 1. Write `templates.ts` as above.
 2. `NewForm` (`dashboard-dialogs.tsx`):
    - state `const [start, setStart] = useState<"blank" | TemplateId>("blank")`;
-   - after `DashboardFields`, a `fieldset` with `legend` "Start from" (class `text-caption text-muted-foreground`) and a `RadioGroup` (`@/components/ui/radio-group`) with `value={start}` and `onValueChange` setting it; one item per choice: `blank` ("Blank", "An empty dashboard.") then each of `TEMPLATES` (`template.name`, `template.description`). Each item is a `label` row: `RadioGroupItem` with `id` and `value`, then the name (`text-ui font-medium`) and the description (`text-caption text-muted-foreground`) stacked;
+   - after `DashboardFields`, follow the pattern of `create-token-dialog.tsx` (~127-143): a `span` with an `id` reading "Start from" (class `text-caption text-muted-foreground`), and a `RadioGroup` (`@/components/ui/radio-group`) with `aria-labelledby` that `id`, `value={start}` and `onValueChange` setting it. One item per choice: `blank` ("Blank", "An empty dashboard.") then each of `TEMPLATES` (`template.name`, `template.description`). Each item is a row: `RadioGroupItem` with `id`, `value` and `aria-label` set to the name; next to it a `label htmlFor` that id holding the name (`text-ui font-medium`) and the description (`text-caption text-muted-foreground`) stacked. The radio's accessible name is therefore exactly the name ("Cost");
    - on submit, `definition` is `start === "blank" ? { widgets: [] } : TEMPLATES.find((t) => t.id === start)?.definition ?? { widgets: [] }`;
    - the dialog description reads "Create a dashboard and open it.".
 3. `CHANGELOG.md` § Unreleased → Added: "Dashboard templates — Cost, Latency and Quality — in the New dashboard dialog; the Overview adds top users and top trace names by cost and drops its section headings (D-C-21)."
@@ -253,10 +254,10 @@ export const TEMPLATES: readonly DashboardTemplate[] = [
   - `the ids and names are Cost, Latency and Quality, in that order`;
   - `each number row fills the width` (number tiles' `w` sums to `COLUMNS` per template).
 - `dashboard-dialogs.test.tsx`:
-  - the existing `creates an empty dashboard and reports it` still sends `{ widgets: [] }` (Blank is the default);
-  - `creates a dashboard from a template`: pick the "Cost" radio, submit, the POST body's `definition` equals `TEMPLATES[0].definition`;
+  - the existing `creates an empty dashboard and reports it` gains: the dashboard passed to `onCreated` has `definition` equal to `{ widgets: [] }` (Blank is the default; the mock POST echoes the body);
+  - `creates a dashboard from a template`: click `getByRole("radio", { name: "Cost" })`, submit; `const cost = TEMPLATES.find((t) => t.id === "cost")`, assert it is defined, and the dashboard passed to `onCreated` has `definition` equal to `cost.definition`;
   - `lists Blank and the three templates under Start from`.
 
-**Done when:** `cd web && pnpm exec vitest run src/lib/dashboards src/components/dashboard --maxWorkers=8` passes; `tsc`; Biome; `just check-web`; `rm -rf web/.vitest`; by hand in the dev server: create a dashboard from each template on the large mock and see every widget draw.
+**Done when:** `cd web && pnpm exec vitest run src/lib/dashboards src/components/dashboard --maxWorkers=8` passes; `tsc`; Biome; `just check-web`; `rm -rf web/.vitest`; by hand in the dev server: create a dashboard from each template on the large mock and see every widget draw, except TTFT widgets and the per-call input/output cost (the mock has no TTFT and no input/output cost split).
 
 **Commit:** `Add Cost, Latency and Quality dashboard templates`
