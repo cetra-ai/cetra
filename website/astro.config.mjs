@@ -13,9 +13,18 @@ export default defineConfig({
   integrations: [
     starlight({
       title: "cetra",
+      logo: {
+        light: "./src/assets/brand/cetra-logo.svg",
+        dark: "./src/assets/brand/cetra-logo-on-dark.svg",
+        replacesTitle: true,
+      },
       description:
         "Open-source LLM observability and evaluation that runs as one binary on one machine.",
       favicon: "/favicon.svg",
+      head: [
+        { tag: "link", attrs: { rel: "icon", href: "/favicon.ico", sizes: "48x48" } },
+        { tag: "link", attrs: { rel: "apple-touch-icon", href: "/apple-touch-icon.png" } },
+      ],
       customCss: ["./src/styles/custom.css"],
       components: {
         // "On this page" as wide as the left sidebar (Starlight's grows with the window).
