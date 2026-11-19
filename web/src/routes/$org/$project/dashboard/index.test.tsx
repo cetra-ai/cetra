@@ -11,7 +11,6 @@ import overviewDocument from "../../../../../../fixtures/api/static/dashboard-ov
 
 const DASHBOARD = "/acme/support-bot/dashboard";
 
-const HEADINGS = ["Volume", "Quality", "Latency", "Cost"];
 const NUMBERS = ["Traces", "Error rate", "p95 latency", "Cost", "Tokens"];
 const CHARTS = [
   "Traces & errors",
@@ -24,6 +23,8 @@ const CHARTS = [
   "Cost by model",
   "Evaluation cost",
   "Top models by cost",
+  "Top users by cost",
+  "Top trace names by cost",
 ];
 
 /** Records the bodies of the widget queries the page sends. */
@@ -46,16 +47,15 @@ function listenQueries() {
   };
 }
 
-it("renders the four headings, the five numbers and every chart", async () => {
+it("renders the five numbers and every chart, with no section headings", async () => {
   const queries = listenQueries();
   try {
     await renderApp(DASHBOARD);
     expect(
       screen.getAllByRole("heading", { level: 1 }).map((heading) => heading.textContent),
     ).toEqual(["Dashboard"]);
-    for (const heading of HEADINGS) {
-      expect(await screen.findByRole("heading", { level: 2, name: heading })).toBeInTheDocument();
-    }
+    await screen.findByRole("region", { name: "Traces & errors" });
+    expect(screen.queryAllByRole("heading", { level: 2 })).toEqual([]);
     for (const title of NUMBERS) {
       expect(screen.getAllByRole("region", { name: title }).length).toBeGreaterThan(0);
     }
@@ -74,8 +74,7 @@ it("renders the four headings, the five numbers and every chart", async () => {
 
 it("has no sections to collapse", async () => {
   await renderApp(DASHBOARD);
-  await screen.findByRole("heading", { level: 2, name: "Volume" });
-  expect(screen.queryByRole("button", { name: "Volume" })).not.toBeInTheDocument();
+  await screen.findByRole("region", { name: "Traces & errors" });
   expect(localStorage.getItem("cetra.dashboard.collapsed.acme/support-bot")).toBeNull();
 });
 
@@ -83,7 +82,7 @@ it("refetches when the range changes", async () => {
   const queries = listenQueries();
   try {
     const { router } = await renderApp(DASHBOARD);
-    await screen.findByRole("heading", { level: 2, name: "Volume" });
+    await screen.findByRole("region", { name: "Traces & errors" });
     const before = queries.bodies.at(-1)?.from;
     fireEvent.click(screen.getByRole("button", { name: "Last 24 hours" }));
     fireEvent.click(await screen.findByRole("button", { name: "Last 1 hour" }));
@@ -104,7 +103,7 @@ it("sends group_by with the charts when grouping by model, but not with the numb
   const queries = listenQueries();
   try {
     const { router } = await renderApp(DASHBOARD);
-    await screen.findByRole("heading", { level: 2, name: "Volume" });
+    await screen.findByRole("region", { name: "Traces & errors" });
     fireEvent.change(screen.getByRole("combobox", { name: "Group by" }), {
       target: { value: "model" },
     });
@@ -200,7 +199,7 @@ it("shows the stored Overview, read from /dashboards/overview, when the project 
   try {
     await renderApp(DASHBOARD);
     expect(await screen.findByRole("heading", { level: 2, name: "Traffic" })).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { level: 2, name: "Volume" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Traces & errors" })).not.toBeInTheDocument();
     expect(
       requests.calls.some(
         (call) => call.method === "GET" && call.path.endsWith("/dashboards/overview"),

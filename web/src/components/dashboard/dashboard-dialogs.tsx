@@ -18,11 +18,32 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Textarea } from "@/components/ui/textarea";
+import { type DashboardTemplate, TEMPLATES, type TemplateId } from "@/lib/dashboards/templates";
 import type { Dashboard, Definition } from "@/lib/dashboards/types";
 import { validateDashboard } from "@/lib/dashboards/validate";
 
 const STALE_MESSAGE = "Someone else changed this dashboard. Reload it and try again.";
+
+/** The choices under "Start from": a blank dashboard, then the templates. */
+const STARTS: readonly { id: "blank" | TemplateId; name: string; description: string }[] = [
+  { id: "blank", name: "Blank", description: "An empty dashboard." },
+  ...TEMPLATES.map((template) => ({
+    id: template.id,
+    name: template.name,
+    description: template.description,
+  })),
+];
+
+/** The template with this id; every `TemplateId` has one. */
+function templateOf(id: TemplateId): DashboardTemplate {
+  const template = TEMPLATES.find((item) => item.id === id);
+  if (!template) {
+    throw new Error(`no dashboard template ${id}`);
+  }
+  return template;
+}
 
 /** The field and form messages of a failed save. Server paths map to `name` and `description`. */
 type Failure = { name?: string; description?: string; form?: string };
@@ -140,6 +161,7 @@ function NewForm({
   const create = useCreateDashboard(org, project);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [start, setStart] = useState<"blank" | TemplateId>("blank");
   const [submitted, setSubmitted] = useState(false);
   const failure = failureOf(create.error, false);
   const issues = clientIssues(name, description, submitted);
@@ -149,8 +171,10 @@ function NewForm({
     if (!issues.valid) {
       return;
     }
+    const definition: Definition =
+      start === "blank" ? { widgets: [] } : structuredClone(templateOf(start).definition);
     const dashboard = await create
-      .mutateAsync({ name, description, definition: { widgets: [] } })
+      .mutateAsync({ name, description, definition })
       .catch(() => undefined);
     if (dashboard) {
       onCreated(dashboard);
@@ -167,7 +191,7 @@ function NewForm({
     >
       <DialogHeader>
         <DialogTitle>New dashboard</DialogTitle>
-        <DialogDescription>Create an empty dashboard and open it.</DialogDescription>
+        <DialogDescription>Create a dashboard and open it.</DialogDescription>
       </DialogHeader>
       <DashboardFields
         name={name}
@@ -177,6 +201,37 @@ function NewForm({
         failure={failure}
         issues={issues}
       />
+      <div className="flex flex-col gap-2">
+        <span id="dashboard-start-label" className="text-caption text-muted-foreground">
+          Start from
+        </span>
+        <RadioGroup
+          aria-labelledby="dashboard-start-label"
+          value={start}
+          onValueChange={(value) => {
+            const choice = STARTS.find((item) => item.id === value);
+            if (choice) {
+              setStart(choice.id);
+            }
+          }}
+          disabled={create.isPending}
+        >
+          {STARTS.map((choice) => (
+            <div key={choice.id} className="flex items-start gap-2">
+              <RadioGroupItem
+                value={choice.id}
+                id={`dashboard-start-${choice.id}`}
+                aria-label={choice.name}
+                className="mt-1"
+              />
+              <Label htmlFor={`dashboard-start-${choice.id}`} className="flex flex-col gap-0.5">
+                <span className="text-ui font-medium">{choice.name}</span>
+                <span className="text-caption text-muted-foreground">{choice.description}</span>
+              </Label>
+            </div>
+          ))}
+        </RadioGroup>
+      </div>
       {failure.form ? <p className="text-caption text-destructive">{failure.form}</p> : null}
       <DialogFooter>
         <Button type="button" variant="outline" onClick={onCancel}>
