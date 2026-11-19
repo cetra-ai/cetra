@@ -94,6 +94,48 @@ pub fn encode_chunk(
     }
 }
 
+/// The candidate encodings of one chunk, fastest to decode first; the writer stores a later one
+/// only when its stored segment is at least 30% smaller. An integer chunk has two: `ForBitpack`, and `Plain`, whose values zstd can still
+/// compress (bit-packing hides repeated values from it). Every other chunk has the one
+/// [`encode_chunk`] gives.
+pub fn encode_chunk_candidates(
+    array: &ArrayRef,
+    dict: Option<&Dictionary>,
+    config: &Config,
+) -> Result<Vec<EncodedChunk>> {
+    let chunk = encode_chunk(array, dict, config)?;
+    if chunk.encoding != Encoding::ForBitpack {
+        return Ok(vec![chunk]);
+    }
+    let num = numeric_of(array.data_type()).ok_or_else(|| unsupported(array.data_type()))?;
+    let plain = plain_int(array.as_ref(), num, &chunk)?;
+    Ok(vec![chunk, plain])
+}
+
+/// The `Plain` encoding of the integer chunk that `bitpacked` encodes: the same validity,
+/// zone and flags, and each value at the type's width, little-endian (null slots are 0).
+fn plain_int(array: &dyn Array, num: Numeric, bitpacked: &EncodedChunk) -> Result<EncodedChunk> {
+    let data = array.to_data();
+    let values = value_bytes_of(&data, array.data_type(), array.len(), num.width)?;
+    let nulls = array.nulls();
+    let mut body = Vec::with_capacity(values.len() + array.len().div_ceil(8));
+    if bitpacked.flags & flags::HAS_NULLS != 0 {
+        body.extend(validity_bitmap(array));
+    }
+    for (i, row) in values.chunks_exact(num.width.max(1)).enumerate() {
+        if nulls.is_none_or(|nb| nb.is_valid(i)) {
+            body.extend_from_slice(row);
+        } else {
+            body.extend(std::iter::repeat_n(0, row.len()));
+        }
+    }
+    Ok(EncodedChunk {
+        encoding: Encoding::Plain,
+        body: Some(body),
+        ..*bitpacked
+    })
+}
+
 /// Copies the low `src.len()` bytes of `src` into the start of `dst`.
 fn set_prefix(dst: &mut [u8], src: &[u8]) {
     if let Some(part) = dst.get_mut(..src.len()) {
@@ -809,6 +851,61 @@ mod tests {
     use crate::narrow::BlockEntry;
     use arrow::array::{Float32Array, Float64Array, Int64Array, new_null_array};
     use std::sync::Arc;
+
+    #[test]
+    fn an_integer_chunk_has_bitpacked_and_plain_candidates_that_decode_alike() {
+        use arrow::array::Int32Array;
+        let arrays: [ArrayRef; 2] = [
+            Arc::new(Int64Array::from(
+                (0..2_000i64)
+                    .map(|i| (i % 7 != 3).then_some(i * 1_000_003 - 5))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Int32Array::from((0..2_000).map(|i| -i).collect::<Vec<_>>())),
+        ];
+        for array in arrays {
+            let candidates = encode_chunk_candidates(&array, None, &Config::default()).unwrap();
+            let encodings: Vec<Encoding> = candidates.iter().map(|c| c.encoding).collect();
+            assert_eq!(encodings, vec![Encoding::ForBitpack, Encoding::Plain]);
+            let (bitpacked, plain) = (&candidates[0], &candidates[1]);
+            assert_eq!(
+                (plain.flags, plain.min, plain.max),
+                (bitpacked.flags, bitpacked.min, bitpacked.max)
+            );
+            let field = arrow::datatypes::Field::new("v", array.data_type().clone(), true);
+            for chunk in &candidates {
+                let entry = BlockEntry {
+                    first_row: 0,
+                    n_rows: array.len() as u32,
+                    segment_offset: 0,
+                    segment_len: 1,
+                    encoding: chunk.encoding,
+                    flags: chunk.flags,
+                    const_len: chunk.const_len,
+                    min: chunk.min,
+                    max: chunk.max,
+                };
+                let decoded =
+                    crate::narrow::decode_chunk(&entry, chunk.body.as_deref(), &field, None)
+                        .unwrap();
+                assert_eq!(decoded.as_ref(), array.as_ref(), "{:?}", chunk.encoding);
+            }
+        }
+    }
+
+    #[test]
+    fn other_chunks_have_one_candidate() {
+        let floats: ArrayRef = Arc::new(Float64Array::from(vec![0.5, 1.5, 2.25]));
+        let constant: ArrayRef = Arc::new(Int64Array::from(vec![7; 10]));
+        for array in [floats, constant] {
+            let candidates = encode_chunk_candidates(&array, None, &Config::default()).unwrap();
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(
+                candidates[0],
+                encode_chunk(&array, None, &Config::default()).unwrap()
+            );
+        }
+    }
 
     #[test]
     fn a_constant_chunk_has_no_body() {

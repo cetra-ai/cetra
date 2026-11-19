@@ -534,7 +534,7 @@ fn column_sizes_parquet(dir: &Path, variant: &str) -> R<Vec<(String, u64)>> {
     v.sort_by_key(|(_, (c, _))| -c);
     if variant == "pq_tuned" {
         println!("parquet column sizes (compressed / uncompressed KiB):");
-        for (n, (c, u)) in v.iter().take(20) {
+        for (n, (c, u)) in v.iter() {
             println!("  {n:24} {:>10} {:>10}  x{:.1}", c >> 10, u >> 10, *u as f64 / (*c).max(1) as f64);
         }
     }
@@ -942,7 +942,8 @@ async fn query(dir: &str, runs: usize, only: Option<String>) -> R<()> {
     let t0 = datagen::DAY_START;
     let h = 3_600 * datagen::NS;
     let ts = |ns: i64| format!("to_timestamp_nanos({ns})");
-    let list_cols = LIST_COLS.join(", ");
+    // FMT_LIST_COLS=a,b: the list query's columns, to see what each one costs.
+    let list_cols = std::env::var("FMT_LIST_COLS").map_or_else(|_| LIST_COLS.join(", "), |v| v.replace(',', ", "));
     let queries = vec![
         Query { name: "count_errors_6h", kind: Kind::Sql, sql: format!(
             "SELECT count(*) FROM t WHERE status = 'error' AND start_time >= {} AND start_time < {}", ts(t0 + 10 * h), ts(t0 + 16 * h)) },
@@ -1299,7 +1300,40 @@ fn restrata_cmd(dir: &Path, out: &str) -> R<()> {
     println!("payload-layer columns (KiB total, of which shared frames): {}; all {} KiB",
         payload_columns.iter().map(|(n, b, f)| format!("{n} {} ({})", b >> 10, f >> 10)).collect::<Vec<_>>().join(", "), total >> 10);
     payload_table(dir, &summaries)?;
+    narrow_table(&summaries);
     Ok(())
+}
+
+/// The narrow columns of the Strata files: bytes, key-filter bytes, chunks and chunks per
+/// encoding, summed over the files, largest first.
+fn narrow_table(summaries: &[strata::FileSummary]) {
+    const ENCODINGS: [&str; 12] = ["const", "null", "for", "plain", "fsb", "fsb_rle", "dict", "varbin", "list_dict", "bool", "ipc", "map"];
+    let mut columns: Vec<(String, u64, u64, u32, [u32; 12])> = Vec::new();
+    for s in summaries {
+        for c in s.columns.iter().filter(|c| c.payload.is_none()) {
+            let i = match columns.iter().position(|e| e.0 == c.name) {
+                Some(i) => i,
+                None => {
+                    columns.push((c.name.clone(), 0, 0, 0, [0; 12]));
+                    columns.len() - 1
+                }
+            };
+            let e = &mut columns[i];
+            e.1 += c.bytes;
+            e.2 += c.filter_bytes;
+            e.3 += c.chunks;
+            for (k, n) in c.encoding_counts.iter().enumerate() {
+                e.4[k] += n;
+            }
+        }
+    }
+    columns.sort_by(|a, b| b.1.cmp(&a.1));
+    let total: u64 = columns.iter().map(|c| c.1 + c.2).sum();
+    println!("strata narrow columns (KiB; all {} KiB): bytes, key filter, chunks, encodings", total >> 10);
+    for (name, bytes, filter, chunks, enc) in &columns {
+        let encs: Vec<String> = enc.iter().enumerate().filter(|(_, n)| **n > 0).map(|(k, n)| format!("{} {n}", ENCODINGS[k])).collect();
+        println!("  {name:28} {:>8} {:>6} {:>6}  {}", bytes >> 10, filter >> 10, chunks, encs.join(", "));
+    }
 }
 
 // ------------------------------------------------------------------ zexp

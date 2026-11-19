@@ -13,6 +13,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use arrow::array::{RecordBatch, RecordBatchOptions};
+use arrow::compute::{SortColumn, concat_batches, lexsort_to_indices, take_record_batch};
 use arrow::compute::{SortOptions, cast};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use async_trait::async_trait;
@@ -38,7 +39,8 @@ use ::datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilde
 use ::datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use ::datafusion::physical_plan::{
     ChildrenPropertiesMode, DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning,
-    PlanProperties, ReplaceChildrenOptions, SendableRecordBatchStream, StatisticsArgs,
+    PlanProperties, ReplaceChildrenOptions, SendableRecordBatchStream, SortOrderPushdownResult,
+    StatisticsArgs,
 };
 
 use crate::config::Config;
@@ -47,7 +49,7 @@ use crate::file::StrataFile;
 use crate::hot::Layer;
 use crate::io::ScanKind;
 use crate::predicate::{self, CmpOp, Lit, Predicate, layout_of};
-use crate::scan::ScanRequest;
+use crate::scan::{ScanRequest, TopRows};
 
 /// A DataFusion table over Strata files that share one schema.
 #[derive(Debug)]
@@ -701,9 +703,101 @@ pub struct StrataExec {
     predicate: Option<Predicate>,
     lookup: Option<Vec<u8>>,
     limit: Option<usize>,
+    /// The order each partition outputs its rows in, when DataFusion pushed a sort down
+    /// (`try_pushdown_sort`). Every key is a projected column.
+    order: Option<Vec<PhysicalSortExpr>>,
+    /// The rows each partition keeps of `order`, from the sort's limit (`with_fetch`).
+    fetch: Option<usize>,
     schema: SchemaRef,
     props: Arc<PlanProperties>,
     metrics: ExecutionPlanMetricsSet,
+}
+
+/// The output position and options of each key of `order`, when every key is a column of the
+/// output (`width` columns) and `order` is not empty.
+fn sort_keys(order: &[PhysicalSortExpr], width: usize) -> Option<Vec<(usize, SortOptions)>> {
+    if order.is_empty() {
+        return None;
+    }
+    order
+        .iter()
+        .map(|key| {
+            let column = key.expr.downcast_ref::<PhysicalColumn>()?;
+            (column.index() < width).then_some((column.index(), key.options))
+        })
+        .collect()
+}
+
+/// The plan properties of a scan with `partitions` partitions. Its rows are in `order` when it
+/// is given; else in sort-key order when the key is projected, since each partition reads one
+/// contiguous row range of one file, which is sorted by the key.
+fn plan_properties(
+    files: &[Arc<StrataFile>],
+    projection: &[usize],
+    schema: &SchemaRef,
+    partitions: usize,
+    order: Option<&[PhysicalSortExpr]>,
+) -> PlanProperties {
+    let mut eq = EquivalenceProperties::new(Arc::clone(schema));
+    match order {
+        Some(order) => {
+            eq.add_ordering(order.iter().cloned());
+        }
+        None => {
+            let sort_key = files.first().and_then(|file| file.sort_key_column());
+            if let Some(key) = sort_key
+                && let Some(position) = projection.iter().position(|&c| c == key)
+                && let Some(field) = schema.fields().get(position)
+            {
+                eq.add_ordering([PhysicalSortExpr::new(
+                    Arc::new(PhysicalColumn::new(field.name(), position)),
+                    SortOptions {
+                        descending: false,
+                        nulls_first: false,
+                    },
+                )]);
+            }
+        }
+    }
+    // Prototype shortcut: the batch stream does not consume DataFusion's cooperative
+    // budget. `Cooperative` avoids the `CooperativeExec` wrapper.
+    PlanProperties::new(
+        eq,
+        Partitioning::UnknownPartitioning(partitions),
+        EmissionType::Incremental,
+        Boundedness::Bounded,
+    )
+    .with_scheduling_type(SchedulingType::Cooperative)
+}
+
+/// Sorts the rows of `batches` (all of `schema`) by `keys` and keeps the first `fetch`.
+fn sort_rows(
+    batches: Vec<RecordBatch>,
+    schema: &SchemaRef,
+    keys: &[(usize, SortOptions)],
+    fetch: Option<usize>,
+) -> Result<Option<RecordBatch>> {
+    if batches.iter().all(|batch| batch.num_rows() == 0) {
+        return Ok(None);
+    }
+    let all = concat_batches(schema, &batches)?;
+    let columns = keys
+        .iter()
+        .map(|&(position, options)| {
+            let values = all
+                .columns()
+                .get(position)
+                .ok_or_else(|| StrataError::Schema {
+                    reason: format!("internal: no sort column {position}"),
+                })?;
+            Ok(SortColumn {
+                values: Arc::clone(values),
+                options: Some(options),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let indices = lexsort_to_indices(&columns, fetch)?;
+    Ok(Some(take_record_batch(&all, &indices)?))
 }
 
 impl StrataExec {
@@ -727,32 +821,7 @@ impl StrataExec {
                 target_partitions
             },
         );
-        // Ordering: the sort key, when its column is projected. Each partition reads one
-        // contiguous row range of one file, which is sorted by the key.
-        let sort_key = files.first().and_then(|file| file.sort_key_column());
-        let mut eq = EquivalenceProperties::new(Arc::clone(&schema));
-        if let Some(key) = sort_key
-            && let Some(position) = projection.iter().position(|&c| c == key)
-            && let Some(field) = schema.fields().get(position)
-        {
-            eq.add_ordering([PhysicalSortExpr::new(
-                Arc::new(PhysicalColumn::new(field.name(), position)),
-                SortOptions {
-                    descending: false,
-                    nulls_first: false,
-                },
-            )]);
-        }
-        let partitions = parts.len().max(1);
-        // Prototype shortcut: the batch stream does not consume DataFusion's cooperative
-        // budget. `Cooperative` avoids the `CooperativeExec` wrapper.
-        let props = PlanProperties::new(
-            eq,
-            Partitioning::UnknownPartitioning(partitions),
-            EmissionType::Incremental,
-            Boundedness::Bounded,
-        )
-        .with_scheduling_type(SchedulingType::Cooperative);
+        let props = plan_properties(&files, &projection, &schema, parts.len().max(1), None);
         StrataExec {
             files,
             parts,
@@ -760,7 +829,33 @@ impl StrataExec {
             predicate,
             lookup,
             limit,
+            order: None,
+            fetch: None,
             schema,
+            props: Arc::new(props),
+            metrics: ExecutionPlanMetricsSet::new(),
+        }
+    }
+
+    /// This scan with each partition's rows sorted by `order`, keeping the first `fetch`.
+    fn ordered(&self, order: Vec<PhysicalSortExpr>, fetch: Option<usize>) -> StrataExec {
+        let props = plan_properties(
+            &self.files,
+            &self.projection,
+            &self.schema,
+            self.partitions(),
+            Some(&order),
+        );
+        StrataExec {
+            files: self.files.clone(),
+            parts: self.parts.clone(),
+            projection: self.projection.clone(),
+            predicate: self.predicate.clone(),
+            lookup: self.lookup.clone(),
+            limit: self.limit,
+            order: Some(order),
+            fetch,
+            schema: Arc::clone(&self.schema),
             props: Arc::new(props),
             metrics: ExecutionPlanMetricsSet::new(),
         }
@@ -784,7 +879,12 @@ impl DisplayAs for StrataExec {
             self.files.len(),
             self.partitions(),
             self.lookup.is_some()
-        )
+        )?;
+        if let Some(order) = &self.order {
+            let keys: Vec<String> = order.iter().map(ToString::to_string).collect();
+            write!(f, ", order=[{}], fetch={:?}", keys.join(", "), self.fetch)?;
+        }
+        Ok(())
     }
 }
 
@@ -821,8 +921,9 @@ impl ExecutionPlan for StrataExec {
         };
         let mut rows = usize::try_from(rows).unwrap_or(usize::MAX);
         // How a limit splits across partitions is not modelled: it only caps the estimate.
-        let filtered = self.predicate.is_some() || self.lookup.is_some() || self.limit.is_some();
-        if let Some(limit) = self.limit {
+        let cap = self.limit.or(self.fetch);
+        let filtered = self.predicate.is_some() || self.lookup.is_some() || cap.is_some();
+        if let Some(limit) = cap {
             rows = rows.min(limit);
         }
         let rows = if filtered {
@@ -833,6 +934,55 @@ impl ExecutionPlan for StrataExec {
         Ok(Arc::new(
             Statistics::new_unknown(&self.schema).with_num_rows(rows),
         ))
+    }
+
+    /// A sort whose first key is a narrow column of every file, and whose other keys are
+    /// projected columns, is done here exactly: each partition outputs its rows in that order,
+    /// so DataFusion drops its `SortExec` and passes the sort's limit to `with_fetch`. With a
+    /// limit, a partition keeps only the rows that can rank in it ([`TopRows`]) before it reads
+    /// the rest of the projection. Not for a lookup, a scan with a limit of its own, or a
+    /// nested first key.
+    fn try_pushdown_sort(
+        &self,
+        order: &[PhysicalSortExpr],
+    ) -> DfResult<SortOrderPushdownResult<Arc<dyn ExecutionPlan>>> {
+        if self.lookup.is_some() || self.limit.is_some() || self.order.is_some() {
+            return Ok(SortOrderPushdownResult::Unsupported);
+        }
+        let Some(keys) = sort_keys(order, self.projection.len()) else {
+            return Ok(SortOrderPushdownResult::Unsupported);
+        };
+        let first = keys.first().and_then(|&(position, _)| {
+            Some((
+                *self.projection.get(position)?,
+                self.schema.fields().get(position)?,
+            ))
+        });
+        let Some((column, field)) = first else {
+            return Ok(SortOrderPushdownResult::Unsupported);
+        };
+        let narrow = self.files.iter().all(|file| {
+            file.directory()
+                .get(column)
+                .is_some_and(|record| record.layer == Layer::Narrow)
+        });
+        if !narrow || field.data_type().is_nested() {
+            return Ok(SortOrderPushdownResult::Unsupported);
+        }
+        Ok(SortOrderPushdownResult::Exact {
+            inner: Arc::new(self.ordered(order.to_vec(), None)),
+        })
+    }
+
+    /// Keeps the first `limit` rows of each partition's order; only a scan with a pushed sort
+    /// takes a limit this way.
+    fn with_fetch(&self, limit: Option<usize>) -> Option<Arc<dyn ExecutionPlan>> {
+        let order = self.order.clone()?;
+        Some(Arc::new(self.ordered(order, limit)))
+    }
+
+    fn fetch(&self) -> Option<usize> {
+        self.fetch
     }
 
     fn apply_expressions(
@@ -889,6 +1039,24 @@ impl ExecutionPlan for StrataExec {
         let predicate = self.predicate.clone();
         let lookup = self.lookup.clone();
         let limit = self.limit;
+        let keys = match &self.order {
+            Some(order) => Some(sort_keys(order, self.projection.len()).ok_or_else(|| {
+                DataFusionError::Internal("StrataExec sort keys are not columns".to_string())
+            })?),
+            None => None,
+        };
+        let fetch = self.fetch;
+        // The first sort key bounds the rows a partition keeps: those that can rank in `fetch`.
+        let top = match (&keys, fetch) {
+            (Some(keys), Some(k)) => keys.first().and_then(|&(position, options)| {
+                Some(TopRows {
+                    column: *self.projection.get(position)?,
+                    options,
+                    k,
+                })
+            }),
+            _ => None,
+        };
         let schema = Arc::clone(&self.schema);
         // Partitions run at once: each builds its batches on its share of the cores.
         let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
@@ -907,21 +1075,33 @@ impl ExecutionPlan for StrataExec {
                         .into_iter()
                         .map(Ok),
                 ),
-                None => Box::new(
-                    file.scan_batches(
-                        &ScanRequest {
-                            projection,
-                            predicate,
-                            row_ranges,
-                            limit,
-                            kind: ScanKind::Scan,
-                            views: true,
-                        },
-                        threads,
-                    )
-                    .await
-                    .map_err(df)?,
-                ),
+                None => {
+                    let scanned = file
+                        .scan_batches(
+                            &ScanRequest {
+                                projection,
+                                predicate,
+                                row_ranges,
+                                limit,
+                                kind: ScanKind::Scan,
+                                views: true,
+                                top,
+                            },
+                            threads,
+                        )
+                        .await
+                        .map_err(df)?;
+                    match &keys {
+                        // The partition's rows, sorted: at most `fetch` of them with a limit.
+                        Some(keys) => {
+                            let scan_schema = scanned.schema();
+                            let rows = scanned.collect::<Result<Vec<_>>>().map_err(df)?;
+                            let sorted = sort_rows(rows, &scan_schema, keys, fetch).map_err(df)?;
+                            Box::new(sorted.into_iter().map(Ok))
+                        }
+                        None => Box::new(scanned),
+                    }
+                }
             };
             let after = file.io_stats();
             bytes.add(
@@ -1367,6 +1547,89 @@ mod tests {
             8,
         );
         assert!(without_key.properties().output_ordering().is_none());
+    }
+
+    /// The rows of `sql`, the segment bytes it fetched, and its physical plan, with DataFusion's sort
+    /// pushdown on or off. `files` back `table`.
+    async fn run_sorted(
+        table: StrataTable,
+        sql: &str,
+        pushdown: bool,
+    ) -> (RecordBatch, u64, String) {
+        use ::datafusion::physical_plan::displayable;
+        use ::datafusion::prelude::{SessionConfig, SessionContext};
+        let files = table.files.clone();
+        let mut config = SessionConfig::new().with_target_partitions(4);
+        config.options_mut().optimizer.enable_sort_pushdown = pushdown;
+        let ctx = SessionContext::new_with_config(config);
+        ctx.register_table("t", Arc::new(table)).unwrap();
+        let frame = ctx.sql(sql).await.unwrap();
+        let plan = frame.clone().create_physical_plan().await.unwrap();
+        let shown = displayable(plan.as_ref()).indent(true).to_string();
+        files.iter().for_each(|f| f.reset_io_stats());
+        let schema = Arc::new(frame.schema().as_arrow().clone());
+        let batches = frame.collect().await.unwrap();
+        let rows = concat_batches(&schema, &batches).unwrap();
+        // Segment bytes, without the gaps merged into requests: the test file is smaller than
+        // the scan's largest merged gap.
+        let bytes = files
+            .iter()
+            .map(|f| f.io_stats().by_kind.iter().sum::<u64>())
+            .sum();
+        (rows, bytes, shown)
+    }
+
+    /// A sort with a limit is pushed into the scan: no `SortExec` is left, the rows are those
+    /// DataFusion's own sort returns (ties, nulls, both directions, two partitions, and no
+    /// limit), and the scan reads less when the top rows sit in a few chunks.
+    #[tokio::test]
+    async fn a_pushed_sort_returns_the_rows_of_datafusions_sort() {
+        // 140,000 rows: two partitions of at least `MIN_PARTITION_ROWS`.
+        let file = open(&wide_batch(140_000), Config::default()).await;
+        let table = || StrataTable::new(vec![Arc::clone(&file)]).unwrap();
+        for sql in [
+            "SELECT trace_id, start_time, status, uid FROM t WHERE span_kind = 'llm' \
+             ORDER BY start_time DESC, trace_id DESC LIMIT 50",
+            "SELECT input_tokens, uid FROM t ORDER BY input_tokens DESC NULLS FIRST, uid LIMIT 30",
+            "SELECT input_tokens, uid FROM t WHERE status = 'ok' \
+             ORDER BY input_tokens, uid LIMIT 7000",
+            "SELECT start_time, uid FROM t WHERE input_tokens < 100 ORDER BY start_time DESC",
+        ] {
+            let (pushed, pushed_bytes, plan) = run_sorted(table(), sql, true).await;
+            let (sorted, sorted_bytes, plain) = run_sorted(table(), sql, false).await;
+            assert!(plan.contains("order=["), "{sql}\n{plan}");
+            assert!(!plan.contains("SortExec"), "{sql}\n{plan}");
+            assert!(plain.contains("SortExec"), "{sql}\n{plain}");
+            assert!(sorted.num_rows() > 0, "{sql}");
+            assert_eq!(pushed, sorted, "{sql}");
+            if sql.contains("ORDER BY start_time DESC, trace_id DESC LIMIT") {
+                // The filter and sort columns are read whole either way; the others only in
+                // the chunks of the top rows.
+                assert!(
+                    pushed_bytes < sorted_bytes,
+                    "{pushed_bytes} of {sorted_bytes} bytes\n{plan}\n{plain}"
+                );
+            }
+        }
+    }
+
+    /// A sort by a payload column or by an expression stays in DataFusion.
+    #[tokio::test]
+    async fn a_sort_strata_cannot_bound_is_not_pushed() {
+        for (table, sql) in [
+            (
+                payload_table().await,
+                "SELECT trace_id, body FROM t ORDER BY body LIMIT 5",
+            ),
+            (
+                main_table().await,
+                "SELECT uid FROM t ORDER BY length(uid), uid LIMIT 5",
+            ),
+        ] {
+            let (_, _, plan) = run_sorted(table, sql, true).await;
+            assert!(plan.contains("SortExec"), "{sql}\n{plan}");
+            assert!(!plan.contains("order=["), "{sql}\n{plan}");
+        }
     }
 
     #[test]

@@ -26,8 +26,8 @@ The bench had one real dataset: `swe`, from 2 shards of `nebius/SWE-agent-trajec
 | Dataset | **Strata** | pq_default | pq_tuned | pq_cetra | vx_default | vx_compact |
 |---|---|---|---|---|---|---|
 | openswe | **29** | 47 | 149 | 48 | 702 | 158 |
-| toucan | **196** | 246 | 295 | 247 | 770 | 233 |
-| wildchat | 592 | 592 | 655 | 596 | 1,429 | **584** |
+| toucan | **195** | 246 | 295 | 247 | 770 | 233 |
+| wildchat | 590 | 592 | 655 | 596 | 1,429 | **584** |
 | swe (existing) | **25** | 36 | 65 | 36 | 560 | 31 |
 
 - **Agent data:**
@@ -56,7 +56,7 @@ The bench had one real dataset: `swe`, from 2 shards of `nebius/SWE-agent-trajec
 | substring_input | **12.13** | 266.86 | 172.29 | **48.17** | 168.63 | 98.73 | **66.42** | 312.04 | 204.27 |
 | scan_all_payload | **234.07** | 286.10 | 313.07 | 274.41 | 281.04 | **205.34** | 544.11 | 538.04 | **404.95** |
 
-- The Strata columns are measured after the UTF-8 changes below; `substring_input` and `scan_all_payload` after the one-pass check, `list_llm_1h` after the scan threads change (§ Narrow queries on one thread). Parquet and Vortex come from the first run.
+- The Strata columns are measured after the UTF-8 changes below; `substring_input` and `scan_all_payload` after the one-pass check, `list_llm_1h` after the scan threads change (§ Narrow queries on one thread). § Top rows in the scan later halved `list_llm_1h` (median of 20 runs: openswe 3.2 ms, toucan 7.2 ms, wildchat 9.6 ms). Parquet and Vortex come from the first run.
 - "pq best" is the fastest of pq_default, pq_tuned and pq_cetra for each query.
 - Vortex cannot run `metadata_filter` (it can't push down `map['key']`).
 
@@ -85,7 +85,7 @@ Cold trace lookup (mean per trace over 20 ids):
 - **Chat traffic was Strata's weak case.** The first run had `scan_all_payload` at 1.4× Parquet's time on wildchat, and `list_llm_1h` at 1.45×. The cause was UTF-8 checking, fixed below. What remains:
   - files are only as small as the others';
   - the full scan takes about Parquet's time, and 1.34× Vortex compact's;
-  - Vortex compact still wins `list_llm_1h` and `model_rollup_day` on toucan and wildchat, though by less on `list_llm_1h` since the scan threads change below. This matches `light`, where its narrow-column decode is also cheaper.
+  - Vortex compact still wins `model_rollup_day` on toucan and wildchat. This matches `light`, where its narrow-column decode is also cheaper. It won `list_llm_1h` too until Strata learned to keep only the top rows (§ Top rows in the scan).
 
 ## UTF-8 checking
 
@@ -167,7 +167,51 @@ The change above still read most bytes twice: an ASCII value was checked by `is_
 
 - A 512 KiB threshold gave the same gains but made swe's `list_llm_1h` 27% slower: starting threads for about a millisecond of work cost more than it saved.
 - The other queries stayed within noise (one 20-run round of the whole suite at 512 KiB, then three rounds of the filter queries at 1 MiB). `payload`'s `list_llm_1h` uses the threads without gaining from them; not investigated.
-- What is left against Vortex: Strata reads 5.7 MB for toucan's `list_llm_1h` against Vortex's 3.6 MB, and zstd is still the largest cost.
+- What is left against Vortex: Strata reads 5.7 MB for toucan's `list_llm_1h` against Vortex's 3.6 MB, and zstd is still the largest cost. Both are answered below.
+
+## Plain integer chunks
+
+On `light`, Strata's narrow columns were 17% larger than Parquet's. Comparing them column by column showed where:
+- `cost_*` floats: 16.7 MB against Parquet's 6.1 MB (Parquet uses a dictionary);
+- previews: +4.3 MB (also a dictionary in Parquet);
+- `ingest_time`: 6.2 MB against 3.9 MB; token counts: +3.1 MB.
+
+An experiment on one file (re-encoding each column's chunks in Python) found that a whole-file dictionary is the best fit for the costs. For `ingest_time` and the token counts, plain values under zstd beat bit-packing: bit-packing hides repeated values from zstd, and `ingest_time` repeats in runs (one per ingested batch).
+
+**The change.** The writer now encodes an integer chunk twice, bit-packed (`ForBitpack`) and `Plain`, compresses both by the narrow rule, and stores the plain one only if it saves at least 30% over the bit-packed one. That is the same bar zstd already has to clear on a narrow chunk, since every scan decompresses it.
+- A first version kept whichever was smaller. It saved a little more (light 172 MiB) but made narrow queries up to 19% slower: most switched chunks were barely smaller and now paid for zstd decompression instead of a cheap bit-unpack. Examples: `count_errors_6h` on `light` +19%, `model_rollup_day` on `payload` +15%, `list_llm_1h` on openswe +13.5%.
+- With the 30% bar, only chunks that really gain switch. On `light`, every `ingest_time` chunk is plain (6,193 → 2,097 KiB), and every other integer column stays bit-packed.
+
+**Results.** `light` 177 → 173 MiB (narrow columns 181.7 → 177.6 MB), toucan 197 → 195, wildchat 592 → 590, swe 26 → 25; payload and openswe unchanged. The queries stayed within noise on the six datasets (two 20-run rounds, old and new files alternating). Still open on `light`: a dictionary for the float costs (about −10 MB, a format change) and for the previews.
+
+## Top rows in the scan
+
+Why did `list_llm_1h` read more than Vortex? Running the query with one column at a time on toucan (`FMT_LIST_COLS`) gave each column's cost. With the filter and sort columns that every variant reads (`span_kind`, `start_time`, `trace_id`, `span_id`), Strata read 820 KiB against Vortex's 542. `input_preview` added 3,256 KiB against 2,194. The other columns added little.
+- The query keeps 50 rows of an hour window. Strata evaluated the filter, then decoded every chunk of every projected column that held a selected row. The files are sorted by trace id, so the window's rows were in every chunk.
+- Most of the extra bytes are not decoded data. A wave makes a few large requests (4 on toucan), and ranges up to 1 MiB apart are merged, so the narrow region is fetched almost whole either way.
+
+**The change.** DataFusion 55 can push a sort into a scan (`ExecutionPlan::try_pushdown_sort`), which sets the sort's limit with `with_fetch`. `StrataExec` accepts a sort whose first key is a narrow column of every file and whose other keys are projected columns. Each partition then:
+- runs the filter wave as before;
+- decodes the first sort key for the selected rows (already decoded when it is a filter column);
+- keeps the rows that rank in the first `fetch` by it, plus the rows tied with the last one (`ScanRequest::top`, `TopRows`);
+- decodes the other columns only in the chunks that hold those rows, then sorts the rows by the full order and keeps `fetch` of them.
+
+DataFusion drops its `SortExec` and merges the partitions with its `SortPreservingMergeExec`. The rows are exactly those of DataFusion's own sort. A test compares both on ties, nulls, both directions, two partitions and no limit. A sort by a payload column or by an expression stays in DataFusion.
+
+**Results** (`list_llm_1h`, median of 20 runs, two rounds alternating with the previous binary):
+
+| Dataset | Before | After | CPU before → after | Vortex compact |
+|---|---|---|---|---|
+| light | 21.8 ms | **11.1** | 134 → 58 ms | 19.2 |
+| payload | 20.9 ms | **7.4** | 28 → 7 ms | 9.8 |
+| swe | 5.0 ms | **3.1** | 4.8 → 2.8 ms | 7.2 |
+| openswe | 4.8 ms | **3.2** | 7.5 → 5.0 ms | 6.6 |
+| toucan | 16.9 ms | **7.2** | 65 → 11 ms | 11.8 |
+| wildchat | 20.0 ms | **9.6** | 111 → 23 ms | 14.7 |
+
+- Strata now wins `list_llm_1h` on all six datasets.
+- The bytes fetched barely moved (toucan 5,729 → 5,566 KiB) because of the merged ranges. On S3 that is the intended trade; locally, the gain is the decoding saved.
+- Each partition keeps its own top rows, so a table of many partitions decodes `fetch` rows per partition, not `fetch` in all. A bound shared between partitions would cut that further; not done.
 
 ## Reproduce
 

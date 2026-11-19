@@ -305,9 +305,9 @@ fn decode_numeric(
             }
             build_array(dt, n, nulls, values, at)
         }
-        (Encoding::Plain, Class::Wide | Class::Float) => {
+        (Encoding::Plain, Class::Wide | Class::Float | Class::Int) => {
             // Plain values are stored at the type's width, little-endian: the bytes are the
-            // Arrow buffer.
+            // Arrow buffer. Every value at the type's width is in range.
             let len = n
                 .checked_mul(num.width)
                 .ok_or_else(|| corrupt("plain values"))?;

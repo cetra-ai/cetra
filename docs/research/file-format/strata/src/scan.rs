@@ -13,9 +13,10 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, BooleanArray, RecordBatch, RecordBatchOptions, UInt32Array, new_empty_array,
+    Array, ArrayRef, BooleanArray, RecordBatch, RecordBatchOptions, UInt32Array, make_comparator,
+    new_empty_array,
 };
-use arrow::compute::{cast, concat, take};
+use arrow::compute::{SortOptions, cast, concat, sort_to_indices, take};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 
 use crate::error::{Result, StrataError};
@@ -59,6 +60,21 @@ pub struct ScanRequest {
     pub kind: ScanKind,
     /// Top-level Utf8 columns come out as `Utf8View`, which avoids copying their strings.
     pub views: bool,
+    /// Keep only the selected rows that rank in the first `k` by one narrow column, and the
+    /// rows tied with the k-th. Cannot be combined with `limit`.
+    pub top: Option<TopRows>,
+}
+
+/// The rows a scan keeps when a sort and a limit sit above it: those that rank in the first `k`
+/// by `column` under `options`, and every row tied with the k-th. Any query that sorts by
+/// `column` first (other columns break ties) and keeps `k` rows finds them all here, so the
+/// projection reads only the chunks that hold these rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TopRows {
+    /// The schema index of a narrow column.
+    pub column: usize,
+    pub options: SortOptions,
+    pub k: usize,
 }
 
 /// `schema` with its top-level Utf8 fields as `Utf8View` when `views` is set.
@@ -299,6 +315,27 @@ fn take_rows(
             Ok(concat(&refs)?)
         }
     }
+}
+
+/// The positions in `values` that rank in the first `k` under `options`, and those tied with the
+/// k-th (nulls are tied with nulls), in ascending order. Every position when there are at most
+/// `k`.
+fn top_positions(values: &dyn Array, options: SortOptions, k: usize) -> Result<Vec<usize>> {
+    let order = sort_to_indices(values, Some(options), None)?;
+    let order = order.values();
+    let Some(&kth) = k.checked_sub(1).and_then(|last| order.get(last)) else {
+        return Ok((0..values.len()).collect());
+    };
+    let compare = make_comparator(values, values, options)?;
+    let (head, tail) = order.split_at(k);
+    let mut keep: Vec<usize> = head.iter().map(|&i| i as usize).collect();
+    keep.extend(
+        tail.iter()
+            .take_while(|&&i| compare(kth as usize, i as usize).is_eq())
+            .map(|&i| i as usize),
+    );
+    keep.sort_unstable();
+    Ok(keep)
 }
 
 /// The rows of the (sorted, disjoint) ranges, in order, or only the first `limit` of them. It
@@ -776,8 +813,21 @@ impl StrataFile {
             None => (None, Vec::new()),
         };
         self.check_row_ranges(req.row_ranges.as_deref())?;
+        if let Some(top) = &req.top {
+            if req.limit.is_some() {
+                return Err(StrataError::Unsupported {
+                    what: "a scan with both a limit and top rows".to_string(),
+                });
+            }
+            let layer = self.directory().get(top.column).map(|record| record.layer);
+            if !matches!(layer, Some(Layer::Narrow)) {
+                return Err(StrataError::Unsupported {
+                    what: format!("top rows by column {}, which is not narrow", top.column),
+                });
+            }
+        }
         let output: SchemaRef = scan_schema(self.schema().project(&req.projection)?, req.views);
-        if req.limit == Some(0) {
+        if req.limit == Some(0) || req.top.is_some_and(|top| top.k == 0) {
             return Ok(ScanBatches::empty(output));
         }
 
@@ -799,6 +849,7 @@ impl StrataFile {
         all_columns.extend(filter_columns.iter().copied());
         all_columns.extend(narrow_reads(self, &req.projection)?);
         all_columns.extend(payload_projection(self, &req.projection));
+        all_columns.extend(req.top.map(|top| top.column));
         let filter_columns: Vec<usize> = filter_columns.into_iter().collect();
         let all_columns: Vec<usize> = all_columns.into_iter().collect();
         self.load_metadata(&all_columns, req.kind).await?;
@@ -920,9 +971,14 @@ impl StrataFile {
             }
         };
 
-        // 6. Limit.
+        // 6. Limit, or the top rows.
         if let Some(limit) = req.limit {
             selection.truncate(limit);
+        }
+        if let Some(top) = &req.top {
+            selection = self
+                .top_rows(top, &infos, selection, req.kind, &mut decoded, threads)
+                .await?;
         }
         if selection.is_empty() {
             return Ok(ScanBatches::empty(output));
@@ -1307,6 +1363,45 @@ impl StrataFile {
     /// Fetches, in one wave, the bodies of the chunks in `wanted` that are not decoded yet, and
     /// decodes them into `decoded`, on `threads` threads when the wave is large enough. A wave
     /// with nothing to fetch makes no request.
+    /// The rows of `selection` (ascending) that rank in the first `top.k` by `top.column`, and
+    /// the rows tied with the k-th, in ascending order. One wave decodes the column's chunks
+    /// that hold a selected row, unless the filter wave already decoded them all.
+    async fn top_rows(
+        &self,
+        top: &TopRows,
+        infos: &HashMap<usize, ColumnInfo>,
+        selection: Vec<u32>,
+        kind: ScanKind,
+        decoded: &mut Decoded,
+        threads: usize,
+    ) -> Result<Vec<u32>> {
+        if selection.len() <= top.k {
+            return Ok(selection);
+        }
+        let info = info_of(infos, top.column)?;
+        let wanted: BTreeSet<(usize, usize)> = chunks_with_rows(&info.entries, &selection)
+            .into_iter()
+            .map(|index| (top.column, index))
+            .filter(|key| !decoded.contains_key(key))
+            .collect();
+        if !wanted.is_empty() {
+            self.decode_wave(infos, &wanted, kind, decoded, threads)
+                .await?;
+        }
+        let values = take_rows(decoded, info, top.column, &selection)?;
+        top_positions(values.as_ref(), top.options, top.k)?
+            .into_iter()
+            .map(|position| {
+                selection
+                    .get(position)
+                    .copied()
+                    .ok_or_else(|| StrataError::Schema {
+                        reason: "internal: top row outside the selection".to_string(),
+                    })
+            })
+            .collect()
+    }
+
     async fn decode_wave(
         &self,
         infos: &HashMap<usize, ColumnInfo>,
@@ -1747,6 +1842,7 @@ mod tests {
                         limit: None,
                         kind: ScanKind::Scan,
                         views,
+                        top: None,
                     };
                     let mut batches = file.scan_batches(&req, threads).await.unwrap();
                     let all = batches.frames_held();
@@ -1805,6 +1901,7 @@ mod tests {
                     limit: None,
                     kind: ScanKind::Scan,
                     views,
+                    top: None,
                 };
                 let plain = file.scan(&req(false)).await.unwrap();
                 let viewed = file.scan(&req(true)).await.unwrap();
@@ -1859,6 +1956,7 @@ mod tests {
                         limit: None,
                         kind: ScanKind::Scan,
                         views: false,
+                        top: None,
                     };
                     let rows: usize = file
                         .scan(&req)
@@ -1882,6 +1980,7 @@ mod tests {
             limit: None,
             kind: ScanKind::Scan,
             views: false,
+            top: None,
         };
         let batches = file.scan(&req).await.unwrap();
         let want = oracle(file, Some(&p), None, projection).await.unwrap();
@@ -2035,6 +2134,7 @@ mod tests {
                 limit: None,
                 kind: ScanKind::Scan,
                 views: false,
+                top: None,
             };
             let batches = file.scan(&req).await.unwrap();
             let stats = file.io_stats();
@@ -2064,6 +2164,7 @@ mod tests {
                 limit: None,
                 kind: ScanKind::Scan,
                 views: false,
+                top: None,
             };
             let batches = file.scan(&req).await.unwrap();
             let stats = file.io_stats();
@@ -2094,6 +2195,7 @@ mod tests {
                 limit: None,
                 kind: ScanKind::Scan,
                 views: false,
+                top: None,
             };
             let batches = file.scan(&req).await.unwrap();
             assert!(batches.is_empty());
@@ -2114,6 +2216,7 @@ mod tests {
                 limit: None,
                 kind: ScanKind::Scan,
                 views: false,
+                top: None,
             };
             let batches = file.scan(&req).await.unwrap();
             let want = oracle(&file, None, Some(ranges.as_slice()), &projection)
@@ -2131,6 +2234,7 @@ mod tests {
                 limit: None,
                 kind: ScanKind::Scan,
                 views: false,
+                top: None,
             };
             let batches = file.scan(&req).await.unwrap();
             let restricted = [100..9_000, 15_000..15_050];
@@ -2155,6 +2259,7 @@ mod tests {
                 limit: Some(7),
                 kind: ScanKind::Scan,
                 views: false,
+                top: None,
             };
             let batches = file.scan(&req).await.unwrap();
             let want = oracle(&file, Some(&p), None, &projection)
@@ -2186,6 +2291,7 @@ mod tests {
                 limit: None,
                 kind: ScanKind::Scan,
                 views: false,
+                top: None,
             };
             let batches = file.scan(&req).await.unwrap();
             assert!(batches.iter().all(|b| b.num_columns() == 0));
@@ -2210,6 +2316,7 @@ mod tests {
                     limit: None,
                     kind: ScanKind::Scan,
                     views: false,
+                    top: None,
                 };
                 let file = &file;
                 async move { file.scan(&req).await }
@@ -2341,6 +2448,7 @@ mod tests {
                     limit: None,
                     kind: ScanKind::Scan,
                     views: false,
+                    top: None,
                 };
                 let got = file.scan(&req).await;
                 let want = oracle(&file, Some(&p), None, &req.projection).await;
@@ -2400,6 +2508,7 @@ mod tests {
             limit: None,
             kind: ScanKind::Scan,
             views: false,
+            top: None,
         };
         let batches = file.scan(&req).await.unwrap();
         let schema = Arc::new(file.schema().project(projection).unwrap());
@@ -2451,6 +2560,7 @@ mod tests {
                 limit: None,
                 kind: ScanKind::Scan,
                 views: false,
+                top: None,
             };
             file.reset_io_stats();
             let batches = file.scan(&req).await.unwrap();
@@ -2486,6 +2596,7 @@ mod tests {
                 limit: None,
                 kind: ScanKind::Scan,
                 views: false,
+                top: None,
             };
             let batches = file.scan(&req).await.unwrap();
             let want = oracle(
@@ -2532,6 +2643,7 @@ mod tests {
                     limit: None,
                     kind: ScanKind::Scan,
                     views: false,
+                    top: None,
                 })
                 .await;
             assert!(matches!(result, Err(StrataError::Unsupported { .. })));
@@ -2543,6 +2655,7 @@ mod tests {
                     limit: None,
                     kind: ScanKind::Scan,
                     views: false,
+                    top: None,
                 })
                 .await;
             assert!(matches!(long, Err(StrataError::Unsupported { .. })));
@@ -2580,6 +2693,7 @@ mod tests {
                 limit: None,
                 kind: ScanKind::Scan,
                 views: false,
+                top: None,
             };
             file.scan(&req).await.unwrap();
             // Metadata, up to four `Contains` waves, the filter and the projection.
@@ -2731,9 +2845,144 @@ mod tests {
                 limit: None,
                 kind: ScanKind::Scan,
                 views: false,
+                top: None,
             };
             assert!(file.scan(&req).await.unwrap().is_empty());
             assert_eq!(file.io_stats().waves, 1);
+        });
+    }
+
+    #[test]
+    fn top_positions_keep_the_first_k_and_their_ties() {
+        use arrow::array::Int64Array;
+        let desc = SortOptions {
+            descending: true,
+            nulls_first: true,
+        };
+        let asc = SortOptions {
+            descending: false,
+            nulls_first: false,
+        };
+        let values = Int64Array::from(vec![Some(5), None, Some(9), Some(5), Some(1), Some(9)]);
+        // Descending, nulls first: null, 9, 9, then 5 twice tied at the fourth.
+        assert_eq!(top_positions(&values, desc, 1).unwrap(), vec![1]);
+        assert_eq!(top_positions(&values, desc, 2).unwrap(), vec![1, 2, 5]);
+        assert_eq!(
+            top_positions(&values, desc, 4).unwrap(),
+            vec![0, 1, 2, 3, 5]
+        );
+        // Ascending, nulls last: 1, 5, 5, 9, 9, null.
+        assert_eq!(top_positions(&values, asc, 2).unwrap(), vec![0, 3, 4]);
+        assert_eq!(
+            top_positions(&values, asc, 6).unwrap(),
+            vec![0, 1, 2, 3, 4, 5]
+        );
+        // More than there are, or nulls tied with nulls.
+        assert_eq!(
+            top_positions(&values, asc, 9).unwrap(),
+            vec![0, 1, 2, 3, 4, 5]
+        );
+        let nulls = Int64Array::from(vec![None, Some(3), None]);
+        assert_eq!(top_positions(&nulls, desc, 1).unwrap(), vec![0, 2]);
+        assert!(
+            top_positions(&Int64Array::from(Vec::<i64>::new()), asc, 3)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// A scan with top rows returns the rows of the full scan that rank in the first `k` (and
+    /// their ties), and reads only the chunks that hold them.
+    #[test]
+    fn a_scan_with_top_rows_reads_only_their_chunks() {
+        runtime().block_on(async {
+            let file = open_wide(40_000, &Config::default()).await;
+            let projection = vec![col("start_time"), col("uid"), col("input_tokens")];
+            let predicate = Some(Predicate::Cmp(
+                col("span_kind"),
+                CmpOp::Eq,
+                Lit::Utf8("llm".into()),
+            ));
+            let req = |top| ScanRequest {
+                projection: projection.clone(),
+                predicate: predicate.clone(),
+                row_ranges: None,
+                limit: None,
+                kind: ScanKind::Scan,
+                views: false,
+                top,
+            };
+            let schema = scan_schema(file.schema().project(&projection).unwrap(), false);
+            file.reset_io_stats();
+            let full = joined(&schema, &file.scan(&req(None)).await.unwrap());
+            let full_bytes = file.io_stats().bytes;
+            for (column, descending, k) in [
+                (col("start_time"), true, 50),
+                (col("start_time"), false, 1),
+                (col("input_tokens"), true, 30),
+                (col("input_tokens"), false, 9_000),
+            ] {
+                let options = SortOptions {
+                    descending,
+                    nulls_first: descending,
+                };
+                file.reset_io_stats();
+                let top = TopRows { column, options, k };
+                let got = joined(&schema, &file.scan(&req(Some(top))).await.unwrap());
+                let bytes = file.io_stats().bytes;
+                let position = projection.iter().position(|&c| c == column).unwrap();
+                let keep = top_positions(full.column(position).as_ref(), options, k).unwrap();
+                let indices = UInt32Array::from_iter_values(keep.iter().map(|&i| i as u32));
+                let want = arrow::compute::take_record_batch(&full, &indices).unwrap();
+                assert_eq!(got, want, "column {column}, k {k}");
+                assert!(got.num_rows() >= k.min(full.num_rows()));
+                // Start times rise with the row: the top rows sit in a few chunks.
+                if column == col("start_time") {
+                    assert!(bytes * 2 < full_bytes, "{bytes} of {full_bytes} bytes");
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn top_rows_refuse_a_limit_and_a_column_that_is_not_narrow() {
+        runtime().block_on(async {
+            let config = Config {
+                payload_min_avg: 1,
+                ..Config::default()
+            };
+            let file = open_wide(2_000, &config).await;
+            let top = |column| TopRows {
+                column,
+                options: SortOptions::default(),
+                k: 5,
+            };
+            let req = |top, limit| ScanRequest {
+                projection: vec![col("start_time")],
+                predicate: None,
+                row_ranges: None,
+                limit,
+                kind: ScanKind::Scan,
+                views: false,
+                top: Some(top),
+            };
+            let with_limit = file.scan(&req(top(col("start_time")), Some(3))).await;
+            assert!(matches!(with_limit, Err(StrataError::Unsupported { .. })));
+            assert_eq!(
+                file.directory()[col("uid")].layer,
+                Layer::Payload,
+                "uid should be a payload column with payload_min_avg 1"
+            );
+            let payload = file.scan(&req(top(col("uid")), None)).await;
+            assert!(matches!(payload, Err(StrataError::Unsupported { .. })));
+            // k = 0 selects nothing and reads nothing.
+            file.reset_io_stats();
+            let none = TopRows {
+                k: 0,
+                ..top(col("start_time"))
+            };
+            assert!(file.scan(&req(none, None)).await.unwrap().is_empty());
+            assert_eq!(file.io_stats().bytes, 0);
         });
     }
 }

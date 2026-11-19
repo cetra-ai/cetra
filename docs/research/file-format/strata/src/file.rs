@@ -1890,6 +1890,7 @@ mod tests {
                     limit: None,
                     kind: ScanKind::Scan,
                     views: false,
+                    top: None,
                 };
                 file.scan(&req).await.unwrap();
                 file.io_stats().bytes
@@ -1912,6 +1913,7 @@ mod tests {
                     limit: None,
                     kind: ScanKind::Scan,
                     views: false,
+                    top: None,
                 };
                 let batches = file.scan(&req).await.unwrap();
                 let got: usize = batches.iter().map(RecordBatch::num_rows).sum();

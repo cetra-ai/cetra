@@ -561,8 +561,8 @@ Two gaps remain:
 | Dataset | What it is | Strata | Parquet | Vortex compact |
 |---|---|---|---|---|
 | openswe | Coding agents (Claude Code and OpenHands harnesses), 2.4 GB of payloads | **29** | 47 | 158 |
-| toucan | Tool-calling agents on 495 MCP servers | **196** | 246 | 233 |
-| wildchat | Real users chatting with ChatGPT | 592 | 592 | **584** |
+| toucan | Tool-calling agents on 495 MCP servers | **195** | 246 | 233 |
+| wildchat | Real users chatting with ChatGPT | 590 | 592 | **584** |
 
 - **On agent data** Strata has the smallest files, lookups about 2× faster than Parquet's, and search 10–32× faster.
 - **On chat data**, with many short conversations, Strata lost at first. A full payload scan took 1.4× Parquet's time, and `list_llm_1h` 1.45×.
@@ -571,7 +571,11 @@ Two gaps remain:
   - Checking each byte once, with two `unsafe` constructors and a chunker that cuts between characters, brought the scan to Parquet's time (544 against 538 ms).
   - Agent-data scans also got 6–22% faster, then 3–8% more.
   - Files stay the same size as the others'.
-- **Narrow queries** on toucan and wildchat ran on one thread: each file is one partition, and a wave under 4 MiB was decoded serially. Scans now decode a wave of 1 MiB or more on the partition's share of the cores, and `list_llm_1h` dropped by 37% on toucan and 12% on wildchat. Vortex compact is still faster there (10.4 and 14.6 ms against 16.8 and 18.8 ms).
+- **Narrow queries** on toucan and wildchat ran on one thread: each file is one partition, and a wave under 4 MiB was decoded serially. Scans now decode a wave of 1 MiB or more on the partition's share of the cores, and `list_llm_1h` dropped by 37% on toucan and 12% on wildchat. Vortex compact was still faster there (10.4 and 14.6 ms against 16.8 and 18.8 ms).
+- **Top rows in the scan:** DataFusion now pushes `ORDER BY … LIMIT k` into the Strata scan. Each partition keeps the rows that rank in the first k by the first sort key, and decodes the other columns only for them. `list_llm_1h` dropped by 35–65% on the six datasets (toucan 7.2 ms, wildchat 9.6 ms), and Strata now beats Vortex compact on all of them.
+- **Plain integer chunks:** an integer chunk is stored plain, compressed by zstd, when that saves at least 30% over bit-packing. On `light`, `ingest_time` dropped from 6.2 to 2.1 MB and the file from 177 to 173 MiB. The rest of the narrow-size gap is the float costs and the previews, where Parquet uses dictionaries.
+
+Details in [real-data.md](real-data.md).
 
 ## What each format gets right and wrong
 

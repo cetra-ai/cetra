@@ -14,7 +14,9 @@ mod lengths;
 pub use chunker::chunk_ranges;
 pub use decode::{decode_chunk, decode_chunk_view};
 pub use dict::{Dictionary, for_column};
-pub use encode::{EncodedChunk, encode_chunk};
+#[cfg(test)]
+pub use encode::encode_chunk;
+pub use encode::{EncodedChunk, encode_chunk_candidates};
 
 use arrow::datatypes::DataType;
 
@@ -197,7 +199,7 @@ impl BlockEntry {
 /// How a numeric type is stored. The class decides which encodings apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Class {
-    /// Integers, dates and timestamps: frame of reference over `i64`, zoned.
+    /// Integers, dates and timestamps: frame of reference over `i64`, or plain values, zoned.
     Int,
     /// `UInt64`: plain values, no zone.
     Wide,

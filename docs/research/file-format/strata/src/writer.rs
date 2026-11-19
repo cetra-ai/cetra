@@ -20,12 +20,14 @@ use crate::hot::{
 };
 use crate::index::{KeyFilter, key_bytes};
 use crate::narrow::{
-    BlockEntry, Class, EncodedChunk, chunk_ranges, encode_chunk, for_column, is_utf8_map,
-    numeric_of,
+    BlockEntry, Class, EncodedChunk, chunk_ranges, encode_chunk_candidates, for_column,
+    is_utf8_map, numeric_of,
 };
 use crate::payload::{self, PayloadStats};
 use crate::postings::ChunkPostings;
-use crate::segment::{Codec, Kind, SegmentCodec, SegmentRef, encode_segment};
+use crate::segment::{
+    Codec, Kind, SegmentCodec, SegmentRef, compress_for, encode_segment, write_body,
+};
 use crate::shred::{Shredded, shred};
 
 /// A shredded map column waiting for its children and residual to be written. `summary` is the
@@ -34,6 +36,14 @@ struct PendingMap {
     column_id: u32,
     summary: usize,
     shredded: Shredded,
+}
+
+/// Whether a later chunk candidate stored in `stored` bytes replaces the best so far, stored in
+/// `best` bytes: it must save at least 30%, the same bar as zstd on a narrow chunk. Plain
+/// integer chunks that were only slightly smaller than bit-packed ones made narrow queries up to
+/// 19% slower, since they are decompressed on every scan.
+fn replaces(stored: usize, best: usize) -> bool {
+    stored * 100 <= best * 70
 }
 
 /// Writes one Strata file. Batches are checked as they arrive and kept until
@@ -617,6 +627,29 @@ fn write_narrow(
     let mut bytes = u64::from(dict_len);
     for range in ranges {
         let slice = array.slice(range.start, range.len());
+        // The first candidate decodes fastest; a later one must save at least 30% to replace it.
+        let mut best: Option<(EncodedChunk, Option<Vec<u8>>, usize)> = None;
+        for candidate in encode_chunk_candidates(&slice, dict.as_ref(), config)? {
+            let (compressed, stored) = match &candidate.body {
+                Some(body) => {
+                    let c = compress_for(Kind::NarrowChunk, body, Codec::Zstd, codec)?;
+                    let stored = c.as_ref().map_or(body.len(), Vec::len);
+                    (c, stored)
+                }
+                None => (None, 0),
+            };
+            if best
+                .as_ref()
+                .is_none_or(|(_, _, len)| replaces(stored, *len))
+            {
+                best = Some((candidate, compressed, stored));
+            }
+        }
+        let Some((chunk, compressed, _)) = best else {
+            return Err(StrataError::Unsupported {
+                what: "a chunk without an encoding".to_string(),
+            });
+        };
         let EncodedChunk {
             encoding,
             flags,
@@ -624,10 +657,10 @@ fn write_narrow(
             min,
             max,
             body,
-        } = encode_chunk(&slice, dict.as_ref(), config)?;
+        } = chunk;
         let (segment_offset, segment_len) = match body {
             Some(body) => {
-                let seg = encode_segment(Kind::NarrowChunk, &body, Codec::Zstd, codec, out)?;
+                let seg = write_body(Kind::NarrowChunk, &body, compressed.as_deref(), out)?;
                 (seg.offset, seg.len)
             }
             None => (0, 0),
@@ -919,6 +952,68 @@ mod tests {
         }
     }
 
+    /// The 30% bar holds at its boundary, and an empty best is replaced only by an empty one.
+    #[test]
+    fn a_later_candidate_must_save_30_percent() {
+        assert!(replaces(70, 100));
+        assert!(!replaces(71, 100));
+        assert!(!replaces(100, 100));
+        assert!(replaces(0, 0));
+        assert!(!replaces(1, 0));
+    }
+
+    /// Integers in long runs (an ingest time shared by a batch of rows) compress better plain
+    /// than bit-packed, and are stored plain; small spread-out integers stay bit-packed. Both
+    /// read back unchanged.
+    #[tokio::test]
+    async fn an_integer_chunk_is_stored_in_its_smallest_encoding() {
+        use arrow::array::{Int64Array, RecordBatch};
+        use arrow::datatypes::{DataType, Schema};
+        let n = 8_192i64;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("runs", DataType::Int64, false),
+            Field::new("small", DataType::Int64, false),
+        ]));
+        // Runs of 6 equal values, far apart; small pseudo-random values.
+        let runs = Int64Array::from_iter_values((0..n).map(|i| (i / 6) * 1_000_000_007));
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        let small = Int64Array::from_iter_values((0..n).map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % 97) as i64
+        }));
+        let batch =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(runs), Arc::new(small)]).unwrap();
+        let mut w = StrataWriter::new(schema, &[], Config::default()).unwrap();
+        w.write(&batch).unwrap();
+        let (bytes, summary) = w.finish().unwrap();
+        let counts = |name: &str| {
+            summary
+                .columns
+                .iter()
+                .find(|c| c.name == name)
+                .unwrap()
+                .encoding_counts
+        };
+        let (runs, small) = (counts("runs"), counts("small"));
+        assert!(runs[Encoding::Plain as usize] > 0, "{runs:?}");
+        assert_eq!(runs[Encoding::ForBitpack as usize], 0, "{runs:?}");
+        assert!(small[Encoding::ForBitpack as usize] > 0, "{small:?}");
+        assert_eq!(small[Encoding::Plain as usize], 0, "{small:?}");
+
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("ints.strata");
+        store.put(&path, PutPayload::from(bytes)).await.unwrap();
+        let file = StrataFile::open(store, path, None, &Config::default())
+            .await
+            .unwrap();
+        for column in 0..2 {
+            let decoded = crate::reader::read_column(&file, column).await.unwrap();
+            assert_same(decoded.as_ref(), batch.column(column).as_ref());
+        }
+    }
+
     #[tokio::test]
     async fn an_empty_sort_key_keeps_unsorted_rows_in_the_order_given() {
         let sorted = wide_batch(5_000);
@@ -951,8 +1046,7 @@ mod tests {
     }
 
     /// xxh3_64 of the file written from `wide_batch(20_000)` with `Config::default()`.
-    /// Recorded after zones on `Varbin` chunks. A change to this value means the output
-    /// changed.
+    /// Recorded after the 30% bar for plain integer chunks. A change to this value means the output changed.
     const GOLDEN: u64 = 0x5d6c_4d57_c42a_d126;
 
     #[test]

@@ -128,12 +128,24 @@ pub(crate) fn encode_segment(
     codec: &mut SegmentCodec,
     out: &mut Out,
 ) -> Result<SegmentRef> {
+    let compressed = compress_for(kind, body, prefer, codec)?;
+    write_body(kind, body, compressed.as_deref(), out)
+}
+
+/// The zstd form of `body` that [`encode_segment`] would store, or `None` when it would store
+/// `body` raw.
+pub(crate) fn compress_for(
+    kind: Kind,
+    body: &[u8],
+    prefer: Codec,
+    codec: &mut SegmentCodec,
+) -> Result<Option<Vec<u8>>> {
     if body.len() > MAX_SEGMENT_RAW as usize {
         return Err(StrataError::Unsupported {
             what: format!("segment body of {} bytes", body.len()),
         });
     }
-    let compressed = match prefer {
+    Ok(match prefer {
         Codec::Zstd => codec.compressor.compress(body).ok().filter(|c| match kind {
             // A narrow chunk is decompressed on every scan: zstd must save at least 30%.
             Kind::NarrowChunk => c.len() * 100 <= body.len() * 70,
@@ -141,12 +153,20 @@ pub(crate) fn encode_segment(
         }),
         // A dictionary needs the run's encoder: `write_segment` stores such bodies.
         Codec::Raw | Codec::ZstdDict => None,
-    };
-    let (codec, stored) = match &compressed {
-        Some(c) => (Codec::Zstd, c.as_slice()),
-        None => (Codec::Raw, body),
-    };
-    write_segment(kind, codec, body.len(), stored, out)
+    })
+}
+
+/// Appends the segment of `body`, stored as `compressed` (zstd) when given, else raw.
+pub(crate) fn write_body(
+    kind: Kind,
+    body: &[u8],
+    compressed: Option<&[u8]>,
+    out: &mut Out,
+) -> Result<SegmentRef> {
+    match compressed {
+        Some(c) => write_segment(kind, Codec::Zstd, body.len(), c, out),
+        None => write_segment(kind, Codec::Raw, body.len(), body, out),
+    }
 }
 
 /// Appends one segment whose body is already stored with `codec`: `stored` is the stored
