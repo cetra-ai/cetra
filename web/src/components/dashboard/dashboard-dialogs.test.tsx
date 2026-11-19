@@ -1,9 +1,10 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import type { ReactNode } from "react";
 import { expect, it, vi } from "vitest";
+import { TEMPLATES } from "@/lib/dashboards/templates";
 import type { Dashboard, Definition } from "@/lib/dashboards/types";
 import { dashboardHandlers, seedDashboards } from "@/mocks/dashboards";
 import { server } from "@/mocks/node";
@@ -55,6 +56,49 @@ it("creates an empty dashboard and reports it", async () => {
   await user.click(screen.getByRole("button", { name: "Create dashboard" }));
   await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
   expect(onCreated.mock.calls[0]?.[0]).toMatchObject({ name: "Costs", version: 1 });
+  expect(onCreated.mock.calls[0]?.[0].definition).toEqual({ widgets: [] });
+});
+
+it("creates a dashboard from a template", async () => {
+  server.use(...dashboardHandlers(seedDashboards()));
+  const onCreated = vi.fn<(dashboard: Dashboard) => void>();
+  const user = renderWith(
+    <NewDashboardDialog
+      org={ORG}
+      project={PROJECT}
+      open
+      onOpenChange={() => {}}
+      onCreated={onCreated}
+    />,
+  );
+  await user.type(screen.getByLabelText("Name"), "Spend");
+  await user.click(screen.getByRole("radio", { name: "Cost" }));
+  await user.click(screen.getByRole("button", { name: "Create dashboard" }));
+  await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
+  const cost = TEMPLATES.find((template) => template.id === "cost");
+  expect(cost).toBeDefined();
+  expect(onCreated.mock.calls[0]?.[0].definition).toEqual(cost?.definition);
+});
+
+it("lists Blank and the three templates under Start from", () => {
+  renderWith(
+    <NewDashboardDialog
+      org={ORG}
+      project={PROJECT}
+      open
+      onOpenChange={() => {}}
+      onCreated={() => {}}
+    />,
+  );
+  const group = screen.getByRole("radiogroup", { name: "Start from" });
+  const radios = within(group).getAllByRole("radio");
+  expect(radios.map((radio) => radio.getAttribute("aria-label"))).toEqual([
+    "Blank",
+    "Cost",
+    "Latency",
+    "Quality",
+  ]);
+  expect(screen.getByRole("radio", { name: "Blank" })).toBeChecked();
 });
 
 it("checks the name on the client before any request", async () => {
