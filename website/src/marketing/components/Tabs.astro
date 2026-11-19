@@ -1,0 +1,90 @@
+---
+interface Props {
+  id: string;
+  labels: string[];
+}
+const { id, labels } = Astro.props;
+---
+<div class="tabs-root" data-tabs data-tabs-id={id}>
+  <div class="tabs" role="tablist">
+    {labels.map((label, i) => (
+      <button
+        type="button"
+        role="tab"
+        id={`${id}-tab-${i}`}
+        aria-selected={i === 0 ? "true" : "false"}
+        tabindex={i === 0 ? 0 : -1}
+      >
+        {label}
+      </button>
+    ))}
+  </div>
+  <slot />
+</div>
+<style>
+  .tabs {
+    display: flex;
+    gap: var(--space-1);
+    padding: var(--space-2);
+    border-bottom: 1px solid var(--line);
+    overflow-x: auto;
+  }
+  .tabs button {
+    font: inherit;
+    font-size: var(--text-sm);
+    background: none;
+    border: 0;
+    color: var(--fg-muted);
+    padding: var(--space-1) var(--space-3);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .tabs button[aria-selected="true"] {
+    background: var(--surface-2);
+    color: var(--fg);
+  }
+</style>
+<script>
+  function selectTab(tabs: HTMLButtonElement[], panels: HTMLElement[], index: number) {
+    tabs.forEach((tab, i) => {
+      tab.setAttribute("aria-selected", String(i === index));
+      tab.tabIndex = i === index ? 0 : -1;
+    });
+    panels.forEach((panel, i) => {
+      panel.hidden = i !== index;
+    });
+  }
+
+  document.querySelectorAll<HTMLElement>("[data-tabs]").forEach((root) => {
+    const id = root.dataset.tabsId ?? "";
+    const tabs = Array.from(root.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
+    const panels = Array.from(root.children).filter(
+      (el): el is HTMLElement => el instanceof HTMLElement && el.matches("[data-tab-panel]"),
+    );
+    if (tabs.length !== panels.length) {
+      console.error(`Tabs ${id}: ${tabs.length} labels, ${panels.length} panels`);
+      return;
+    }
+    panels.forEach((panel, i) => {
+      panel.id = `${id}-panel-${i}`;
+      panel.setAttribute("aria-labelledby", `${id}-tab-${i}`);
+      panel.hidden = i !== 0;
+      tabs[i].setAttribute("aria-controls", panel.id);
+    });
+    tabs.forEach((tab, i) => {
+      tab.addEventListener("click", () => selectTab(tabs, panels, i));
+      tab.addEventListener("keydown", (event) => {
+        let next: number | null = null;
+        if (event.key === "ArrowRight") next = (i + 1) % tabs.length;
+        else if (event.key === "ArrowLeft") next = (i - 1 + tabs.length) % tabs.length;
+        else if (event.key === "Home") next = 0;
+        else if (event.key === "End") next = tabs.length - 1;
+        if (next === null) return;
+        event.preventDefault();
+        selectTab(tabs, panels, next);
+        tabs[next].focus();
+      });
+    });
+  });
+</script>

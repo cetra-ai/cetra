@@ -1,0 +1,40 @@
+---
+interface Props {
+  eyebrow?: string;
+  title: string;
+  lede?: string;
+  align?: "start" | "center";
+  level?: 1 | 2;
+  id?: string;
+}
+const { eyebrow, title, lede, align = "start", level = 2, id } = Astro.props;
+const Tag = level === 1 ? "h1" : "h2";
+---
+<div class:list={["heading", align === "center" && "heading--center"]}>
+  {eyebrow && <p class="eyebrow">{eyebrow}</p>}
+  <Tag id={id} class:list={["title", `title--${level}`]}>{title}</Tag>
+  {lede && <p class="lede">{lede}</p>}
+</div>
+<style>
+  .heading {
+    max-width: 46rem;
+  }
+  .heading--center {
+    margin-inline: auto;
+    text-align: center;
+  }
+  .title {
+    margin-top: var(--space-3);
+  }
+  .title--1 {
+    font-size: var(--text-hero);
+  }
+  .title--2 {
+    font-size: var(--text-3xl);
+  }
+  .lede {
+    font-size: var(--text-lg);
+    color: var(--fg-muted);
+    margin-top: var(--space-4);
+  }
+</style>

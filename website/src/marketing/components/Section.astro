@@ -1,0 +1,51 @@
+---
+interface Props {
+  tone?: "ink" | "raised" | "teal" | "paper";
+  id?: string;
+  width?: "default" | "narrow" | "wide";
+  /** Vertical padding. */
+  pad?: "md" | "lg";
+  /** A rim divider at the top of the section. */
+  divider?: boolean;
+  /** The id of the heading that names this section (aria-labelledby). */
+  labelledby?: string;
+}
+
+import RimDivider from "./RimDivider.astro";
+
+const {
+  tone = "ink",
+  id,
+  width = "default",
+  pad = "lg",
+  divider = false,
+  labelledby,
+} = Astro.props;
+---
+<section id={id} class:list={["section", `tone-${tone}`, `pad-${pad}`]} aria-labelledby={labelledby}>
+  <div class:list={["container", width !== "default" && `container--${width}`]}>
+    {divider && <div class="divider"><RimDivider /></div>}
+    <slot />
+  </div>
+</section>
+<style>
+  .section {
+    background: var(--band-bg);
+    color: var(--fg);
+    overflow: hidden;
+  }
+  .pad-md {
+    padding-block: var(--space-8);
+  }
+  .pad-lg {
+    padding-block: var(--space-10);
+  }
+  @media (max-width: 720px) {
+    .pad-lg {
+      padding-block: var(--space-8);
+    }
+  }
+  .divider {
+    margin-bottom: var(--space-8);
+  }
+</style>
