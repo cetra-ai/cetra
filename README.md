@@ -1,4 +1,9 @@
-# cetra
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/cetra-logo-on-dark.svg">
+    <img alt="cetra" src="assets/brand/cetra-logo.svg" height="56">
+  </picture>
+</h1>
 
 Open-source LLM observability and evaluation that runs as one binary on one machine.
 
