@@ -3,7 +3,6 @@ import {
   type CSSProperties,
   type ReactNode,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useReducer,
   useRef,
@@ -14,7 +13,6 @@ import {
   GridLayout,
   type Layout,
   moveElement,
-  useContainerWidth,
   verticalCompactor,
 } from "react-grid-layout";
 import { LayoutKey } from "@/components/charts/layout-key";
@@ -23,6 +21,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { COLUMNS, MAX_HEIGHT, type Nudge, nudgedLayout, withLayouts } from "@/lib/dashboards/draft";
 import type { Widget as WidgetModel } from "@/lib/dashboards/types";
+import { useGridWidth } from "./grid-width";
 import { DRAG_HANDLE } from "./widget";
 
 /** Height of one row in pixels. */
@@ -146,29 +145,6 @@ function redrawOrder(
   };
 }
 
-/**
- * The grid's width. react-grid-layout's own hook starts at 1280 px and measures after the first
- * paint, so a dashboard drew its first frame at the wrong width and its charts at that width, then
- * snapped to the right one. This measures the container in a layout effect, before the browser
- * paints, and the grid is not drawn until then (`width` is null). The library's hook (with
- * `measureBeforeMount`) keeps following later changes.
- */
-function useGridWidth(): {
-  width: number | null;
-  containerRef: ReturnType<typeof useContainerWidth>["containerRef"];
-  mounted: boolean;
-} {
-  const observed = useContainerWidth({ measureBeforeMount: true });
-  const { containerRef } = observed;
-  const [first, setFirst] = useState<number | null>(null);
-  useLayoutEffect(() => {
-    const node = containerRef.current;
-    if (node) setFirst(node.clientWidth);
-  }, [containerRef]);
-  if (observed.mounted) return { width: observed.width, containerRef, mounted: true };
-  return { width: first, containerRef, mounted: first !== null };
-}
-
 /** The class of a cell's body: the grid's styles lift it while it is dragged. */
 export const CELL_BODY = "dashboard-cell";
 
@@ -286,7 +262,8 @@ function FreeWidgets({
   onResizeStop?: (layout: Layout) => void;
   renderCell: (widget: WidgetModel) => ReactNode;
 }) {
-  const { width, containerRef, mounted } = useGridWidth();
+  const { width, containerRef } = useGridWidth();
+  const mounted = width !== null;
   const drawnAt = useDrawnWidths(widgets, width ?? 0, mounted, containerRef);
   // After a drop or a resize the widgets slide into place; a width change moves them at once.
   const [settling, setSettling] = useState(false);
