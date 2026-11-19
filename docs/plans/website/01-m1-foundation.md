@@ -32,7 +32,9 @@ When M1 is done:
 M1 does **not** add:
 - the homepage or any real page (M2–M5);
 - `sitemap`, Open Graph images or the switch from the holding page (M7);
-- any change to the Starlight docs, their styles or `src/pages/index.astro`.
+- any change to the Starlight docs, their styles or `src/pages/index.astro`. The docs already link back to the marketing site: Starlight's site title links to `/`.
+- a sitemap filter. Starlight adds `@astrojs/sitemap`, so `/styleguide/` (and later the `noindex` pages) appear in `dist/sitemap-0.xml` until M7, which filters the sitemap at launch. A listed `noindex` page is harmless: search engines honour the `noindex`.
+- the data-file checks of design §7 (prices, comparison facts, integrations). They come with their data in M3, M4 and M5.
 
 ## Decisions this plan relies on
 
@@ -66,7 +68,7 @@ Checked with `npm view` on 2026-11-20. The repo installs only versions older tha
 | `@fontsource-variable/inter` | 5.3.0 | 2026-07-19 | `website` dependencies | body face (the web UI's) |
 | `@fontsource-variable/jetbrains-mono` | 5.3.0 | 2026-07-19 | `website` dependencies | code and labels (the web UI's) |
 
-The implementer re-checks these with `npm view <package> version time --json` and reports the versions used. If a newer version is older than 7 days, use the version in this table anyway: one family is updated together by Dependabot.
+The implementer re-checks these with `npm view <package> version time --json` and reports the versions used. If a newer version is older than 7 days, still use the version in this table, and report the newer one.
 
 ## Phases
 
@@ -75,6 +77,12 @@ F1 tokens, fonts, site constants, small libraries ──► F2 layout, header, f
 ```
 
 Strictly sequential: each phase uses the previous one's files.
+
+**Formatting rule for every phase.** After writing the files, run `pnpm --dir website exec biome check --write <the files you created or changed>`. Biome's formatting and import order win over the code quoted in this plan; behaviour must stay as quoted. After that, `biome check` must report no errors. Two warnings are expected and accepted:
+- `noUnusedVariables` on Astro props used only in the template;
+- `noImportantStyles` on the three `!important` in `base.css` (the reduced-motion override).
+
+**What each phase's checks cover.** F2 and F3 add components that no page renders until F4, so `astro check` and Biome are their only checks; F4's build and `check-marketing.mjs` then exercise them all.
 
 ## Files this milestone creates
 
@@ -154,7 +162,11 @@ export const DOCS_URL = "/docs/";
 export const STATUS_URL = "https://status.cetra.sh";
 export const CONTACT_EMAIL = "hello@cetra.sh";
 
-/** The cloud (the control plane `app.cetra.sh`, the first cell `eu1.cetra.sh`). */
+/**
+ * The cloud. Sources: the control plane's routes `/signup` and `/login` on `app.cetra.sh`
+ * (llmobs-control `web/src/routes/`), the demo route `/demo` on the first cell `eu1.cetra.sh`
+ * (docs/plans/demo-org/README.md, D187), the status page `status.cetra.sh` (llmobs-control docs).
+ */
 export const CLOUD = {
   signup: "https://app.cetra.sh/signup",
   login: "https://app.cetra.sh/login",
@@ -171,11 +183,13 @@ export const RELEASED = false;
 export const INSTALL_COMMANDS = [
   {
     label: "macOS / Linux",
-    command: "curl -fsSL https://github.com/cetra-ai/cetra/releases/latest/download/install.sh | sh",
+    command:
+      "curl -fsSL https://github.com/cetra-ai/cetra/releases/latest/download/install.sh | sh",
   },
   {
     label: "Docker",
-    command: "docker run -p 8080:8080 -v cetra-data:/data ghcr.io/cetra-ai/cetra",
+    command:
+      "docker run -p 8080:8080 -p 4318:4318 -v cetra-data:/data -e CETRA_PUBLIC_URL=http://localhost:8080 ghcr.io/cetra-ai/cetra:latest",
   },
 ] as const;
 
@@ -216,7 +230,7 @@ export const FOOTER: FooterColumn[] = [
       { label: "Docs", href: DOCS_URL },
       { label: "Quick start", href: "/docs/get-started/quickstart/" },
       { label: "Self-hosting guide", href: "/docs/self-hosting/" },
-      { label: "API reference", href: "/docs/reference/api/" },
+      { label: "API reference", href: "/docs/reference/api/overview/" },
       { label: "GitHub", href: GITHUB_URL },
     ],
   },
@@ -230,9 +244,9 @@ export const FOOTER: FooterColumn[] = [
 ];
 ```
 
-Before writing, check that `/docs/get-started/quickstart/`, `/docs/self-hosting/` and `/docs/reference/api/` exist in `website/src/content/docs/docs/` (as `get-started/quickstart.*`, `self-hosting/index.*`) and in `astro.config.mjs` (`base: "docs/reference/api"`). If one is missing, stop with `QUESTION:`.
+Before writing, check that these docs pages exist: `website/src/content/docs/docs/get-started/quickstart.*`, `website/src/content/docs/docs/self-hosting/index.*`, and `/docs/reference/api/overview/` (linked from `astro.config.mjs`; starlight-openapi serves it). After the F4 build, confirm `website/dist/docs/reference/api/overview/index.html` exists. If one is missing, stop with `QUESTION:`.
 
-Check the Docker command against `website/src/content/docs/docs/self-hosting/install.md`: the image name, port and volume path must be the ones that page uses, without a version tag. If the page differs, use the page's values and report it.
+The Docker command is a short form of the one in `website/src/content/docs/docs/self-hosting/install.md` § Docker (same image, volume and `CETRA_PUBLIC_URL`; the UI port and the OTLP/HTTP port; the `latest` tag, which the release workflow publishes per `docs/plans/n-packaging/08-versions.md`). Use it as written.
 
 4. `website/src/marketing/assets/cetra-logo-on-dark.svg`: copy `assets/brand/cetra-logo-on-dark.svg` byte for byte (`cp`).
 
@@ -270,7 +284,7 @@ export async function fetchStars(repo, { fetchImpl = fetch, timeoutMs = 3000 } =
  */
 export function formatStars(n) {
   if (n < 1000) return String(n);
-  if (n < 1_000_000) return `${trim(n / 1000)}k`;
+  if (Math.round(n / 100) < 10_000) return `${trim(n / 1000)}k`;
   return `${trim(n / 1_000_000)}M`;
 }
 
@@ -300,6 +314,7 @@ export function starsOnce(repo) {
      - 1250 → `"1.3k"`;
      - 12345 → `"12.3k"`;
      - 999949 → `"999.9k"`;
+     - 999950 → `"1M"` (rounds up to the next unit);
      - 1000000 → `"1M"`;
      - 2500000 → `"2.5M"`.
 
@@ -335,12 +350,13 @@ export function starsOnce(repo) {
   --accent-fg: var(--c-teal-ink);
   --link: var(--c-teal-light);
   --focus: var(--c-teal-light);
+  --band-bg: var(--c-ink);
 
   /* Type */
   --font-display: "Space Grotesk Variable", "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
   --font-body: "Inter Variable", "Inter", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo,
-    monospace;
+  --font-mono:
+    "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --text-xs: 0.8125rem;
   --text-sm: 0.9375rem;
   --text-base: 1.0625rem;
@@ -518,7 +534,7 @@ pre {
 ```
 
 10. `website/src/marketing/styles/contrast.test.mjs`. It parses `tokens.css` and checks WCAG contrast.
-    - Export nothing. Implement `parseTokens(css)`: return a `Map` from each `--c-*` name to its hex, taken from lines matching `/^\s*(--c-[a-z0-9-]+):\s*(#[0-9a-f]{6});/i`. Only raw palette tokens are parsed. The pairs below use hex literals where a band uses a literal.
+    - Export nothing. Implement `parseTokens(css)`: return a `Map` from each `--c-*` name to its hex, taken from lines matching `/^\s*(--c-[a-z0-9-]+):\s*(#[0-9a-f]{6});/i`. Only raw palette tokens are parsed. In the table below, a `--c-*` name is looked up in that map and a `#rrggbb` literal is used as it is (the bands in `tokens.css` use those literals).
     - Implement `luminance(hex)` per WCAG 2.2 (sRGB channel `c/255`; `c <= 0.04045 ? c/12.92 : ((c+0.055)/1.055)**2.4`; `0.2126 R + 0.7152 G + 0.0722 B`) and `ratio(a, b) = (L1 + 0.05) / (L2 + 0.05)` with `L1 >= L2`.
     - Test **"text pairs meet 4.5:1"** over this exact table (foreground, background):
 
@@ -537,6 +553,15 @@ pre {
 | `--c-stone-600` | `--c-paper` |
 | `--c-teal` | `--c-paper` |
 | `#ffffff` | `--c-teal` |
+| `--c-teal-light` | `--c-ink-2` |
+| `--c-teal-light` | `--c-ink-3` |
+| `--c-teal-light` | `--c-teal-deep` |
+| `--c-teal-light` | `#0f3b37` |
+| `--c-paper` | `#0f3b37` |
+| `#a7d8d1` | `#0f3b37` |
+| `#a7d8d1` | `#134843` |
+| `--c-stone-600` | `#ecebe9` |
+| `--c-teal` | `#ffffff` |
 
     - Test **"every palette name in the table exists"**: each `--c-*` name above is in the parsed map, so a renamed token fails loudly.
     - Test **"luminance of black and white"**: `luminance("#000000") === 0`, `luminance("#ffffff") === 1`, and `ratio("#000000", "#ffffff")` is 21.
@@ -667,12 +692,14 @@ If `astro check` reports that an SVG import has no `width`/`height` in this Astr
      - Left: `<Logo />`.
      - Middle: `<nav aria-label="Main">` with a `<ul>` of `items`. Links use `color: var(--fg-muted); text-decoration: none; font-size: var(--text-sm)`; hover `color: var(--fg)`. List: `display: flex; gap: var(--space-5); list-style: none; margin: 0; padding: 0`.
      - Right, `display: flex; gap: var(--space-3); align-items: center`:
-       - a GitHub link `<a class="gh" href={GITHUB_URL}>` showing a GitHub mark SVG (16 px, `aria-hidden="true"`, the standard Octicon `mark-github` 16 px path, `fill="currentColor"`), the text `GitHub` and, when `stars !== null`, `<span class="stars">{formatStars(stars)}</span>`. Give it an `aria-label`: "cetra on GitHub" plus `, ${stars} stars` when known.
+       - a GitHub link `<a class="gh" href={GITHUB_URL}>` showing a GitHub mark SVG (16 px, `aria-hidden="true"`, `viewBox="0 0 16 16"`, `fill="currentColor"`, this exact path (GitHub's Octicon `mark-github`, MIT licence): `M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z`), the text `GitHub` and, when `stars !== null`, `<span class="stars">{formatStars(stars)}</span>`. Give it an `aria-label`: "cetra on GitHub" plus `, ${stars} stars` when known.
        - `<a class="login" href={CLOUD.login}>Log in</a>`.
-       - `<Button href={CLOUD.demo} srHint="(needs a free account)">Try the demo</Button>`.
+       - `<Button href={CLOUD.demo} external srHint="(needs a free account)">Try the demo</Button>`.
+
+       The GitHub link also gets `rel="noopener"`.
    - Mobile, below 860 px:
      - hide the `nav` and the login link;
-     - show a `<details class="menu">` with `<summary aria-label="Menu">` (three-bar icon from CSS spans) whose panel lists the same `items` plus "Log in" and "GitHub", absolutely positioned under the header with `background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: var(--space-4)`.
+     - show a `<details class="menu">` with `<summary aria-label="Menu">`. The summary holds three `<span class="bar"></span>` (each `display: block; width: 18px; height: 2px; background: var(--fg); border-radius: 1px`, stacked with `gap: 4px` in a flex column; `list-style: none` and `summary::-webkit-details-marker { display: none }`). The panel is a `ul` listing the same `items` plus "Log in" and "GitHub", with `position: absolute; right: max(16px, env(safe-area-inset-right, 0px)); top: 64px; z-index: 30; min-width: 220px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: var(--space-4)`. The `header-inner` gets `position: relative`.
 
      Above 860 px, hide `details.menu`. No JavaScript.
 
@@ -683,7 +710,7 @@ If `astro check` reports that an SVG import has no `width`/`height` in this Astr
      - `<footer class="site-footer">` (`border-top: 1px solid var(--line); background: var(--c-ink); padding-block: var(--space-8) var(--space-6)`) with `.container` and a grid `grid-template-columns: 1.4fr repeat(3, 1fr); gap: var(--space-6)`. It becomes 2 columns below 860 px and 1 below 520 px.
      - First cell: `<Logo height={24} />`, then a `p.muted` reading "Open-source LLM observability and evaluation. One binary, on your machine or in our cloud."
      - Each column: an `h2` styled as `.eyebrow` (`font-size: var(--text-xs)`; it is an `h2` for heading order) and a `ul` of links (`color: var(--fg-muted)`, no underline, hover `var(--fg)`).
-     - Bottom row, above a `border-top: 1px solid var(--line)` separator: `© {new Date().getFullYear()} sebastiencs. The cetra core is MIT; enterprise features are under the Elastic License 2.0.` and the contact link `<a href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a>`.
+     - Bottom row, above a `border-top: 1px solid var(--line)` separator (the copyright holder is the company sebastiencs, D190): `© {new Date().getFullYear()} sebastiencs. The cetra core is MIT; enterprise features are under the Elastic License 2.0.` and the contact link `<a href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a>`.
 
 6. `layouts/MarketingLayout.astro`:
 
@@ -879,7 +906,7 @@ const { tone = "ink", id, width = "default", pad = "lg", divider = false, labell
    - Default slot: the visual (a scene or screenshot).
    - Markup:
      - `div.chapter` grid with two rows: the text block, then the visual in `div.visual`.
-     - The text block is a grid of `1fr 1fr` above 960 px: left the eyebrow and `h3`/`h2` title, right the lede and the feature list. The title is an `h2` with `id`, `font-size: var(--text-2xl)`.
+     - The text block is a grid of `1fr 1fr` above 960 px: left the eyebrow and the title, right the lede and the feature list. The title is an `h2` with `id`, `font-size: var(--text-2xl)`.
      - Features: a `ul.features` with `list-style: none; padding: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2) var(--space-5); font-size: var(--text-sm); color: var(--fg-muted)`. Each `li` has a 6 px teal dot before it (`::before`, `background: var(--accent); border-radius: 50%`).
    - `div.visual`: `margin-top: var(--space-7); border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-panel); overflow: hidden; position: relative`. Below 720 px it scrolls horizontally (`overflow-x: auto`).
    - A bottom fade over the visual: `::after` with `inset: auto 0 0 0; height: 30%; background: linear-gradient(to bottom, transparent, var(--band-bg)); pointer-events: none`.
@@ -898,7 +925,7 @@ const { tone = "ink", id, width = "default", pad = "lg", divider = false, labell
    - Props `{ commands: readonly { label: string; command: string }[]; note?: string; noteHref?: string; id: string }`. The `id` is unique per page.
    - Markup:
      - `div.copy` with `data-copy`;
-     - when `commands.length > 1`, a `div.tabs[role=tablist]` of `button[role=tab]`, each with `id={`${id}-tab-${i}`}`, `aria-controls={`${id}-panel-${i}`}`, `aria-selected` (`"true"` for index 0) and `tabindex` (`0` for the selected tab, `-1` otherwise);
+     - when `commands.length > 1`, a `div.tabs[role=tablist]` of `button[role=tab][type=button]`, each with `id={`${id}-tab-${i}`}`, `aria-controls={`${id}-panel-${i}`}`, `aria-selected` (`"true"` for index 0) and `tabindex` (`0` for the selected tab, `-1` otherwise);
      - one `div.panel[role=tabpanel]` per command, with `id`, `aria-labelledby` and `hidden` for all but the first. Each panel holds `<pre><code><span class="prompt" aria-hidden="true">$ </span><span class="cmd">{command}</span></code></pre>` and a `button.copy-btn` with `type="button"`, `aria-label="Copy command"`, the text `Copy`, and `data-copy-target` set to the panel id;
      - when `note`, a `p.note` (with a link when `noteHref`).
    - Styles:
@@ -907,19 +934,19 @@ const { tone = "ink", id, width = "default", pad = "lg", divider = false, labell
      - tab buttons: `font: inherit; font-size: var(--text-xs); background: none; border: 0; color: var(--fg-muted); padding: var(--space-1) var(--space-3); border-radius: var(--radius-sm); cursor: pointer`, `[aria-selected=true]` with `background: var(--surface-2); color: var(--fg)`;
      - panel: `display: flex; align-items: center; gap: var(--space-3); padding: var(--space-3) var(--space-4)`;
      - `pre`: `margin: 0; overflow-x: auto; flex: 1; font-size: var(--text-sm); color: var(--c-paper)`;
-     - `.prompt`: `color: var(--c-teal-light)`;
+     - `.prompt`: `color: var(--c-teal-light); user-select: none`;
      - copy button: like a `.btn--secondary` at `--text-xs` (write the CSS here; no class sharing with Button).
    - One `<script>` (Astro bundles and dedupes it):
-     - For every `[data-copy]`, wire the tabs. A click selects the tab: set `aria-selected`, `tabindex` and `hidden` on the panels. ArrowLeft and ArrowRight move between tabs and focus them.
+     - For every `[data-copy]`, wire the tabs. A click selects the tab: set `aria-selected`, `tabindex` and `hidden` on the panels. ArrowLeft and ArrowRight move to the previous and next tab, wrapping around at the ends; Home and End go to the first and last tab. Moving selects the tab and focuses it.
      - For every `.copy-btn`, a click copies the text of `#<target> .cmd` with `navigator.clipboard.writeText`. On success the label becomes "Copied" for 1.5 s. On failure (rejected promise or no `navigator.clipboard`) the label becomes "Press Ctrl+C" and the command's text is selected with `getSelection().selectAllChildren`.
      - The `$ ` prompt is never copied, because only `.cmd` is read.
 
 7. `Tabs.astro`: a generic tab switcher for scenes (used from M2).
    - Props `{ id: string; labels: string[] }`.
-   - Markup: `div.tabs-root[data-tabs]`; a `div[role=tablist]` of buttons as in `CopyCommand` (ids `${id}-tab-${i}`, controls `${id}-panel-${i}`); then `<slot />`. The children are the panels, each authored by the page as `<div role="tabpanel" data-tab-panel>`.
+   - Markup: `div.tabs-root[data-tabs][data-tabs-id={id}]`; a `div[role=tablist]` of `button[role=tab][type=button]` with ids `${id}-tab-${i}`, `aria-selected` and `tabindex` as in `CopyCommand`, and **no** `aria-controls` in the markup; then `<slot />`. The children are the panels, each authored by the page as `<div role="tabpanel" data-tab-panel>`.
    - The script:
-     - on load, for each `[data-tabs]`, takes its direct-descendant `[data-tab-panel]` elements in order and sets `id`, `aria-labelledby` and `hidden` (not the first) on each;
-     - wires clicks and arrow keys like `CopyCommand`;
+     - on load, for each `[data-tabs]`, takes its direct-descendant `[data-tab-panel]` elements in order and sets `id` (`${id}-panel-${i}`, with the root's id prefix stored as `data-tabs-id`), `aria-labelledby` and `hidden` (not the first) on each, and sets `aria-controls` on the matching tab button;
+     - wires clicks and keys exactly like `CopyCommand` (wrap-around arrows, Home, End);
      - if the panel count differs from the label count, logs `console.error("Tabs <id>: N labels, M panels")` and leaves every panel visible.
    - Styles for the tab buttons as in `CopyCommand`, at `--text-sm`.
 
@@ -946,63 +973,73 @@ const { tone = "ink", id, width = "default", pad = "lg", divider = false, labell
 - `website/README.md`
 - `docs/website/00-design.md` (§7)
 - `docs/plans/website/README.md` (status)
+- `docs/website/00-design.md` (§10, M1 row)
 
 **Steps**
 
 1. `website/src/pages/styleguide.astro`: `<MarketingLayout title="Style guide" description="The cetra marketing components and colour bands, for review." route="/styleguide/">`. Its content, in order:
    1. A `Section tone="ink"` with a `SectionHeading level={1} eyebrow="Style guide" title="cetra marketing components" lede="Every component and band of the marketing site."`. Then a row of `Button`s: primary `lg`, secondary `lg`, ghost; all `href="/docs/"`.
-   2. A `Section tone="raised" divider` with `SectionHeading title="Type scale"` and one line in each size token (`--text-hero` to `--text-xs`), each labelled with its token name in `.eyebrow`.
+   2. A `Section tone="raised" divider` with `SectionHeading title="Type scale"` and one `<p>` in each size token (`--text-hero` to `--text-xs`, set with an inline `style`), each preceded by a `<p class="eyebrow">` with the token name. No heading tags in this list.
    3. A `Section tone="ink"` with a `CopyCommand id="install" commands={INSTALL_COMMANDS} note="What does this run?" noteHref="/docs/self-hosting/install/"`.
    4. A `Section tone="teal" divider` with a `Chapter eyebrow="Chapter" title="A chapter title" lede="One sentence that says what this part of the product does." features={["First feature", "Second feature", "Third feature", "Fourth feature"]}`. Its visual is a `div` 320 px high showing the text "Scene area".
-   5. A `Section tone="paper"` with three `Card`s in a 3-column grid (`grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: var(--space-5)`): one with `href="/docs/"`, one without, one `tone="outline"`.
+   5. A `Section tone="paper"` with `SectionHeading title="Cards"` (an `h2`) and three `Card`s with titles in a 3-column grid (`grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: var(--space-5)`): one with `href="/docs/"`, one without, one `tone="outline"`.
    6. A `Section tone="ink"` with a `Tabs id="demo-tabs" labels={["One", "Two"]}` and two panels with one paragraph each.
    7. A colour swatch grid of every raw `--c-*` token, each square labelled with its name and hex in `.eyebrow`. The list is hard-coded in the page, matching `tokens.css`.
 
-   Every heading level must follow on from the one before (one `h1`, then `h2`s, then `h3`s).
+   Every heading level must follow on from the one before (one `h1`, then `h2`s, then `h3`s). The footer's column titles are `h2`s, which is valid after any heading.
 
 2. `website/src/marketing/routes.mjs` already lists `/styleguide/` (F1). Nothing to add.
 
-3. `website/scripts/check-marketing.mjs`. It checks every route in `MARKETING_ROUTES` after `astro build`, prints `route: message` per finding, and exits 1 when there is any.
-   - It exports `checkPage(route, html, { noindex, distFiles })` (returns an array of strings) and `pageWeight(html, readAsset)`. `main` runs only when the file is the entry point (`import.meta.main`, or `process.argv[1] === fileURLToPath(import.meta.url)` if `import.meta.main` is undefined in Node 26; check, and use the one that works).
-   - `distFiles` is a `Set` of every file path under `website/dist`, relative, with `/` separators and a leading `/` (e.g. `/docs/index.html`, `/_astro/x.css`).
-   - `checkPage` reports, each as one string:
-     1. `missing <html lang="en">` when absent.
-     2. `title missing` when `<title>` is empty.
-     3. `description missing` or `description is N characters, the limit is 160`. The value is from `<meta name="description" content="…">`, with HTML entities `&amp; &lt; &gt; &quot; &#39;` decoded before counting.
-     4. `canonical must be https://cetra.sh<route>` unless `<link rel="canonical" href="…">` equals it.
-     5. `noindex expected` when `noindex` is true and there is no `<meta name="robots" content="noindex">`; `noindex not allowed` when false and there is one.
+3. `website/scripts/check-marketing.mjs`. It checks the built marketing pages, prints `route: message` per finding, and exits 1 when there is any. Before writing the regular expressions, build once (`pnpm --dir website exec astro build`) and read `website/dist/styleguide/index.html`. Astro adds `data-astro-cid-*` attributes and may order attributes differently from this plan, and the checks must work on that real output.
+   - **Parsing helpers** (exported, unit-tested):
+     - `stripBlocks(html)` removes `<script…>…</script>`, `<style…>…</style>` and `<!-- … -->`.
+     - `tags(html, name)` returns, for every opening tag `<name …>` (case-insensitive, `/<name\b([^>]*)>/gi`), a `Map` of its attributes. Attributes are parsed with `/([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g`; names are lower-cased, a bare attribute has the value `""`, and values are entity-decoded.
+     - `decode(text)` decodes `&amp; &lt; &gt; &quot; &#34; &#39; &#x27;` and any `&#NNN;` / `&#xHH;`.
+     - `elements(html, name)` returns `{ attrs, inner }` for every `<name …>inner</name>` (non-greedy, case-insensitive; used for `a`, `button`, `h1`–`h6`).
+     - `textOf(inner)` removes tags, decodes, and collapses whitespace.
+   - **`checkPage(route, html, { noindex, distFiles = new Set() })`** returns an array of strings. It runs these checks on `stripBlocks(html)`, except check 13, which uses the full HTML:
+     1. `missing lang="en"` unless the `html` tag has `lang="en"`.
+     2. `title missing` when the `<title>` text is empty.
+     3. `description missing`, or `description is N characters, the limit is 160`. The value is the decoded `content` of the `meta` tag whose `name` is `description`.
+     4. `canonical must be https://cetra.sh<route>` unless the `link` tag with `rel="canonical"` has exactly that `href`.
+     5. `noindex expected` when `noindex` is true and no `meta` tag has `name="robots"` with a `content` containing `noindex`; `noindex not allowed` when false and one has.
      6. `expected one h1, found N`.
-     7. `heading level skipped: hA then hB` when a heading is more than one level deeper than the previous heading, in document order.
-     8. `image without alt` for each `<img` without an `alt=` attribute (`alt=""` is allowed).
-     9. `link without a name: <href>` for each `<a …>…</a>` whose inner text, after removing tags and whitespace, is empty and that has no `aria-label`. An `<img alt="x">` inside counts as a name.
-     10. `button without a name` likewise for `<button`.
-     11. `broken internal link: <href>` for each `href` that starts with `/` and not `//`. Strip any `#…` and `?…`. A path ending in `/` must have `<path>index.html` in `distFiles`; any other path must be in `distFiles` itself. Skip `href="/"` while `LAUNCHED` is false: the holding page is at `/` and has no anchors.
-     12. `href="#" not allowed`.
+     7. `heading level skipped: hA then hB` when a heading is more than one level deeper than the previous heading, in document order. Going back up any number of levels is fine.
+     8. `image without alt` for each `img` tag without an `alt` attribute (`alt=""` is fine).
+     9. `link without a name: <href>` for each `a` element whose `textOf(inner)` is empty, that has no `aria-label`, and contains no `img` with a non-empty `alt`.
+     10. `button without a name` likewise for `button` elements (text or `aria-label`).
+     11. `broken internal link: <href>`, for the `href` of `a` elements only (not `link`), when it starts with `/` and not `//`. Strip any `#…` and `?…`. A path ending in `/` must have `<path>index.html` in `distFiles`; any other path must be in `distFiles` itself. While `LAUNCHED` is false, skip `href="/"` and hrefs starting with `/#`: the holding page is at `/` and has no anchors.
+     12. `href="#" not allowed` for an `a` element whose `href` is exactly `#`.
+     13. `banned word: <word>` for each match in the visible text (`textOf` of the stripped `body`) of `/\b(seamless(ly)?|blazing(ly)?|effortless(ly)?|powerful|simply)\b/gi`, and `write cetra in lower case` for each match of `/\b(Cetra|CETRA)\b/g` (website/STYLE.md).
+   - **`pageWeight(html, readAsset)`** returns the bytes of the HTML plus every `link` tag with `rel="stylesheet"` and an `href` starting with `/_astro/`, and every `script` tag with a `src` starting with `/_astro/`, each read through `readAsset(path)` (returns a `Buffer`). Fonts are not counted: CSS loads them, nothing links them.
+   - **`listedRoutes(distFiles, launched)`** returns the routes of every `index.html` in `distFiles` that is not under `/docs/`, minus `/` while `launched` is false (the holding page). The route of `/x/y/index.html` is `/x/y/`.
+   - **`main`** runs when `import.meta.main` is true (Node 26):
+     1. Build `distFiles` by walking `website/dist` (relative paths with `/` separators and a leading `/`).
+     2. For each route in `listedRoutes(distFiles, LAUNCHED)` that is not in `MARKETING_ROUTES`: finding `unlisted marketing page`.
+     3. For each route in `MARKETING_ROUTES`: read `dist<route>index.html` (missing → finding `page not built`), run `checkPage` with `noindex: isNoindex(route)` and `distFiles`, and check the weight against `MAX_PAGE_BYTES = 350_000` (finding `page weighs N bytes, the cap is 350000`).
+     4. Print all findings as `route: message` and exit 1 if there are any. Otherwise print `check-marketing: N pages ok`.
 
-     Parse with regular expressions on the built HTML. Strip `<script>…</script>` and `<style>…</style>` blocks before checks 6–11 (keep them for the weight).
-   - `pageWeight(html, readAsset)` returns the total bytes of the HTML plus every `<link rel="stylesheet" href="/_astro/…">` and every `<script … src="/_astro/…">`, read through `readAsset(path)` (returns a `Buffer`). Fonts are not counted (`.woff2` is loaded by CSS, not linked).
-   - `main`:
-     1. Build `distFiles` by walking `website/dist`.
-     2. For each route in `MARKETING_ROUTES`: read `dist<route>index.html` (missing → finding `page not built`), run `checkPage` with `noindex: isNoindex(route)`, and check the weight against `MAX_PAGE_BYTES = 350_000` (finding `page weighs N bytes, the cap is 350000`).
-     3. Print all findings and exit 1 if there are any. Otherwise print `check-marketing: N pages ok`.
-
-4. `website/scripts/check-marketing.test.mjs` (node:test). Build each case from a minimal valid page, a template string helper `page({ ... })` producing `<html lang="en"><head><title>T</title><meta name="description" content="D"><link rel="canonical" href="https://cetra.sh/x/"><meta name="robots" content="noindex"></head><body><h1>A</h1></body></html>` with overrides:
+4. `website/scripts/check-marketing.test.mjs` (node:test). Use a helper `page(overrides)` building a valid page from parts (lang, title, description, canonical, robots, body), by default `<html lang="en"><head><title>T</title><meta name="description" content="D"><link rel="canonical" href="https://cetra.sh/x/"><meta name="robots" content="noindex"></head><body><h1>A</h1></body></html>`. Call `checkPage("/x/", html, { noindex: true, distFiles })`. Cases:
    - **"a valid page has no findings"**;
+   - **"attributes in another order and data-astro-cid attributes are fine"**: `<html data-astro-cid-x lang="en">`, `<meta content="D" name="description">`, `<link href="https://cetra.sh/x/" rel="canonical">`;
    - **"missing lang"**, **"empty title"**, **"missing description"**;
-   - **"description of 161 characters"** (and 160 passes; `&amp;` counts as one character);
+   - **"description of 161 characters"**; 160 passes; `&amp;` and `&#x27;` count as one character each;
    - **"wrong canonical"**;
    - **"noindex expected"** and **"noindex not allowed"**;
    - **"two h1"** and **"no h1"**;
-   - **"h2 then h4 is a skip"** and **"h3 then h2 is fine"**;
-   - **"img without alt"** and **"img with empty alt is fine"**;
+   - **"h2 then h4 is a skip"**, and **"h3 then h2 is fine"**;
+   - **"img without alt"**, and **"img with empty alt is fine"**;
    - **"empty link"**, **"link named by aria-label"**, **"link named by an img alt"**;
    - **"empty button"**;
    - **"broken internal link"**: `/nope/` with `distFiles` lacking `/nope/index.html`;
-   - **"internal link ok"**: `/docs/` with `/docs/index.html` present; `/docs/#x` ok;
-   - **"external link not checked"**: `https://example.com/` and `//cdn` produce no finding;
+   - **"internal link ok"**: `/docs/` with `/docs/index.html` present, and `/docs/#x` also passes;
+   - **"holding page links skipped before launch"**: `/` and `/#product` give no finding;
+   - **"external, mailto and in-page links not checked"**: `https://example.com/`, `//cdn.example.com/x`, `mailto:a@b.c` and `#main` give no finding;
    - **"href # not allowed"**;
-   - **"script and style content ignored"**: an `<h1>` inside `<script>` does not count;
-   - **"page weight sums html, css and js"**: with a fake `readAsset` returning buffers of 100 and 200 bytes, the weight is the HTML length plus 300.
+   - **"banned word"**: `<p>A powerful tool</p>` gives `banned word: powerful`; **"capitalised name"**: `<p>Cetra runs</p>` gives `write cetra in lower case`;
+   - **"script and style content ignored"**: an `<h1>` inside `<script>` does not count, and `powerful` inside `<style>` is not reported;
+   - **"page weight sums html, css and js"**: a fake `readAsset` returns 100- and 200-byte buffers for one stylesheet and one script; the weight is the HTML's byte length plus 300;
+   - **"listed routes"**: `listedRoutes(new Set(["/index.html", "/styleguide/index.html", "/docs/index.html", "/docs/a/index.html", "/404.html"]), false)` deep-equals `["/styleguide/"]`, and with `true` deep-equals `["/", "/styleguide/"]`.
 
 5. `website/package.json`: append ` && node scripts/check-marketing.mjs` to the end of the `check` script, after `astro build`.
 
@@ -1018,10 +1055,12 @@ const { tone = "ink", id, width = "default", pad = "lg", divider = false, labell
 
    > **Accessibility and weight:** `check-marketing.mjs` checks every built marketing page: one `h1`, no skipped heading level, `alt` on images, a name on every link and button, metadata, `noindex`, internal links, and a 350 KB cap without fonts. `contrast.test.mjs` checks WCAG AA contrast for every text colour pair of the tokens. CI never downloads a browser (`website/README.md`), so Lighthouse and axe are not used (M1 plan).
 
-8. `docs/plans/website/README.md`: set M1's status to `done` (the implementer writes `done (F1–F4)`).
+8. `docs/website/00-design.md` §10, the M1 row, "Delivers" cell: replace it with "Marketing layout (header, footer, release banner), design tokens, fonts, the bands and the rim motif, base components (buttons, copy-command box, tabs, section and chapter layouts, card), the marketing page checks (structure, metadata, `noindex`, internal links, weight, contrast). A style page at `/styleguide/` (noindex) to review the look. The docs already link back to `/` through Starlight's site title; the data-file checks come with their data in M3–M5."
+
+9. `docs/plans/website/README.md`: set M1's status to `done (F1–F4)`.
 
 **Tests**
-- `check-marketing.test.mjs`: the 22 cases in step 4.
+- `check-marketing.test.mjs`: every case in step 4.
 - The real run: `check-marketing: 1 pages ok` after the build.
 
 **Done when**
