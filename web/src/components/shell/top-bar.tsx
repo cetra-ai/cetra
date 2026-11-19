@@ -6,7 +6,7 @@ import { AlertBell } from "@/components/shell/alert-bell";
 import { IngestDot } from "@/components/shell/ingest-dot";
 import { pageOf } from "@/components/shell/page-crumb";
 import { ProjectSwitcher } from "@/components/shell/project-switcher";
-import { TopBarSlotTarget } from "@/components/shell/top-bar-slot";
+import { TopBarSlotTarget, TopBarStartTarget } from "@/components/shell/top-bar-slot";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { UserMenu } from "@/components/user-menu";
 import { PRODUCT_NAME } from "@/product";
@@ -27,6 +27,7 @@ export function TopBar() {
       : pageOf(pathname, project.params.org, project.params.project);
   return (
     <header className="flex h-[40px] shrink-0 items-center gap-2 border-b px-3">
+      <TopBarStartTarget />
       <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5">
         <Link
           to="/"

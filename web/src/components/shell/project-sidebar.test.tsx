@@ -21,13 +21,26 @@ function sidebar(): HTMLElement {
   return document.querySelector<HTMLElement>('[data-slot="sidebar"][data-state]') as HTMLElement;
 }
 
-it("opens the navigation from the page on a narrow screen", async () => {
+it("opens the navigation from the top bar's toggle on a narrow screen", async () => {
   window.innerWidth = 375;
   const { user } = await renderApp("/acme/support-bot/traces");
-  const triggers = await screen.findAllByRole("button", { name: "Toggle Sidebar" });
+  const trigger = await screen.findByRole("button", { name: "Toggle Sidebar" });
   expect(screen.queryByRole("link", { name: "Dashboard" })).not.toBeInTheDocument();
-  await user.click(triggers[0] as HTMLElement);
+  await user.click(trigger);
   expect(await screen.findByRole("link", { name: "Dashboard" })).toBeInTheDocument();
+});
+
+it("puts the one sidebar toggle at the top bar's far left", async () => {
+  await renderApp("/acme/support-bot/traces");
+  const trigger = await screen.findByRole("button", { name: "Toggle Sidebar" });
+  const header = trigger.closest("header");
+  expect(header).not.toBeNull();
+  // Before the breadcrumb, which starts with the product mark.
+  const breadcrumb = within(header as HTMLElement).getByRole("navigation", { name: "Breadcrumb" });
+  expect(
+    trigger.compareDocumentPosition(breadcrumb) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  expect(screen.getAllByRole("button", { name: "Toggle Sidebar" })).toHaveLength(1);
 });
 
 it("groups the pages under their section headings", async () => {
