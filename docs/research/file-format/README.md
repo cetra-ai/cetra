@@ -565,12 +565,11 @@ Two gaps remain:
 | wildchat | Real users chatting with ChatGPT | 594 | 592 | **584** |
 
 - **On agent data** Strata has the smallest files, lookups about 2× faster than Parquet's, and search 10–32× faster.
-- **On chat data**, with many short conversations, it loses:
-  - files are the same size as the others';
-  - a full payload scan takes 1.4× Parquet's time;
-  - `list_llm_1h` takes 1.45× Parquet's time.
-
-  This is the per-chunk decode cost that is still open.
+- **On chat data**, with many short conversations, Strata lost at first. A full payload scan took 1.4× Parquet's time, and `list_llm_1h` 1.45×.
+  - Most of that was arrow's per-value UTF-8 check, which is slow on non-ASCII text.
+  - Checking with `simdutf8` brought the scan to 1.14× Parquet's time and `list_llm_1h` to 0.92×.
+  - Agent-data scans also got 6–22% faster.
+  - Files stay the same size as the others'.
 
 ## What each format gets right and wrong
 

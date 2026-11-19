@@ -139,15 +139,38 @@ fn decode_varbin(
     // Invariant: the offsets start at 0 and never decrease, and the total fits the body, so
     // `OffsetBuffer::new` cannot panic.
     let offsets = OffsetBuffer::new(ScalarBuffer::from(offsets_of(&lens, "varbin offsets", at)?));
-    let values = Buffer::from_vec(bytes.to_vec());
     match dt {
-        DataType::Utf8 => {
-            // `try_new` checks the UTF-8 of every value and the character boundaries.
+        DataType::Utf8 if bytes.is_ascii() => {
+            // `try_new` checks the UTF-8 and the character boundaries again, fast on ASCII.
+            let values = Buffer::from_vec(bytes.to_vec());
             let array =
                 StringArray::try_new(offsets, values, nulls).map_err(|_| corrupt("varbin utf8"))?;
             Ok(Arc::new(array))
         }
+        DataType::Utf8 => {
+            // `StringArray::try_new` would check the bytes with `std::str::from_utf8`, several
+            // times slower than `simdutf8` on non-ASCII text. The bytes are checked once here,
+            // and `str::get` checks that each value starts and ends on a character boundary.
+            let text = simdutf8::basic::from_utf8(bytes).map_err(|_| corrupt("varbin utf8"))?;
+            let mut builder = StringBuilder::with_capacity(n, total);
+            for (i, w) in offsets.windows(2).enumerate() {
+                if nulls.as_ref().is_some_and(|v| v.is_null(i)) {
+                    builder.append_null();
+                    continue;
+                }
+                let (Some(&a), Some(&b)) = (w.first(), w.get(1)) else {
+                    return Err(corrupt("varbin offsets"));
+                };
+                let (Ok(a), Ok(b)) = (usize::try_from(a), usize::try_from(b)) else {
+                    return Err(corrupt("varbin offsets"));
+                };
+                let value = text.get(a..b).ok_or_else(|| corrupt("varbin utf8"))?;
+                builder.append_value(value);
+            }
+            Ok(Arc::new(builder.finish()))
+        }
         DataType::Binary => {
+            let values = Buffer::from_vec(bytes.to_vec());
             let array = BinaryArray::try_new(offsets, values, nulls)
                 .map_err(|_| corrupt("varbin values"))?;
             Ok(Arc::new(array))
@@ -821,6 +844,69 @@ mod tests {
         assert_eq!(decoded.data_type(), array.data_type());
         assert_same(decoded.as_ref(), array.as_ref());
         chunk
+    }
+
+    /// Encodes `values` as a Binary `Varbin` chunk and decodes the body as Utf8.
+    fn varbin_as_utf8(values: Vec<Option<&[u8]>>) -> Result<ArrayRef> {
+        let array: ArrayRef = Arc::new(BinaryArray::from(values));
+        let chunk = encode_chunk(&array, None, &Config::default()).unwrap();
+        assert_eq!(chunk.encoding, Encoding::Varbin);
+        let entry = BlockEntry {
+            first_row: 0,
+            n_rows: array.len() as u32,
+            segment_offset: 8,
+            segment_len: chunk.body.as_ref().map_or(0, |b| b.len() as u32 + 16),
+            encoding: chunk.encoding,
+            flags: chunk.flags,
+            const_len: chunk.const_len,
+            min: chunk.min,
+            max: chunk.max,
+        };
+        let field = Field::new("c", DataType::Utf8, true);
+        decode_chunk(&entry, chunk.body.as_deref(), &field, None)
+    }
+
+    #[test]
+    fn varbin_utf8_keeps_values_and_nulls() {
+        let decoded = varbin_as_utf8(vec![
+            Some("é".as_bytes()),
+            None,
+            Some(&b"x"[..]),
+            Some(&b""[..]),
+        ])
+        .unwrap();
+        let expected: ArrayRef = Arc::new(StringArray::from(vec![
+            Some("é"),
+            None,
+            Some("x"),
+            Some(""),
+        ]));
+        assert_same(decoded.as_ref(), expected.as_ref());
+    }
+
+    #[test]
+    fn varbin_utf8_rejects_invalid_bytes() {
+        let err = varbin_as_utf8(vec![Some(&b"ok"[..]), Some(&b"\xff"[..])]).unwrap_err();
+        assert!(matches!(
+            err,
+            StrataError::Corrupt {
+                what: "varbin utf8",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn varbin_utf8_rejects_a_value_that_splits_a_character() {
+        // The bytes of "é" are valid together, but each value holds half of the character.
+        let err = varbin_as_utf8(vec![Some(&b"\xc3"[..]), Some(&b"\xa9"[..])]).unwrap_err();
+        assert!(matches!(
+            err,
+            StrataError::Corrupt {
+                what: "varbin utf8",
+                ..
+            }
+        ));
     }
 
     /// A List(Utf8) array with the field the writer's schema gives it, from rows that are

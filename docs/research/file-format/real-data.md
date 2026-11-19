@@ -46,16 +46,17 @@ The bench had one real dataset: `swe`, from 2 shards of `nebius/SWE-agent-trajec
 
 | Query | openswe st | pq best | vx_compact | toucan st | pq best | vx_compact | wildchat st | pq best | vx_compact |
 |---|---|---|---|---|---|---|---|---|---|
-| count_errors_6h | **0.76** | 2.31 | 1.84 | **0.93** | 2.27 | 2.09 | **0.88** | 2.28 | 2.12 |
-| model_rollup_day | **3.46** | 5.19 | 4.84 | 11.04 | 10.95 | **8.09** | 16.10 | 15.78 | **12.45** |
-| list_llm_1h | **4.32** | 6.63 | 6.36 | 29.82 | 24.27 | **10.55** | 34.73 | 23.95 | **14.60** |
-| user_filter | **0.86** | 2.70 | 2.94 | **0.88** | 2.83 | 3.99 | **2.54** | 5.05 | 6.40 |
-| metadata_filter | **0.78** | 3.72 | n/a | **2.26** | 10.23 | n/a | **3.41** | 16.71 | n/a |
-| trace_lookup_full | **5.90** | 11.19 | 35.61 | **5.60** | 12.19 | 22.70 | **4.89** | 12.24 | 28.01 |
-| trace_lookup_light | **0.99** | 3.73 | 3.74 | **0.99** | 4.81 | 5.30 | **0.99** | 5.53 | 6.16 |
-| substring_input | **11.66** | 266.86 | 172.29 | **41.71** | 168.63 | 98.73 | **62.73** | 312.04 | 204.27 |
-| scan_all_payload | 290.82 | **286.10** | 313.07 | 316.17 | 281.04 | **205.34** | 768.31 | 538.04 | **404.95** |
+| count_errors_6h | **0.80** | 2.31 | 1.84 | **0.86** | 2.27 | 2.09 | **0.88** | 2.28 | 2.12 |
+| model_rollup_day | **3.05** | 5.19 | 4.84 | 11.18 | 10.95 | **8.09** | 15.22 | 15.78 | **12.45** |
+| list_llm_1h | **4.27** | 6.63 | 6.36 | 26.99 | 24.27 | **10.55** | 22.02 | 23.95 | **14.60** |
+| user_filter | **0.75** | 2.70 | 2.94 | **0.82** | 2.83 | 3.99 | **2.45** | 5.05 | 6.40 |
+| metadata_filter | **0.70** | 3.72 | n/a | **2.16** | 10.23 | n/a | **3.10** | 16.71 | n/a |
+| trace_lookup_full | **5.66** | 11.19 | 35.61 | **5.39** | 12.19 | 22.70 | **4.66** | 12.24 | 28.01 |
+| trace_lookup_light | **0.89** | 3.73 | 3.74 | **0.96** | 4.81 | 5.30 | **0.99** | 5.53 | 6.16 |
+| substring_input | **11.65** | 266.86 | 172.29 | **39.89** | 168.63 | 98.73 | **67.21** | 312.04 | 204.27 |
+| scan_all_payload | **237.99** | 286.10 | 313.07 | 297.69 | 281.04 | **205.34** | 611.49 | 538.04 | **404.95** |
 
+- The Strata columns are measured after the UTF-8 change below. `list_llm_1h` on wildchat comes from a 60-run rerun after the ASCII fast path. Parquet and Vortex come from the first run.
 - "pq best" is the fastest of pq_default, pq_tuned and pq_cetra for each query.
 - Vortex cannot run `metadata_filter` (it can't push down `map['key']`).
 
@@ -77,14 +78,47 @@ Cold trace lookup (mean per trace over 20 ids):
 
 ## What the new data shows
 
-- **The agent results hold on other frameworks and tasks.** On openswe and toucan, Strata has the smallest files, the fastest lookups (about 2× faster than Parquet, 3–6× faster than Vortex compact) and the fastest search (10–32× Parquet, 2.4–12× Vortex compact).
-- **Chat traffic is Strata's weak case.** With many short conversations:
-  - files are only as small as the others;
-  - `scan_all_payload` takes 1.4× Parquet's time and 1.9× Vortex compact's;
-  - `list_llm_1h` takes 1.45× Parquet's time and 2.4× Vortex compact's.
+- **The agent results hold on other frameworks and tasks.** On openswe and toucan, Strata has:
+  - the smallest files;
+  - the fastest lookups: about 2× faster than Parquet and 3–6× faster than Vortex compact;
+  - the fastest search: 10–32× faster than Parquet and 2.4–12× faster than Vortex compact.
+- **Chat traffic was Strata's weak case.** The first run had `scan_all_payload` at 1.4× Parquet's time on wildchat, and `list_llm_1h` at 1.45×. The cause was UTF-8 checking, fixed below. What remains:
+  - files are only as small as the others';
+  - the full scan takes 1.14× Parquet's time and 1.5× Vortex compact's;
+  - Vortex compact still wins `list_llm_1h` and `model_rollup_day` on toucan and wildchat. This matches `light`, where its narrow-column decode is also cheaper.
 
-  The cost is per value: wildchat has 18× openswe's spans for about the same payload volume. This is the open per-chunk decode cost from [timeseries.md](timeseries.md) gap 4.
-- **Vortex compact wins `list_llm_1h` and `model_rollup_day` on every dataset with many spans.** That matches `light`, and the cause is the same: its narrow-column decode is cheaper.
+## UTF-8 checking
+
+The first wildchat profile of `scan_all_payload` spent 38% of the time checking the UTF-8 of each value. For `list_llm_1h` the figure was 34%.
+
+**Why it is slow.**
+- Every safe arrow constructor of a string array checks with `std::str::from_utf8`. That is fast on ASCII but several times slower than SIMD on other text, and WildChat is multilingual.
+- Parquet avoids the cost: its reader checks each page in one pass with `simdutf8`.
+
+**The change.** `unsafe` stays out, so a value can skip arrow's check only by being appended as a `&str`, and that copies it.
+- **Payload columns** ([strata/src/payload/read.rs](strata/src/payload/read.rs) `build_string_views`):
+  - an ASCII value that lies in one frame is still a zero-copy view into the frame;
+  - every other value is checked with `simdutf8` and copied into blocks of at most 256 KiB.
+- **Narrow `Varbin` chunks** ([strata/src/narrow/decode.rs](strata/src/narrow/decode.rs) `decode_varbin`):
+  - an all-ASCII chunk still goes through `StringArray::try_new`;
+  - any other chunk is checked once with `simdutf8`, and each value is sliced with `str::get`, which checks character boundaries.
+
+**A memory trap.** Arrow's `StringViewBuilder::append_block` closes the block being filled. Adding shared frame bodies as they came therefore left the copy blocks two-thirds empty: 16.5 GB of capacity held 5.4 GB of data. Peak memory doubled, to 3.9 GB on payload and 7.5 GB on wildchat. The reader now adds every shared body before it appends any value.
+
+**Results** (Strata `scan_all_payload`, min of 5 runs, before → after, with peak RSS):
+
+| Dataset | Before | After | Peak RSS before | Peak RSS after |
+|---|---|---|---|---|
+| wildchat | 773 ms | 621 ms | 2.85 GB | 3.27 GB |
+| openswe | 281 ms | 243 ms | 3.34 GB | 3.39 GB |
+| swe | 288 ms | 226 ms | 3.00 GB | 3.02 GB |
+| toucan | 312 ms | 294 ms | 1.58 GB | 1.65 GB |
+| payload | 354 ms | 356 ms | 2.03 GB | 1.98 GB |
+
+Other results:
+- `list_llm_1h` on wildchat went from 32.2 ms to 22.0 ms (60 runs each, old and new binaries alternating). On `light` (18.0 → 17.7 ms) and `payload` (18.7 → 19.1 ms) it did not change.
+- Every other Strata query on the six datasets stayed within run-to-run noise.
+- Wildchat's peak memory rose 15%, because its non-ASCII values are now copied instead of shared.
 
 ## Reproduce
 

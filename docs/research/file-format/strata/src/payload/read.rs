@@ -497,15 +497,31 @@ pub(crate) fn build_values(
     Ok(array)
 }
 
-/// Bytes of one data block of a `Utf8View` array built by [`build_string_views`]: small
-/// enough that a block is still in cache when its values are checked.
+/// Largest data block of a `Utf8View` array built by [`build_string_views`] for the values
+/// it copies.
 const VIEW_BLOCK_BYTES: usize = 256 << 10;
 
+/// How [`build_string_views`] adds one row.
+enum ViewRow<'a> {
+    Null,
+    /// A view into the shared frame body with this block id: (block, start, length).
+    Shared(u32, u32, u32),
+    /// Bytes consecutive in one frame body, copied.
+    Span(&'a [u8]),
+    /// A value rebuilt from these chunk ids, copied.
+    Chunks(&'a [u32]),
+}
+
 /// The values of `ids` (one entry per row, `None` for a null row) of a Utf8 column, as a
-/// `Utf8View` array. A value whose chunks are consecutive in one frame is a view into that
-/// frame's body, which the array then shares. Other values are copied into blocks of about
-/// `VIEW_BLOCK_BYTES`, and checked as UTF-8 when their view is added, right after their block
-/// is filled.
+/// `Utf8View` array. An ASCII value whose chunks are consecutive in one frame is a view into
+/// that frame's body, which the array then shares; arrow checks its UTF-8 when the view is
+/// added. Other values are rebuilt from their chunks, checked with `simdutf8`, and copied
+/// into blocks of at most `VIEW_BLOCK_BYTES`: arrow's own check of a view is
+/// `std::str::from_utf8`, fast on ASCII but several times slower than `simdutf8` on other
+/// text.
+///
+/// The shared bodies are all added before any value: adding a block closes the block being
+/// filled, so adding them as they come would leave most of each copy block empty.
 fn build_string_views(
     header: &PayloadHeader,
     frames: &FrameBodies,
@@ -523,111 +539,78 @@ fn build_string_views(
     let mut builder = StringViewBuilder::with_capacity(ids.len());
     // The block id of each frame body the array shares, by the body's address.
     let mut shared: HashMap<*const u8, u32> = HashMap::new();
-    // The bytes of the copied values not copied yet.
-    let mut left = 0usize;
-    for row in ids.iter().flatten() {
-        if reader.span(row)?.is_none() {
-            for &id in row {
-                left += reader.chunk(id)?.len();
-            }
-        }
-    }
-    let mut block: Vec<u8> = Vec::new();
-    // The rows since the first value copied into the block being filled, in order: `None`
-    // for a null row. While it is empty, rows are added to the array at once.
-    let mut rows: Vec<Option<View>> = Vec::new();
-    let append = |builder: &mut StringViewBuilder, row: Option<(u32, u32, u32)>| -> Result<()> {
-        match row {
-            Some((block, start, len)) => builder
-                .try_append_view(block, start, len)
-                .map_err(|_| corrupt("payload utf8")),
-            None => {
-                builder.append_null();
-                Ok(())
-            }
-        }
-    };
-    let flush = |block: &mut Vec<u8>,
-                 rows: &mut Vec<Option<View>>,
-                 builder: &mut StringViewBuilder|
-     -> Result<()> {
-        if block.len() >= u32::MAX as usize {
-            return Err(corrupt("payload size"));
-        }
-        let id = builder.append_block(Buffer::from_vec(std::mem::take(block)));
-        for row in rows.drain(..) {
-            let row = row.map(|view| match view {
-                View::Copied(start, len) => (id, start, len),
-                View::Shared(block, start, len) => (block, start, len),
-            });
-            append(builder, row)?;
-        }
-        Ok(())
-    };
+    let mut plan: Vec<ViewRow<'_>> = Vec::with_capacity(ids.len());
+    // The bytes of the copied values.
+    let mut copied = 0usize;
     for row in ids {
         let Some(row) = row else {
-            if rows.is_empty() {
-                append(&mut builder, None)?;
-            } else {
-                rows.push(None);
-            }
+            plan.push(ViewRow::Null);
             continue;
         };
-        if let Some((body, range)) = reader.span(row)? {
-            let id = match shared.get(&body.as_ptr()) {
-                Some(&id) => id,
-                None => {
-                    if body.len() >= u32::MAX as usize {
-                        return Err(corrupt("payload size"));
-                    }
-                    let id = builder.append_block(body.clone());
-                    shared.insert(body.as_ptr(), id);
-                    id
-                }
-            };
-            let (start, len) = (to_u32(range.start)?, to_u32(range.len())?);
-            if rows.is_empty() {
-                append(&mut builder, Some((id, start, len)))?;
-            } else {
-                rows.push(Some(View::Shared(id, start, len)));
+        let Some((body, range)) = reader.span(row)? else {
+            for &id in row {
+                copied += reader.chunk(id)?.len();
             }
+            plan.push(ViewRow::Chunks(row));
+            continue;
+        };
+        let bytes = body
+            .get(range.clone())
+            .ok_or_else(|| corrupt("payload span"))?;
+        if !bytes.is_ascii() {
+            copied += bytes.len();
+            plan.push(ViewRow::Span(bytes));
             continue;
         }
-        // The value is sized first, so that a block is allocated once at its final size and
-        // never grows: a value that does not fit closes the block and starts the next one. A
-        // block is no bigger than the values left need, so a small read allocates little.
-        let mut value_len = 0usize;
-        for &id in row {
-            value_len += reader.chunk(id)?.len();
-        }
-        if block.capacity() - block.len() < value_len {
-            if !block.is_empty() {
-                flush(&mut block, &mut rows, &mut builder)?;
+        let id = match shared.get(&body.as_ptr()) {
+            Some(&id) => id,
+            None => {
+                if body.len() >= u32::MAX as usize {
+                    return Err(corrupt("payload size"));
+                }
+                let id = builder.append_block(body.clone());
+                shared.insert(body.as_ptr(), id);
+                id
             }
-            block = Vec::with_capacity(value_len.max(VIEW_BLOCK_BYTES.min(left)));
-        }
-        left = left.saturating_sub(value_len);
-        let start = block.len();
-        for &id in row {
-            block.extend_from_slice(reader.chunk(id)?);
-        }
-        let len = block.len() - start;
-        rows.push(Some(View::Copied(to_u32(start)?, to_u32(len)?)));
-        if block.len() >= VIEW_BLOCK_BYTES {
-            flush(&mut block, &mut rows, &mut builder)?;
-        }
+        };
+        plan.push(ViewRow::Shared(
+            id,
+            to_u32(range.start)?,
+            to_u32(range.len())?,
+        ));
     }
-    if !rows.is_empty() {
-        flush(&mut block, &mut rows, &mut builder)?;
+    // A small read allocates no more than its values need.
+    let block = to_u32(copied.clamp(1, VIEW_BLOCK_BYTES))?;
+    let mut builder = builder.with_fixed_block_size(block);
+    // The bytes of a value made of chunks that are not consecutive in one frame.
+    let mut scratch: Vec<u8> = Vec::new();
+    for row in plan {
+        let bytes = match row {
+            ViewRow::Null => {
+                builder.append_null();
+                continue;
+            }
+            ViewRow::Shared(id, start, len) => {
+                builder
+                    .try_append_view(id, start, len)
+                    .map_err(|_| corrupt("payload utf8"))?;
+                continue;
+            }
+            ViewRow::Span(bytes) => bytes,
+            ViewRow::Chunks(row) => {
+                scratch.clear();
+                for &id in row {
+                    scratch.extend_from_slice(reader.chunk(id)?);
+                }
+                scratch.as_slice()
+            }
+        };
+        let value = simdutf8::basic::from_utf8(bytes).map_err(|_| corrupt("payload utf8"))?;
+        builder
+            .try_append_value(value)
+            .map_err(|_| corrupt("payload size"))?;
     }
     Ok(Arc::new(builder.finish()))
-}
-
-/// Where the bytes of a value of [`build_string_views`] are: copied into the block being
-/// filled (start, length), or in a shared frame body (block id, start, length).
-enum View {
-    Copied(u32, u32),
-    Shared(u32, u32, u32),
 }
 
 /// The values of `ids` (one entry per row, `None` for a null row). With `views`, a Utf8 column
@@ -775,9 +758,24 @@ mod tests {
 
     #[test]
     fn string_views_mix_shared_frames_and_copied_values() {
+        mixed_string_views(true);
+    }
+
+    #[test]
+    fn string_views_copy_the_values_of_non_ascii_frames() {
+        mixed_string_views(false);
+    }
+
+    /// New values, repeats and extensions of earlier values (whose chunk ids are not
+    /// consecutive), empty values and nulls, in a mixed order. With `ascii`, the text is all
+    /// ASCII, and the array shares frame bodies; otherwise it shares none.
+    fn mixed_string_views(ascii: bool) {
+        let (unique, accent, short) = if ascii {
+            ("unique", "e", "short")
+        } else {
+            ("ünïque", "é", "shört")
+        };
         runtime().block_on(async {
-            // New values, repeats and extensions of earlier values (whose chunk ids are not
-            // consecutive), empty values and nulls, in a mixed order.
             let n = 2_000usize;
             let schema = Arc::new(arrow::datatypes::Schema::new(vec![
                 Field::new("trace_id", DataType::FixedSizeBinary(16), false),
@@ -787,14 +785,14 @@ mod tests {
             let mut text: Vec<Option<String>> = Vec::with_capacity(n);
             for i in 0..n {
                 let value = match i % 6 {
-                    0 => Some(format!("ünïque {i} {}", "ab".repeat(i % 900))),
+                    0 => Some(format!("{unique} {i} {}", "ab".repeat(i % 900))),
                     1 if i > 40 => text[i - 37].clone(),
                     2 if i > 40 => text[i - 29]
                         .clone()
-                        .map(|v| format!("{v} then {i} {}", "é".repeat(400))),
+                        .map(|v| format!("{v} then {i} {}", accent.repeat(400))),
                     3 => Some(String::new()),
                     4 => None,
-                    _ => Some(format!("short {i}")),
+                    _ => Some(format!("{short} {i}")),
                 };
                 text.push(value);
             }
@@ -845,6 +843,21 @@ mod tests {
                 shared > 100 && copied > 100,
                 "{shared} shared, {copied} copied"
             );
+
+            // The whole column: the array's data blocks include frame bodies only for ASCII.
+            let bodies: Vec<*const u8> = decoded
+                .slots
+                .keys()
+                .map(|&offset| decoded.get(offset).unwrap().0.as_ptr())
+                .collect();
+            let views = build_string_views(&header, &decoded, &ids, 0).unwrap();
+            let views = arrow::array::AsArray::as_string_view(views.as_ref());
+            let shares = views
+                .data_buffers()
+                .iter()
+                .filter(|b| bodies.contains(&b.as_ptr()))
+                .count();
+            assert_eq!(shares > 0, ascii, "{shares} frame bodies shared");
 
             // Pieces that start anywhere: with a null, a shared or a copied value first.
             for piece in [n, 7, 64, 333] {
