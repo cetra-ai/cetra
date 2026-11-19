@@ -2,13 +2,14 @@ import { CopyButton } from "@/components/copy-button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { shortId } from "@/lib/format";
 
-export function IdText({ value, kind }: { value: string; kind: string }) {
+/** `shown` replaces the default short form (`shortId`) of `value`. */
+export function IdText({ value, kind, shown }: { value: string; kind: string; shown?: string }) {
   return (
     <TooltipProvider>
       <span className="group/id inline-flex items-center gap-0.5">
         <Tooltip>
           <TooltipTrigger asChild>
-            <span className="font-mono">{shortId(value)}</span>
+            <span className="font-mono">{shown ?? shortId(value)}</span>
           </TooltipTrigger>
           <TooltipContent>{value}</TooltipContent>
         </Tooltip>

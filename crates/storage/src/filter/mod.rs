@@ -8,7 +8,7 @@ mod scope;
 mod scores;
 mod validate;
 
-pub(crate) use scope::{exclusions, search, strict_exclusions, time_window};
+pub(crate) use scope::{exclusions, like_pattern, search, strict_exclusions, time_window};
 
 use datafusion::arrow::datatypes::DataType;
 use datafusion::error::DataFusionError;
@@ -146,14 +146,14 @@ mod tests {
     use std::str::FromStr;
     use std::sync::Arc;
 
+    use cetra_core::enums::{SpanKind, SpanStatus};
+    use cetra_core::ids::{SpanId, TraceId};
+    use cetra_core::names::metadata_key;
+    use cetra_core::score::{Score, ScoreTarget};
+    use cetra_core::span::Span;
     use datafusion::arrow::array::{Array, AsArray, RecordBatch};
     use datafusion::execution::runtime_env::RuntimeEnv;
     use datafusion::logical_expr::Expr;
-    use llmobs_core::enums::{SpanKind, SpanStatus};
-    use llmobs_core::ids::{SpanId, TraceId};
-    use llmobs_core::names::metadata_key;
-    use llmobs_core::score::{Score, ScoreTarget};
-    use llmobs_core::span::Span;
 
     use crate::query_error::{Position, RunError};
     use crate::test_support::{
@@ -344,12 +344,12 @@ mod tests {
             matching(
                 &ctx,
                 FilterView::Spans,
-                "attributes['llmobs.eval.evaluator_id'] = '01900000-0000-7000-8000-000000000201'",
+                "attributes['cetra.eval.evaluator_id'] = '01900000-0000-7000-8000-000000000201'",
                 "span_id"
             )
             .await,
             ids_where(&spans, |span| {
-                span.attributes.get("llmobs.eval.evaluator_id")
+                span.attributes.get("cetra.eval.evaluator_id")
                     == Some(&"01900000-0000-7000-8000-000000000201".to_owned())
             })
         );
@@ -463,7 +463,7 @@ mod tests {
             matching(
                 &ctx,
                 FilterView::Spans,
-                "attributes['llmobs.eval.evaluator_id']::DOUBLE > 0",
+                "attributes['cetra.eval.evaluator_id']::DOUBLE > 0",
                 "span_id"
             )
             .await,

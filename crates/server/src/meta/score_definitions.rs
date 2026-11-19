@@ -1,11 +1,12 @@
 //! `score_definitions` rows (spec 04, D-I-26). A name is unique among live (non-archived) rows.
 
-use llmobs_core::enums::ScoreDataType;
-use llmobs_core::ids::ProjectId;
+use cetra_core::enums::ScoreDataType;
+use cetra_core::ids::ProjectId;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use super::{MetaError, unique_or};
+use crate::api::score_definitions::ScoreDirection;
 
 /// A project holds at most this many live definitions.
 const PROJECT_CAP: i64 = 1_000;
@@ -29,6 +30,8 @@ pub(crate) struct DefinitionRow {
     pub(crate) max_value: Option<f64>,
     /// Free text.
     pub(crate) description: Option<String>,
+    /// Which way the score should move to be good.
+    pub(crate) direction: ScoreDirection,
     /// Set when archived; `None` for a live definition.
     pub(crate) archived_at: Option<i64>,
     /// Creation time, nanoseconds.
@@ -61,6 +64,8 @@ pub(crate) struct DefinitionFields {
     pub(crate) max_value: Option<f64>,
     /// Free text.
     pub(crate) description: Option<String>,
+    /// Which way the score should move to be good.
+    pub(crate) direction: ScoreDirection,
     /// Set to archive, `None` to restore.
     pub(crate) archived_at: Option<i64>,
 }
@@ -79,7 +84,7 @@ pub(crate) async fn list_definitions(
     let records: Vec<DefinitionRecord> = if include_archived {
         sqlx::query_as(
             "SELECT id, project_id, name, data_type, categories, min_value, max_value, \
-             description, archived_at, created_at, updated_at \
+             description, direction, archived_at, created_at, updated_at \
              FROM score_definitions WHERE project_id = ? ORDER BY name, id",
         )
         .bind(project.to_string())
@@ -88,7 +93,7 @@ pub(crate) async fn list_definitions(
     } else {
         sqlx::query_as(
             "SELECT id, project_id, name, data_type, categories, min_value, max_value, \
-             description, archived_at, created_at, updated_at \
+             description, direction, archived_at, created_at, updated_at \
              FROM score_definitions WHERE project_id = ? AND archived_at IS NULL \
              ORDER BY name, id",
         )
@@ -111,7 +116,7 @@ pub(crate) async fn get_definition(
 ) -> Result<Option<DefinitionRow>, MetaError> {
     let record: Option<DefinitionRecord> = sqlx::query_as(
         "SELECT id, project_id, name, data_type, categories, min_value, max_value, \
-         description, archived_at, created_at, updated_at \
+         description, direction, archived_at, created_at, updated_at \
          FROM score_definitions WHERE project_id = ? AND id = ?",
     )
     .bind(project.to_string())
@@ -133,7 +138,7 @@ pub(crate) async fn get_definition_tx(
 ) -> Result<Option<DefinitionRow>, MetaError> {
     let record: Option<DefinitionRecord> = sqlx::query_as(
         "SELECT id, project_id, name, data_type, categories, min_value, max_value, \
-         description, archived_at, created_at, updated_at \
+         description, direction, archived_at, created_at, updated_at \
          FROM score_definitions WHERE project_id = ? AND id = ?",
     )
     .bind(project.to_string())
@@ -178,8 +183,8 @@ pub(crate) async fn insert_definition(
     sqlx::query(
         "INSERT INTO score_definitions \
          (id, project_id, name, data_type, categories, min_value, max_value, description, \
-         archived_at, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         direction, archived_at, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(id.to_string())
     .bind(project.to_string())
@@ -189,6 +194,7 @@ pub(crate) async fn insert_definition(
     .bind(fields.min_value)
     .bind(fields.max_value)
     .bind(fields.description)
+    .bind(fields.direction.as_str())
     .bind(fields.archived_at)
     .bind(now)
     .bind(now)
@@ -238,7 +244,7 @@ pub(crate) async fn update_definition(
     let categories = categories_json(&fields.categories)?;
     let result = sqlx::query(
         "UPDATE score_definitions SET name = ?, categories = ?, min_value = ?, max_value = ?, \
-         description = ?, archived_at = ?, updated_at = ? \
+         description = ?, direction = ?, archived_at = ?, updated_at = ? \
          WHERE project_id = ? AND id = ?",
     )
     .bind(fields.name)
@@ -246,6 +252,7 @@ pub(crate) async fn update_definition(
     .bind(fields.min_value)
     .bind(fields.max_value)
     .bind(fields.description)
+    .bind(fields.direction.as_str())
     .bind(fields.archived_at)
     .bind(now)
     .bind(project.to_string())
@@ -275,6 +282,7 @@ struct DefinitionRecord {
     min_value: Option<f64>,
     max_value: Option<f64>,
     description: Option<String>,
+    direction: String,
     archived_at: Option<i64>,
     created_at: i64,
     updated_at: i64,
@@ -293,6 +301,7 @@ fn row_from(record: DefinitionRecord) -> Result<DefinitionRow, MetaError> {
         min_value: record.min_value,
         max_value: record.max_value,
         description: record.description,
+        direction: ScoreDirection::parse(&record.direction).ok_or_else(|| corrupt("direction"))?,
         archived_at: record.archived_at,
         created_at: record.created_at,
         updated_at: record.updated_at,
@@ -322,11 +331,12 @@ fn categories_json(categories: &[DefinitionCategory]) -> Result<Option<String>, 
 
 #[cfg(test)]
 mod tests {
-    use llmobs_core::enums::ScoreDataType;
-    use llmobs_core::ids::{OrgId, ProjectId};
+    use cetra_core::enums::ScoreDataType;
+    use cetra_core::ids::{OrgId, ProjectId};
     use uuid::Uuid;
 
     use super::{DefinitionCategory, DefinitionFields, DefinitionRow, PROJECT_CAP};
+    use crate::api::score_definitions::ScoreDirection;
     use crate::meta::orgs::insert_org;
     use crate::meta::projects::insert_project;
     use crate::meta::score_definitions::{
@@ -364,6 +374,7 @@ mod tests {
             min_value: Some(0.0),
             max_value: Some(1.0),
             description: None,
+            direction: ScoreDirection::None,
             archived_at: None,
         }
     }
@@ -384,6 +395,7 @@ mod tests {
             min_value: None,
             max_value: None,
             description: Some("tone".to_owned()),
+            direction: ScoreDirection::None,
             archived_at,
         }
     }
@@ -429,6 +441,7 @@ mod tests {
             min_value: Some(0.0),
             max_value: Some(1.0),
             description: None,
+            direction: ScoreDirection::None,
             archived_at: None,
             created_at: NOW,
             updated_at: NOW,

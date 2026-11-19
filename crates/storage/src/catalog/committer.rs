@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use cetra_core::ids::ProjectId;
 use chrono::NaiveDate;
-use llmobs_core::ids::ProjectId;
 use sqlx::{Connection, SqliteConnection};
 use tokio::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
@@ -2027,8 +2027,8 @@ mod tests {
     use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex, PoisonError};
 
+    use cetra_core::ids::{ProjectId, TraceId};
     use chrono::NaiveDate;
-    use llmobs_core::ids::{ProjectId, TraceId};
     use sqlx::Row;
 
     use super::{load, open_catalog_db, *};

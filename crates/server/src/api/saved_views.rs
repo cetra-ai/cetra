@@ -49,11 +49,11 @@ pub struct SavedView {
     /// The default of its scope: among the owner's private views of this kind ("my default"), or among the project's shared views of this kind ("project default"). Setting it clears the other default of that scope (D-H-6).
     pub is_default: bool,
     /// Creation time, nanoseconds since the Unix epoch. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub created_at: i64,
     /// Last update, nanoseconds since the Unix epoch. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub updated_at: i64,
 }

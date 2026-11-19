@@ -3,7 +3,7 @@
 use axum::extract::{Extension, State};
 use axum::http::Method;
 use axum::routing::get;
-use llmobs_storage as storage;
+use cetra_storage as storage;
 use serde::Deserialize;
 
 use crate::api::common::{Page, TimeParam};
@@ -207,9 +207,9 @@ fn span_sort(sort: SpanSort) -> storage::SpanSort {
 #[cfg(test)]
 mod tests {
     use axum::http::{Method, StatusCode};
-    use llmobs_core::ids::TraceId;
-    use llmobs_core::message::Part;
-    use llmobs_core::score::ScoreValue;
+    use cetra_core::ids::TraceId;
+    use cetra_core::message::Part;
+    use cetra_core::score::ScoreValue;
     use serde_json::Value as Json;
 
     use super::*;
@@ -471,7 +471,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn span_detail_carries_events_links_and_maps() {
         let (app, seeded) = loaded().await;
-        let mut span: llmobs_core::span::Span = serde_json::from_value(serde_json::json!({
+        let mut span: cetra_core::span::Span = serde_json::from_value(serde_json::json!({
             "project_id": seeded.project.id.to_string(),
             "trace_id": "a1000000000000000000000000000008",
             "span_id": "b100000000000081",
@@ -485,18 +485,18 @@ mod tests {
         }))
         .unwrap();
         span.events = vec![
-            llmobs_core::span::SpanEvent {
+            cetra_core::span::SpanEvent {
                 time: span.start_time,
                 name: "gen_ai.choice".to_owned(),
                 attributes: Some(r#"{"index":0}"#.to_owned()),
             },
-            llmobs_core::span::SpanEvent {
+            cetra_core::span::SpanEvent {
                 time: span.end_time,
                 name: "retry".to_owned(),
                 attributes: None,
             },
         ];
-        span.links = vec![llmobs_core::span::SpanLink {
+        span.links = vec![cetra_core::span::SpanLink {
             trace_id: TRACE_1.parse().unwrap(),
             span_id: "b100000000000011".parse().unwrap(),
             attributes: Some(r#"{"kind":"follows"}"#.to_owned()),
@@ -505,8 +505,8 @@ mod tests {
             .insert("http.method".to_owned(), "GET".to_owned());
         span.resource_attributes
             .insert("host.name".to_owned(), "box".to_owned());
-        span.conventions = vec![llmobs_core::enums::Convention::Genai];
-        let batch = llmobs_core::batch::spans_to_record_batch(&[span]).unwrap();
+        span.conventions = vec![cetra_core::enums::Convention::Genai];
+        let batch = cetra_core::batch::spans_to_record_batch(&[span]).unwrap();
         app.state
             .storage
             .append_spans(seeded.project.id, batch)

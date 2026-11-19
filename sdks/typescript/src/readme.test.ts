@@ -35,9 +35,9 @@ const EXAMPLES_BY_NAME: Record<string, Example> = {
     assert: async (memory) => {
       const [span] = await finished(memory.exporter);
       expect(span?.name).toBe("search_docs");
-      expect(span?.attributes["llmobs.span.kind"]).toBe("tool");
-      expect(span?.attributes["llmobs.input"]).toBe('{"query":"pricing"}');
-      expect(span?.attributes["llmobs.output"]).toBe("results for pricing");
+      expect(span?.attributes["cetra.span.kind"]).toBe("tool");
+      expect(span?.attributes["cetra.input"]).toBe('{"query":"pricing"}');
+      expect(span?.attributes["cetra.output"]).toBe("results for pricing");
     },
   },
   "with-llm-span": {
@@ -56,9 +56,9 @@ const EXAMPLES_BY_NAME: Record<string, Example> = {
     assert: async (memory) => {
       const [span] = await finished(memory.exporter);
       expect(span?.name).toBe("turn");
-      expect(span?.attributes["llmobs.session.id"]).toBe("chat-42");
-      expect(span?.attributes["llmobs.user.id"]).toBe("u-17");
-      expect(span?.attributes["llmobs.tags"]).toEqual(["beta"]);
+      expect(span?.attributes["cetra.session.id"]).toBe("chat-42");
+      expect(span?.attributes["cetra.user.id"]).toBe("u-17");
+      expect(span?.attributes["cetra.tags"]).toEqual(["beta"]);
     },
   },
   score: {
@@ -72,9 +72,9 @@ const EXAMPLES_BY_NAME: Record<string, Example> = {
   },
   "ai-telemetry": {
     run: aiTelemetryExample,
-    // The tracer `aiTelemetry()` hands out is the llmobs provider's (scope
-    // `ai`), so AI SDK spans flow to llmobs. `sessionId` in the options rides
-    // in the AI SDK's telemetry metadata; the `llmobs.session.id` attribute
+    // The tracer `aiTelemetry()` hands out is the cetra provider's (scope
+    // `ai`), so AI SDK spans flow to cetra. `sessionId` in the options rides
+    // in the AI SDK's telemetry metadata; the `cetra.session.id` attribute
     // comes from `withContext`, as in the with-context example.
     assert: async (memory) => {
       const [span] = await finished(memory.exporter);

@@ -21,7 +21,7 @@ lint:
 # Run all Rust tests
 test:
     cargo test --workspace --all-features
-    # The crash tests must reuse the workspace feature set: `-p llmobs-storage`
+    # The crash tests must reuse the workspace feature set: `-p cetra-storage`
     # resolves different features and rebuilds every dependency from scratch.
     cargo test --workspace --all-features -- --ignored --exact crash_tests::every_flush_hook_aborts_safely
     cargo test --workspace --all-features -- --ignored --exact crash_tests::every_compaction_hook_aborts_safely
@@ -39,12 +39,12 @@ test:
 
 # The storage model test with more cases (D-R-14), in release mode.
 model cases="500":
-    LLMOBS_MODEL_CASES={{cases}} cargo test --release --workspace --all-features -- model_tests::storage_matches_the_model
+    CETRA_MODEL_CASES={{cases}} cargo test --release --workspace --all-features -- model_tests::storage_matches_the_model
 
 # The concurrent model stress test (track R M6), release mode. `secs` is the
-# run time; LLMOBS_STRESS_* variables tune it (docs/plans/r-hardening/06-m6-concurrency.md).
+# run time; CETRA_STRESS_* variables tune it (docs/plans/r-hardening/06-m6-concurrency.md).
 stress secs="300":
-    LLMOBS_STRESS_SECS={{secs}} cargo test --release --workspace --all-features -- --ignored --exact --nocapture model_tests::stress::concurrent_lanes_match_the_model
+    CETRA_STRESS_SECS={{secs}} cargo test --release --workspace --all-features -- --ignored --exact --nocapture model_tests::stress::concurrent_lanes_match_the_model
 
 # Write a golden data directory from the current build (track R M8, D-R-29) and a golden server
 # backup directory (track SF6, D-R-38): `just golden-dir 0.1.0` at a release; `just golden-dir
@@ -66,20 +66,24 @@ golden-dir name:
             echo "golden-dir: $dir exists; a released directory is never rewritten. If it is a partial write that is not in RELEASES, delete it and run again." >&2; exit 1
         fi
     done
-    LLMOBS_GOLDEN_OUT="$out" cargo test --workspace --all-features -- --ignored --exact golden_tests::write_golden_dir
-    LLMOBS_SERVER_GOLDEN_OUT="$server_out" cargo test -p llmobs-server --all-features -- --ignored --exact golden_tests::write_server_golden_dir
+    CETRA_GOLDEN_OUT="$out" cargo test --workspace --all-features -- --ignored --exact golden_tests::write_golden_dir
+    CETRA_SERVER_GOLDEN_OUT="$server_out" cargo test -p cetra-server --all-features -- --ignored --exact golden_tests::write_server_golden_dir
     case "$name" in
         scratch*) ;;
         *) echo "$name" >> "$root/fixtures/storage/golden/RELEASES" ;;
     esac
 
+# Fetch main into origin/main with its full history, so check-golden finds the merge base (CI's rust-policy job).
+fetch-main:
+    git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+
 # Released golden directories and RELEASES lines are never removed (spec 03 § 12, D-R-30).
-# Skipped without origin/main. LLMOBS_GOLDEN_DROP=1 allows the clean-up at 1.0 (D-R-12).
+# Skipped without origin/main. CETRA_GOLDEN_DROP=1 allows the clean-up at 1.0 (D-R-12).
 check-golden:
     #!/usr/bin/env bash
     set -euo pipefail
     if ! git rev-parse --verify -q origin/main >/dev/null; then echo "check-golden: no origin/main, skipped"; exit 0; fi
-    if [ "${LLMOBS_GOLDEN_DROP:-}" = 1 ]; then exit 0; fi
+    if [ "${CETRA_GOLDEN_DROP:-}" = 1 ]; then exit 0; fi
     base="$(git merge-base origin/main HEAD)" || { echo "check-golden: no merge base with origin/main (shallow clone?), skipped"; exit 0; }
     gone="$(git diff --no-renames --name-only --diff-filter=D "$base" -- fixtures/storage/golden fixtures/server/golden || true)"
     lines="$(git diff --no-renames --text "$base" -- fixtures/storage/golden/RELEASES | grep -E '^-[^-]' || true)"
@@ -89,7 +93,7 @@ check-golden:
     fi
 
 # Resource exhaustion (track R M5, D-R-9): a full disk, a memory limit and few file descriptors.
-# Needs unprivileged user namespaces, or LLMOBS_TEST_SMALL_FS (a small mounted filesystem).
+# Needs unprivileged user namespaces, or CETRA_TEST_SMALL_FS (a small mounted filesystem).
 # Ubuntu 24.04 and later restrict them with AppArmor: run
 # `sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0` first (until the next reboot).
 resources:
@@ -101,15 +105,15 @@ resources-memory:
 
 # The smallest memory limit a profile survives (defaults or small). Takes tens of minutes.
 resources-memory-min profile="defaults":
-    LLMOBS_MEMORY_PROFILE={{profile}} cargo test --release --workspace --all-features -- --ignored --exact --nocapture model_tests::resources::memory::minimum_memory
+    CETRA_MEMORY_PROFILE={{profile}} cargo test --release --workspace --all-features -- --ignored --exact --nocapture model_tests::resources::memory::minimum_memory
 
 # The storage model test on a remote store with injected S3 faults, in release mode (R4.5).
 model-s3 cases="200":
-    LLMOBS_MODEL_S3_CASES={{cases}} LLMOBS_MODEL_S3_STATS=1 cargo test --release --workspace --all-features -- model_tests::storage_matches_the_model_on_s3
+    CETRA_MODEL_S3_CASES={{cases}} CETRA_MODEL_S3_STATS=1 cargo test --release --workspace --all-features -- model_tests::storage_matches_the_model_on_s3
 
 # S3 chaos through toxiproxy in front of an S3 endpoint (R M4). Needs
-# LLMOBS_TEST_S3_ENDPOINT, LLMOBS_TEST_S3_BUCKET, AWS_ACCESS_KEY_ID,
-# AWS_SECRET_ACCESS_KEY and LLMOBS_TEST_TOXIPROXY; see crates/storage/tests/s3_chaos.rs.
+# CETRA_TEST_S3_ENDPOINT, CETRA_TEST_S3_BUCKET, AWS_ACCESS_KEY_ID,
+# AWS_SECRET_ACCESS_KEY and CETRA_TEST_TOXIPROXY; see crates/storage/tests/s3_chaos.rs.
 s3-chaos:
     cargo test --release --workspace --all-features --test s3_chaos -- --ignored --test-threads 1 --nocapture
 
@@ -125,9 +129,9 @@ fetch-corpus:
     echo "a9f240c4c77aa1378364f70d37e753c07ba284e247b019d700e1947a0e5da751  target/bench-corpus/oasst2-ready-messages.jsonl.gz.part" | sha256sum --check --strict -
     mv target/bench-corpus/oasst2-ready-messages.jsonl.gz.part target/bench-corpus/oasst2-ready-messages.jsonl.gz
 
-# Storage soak (D-R-11). Needs LLMOBS_SOAK_DIR and LLMOBS_SOAK_OUT; see crates/storage/tests/soak.rs
+# Storage soak (D-R-11). Needs CETRA_SOAK_DIR and CETRA_SOAK_OUT; see crates/storage/tests/soak.rs
 soak:
-    RUST_MIN_STACK=33554432 cargo test --release -p llmobs-storage --all-features --test soak -- --ignored --nocapture --exact soak
+    RUST_MIN_STACK=33554432 cargo test --release -p cetra-storage --all-features --test soak -- --ignored --nocapture --exact soak
 
 # Plots of a soak run's samples into <out>/plots
 soak-plot out:
@@ -159,14 +163,19 @@ fuzz-lock:
     cp Cargo.lock fuzz/Cargo.lock
     cargo metadata --manifest-path fuzz/Cargo.toml --format-version 1 > /dev/null
 
+# The host triple. cargo-fuzz defaults to the target it was itself built for, so a prebuilt
+# (musl) cargo-fuzz would build for musl, which the sanitizer rejects.
+_fuzz-host:
+    @rustc -vV | sed -n 's/^host: //p'
+
 # Fuzz one target for `secs` seconds; new inputs go into its committed corpus
 fuzz target secs="60": fuzz-lock
-    cargo +{{fuzz_toolchain}} fuzz run {{target}} fuzz/corpus/{{target}} -- -max_total_time={{secs}} -rss_limit_mb=4096 -timeout=30 -max_len=$(just _fuzz-max-len {{target}})
+    cargo +{{fuzz_toolchain}} fuzz run --target "$(just _fuzz-host)" {{target}} fuzz/corpus/{{target}} -- -max_total_time={{secs}} -rss_limit_mb=4096 -timeout=30 -max_len=$(just _fuzz-max-len {{target}})
 
 # Fuzz one target for CI: new inputs go to target/fuzz-new/<target>, so the checkout stays clean
 fuzz-ci target secs: fuzz-lock
     mkdir -p target/fuzz-new/{{target}}
-    cargo +{{fuzz_toolchain}} fuzz run {{target}} target/fuzz-new/{{target}} fuzz/corpus/{{target}} -- -max_total_time={{secs}} -rss_limit_mb=4096 -timeout=30 -max_len=$(just _fuzz-max-len {{target}})
+    cargo +{{fuzz_toolchain}} fuzz run --target "$(just _fuzz-host)" {{target}} target/fuzz-new/{{target}} fuzz/corpus/{{target}} -- -max_total_time={{secs}} -rss_limit_mb=4096 -timeout=30 -max_len=$(just _fuzz-max-len {{target}})
 
 # Fuzz every target in turn; fails if any target crashed
 fuzz-all secs="60":
@@ -182,7 +191,7 @@ fuzz-cmin: fuzz-lock
     set -euo pipefail
     for target in {{fuzz_targets}}; do
         dir="fuzz/corpus/$target"
-        cargo +{{fuzz_toolchain}} fuzz cmin "$target" "$dir" -- -max_len="$(just _fuzz-max-len "$target")"
+        cargo +{{fuzz_toolchain}} fuzz cmin --target "$(just _fuzz-host)" "$target" "$dir" -- -max_len="$(just _fuzz-max-len "$target")"
         dropped=0
         while [ "$(du -sb "$dir" | cut -f1)" -gt 2097152 ]; do
             rm -- "$dir/$(ls -S "$dir" | head -n 1)"
@@ -231,9 +240,9 @@ nightly-issue:
 
 # Opt-in live provider tests. Ignored by `just check` (D167).
 eval-live:
-    cargo test -p llmobs-eval --test live -- --ignored --test-threads 1
+    cargo test -p cetra-eval --test live -- --ignored --test-threads 1
 
-# Supply-chain checks: advisories, bans, licences, sources (D-P-3), for the root graph and the fuzz graph (track R M3)
+# Supply-chain checks: advisories, bans, licences, sources (D-P-3), for the root graph and the fuzz graph (track R M3). Run by hand until the first release (D188)
 deny: fuzz-lock
     cargo deny check advisories bans licenses sources
     cargo deny --manifest-path fuzz/Cargo.toml check advisories bans licenses sources
@@ -245,18 +254,31 @@ build:
 # Build the web UI, then the release binary with the UI embedded (D-G-18)
 build-release: js-install
     pnpm --dir web run build
-    cargo build --release -p llmobs-cli
+    cargo build --release -p cetra-cli
 
 # Build the release binary and check that the UI is embedded (D-G-37)
 check-release: build-release
-    ./target/release/llmobs version | grep -qx 'ui: embedded'
+    ./target/release/cetra version | grep -qx 'ui: embedded'
 
 # Run the binary with arguments, e.g. `just run --version`
 run *args:
-    cargo run -p llmobs-cli -- {{args}}
+    cargo run -p cetra-cli -- {{args}}
 
-# Rust checks: format, lint, tests, supply chain
-check-rust: fmt-check lint test deny check-ee check-golden
+# Run the demo data generator (tools/demo), e.g. `just demo -- --help`
+demo *args:
+    cargo run -q -p cetra-demo -- {{args}}
+
+# Build the cetra-demo image (D187): a static musl binary and the fixtures, staged in target/demo-image, then the image from that directory (tools/demo/Dockerfile)
+demo-image tag="cetra-demo:dev":
+    CC_x86_64_unknown_linux_musl=musl-gcc cargo build --release --locked -p cetra-demo --target x86_64-unknown-linux-musl
+    rm -rf target/demo-image
+    mkdir -p target/demo-image/fixtures
+    cp "${CARGO_TARGET_DIR:-target}/x86_64-unknown-linux-musl/release/cetra-demo" target/demo-image/
+    cp -r fixtures/otlp target/demo-image/fixtures/otlp
+    docker build -f tools/demo/Dockerfile -t {{tag}} target/demo-image
+
+# Rust checks: format, lint, tests, licence headers, golden directories. `just deny` is off until the first release (D188)
+check-rust: fmt-check lint test check-ee check-golden
 
 # Install JS dependencies from the lockfile
 js-install:
@@ -282,7 +304,7 @@ e2e: js-install
     pnpm --dir web run build
     E2E_REQUIRE_UI=1 cargo test --workspace --all-features --test e2e
     bash tools/e2e/run.sh
-    ./target/debug/llmobs version | grep -qx 'ui: embedded'
+    ./target/debug/cetra version | grep -qx 'ui: embedded'
 
 # Fail if the working tree changed (generated files, snapshot or fixture writes)
 assert-clean:
@@ -304,9 +326,9 @@ ts-smoke tarball:
     # pnpm's minimumReleaseAge applies to the repo (D74); npm 10, shipped with Node 22.12, supports --before.
     before="$(node -p 'new Date(Date.now() - 7*24*3600*1000).toISOString()')"
     npm install --no-audit --no-fund --ignore-scripts --before "$before" "$tarball" >/dev/null
-    EXPECTED="$expected" node --input-type=module -e 'import { VERSION } from "llmobs"; if (VERSION !== process.env.EXPECTED) { console.error(`ESM: VERSION ${VERSION}`); process.exit(1); }'
-    EXPECTED="$expected" node -e 'const { VERSION } = require("llmobs"); if (VERSION !== process.env.EXPECTED) { console.error(`CJS: VERSION ${VERSION}`); process.exit(1); }'
-    echo "llmobs ${expected} loads from ESM and CommonJS on Node $(node --version)"
+    EXPECTED="$expected" node --input-type=module -e 'import { VERSION } from "@cetra-ai/sdk"; if (VERSION !== process.env.EXPECTED) { console.error(`ESM: VERSION ${VERSION}`); process.exit(1); }'
+    EXPECTED="$expected" node -e 'const { VERSION } = require("@cetra-ai/sdk"); if (VERSION !== process.env.EXPECTED) { console.error(`CJS: VERSION ${VERSION}`); process.exit(1); }'
+    echo "cetra ${expected} loads from ESM and CommonJS on Node $(node --version)"
 
 # Lint GitHub Actions workflows (actionlint) and audit them for security issues (zizmor)
 check-workflows:
@@ -350,7 +372,7 @@ check-ee:
 
 # Re-sign fixtures/license/payloads with the dev key (D-P-6)
 license-fixtures:
-    cargo run -q -p llmobs-license-tool -- fixtures
+    cargo run -q -p cetra-license-tool -- fixtures
 
 # Web dev server with mocked API (fixtures/api)
 web-dev: js-install
@@ -362,41 +384,41 @@ web-dev-server: js-install
 
 # Regenerate crates/server/openapi.json and web/src/api/schema.gen.ts
 openapi: js-install
-    LLMOBS_OPENAPI_WRITE=1 cargo test -p llmobs-server --test openapi -- contract_file_is_up_to_date
+    CETRA_OPENAPI_WRITE=1 cargo test -p cetra-server --test openapi -- contract_file_is_up_to_date
     pnpm --dir web run gen:api
 
 # Regenerate fixtures/api responses and manifest
 api-examples:
-    LLMOBS_API_EXAMPLES_WRITE=1 cargo test -p llmobs-server --lib api_examples::examples_are_up_to_date
+    CETRA_API_EXAMPLES_WRITE=1 cargo test -p cetra-server --lib api_examples::examples_are_up_to_date
 
 # Validate OTLP fixtures
 fixtures-check:
-    cargo test -p llmobs-otel --test fixtures
+    cargo test -p cetra-otel --test fixtures
 
 # Rewrite OTLP fixtures in canonical JSON formatting
 fixtures-fmt:
-    LLMOBS_FIXTURES_FMT=1 cargo test -p llmobs-otel --test fixtures -- canonical_formatting
+    CETRA_FIXTURES_FMT=1 cargo test -p cetra-otel --test fixtures -- canonical_formatting
 
 # Rewrite expected.json from the normalizer. Review the diff before committing.
 fixtures-bless:
-    LLMOBS_BLESS=1 cargo test -p llmobs-otel --test golden
+    CETRA_BLESS=1 cargo test -p cetra-otel --test golden
 
 # Regenerate the built-in price snapshot from a downloaded LiteLLM JSON (D104).
 # Download model_prices_and_context_window.json from
 # https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json
 # by hand. This recipe does not fetch it.
 prices-update litellm_json:
-    LLMOBS_LITELLM_JSON={{litellm_json}} cargo test -p llmobs-otel --test prices -- refresh
+    CETRA_LITELLM_JSON={{litellm_json}} cargo test -p cetra-otel --test prices -- refresh
 
 # Fixture capture
 
 # Capture OTLP fixtures from real instrumentations (tools/capture), e.g. `just capture openinference/openai-chat-tool`
 capture +cases: capture-py-sync capture-ts-sync
-    cargo run -q -p llmobs-capture -- run {{cases}}
+    cargo run -q -p cetra-capture -- run {{cases}}
 
 # Recapture every scenario
 capture-all: capture-py-sync capture-ts-sync
-    cargo run -q -p llmobs-capture -- run --all
+    cargo run -q -p cetra-capture -- run --all
 
 # Install the Python capture project (tools/capture/py)
 capture-py-sync:
@@ -411,7 +433,7 @@ check-capture: capture-py-sync capture-ts-sync
     cd tools/capture/py && uv run ruff format --check && uv run ruff check && uv run mypy
     pnpm --dir tools/capture/ts run typecheck
     pnpm exec biome check tools/capture/ts
-    cargo run -q -p llmobs-capture -- run --all --check
+    cargo run -q -p cetra-capture -- run --all --check
 
 # Packaging and release (track N, docs/plans/n-packaging/)
 
@@ -436,19 +458,19 @@ checksums dir:
     tools/packaging/checksums.sh {{dir}}
 
 # Build the image for this machine's architecture from target/dist/image (run `just dist` first) (D-N-3)
-image tag="llmobs:dev":
+image tag="cetra:dev":
     docker build -f deploy/docker/Dockerfile -t {{tag}} .
 
 # Run an image with a fresh volume and smoke-test it, healthcheck included (D-N-13)
-image-smoke tag="llmobs:dev":
+image-smoke tag="cetra:dev":
     tools/packaging/image-smoke.sh {{tag}}
 
 # Run deploy/install.sh against target/dist served on loopback (D-N-15)
 install-smoke:
     tools/packaging/install-smoke.sh
 
-# Run deploy/compose with an image and smoke-test it; `just compose-smoke llmobs:dev s3` adds Garage (D-N-9)
-compose-smoke tag="llmobs:dev" *mode:
+# Run deploy/compose with an image and smoke-test it; `just compose-smoke cetra:dev s3` adds Garage (D-N-9)
+compose-smoke tag="cetra:dev" *mode:
     tools/packaging/compose-smoke.sh {{tag}} {{mode}}
 
 # Lint the Helm chart and validate its manifests with kubeconform (D-N-10)
@@ -456,14 +478,15 @@ helm-check:
     tools/packaging/helm-check.sh
 
 # Install the chart with an image on a throwaway kind cluster and smoke-test it (D-N-10)
-helm-smoke tag="llmobs:dev":
+helm-smoke tag="cetra:dev":
     tools/packaging/helm-smoke.sh {{tag}}
 
 # Check that the chart and compose files carry the workspace version (D-N-5)
 versions-check:
     tools/packaging/versions-check.sh
 
-# Set the release version everywhere and date the changelog section, e.g. `just release-prep 0.1.0` (D-N-5)
+# Set the release version everywhere and date the changelog section, e.g. `just release-prep 0.1.0`
+# (D-N-5); a stable version also writes its golden data directory (D-R-30)
 release-prep version:
     tools/packaging/release-prep.sh {{version}}
 
@@ -484,9 +507,9 @@ check-packaging-lint: versions-check helm-check js-install
 # Full packaging checks on x86_64 Linux: the lint checks, the archive, binary, install, image and compose smokes (packaging.yml, D-N-13)
 check-packaging: check-packaging-lint
     just dist x86_64-unknown-linux-musl
-    just binary-smoke target/x86_64-unknown-linux-musl/release/llmobs
+    just binary-smoke target/x86_64-unknown-linux-musl/release/cetra
     just install-smoke
-    just image llmobs:dev
-    just image-smoke llmobs:dev
-    just compose-smoke llmobs:dev
-    just compose-smoke llmobs:dev s3
+    just image cetra:dev
+    just image-smoke cetra:dev
+    just compose-smoke cetra:dev
+    just compose-smoke cetra:dev s3

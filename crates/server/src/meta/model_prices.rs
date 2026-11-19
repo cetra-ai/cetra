@@ -1,7 +1,7 @@
 //! `model_prices` rows: custom prices of an org or a project (spec 04 § Pricing, D-T-2, D-T-4).
 
-use llmobs_core::ids::{OrgId, ProjectId};
-use llmobs_otel::{PriceRow, PriceScope, PriceTier};
+use cetra_core::ids::{OrgId, ProjectId};
+use cetra_otel::{PriceRow, PriceScope, PriceTier};
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
@@ -416,8 +416,8 @@ fn tiers_json(row: &PriceRow) -> Result<Option<String>, MetaError> {
 
 #[cfg(test)]
 mod tests {
-    use llmobs_core::ids::{OrgId, ProjectId};
-    use llmobs_otel::{PriceRow, PriceScope, PriceTier, exact_pattern};
+    use cetra_core::ids::{OrgId, ProjectId};
+    use cetra_otel::{PriceRow, PriceScope, PriceTier, exact_pattern};
     use sqlx::SqliteConnection;
     use uuid::Uuid;
 

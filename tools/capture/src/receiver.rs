@@ -284,7 +284,7 @@ async fn handle(
     let Some(signal) = accepted(&method, &path) else {
         return receiver.fail(
             StatusCode::NOT_FOUND,
-            format!("llmobs-capture receiver: no route {method} {path}"),
+            format!("cetra-capture receiver: no route {method} {path}"),
         );
     };
     if !is_identity(request.headers()) {
@@ -444,7 +444,7 @@ mod tests {
                 .method("POST")
                 .uri("/v1/traces?timeout=1")
                 .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
-                .header(header::AUTHORIZATION, "Bearer sk-llmobs-secret")
+                .header(header::AUTHORIZATION, "Bearer sk-cetra-secret")
                 .body(Body::from(json))
                 .unwrap(),
         )
@@ -623,8 +623,8 @@ mod tests {
         assert_eq!(
             log.errors,
             vec![
-                "llmobs-capture receiver: no route GET /v1/traces".to_owned(),
-                "llmobs-capture receiver: no route POST /v1/traces/extra".to_owned(),
+                "cetra-capture receiver: no route GET /v1/traces".to_owned(),
+                "cetra-capture receiver: no route POST /v1/traces/extra".to_owned(),
                 "unsupported content type: text/plain".to_owned(),
                 "unsupported content type: missing".to_owned(),
             ]

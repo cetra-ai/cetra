@@ -11,7 +11,7 @@ use axum::extract::{Request, State};
 use axum::http::HeaderMap;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use llmobs_core::ids::ProjectId;
+use cetra_core::ids::ProjectId;
 use uuid::Uuid;
 
 use crate::api::common::ProblemCode;
@@ -56,7 +56,7 @@ pub(crate) enum Principal {
         /// SHA-256 hex of the cookie. Not the cookie value.
         session_hash: String,
         /// The org whose provider started this session, D-P-59.
-        sso_org: Option<llmobs_core::ids::OrgId>,
+        sso_org: Option<cetra_core::ids::OrgId>,
     },
     /// A project API key. `Debug` omits the hash.
     ApiKey {
@@ -241,7 +241,7 @@ pub(crate) async fn bearer_principal(
     let token = bearer_token(headers)?;
     let now = state.clock.now_ns();
     if token
-        .strip_prefix(llmobs_token::TOKEN_TAG)
+        .strip_prefix(cetra_token::TOKEN_TAG)
         .is_some_and(|rest| rest.starts_with('.'))
     {
         return control_plane_principal(state, token, now);
@@ -281,10 +281,10 @@ fn control_plane_principal(state: &AppState, token: &str, now: i64) -> Result<Pr
     if !state.config.entitlements.control_plane {
         return Err(ApiError::Unauthorized);
     }
-    let Ok(verified) = llmobs_token::verify(token) else {
+    let Ok(verified) = cetra_token::verify(token) else {
         return Err(ApiError::Unauthorized);
     };
-    let llmobs_token::Claims::ControlPlane(claims) = verified.claims else {
+    let cetra_token::Claims::ControlPlane(claims) = verified.claims else {
         return Err(ApiError::Unauthorized);
     };
     let five_minutes = 300 * 1_000_000_000;
@@ -416,7 +416,7 @@ mod tests {
     use uuid::Uuid;
 
     use axum::http::{HeaderMap, HeaderValue, header};
-    use llmobs_core::ids::{OrgId, ProjectId};
+    use cetra_core::ids::{OrgId, ProjectId};
     use serde_json::json;
 
     use super::{AuthUser, Principal, bearer_principal};
@@ -460,7 +460,7 @@ mod tests {
             scopes: KeyScopes::from_scopes(&[KeyScope::Read]),
         };
         let text = format!("{principal:?}");
-        assert!(!text.contains("sk-llmobs-"), "{text}");
+        assert!(!text.contains("sk-cetra-"), "{text}");
     }
 
     fn bearer_headers(token: &str) -> HeaderMap {
@@ -586,7 +586,7 @@ mod tests {
             ("bad signature", tampered, false),
         ];
         for (case, token, verifies) in cases {
-            assert_eq!(llmobs_token::verify(&token).is_ok(), verifies, "{case}");
+            assert_eq!(cetra_token::verify(&token).is_ok(), verifies, "{case}");
             assert!(
                 bearer_principal(&app.state, &bearer_headers(&token))
                     .await

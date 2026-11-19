@@ -11,32 +11,75 @@ import {
   flexRender,
   type RowData,
   rowSortingFeature,
+  type Row as TableRow,
   tableFeatures,
   useTable,
 } from "@tanstack/react-table";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn } from "cn";
-import { ArrowDown, ArrowUp, Loader2 } from "lucide-react";
-import { type KeyboardEvent, type ReactNode, useEffect, useRef, useState } from "react";
+import { ArrowDown, ArrowUp, Loader2, type LucideIcon } from "lucide-react";
+import {
+  type KeyboardEvent,
+  memo,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
+import { moveColumn } from "@/components/data-table/column-layout";
 import {
   columnSizesAfterReset,
   columnSizesAfterResize,
   readColumnSizes,
   writeColumnSizes,
 } from "@/components/data-table/column-size";
+import { ROW_HEIGHTS, useRowHeight } from "@/components/theme-provider";
+import { Checkbox } from "@/components/ui/checkbox";
+import type { RowAnchor } from "@/lib/list-return";
 import { matchesBinding } from "@/lib/shortcuts";
 
 const features = tableFeatures({
   columnSizingFeature,
   rowSortingFeature,
-  columnMeta: {} as { align?: "left" | "right"; mono?: boolean },
+  columnMeta: {} as {
+    align?: "left" | "right";
+    mono?: boolean;
+    icon?: LucideIcon;
+    /** Takes the row's remaining width. `size` is its minimum. */
+    grow?: boolean;
+    /** Accessible name of the column, for a header given as a render function. */
+    label?: string;
+  },
 });
 
 export type DataTableColumn<Row extends RowData> = ColumnDef<typeof features, Row>;
 
-export const ROW_HEIGHT = 28;
-const OVERSCAN = 12;
+/** The compact row height, which tests use. Components use `useRowHeight()`, which follows the density. */
+export const ROW_HEIGHT = ROW_HEIGHTS.compact;
+const OVERSCAN = 14;
 const FETCH_AHEAD = 20;
+/** Pointer travel, in px, that turns a press on a header into a column drag. */
+const DRAG_START_PX = 4;
+const EDGE_PX = 40;
+const EDGE_STEP_PX = 12;
+/** How long the pointer must rest on a body row before `onRowHover` fires. */
+const ROW_HOVER_MS = 100;
+const NO_LOCKED: ReadonlySet<string> = new Set();
+const NO_CHECKED: ReadonlySet<string> = new Set();
+/** Width, in px, of the checkbox column when selection is on. It is not a column: it cannot be moved or sized. */
+const CHECK_COLUMN_PX = 32;
+/** Quiet time, in ms, after the last scroll before the first visible row is reported. */
+const ANCHOR_SETTLE_MS = 150;
+/** Pages fetched, at most, while looking for the row a restore scrolls to and the rows below it. */
+const RESTORE_MAX_PAGES = 20;
+
+interface ReorderDrag {
+  id: string;
+  /** Left edge of the drop indicator, relative to the header. */
+  left: number;
+}
 
 export interface DataTableProps<Row extends RowData> {
   tableId: string;
@@ -57,6 +100,25 @@ export interface DataTableProps<Row extends RowData> {
   highlightedRowIds?: ReadonlySet<string>;
   /** Floating control drawn over the top of the scrollport, for the live pill. */
   notice?: ReactNode;
+  /** Marks a row, e.g. `"error"` draws a red edge. A selected row keeps its selected style. */
+  rowTone?: (row: Row) => "error" | undefined;
+  /** Receives the new order of the column ids after a column is dragged to a new place. */
+  onReorder?: (ids: string[]) => void;
+  /** Columns that cannot be moved, and that columns cannot be dropped before. */
+  lockedColumnIds?: ReadonlySet<string>;
+  /** Called once the pointer has rested on a body row for ROW_HOVER_MS. */
+  onRowHover?: (row: Row) => void;
+  /** Reports the first visible row and its offset, once scrolling has settled. */
+  onScrollAnchor?: (anchor: RowAnchor) => void;
+  /** Scrolls to this row once after mount, fetching pages until it is loaded. */
+  restoreAnchor?: RowAnchor;
+  /**
+   * Checkbox selection, off unless `onCheckedChange` is given. Then a fixed first column holds a
+   * header checkbox (all loaded rows) and a checkbox per row. A checkbox click does not activate
+   * its row. `checkedIds` are the checked row ids; the table calls `onCheckedChange` with the new set.
+   */
+  checkedIds?: ReadonlySet<string>;
+  onCheckedChange?: (ids: ReadonlySet<string>) => void;
 }
 
 export function DataTable<Row extends RowData>({
@@ -76,14 +138,96 @@ export function DataTable<Row extends RowData>({
   emptyState,
   highlightedRowIds,
   notice,
+  rowTone,
+  onReorder,
+  lockedColumnIds = NO_LOCKED,
+  onRowHover,
+  onScrollAnchor,
+  restoreAnchor,
+  checkedIds = NO_CHECKED,
+  onCheckedChange,
 }: DataTableProps<Row>) {
+  const selectable = onCheckedChange !== undefined;
   const scrollRef = useRef<HTMLDivElement>(null);
   const headerRef = useRef<HTMLDivElement>(null);
+  const rowHeight = useRowHeight();
   const [columnSizing, setColumnSizing] = useState(() => readColumnSizes(tableId));
   const [focusedIndex, setFocusedIndex] = useState<number | null>(null);
+  const [reorderDrag, setReorderDrag] = useState<ReorderDrag | null>(null);
   const stopDrag = useRef<(() => void) | null>(null);
+  // Set by a drag's release so the click that follows does not sort the column.
+  const suppressClick = useRef(false);
 
   useEffect(() => () => stopDrag.current?.(), []);
+
+  // The latest rows and callbacks, read by the settle timer, which outlives a render.
+  const anchorSource = useRef({ rows, getRowId, onScrollAnchor });
+  useLayoutEffect(() => {
+    anchorSource.current = { rows, getRowId, onScrollAnchor };
+  });
+  const anchorTimer = useRef<number | undefined>(undefined);
+  const reportAnchor = useCallback(() => {
+    window.clearTimeout(anchorTimer.current);
+    anchorTimer.current = undefined;
+    const scroller = scrollRef.current;
+    const source = anchorSource.current;
+    if (!scroller || !source.onScrollAnchor) {
+      return;
+    }
+    const index = Math.floor(scroller.scrollTop / rowHeight);
+    const row = source.rows[index];
+    if (row === undefined) {
+      return;
+    }
+    source.onScrollAnchor({
+      rowId: source.getRowId(row),
+      offset: scroller.scrollTop - index * rowHeight,
+    });
+  }, [rowHeight]);
+  // A row opened before the timer fires still reports the position it was opened from.
+  const flushAnchor = useCallback(() => {
+    if (anchorTimer.current !== undefined) {
+      reportAnchor();
+    }
+  }, [reportAnchor]);
+  function onScrollSettle() {
+    window.clearTimeout(anchorTimer.current);
+    anchorTimer.current = window.setTimeout(reportAnchor, ANCHOR_SETTLE_MS);
+  }
+  useEffect(() => () => window.clearTimeout(anchorTimer.current), []);
+
+  const restoreDone = useRef(false);
+  const restoreFetches = useRef(0);
+  useEffect(() => {
+    // An empty table is still loading its first page (a return usually refetches): wait for rows
+    // rather than giving up, which would leave the list at the top.
+    if (!restoreAnchor || restoreDone.current || rows.length === 0) {
+      return;
+    }
+    const scroller = scrollRef.current;
+    const index = rows.findIndex((row) => getRowId(row) === restoreAnchor.rowId);
+    const canFetch = hasNextPage && restoreFetches.current < RESTORE_MAX_PAGES;
+    // The anchor goes to the top of the scrollport, so a screen of rows must be loaded below it:
+    // with fewer, the scroll is clamped and lands short of it.
+    const rowsOnScreen = Math.ceil((scroller?.clientHeight ?? 0) / rowHeight);
+    if (index >= 0 && (rows.length - index >= rowsOnScreen || !canFetch)) {
+      restoreDone.current = true;
+      if (scroller) {
+        scroller.scrollTop = index * rowHeight + restoreAnchor.offset;
+        scroller.dispatchEvent(new Event("scroll"));
+      }
+      return;
+    }
+    if (!canFetch) {
+      restoreDone.current = true;
+      return;
+    }
+    if (isFetchingNextPage) {
+      return;
+    }
+    restoreFetches.current += 1;
+    fetchNextPage();
+  }, [restoreAnchor, rows, getRowId, hasNextPage, isFetchingNextPage, fetchNextPage, rowHeight]);
 
   function commit(next: Record<string, number>) {
     setColumnSizing(next);
@@ -107,12 +251,98 @@ export function DataTable<Row extends RowData>({
     },
   });
 
+  // Keeps the row click callback's identity stable, so memoised rows skip re-rendering on scroll.
+  const onActivateRef = useRef(onActivate);
+  useLayoutEffect(() => {
+    onActivateRef.current = onActivate;
+  }, [onActivate]);
+  const onRowClick = useCallback(
+    (index: number, row: TableRow<typeof features, Row>) => {
+      setFocusedIndex(index);
+      flushAnchor();
+      onActivateRef.current(row.original);
+    },
+    [flushAnchor],
+  );
+
+  // Read by the row checkboxes, which keep their identity while the checked set changes.
+  const checkRef = useRef({ checkedIds, onCheckedChange });
+  useLayoutEffect(() => {
+    checkRef.current = { checkedIds, onCheckedChange };
+  });
+  const toggleRow = useCallback((id: string) => {
+    const { checkedIds: current, onCheckedChange: notify } = checkRef.current;
+    if (!notify) {
+      return;
+    }
+    const next = new Set(current);
+    if (next.has(id)) {
+      next.delete(id);
+    } else {
+      next.add(id);
+    }
+    notify(next);
+  }, []);
+  const checkedLoaded = rows.reduce(
+    (count, row) => count + (checkedIds.has(getRowId(row)) ? 1 : 0),
+    0,
+  );
+  const allLoadedChecked = rows.length > 0 && checkedLoaded === rows.length;
+  const headerChecked = allLoadedChecked ? true : checkedLoaded > 0 ? "indeterminate" : false;
+  // Checks every loaded row, or clears them when they are all checked; checked rows past the page stay.
+  function toggleAllLoaded() {
+    if (!onCheckedChange) {
+      return;
+    }
+    const next = new Set(checkedIds);
+    for (const row of rows) {
+      if (allLoadedChecked) {
+        next.delete(getRowId(row));
+      } else {
+        next.add(getRowId(row));
+      }
+    }
+    onCheckedChange(next);
+  }
+
+  // One timer is enough: the pointer rests on one row at a time.
+  const onRowHoverRef = useRef(onRowHover);
+  useLayoutEffect(() => {
+    onRowHoverRef.current = onRowHover;
+  }, [onRowHover]);
+  const hoverTimer = useRef<number | undefined>(undefined);
+  const cancelRowHover = useCallback(() => {
+    window.clearTimeout(hoverTimer.current);
+    hoverTimer.current = undefined;
+  }, []);
+  useEffect(() => cancelRowHover, [cancelRowHover]);
+  const onRowEnter = useCallback(
+    (row: TableRow<typeof features, Row>) => {
+      cancelRowHover();
+      if (!onRowHoverRef.current) {
+        return;
+      }
+      const data = row.original;
+      hoverTimer.current = window.setTimeout(() => {
+        hoverTimer.current = undefined;
+        onRowHoverRef.current?.(data);
+      }, ROW_HOVER_MS);
+    },
+    [cancelRowHover],
+  );
+
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => ROW_HEIGHT,
+    estimateSize: () => rowHeight,
     overscan: OVERSCAN,
   });
+
+  // A density change alters every row's height, so the measurements must be redone.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: rowHeight is the trigger; estimateSize reads it
+  useEffect(() => {
+    virtualizer.measure();
+  }, [rowHeight, virtualizer]);
 
   const virtualRows = virtualizer.getVirtualItems();
   const lastIndex = virtualRows.at(-1)?.index ?? -1;
@@ -151,6 +381,10 @@ export function DataTable<Row extends RowData>({
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    // A checkbox (and its keys) belongs to its own cell: Enter on it checks it, not opens the row.
+    if (event.target instanceof Element && event.target.closest("[data-select-cell]")) {
+      return;
+    }
     if (rows.length === 0) {
       return;
     }
@@ -173,6 +407,7 @@ export function DataTable<Row extends RowData>({
       event.preventDefault();
       const row = rows[focusedIndex];
       if (row) {
+        flushAnchor();
         onActivate(row);
       }
     }
@@ -198,13 +433,154 @@ export function DataTable<Row extends RowData>({
     window.addEventListener("pointerup", stop);
   }
 
+  /**
+   * Press a header and drag it to a new place. The drag starts once the pointer has
+   * moved DRAG_START_PX; a press released before that is a click, so sorting still works.
+   */
+  function beginReorder(event: React.PointerEvent<HTMLDivElement>, id: string) {
+    if (!onReorder || event.button !== 0 || lockedColumnIds.has(id)) {
+      return;
+    }
+    const reorder: (ids: string[]) => void = onReorder;
+    const ids = table.getHeaderGroups()[0]?.headers.map((header) => header.column.id) ?? [];
+    const startX = event.clientX;
+    const startY = event.clientY;
+    let dragging = false;
+    let cancelled = false;
+    let lastX = startX;
+    let target: number | undefined;
+    let shownLeft: number | undefined;
+    let frame: number | undefined;
+
+    // Places the indicator at the boundary of the drop slot under `clientX`.
+    function updateDrop(clientX: number) {
+      const header = headerRef.current;
+      if (!header) {
+        return;
+      }
+      const others = Array.from(header.querySelectorAll<HTMLElement>("[data-column-id]")).filter(
+        (cell) => cell.dataset.columnId !== id,
+      );
+      const boxes = others.map((cell) => cell.getBoundingClientRect());
+      const index = boxes.filter((box) => box.left + box.width / 2 < clientX).length;
+      const boundary = index < boxes.length ? boxes[index]?.left : boxes.at(-1)?.right;
+      if (boundary === undefined) {
+        return;
+      }
+      const left = boundary - header.getBoundingClientRect().left;
+      if (index !== target || left !== shownLeft) {
+        target = index;
+        shownLeft = left;
+        setReorderDrag({ id, left });
+      }
+    }
+
+    // Scrolls the body while the pointer is near its left or right edge.
+    function tick() {
+      frame = window.requestAnimationFrame(tick);
+      const scroller = scrollRef.current;
+      if (!scroller) {
+        return;
+      }
+      const box = scroller.getBoundingClientRect();
+      if (lastX - box.left < EDGE_PX) {
+        scroller.scrollLeft -= EDGE_STEP_PX;
+      } else if (box.right - lastX < EDGE_PX) {
+        scroller.scrollLeft += EDGE_STEP_PX;
+      }
+      if (headerRef.current) {
+        headerRef.current.scrollLeft = scroller.scrollLeft;
+      }
+      updateDrop(lastX);
+    }
+
+    function startDrag() {
+      dragging = true;
+      document.body.style.cursor = "grabbing";
+      window.addEventListener("keydown", onKey);
+      frame = window.requestAnimationFrame(tick);
+      updateDrop(lastX);
+    }
+
+    // Ends the drag's motion and visuals; the release listener stays until pointerup.
+    function leaveDrag() {
+      if (frame !== undefined) {
+        window.cancelAnimationFrame(frame);
+        frame = undefined;
+      }
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("keydown", onKey);
+      document.body.style.cursor = "";
+      setReorderDrag(null);
+    }
+
+    function stop() {
+      leaveDrag();
+      window.removeEventListener("pointerup", onUp);
+      if (stopDrag.current === stop) {
+        stopDrag.current = null;
+      }
+    }
+
+    function onMove(ev: globalThis.PointerEvent) {
+      lastX = ev.clientX;
+      if (dragging) {
+        updateDrop(lastX);
+        return;
+      }
+      if (Math.hypot(ev.clientX - startX, ev.clientY - startY) > DRAG_START_PX) {
+        startDrag();
+      }
+    }
+
+    function onKey(ev: globalThis.KeyboardEvent) {
+      if (ev.key === "Escape") {
+        cancelled = true;
+        leaveDrag();
+      }
+    }
+
+    function onUp() {
+      if (dragging) {
+        suppressClick.current = true;
+        window.setTimeout(() => {
+          suppressClick.current = false;
+        }, 0);
+        const next =
+          cancelled || target === undefined
+            ? undefined
+            : moveColumn(ids, id, target, lockedColumnIds);
+        if (next) {
+          reorder(next);
+        }
+      }
+      stop();
+    }
+
+    stopDrag.current?.();
+    stopDrag.current = stop;
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }
+
   const headerGroup = table.getHeaderGroups()[0];
-  const template = headerGroup
-    ? headerGroup.headers.map((header) => `${header.getSize()}px`).join(" ")
+  const columnsTemplate = headerGroup
+    ? headerGroup.headers
+        .map((header) =>
+          header.column.columnDef.meta?.grow
+            ? `minmax(${header.getSize()}px, 1fr)`
+            : `${header.getSize()}px`,
+        )
+        .join(" ")
     : undefined;
-  const totalWidth = headerGroup
+  const columnsWidth = headerGroup
     ? headerGroup.headers.reduce((sum, header) => sum + header.getSize(), 0)
     : undefined;
+  // With selection, the checkbox column comes first and takes its fixed width.
+  const template = selectable
+    ? [`${CHECK_COLUMN_PX}px`, columnsTemplate].filter(Boolean).join(" ")
+    : columnsTemplate;
+  const totalWidth = selectable ? CHECK_COLUMN_PX + (columnsWidth ?? 0) : columnsWidth;
   const model = table.getRowModel().rows;
 
   return (
@@ -212,30 +588,60 @@ export function DataTable<Row extends RowData>({
       role="grid"
       aria-label={ariaLabel}
       aria-rowcount={rows.length + 1 + (isFetchingNextPage ? 1 : 0)}
-      aria-colcount={columns.length}
+      aria-colcount={columns.length + (selectable ? 1 : 0)}
       tabIndex={0}
       className="flex min-h-0 flex-1 flex-col outline-none focus-visible:outline-2 focus-visible:outline-ring focus-visible:-outline-offset-2 focus-visible:outline-solid"
       onKeyDown={onKeyDown}
     >
+      {/* The highlight keyframes, for `highlightedRowIds`, on a page without the live toggle. */}
       {headerGroup ? (
-        <div ref={headerRef} className="flex shrink-0 overflow-hidden [scrollbar-gutter:stable]">
+        <div
+          ref={headerRef}
+          className="relative flex shrink-0 overflow-hidden [scrollbar-gutter:stable]"
+        >
+          {reorderDrag ? (
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-y-0 z-20 w-0.5 bg-primary"
+              style={{ left: reorderDrag.left }}
+            />
+          ) : null}
           <div
             role="row"
             aria-rowindex={1}
-            className="grid h-row shrink-0 items-center border-b bg-background text-[11px] font-medium text-muted-foreground uppercase"
+            className="grid h-row w-full shrink-0 items-center border-b bg-surface select-none text-caption font-medium tracking-wide text-muted-foreground uppercase"
             style={{ gridTemplateColumns: template, minWidth: totalWidth }}
           >
+            {selectable ? (
+              <div
+                role="columnheader"
+                aria-label="Selection"
+                data-select-cell
+                className="flex h-full min-w-0 items-center justify-center"
+              >
+                <Checkbox
+                  aria-label="Select all loaded rows"
+                  checked={headerChecked}
+                  disabled={rows.length === 0}
+                  onCheckedChange={toggleAllLoaded}
+                />
+              </div>
+            ) : null}
             {headerGroup.headers.map((header) => {
               const sorted = header.column.getIsSorted();
               const canSort = header.column.getCanSort();
               const label =
-                typeof header.column.columnDef.header === "string"
+                header.column.columnDef.meta?.label ??
+                (typeof header.column.columnDef.header === "string"
                   ? header.column.columnDef.header
-                  : "column";
+                  : "column");
+              const HeaderIcon = header.column.columnDef.meta?.icon;
               return (
                 <div
                   key={header.id}
                   role="columnheader"
+                  data-column-id={header.column.id}
+                  onPointerDown={(event) => beginReorder(event, header.column.id)}
                   aria-labelledby={`${tableId}-${header.id}-label`}
                   aria-sort={
                     canSort
@@ -249,14 +655,19 @@ export function DataTable<Row extends RowData>({
                   className={cn(
                     "relative flex h-full min-w-0 items-center px-2",
                     header.column.columnDef.meta?.align === "right" && "justify-end",
+                    reorderDrag?.id === header.column.id && "bg-muted",
                   )}
                 >
                   {canSort && onSortingChange ? (
                     <button
                       type="button"
                       id={`${tableId}-${header.id}-label`}
-                      className="inline-flex min-w-0 items-center gap-1"
+                      className="inline-flex min-w-0 items-center gap-1 uppercase hover:text-foreground"
                       onClick={() => {
+                        if (suppressClick.current) {
+                          suppressClick.current = false;
+                          return;
+                        }
                         if (sorting?.id !== header.column.id) {
                           onSortingChange({ id: header.column.id, desc: true });
                           return;
@@ -269,12 +680,24 @@ export function DataTable<Row extends RowData>({
                       }}
                     >
                       <span className="truncate">
+                        {HeaderIcon ? (
+                          <HeaderIcon
+                            aria-hidden
+                            className="mr-1 inline-block size-3 align-[-2px] opacity-70"
+                          />
+                        ) : null}
                         {flexRender(header.column.columnDef.header, header.getContext())}
                       </span>
                       <SortArrow direction={sorted} />
                     </button>
                   ) : (
                     <span id={`${tableId}-${header.id}-label`} className="min-w-0 truncate">
+                      {HeaderIcon ? (
+                        <HeaderIcon
+                          aria-hidden
+                          className="mr-1 inline-block size-3 align-[-2px] opacity-70"
+                        />
+                      ) : null}
                       {flexRender(header.column.columnDef.header, header.getContext())}
                     </span>
                   )}
@@ -282,7 +705,7 @@ export function DataTable<Row extends RowData>({
                     role="separator"
                     aria-orientation="vertical"
                     aria-label={`Resize ${label}`}
-                    className="absolute inset-y-0 right-0 w-1 cursor-col-resize"
+                    className="absolute inset-y-0 -right-1 z-10 w-2 cursor-col-resize after:absolute after:inset-y-1 after:left-1/2 after:w-px after:-translate-x-1/2 after:bg-transparent hover:after:bg-primary active:after:bg-primary"
                     onPointerDown={(event) =>
                       beginResize(event, header.column.id, header.getSize())
                     }
@@ -297,7 +720,7 @@ export function DataTable<Row extends RowData>({
             })}
           </div>
           {/* Lets the header scroll as far as the body, whose overflow-auto can scroll one gutter further. */}
-          <div aria-hidden="true" className="w-8 shrink-0 border-b" />
+          <div aria-hidden="true" className="w-8 shrink-0 border-b bg-surface" />
         </div>
       ) : null}
       <div
@@ -308,6 +731,7 @@ export function DataTable<Row extends RowData>({
           if (headerRef.current) {
             headerRef.current.scrollLeft = event.currentTarget.scrollLeft;
           }
+          onScrollSettle();
         }}
       >
         {notice ? (
@@ -320,7 +744,13 @@ export function DataTable<Row extends RowData>({
         ) : (
           <div
             className="relative"
-            style={{ height: virtualizer.getTotalSize() + (isFetchingNextPage ? ROW_HEIGHT : 0) }}
+            style={{
+              height: virtualizer.getTotalSize() + (isFetchingNextPage ? rowHeight : 0),
+              // Faint row lines show where rows are not rendered yet, so blank space looks like empty rows.
+              backgroundImage:
+                "linear-gradient(to bottom, transparent calc(var(--row-height) - 1px), color-mix(in oklab, var(--border) 60%, transparent) 0)",
+              backgroundSize: "100% var(--row-height)",
+            }}
           >
             {virtualRows.map((item) => {
               const row = model[item.index];
@@ -328,47 +758,26 @@ export function DataTable<Row extends RowData>({
                 return null;
               }
               const selected = row.id === selectedRowId;
-              const focused = focusedIndex === item.index;
               return (
-                <div
+                <BodyRow
                   key={row.id}
-                  role="row"
-                  aria-rowindex={item.index + 2}
-                  aria-selected={selected}
-                  data-focused={focused ? "" : undefined}
-                  className={cn(
-                    "absolute top-0 grid w-full items-center border-b",
-                    selected
-                      ? "bg-selection shadow-[inset_2px_0_0_var(--primary)]"
-                      : "hover:bg-muted",
-                    focused && !selected && "bg-muted",
-                    highlightedRowIds?.has(row.id) && "live-row",
-                  )}
-                  style={{
-                    height: ROW_HEIGHT,
-                    transform: `translateY(${item.start}px)`,
-                    gridTemplateColumns: template,
-                    minWidth: totalWidth,
-                  }}
-                  onClick={() => {
-                    setFocusedIndex(item.index);
-                    onActivate(row.original);
-                  }}
-                >
-                  {row.getAllCells().map((cell) => (
-                    <div
-                      key={cell.id}
-                      role="gridcell"
-                      className={cn(
-                        "min-w-0 truncate px-2",
-                        cell.column.columnDef.meta?.align === "right" && "text-right",
-                        cell.column.columnDef.meta?.mono && "font-mono",
-                      )}
-                    >
-                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                    </div>
-                  ))}
-                </div>
+                  row={row}
+                  index={item.index}
+                  start={item.start}
+                  rowHeight={rowHeight}
+                  selected={selected}
+                  focused={focusedIndex === item.index}
+                  highlighted={highlightedRowIds?.has(row.id) ?? false}
+                  tone={!selected && rowTone?.(row.original) === "error" ? "error" : undefined}
+                  template={template}
+                  totalWidth={totalWidth}
+                  checkable={selectable}
+                  checked={checkedIds.has(row.id)}
+                  onToggle={toggleRow}
+                  onRowClick={onRowClick}
+                  onRowEnter={onRowEnter}
+                  onRowLeave={cancelRowHover}
+                />
               );
             })}
             {isFetchingNextPage ? (
@@ -376,7 +785,7 @@ export function DataTable<Row extends RowData>({
                 role="row"
                 aria-rowindex={rows.length + 2}
                 className="absolute right-0 left-0 flex items-center px-2 text-muted-foreground"
-                style={{ top: virtualizer.getTotalSize(), height: ROW_HEIGHT }}
+                style={{ top: virtualizer.getTotalSize(), height: rowHeight }}
               >
                 <Loader2 className="size-3 animate-spin" />
                 <span className="sr-only">Loading more</span>
@@ -388,6 +797,106 @@ export function DataTable<Row extends RowData>({
     </div>
   );
 }
+
+interface BodyRowProps<TData extends RowData> {
+  row: TableRow<typeof features, TData>;
+  index: number;
+  start: number;
+  rowHeight: number;
+  selected: boolean;
+  focused: boolean;
+  highlighted: boolean;
+  tone: "error" | undefined;
+  template: string | undefined;
+  totalWidth: number | undefined;
+  checkable: boolean;
+  checked: boolean;
+  onToggle: (id: string) => void;
+  onRowClick: (index: number, row: TableRow<typeof features, TData>) => void;
+  onRowEnter: (row: TableRow<typeof features, TData>) => void;
+  onRowLeave: () => void;
+}
+
+// One virtual body row. Every prop is a primitive or a stable reference, so a scroll
+// that only changes the visible range re-renders only the rows that newly appear.
+function BodyRowView<TData extends RowData>({
+  row,
+  index,
+  start,
+  rowHeight,
+  selected,
+  focused,
+  highlighted,
+  tone,
+  template,
+  totalWidth,
+  checkable,
+  checked,
+  onToggle,
+  onRowClick,
+  onRowEnter,
+  onRowLeave,
+}: BodyRowProps<TData>) {
+  return (
+    <div
+      role="row"
+      aria-rowindex={index + 2}
+      aria-selected={selected}
+      data-focused={focused ? "" : undefined}
+      className={cn(
+        "absolute top-0 grid w-full items-center border-b border-border/60",
+        selected ? "bg-selection shadow-[inset_2px_0_0_var(--primary)]" : "hover:bg-row-hover",
+        focused && !selected && "bg-row-hover",
+        tone === "error" && "shadow-[inset_2px_0_0_var(--status-error)]",
+        highlighted && "live-row",
+      )}
+      style={{
+        height: rowHeight,
+        transform: `translateY(${start}px)`,
+        gridTemplateColumns: template,
+        minWidth: totalWidth,
+      }}
+      onClick={() => onRowClick(index, row)}
+      onPointerEnter={() => onRowEnter(row)}
+      onPointerLeave={onRowLeave}
+    >
+      {checkable ? (
+        // The wrapper stops the click here, so a checkbox does not reach the row's activation.
+        <div
+          role="gridcell"
+          data-select-cell
+          className="flex min-w-0 items-center justify-center"
+          onClick={(event) => {
+            event.stopPropagation();
+          }}
+        >
+          <Checkbox
+            aria-label="Select row"
+            checked={checked}
+            onCheckedChange={() => {
+              onToggle(row.id);
+            }}
+          />
+        </div>
+      ) : null}
+      {row.getAllCells().map((cell) => (
+        <div
+          key={cell.id}
+          role="gridcell"
+          className={cn(
+            "min-w-0 truncate px-2",
+            cell.column.columnDef.meta?.align === "right" && "text-right",
+            cell.column.columnDef.meta?.mono && "font-mono",
+          )}
+        >
+          {flexRender(cell.column.columnDef.cell, cell.getContext())}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+const BodyRow = memo(BodyRowView) as typeof BodyRowView;
 
 function SortArrow({ direction }: { direction: false | "asc" | "desc" }) {
   if (direction === "asc") {

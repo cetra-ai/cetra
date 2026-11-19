@@ -22,14 +22,14 @@ The results are written up so they can back a "fast and solid" claim.
 | S3 | `test_support::FaultStore` fails puts or reads on demand; `tests/s3.rs` runs against Versity Gateway; the multipart bug of M6.6 was found by a benchmark. | No latency, 503, connection resets, partial multipart or listing faults. Never run against a remote endpoint. |
 | Resources | `min_free_bytes` refuses appends; compaction reserves disk; query memory admission (D-A1-8, D-A1-9). | Never tested on a really full disk. Query spill files are not checked against `min_free_bytes` (`benchmarks.md` § Findings (a)). No memory-cgroup or file-descriptor limit tests. |
 | Scale | 1M-trace `trace_bench`, 60 s ingest bench, on a workstation with a rotational disk and a loopback S3. | No 5M run, no soak, no network S3, and payloads are random words, so compression is not realistic. |
-| Format | `llmobs.schema_version` in Parquet metadata, WAL record `kind`, forward-only `sqlx` migrations for `catalog.db`. | No rule for what needs a format version, and no test that opens an older directory. |
+| Format | `cetra.schema_version` in Parquet metadata, WAL record `kind`, forward-only `sqlx` migrations for `catalog.db`. | No rule for what needs a format version, and no test that opens an older directory. |
 
 ## Audit so far
 
 Reading the durability paths for this design (`wal/segment.rs`, `wal/writer.rs`, `wal/replay.rs`, `objects.rs`, `gc.rs`, `read_cache.rs`) found candidate bugs. M2 confirms each one with a lossy-crash test before fixing it.
 
 1. **WAL rotation in interval mode** (`wal.sync = "<duration>"`). `IoJob::commit` writes a group and rotates without syncing the old segment, then drops it, so that segment's tail stays dirty. On power loss the old segment is torn but is no longer the last one. Replay treats a bad record in a non-final segment as corruption and **refuses to start** (spec 03 §1 Recovery). The default `"always"` mode is not affected.
-2. **GC unlink is not made durable.** `collect_obsolete` deletes a local object, then its `data_files` row, with no directory fsync in between. After a power loss the file can come back with no row pointing to it. Nothing lists the object tree today, so the file leaks forever. N's `collect_orphans` (N M2, B5) will reclaim such files when an operator runs `llmobs admin gc-orphans`, but the leak itself is a durability bug and M2 fixes it.
+2. **GC unlink is not made durable.** `collect_obsolete` deletes a local object, then its `data_files` row, with no directory fsync in between. After a power loss the file can come back with no row pointing to it. Nothing lists the object tree today, so the file leaks forever. N's `collect_orphans` (N M2, B5) will reclaim such files when an operator runs `cetra admin gc-orphans`, but the leak itself is a durability bug and M2 fixes it.
 3. **Failed WAL group.** `discard_unacked` removes a new empty segment without a directory fsync. It also runs `rewind` (`set_len` + `sync_all`) after a failed `fdatasync`, which is a second fsync after the first one failed. The writer stops either way. After a restart, an unacknowledged group may still be on disk and be replayed. That is acceptable (the client got an error and may retry, and duplicates are tolerated), but it must be documented and tested.
 4. **Read cache `size` file.** It is written through `write_renamed` with no fsync and no checksum. A torn write that still parses as a number would give a wrong object size. That size bounds block reads, so it could serve short or wrong ranges. The blocks themselves carry a CRC.
 5. **Catalog fsync errors.** SQLite reports `SQLITE_IOERR_FSYNC`, but nothing defines what the committer does next. Today a failed commit is a retryable job error, which repeats the fsyncgate mistake on `catalog.db`.
@@ -87,7 +87,7 @@ A proptest state machine runs against a simple in-memory model of the reads behi
   - Bounds, while duplicate re-sends are not yet merged.
   - Exact equality once the state is *settled*: everything flushed, deletions applied, every partition fully compacted.
   - After settling, the files are also checked physically: no covered row is left, and there is one partial per trace.
-- **Budget:** up to 16 cases of up to 24 ops in `just test`, kept under a minute in debug. `LLMOBS_MODEL_CASES` sets the count for long runs, which go nightly from M3 (D-R-14).
+- **Budget:** up to 16 cases of up to 24 ops in `just test`, kept under a minute in debug. `CETRA_MODEL_CASES` sets the count for long runs, which go nightly from M3 (D-R-14).
 
 Plan: `01-m1-model.md`.
 
@@ -153,7 +153,7 @@ Plan: `01-m1-model.md`.
 
 ### M5 — Resource exhaustion
 
-- **Full disk.** Ignored tests run on a small dedicated filesystem: a size-limited tmpfs mounted inside an unprivileged user and mount namespace (`unshare -rm`), or a loop device the operator provides through `LLMOBS_TEST_SMALL_FS`. The disk fills during WAL writes, flush, compaction, query spill and read-cache fill. Each case checks a clean refusal (`DiskFull`, `WalFailed`, deferred compaction, a query failing as too large), recovery once space is freed, and the M1 model's reads afterwards.
+- **Full disk.** Ignored tests run on a small dedicated filesystem: a size-limited tmpfs mounted inside an unprivileged user and mount namespace (`unshare -rm`), or a loop device the operator provides through `CETRA_TEST_SMALL_FS`. The disk fills during WAL writes, flush, compaction, query spill and read-cache fill. Each case checks a clean refusal (`DiskFull`, `WalFailed`, deferred compaction, a query failing as too large), recovery once space is freed, and the M1 model's reads afterwards.
 - **Spill capped.** Query spill is checked against `storage.min_free_bytes`, through DataFusion's disk manager limit (`benchmarks.md` § Findings (a)). This is a fix with a spec 03 §6 update.
 - **Memory limit.** Runs under a cgroup (`systemd-run --user --scope -p MemoryMax=…`) at the documented minimum. They are storage-level tests: the expected outcomes are `AppendError::Backpressure`/`DiskFull`, `QueryError::Busy` and `RunError::TooLarge` (which the server maps to 503 and 422), never an OOM kill, and that minimum gets documented (full-plan review R-5).
 - **File descriptors.** Runs under a low `RLIMIT_NOFILE`, set in a re-executed child as the crash tests do: many partitions, compaction and queries at once. The result must be errors, never a panic or a wedged writer. The descriptors the engine needs at a given scale get documented.
@@ -179,7 +179,7 @@ Every concurrent read must equal the model **before or after** each op in flight
 
 The rule, written into spec 03 (new § 12 Format versions), D-R-12 and D-R-26 to D-R-32:
 - **Format surfaces:** the WAL segment header and record format; the Parquet schemas and KV metadata; the `catalog.db` schema and its data-directory marker; the object layout and paths; the read-cache layout (pinned, not versioned).
-- **One `FORMAT_VERSION`** for the whole directory, stored in `catalog.db`'s `user_version`, in every WAL segment header (new) and in every Parquet file as `llmobs.format_version` (new; `llmobs.schema_version` stays the row normalization version).
+- **One `FORMAT_VERSION`** for the whole directory, stored in `catalog.db`'s `user_version`, in every WAL segment header (new) and in every Parquet file as `cetra.format_version` (new; `cetra.schema_version` stays the row normalization version).
 - **Not a format change:** adding a nullable Parquet column (spec 03 §3 Schema evolution) and a new `catalog.db` migration that only adds. Anything else is a format change. Examples: a new WAL `kind`, a changed sort order or column type, a renamed path, a changed checksum, a new value of a catalog TEXT enum.
 - **Before the first public release:** no constraint (no users, `AGENTS.md`). Directories written before M8 are refused, not migrated; that includes stored benchmark and soak datasets (`trace_bench`'s, M7's), which must be regenerated.
 - **From the first public release:** a format change needs a `FORMAT_VERSION` bump, readers or an open-time migration for what the previous release wrote, tests against the previous releases' golden directories, and an `### Upgrade notes` line (D-N-5).
@@ -200,7 +200,7 @@ Plan: `08-m8-format.md`. The first-release trigger is settled by D185 (the first
   - `CHANGELOG.md`, for every user-visible fix (AGENTS.md § Commits);
   - `tools/soak/` (M7).
 
-  Changes to `llmobs-core`, to the server or to N's release scripts (M8's golden-directory step) are requested from the coordinating session.
+  Changes to `cetra-core`, to the server or to N's release scripts (M8's golden-directory step) are requested from the coordinating session.
 - **Fixes** (D-R-2). A bug found by an R test is fixed in R, in a sub-phase of its own, with the shrunk case as a named regression test. The fix and the test share a commit. A fix that needs a format, public API or spec semantic change stops and is raised first.
 - **No production cost.** Test seams compile to nothing outside `cfg(test)`/`cfg(fuzzing)`, as `hooks.rs` does. The `fs` module's production path is a direct call.
 - **Findings log.** `docs/research/storage/hardening.md` records every bug found: milestone, test, shrunk case, cause, fix commit. Each run has its machine and command. This is the public record behind the robustness claims.

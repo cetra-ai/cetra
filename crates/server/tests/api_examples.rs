@@ -6,57 +6,59 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use llmobs_core::enums::PayloadFormat;
-use llmobs_core::ids::{SpanId, TraceId};
-use llmobs_core::message::{Message, Part};
-use llmobs_core::score::{Score, ScoreTarget, ScoreValue};
-use llmobs_core::span::Span;
-use llmobs_server::api::account::{
+use cetra_core::enums::PayloadFormat;
+use cetra_core::ids::{SpanId, TraceId};
+use cetra_core::message::{Message, Part};
+use cetra_core::score::{Score, ScoreTarget, ScoreValue};
+use cetra_core::span::Span;
+use cetra_server::api::account::{
     AuthConfig, Me, OrgMembership, OrgRole, Project, SetupResponse, SignupResponse,
 };
-use llmobs_server::api::admin::{AdminLicense, AdminSettings, AdminUser, CreatedAdminUser};
-use llmobs_server::api::alerts::{AlertEvent, AlertRule, NotificationChannel};
-use llmobs_server::api::backfills::{Backfill, BackfillEstimate, CreateBackfillRequest};
-use llmobs_server::api::common::Page;
-use llmobs_server::api::connections::{
+use cetra_server::api::admin::{AdminLicense, AdminSettings, AdminUser, CreatedAdminUser};
+use cetra_server::api::alerts::{AlertEvent, AlertRule, NotificationChannel};
+use cetra_server::api::backfills::{Backfill, BackfillEstimate, CreateBackfillRequest};
+use cetra_server::api::common::{Page, Problem};
+use cetra_server::api::connections::{
     CreateLlmConnectionRequest, LlmConnection, LlmConnectionTestResult,
 };
-use llmobs_server::api::datasets::{
-    AddItemsRequest, CreateDatasetRequest, Dataset, DatasetItem, DatasetVersion, FromTraceRequest,
-    ImportMapping, ImportPreview, ImportResult,
+use cetra_server::api::dashboards::{Dashboard, DashboardSummary, WidgetQueryResponse};
+use cetra_server::api::datasets::{
+    AddItemsRequest, CreateDatasetRequest, Dataset, DatasetItem, DatasetVersion, EditItemsResponse,
+    ExperimentTrends, FromTraceRequest, FromTracesResult, ImportMapping, ImportPreview,
+    ImportResult, ItemChange,
 };
-use llmobs_server::api::deletions::{Deletion, DeletionPreview};
-use llmobs_server::api::entitlements::OrgEntitlements;
-use llmobs_server::api::eval_jobs::{EvalJob, RunEvaluatorRequest};
-use llmobs_server::api::evaluators::{
-    CreateEvaluatorRequest, Evaluator, EvaluatorTemplateList, EvaluatorTestRequest,
-    EvaluatorTestResult,
+use cetra_server::api::deletions::{Deletion, DeletionPreview};
+use cetra_server::api::entitlements::OrgEntitlements;
+use cetra_server::api::eval_jobs::{EvalJob, RunEvaluatorRequest};
+use cetra_server::api::evaluators::{
+    CreateEvaluatorRequest, Evaluator, EvaluatorStatsResponse, EvaluatorTemplateList,
+    EvaluatorTestRequest, EvaluatorTestResult, EvaluatorVersion,
 };
-use llmobs_server::api::experiments::{
+use cetra_server::api::experiments::{
     CreateExperimentResponse, Experiment, ExperimentComparison, ExperimentResults,
-    ExperimentResultsRequest,
+    ExperimentResultsRequest, ExperimentSummaries,
 };
-use llmobs_server::api::invites::{CreatedInvite, Invite, InvitePreview};
-use llmobs_server::api::keys::{ApiKey, CreatedApiKey, CreatedPersonalToken, PersonalToken};
-use llmobs_server::api::members::{OrgMember, ProjectMember};
-use llmobs_server::api::metrics::MetricsResponse;
-use llmobs_server::api::model_prices::{ModelPrice, ModelPriceInput, ModelPriceResolution};
-use llmobs_server::api::online_rules::{
+use cetra_server::api::facets::FacetsResponse;
+use cetra_server::api::invites::{CreatedInvite, Invite, InvitePreview};
+use cetra_server::api::keys::{ApiKey, CreatedApiKey, CreatedPersonalToken, PersonalToken};
+use cetra_server::api::members::{OrgMember, ProjectMember};
+use cetra_server::api::model_prices::{ModelPrice, ModelPriceInput, ModelPriceResolution};
+use cetra_server::api::online_rules::{
     CreateOnlineRuleRequest, OnlineRule, OnlineRulePage, OnlineRulePreview,
-    OnlineRulePreviewRequest, UpdateOnlineRuleRequest,
+    OnlineRulePreviewRequest, OnlineRuleStatsResponse, UpdateOnlineRuleRequest,
 };
-use llmobs_server::api::openapi::openapi;
-use llmobs_server::api::org_sso::OrgSso;
-use llmobs_server::api::payload::Payload;
-use llmobs_server::api::saved_views::SavedView;
-use llmobs_server::api::schema::SchemaResponse;
-use llmobs_server::api::score_definitions::{CreateScoreDefinitionRequest, ScoreDefinition};
-use llmobs_server::api::scores::{FeedbackRequest, ScoreBatch};
-use llmobs_server::api::sessions::{SessionDetail, SessionSummary};
-use llmobs_server::api::sql::{SqlQueryRequest, SqlQueryResult};
-use llmobs_server::api::traces::{SpanDetail, SpanSummary, TraceDetail, TraceSummary};
-use llmobs_server::api::usage::OrgUsage;
-use llmobs_server::api::users::{EndUserDetail, EndUserSummary};
+use cetra_server::api::openapi::openapi;
+use cetra_server::api::org_sso::OrgSso;
+use cetra_server::api::payload::Payload;
+use cetra_server::api::saved_views::SavedView;
+use cetra_server::api::schema::SchemaResponse;
+use cetra_server::api::score_definitions::{CreateScoreDefinitionRequest, ScoreDefinition};
+use cetra_server::api::scores::{FeedbackRequest, ScoreBatch};
+use cetra_server::api::sessions::{SessionDetail, SessionSummary};
+use cetra_server::api::sql::{SqlQueryRequest, SqlQueryResult};
+use cetra_server::api::traces::{SpanDetail, SpanSummary, TraceDetail, TraceSummary};
+use cetra_server::api::usage::OrgUsage;
+use cetra_server::api::users::{EndUserDetail, EndUserSummary};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -216,7 +218,7 @@ fn contract_document() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("openapi.json")
 }
 
-const OPENAPI_URI: &str = "urn:llmobs:openapi";
+const OPENAPI_URI: &str = "urn:cetra:openapi";
 
 fn schema_pointer(document: &Value, entry: &Example, failures: &mut Vec<String>) -> Option<String> {
     let Some((path, method, operation)) = operation_at(document, &entry.operation_id) else {
@@ -411,6 +413,10 @@ fn static_files_match_their_types() {
     roundtrip::<CreatedPersonalToken>("static/personal-token-created.json");
     roundtrip::<SchemaResponse>("static/schema.json");
     roundtrip::<Page<SavedView>>("static/saved-views.json");
+    roundtrip::<Page<DashboardSummary>>("static/dashboards.json");
+    roundtrip::<Dashboard>("static/dashboard.json");
+    roundtrip::<Dashboard>("static/dashboard-overview.json");
+    roundtrip::<Problem>("static/dashboard-stale.json");
     roundtrip::<SqlQueryResult>("static/sql-result.json");
     roundtrip::<Page<Deletion>>("static/deletions.json");
     roundtrip::<Deletion>("static/deletion.json");
@@ -421,13 +427,16 @@ fn static_files_match_their_types() {
     roundtrip::<Deletion>("static/deletion-org.json");
     roundtrip::<Page<Evaluator>>("static/evaluators.json");
     roundtrip::<Evaluator>("static/evaluator.json");
+    roundtrip::<Page<EvaluatorVersion>>("static/evaluator-versions.json");
     roundtrip::<EvaluatorTemplateList>("static/evaluator-templates.json");
+    roundtrip::<EvaluatorStatsResponse>("static/evaluator-stats.json");
     roundtrip::<EvaluatorTestResult>("static/evaluator-test-result.json");
     roundtrip::<Page<Experiment>>("static/experiments.json");
     roundtrip::<Experiment>("static/experiment.json");
     roundtrip::<CreateExperimentResponse>("static/experiment-created.json");
     roundtrip::<ExperimentResults>("static/experiment-results.json");
     roundtrip::<ExperimentComparison>("static/experiment-comparison.json");
+    roundtrip::<ExperimentSummaries>("static/experiment-summaries.json");
     roundtrip::<Page<ScoreDefinition>>("static/score-definitions.json");
     roundtrip::<ScoreDefinition>("static/score-definition.json");
     roundtrip::<Page<ModelPrice>>("static/model-prices.json");
@@ -435,6 +444,7 @@ fn static_files_match_their_types() {
     roundtrip::<ModelPrice>("static/model-price.json");
     roundtrip::<ModelPriceResolution>("static/model-price-resolution.json");
     roundtrip::<OnlineRulePage>("static/online-rules.json");
+    roundtrip::<OnlineRuleStatsResponse>("static/online-rule-stats.json");
     roundtrip::<OnlineRule>("static/online-rule.json");
     roundtrip::<OnlineRule>("static/online-rule-resumed.json");
     roundtrip::<OnlineRulePreview>("static/online-rule-preview.json");
@@ -447,6 +457,10 @@ fn static_files_match_their_types() {
     roundtrip::<ImportPreview>("static/dataset-import-preview.json");
     roundtrip::<ImportResult>("static/dataset-import-result.json");
     roundtrip::<DatasetItem>("static/dataset-item-from-trace.json");
+    roundtrip::<EditItemsResponse>("static/dataset-items-edited.json");
+    roundtrip::<DatasetVersion>("static/dataset-items-deleted.json");
+    roundtrip::<FromTracesResult>("static/dataset-items-from-traces.json");
+    roundtrip::<DatasetVersion>("static/dataset-restored.json");
 }
 
 #[test]
@@ -523,6 +537,16 @@ fn request_examples_match_their_types_and_the_openapi_document() {
         ),
         ("post_dataset", "requests/dataset-create.json"),
         ("post_dataset_items", "requests/dataset-items-add.json"),
+        ("patch_dataset_items", "requests/dataset-items-edit.json"),
+        (
+            "post_dataset_items_delete",
+            "requests/dataset-items-delete.json",
+        ),
+        (
+            "post_dataset_items_from_traces",
+            "requests/dataset-items-from-traces.json",
+        ),
+        ("restore_dataset", "requests/dataset-restore.json"),
         (
             "post_dataset_item_from_trace",
             "requests/dataset-from-trace.json",
@@ -603,11 +627,14 @@ fn generated_files_roundtrip() {
             "post_api_key" => roundtrip::<CreatedApiKey>(&example.file),
             "list_personal_tokens" => roundtrip::<Page<PersonalToken>>(&example.file),
             "post_personal_token" => roundtrip::<CreatedPersonalToken>(&example.file),
-            "get_metrics" => roundtrip::<MetricsResponse>(&example.file),
+            "get_facets" => roundtrip::<FacetsResponse>(&example.file),
             "run_sql" => roundtrip::<SqlQueryResult>(&example.file),
+            "query_widget" => roundtrip::<WidgetQueryResponse>(&example.file),
             "list_deletions" => roundtrip::<Page<Deletion>>(&example.file),
             "list_org_deletions" => roundtrip::<Page<Deletion>>(&example.file),
             "get_org_usage" => roundtrip::<OrgUsage>(&example.file),
+            "get_dashboard" | "list_dashboards" | "create_dashboard" | "update_dashboard"
+            | "get_overview" | "save_overview" => {}
             "get_deletion" | "create_deletion" | "delete_project" | "delete_org" => {
                 roundtrip::<Deletion>(&example.file);
             }
@@ -630,6 +657,7 @@ fn generated_files_roundtrip() {
             | "list_alert_rules"
             | "get_alert_rule"
             | "list_alert_events"
+            | "list_project_alert_events"
             | "post_setup"
             | "post_login"
             | "post_signup"
@@ -645,7 +673,9 @@ fn generated_files_roundtrip() {
             "post_llm_connection_test" => roundtrip::<LlmConnectionTestResult>(&example.file),
             "list_evaluators" => roundtrip::<Page<Evaluator>>(&example.file),
             "get_evaluator" | "post_evaluator" => roundtrip::<Evaluator>(&example.file),
+            "list_evaluator_versions" => roundtrip::<Page<EvaluatorVersion>>(&example.file),
             "list_evaluator_templates" => roundtrip::<EvaluatorTemplateList>(&example.file),
+            "get_evaluator_stats" => roundtrip::<EvaluatorStatsResponse>(&example.file),
             "post_evaluator_test" => roundtrip::<EvaluatorTestResult>(&example.file),
             "get_saved_view" => roundtrip::<SavedView>(&example.file),
             "list_score_definitions" => roundtrip::<Page<ScoreDefinition>>(&example.file),
@@ -655,6 +685,7 @@ fn generated_files_roundtrip() {
             "resolve_model_price" => roundtrip::<ModelPriceResolution>(&example.file),
             "post_model_price" => roundtrip::<ModelPrice>(&example.file),
             "list_online_rules" => roundtrip::<OnlineRulePage>(&example.file),
+            "get_online_rule_stats" => roundtrip::<OnlineRuleStatsResponse>(&example.file),
             "get_online_rule" | "post_online_rule" | "post_online_rule_resume" => {
                 roundtrip::<OnlineRule>(&example.file);
             }
@@ -666,12 +697,20 @@ fn generated_files_roundtrip() {
             "post_experiment" => roundtrip::<CreateExperimentResponse>(&example.file),
             "get_experiment_results" => roundtrip::<ExperimentResults>(&example.file),
             "compare_experiments" => roundtrip::<ExperimentComparison>(&example.file),
+            "get_experiment_summaries" => roundtrip::<ExperimentSummaries>(&example.file),
             "list_backfills" => roundtrip::<Page<Backfill>>(&example.file),
             "post_backfill" => roundtrip::<Backfill>(&example.file),
             "post_backfill_estimate" => roundtrip::<BackfillEstimate>(&example.file),
             "post_dataset_import_preview" => roundtrip::<ImportPreview>(&example.file),
             "post_dataset_import" => roundtrip::<ImportResult>(&example.file),
             "post_dataset_item_from_trace" => roundtrip::<DatasetItem>(&example.file),
+            "patch_dataset_items" => roundtrip::<EditItemsResponse>(&example.file),
+            "post_dataset_items_delete" | "restore_dataset" => {
+                roundtrip::<DatasetVersion>(&example.file);
+            }
+            "post_dataset_items_from_traces" => roundtrip::<FromTracesResult>(&example.file),
+            "list_dataset_version_changes" => roundtrip::<Page<ItemChange>>(&example.file),
+            "list_experiment_trends" => roundtrip::<ExperimentTrends>(&example.file),
             other => panic!("{other} has no round-trip"),
         }
     }
@@ -923,7 +962,7 @@ fn example_scenarios() {
         .iter()
         .find(|trace| trace.trace_id.to_string() == TRACE_3)
         .unwrap_or_else(|| panic!("T3"));
-    assert_eq!(third.status, llmobs_core::enums::SpanStatus::Error);
+    assert_eq!(third.status, cetra_core::enums::SpanStatus::Error);
     assert_eq!(third.error_count, 2);
 
     let span: SpanDetail =

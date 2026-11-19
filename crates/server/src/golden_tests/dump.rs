@@ -22,10 +22,10 @@ use crate::meta::orgs::OrgRow;
 use crate::meta::projects::ProjectRow;
 use crate::meta::{self, MetaDb};
 use crate::meta::{
-    alerts, api_keys, backfills, connections, datasets, deletions, entitlements, eval_jobs,
-    evaluators, experiments, identities, instance_settings, invites, members, model_prices,
-    online_rules, orgs, password_resets, pending_traces, personal_tokens, projects, rule_spend,
-    saved_views, score_definitions, usage, users, web_sessions,
+    alerts, api_keys, backfills, connections, dashboards, datasets, deletions, entitlements,
+    eval_jobs, evaluators, experiments, identities, instance_settings, invites, members,
+    model_prices, online_rules, orgs, password_resets, pending_traces, personal_tokens, projects,
+    rule_spend, saved_views, score_definitions, usage, users, web_sessions,
 };
 use std::collections::BTreeMap;
 use uuid::Uuid;
@@ -255,6 +255,7 @@ async fn reads(meta: &MetaDb) -> Value {
         ("model_prices", prices_section(&world).await),
         ("datasets", datasets_section(&world).await),
         ("experiments", experiments_section(&world).await),
+        ("dashboards", dashboards_section(&world).await),
     ] {
         out.insert(table.to_owned(), value);
     }
@@ -495,7 +496,8 @@ async fn evaluator_names(world: &World<'_>) -> (BTreeMap<Uuid, String>, BTreeMap
     (connection_names, evaluator_names)
 }
 
-/// evaluators: `evaluators::list_evaluators`, by name. The sealed webhook document is in `secrets`.
+/// evaluators (with evaluator_versions): `evaluators::list_evaluators` and
+/// `list_evaluator_versions`, by name. The sealed webhook document is in `secrets`.
 async fn evaluators_section(world: &World<'_>) -> Value {
     let (connection_names, _) = evaluator_names(world).await;
     let mut map = Map::new();
@@ -508,6 +510,26 @@ async fn evaluators_section(world: &World<'_>) -> Value {
         if let Some(object) = config.as_object_mut() {
             object.remove("connection_id");
         }
+        let versions: Vec<Value> =
+            evaluators::list_evaluator_versions(world.pool, world.p1.id, row.id, None, 100)
+                .await
+                .expect("read the evaluator versions")
+                .into_iter()
+                .map(|version| {
+                    let mut config = json_text(&version.config);
+                    if let Some(object) = config.as_object_mut() {
+                        object.remove("connection_id");
+                    }
+                    json!({
+                        "version": version.version,
+                        "name": version.name,
+                        "kind": version.kind,
+                        "config": config,
+                        "output_score": json_text(&version.output_score),
+                        "created_by": version.created_by.map(|id| world.emails.get(&id).cloned()),
+                    })
+                })
+                .collect();
         map.insert(
             row.name.clone(),
             json!({
@@ -517,6 +539,7 @@ async fn evaluators_section(world: &World<'_>) -> Value {
                 "connection": row.connection_id.map(|id| connection_names[&id].clone()),
                 "has_secret": row.secret_enc.is_some(),
                 "version": row.version,
+                "versions": versions,
             }),
         );
     }
@@ -565,6 +588,7 @@ async fn definitions_section(world: &World<'_>) -> Value {
                 "min_value": row.min_value,
                 "max_value": row.max_value,
                 "description": row.description,
+                "direction": ser(&row.direction),
                 "archived": row.archived_at.is_some(),
             }),
         );
@@ -727,7 +751,7 @@ async fn deletions_section(world: &World<'_>) -> Value {
                 "handed_over": row.handed_over_at.is_some(),
                 "applied": row.applied_at.is_some(),
                 "error": row.error.map(deletions::FailReason::as_str),
-                "traces": traces.iter().map(llmobs_core::ids::TraceId::to_hex).collect::<Vec<_>>(),
+                "traces": traces.iter().map(cetra_core::ids::TraceId::to_hex).collect::<Vec<_>>(),
                 "sessions": sessions,
                 "projects": projects
                     .iter()
@@ -936,6 +960,41 @@ async fn usage_section(world: &World<'_>) -> Value {
     json!({ "golden-org": ser(&days) })
 }
 
+/// dashboards: `dashboards::list` and `get` (custom, by name) and `get_overview` (the
+/// project's Overview, under `overview`).
+async fn dashboards_section(world: &World<'_>) -> Value {
+    let row_json = |row: dashboards::DashboardRow| {
+        json!({
+            "description": row.info.description,
+            "version": row.info.version,
+            "created_by": row.info.created_by.map(|id| world.emails.get(&id).cloned()),
+            "updated_by": row.info.updated_by.map(|id| world.emails.get(&id).cloned()),
+            "definition": ser(&row.definition),
+        })
+    };
+    let mut custom = Map::new();
+    let page = dashboards::list(world.pool, world.p1.id, 100, None)
+        .await
+        .expect("read the dashboards");
+    for info in page.rows {
+        let row = dashboards::get(world.pool, world.p1.id, info.id)
+            .await
+            .expect("read a dashboard")
+            .expect("a listed dashboard exists");
+        custom.insert(info.name.clone(), row_json(row));
+    }
+    let overview = dashboards::get_overview(world.pool, world.p1.id)
+        .await
+        .expect("read the overview")
+        .map(|row| {
+            let name = row.info.name.clone();
+            let mut value = row_json(row);
+            value["name"] = json!(name);
+            value
+        });
+    json!({ "custom": custom, "overview": overview })
+}
+
 /// model_prices: `model_prices::list_all`, by model name. Ids and times stay in `rows`.
 async fn prices_section(world: &World<'_>) -> Value {
     let mut map = Map::new();
@@ -966,10 +1025,16 @@ async fn datasets_section(world: &World<'_>) -> Value {
         let versions = datasets::list_versions(world.pool, dataset.id, None, 100)
             .await
             .expect("read the versions");
-        let items =
-            datasets::list_items(world.pool, dataset.id, dataset.current_version, None, 100)
-                .await
-                .expect("read the items");
+        let items = datasets::list_items(
+            world.pool,
+            dataset.id,
+            dataset.current_version,
+            None,
+            100,
+            None,
+        )
+        .await
+        .expect("read the items");
         map.insert(
             dataset.name.clone(),
             json!({

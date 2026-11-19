@@ -3,7 +3,7 @@ export function FormError({ message }: { message?: string }) {
     return null;
   }
   return (
-    <p role="alert" className="text-sm text-destructive">
+    <p role="alert" className="text-body text-destructive">
       {message}
     </p>
   );

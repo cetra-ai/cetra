@@ -1,7 +1,7 @@
 const MEDIA_PREFIX = "media://";
 
 export type MediaSource =
-  /** `llmobs:dropped`: the bytes were dropped at ingest. */
+  /** `cetra:dropped`: the bytes were dropped at ingest. */
   | { kind: "dropped" }
   /** `media://<sha256>` of this project: served by the API. */
   | { kind: "stored"; url: string }
@@ -13,7 +13,7 @@ export type MediaSource =
   | { kind: "unsupported" };
 
 export function classifyMedia(projectRef: string | undefined, uri: string): MediaSource {
-  if (uri === "llmobs:dropped") return { kind: "dropped" };
+  if (uri === "cetra:dropped") return { kind: "dropped" };
   if (uri.startsWith(MEDIA_PREFIX)) {
     if (projectRef === undefined) return { kind: "unsupported" };
     const sha = uri.slice(MEDIA_PREFIX.length);

@@ -1,27 +1,27 @@
-//! `llmobs projects list`: every project the caller can read, across their orgs (spec 09
+//! `cetra projects list`: every project the caller can read, across their orgs (spec 09
 //! § Orgs, projects, members, keys; D-H-12).
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use cetra_server::api::account::{OrgMembership, OrgRole, Project};
+use cetra_server::api::common::Page;
 use clap::{Args, Subcommand};
-use llmobs_server::api::account::{OrgMembership, OrgRole, Project};
-use llmobs_server::api::common::Page;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::client::{self, ApiClient, ConnectionArgs};
 use crate::output::{self, Column, Io, ListFormat};
 
-/// `llmobs projects …`.
+/// `cetra projects …`.
 #[derive(Debug, Subcommand)]
 pub(crate) enum ProjectsCommand {
     /// List every project you can read, across your orgs.
     List(ProjectListArgs),
 }
 
-/// `llmobs projects list`.
+/// `cetra projects list`.
 #[derive(Debug, Args)]
 pub(crate) struct ProjectListArgs {
     /// Output format.
@@ -46,7 +46,7 @@ struct ListedProject {
     role: Option<String>,
 }
 
-/// Runs `llmobs projects …`. Credentials are read only when the target needs them.
+/// Runs `cetra projects …`. Credentials are read only when the target needs them.
 pub(crate) async fn run(
     command: &ProjectsCommand,
     credentials: impl FnOnce() -> anyhow::Result<PathBuf>,
@@ -168,9 +168,9 @@ mod tests {
     use super::*;
     use crate::test_server::{BrokenPipe, Canned, TestServer};
 
-    /// `llmobs projects …` parsed from `argv` (after `projects`).
+    /// `cetra projects …` parsed from `argv` (after `projects`).
     fn projects_args(argv: &[&str]) -> ProjectsCommand {
-        let mut full = vec!["llmobs", "projects"];
+        let mut full = vec!["cetra", "projects"];
         full.extend_from_slice(argv);
         match crate::Cli::try_parse_from(full).unwrap().command {
             crate::Command::Projects { command } => *command,
@@ -296,11 +296,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn projects_list_pages_orgs_and_projects() {
         let orgs_first = json!({
-            "data": [{"id": "01900000-0000-7000-8000-000000000010", "slug": "acme", "name": "Acme", "role": "owner"}],
+            "data": [{"id": "01900000-0000-7000-8000-000000000010", "slug": "acme", "name": "Acme", "role": "owner", "demo": false}],
             "next_cursor": "o2"
         });
         let orgs_second = json!({
-            "data": [{"id": "01900000-0000-7000-8000-000000000011", "slug": "beta", "name": "Beta", "role": "viewer"}],
+            "data": [{"id": "01900000-0000-7000-8000-000000000011", "slug": "beta", "name": "Beta", "role": "viewer", "demo": false}],
             "next_cursor": null
         });
         let acme_first = json!({
@@ -383,7 +383,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn projects_list_stops_when_a_cursor_repeats() {
         let org_page = json!({
-            "data": [{"id": "01900000-0000-7000-8000-000000000010", "slug": "acme", "name": "Acme", "role": "owner"}],
+            "data": [{"id": "01900000-0000-7000-8000-000000000010", "slug": "acme", "name": "Acme", "role": "owner", "demo": false}],
             "next_cursor": "o2"
         });
         let canned = Canned::json(vec![
@@ -401,7 +401,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn projects_list_cleans_a_control_character_in_a_cell() {
         let orgs = json!({
-            "data": [{"id": "01900000-0000-7000-8000-000000000010", "slug": "acme", "name": "Acme", "role": "owner"}],
+            "data": [{"id": "01900000-0000-7000-8000-000000000010", "slug": "acme", "name": "Acme", "role": "owner", "demo": false}],
             "next_cursor": null
         });
         let projects = json!({
@@ -452,7 +452,7 @@ mod tests {
             (
                 200,
                 json!({
-                    "data": [{"id": "01900000-0000-7000-8000-000000000010", "slug": "acme", "name": "Acme", "role": "owner"}],
+                    "data": [{"id": "01900000-0000-7000-8000-000000000010", "slug": "acme", "name": "Acme", "role": "owner", "demo": false}],
                     "next_cursor": null
                 })
                 .to_string(),

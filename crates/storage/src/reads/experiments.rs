@@ -1,7 +1,7 @@
 //! The scores and traces of one experiment, for its results and comparison (D-J-13).
 //!
 //! The `scores` view holds live scores only. Experiment scores carry `experiment_id`
-//! (D-J-12); experiment traces carry `metadata['llmobs.experiment_id']` (spec 02 § Context
+//! (D-J-12); experiment traces carry `metadata['cetra.experiment_id']` (spec 02 § Context
 //! fields). Default exclusions do not apply.
 
 use std::time::Duration;
@@ -10,12 +10,14 @@ use arrow::array::{Array, ArrayRef, AsArray, Float64Array, Int64Array, StringArr
 use arrow::compute::cast;
 use arrow::datatypes::{DataType, Float64Type, Int64Type};
 use arrow::error::ArrowError;
+use cetra_core::enums::ScoreDataType;
+use cetra_core::names::metadata_key;
+use cetra_core::schema::{scores, traces};
 use datafusion::common::ScalarValue;
 use datafusion::error::DataFusionError;
+use datafusion::functions_aggregate::expr_fn::{avg, count};
 use datafusion::logical_expr::{Expr, col, lit};
 use futures::StreamExt;
-use llmobs_core::names::metadata_key;
-use llmobs_core::schema::{scores, traces};
 
 use crate::query_error::{RunError, classify};
 use crate::views::{QueryContext, ViewName};
@@ -24,6 +26,9 @@ use crate::views::{QueryContext, ViewName};
 pub const MAX_EXPERIMENT_SCORES: usize = 500_000;
 /// Most trace rows [`experiment_traces`] returns.
 pub const MAX_EXPERIMENT_TRACES: usize = 100_000;
+
+/// Most experiments [`experiment_score_means`] takes in one read (D-J-26).
+pub const MAX_MEAN_EXPERIMENTS: usize = 1_000;
 
 /// The `duration_ns` column of the `traces` view (a computed column of the view).
 const DURATION_NS: &str = "duration_ns";
@@ -43,6 +48,21 @@ pub struct ExperimentScore {
     pub value_num: Option<f64>,
     /// The label of a `categorical` score, or the text of a `text` score.
     pub value_str: Option<String>,
+}
+
+/// The mean of one score name and data type over the live scores of one experiment (D-J-26).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExperimentScoreMean {
+    /// Lowercase hyphenated UUID, as the experiment was asked for.
+    pub experiment_id: String,
+    /// Score name.
+    pub name: String,
+    /// `numeric` or `boolean`.
+    pub data_type: String,
+    /// Mean of the numeric values over the score rows; `None` when none has a value.
+    pub mean: Option<f64>,
+    /// Score rows counted.
+    pub count: i64,
 }
 
 /// One trace of an experiment.
@@ -81,7 +101,7 @@ pub async fn experiment_scores(
     }
 }
 
-/// Traces whose merged `metadata['llmobs.experiment_id']` is `experiment`, in no order.
+/// Traces whose merged `metadata['cetra.experiment_id']` is `experiment`, in no order.
 ///
 /// `since` is a lower bound on `start_time`, as for [`experiment_scores`].
 ///
@@ -100,6 +120,103 @@ pub async fn experiment_traces(
         Err(_) => Err(RunError::Timeout),
         Ok(result) => result,
     }
+}
+
+/// Per experiment in `experiments`, name and data type (`numeric` and `boolean` only), the mean
+/// and the row count of the live, not deleted scores created at or after `since` (D-J-26). One
+/// read for all of them.
+///
+/// # Errors
+///
+/// [`RunError::InvalidRequest`] when an id is not a UUID or more than
+/// [`MAX_MEAN_EXPERIMENTS`] are asked for; [`RunError::Timeout`]; other errors as
+/// `ctx.fail` classifies them.
+pub async fn experiment_score_means(
+    ctx: &QueryContext,
+    experiments: &[String],
+    since: i64,
+    timeout: Duration,
+) -> Result<Vec<ExperimentScoreMean>, RunError> {
+    if experiments.len() > MAX_MEAN_EXPERIMENTS {
+        return Err(RunError::InvalidRequest(format!(
+            "at most {MAX_MEAN_EXPERIMENTS} experiments"
+        )));
+    }
+    let experiments = experiments
+        .iter()
+        .map(|experiment| experiment_key(experiment))
+        .collect::<Result<Vec<_>, _>>()?;
+    if experiments.is_empty() {
+        return Ok(Vec::new());
+    }
+    match tokio::time::timeout(timeout, means_of(ctx, &experiments, since)).await {
+        Err(_) => Err(RunError::Timeout),
+        Ok(result) => result,
+    }
+}
+
+async fn means_of(
+    ctx: &QueryContext,
+    experiments: &[String],
+    since: i64,
+) -> Result<Vec<ExperimentScoreMean>, RunError> {
+    let ids = experiments.iter().map(|id| lit(id.as_str())).collect();
+    let predicate = col(scores::EXPERIMENT_ID)
+        .in_list(ids, false)
+        .and(col(scores::DELETED).eq(lit(false)))
+        .and(col(scores::CREATED_AT).gt_eq(since_literal(since)))
+        .and(col(scores::DATA_TYPE).in_list(
+            vec![
+                lit(ScoreDataType::Numeric.as_str()),
+                lit(ScoreDataType::Boolean.as_str()),
+            ],
+            false,
+        ));
+    let batches = ctx
+        .session()
+        .table("scores")
+        .await
+        .map_err(classify)?
+        .filter(predicate)
+        .map_err(classify)?
+        .aggregate(
+            vec![
+                col(scores::EXPERIMENT_ID),
+                col(scores::NAME),
+                col(scores::DATA_TYPE),
+            ],
+            vec![
+                avg(col(scores::VALUE_NUM)).alias("mean"),
+                count(lit(1_i64)).alias("count"),
+            ],
+        )
+        .map_err(classify)?
+        .collect()
+        .await
+        .map_err(|error| ctx.fail(error))?;
+    let mut found = Vec::new();
+    for batch in &batches {
+        let experiment = texts(batch.column(0))?;
+        let experiment = experiment.as_string::<i32>();
+        let name = texts(batch.column(1))?;
+        let name = name.as_string::<i32>();
+        let data_type = texts(batch.column(2))?;
+        let data_type = data_type.as_string::<i32>();
+        let mean = floats(batch.column(3))?;
+        let mean = mean.as_primitive::<Float64Type>();
+        let count = ints(batch.column(4))?;
+        let count = count.as_primitive::<Int64Type>();
+        for row in 0..batch.num_rows() {
+            found.push(ExperimentScoreMean {
+                experiment_id: required_text(experiment, row)?,
+                name: required_text(name, row)?,
+                data_type: required_text(data_type, row)?,
+                mean: float_at(mean, row),
+                count: int_at(count, row)?,
+            });
+        }
+    }
+    Ok(found)
 }
 
 fn experiment_key(experiment: &str) -> Result<String, RunError> {
@@ -303,12 +420,15 @@ fn bad_row() -> RunError {
 mod tests {
     use std::time::Duration;
 
-    use llmobs_core::enums::SpanStatus;
-    use llmobs_core::names::metadata_key;
-    use llmobs_core::score::{Score, ScoreValue};
-    use llmobs_core::span::Span;
+    use cetra_core::enums::SpanStatus;
+    use cetra_core::names::metadata_key;
+    use cetra_core::score::{Score, ScoreValue};
+    use cetra_core::span::Span;
 
-    use super::{ExperimentScore, ExperimentTrace, RunError, experiment_scores, experiment_traces};
+    use super::{
+        ExperimentScore, ExperimentScoreMean, ExperimentTrace, RunError, experiment_score_means,
+        experiment_scores, experiment_traces,
+    };
     use crate::test_support::{
         example_query, live_scores_table, score_row, span_row, spans_table, traces_table,
     };
@@ -382,6 +502,81 @@ mod tests {
                 value_num: Some(0.5),
                 value_str: None,
             }]
+        );
+    }
+
+    #[tokio::test]
+    async fn means_per_experiment_name_and_type() {
+        let mut first = score_row(1, 0, 100, 100, 100, false, "accuracy");
+        first.experiment_id = Some(E1.parse().expect("experiment"));
+        first.value = ScoreValue::Numeric(0.5);
+        let mut second = score_row(2, 0, 150, 150, 150, false, "accuracy");
+        second.experiment_id = Some(E1.parse().expect("experiment"));
+        second.value = ScoreValue::Numeric(1.5);
+        let mut passed = score_row(3, 0, 160, 160, 160, false, "passed");
+        passed.experiment_id = Some(E1.parse().expect("experiment"));
+        passed.value = ScoreValue::Boolean(true);
+        let mut label = score_row(4, 0, 170, 170, 170, false, "tone");
+        label.experiment_id = Some(E1.parse().expect("experiment"));
+        label.value = ScoreValue::Categorical {
+            label: "warm".to_owned(),
+            value: None,
+        };
+        let mut other = score_row(5, 1, 200, 200, 200, false, "accuracy");
+        other.experiment_id = Some(E2.parse().expect("experiment"));
+        other.value = ScoreValue::Numeric(0.25);
+        let ctx = context_of(&[], &[first, second, passed, label, other]);
+        let asked = [E1.to_owned(), E2.to_owned()];
+
+        let mut found = experiment_score_means(&ctx, &asked, 0, TIMEOUT)
+            .await
+            .expect("means");
+        found.sort_by(|left, right| {
+            (&left.experiment_id, &left.name).cmp(&(&right.experiment_id, &right.name))
+        });
+        let mean = |experiment: &str, name: &str, data_type: &str, mean: f64, count: i64| {
+            ExperimentScoreMean {
+                experiment_id: experiment.to_owned(),
+                name: name.to_owned(),
+                data_type: data_type.to_owned(),
+                mean: Some(mean),
+                count,
+            }
+        };
+        assert_eq!(
+            found,
+            [
+                mean(E1, "accuracy", "numeric", 1.0, 2),
+                mean(E1, "passed", "boolean", 1.0, 1),
+                mean(E2, "accuracy", "numeric", 0.25, 1),
+            ]
+        );
+
+        // `since` is a lower bound on creation time.
+        let recent = experiment_score_means(&ctx, &asked, 120, TIMEOUT)
+            .await
+            .expect("means");
+        assert!(
+            recent.contains(&mean(E1, "accuracy", "numeric", 1.5, 1)),
+            "{recent:?}"
+        );
+        assert_eq!(recent.len(), 3, "{recent:?}");
+        assert!(recent.iter().all(|row| row.count == 1), "{recent:?}");
+    }
+
+    #[tokio::test]
+    async fn means_refuse_more_than_a_thousand_experiments() {
+        let ctx = context_of(&[], &[]);
+        let many = vec![E1.to_owned(); 1_001];
+        assert!(matches!(
+            experiment_score_means(&ctx, &many, 0, TIMEOUT).await,
+            Err(RunError::InvalidRequest(_))
+        ));
+        assert!(
+            experiment_score_means(&ctx, &[], 0, TIMEOUT)
+                .await
+                .expect("no experiments")
+                .is_empty()
         );
     }
 

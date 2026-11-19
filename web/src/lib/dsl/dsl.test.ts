@@ -1,10 +1,12 @@
 import { expect, it } from "vitest";
 import {
+  appendFilter,
   type Chip,
   type ChipValue,
   type CompareOp,
   type Field,
   parseChip,
+  quoteString,
   serializeChip,
   serializeFilter,
   splitConjuncts,
@@ -476,3 +478,17 @@ function str(value: string): { kind: "string"; value: string } {
 function num(value: number, text: string): { kind: "number"; value: number; text: string } {
   return { kind: "number", value, text };
 }
+
+it("quotes a string value by doubling single quotes", () => {
+  expect(quoteString("it's")).toBe("'it''s'");
+});
+
+it("appends a conjunct and parenthesizes a top-level OR", () => {
+  expect(appendFilter("", "x = 1")).toBe("x = 1");
+  expect(appendFilter("  ", "x = 1")).toBe("x = 1");
+  expect(appendFilter("a = 1", "b = 2")).toBe("a = 1 AND b = 2");
+  expect(appendFilter("a = 1 OR b = 2", "status = 'error'")).toBe(
+    "(a = 1 OR b = 2) AND status = 'error'",
+  );
+  expect(appendFilter("(a = 1 OR b = 2)", "c = 3")).toBe("(a = 1 OR b = 2) AND c = 3");
+});

@@ -246,12 +246,12 @@ Under `### Upgrade notes`:
 ### 7. Closeout
 
 1. `docs/plans/s-cloud-auth/README.md`: the first line becomes `Status: S1–S5 done on <today, YYYY-MM-DD>`.
-2. `docs/roadmap.md`, the row that starts `| **S** Cloud auth |`: the status cell becomes `**Done.** S1–S5: R16 (\`LLMOBS_AUTH__OIDC__<NAME>__CLIENT_SECRET\`), R13 (instance admins' password at \`/login?password=1\`), R7 (login and invite pages start the only provider), R21 (the control plane's user calls fall back to the email). Q's Q2.27 can move its pin.` Append the merged PR numbers to that cell when you know them (the table has no PR column).
+2. `docs/roadmap.md`, the row that starts `| **S** Cloud auth |`: the status cell becomes `**Done.** S1–S5: R16 (\`CETRA_AUTH__OIDC__<NAME>__CLIENT_SECRET\`), R13 (instance admins' password at \`/login?password=1\`), R7 (login and invite pages start the only provider), R21 (the control plane's user calls fall back to the email). Q's Q2.27 can move its pin.` Append the merged PR numbers to that cell when you know them (the table has no PR column).
 
 ## Check
 
 ```bash
-cargo test -p llmobs-server routes::internal_users
+cargo test -p cetra-server routes::internal_users
 just openapi
 just check
 ```

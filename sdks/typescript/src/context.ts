@@ -21,10 +21,10 @@ import { debug } from "./log.js";
 import { applyMask } from "./mask.js";
 
 /** README § Names: one OTel context key for all context values. */
-export const CONTEXT_KEY = createContextKey("llmobs.context");
+export const CONTEXT_KEY = createContextKey("cetra.context");
 
-const BAGGAGE_SESSION_KEY = "llmobs.session.id";
-const BAGGAGE_USER_KEY = "llmobs.user.id";
+const BAGGAGE_SESSION_KEY = "cetra.session.id";
+const BAGGAGE_USER_KEY = "cetra.user.id";
 /** § Span attributes: not empty, only `[A-Za-z0-9_.-]`. */
 const METADATA_KEY = /^[A-Za-z0-9_.-]+$/;
 
@@ -115,7 +115,7 @@ function contextFor(options: ContextOptions): Context {
     }
     return ctx;
   } catch (error) {
-    debug(`llmobs: withContext failed: ${errorName(error)}`);
+    debug(`cetra: withContext failed: ${errorName(error)}`);
     return context.active();
   }
 }
@@ -138,7 +138,7 @@ function validOptions(raw: Record<string, unknown>): {
       metadata[key] = applyMask(value);
     }
   } else if (source !== undefined) {
-    debug("llmobs: withContext metadata option dropped");
+    debug("cetra: withContext metadata option dropped");
   }
   return { sessionId, userId, tags, metadata };
 }
@@ -148,7 +148,7 @@ function validString(value: unknown, name: string): string | undefined {
     return value;
   }
   if (value !== undefined) {
-    debug(`llmobs: withContext ${name} option dropped`);
+    debug(`cetra: withContext ${name} option dropped`);
   }
   return undefined;
 }
@@ -160,7 +160,7 @@ function validTags(value: unknown): string[] {
   }
   if (!Array.isArray(value)) {
     if (value !== undefined) {
-      debug("llmobs: withContext tags option dropped");
+      debug("cetra: withContext tags option dropped");
     }
     return [];
   }
@@ -219,17 +219,17 @@ function coerceLink(raw: unknown): ExperimentLink | undefined {
 const skippedMetadataKeys = new Set<string>();
 
 /**
- * The attribute name a metadata key maps to (`llmobs.metadata.<key>`), or
+ * The attribute name a metadata key maps to (`cetra.metadata.<key>`), or
  * `undefined` when the key fails the rule (§ Span attributes). A failing key
  * is logged once at debug level, with its length only, never the key.
  */
 export function metadataAttributeName(key: string): string | undefined {
   if (METADATA_KEY.test(key)) {
-    return `llmobs.metadata.${key}`;
+    return `cetra.metadata.${key}`;
   }
   if (!skippedMetadataKeys.has(key)) {
     skippedMetadataKeys.add(key);
-    debug(`llmobs: metadata key of length ${key.length} skipped`);
+    debug(`cetra: metadata key of length ${key.length} skipped`);
   }
   return undefined;
 }

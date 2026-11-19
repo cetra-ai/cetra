@@ -14,6 +14,6 @@ describe("EvaluateSnippet", () => {
     const user = userEvent.setup();
     render(<EvaluateSnippet datasetName="faq" />);
     await user.click(screen.getByRole("tab", { name: "TypeScript" }));
-    expect(await screen.findByText(/llmobs\.evaluate\(\{/)).toBeInTheDocument();
+    expect(await screen.findByText(/cetra\.evaluate\(\{/)).toBeInTheDocument();
   });
 });

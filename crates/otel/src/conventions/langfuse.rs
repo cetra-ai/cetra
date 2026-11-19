@@ -4,7 +4,7 @@
 //! over `langfuse.trace.input` / `.output`. An OpenAI message array, or one
 //! message object, becomes messages. Anything else follows rule 10.
 
-use llmobs_core::enums::SpanStatus;
+use cetra_core::enums::SpanStatus;
 use opentelemetry_proto::tonic::common::v1::AnyValue;
 
 use crate::bag::AttrBag;
@@ -103,8 +103,8 @@ mod tests {
     use crate::bag::{AttrBag, Use};
     use crate::payload::{Payload, ReadContext};
     use crate::warn::Warnings;
-    use llmobs_core::enums::{SpanKind, SpanStatus};
-    use llmobs_core::message::messages_to_json;
+    use cetra_core::enums::{SpanKind, SpanStatus};
+    use cetra_core::message::messages_to_json;
     use opentelemetry_proto::tonic::common::v1::any_value::Value;
     use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
     use serde_json::json;

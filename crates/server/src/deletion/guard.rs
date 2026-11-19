@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 
-use llmobs_core::ids::{ProjectId, TraceId};
+use cetra_core::ids::{ProjectId, TraceId};
 use uuid::Uuid;
 
 use crate::meta::{MetaDb, MetaError};
@@ -168,7 +168,7 @@ mod tests {
         insert_traces,
     };
     use crate::test_support::TestApp;
-    use llmobs_core::ids::OrgId;
+    use cetra_core::ids::OrgId;
     use uuid::Uuid;
 
     fn trace(n: u128) -> TraceId {

@@ -72,17 +72,22 @@ jobs:
       - run: just test
       - run: just assert-clean
 
-  rust-deny:
+  rust-policy:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # check-golden diffs against origin/main from the merge base (D-R-30).
+          fetch-depth: 0
       - uses: ./.github/actions/rust # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
         with:
           cache: "false"
-      - run: just deny check-ee
+      # The checkout's ref is the PR merge commit: fetch main explicitly so origin/main exists.
+      - run: just fetch-main
+      # cargo deny is off until the first release (D188).
+      - run: just check-ee check-golden
       - run: just assert-clean
 
   web:
@@ -126,7 +131,7 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          tarballs=("$RUNNER_TEMP"/llmobs-*.tgz)
+          tarballs=("$RUNNER_TEMP"/cetra-ai-sdk-*.tgz)
           if (( ${#tarballs[@]} != 1 )); then
             printf 'expected one tarball, found %s\n' "${#tarballs[@]}"
             exit 1
@@ -231,7 +236,7 @@ jobs:
       [
         rust-lint,
         rust-test,
-        rust-deny,
+        rust-policy,
         web,
         ts-sdk,
         ts-sdk-min-node,

@@ -770,7 +770,7 @@ In the table row that starts with `| **H** Console and agents |`, replace the St
 | More than 1,000 rows or 5 series | Chart shows `CLIPPED` above it |
 | Re-run on the Chart tab | Stays on the Chart tab |
 | Schema loading / failed | "Loading…" / "Schema unavailable" in the panel |
-| Schema panel closed | Toggle `aria-pressed="false"`; `llmobs.sql.schema` is `closed` and is read on the next visit |
+| Schema panel closed | Toggle `aria-pressed="false"`; `cetra.sql.schema` is `closed` and is read on the next visit |
 
 ## Tests
 
@@ -881,7 +881,7 @@ Results are built inline (`{ columns, rows, truncated: false }`); `TS = 'Timesta
 
 ### `web/src/lib/sql/schema-panel.test.ts`
 
-1. `readSchemaPanelOpen()` is `true` with nothing stored; after `writeSchemaPanelOpen(false)`, `localStorage.getItem("llmobs.sql.schema")` is `"closed"` and `readSchemaPanelOpen()` is `false`.
+1. `readSchemaPanelOpen()` is `true` with nothing stored; after `writeSchemaPanelOpen(false)`, `localStorage.getItem("cetra.sql.schema")` is `"closed"` and `readSchemaPanelOpen()` is `false`.
 2. With `vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => { throw new Error("denied"); })`, `readSchemaPanelOpen()` is `true`; with `setItem` throwing, `writeSchemaPanelOpen(false)` does not throw. Restore the spies in `finally`.
 
 ### `web/src/components/sql/sql-editor.test.tsx` (append)
@@ -939,8 +939,8 @@ function InsertHarness({ initial = "" }: { initial?: string }) {
 16. **"lists SQL functions on demand"**: `storeDraft("")`; render; `await screen.findByRole("button", { name: "Insert traces" })` (the schema has loaded); `getByRole("button", { name: "Functions", expanded: false })`; `queryByRole("list", { name: "Functions" })` is null; click the toggle; `within(getByRole("list", { name: "Functions" })).getAllByRole("button").map((button) => button.getAttribute("aria-label"))` equals `schemaFixture.functions.filter((fn) => fn.in_sql).map((fn) => \`Insert ${fn.name}(\`)`; click `Insert now(`; `waitFor` the editor text is `"now("`.
 17. **"shows Loading… until the schema arrives"**: `server.use(http.get("*/api/v1/projects/:project/schema", async () => { await gate; return HttpResponse.json(schemaFixture); }))`; render; `within(await screen.findByRole("navigation", { name: "Schema" })).getByText("Loading…")`; `release()`; `findByRole("button", { name: "Insert traces" })`.
 18. **"shows Schema unavailable when the schema fails"**: `server.use(http.get("*/api/v1/projects/:project/schema", () => HttpResponse.json({ type: "about:blank", title: "Service Unavailable", status: 503, code: "busy" }, { status: 503, headers: PROBLEM_JSON })))`; render; `within(await screen.findByRole("navigation", { name: "Schema" })).findByText("Schema unavailable")`.
-19. **"hides the schema browser and remembers it"**: render; `await user.click(await screen.findByRole("button", { name: "Schema" }))`; `queryByRole("navigation", { name: "Schema" })` is null; the button has `aria-pressed="false"`; `localStorage.getItem("llmobs.sql.schema")` is `"closed"`.
-20. **"starts closed when it was closed"**: `localStorage.setItem("llmobs.sql.schema", "closed")`; render; `findByRole("button", { name: "Schema" })` has `aria-pressed="false"`; no `navigation` "Schema".
+19. **"hides the schema browser and remembers it"**: render; `await user.click(await screen.findByRole("button", { name: "Schema" }))`; `queryByRole("navigation", { name: "Schema" })` is null; the button has `aria-pressed="false"`; `localStorage.getItem("cetra.sql.schema")` is `"closed"`.
+20. **"starts closed when it was closed"**: `localStorage.setItem("cetra.sql.schema", "closed")`; render; `findByRole("button", { name: "Schema" })` has `aria-pressed="false"`; no `navigation` "Schema".
 
 ## Commands
 

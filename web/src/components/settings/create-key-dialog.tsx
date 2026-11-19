@@ -192,7 +192,7 @@ function CreateKeyForm({
             />
             <div className="flex flex-col gap-0.5">
               <Label htmlFor="key-kind-secret">Secret key</Label>
-              <p id="key-kind-secret-help" className="text-xs text-muted-foreground">
+              <p id="key-kind-secret-help" className="text-caption text-muted-foreground">
                 For servers: SDKs, OpenTelemetry exporters, CI.
               </p>
             </div>
@@ -205,7 +205,7 @@ function CreateKeyForm({
             />
             <div className="flex flex-col gap-0.5">
               <Label htmlFor="key-kind-public">Public key</Label>
-              <p id="key-kind-public-help" className="text-xs text-muted-foreground">
+              <p id="key-kind-public-help" className="text-caption text-muted-foreground">
                 For browsers: end-user feedback only.
               </p>
             </div>
@@ -262,7 +262,7 @@ function CreateKeyForm({
           </SelectContent>
         </Select>
         {expiryError ? (
-          <p id="key-expiry-error" className="text-xs text-destructive">
+          <p id="key-expiry-error" className="text-caption text-destructive">
             {expiryError}
           </p>
         ) : null}

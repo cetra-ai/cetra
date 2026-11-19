@@ -14,6 +14,7 @@ pub(crate) mod retry;
 pub(crate) mod rule_check;
 pub(crate) mod rule_limit;
 pub(crate) mod sampling;
+pub(crate) mod stats;
 pub(crate) mod test_run;
 pub(crate) mod trace_load;
 pub(crate) mod trigger;
@@ -22,7 +23,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use llmobs_core::ids::ProjectId;
+use cetra_core::ids::ProjectId;
 use tokio::sync::{Notify, Semaphore, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use uuid::Uuid;

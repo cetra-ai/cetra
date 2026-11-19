@@ -14,8 +14,8 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, Method};
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use llmobs_core::ids::{OrgId, ProjectId, TraceId};
-use llmobs_storage::{
+use cetra_core::ids::{OrgId, ProjectId, TraceId};
+use cetra_storage::{
     MAX_REFRESH_IDS, QueryContext, RunError, Storage, TimeWindow, TraceRefreshRequest,
 };
 use serde::{Deserialize, Serialize};
@@ -228,7 +228,7 @@ async fn check_filter(
     params: &TraceStreamParams,
 ) -> Result<(), ApiError> {
     let ctx = open_query(state, org, project, None).await?;
-    llmobs_storage::trace_refresh(&ctx, refresh_request(params, &[], None)).await?;
+    cetra_storage::trace_refresh(&ctx, refresh_request(params, &[], None)).await?;
     Ok(())
 }
 
@@ -457,7 +457,7 @@ async fn read_summaries(
 ) -> Result<Vec<TraceSummary>, RefreshError> {
     let texts: Vec<String> = ids.iter().map(TraceId::to_string).collect();
     let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-    let batches = llmobs_storage::trace_refresh(ctx, refresh_request(params, &refs, search))
+    let batches = cetra_storage::trace_refresh(ctx, refresh_request(params, &refs, search))
         .await
         .map_err(|error| {
             tracing::warn!(kind = error.kind(), "a trace stream re-read failed");
@@ -568,7 +568,7 @@ mod tests {
     use std::time::Duration;
 
     use axum::http::StatusCode;
-    use llmobs_core::ids::{ProjectId, SpanId, TraceId};
+    use cetra_core::ids::{ProjectId, SpanId, TraceId};
     use serde_json::Value;
 
     use crate::api::traces::{SpanSummary, TraceSummary};
@@ -1160,7 +1160,7 @@ mod tests {
             &judged,
             "b100000000000030",
             "judge",
-            "llmobs-eval",
+            "cetra-eval",
         )
         .await;
         let shown = next_trace(&mut including).await;

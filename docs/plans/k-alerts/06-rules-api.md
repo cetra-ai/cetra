@@ -154,7 +154,7 @@ impl AlertEventKind {
 /// One delivery of an event to a channel.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct AlertDelivery {
-    /// Delivery id; the webhook's `X-Llmobs-Delivery`.
+    /// Delivery id; the webhook's `X-Cetra-Delivery`.
     pub id: Uuid,
     /// The channel.
     pub channel_id: Uuid,
@@ -301,7 +301,7 @@ async fn checked_condition(state: &AppState, project: ProjectId, condition: Aler
 ```
 
 - `checked_channels`: more than `alerts::MAX_RULE_CHANNELS` (the K4 store constant) → field `channel_ids`, `"at most 10 channels"`; a duplicate id → `"duplicate channel"`; an id not in `list_channels(reader, project)` → `"unknown channel"`. Returns the ids sorted.
-- `checked_condition`: `normalize_condition(condition)` (errors → `ApiError::BadRequest { detail: None, errors }`); then, when `filter` is `Some(text)`: `let ctx = open_query(state, project, None).await?; llmobs_storage::check_alert_filter(&ctx, &text)?;` (the `RunError` converts: an invalid filter is `400 invalid_filter` with field `filter`). Return the normalized condition.
+- `checked_condition`: `normalize_condition(condition)` (errors → `ApiError::BadRequest { detail: None, errors }`); then, when `filter` is `Some(text)`: `let ctx = open_query(state, project, None).await?; cetra_storage::check_alert_filter(&ctx, &text)?;` (the `RunError` converts: an invalid filter is `400 invalid_filter` with field `filter`). Return the normalized condition.
 
 ### Handlers
 
@@ -332,7 +332,7 @@ On the cloud Free plan an org may have 1 enabled alert rule; paid plans and self
 ```rust
 //! The per-org alert rule limit (D178, D-K-14).
 
-use llmobs_core::ids::OrgId;
+use cetra_core::ids::OrgId;
 
 use crate::http::AppState;
 use crate::http::error::ApiError;
@@ -569,7 +569,7 @@ Ids: rules `…0510` (firing), `…0511`, `…0512`; events `…0520`–`…0522
 
 Only rule `…0510` has detail and event examples, so in `just web-dev` the other two rules' detail pages show "not found". Accepted; web tests override these endpoints per test.
 
-`just api-examples`. In `tests/api_examples.rs` `generated_files_roundtrip`, add `| "list_alert_rules" | "get_alert_rule" | "list_alert_events"` to the arm that lists the static operations (with `"list_saved_views"` and `"list_channels"`). Import `AlertEvent` and `AlertRule` with `NotificationChannel` from `llmobs_server::api::alerts`. `static_files_match_their_types`: `roundtrip::<Page<AlertRule>>("static/alert-rules.json"); roundtrip::<AlertRule>("static/alert-rule.json"); roundtrip::<Page<AlertEvent>>("static/alert-events.json");`. `roundtrip` compares text: serde_json writes an `f64` such as `50.0` with its `.0`, which the canonicalizing command keeps.
+`just api-examples`. In `tests/api_examples.rs` `generated_files_roundtrip`, add `| "list_alert_rules" | "get_alert_rule" | "list_alert_events"` to the arm that lists the static operations (with `"list_saved_views"` and `"list_channels"`). Import `AlertEvent` and `AlertRule` with `NotificationChannel` from `cetra_server::api::alerts`. `static_files_match_their_types`: `roundtrip::<Page<AlertRule>>("static/alert-rules.json"); roundtrip::<AlertRule>("static/alert-rule.json"); roundtrip::<Page<AlertEvent>>("static/alert-events.json");`. `roundtrip` compares text: serde_json writes an `f64` such as `50.0` with its `.0`, which the canonicalizing command keeps.
 
 ## 6. Tests (`#[cfg(test)] mod tests` in `routes/alert_rules.rs`)
 
@@ -593,11 +593,11 @@ Only rule `…0510` has detail and event examples, so in `just web-dev` the othe
 ## Commands
 
 ```bash
-cargo test -p llmobs-server alert_rules
+cargo test -p cetra-server alert_rules
 ```
 
 ```bash
-cargo test -p llmobs-server meta::alerts
+cargo test -p cetra-server meta::alerts
 ```
 
 ```bash
@@ -614,6 +614,6 @@ just check
 
 ## Done when
 
-- Imports to add beyond the K5 set: in `meta/alerts.rs`, `serde::{Deserialize, Serialize}` and `crate::api::alerts::{AlertEventKind, AlertMetric, AlertWindow, Comparator, DeliveryStatus}`; in `routes/alert_rules.rs`, `serde::{Deserialize, Serialize}` (path and cursor structs), `llmobs_core::ids::OrgId`, `crate::alerts::quota`.
+- Imports to add beyond the K5 set: in `meta/alerts.rs`, `serde::{Deserialize, Serialize}` and `crate::api::alerts::{AlertEventKind, AlertMetric, AlertWindow, Comparator, DeliveryStatus}`; in `routes/alert_rules.rs`, `serde::{Deserialize, Serialize}` (path and cursor structs), `cetra_core::ids::OrgId`, `crate::alerts::quota`.
 - The six routes answer as above; OpenAPI, schema types, fixtures and manifest are regenerated and committed.
 - The 14 route tests, the 2 store tests, the 3 quota tests and `plan_limit_problem`, the OpenAPI and API-example tests and the access suite pass; `just check` is green.

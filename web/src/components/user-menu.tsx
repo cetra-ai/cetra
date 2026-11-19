@@ -25,65 +25,108 @@ export function initials(name: string | null | undefined, email: string): string
   return `${first}${last}`.toUpperCase();
 }
 
-export function UserMenu() {
-  const { signOut, pending } = useSignOut();
+/** Name, email and the instance admin badge. Not clickable. */
+export function UserMenuHeader() {
   const { data: me } = $api.useSuspenseQuery("get", "/api/auth/me");
   const name = me.user.name?.trim() ? me.user.name : undefined;
-  const letters = initials(me.user.name, me.user.email);
+
+  return (
+    <>
+      {name ? <DropdownMenuLabel>{name}</DropdownMenuLabel> : null}
+      <p className="px-2 py-1.5 text-body text-muted-foreground">{me.user.email}</p>
+      {me.user.is_instance_admin ? (
+        <div className="px-2 py-1.5">
+          <Badge variant="secondary">Instance admin</Badge>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+/** Account, and Admin for instance admins. */
+export function UserMenuAccountLinks() {
+  const { data: me } = $api.useSuspenseQuery("get", "/api/auth/me");
+
+  return (
+    <>
+      <DropdownMenuItem asChild>
+        <Link to="/account">
+          <UserRound aria-hidden="true" />
+          Account
+        </Link>
+      </DropdownMenuItem>
+      {me.user.is_instance_admin ? (
+        <DropdownMenuItem asChild>
+          <Link to="/admin/users">
+            <ShieldCheck />
+            Admin
+          </Link>
+        </DropdownMenuItem>
+      ) : null}
+    </>
+  );
+}
+
+export function UserMenuTimeZoneItem() {
   const zone = useTimeZone();
 
   return (
+    <DropdownMenuCheckboxItem
+      checked={zone === "utc"}
+      onCheckedChange={(checked) => {
+        setTimeZone(checked === true ? "utc" : "local");
+      }}
+    >
+      Show times in UTC
+    </DropdownMenuCheckboxItem>
+  );
+}
+
+export function UserMenuSignOutItem() {
+  const { signOut, pending } = useSignOut();
+
+  return (
+    <DropdownMenuItem disabled={pending} onSelect={signOut}>
+      <LogOut aria-hidden="true" />
+      Sign out
+    </DropdownMenuItem>
+  );
+}
+
+export function UserMenu() {
+  return (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          variant="ghost"
-          size="icon"
-          aria-label={name ?? me.user.email}
-          className="rounded-full"
-        >
-          <Avatar size="sm">
-            <AvatarFallback>{letters}</AvatarFallback>
-          </Avatar>
-        </Button>
-      </DropdownMenuTrigger>
+      <UserMenuTrigger />
       <DropdownMenuContent align="end" className="min-w-56">
-        {name ? <DropdownMenuLabel>{name}</DropdownMenuLabel> : null}
-        <p className="px-2 py-1.5 text-sm text-muted-foreground">{me.user.email}</p>
-        {me.user.is_instance_admin ? (
-          <div className="px-2 py-1.5">
-            <Badge variant="secondary">Instance admin</Badge>
-          </div>
-        ) : null}
+        <UserMenuHeader />
         <DropdownMenuSeparator />
-        <DropdownMenuCheckboxItem
-          checked={zone === "utc"}
-          onCheckedChange={(checked) => {
-            setTimeZone(checked === true ? "utc" : "local");
-          }}
-        >
-          Show times in UTC
-        </DropdownMenuCheckboxItem>
+        <UserMenuTimeZoneItem />
         <DropdownMenuSeparator />
-        <DropdownMenuItem asChild>
-          <Link to="/account">
-            <UserRound aria-hidden="true" />
-            Account
-          </Link>
-        </DropdownMenuItem>
-        {me.user.is_instance_admin ? (
-          <DropdownMenuItem asChild>
-            <Link to="/admin/users">
-              <ShieldCheck />
-              Admin
-            </Link>
-          </DropdownMenuItem>
-        ) : null}
+        <UserMenuAccountLinks />
         <DropdownMenuSeparator />
-        <DropdownMenuItem disabled={pending} onSelect={signOut}>
-          <LogOut aria-hidden="true" />
-          Sign out
-        </DropdownMenuItem>
+        <UserMenuSignOutItem />
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+function UserMenuTrigger() {
+  const { data: me } = $api.useSuspenseQuery("get", "/api/auth/me");
+  const name = me.user.name?.trim() ? me.user.name : undefined;
+  const letters = initials(me.user.name, me.user.email);
+
+  return (
+    <DropdownMenuTrigger asChild>
+      <Button
+        variant="ghost"
+        size="icon"
+        aria-label={name ?? me.user.email}
+        className="rounded-full"
+      >
+        <Avatar size="sm">
+          <AvatarFallback>{letters}</AvatarFallback>
+        </Avatar>
+      </Button>
+    </DropdownMenuTrigger>
   );
 }

@@ -12,11 +12,11 @@
       "cost_input": 0.25,
       "cost_source": "reported",
       "attributes": {
-        "llm.cost.prompt": "0.25",
-        "llmobs.span.kind": "llm"
+        "cetra.span.kind": "llm",
+        "llm.cost.prompt": "0.25"
       },
       "conventions": [
-        "llmobs",
+        "cetra",
         "openinference"
       ],
       "ingest_time": "2026-01-01T00:00:00.000000000Z",

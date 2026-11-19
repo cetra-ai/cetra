@@ -147,8 +147,8 @@ stored_enum! {
     ///
     /// Spec 01 `conventions` and spec 02 § Convention detection.
     pub enum Convention, "convention" {
-        /// Our own `llmobs.*` attributes.
-        Llmobs,
+        /// Our own `cetra.*` attributes.
+        Cetra,
         /// OTel GenAI semantic conventions.
         Genai,
         /// OpenInference.

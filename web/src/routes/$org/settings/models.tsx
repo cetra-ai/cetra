@@ -1,170 +1,183 @@
-import { useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { Coins } from "lucide-react";
-import { useState } from "react";
+import type { ReactNode } from "react";
 import { $api } from "@/api/client";
-import { problemMessage } from "@/api/problem";
-import {
-  orgPricesInit,
-  orgPricesKey,
-  PROJECT_PRICES_PREFIX,
-  PROJECT_RESOLVE_PREFIX,
-} from "@/api/queries-prices";
+import { orgPricesInit } from "@/api/queries-prices";
 import type { Schema } from "@/api/types";
-import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DisabledReason } from "@/components/disabled-reason";
 import { EmptyState } from "@/components/empty-state";
-import { PriceDialog } from "@/components/prices/price-dialog";
-import { PriceTable } from "@/components/prices/price-table";
+import { PriceFormPanel } from "@/components/prices/price-form";
+import { type PriceSorting, PriceTable } from "@/components/prices/price-table";
+import { useSearchText } from "@/components/prices/use-search-text";
+import { SettingsCard } from "@/components/settings/settings-card";
+import {
+  filterRows,
+  SettingsListLayout,
+  SettingsListToolbar,
+  SettingsPanel,
+  type SortValue,
+  sortRows,
+} from "@/components/settings/settings-list";
 import { SettingsPage } from "@/components/settings/settings-page";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { blockedByRules } from "@/lib/prices";
 import { canManageOrgPrices } from "@/lib/roles";
+import { parseSettingsListSearch } from "@/lib/search/settings-list";
 
 export const Route = createFileRoute("/$org/settings/models")({
+  validateSearch: (search) => parseSettingsListSearch(search, ["model", "input", "output"]),
   component: OrgPricesPage,
 });
 
+const NO_PERMISSION = "Only admins and owners can change prices";
+/** The `open` value that opens the panel to add a price. */
+const NEW = "new";
+
+type PriceRow = Schema<"ModelPrice">;
+
+/** The sort keys of the price columns, by column id. */
+const SORT_KEYS: Record<string, (row: PriceRow) => SortValue> = {
+  model: (row) => row.model_name,
+  input: (row) => row.price_input,
+  output: (row) => row.price_output,
+};
+
 function OrgPricesPage() {
   const { org } = Route.useParams();
+  const { q, sort, desc, open } = Route.useSearch();
+  const navigate = Route.useNavigate();
   const { data: me } = $api.useSuspenseQuery("get", "/api/auth/me");
   const role = me.orgs.find((item) => item.slug === org)?.role;
   const canManage = canManageOrgPrices(role);
-  const [adding, setAdding] = useState(false);
-  return (
-    <SettingsPage
-      title="Model prices"
-      description="Prices for every project of this organization. A project's own price beats an organization price, which beats the built-in LiteLLM prices. New prices apply to spans received from now on; stored costs are not recomputed."
-      actions={
-        <DisabledReason reason={canManage ? undefined : "Only admins and owners can change prices"}>
-          <Button type="button" disabled={!canManage} onClick={() => setAdding(true)}>
-            Add price
-          </Button>
-        </DisabledReason>
-      }
-    >
-      <PriceList org={org} canManage={canManage} adding={adding} onAddingChange={setAdding} />
-    </SettingsPage>
-  );
-}
-
-function PriceList({
-  org,
-  canManage,
-  adding,
-  onAddingChange,
-}: {
-  org: string;
-  canManage: boolean;
-  adding: boolean;
-  onAddingChange: (open: boolean) => void;
-}) {
-  const queryClient = useQueryClient();
   const query = $api.useQuery("get", "/api/v1/orgs/{org}/models", orgPricesInit(org));
-  // Never cleared on close, so the dialogs do not blank while they animate out.
-  const [editing, setEditing] = useState<Schema<"ModelPrice"> | undefined>();
-  const [editOpen, setEditOpen] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState<Schema<"ModelPrice"> | undefined>();
-  const [deleteOpen, setDeleteOpen] = useState(false);
-  const remove = $api.useMutation("delete", "/api/v1/orgs/{org}/models/{id}");
+  const [text, setText] = useSearchText(q, (next) => {
+    void navigate({
+      to: "/$org/settings/models",
+      params: { org },
+      search: (prev) => ({ ...prev, q: next }),
+      replace: true,
+    });
+  });
 
   if (query.error) {
     throw query.error;
   }
 
   const rows = query.data?.data ?? [];
-  const scope = { kind: "org" as const, org };
+  const sorting: PriceSorting | undefined =
+    sort === undefined ? undefined : { id: sort, desc: desc === true };
+  const shown = sortRows(
+    filterRows(rows, q, (row) => [row.model_name, row.match_pattern, row.provider]),
+    sorting,
+    SORT_KEYS,
+  );
+
+  function setOpen(next: string | undefined, ignoreBlocker = false) {
+    void navigate({
+      to: "/$org/settings/models",
+      params: { org },
+      search: (prev) => ({ ...prev, open: next }),
+      ignoreBlocker,
+    });
+  }
+
+  const close = () => {
+    setOpen(undefined);
+  };
+
+  function panel(): ReactNode {
+    if (open === undefined) {
+      return null;
+    }
+    const row = open === NEW ? undefined : rows.find((item) => item.id === open);
+    if (open === NEW || row !== undefined) {
+      return (
+        <PriceFormPanel
+          key={open}
+          scope={{ kind: "org", org }}
+          row={row}
+          readOnlyReason={canManage ? undefined : NO_PERMISSION}
+          onClose={close}
+          onDone={() => {
+            setOpen(undefined, true);
+          }}
+        />
+      );
+    }
+    return (
+      <SettingsPanel title="Edit model price" onClose={close}>
+        {query.isPending ? (
+          <Skeleton className="h-8 w-full" />
+        ) : (
+          <p className="text-body text-muted-foreground">Price not found.</p>
+        )}
+      </SettingsPanel>
+    );
+  }
 
   return (
-    <>
-      {query.isPending ? (
-        <>
-          <Skeleton className="h-8 w-full" />
-          <Skeleton className="h-8 w-full" />
-          <Skeleton className="h-8 w-full" />
-        </>
-      ) : rows.length === 0 ? (
-        <EmptyState
-          icon={Coins}
-          title="No organization prices"
-          description="Built-in prices apply. Add a price for a model they do not cover, such as a local model."
-        />
-      ) : (
-        <PriceTable
-          label="Organization prices"
-          rows={rows}
-          actions={
-            canManage
-              ? (row) => (
-                  <div className="flex items-center justify-end gap-1">
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => {
-                        setEditing(row);
-                        setEditOpen(true);
-                      }}
-                    >
-                      Edit
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => {
-                        setDeleteTarget(row);
-                        setDeleteOpen(true);
-                      }}
-                    >
-                      Delete
-                    </Button>
-                  </div>
-                )
-              : undefined
-          }
-        />
-      )}
-      <PriceDialog scope={scope} open={adding} onOpenChange={onAddingChange} />
-      <PriceDialog scope={scope} row={editing} open={editOpen} onOpenChange={setEditOpen} />
-      <ConfirmDialog
-        open={deleteOpen}
-        onOpenChange={(open) => {
-          if (!open) {
-            setDeleteOpen(false);
-            remove.reset();
-          }
-        }}
-        title="Delete this price?"
-        description="Spans received after this use the next matching price. Stored costs do not change."
-        confirmLabel="Delete"
-        destructive
-        pending={remove.isPending}
-        error={
-          remove.error
-            ? (blockedByRules(remove.error) ??
-              problemMessage(remove.error, "Could not delete the price."))
-            : undefined
+    <SettingsListLayout open={open !== undefined} onClose={close} panel={panel()}>
+      <SettingsPage
+        width="wide"
+        title="Model prices"
+        description="Default prices for every project in the organization. A project can override them in its own Model prices. New prices apply to spans received from now on; stored costs are not recomputed."
+        actions={
+          <DisabledReason reason={canManage ? undefined : NO_PERMISSION}>
+            <Button
+              type="button"
+              disabled={!canManage}
+              onClick={() => {
+                setOpen(NEW);
+              }}
+            >
+              Add price
+            </Button>
+          </DisabledReason>
         }
-        onConfirm={() => {
-          if (!deleteTarget?.id) {
-            return;
-          }
-          remove.mutate(
-            { params: { path: { org, id: deleteTarget.id } } },
-            {
-              onSuccess: () => {
-                setDeleteOpen(false);
-                remove.reset();
-                void queryClient.invalidateQueries({ queryKey: orgPricesKey(org) });
-                void queryClient.invalidateQueries({ queryKey: [...PROJECT_PRICES_PREFIX] });
-                void queryClient.invalidateQueries({ queryKey: [...PROJECT_RESOLVE_PREFIX] });
-              },
-            },
-          );
-        }}
-      />
-    </>
+      >
+        <SettingsCard title="Organization prices">
+          <SettingsListToolbar label="organization prices" query={text} onQueryChange={setText} />
+          {query.isPending ? (
+            <>
+              <Skeleton className="h-8 w-full" />
+              <Skeleton className="h-8 w-full" />
+              <Skeleton className="h-8 w-full" />
+            </>
+          ) : rows.length === 0 ? (
+            <EmptyState
+              icon={Coins}
+              title="No organization prices"
+              description="Built-in prices apply. Add a price for a model they do not cover, such as a local model."
+            />
+          ) : shown.length === 0 ? (
+            <p className="text-body text-muted-foreground">No organization prices match.</p>
+          ) : (
+            <PriceTable
+              label="Organization prices"
+              rows={shown}
+              selectedRowId={open}
+              onActivate={(row) => {
+                if (row.id !== undefined) {
+                  setOpen(row.id);
+                }
+              }}
+              sorting={sorting}
+              onSortingChange={(next) => {
+                void navigate({
+                  to: "/$org/settings/models",
+                  params: { org },
+                  search: (prev) => ({
+                    ...prev,
+                    sort: next?.id,
+                    desc: next?.desc ? true : undefined,
+                  }),
+                  replace: true,
+                });
+              }}
+            />
+          )}
+        </SettingsCard>
+      </SettingsPage>
+    </SettingsListLayout>
   );
 }

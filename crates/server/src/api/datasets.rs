@@ -2,13 +2,13 @@
 
 use std::fmt;
 
-use llmobs_core::ids::{SpanId, TraceId};
+use cetra_core::ids::{SpanId, TraceId};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-use super::common::{Limit, any_json};
+use super::common::{Limit, any_json, nullable_open_object, open_object};
 use crate::datasets::json_bytes;
 
 /// A dataset (D-J-2, D-J-3).
@@ -23,11 +23,11 @@ pub struct Dataset {
     pub description: Option<String>,
     /// JSON Schema (Draft 2020-12) every item input must fit. Omitted when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Option<Object>)]
+    #[schema(schema_with = open_object)]
     pub input_schema: Option<Value>,
     /// JSON Schema every present expected output must fit. Omitted when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Option<Object>)]
+    #[schema(schema_with = open_object)]
     pub expected_schema: Option<Value>,
     /// Latest version; 0 for a dataset with no change yet.
     pub current_version: i64,
@@ -36,11 +36,11 @@ pub struct Dataset {
     /// Experiments run on this dataset.
     pub experiment_count: i64,
     /// Creation time. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub created_at: i64,
     /// Last change time. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub updated_at: i64,
 }
@@ -56,11 +56,11 @@ pub struct CreateDatasetRequest {
     pub description: Option<String>,
     /// JSON Schema (Draft 2020-12) every item input must fit, at most 64 KiB.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Option<Object>)]
+    #[schema(schema_with = open_object)]
     pub input_schema: Option<Value>,
     /// JSON Schema every present expected output must fit, at most 64 KiB.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Option<Object>)]
+    #[schema(schema_with = open_object)]
     pub expected_schema: Option<Value>,
 }
 
@@ -78,11 +78,11 @@ pub struct UpdateDatasetRequest {
     pub description: Option<Option<String>>,
     /// New input schema, when present. `null` clears it.
     #[serde(default, deserialize_with = "present")]
-    #[schema(value_type = Option<Object>)]
+    #[schema(schema_with = nullable_open_object)]
     pub input_schema: Option<Option<Value>>,
     /// New expected-output schema, when present. `null` clears it.
     #[serde(default, deserialize_with = "present")]
-    #[schema(value_type = Option<Object>)]
+    #[schema(schema_with = nullable_open_object)]
     pub expected_schema: Option<Option<Value>>,
 }
 
@@ -97,9 +97,85 @@ pub struct DatasetVersion {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_by: Option<String>,
     /// Creation time. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub created_at: i64,
+    /// Items this version adds (D-J-24).
+    pub added: i64,
+    /// Items this version edits (D-J-24).
+    pub edited: i64,
+    /// Items this version deletes (D-J-24).
+    pub deleted: i64,
+}
+
+/// How an item changed in a version (D-J-24).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ItemChangeKind {
+    /// The item did not exist before the version.
+    Added,
+    /// The item's revision was replaced.
+    Edited,
+    /// The item is gone after the version.
+    Deleted,
+}
+
+/// One item that changed in a version (D-J-24). `before` is the revision the version closed,
+/// `after` the one it started; each is absent when the version did not make it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ItemChange {
+    /// The item id.
+    pub item_id: Uuid,
+    /// What the version did to the item.
+    pub change: ItemChangeKind,
+    /// The revision before the version. Omitted for an added item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<DatasetItem>,
+    /// The revision after the version. Omitted for a deleted item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<DatasetItem>,
+}
+
+/// `GET …/versions/{version}/changes` query (D-J-24).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+pub struct ItemChangeListParams {
+    /// Maximum number of changes to return (1–100, default 50).
+    #[serde(default)]
+    #[param(minimum = 1, maximum = 100, default = 50)]
+    pub limit: ChangeLimit,
+    /// Opaque cursor from a previous page.
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
+/// Page size of a change listing. Default 50, accepted range 1–100.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(transparent)]
+#[schema(value_type = u32, minimum = 1, maximum = 100, default = 50)]
+pub struct ChangeLimit(u32);
+
+impl ChangeLimit {
+    /// The page size.
+    pub fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl Default for ChangeLimit {
+    fn default() -> Self {
+        Self(50)
+    }
+}
+
+impl<'de> Deserialize<'de> for ChangeLimit {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = u32::deserialize(deserializer)?;
+        if value == 0 || value > 100 {
+            return Err(serde::de::Error::custom("limit must be between 1 and 100"));
+        }
+        Ok(Self(value))
+    }
 }
 
 /// One item as it is in a version.
@@ -119,7 +195,7 @@ pub struct DatasetItem {
     #[schema(schema_with = any_json)]
     pub expected_output: Option<Value>,
     /// A JSON object. Empty when the item has no metadata.
-    #[schema(value_type = Object)]
+    #[schema(schema_with = open_object)]
     pub metadata: Map<String, Value>,
     /// The trace the item was copied from. Omitted when none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -128,7 +204,7 @@ pub struct DatasetItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_span_id: Option<SpanId>,
     /// Creation time of this revision. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub created_at: i64,
 }
@@ -159,7 +235,7 @@ pub struct NewDatasetItem {
     pub expected_output: Option<Value>,
     /// A JSON object. Empty when omitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Option<Object>)]
+    #[schema(schema_with = open_object)]
     pub metadata: Option<Map<String, Value>>,
 }
 
@@ -205,7 +281,7 @@ pub struct UpdateItemRequest {
     pub expected_output: Option<Option<Value>>,
     /// New metadata, when present. A JSON object; must not be null.
     #[serde(default, deserialize_with = "present")]
-    #[schema(value_type = Option<Object>)]
+    #[schema(schema_with = open_object)]
     pub metadata: Option<Option<Map<String, Value>>>,
 }
 
@@ -223,6 +299,146 @@ impl fmt::Debug for UpdateItemRequest {
             .field("bytes", &bytes)
             .finish_non_exhaustive()
     }
+}
+
+/// One item of a batch edit (D-J-23): the item id and the fields to replace, as in
+/// [`UpdateItemRequest`]. An absent field is unchanged; `expected_output: null` clears it.
+#[derive(Clone, PartialEq, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EditItem {
+    /// The live item to edit.
+    pub id: Uuid,
+    /// New input, when present. Must not be null.
+    #[serde(default, deserialize_with = "present")]
+    #[schema(schema_with = any_json_not_null)]
+    pub input: Option<Option<Value>>,
+    /// New expected output, when present. `null` clears it.
+    #[serde(default, deserialize_with = "present")]
+    #[schema(schema_with = any_json)]
+    pub expected_output: Option<Option<Value>>,
+    /// New metadata, when present. A JSON object; must not be null.
+    #[serde(default, deserialize_with = "present")]
+    #[schema(schema_with = open_object)]
+    pub metadata: Option<Option<Map<String, Value>>>,
+}
+
+// `Debug` is hand-written: ids and presence flags only, never content (AGENTS.md § Privacy).
+impl fmt::Debug for EditItem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EditItem")
+            .field("id", &self.id)
+            .field("input_present", &self.input.is_some())
+            .field("expected_output_present", &self.expected_output.is_some())
+            .field("metadata_present", &self.metadata.is_some())
+            .finish()
+    }
+}
+
+/// `PATCH …/datasets/{dataset}/items` body (D-J-23): 1 to 1 000 distinct live items.
+#[derive(Clone, PartialEq, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EditItemsRequest {
+    /// The edits, 1 to 1 000 of them, one per item id.
+    pub items: Vec<EditItem>,
+}
+
+// `Debug` is hand-written: it only counts the edits (AGENTS.md § Privacy).
+impl fmt::Debug for EditItemsRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EditItemsRequest")
+            .field("items", &self.items.len())
+            .finish()
+    }
+}
+
+/// The answer to a batch edit (D-J-23): the new version, or `null` when no item changed, and the
+/// live revision of every id in request order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct EditItemsResponse {
+    /// The version the changed items were edited in. `null` when nothing changed.
+    pub version: Option<DatasetVersion>,
+    /// The live revisions of every id, in request order.
+    pub items: Vec<DatasetItem>,
+}
+
+/// `GET …/dataset-trends` query (D-J-26).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+pub struct ExperimentTrendParams {
+    /// Comma-separated dataset ids, 1 to 100 distinct UUIDs. Unknown ids are left out.
+    pub ids: String,
+}
+
+/// The score of an experiment: the mean and row count of one name and data type (D-J-26).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ExperimentScoreMean {
+    /// Score name.
+    pub name: String,
+    /// `numeric` or `boolean`. A boolean's mean is its pass rate.
+    pub data_type: String,
+    /// Mean of the values over the score rows. Omitted when no row has a value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mean: Option<f64>,
+    /// Score rows counted.
+    pub count: i64,
+}
+
+/// One of a dataset's latest experiments in the trends answer (D-J-26).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ExperimentTrend {
+    /// The experiment id.
+    pub id: Uuid,
+    /// The experiment name.
+    pub name: String,
+    /// `running`, `completed` or `failed`.
+    pub status: String,
+    /// Creation time. JSON is RFC 3339.
+    #[serde(with = "cetra_core::time_serde")]
+    #[schema(value_type = String, format = DateTime)]
+    pub created_at: i64,
+    /// Results of the experiment.
+    pub result_count: i64,
+    /// Results with an error.
+    pub error_count: i64,
+    /// The numeric and boolean scores of the experiment. Omitted when storage could not read
+    /// them (`scores_unavailable` on the answer).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scores: Option<Vec<ExperimentScoreMean>>,
+}
+
+/// The latest experiments of one dataset, newest first (D-J-26).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct DatasetTrend {
+    /// The dataset id.
+    pub dataset_id: Uuid,
+    /// Up to 10 visible experiments, newest first.
+    pub experiments: Vec<ExperimentTrend>,
+}
+
+/// The answer of the experiment trends (D-J-26).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ExperimentTrends {
+    /// One entry per dataset of the request that exists in the project, in request order.
+    pub data: Vec<DatasetTrend>,
+    /// True when storage was busy or timed out, so no experiment has `scores`.
+    pub scores_unavailable: bool,
+}
+
+/// `POST …/datasets/{dataset}/restore` body (D-J-24): the earlier version whose items the dataset
+/// takes again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RestoreRequest {
+    /// An earlier version, 0 to the current version minus one.
+    pub version: i64,
+}
+
+/// `POST …/datasets/{dataset}/items/delete` body (D-J-23): 1 to 1 000 distinct live item ids.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteItemsRequest {
+    /// The live items to delete, 1 to 1 000 distinct ids.
+    pub ids: Vec<Uuid>,
 }
 
 /// `POST …/items/from-trace` body (D-J-8). Fields left out take the span's values.
@@ -249,8 +465,50 @@ pub struct FromTraceRequest {
     pub expected_output: Option<Option<Value>>,
     /// The item's metadata, a JSON object. Absent: `{}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Option<Object>)]
+    #[schema(schema_with = open_object)]
     pub metadata: Option<Map<String, Value>>,
+}
+
+/// One trace of a bulk add from traces (D-J-25): the trace, and the span when it is not the root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TraceRef {
+    /// 32 hex digits, either case.
+    pub trace_id: String,
+    /// 16 hex digits. Absent: the trace root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span_id: Option<String>,
+}
+
+/// `POST …/items/from-traces` body (D-J-25): 1 to 100 traces, each copied as `from-trace` copies it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FromTracesRequest {
+    /// The traces to copy, 1 to 100 of them.
+    pub items: Vec<TraceRef>,
+}
+
+/// A trace of a bulk add that was not copied (D-J-25).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SkippedTrace {
+    /// Position of the trace in the request.
+    pub index: i64,
+    /// The trace id as the request gave it.
+    pub trace_id: String,
+    /// Why it was not copied.
+    pub message: String,
+}
+
+/// The answer of a bulk add from traces (D-J-25): the new version, the items it added, and the
+/// traces that were not copied.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct FromTracesResult {
+    /// The version the copies were added in.
+    pub version: DatasetVersion,
+    /// The items added, in request order.
+    pub items: Vec<DatasetItem>,
+    /// Every trace that was not copied, in request order.
+    pub skipped: Vec<SkippedTrace>,
 }
 
 // `Debug` is hand-written: presence flags and sizes only, never content (AGENTS.md § Privacy).
@@ -306,6 +564,10 @@ pub struct DatasetItemListParams {
     /// Version to read, 0 to the current version. Default: the current version.
     #[serde(default)]
     pub version: Option<i64>,
+    /// Search text, 1 to 200 characters after trimming: keeps the items whose input, expected
+    /// output or metadata contains it, case-insensitively. Keys count too. Absent: no search.
+    #[serde(default)]
+    pub q: Option<String>,
     /// Maximum number of items to return (1–1000, default 50).
     #[serde(default)]
     #[param(minimum = 1, maximum = 1000, default = 50)]

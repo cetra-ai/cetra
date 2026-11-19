@@ -10,7 +10,7 @@ import projectFixture from "../../../../../../../fixtures/api/static/project.jso
 
 const PAGE = `/acme/support-bot/alerts/${FIRING_RULE_ID}/edit`;
 const RULE = "/api/v1/projects/:project/alert-rules/:id";
-const RULE_PAGE = `/acme/support-bot/alerts/${FIRING_RULE_ID}`;
+const LIST = "/acme/support-bot/alerts";
 
 it("edits the name only", async () => {
   let body: unknown;
@@ -35,7 +35,9 @@ it("edits the name only", async () => {
   await user.click(screen.getByRole("button", { name: "Save" }));
 
   await waitFor(() => expect(body).toEqual({ name: "Errors 2" }));
-  await waitFor(() => expect(router.state.location.pathname).toBe(RULE_PAGE));
+  await waitFor(() => expect(router.state.location.pathname).toBe(LIST));
+  expect(router.state.location.search).toMatchObject({ rule: FIRING_RULE_ID });
+  await waitFor(() => expect(router.state.status).toBe("idle"));
 });
 
 it("sends the channels and reminder interval that changed", async () => {
@@ -79,7 +81,9 @@ it("sends nothing when nothing changed", async () => {
   const { router, user } = await renderApp(PAGE);
   await user.click(await screen.findByRole("button", { name: "Save" }));
 
-  await waitFor(() => expect(router.state.location.pathname).toBe(RULE_PAGE));
+  await waitFor(() => expect(router.state.location.pathname).toBe(LIST));
+  expect(router.state.location.search).toMatchObject({ rule: FIRING_RULE_ID });
+  await waitFor(() => expect(router.state.status).toBe("idle"));
   expect(patches).toBe(0);
 });
 

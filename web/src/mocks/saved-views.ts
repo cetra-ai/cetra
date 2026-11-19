@@ -1,4 +1,5 @@
 import { type HttpHandler, HttpResponse, http } from "msw";
+import { uuidv7 } from "@/lib/uuid";
 import meDocument from "../../../fixtures/api/static/me.json";
 import seedDocument from "../../../fixtures/api/static/saved-views.json";
 
@@ -35,6 +36,16 @@ export function seedSavedViews(): StoredView[] {
   }));
 }
 
+/** The shared "Errors" traces view of the fixture. */
+export const ERRORS_VIEW_ID = "01900000-0000-7000-8000-000000000210";
+
+/** The fixture views with "Errors" as the shared default of Traces. The fixture has no default. */
+export function seedWithDefaultView(): StoredView[] {
+  return seedSavedViews().map((view) =>
+    view.id === ERRORS_VIEW_ID ? { ...view, is_default: true } : view,
+  );
+}
+
 /** Handlers for one in-memory store. Calling this replaces the store with `initial`. */
 export function savedViewHandlers(initial: readonly StoredView[]): HttpHandler[] {
   views = initial.map((view) => structuredClone(view));
@@ -60,7 +71,7 @@ const handlers: HttpHandler[] = [
     }
     const now = new Date().toISOString();
     const view: StoredView = {
-      id: crypto.randomUUID(),
+      id: uuidv7(),
       kind,
       name,
       state: body.state,

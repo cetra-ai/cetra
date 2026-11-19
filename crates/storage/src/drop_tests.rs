@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use cetra_core::ids::ProjectId;
 use chrono::NaiveDate;
-use llmobs_core::ids::ProjectId;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -390,6 +390,57 @@ async fn wal_rows_of_a_dropped_project_never_reach_a_file() {
         0
     );
     storage.shutdown().await.unwrap();
+}
+
+// 3c. A storage dropped without shutdown (a crash) starts no last flush. Its
+//     rows stay in the WAL and replay, even those of a dropped project, whose
+//     flush would write no file and commit only its sequence. The storage is
+//     dropped outside its runtime, as the model harness does, so a flush the
+//     drop woke would run on an idle worker at once.
+#[test]
+fn a_drop_without_shutdown_starts_no_flush() {
+    for _ in 0..20 {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_in(dir.path(), quiet_compaction(8), Duration::from_secs(3_600));
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let storage = runtime.block_on(async {
+            let storage = Storage::open(config.clone()).await.unwrap();
+            let time = at(0, 0, 0);
+            storage
+                .append_spans(project(), span_rows(&[span_row(1, 0, time, time)]))
+                .await
+                .unwrap();
+            storage.drop_project(project()).await.unwrap();
+            storage
+        });
+        let hooks = storage.hooks().clone();
+        hooks.hold(HookPoint::FlushAfterFreeze);
+        let release = ReleaseOnDrop(hooks.clone(), HookPoint::FlushAfterFreeze);
+        drop(storage);
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(
+            hooks.waiting_at(HookPoint::FlushAfterFreeze),
+            0,
+            "the drop started a flush"
+        );
+        drop(release);
+        runtime.shutdown_timeout(Duration::from_secs(10));
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let storage = Storage::open(config).await.unwrap();
+            assert_eq!(
+                storage.replayed(Table::Spans),
+                1,
+                "a flush committed the WAL"
+            );
+            storage.shutdown().await.unwrap();
+        });
+    }
 }
 
 struct ReleaseOnDrop(crate::hooks::Hooks, HookPoint);

@@ -122,7 +122,7 @@ async fn unknown(
     request: axum::extract::Request,
 ) -> Response {
     let message = format!(
-        "llmobs-capture mock: no route {} {}",
+        "cetra-capture mock: no route {} {}",
         request.method(),
         request.uri().path()
     );
@@ -136,7 +136,7 @@ impl Mock {
         let path = request.uri().path().to_owned();
         let query = request.uri().query().map(str::to_owned);
         let Some(route) = classify(&path) else {
-            let message = format!("llmobs-capture mock: no route {label}");
+            let message = format!("cetra-capture mock: no route {label}");
             self.push_error(message.clone());
             return error_response(StatusCode::NOT_FOUND, &message);
         };
@@ -819,7 +819,7 @@ mod tests {
         let get_body: Value = serde_json::from_slice(&bytes(get).await).unwrap();
         assert_eq!(
             get_body["error"]["message"],
-            "llmobs-capture mock: no route GET /v1/chat/completions"
+            "cetra-capture mock: no route GET /v1/chat/completions"
         );
         let missing = send(&mock, "POST", "/v1/other", "{}").await;
         assert_eq!(missing.status(), 404);
@@ -836,9 +836,9 @@ mod tests {
         assert_eq!(
             log.errors,
             vec![
-                "llmobs-capture mock: no route GET /v1/chat/completions",
-                "llmobs-capture mock: no route POST /v1/other",
-                "llmobs-capture mock: no route POST /v1beta/models/gemini-2.5-flash:countTokens",
+                "cetra-capture mock: no route GET /v1/chat/completions",
+                "cetra-capture mock: no route POST /v1/other",
+                "cetra-capture mock: no route POST /v1beta/models/gemini-2.5-flash:countTokens",
                 "1 turns not served",
             ]
         );

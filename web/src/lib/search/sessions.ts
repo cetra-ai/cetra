@@ -15,6 +15,7 @@ const SORT_ORDERS = ["asc", "desc"] as const;
 
 export const SESSION_COLUMN_IDS = [
   "session",
+  "first_message",
   "start",
   "last",
   "traces",
@@ -23,6 +24,8 @@ export const SESSION_COLUMN_IDS = [
   "tokens",
   "cost",
   "errors",
+  "error_rate",
+  "last_answer",
   "tags",
 ] as const;
 
@@ -49,12 +52,6 @@ export type SessionPageSearch = {
   eval?: 1;
   exp?: 1;
 };
-
-declare module "@tanstack/react-router" {
-  interface HistoryState {
-    sessionsSearch?: SessionsSearch;
-  }
-}
 
 /** Fixed column ids, plus `score:<name>` for a non-empty name. */
 export function isSessionColumnId(id: string): boolean {

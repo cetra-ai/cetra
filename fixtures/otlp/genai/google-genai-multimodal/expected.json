@@ -2,12 +2,12 @@
   "spans": [
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "a7bf1572446464f7495536bf683aaa5c",
-      "span_id": "967fd0eb112424f2",
+      "trace_id": "96144651607127238d56a006247f54c7",
+      "span_id": "63d7da86e994b518",
       "name": "generate_content gemini-2.5-flash",
       "span_kind": "llm",
       "start_time": "2025-12-31T23:59:50.000000000Z",
-      "end_time": "2025-12-31T23:59:50.064000000Z",
+      "end_time": "2025-12-31T23:59:50.047000000Z",
       "status": "unset",
       "service_name": "capture-app",
       "provider": "gcp.gemini",

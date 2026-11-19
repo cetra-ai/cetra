@@ -1,4 +1,5 @@
-//! OTLP/gRPC `TraceService/Export` (spec 02 § Endpoints, D-G-29).
+//! OTLP/gRPC `TraceService/Export` (spec 02 § Endpoints, D-G-29), and the `LogsService` and
+//! `MetricsService` that acknowledge and drop their data (D-G-40).
 //!
 //! The credential is the `authorization` metadata. Only a project key with `ingest` is
 //! admitted, on its own project, as on the HTTP route (D-G-15). The admission runs in a tower
@@ -15,7 +16,19 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll};
 use std::time::Instant;
 
-use llmobs_storage::error::{AppendError, MediaError};
+use cetra_storage::error::{AppendError, MediaError};
+use opentelemetry_proto::tonic::collector::logs::v1::logs_service_server::{
+    LogsService, LogsServiceServer,
+};
+use opentelemetry_proto::tonic::collector::logs::v1::{
+    ExportLogsServiceRequest, ExportLogsServiceResponse,
+};
+use opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_server::{
+    MetricsService, MetricsServiceServer,
+};
+use opentelemetry_proto::tonic::collector::metrics::v1::{
+    ExportMetricsServiceRequest, ExportMetricsServiceResponse,
+};
 use opentelemetry_proto::tonic::collector::trace::v1::trace_service_server::{
     TraceService, TraceServiceServer,
 };
@@ -76,6 +89,80 @@ impl TraceService for GrpcTraces {
                 Err(status)
             }
         }
+    }
+}
+
+/// The tonic `LogsService` (D-G-40). Cloning shares the state.
+#[derive(Clone)]
+pub(crate) struct GrpcLogs {
+    state: AppState,
+}
+
+impl fmt::Debug for GrpcLogs {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("GrpcLogs").finish_non_exhaustive()
+    }
+}
+
+#[tonic::async_trait]
+impl LogsService for GrpcLogs {
+    async fn export(
+        &self,
+        request: tonic::Request<ExportLogsServiceRequest>,
+    ) -> Result<tonic::Response<ExportLogsServiceResponse>, tonic::Status> {
+        let started = Instant::now();
+        let (project, mut reservation) = take_admitted(&request)?;
+        let message = request.into_inner();
+        let size = message.encoded_len();
+        self.state.ingest.fit(&mut reservation, size)?;
+        let genai = cetra_otel::count_genai_log_records(&message);
+        self.state.usage.add_log_events(
+            project.org_id,
+            project.id,
+            self.state.clock.now_ns(),
+            genai,
+        );
+        tracing::info!(
+            target: "ingest",
+            transport = "grpc",
+            project_id = %project.id,
+            request_bytes = size,
+            genai_log_records = genai,
+            duration_ms = elapsed_ms(started),
+            "logs dropped"
+        );
+        Ok(tonic::Response::new(ExportLogsServiceResponse {
+            partial_success: None,
+        }))
+    }
+}
+
+/// The tonic `MetricsService` (D-G-40): admitted, then dropped.
+#[derive(Clone)]
+pub(crate) struct GrpcMetrics {
+    state: AppState,
+}
+
+impl fmt::Debug for GrpcMetrics {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GrpcMetrics")
+            .finish_non_exhaustive()
+    }
+}
+
+#[tonic::async_trait]
+impl MetricsService for GrpcMetrics {
+    async fn export(
+        &self,
+        request: tonic::Request<ExportMetricsServiceRequest>,
+    ) -> Result<tonic::Response<ExportMetricsServiceResponse>, tonic::Status> {
+        let (_project, mut reservation) = take_admitted(&request)?;
+        let size = request.get_ref().encoded_len();
+        self.state.ingest.fit(&mut reservation, size)?;
+        Ok(tonic::Response::new(ExportMetricsServiceResponse {
+            partial_success: None,
+        }))
     }
 }
 
@@ -155,14 +242,37 @@ where
 /// The service with its limits and compressions, behind the admission layer (G-1). The decoded
 /// message cap is `ingest.max_grpc_message_bytes` (validated by `config`).
 pub(crate) fn service(state: AppState) -> Admit<TraceServiceServer<GrpcTraces>> {
-    let limit =
-        usize::try_from(state.config.ingest.max_grpc_message_bytes.as_u64()).unwrap_or(usize::MAX);
     let inner = TraceServiceServer::new(GrpcTraces {
         state: state.clone(),
     })
-    .max_decoding_message_size(limit)
+    .max_decoding_message_size(message_limit(&state))
     .accept_compressed(CompressionEncoding::Gzip);
     AdmitLayer { state }.layer(inner)
+}
+
+/// The `LogsService` with the trace service's limits and compressions, behind the same
+/// admission layer (D-G-40).
+pub(crate) fn logs_service(state: AppState) -> Admit<LogsServiceServer<GrpcLogs>> {
+    let inner = LogsServiceServer::new(GrpcLogs {
+        state: state.clone(),
+    })
+    .max_decoding_message_size(message_limit(&state))
+    .accept_compressed(CompressionEncoding::Gzip);
+    AdmitLayer { state }.layer(inner)
+}
+
+/// The `MetricsService`, as [`logs_service`].
+pub(crate) fn metrics_service(state: AppState) -> Admit<MetricsServiceServer<GrpcMetrics>> {
+    let inner = MetricsServiceServer::new(GrpcMetrics {
+        state: state.clone(),
+    })
+    .max_decoding_message_size(message_limit(&state))
+    .accept_compressed(CompressionEncoding::Gzip);
+    AdmitLayer { state }.layer(inner)
+}
+
+fn message_limit(state: &AppState) -> usize {
+    usize::try_from(state.config.ingest.max_grpc_message_bytes.as_u64()).unwrap_or(usize::MAX)
 }
 
 /// The admission checks, in order: the credential, the key's scope, the project, the org's cap,
@@ -252,6 +362,9 @@ async fn export_request(
     let receipt = commit_in_task(state, target, normalized, reservation)
         .await
         .map_err(|error| refused(state, error))?;
+    if receipt.accepted > 0 {
+        state.last_ingest.record(project.id, now);
+    }
     state.telemetry.accept_ingest(
         Protocol::otlp_grpc,
         u64::try_from(receipt.accepted).unwrap_or(u64::MAX),
@@ -276,8 +389,8 @@ async fn export_request(
 
 /// The project and the reservation the layer admitted. Without them `export` was not reached
 /// through the layer, which is a defect, not a client error.
-fn take_admitted(
-    request: &tonic::Request<ExportTraceServiceRequest>,
+fn take_admitted<T>(
+    request: &tonic::Request<T>,
 ) -> Result<(ProjectRow, Reservation), tonic::Status> {
     let admitted = request
         .extensions()
@@ -404,9 +517,9 @@ fn elapsed_ms(started: Instant) -> u64 {
 mod tests {
     use crate::test_support::raw_query;
     use bytes::Bytes;
+    use cetra_otel::decode_json;
     use datafusion::prelude::SessionContext;
     use http_body_util::{BodyExt, Full};
-    use llmobs_otel::decode_json;
     use opentelemetry_proto::tonic::collector::trace::v1::trace_service_server::TraceService;
     use tonic::Code;
     use tower::ServiceExt;
@@ -476,7 +589,7 @@ mod tests {
     }
 
     /// Spans in the project, read through the storage query provider.
-    async fn stored_spans(app: &TestApp, project: llmobs_core::ids::ProjectId) -> usize {
+    async fn stored_spans(app: &TestApp, project: cetra_core::ids::ProjectId) -> usize {
         let query = raw_query(&app.state.storage, project).await;
         let ctx = SessionContext::new();
         ctx.register_table("raw_spans", query.spans)
@@ -636,6 +749,10 @@ mod tests {
         send(&app.state, &[bearer(&seeded.ingest_key)], &message)
             .await
             .expect("exported");
+        assert_eq!(
+            app.state.last_ingest.get(seeded.project.id),
+            Some(app.state.clock.now_ns())
+        );
         let text = app
             .state
             .telemetry
@@ -643,9 +760,9 @@ mod tests {
             .await
             .expect("metrics render");
         let expected = [
-            "llmobs_ingest_requests_total{protocol=\"otlp_grpc\",outcome=\"ok\"} 1".to_owned(),
-            format!("llmobs_ingest_spans_total{{protocol=\"otlp_grpc\"}} {spans}"),
-            format!("llmobs_ingest_bytes_total{{protocol=\"otlp_grpc\"}} {bytes}"),
+            "cetra_ingest_requests_total{protocol=\"otlp_grpc\",outcome=\"ok\"} 1".to_owned(),
+            format!("cetra_ingest_spans_total{{protocol=\"otlp_grpc\"}} {spans}"),
+            format!("cetra_ingest_bytes_total{{protocol=\"otlp_grpc\"}} {bytes}"),
         ];
         for line in expected {
             assert!(
@@ -667,8 +784,109 @@ mod tests {
             .render(&app.state)
             .await
             .expect("metrics render");
-        let line =
-            "llmobs_ingest_requests_total{protocol=\"otlp_grpc\",outcome=\"unauthorized\"} 1";
+        let line = "cetra_ingest_requests_total{protocol=\"otlp_grpc\",outcome=\"unauthorized\"} 1";
         assert!(text.lines().any(|candidate| candidate == line), "{text}");
+    }
+
+    /// One uncompressed gRPC frame of `message`, sent to `path` through `service`.
+    async fn send_signal<S, M>(
+        service: S,
+        path: &str,
+        headers: &[(&str, String)],
+        message: &M,
+    ) -> Result<(), tonic::Status>
+    where
+        S: Service<
+                axum::http::Request<tonic::body::Body>,
+                Response = axum::http::Response<tonic::body::Body>,
+                Error = Infallible,
+            >,
+        M: Message,
+    {
+        let payload = message.encode_to_vec();
+        let length = u32::try_from(payload.len()).expect("the message is small");
+        let mut frame = vec![0_u8];
+        frame.extend_from_slice(&length.to_be_bytes());
+        frame.extend_from_slice(&payload);
+        let mut request = axum::http::Request::post(path)
+            .header(axum::http::header::CONTENT_TYPE, "application/grpc");
+        for (name, value) in headers {
+            request = request.header(*name, value.as_str());
+        }
+        let request = request
+            .body(tonic::body::Body::new(Full::new(Bytes::from(frame))))
+            .expect("the request builds");
+        let response = service
+            .oneshot(request)
+            .await
+            .expect("the service never fails");
+        let (parts, body) = response.into_parts();
+        let collected = body.collect().await?;
+        let trailers = collected.trailers().cloned();
+        let status = trailers
+            .as_ref()
+            .and_then(tonic::Status::from_header_map)
+            .or_else(|| tonic::Status::from_header_map(&parts.headers))
+            .expect("the answer carries a gRPC status");
+        if status.code() == Code::Ok {
+            Ok(())
+        } else {
+            Err(status)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn logs_are_dropped_and_genai_records_counted() {
+        use cetra_otel::decode_logs_json;
+        let app = TestApp::new().await;
+        let seeded: Seeded = app.seed().await;
+        let message = decode_logs_json(
+            br#"{"resourceLogs":[{"scopeLogs":[{"logRecords":[
+                {"eventName":"gen_ai.choice"},{"body":{"stringValue":"plain"}}]}]}]}"#,
+        )
+        .expect("valid logs");
+        let path = "/opentelemetry.proto.collector.logs.v1.LogsService/Export";
+        send_signal(
+            logs_service(app.state.clone()),
+            path,
+            &[bearer(&seeded.ingest_key)],
+            &message,
+        )
+        .await
+        .expect("exported");
+        app.state.usage.flush(&app.state.meta).await.expect("flush");
+        let counted: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(genai_log_events), 0) FROM usage_daily WHERE project_id = ?",
+        )
+        .bind(seeded.project.id.to_string())
+        .fetch_one(app.state.meta.reader())
+        .await
+        .expect("sum");
+        assert_eq!(counted, 1);
+
+        let refused = send_signal(logs_service(app.state.clone()), path, &[], &message)
+            .await
+            .expect_err("no credentials");
+        assert_eq!(refused.code(), Code::Unauthenticated);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn metrics_are_dropped() {
+        let app = TestApp::new().await;
+        let seeded: Seeded = app.seed().await;
+        let path = "/opentelemetry.proto.collector.metrics.v1.MetricsService/Export";
+        let message = ExportMetricsServiceRequest::default();
+        send_signal(
+            metrics_service(app.state.clone()),
+            path,
+            &[bearer(&seeded.ingest_key)],
+            &message,
+        )
+        .await
+        .expect("exported");
+        let refused = send_signal(metrics_service(app.state.clone()), path, &[], &message)
+            .await
+            .expect_err("no credentials");
+        assert_eq!(refused.code(), Code::Unauthenticated);
     }
 }

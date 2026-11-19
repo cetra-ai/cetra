@@ -48,15 +48,15 @@
           },
           "spans": [
             {
-              "traceId": "ebfb55d6ad2563b827f75a448a9e5031",
-              "spanId": "1594771b40d5170b",
+              "traceId": "92a416362586da65a20d34bf1d8ece4a",
+              "spanId": "3ade816607d3d14b",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
               "name": "weather-generation",
               "kind": 1,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590054000000",
+              "endTimeUnixNano": "1767225590060000000",
               "attributes": [
                 {
                   "key": "langfuse.internal.is_app_root",
@@ -109,7 +109,7 @@
                 {
                   "key": "langfuse.observation.completion_start_time",
                   "value": {
-                    "stringValue": "\"2025-12-31T23:59:50.054000Z\""
+                    "stringValue": "\"2025-12-31T23:59:50.060000Z\""
                   }
                 }
               ],

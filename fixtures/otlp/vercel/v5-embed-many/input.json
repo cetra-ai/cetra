@@ -41,15 +41,15 @@
           },
           "spans": [
             {
-              "traceId": "02c992eebd615b1888eb88e7860f4c5a",
-              "spanId": "fc7add3f1986bae8",
+              "traceId": "8c55647de578bb211b6405e1a8edef56",
+              "spanId": "9c400d584b16e1b3",
               "traceState": "",
               "parentSpanId": "",
               "flags": 257,
               "name": "ai.embedMany",
               "kind": 1,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590070000000",
+              "endTimeUnixNano": "1767225590060000000",
               "attributes": [
                 {
                   "key": "operation.name",
@@ -144,15 +144,15 @@
               "status": null
             },
             {
-              "traceId": "02c992eebd615b1888eb88e7860f4c5a",
-              "spanId": "bd2e639dd6b13d7a",
+              "traceId": "8c55647de578bb211b6405e1a8edef56",
+              "spanId": "5fc74ab995a9c9eb",
               "traceState": "",
-              "parentSpanId": "fc7add3f1986bae8",
+              "parentSpanId": "9c400d584b16e1b3",
               "flags": 257,
               "name": "ai.embedMany.doEmbed",
               "kind": 1,
-              "startTimeUnixNano": "1767225590002000000",
-              "endTimeUnixNano": "1767225590067000000",
+              "startTimeUnixNano": "1767225590001000000",
+              "endTimeUnixNano": "1767225590058000000",
               "attributes": [
                 {
                   "key": "operation.name",

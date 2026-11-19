@@ -7,10 +7,10 @@ use serde_json::{Map, Value};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-use llmobs_core::enums::ScoreDataType;
-use llmobs_core::ids::TraceId;
+use cetra_core::enums::ScoreDataType;
+use cetra_core::ids::TraceId;
 
-use super::common::{Limit, any_json};
+use super::common::{Limit, any_json, open_object};
 use super::datasets::DatasetItem;
 
 /// Repetitions of an experiment (D-J-10).
@@ -69,7 +69,7 @@ pub struct Experiment {
     /// The dataset version the experiment is pinned to.
     pub dataset_version: i64,
     /// A JSON object.
-    #[schema(value_type = Object)]
+    #[schema(schema_with = open_object)]
     pub metadata: Map<String, Value>,
     /// Repetitions of every item, 1 to 20.
     pub repetitions: i64,
@@ -83,7 +83,7 @@ pub struct Experiment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// Creation time. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub created_at: i64,
     /// When the experiment finished. Omitted while it runs. JSON is RFC 3339.
@@ -112,7 +112,7 @@ pub struct CreateExperimentRequest {
     pub description: Option<String>,
     /// A JSON object of at most 64 KiB.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Option<Object>)]
+    #[schema(schema_with = open_object)]
     pub metadata: Option<Map<String, Value>>,
     /// Repetitions of every item, 1 to 20. Defaults to 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -237,6 +237,9 @@ pub struct ScoreSummary {
     pub pass_rate: Option<f64>,
     /// Categoricals only: the rows per label.
     pub labels: BTreeMap<String, i64>,
+    /// Numeric scores only: the rows per bucket, 10 equal-width buckets from `min` to `max` (one
+    /// bucket when `min` equals `max`); empty for other types.
+    pub histogram: Vec<i64>,
 }
 
 /// The results of one experiment, aggregated.
@@ -333,6 +336,9 @@ pub struct CompareCell {
     /// Whether this cell regressed against the baseline's cell of the same item. Always false
     /// for the baseline.
     pub regressed: bool,
+    /// Whether this cell improved on the baseline's cell of the same item. Always false for the
+    /// baseline.
+    pub improved: bool,
 }
 
 /// One dataset item, with each experiment's cell.
@@ -359,6 +365,10 @@ pub struct ScoreDelta {
     pub delta: f64,
     /// The items that were compared.
     pub n_compared: i64,
+    /// The compared items whose candidate value is higher by more than the threshold.
+    pub improved: i64,
+    /// The compared items whose candidate value is lower by more than the threshold.
+    pub regressed: i64,
 }
 
 /// The deltas of one candidate, per score name.
@@ -368,6 +378,40 @@ pub struct ScoreDeltas {
     pub experiment_id: Uuid,
     /// One delta per score name with at least one compared item.
     pub scores: BTreeMap<String, ScoreDelta>,
+    /// The items the baseline also has whose candidate cell improved (see `CompareCell`).
+    pub improved_items: i64,
+    /// The items the baseline also has whose candidate cell regressed (see `CompareCell`).
+    pub regressed_items: i64,
+}
+
+/// `only` of `GET …/experiments/compare`: keep the items with a cell of this kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CompareOnly {
+    /// The items where a candidate regressed.
+    Regressed,
+    /// The items where a candidate improved.
+    Improved,
+    /// The items where a candidate regressed or improved.
+    Changed,
+}
+
+/// `GET …/experiments/summaries` query.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+pub struct SummariesParams {
+    /// One to 25 distinct experiment ids, comma-separated, in the order of the answer.
+    pub ids: String,
+}
+
+/// `GET …/experiments/summaries`: the summaries of the requested experiments.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ExperimentSummaries {
+    /// One summary per experiment found, in request order. Unknown and hidden experiments are
+    /// left out.
+    pub data: Vec<ExperimentSummary>,
+    /// The experiments too large to summarize (D-J-13), in request order.
+    pub skipped: Vec<Uuid>,
 }
 
 /// `GET …/experiments/compare`: two to four experiments of one dataset, the first the baseline.
@@ -412,9 +456,9 @@ pub struct CompareParams {
     /// The regression threshold, absolute, 0 to 1000 (default 0.1).
     #[serde(default)]
     pub threshold: Option<f64>,
-    /// Keep only the items with a regressed cell.
+    /// Keep only the items with a regressed, improved or changed cell. Omitted keeps every item.
     #[serde(default)]
-    pub regressions_only: bool,
+    pub only: Option<CompareOnly>,
     /// Maximum number of items to return (1–1000, default 50).
     #[serde(default)]
     #[param(minimum = 1, maximum = 1000, default = 50)]

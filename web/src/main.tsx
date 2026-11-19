@@ -6,7 +6,11 @@ import "@fontsource-variable/inter";
 import "@fontsource-variable/jetbrains-mono";
 import { createAppQueryClient } from "@/api/client";
 import {
+  applyDensity,
+  applyPalette,
   applyResolvedTheme,
+  readStoredDensity,
+  readStoredPalette,
   readStoredTheme,
   resolveTheme,
   ThemeProvider,
@@ -16,11 +20,16 @@ import "./styles.css";
 
 async function main(): Promise<void> {
   applyResolvedTheme(resolveTheme(readStoredTheme()));
+  applyPalette(readStoredPalette());
+  applyDensity(readStoredDensity());
 
   if (import.meta.env.DEV && import.meta.env.MODE !== "server") {
     const { isCommonAssetRequest } = await import("msw");
     const { HttpNetworkFrame } = await import("msw/experimental");
-    const { readMockMode, worker } = await import("./mocks/browser");
+    const [{ worker }, { readMockMode }] = await Promise.all([
+      import("./mocks/browser"),
+      import("./mocks/mock-mode"),
+    ]);
     if (readMockMode() === "large") {
       const [{ createDataset }, { largeHandlers }] = await Promise.all([
         import("./mocks/generated/dataset"),

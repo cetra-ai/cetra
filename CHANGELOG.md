@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to llmobs are listed here. The format follows
+All notable changes to cetra are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/) (D-N-5). A release that needs action on upgrade starts
 with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
@@ -22,8 +22,8 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
   recorded as failed. Change the recipients, or use `invite_only` signup.
 - A trace `latency_p95` alert rule whose threshold is at or above its window is refused on its next
   edit; lower the threshold or widen the window.
-- An `LLMOBS_AUTH__OIDC__*` environment variable other than
-  `LLMOBS_AUTH__OIDC__<NAME>__CLIENT_SECRET` for a provider of the config file now stops the
+- A`CETRA_AUTH__OIDC__*` environment variable other than
+  `CETRA_AUTH__OIDC__<NAME>__CLIENT_SECRET` for a provider of the config file now stops the
   server at start; such variables used to be ignored. Remove them.
 - `/readyz` can now fail on a full disk or an unreachable object store. Keep liveness probes on
   `/healthz`; the Helm chart already does.
@@ -32,24 +32,45 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Added
 
+- Dashboard templates — Cost, Latency and Quality — in the New dashboard dialog; the Overview adds top users and top trace names by cost and drops its section headings (D-C-21).
+- A demo org that every signed-in user can read (`demo.org`): users see it last in their org switcher as an implicit viewer, without a membership row (D187).
+- A filter sidebar on the Traces, Spans, Sessions and Users lists: per-field values with counts, keys of metadata and attributes, and histograms with range selection for durations, costs and tokens, all written into the filter text. Backed by the new `GET /facets` endpoint (D-C-13).
+- Preset filters (Errors, Slow, Expensive, Has score, LLM), value autocomplete in the filter editor, a "+ Filter" button with a searchable field picker and token input for `IN`, and wrapping chips in a new filter row.
+- Lists opened without URL parameters keep the range, flags and compatible filters of the last list (D-C-14).
+- A right-click menu on filterable list cells: filter, exclude, copy, open the session or user.
+- Dashboard: KPI sparklines, a shared hover cursor across charts, drag to zoom the range, per-score small charts, and top-model rows that open the filtered traces (D-C-15).
+- Custom dashboards (D-C-16): any number of named dashboards per project on a 60-column grid (D-C-19) that members edit by dragging, resizing and a widget editor; widgets are line, bar, area, horizontal bar, number and table charts, and headings. The built-in Overview is a read-only preset of the same widgets that can be duplicated. API: `GET/POST /dashboards`, `GET/PATCH/DELETE /dashboards/{id}` and `POST /dashboards/query`, which computes one widget from traces, spans or scores with up to six measures, a breakdown and filters.
+- The Overview is editable in place, with "Reset to default" (D-C-18): the first save stores the project's own copy, and everyone sees it. Charts on any dashboard a member can edit are dragged and resized without entering Edit; the layout saves itself, with an Undo bar.
+- Online rules: `GET /online-rules/stats` answers the last 24 hours per rule, with the finished jobs by hour and the score summary with an hourly series (D-I-50), and the reworked Online rules page shows them beside a full-width list with a side panel: status, spend, hourly jobs, score summary and trend, and recent failures.
+- Experiments:
+  - The list is full width, with a status strip, metadata tags, score badges with the change since the previous run, errors, latency and cost, and a trend chart per dataset. Experiments open in the list's panel (drawer, bottom or page).
+  - Experiment pages show score distributions and open each item in a side sheet that renders the input and outputs as Markdown or JSON.
+  - The compare view filters items that are regressed, improved or changed, counts improved and regressed items per score, and opens an item with its outputs side by side.
+  - New: `GET /experiments/summaries?ids=` and `ScoreSummary.histogram` (D-J-20, D-J-21).
+- Users: the user page has a time range and Overview, Sessions and Traces tabs; Overview shows the user's scores, metadata, and the dashboard's KPIs and charts for that user, with a link to the dashboard filtered to them. The list shows each user's name and plan from `user.*` metadata, relative first/last seen, KPI changes against the previous period and the top users by cost; the drawer shows metric chips, an activity chart and each recent session's first message. `GET /users/{user_id}` takes `from` and `to`.
+- Licences: release builds also accept licence keys signed by `license-1`, the cloud control plane's online licence key, and `license-2`, its offline spare (D-P-73).
+- OTLP: `POST /v1/logs` and `POST /v1/metrics` (HTTP) and the gRPC `LogsService` and `MetricsService` are accepted and dropped instead of answering 404 (D-G-40). GenAI content sent as log events is counted per project; `GET /api/v1/projects/{project}` returns it as `genai_log_events`, and the UI tells the project's users once that the content was dropped. Migration `0018` adds `usage_daily.genai_log_events`.
+- Alerts: a `no_data` event kind, shown in the history, and a "No data" notification on Slack, email and webhooks (`alert.no_data`) (D-K-20).
 - Datasets: versioned datasets of input / expected output / metadata items with optional JSON Schemas, and their API (`/datasets`, items, versions) (track J).
 - Datasets: import items from CSV (with a column mapping) or JSONL, export a version as JSONL or CSV, and add an item from a trace or a span (track J).
 - Experiments API: create an experiment from a dataset version, store results and finish it; results with score summaries and a 2–4 experiment comparison; experiment scores; `dataset_items` and `experiment_items` in the SQL console and MCP; deleting a trace also deletes dataset items copied from it and experiment results about it (track J).
-- Python SDK: `llmobs.Client` for datasets and `llmobs.evaluate` / `aevaluate` to run experiments on your machine (track J).
-- TypeScript SDK: `new llmobs.Client()` for datasets and `llmobs.evaluate` to run experiments on your machine (track J).
+- Python SDK: `cetra.Client` for datasets and `cetra.evaluate` / `aevaluate` to run experiments on your machine (track J).
+- TypeScript SDK: `new cetra.Client()` for datasets and `cetra.evaluate` to run experiments on your machine (track J).
 - Experiments: the experiments list, experiment page and compare view (2–4 experiments, deltas, regressions and a word-level output diff) in the web UI (track J).
 - Datasets: the dataset pages in the web UI, with items, versions, import, export and an Experiments tab (track J).
+- Datasets: item search (`q`), batch edit and batch delete of items in one version each, a version's added, edited and deleted counts with its item changes, restore of an earlier version, bulk add of up to 100 traces, and `GET /dataset-trends` with the latest experiments and score means per dataset (track J, D-J-22 to D-J-26).
+- Datasets UI: a full-width list with a summary strip, last experiment and score trend columns and a dataset panel; a dataset page with header chips, a "Run experiment" snippet, an items grid with previews, search, an item panel, cell edit mode and bulk delete; a versions timeline with change counts, diffs and restore; how-to empty states; and "Add N to dataset" for checked rows of the traces list.
 - Settings → Model prices, for an organization and for a project: add, edit and delete custom prices, search the built-in prices, and check which price applies to a model.
 - Custom model prices per project: `/api/v1/projects/{project}/models` lists the effective price table, resolves which price applies, and adds, replaces and deletes project prices. New prices apply to spans received afterwards; stored costs are not recomputed (D-T-5). Org-wide prices under `/api/v1/orgs/{org}/models` apply to every project of the org; a project price beats an org price.
 - Auth: an `[[auth.oidc]]` provider's client secret can come from
-  `LLMOBS_AUTH__OIDC__<NAME>__CLIENT_SECRET`, and `client_secret` may then be left out of
-  `llmobs.toml` (D-S-2).
+  `CETRA_AUTH__OIDC__<NAME>__CLIENT_SECRET`, and `client_secret` may then be left out of
+  `cetra.toml` (D-S-2).
 - Storage: a failed fsync of a local object stops local object writes until a restart, and `StorageHealth::objects_sync_failed` reports it (D-R-6). New error `ObjectError::SyncFailed`.
 - Storage: a `catalog.db` commit that fails with an I/O error stops the catalog until a restart, and `StorageHealth::catalog_failed` reports it (D-R-6). New errors `CatalogError::Stopped` and `CommitError::Stopped`.
 - The S3 self-hosting guide recommends a lifecycle rule that aborts incomplete multipart uploads (track R).
 - Storage: a warning at start when the storage's memory budgets add up to more than the memory limit.
 - Per-org single sign-on (enterprise): an org's own OIDC provider, DNS-verified email domains,
-  email-first login, just-in-time membership and SSO enforcement; `llmobs admin org-sso disable`.
+  email-first login, just-in-time membership and SSO enforcement; `cetra admin org-sso disable`.
 - Release archives for Linux x86_64 and aarch64 (static) and macOS arm64, an install script, a
   Docker image on GHCR, docker-compose files (local volume, or S3 with Garage) and a Helm chart,
   with checksums, build provenance attestations, SBOMs and third-party licence notices (track N).
@@ -60,21 +81,42 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 - `email_verified` and `has_password` on the `User` returned by `GET /api/auth/me`, signup and
   setup.
 - `GET /api/v1/projects/{project}/saved-views/{id}` returns one saved view by id.
-- `llmobs admin backup` takes a consistent backup of a running server (local mode: hard-linked
+- `cetra admin backup` takes a consistent backup of a running server (local mode: hard-linked
   objects; S3 mode: metadata, restorable for `storage.gc.grace`, which may now be up to 30 days).
-- `llmobs admin gc-orphans` cleans the object store after a restore and reports missing objects.
-- `llmobs admin migrate` migrates `meta.db` and `catalog.db` while the server is stopped, before a
+- `cetra admin gc-orphans` cleans the object store after a restore and reports missing objects.
+- `cetra admin migrate` migrates `meta.db` and `catalog.db` while the server is stopped, before a
   restore's deletions are re-applied.
 - The server keeps a copy of `meta.db` and `catalog.db` before migrating them.
+- `meta.db` records its format version. `cetra serve`, `admin migrate` and `admin gc-orphans`
+  refuse a `meta.db` written by a newer release before they open storage or change any file.
+- The admin socket (`admin.sock`) carries a protocol version; a CLI and a server of different
+  protocol versions refuse each other with a message naming both.
+- A backup's `manifest.json` records the formats and last migrations of `meta.db` and `catalog.db`
+  (`meta_format`, `meta_schema`, `storage_format`, `catalog_schema`).
 - Helm chart values `extraVolumes` and `extraVolumeMounts` (for example a backup volume).
 - Restore mode (`restore_mode`): the server serves reads and makes no outbound call, for restore drills.
 - Prometheus metrics on a separate listener (`metrics_addr`); the Helm chart's `metrics.enabled`.
+- A layout switcher on the Traces and Spans lists: split, drawer, rail and bottom.
+
+- Evaluator version history: every change to an evaluator's config or output is kept, `GET /api/v1/projects/{project}/evaluators/{id}/versions` lists the versions, and the evaluator page has a History tab that diffs a version against the previous one.
+- Evaluators: `GET /evaluators/stats`; the evaluator list shows 7-day runs, errors, average cost, p50 and result columns (the score column is now "Output"), and the evaluator page a 7-day stats row and the experiments with its score (D-I-48).
 
 ### Changed
 
+- The top bar is a breadcrumb to the current page and its open item, shows whether spans are arriving, and lists firing alerts (D-C-20).
+- Dashboard charts use round axis ticks, at most 60 buckets, the error colour for errors and one colour per model; change badges show `new` or `×N` instead of huge percentages. The list toolbars' Eval and Experiments switches are now one "Include" menu (D-C-15).
+- The project sidebar groups its pages into Observe, Monitor, Evaluate and Explore, with live badges on Alerts, Online rules and Experiments, a Recent group, and the account menu, Docs link and version in its footer; `g` then a letter now reaches every project page (Spans moves to `g p`, Sessions to `g s`), and the sidebar starts collapsed below 1024 px (D-C-12).
+- Settings: `/settings` is now an overview with a live status per section; every settings page shares one layout with per-card Save, a danger zone last, inline validation and an unsaved-changes prompt; lists (API keys, members, invites, tokens, LLM connections, channels, model prices, score definitions) get search, sort, status pills and a row panel; destructive actions ask for the item's name; the settings sidebar has a filter and a usage meter, and ⌘K lists every settings page.
+- `GET /experiments/compare` takes `only=regressed|improved|changed` in place of `regressions_only`; compare cells carry `improved`, and score deltas count the improved and regressed items (D-J-21).
+- New logo, the Caetra c (D189): the web UI's favicons, and the brand files in `assets/brand/`.
+- The product is renamed from the working name `llmobs` to cetra (cetra.sh, D46): the binary and crates,
+  the `CETRA_*` environment variables, the `cetra.*` span attributes, the `sk-cetra-`, `pk-cetra-` and
+  `pat-cetra-` key prefixes, the `ghcr.io/cetra-ai/cetra` image, the `cetra` Helm chart, and the
+  SDK packages (`cetra-sdk` on PyPI, imported as `cetra`, and `@cetra-ai/sdk` on npm). Update config files, environment
+  variables and SDK code to the new names.
 - Auth: with `auth.disable_password = true`, instance admins can still sign in with their
   password at `/login?password=1`, change it, and set it from a reset link
-  (`llmobs admin reset-password`) (D-S-3).
+  (`cetra admin reset-password`) (D-S-3).
 - Deletion, project and organization drop dialogs no longer promise erasure within 24 hours: data is hidden within seconds, removed within 24 hours, and its stored copies are purged after the storage grace period (`storage.gc.grace`, D181).
 - Alert email is capped at 1,000 messages per org per UTC day, "Send test" is limited to 5 a minute
   per user and per channel, and when signup is open an email channel may only list verified
@@ -85,9 +127,9 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
   update is nullable in the OpenAPI contract, from 1 to 36500; `null` keeps data forever.
 - A read that makes several storage calls (a list with scores, a session or user detail) has 30 s
   in total, not 30 s per call.
-- `llmobs login` receives the token from the browser as a form POST, not in the callback URL, so
+- `cetra login` receives the token from the browser as a form POST, not in the callback URL, so
   the token stays out of browser history. A token created by the sign-in page expires after 90
-  days; run `llmobs login` again when it does.
+  days; run `cetra login` again when it does.
 - `PATCH /api/v1/orgs/{org}/llm-connections/{id}` that changes `base_url` or `adapter` must send
   `api_key` again (400 on `api_key`), so a new host never receives the stored key.
 - Web UI: with password sign-in off and exactly one sign-in provider, the login page and, for a
@@ -99,6 +141,7 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Fixed
 
+- Alerts: a firing rule whose data stops (two readings below `min_count`) no longer reports itself resolved; it moves to `no_data` and sends a no data notification, and resolves when a reading with data is clear (D-K-20).
 - A WAL record with a corrupt compressed-buffer length is rejected as corrupt instead of aborting the server at startup.
 - The WAL now rejects a batch whose decoded size exceeds 1 GiB with an invalid-batch error (previously such a record could not be replayed).
 - A Parquet decoder panic on a corrupt data file no longer drops the request, stops compaction or
@@ -150,7 +193,7 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 - Usage counts are no longer lost when shutdown cuts a usage flush short.
 - Identical dashboard metric requests that miss the cache together run the query once, and a full
   cache drops its oldest answers instead of all of them.
-- `llmobs login` exits at once when the sign-in is cancelled in the browser, instead of waiting five
+- `cetra login` exits at once when the sign-in is cancelled in the browser, instead of waiting five
   minutes for a callback that never comes.
 - A password reset (forgot-password link or admin reset link) now revokes the user's personal
   access tokens as well as their web sessions, as a password change already did.
@@ -171,7 +214,7 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 - Deleted spans and the spans of a dropped project leave the WAL by the end of the next flush cycle,
   not when the newest WAL segment fills (64 MiB): each committed flush starts a new segment when
   the open one holds records, and deletes the segments it has flushed (D-A1-14).
-- `llmobs query` finds `{name:Type}` placeholders after a nested `/* … /* … */ … */` comment, as the
+- `cetra query` finds `{name:Type}` placeholders after a nested `/* … /* … */ … */` comment, as the
   server does, instead of reading the rest of the statement as a string.
 - An export whose client stops reading for 30 s releases its query, and its memory admission, instead
   of holding them until the connection closes.
@@ -191,3 +234,7 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 - Cloud cells must set `entitlements.control_plane = true`; without it, `/api/internal/v1/*`
   answers 404 and org and control-plane tokens are refused (D-P-50).
+
+### Removed
+
+- `GET /metrics`: every chart now reads `POST /dashboards/query` (D-C-16).

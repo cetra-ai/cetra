@@ -3,8 +3,8 @@
 //! Spec 02 § Input and output, the GenAI and GenAI legacy events rows, and
 //! rule 16. Tool-call arguments and results are read only on tool spans.
 
-use llmobs_core::enums::SpanKind;
-use llmobs_core::message::Message;
+use cetra_core::enums::SpanKind;
+use cetra_core::message::Message;
 use opentelemetry_proto::tonic::common::v1::AnyValue;
 use opentelemetry_proto::tonic::trace::v1::span::Event;
 use serde_json::{Map, Value as Json};
@@ -327,8 +327,8 @@ mod tests {
     use crate::bag::AttrBag;
     use crate::payload::{Payload, ReadContext};
     use crate::warn::Warnings;
-    use llmobs_core::enums::SpanKind;
-    use llmobs_core::message::messages_to_json;
+    use cetra_core::enums::SpanKind;
+    use cetra_core::message::messages_to_json;
     use opentelemetry_proto::tonic::common::v1::any_value::Value;
     use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
     use opentelemetry_proto::tonic::trace::v1::span::Event;

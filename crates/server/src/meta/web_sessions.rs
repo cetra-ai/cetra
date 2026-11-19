@@ -3,7 +3,7 @@
 //! `id` is the SHA-256 hex of the cookie value. The plaintext never lands here.
 #![cfg_attr(not(test), allow(dead_code))]
 
-use llmobs_core::ids::OrgId;
+use cetra_core::ids::OrgId;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 

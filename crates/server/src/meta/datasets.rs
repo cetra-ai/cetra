@@ -1,9 +1,10 @@
 //! `datasets`, `dataset_versions` and `dataset_items` rows (spec 04 § Datasets & experiments, D-J-2, D-J-3, D-J-4).
 
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
+use cetra_core::ids::{ProjectId, SpanId, TraceId};
 use futures::TryStreamExt;
-use llmobs_core::ids::{ProjectId, SpanId, TraceId};
 use serde_json::{Map, Value};
 use sqlx::{AssertSqlSafe, SqliteConnection, SqlitePool};
 use uuid::Uuid;
@@ -79,6 +80,52 @@ pub(crate) struct VersionRow {
     /// A user id, or `key:<key id>`.
     pub(crate) created_by: Option<String>,
     pub(crate) created_at: i64,
+    pub(crate) counts: VersionCounts,
+}
+
+/// The item changes of one version (D-J-24): an item whose revision the version starts and
+/// that had none closed by it is added; one with a revision closed by it and another started by
+/// it is edited; one with only a closed revision is deleted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct VersionCounts {
+    pub(crate) added: i64,
+    pub(crate) edited: i64,
+    pub(crate) deleted: i64,
+}
+
+impl VersionCounts {
+    /// The counts of the version `change` writes, as [`list_versions`] counts it afterwards.
+    pub(crate) fn of_change(change: &VersionChange) -> Self {
+        let inserted: HashSet<Uuid> = change.insert.iter().map(|rev| rev.item_id).collect();
+        let closed: HashSet<Uuid> = change.close.iter().copied().collect();
+        let edited = closed.intersection(&inserted).count();
+        Self {
+            added: i64::try_from(inserted.len() - edited).unwrap_or(i64::MAX),
+            edited: i64::try_from(edited).unwrap_or(i64::MAX),
+            deleted: i64::try_from(closed.difference(&inserted).count()).unwrap_or(i64::MAX),
+        }
+    }
+}
+
+/// One item that changed in a version, with the revisions on either side of it (D-J-24).
+/// Both are absent only for an item the version does not touch, which listing never returns.
+#[derive(Clone, PartialEq)]
+pub(crate) struct ItemChangeRow {
+    pub(crate) item_id: Uuid,
+    /// The revision the version closed.
+    pub(crate) before: Option<ItemRow>,
+    /// The revision the version started.
+    pub(crate) after: Option<ItemRow>,
+}
+
+impl fmt::Debug for ItemChangeRow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ItemChangeRow")
+            .field("item_id", &self.item_id)
+            .field("before", &self.before)
+            .field("after", &self.after)
+            .finish()
+    }
 }
 
 /// One item revision. `Debug` is hand-written (below): it prints ids, versions and sizes, never content.
@@ -186,6 +233,14 @@ struct VersionRecord {
     description: String,
     created_by: Option<String>,
     created_at: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct CountRecord {
+    version: i64,
+    added: i64,
+    edited: i64,
+    deleted: i64,
 }
 
 #[derive(sqlx::FromRow)]
@@ -443,6 +498,7 @@ pub(crate) async fn write_version(
 
 /// Versions of `dataset`, newest first; `before` is the cursor (versions strictly lower).
 /// Returns at most `limit + 1` rows; the caller uses the extra row to know there is a next page.
+/// Each row carries its item counts (D-J-24), computed for the rows' range in one query.
 pub(crate) async fn list_versions(
     pool: &SqlitePool,
     dataset: Uuid,
@@ -458,28 +514,156 @@ pub(crate) async fn list_versions(
     .bind(i64::from(limit) + 1)
     .fetch_all(pool)
     .await?;
-    Ok(records.into_iter().map(version_from).collect())
+    let (Some(newest), Some(oldest)) = (
+        records.first().map(|record| record.version),
+        records.last().map(|record| record.version),
+    ) else {
+        return Ok(Vec::new());
+    };
+    let counts = version_counts(pool, dataset, oldest, newest).await?;
+    Ok(records
+        .into_iter()
+        .map(|record| {
+            let counts = counts.get(&record.version).copied().unwrap_or_default();
+            VersionRow {
+                counts,
+                ..version_from(record)
+            }
+        })
+        .collect())
 }
 
-/// The revisions in `version`, ordered by `item_id`, with `item_id > after` when set.
-/// Returns at most `limit + 1` rows.
+/// The item counts of the versions `low..=high` of `dataset`: per version, the items whose
+/// revision it starts and had no closed revision (added), had one (edited), and the items it
+/// only closes (deleted). Versions with no change are absent.
+async fn version_counts(
+    pool: &SqlitePool,
+    dataset: Uuid,
+    low: i64,
+    high: i64,
+) -> Result<HashMap<i64, VersionCounts>, MetaError> {
+    let records: Vec<CountRecord> = sqlx::query_as(
+        "WITH events AS ( \
+           SELECT valid_from_version AS version, item_id, 1 AS opened, 0 AS closed \
+             FROM dataset_items WHERE dataset_id = ?1 AND valid_from_version BETWEEN ?2 AND ?3 \
+           UNION ALL \
+           SELECT valid_to_version, item_id, 0, 1 \
+             FROM dataset_items WHERE dataset_id = ?1 AND valid_to_version BETWEEN ?2 AND ?3 \
+         ), per_item AS ( \
+           SELECT version, item_id, MAX(opened) AS opened, MAX(closed) AS closed \
+             FROM events GROUP BY version, item_id \
+         ) \
+         SELECT version, \
+           COALESCE(SUM(opened = 1 AND closed = 0), 0) AS added, \
+           COALESCE(SUM(opened = 1 AND closed = 1), 0) AS edited, \
+           COALESCE(SUM(opened = 0 AND closed = 1), 0) AS deleted \
+         FROM per_item GROUP BY version",
+    )
+    .bind(dataset.to_string())
+    .bind(low)
+    .bind(high)
+    .fetch_all(pool)
+    .await?;
+    Ok(records
+        .into_iter()
+        .map(|record| {
+            (
+                record.version,
+                VersionCounts {
+                    added: record.added,
+                    edited: record.edited,
+                    deleted: record.deleted,
+                },
+            )
+        })
+        .collect())
+}
+
+/// The revisions that `version` starts or closes, paired per item and ordered by `item_id`,
+/// with `item_id > after` when set. Returns at most `limit + 1` items; the caller uses the extra
+/// one to know there is a next page (D-J-24).
+pub(crate) async fn list_changes(
+    pool: &SqlitePool,
+    dataset: Uuid,
+    version: i64,
+    after: Option<Uuid>,
+    limit: u32,
+) -> Result<Vec<ItemChangeRow>, MetaError> {
+    // Only constants are spliced; every value is bound. The page is chosen by item, so that both
+    // revisions of an edited item are read together.
+    let sql = format!(
+        "SELECT {ITEM_COLUMNS} FROM dataset_items WHERE dataset_id = ?1 \
+         AND (valid_from_version = ?2 OR valid_to_version = ?2) \
+         AND item_id IN ( \
+           SELECT item_id FROM dataset_items WHERE dataset_id = ?1 \
+           AND (valid_from_version = ?2 OR valid_to_version = ?2) \
+           AND (?3 IS NULL OR item_id > ?3) ORDER BY item_id LIMIT ?4) \
+         ORDER BY item_id, valid_from_version"
+    );
+    let records: Vec<ItemRecord> = sqlx::query_as(AssertSqlSafe(sql))
+        .bind(dataset.to_string())
+        .bind(version)
+        .bind(after.map(|id| id.to_string()))
+        .bind(i64::from(limit) + 1)
+        .fetch_all(pool)
+        .await?;
+    let mut changes: Vec<ItemChangeRow> = Vec::new();
+    for record in records {
+        let row = item_from(record)?;
+        let item_id = row.item_id;
+        let opened = row.valid_from_version == version;
+        match changes.last_mut() {
+            Some(last) if last.item_id == item_id => {
+                if opened {
+                    last.after = Some(row);
+                } else {
+                    last.before = Some(row);
+                }
+            }
+            _ => changes.push(if opened {
+                ItemChangeRow {
+                    item_id,
+                    before: None,
+                    after: Some(row),
+                }
+            } else {
+                ItemChangeRow {
+                    item_id,
+                    before: Some(row),
+                    after: None,
+                }
+            }),
+        }
+    }
+    Ok(changes)
+}
+
+/// The revisions in `version`, ordered by `item_id`, with `item_id > after` when set. With
+/// `needle`, only the revisions whose JSON text (input, expected output, metadata) contains it,
+/// case-insensitively and literally (D-J-22). Returns at most `limit + 1` rows.
 pub(crate) async fn list_items(
     pool: &SqlitePool,
     dataset: Uuid,
     version: i64,
     after: Option<Uuid>,
     limit: u32,
+    needle: Option<&str>,
 ) -> Result<Vec<ItemRow>, MetaError> {
     // Only constants are spliced; every value is bound.
     let sql = format!(
         "SELECT {ITEM_COLUMNS} FROM dataset_items WHERE dataset_id = ?2 AND {IN_VERSION} \
-         AND (?3 IS NULL OR item_id > ?3) ORDER BY item_id LIMIT ?4"
+         AND (?3 IS NULL OR item_id > ?3) \
+         AND (?5 IS NULL OR lower(input || ' ' || COALESCE(expected_output, '') || ' ' || metadata) \
+           LIKE '%' || lower(?5) || '%' ESCAPE '\\') \
+         ORDER BY item_id LIMIT ?4"
     );
+    let needle = needle.map(escape_like);
     let records: Vec<ItemRecord> = sqlx::query_as(AssertSqlSafe(sql))
         .bind(version)
         .bind(dataset.to_string())
         .bind(after.map(|id| id.to_string()))
         .bind(i64::from(limit) + 1)
+        .bind(needle)
         .fetch_all(pool)
         .await?;
     records.into_iter().map(item_from).collect()
@@ -521,6 +705,30 @@ pub(crate) async fn live_items_tx(
     .bind(i64::from(limit) + 1)
     .fetch_all(&mut *conn)
     .await?;
+    records.into_iter().map(item_from).collect()
+}
+
+/// The page of revisions in `version`, ordered by `item_id`, inside a write transaction (D-J-24).
+/// Returns at most `limit + 1` rows.
+pub(crate) async fn version_items_tx(
+    conn: &mut SqliteConnection,
+    dataset: Uuid,
+    version: i64,
+    after: Option<Uuid>,
+    limit: u32,
+) -> Result<Vec<ItemRow>, MetaError> {
+    // Only constants are spliced; every value is bound.
+    let sql = format!(
+        "SELECT {ITEM_COLUMNS} FROM dataset_items WHERE dataset_id = ?2 AND {IN_VERSION} \
+         AND (?3 IS NULL OR item_id > ?3) ORDER BY item_id LIMIT ?4"
+    );
+    let records: Vec<ItemRecord> = sqlx::query_as(AssertSqlSafe(sql))
+        .bind(version)
+        .bind(dataset.to_string())
+        .bind(after.map(|id| id.to_string()))
+        .bind(i64::from(limit) + 1)
+        .fetch_all(&mut *conn)
+        .await?;
     records.into_iter().map(item_from).collect()
 }
 
@@ -725,6 +933,7 @@ fn version_from(record: VersionRecord) -> VersionRow {
         description: record.description,
         created_by: record.created_by,
         created_at: record.created_at,
+        counts: VersionCounts::default(),
     }
 }
 
@@ -779,7 +988,7 @@ fn span_bytes(span: &SpanId) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use llmobs_core::ids::{OrgId, ProjectId, SpanId, TraceId};
+    use cetra_core::ids::{OrgId, ProjectId, SpanId, TraceId};
     use serde_json::{Map, Value, json};
     use uuid::Uuid;
 
@@ -1033,14 +1242,20 @@ mod tests {
                 .map(|row| (row.item_id, row.input.clone()))
                 .collect()
         };
-        let v1 = list_items(db.reader(), dataset, 1, None, 10).await.unwrap();
+        let v1 = list_items(db.reader(), dataset, 1, None, 10, None)
+            .await
+            .unwrap();
         assert_eq!(inputs(&v1), [(a, json!("a1")), (b, json!("b1"))]);
-        let v2 = list_items(db.reader(), dataset, 2, None, 10).await.unwrap();
+        let v2 = list_items(db.reader(), dataset, 2, None, 10, None)
+            .await
+            .unwrap();
         assert_eq!(inputs(&v2), [(a, json!("a2")), (b, json!("b1"))]);
-        let v3 = list_items(db.reader(), dataset, 3, None, 10).await.unwrap();
+        let v3 = list_items(db.reader(), dataset, 3, None, 10, None)
+            .await
+            .unwrap();
         assert_eq!(inputs(&v3), [(a, json!("a2"))]);
         assert!(
-            list_items(db.reader(), dataset, 0, None, 10)
+            list_items(db.reader(), dataset, 0, None, 10, None)
                 .await
                 .unwrap()
                 .is_empty()
@@ -1073,6 +1288,93 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn search_matches_the_json_text_literally() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let project = project(&db, org(&db).await).await;
+        let dataset = create(&db, project, "faq").await;
+        let [order, expected, meta, percent, underscore, letter_x] =
+            [(); 6].map(|()| Uuid::now_v7());
+        let mut with_expected = revision(expected, json!("question"));
+        with_expected.expected_output = Some(json!("pay_42"));
+        let mut with_meta = revision(meta, json!("plain"));
+        with_meta.metadata = Map::from_iter([("tier".to_owned(), json!("gold"))]);
+        let inserts = vec![
+            revision(order, json!("Refund the ORDER")),
+            with_expected,
+            with_meta,
+            revision(percent, json!("100% sure")),
+            revision(underscore, json!("a_b")),
+            revision(letter_x, json!("axb")),
+        ];
+        write(&db, dataset, change(vec![], inserts, "add 6 items"))
+            .await
+            .unwrap();
+
+        let ids =
+            |rows: Vec<ItemRow>| -> Vec<Uuid> { rows.iter().map(|row| row.item_id).collect() };
+        let search = |needle: &'static str| {
+            let db = &db;
+            async move {
+                ids(list_items(db.reader(), dataset, 1, None, 100, Some(needle))
+                    .await
+                    .unwrap())
+            }
+        };
+        // Case-insensitive, in the input.
+        assert_eq!(search("order").await, [order]);
+        // In the expected output.
+        assert_eq!(search("PAY_42").await, [expected]);
+        // In the metadata, by value and by key.
+        assert_eq!(search("gold").await, [meta]);
+        assert_eq!(search("tier").await, [meta]);
+        // LIKE wildcards are literal: `%` matches only the percent sign, `_` only an underscore.
+        assert_eq!(search("%").await, [percent]);
+        assert_eq!(search("a_b").await, [underscore]);
+        assert_eq!(search("x").await, [letter_x]);
+        // An absent search lists everything.
+        assert_eq!(
+            list_items(db.reader(), dataset, 1, None, 100, None)
+                .await
+                .unwrap()
+                .len(),
+            6
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn search_pages_by_item_id() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let project = project(&db, org(&db).await).await;
+        let dataset = create(&db, project, "faq").await;
+        let mut matching: Vec<Uuid> = (0..3).map(|_| Uuid::now_v7()).collect();
+        matching.sort();
+        let mut inserts: Vec<NewRevision> = matching
+            .iter()
+            .map(|item| revision(*item, json!("needle here")))
+            .collect();
+        inserts.push(revision(Uuid::now_v7(), json!("other")));
+        write(&db, dataset, change(vec![], inserts, "add 4 items"))
+            .await
+            .unwrap();
+
+        let first = list_items(db.reader(), dataset, 1, None, 1, Some("needle"))
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 2);
+        let next = list_items(
+            db.reader(),
+            dataset,
+            1,
+            Some(matching[0]),
+            1,
+            Some("needle"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(next.first().map(|row| row.item_id), Some(matching[1]));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn paging() {
         let (_dir, db) = crate::meta::test_db().await;
         let project = project(&db, org(&db).await).await;
@@ -1090,10 +1392,12 @@ mod tests {
             .await
             .unwrap();
 
-        let first = list_items(db.reader(), dataset, 1, None, 2).await.unwrap();
+        let first = list_items(db.reader(), dataset, 1, None, 2, None)
+            .await
+            .unwrap();
         assert_eq!(first.len(), 3);
         let after = first[1].item_id;
-        let next = list_items(db.reader(), dataset, 1, Some(after), 2)
+        let next = list_items(db.reader(), dataset, 1, Some(after), 2, None)
             .await
             .unwrap();
         assert_eq!(next.first().map(|row| row.item_id), Some(items[2]));

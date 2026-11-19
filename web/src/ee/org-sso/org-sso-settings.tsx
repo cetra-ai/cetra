@@ -7,7 +7,7 @@ import { LockedFeature } from "@/components/plan/locked-feature";
 import { useOrgEntitlements } from "@/components/plan/use-org-entitlements";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DomainsSection } from "@/ee/org-sso/domains-section";
-import { ProviderSection } from "@/ee/org-sso/provider-section";
+import { ProviderRemoval, ProviderSection } from "@/ee/org-sso/provider-section";
 import { StatusSection } from "@/ee/org-sso/status-section";
 
 /**
@@ -28,11 +28,18 @@ export function OrgSsoSettings({ org }: { org: string }) {
 
   const sso = query.data;
   return (
-    <div className="flex flex-col gap-8">
+    <div className="flex flex-col gap-6">
       {locked ? <LockedFeature feature="org_sso" upgradeUrl={entitlements.upgradeUrl} /> : null}
-      <ProviderSection org={org} sso={sso} locked={locked} />
+      {/* Keyed on the provider's creation, so a new or removed provider starts a fresh form. */}
+      <ProviderSection
+        key={sso.provider?.created_at ?? "no-provider"}
+        org={org}
+        sso={sso}
+        locked={locked}
+      />
       <DomainsSection org={org} sso={sso} locked={locked} />
       <StatusSection org={org} sso={sso} locked={locked} />
+      {sso.provider ? <ProviderRemoval org={org} issuer={sso.provider.issuer} /> : null}
     </div>
   );
 }

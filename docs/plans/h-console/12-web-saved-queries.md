@@ -476,7 +476,7 @@ If `Schema<"UpdateSavedView">["state"]` is not assignable from `Schema<"CreateSa
 
 ### 6. Examples — `web/src/lib/sql/examples.ts`
 
-The five examples of spec 05, over the real columns of `fixtures/api/static/schema.json` (`scores.source` is `llm_judge` for LLM judges, `ScoreSource` in `llmobs-core`):
+The five examples of spec 05, over the real columns of `fixtures/api/static/schema.json` (`scores.source` is `llm_judge` for LLM judges, `ScoreSource` in `cetra-core`):
 
 ```ts
 export type SqlExample = { name: string; query: string };
@@ -1144,7 +1144,7 @@ New unit test files import `{ expect, it }` (and `describe` if used) from `vites
 ### `web/src/lib/sql/history.test.ts`
 
 `REF = "acme/support-bot"`.
-1. `pushHistory(REF, { query: "A", params: {}, ranAt: "2026-01-01T00:00:00.000Z", rows: 1 })` then `{ query: "B", params: {}, ranAt: "2026-01-01T00:00:01.000Z" }` → `readHistory(REF).map((e) => e.query)` is `["B", "A"]`; `localStorage.getItem("llmobs.sql.history.acme/support-bot")` is not null.
+1. `pushHistory(REF, { query: "A", params: {}, ranAt: "2026-01-01T00:00:00.000Z", rows: 1 })` then `{ query: "B", params: {}, ranAt: "2026-01-01T00:00:01.000Z" }` → `readHistory(REF).map((e) => e.query)` is `["B", "A"]`; `localStorage.getItem("cetra.sql.history.acme/support-bot")` is not null.
 2. Pushing `{ query: "B", params: {}, ranAt: "2026-01-01T00:00:02.000Z" }` again leaves two entries, the newest with `ranAt` `"2026-01-01T00:00:02.000Z"` and no `rows`; pushing `B` with `params: { a: "1" }` adds a third.
 3. 55 pushes of `Q0`…`Q54` (each `ranAt` `"2026-01-01T00:00:00.000Z"`) keep 50, the first being `Q54`.
 4. Stored `"x"` or `'{"a":1}'` reads `[]`; an entry without `query` is skipped; `clearHistory(REF)` empties it.
@@ -1177,17 +1177,17 @@ function sqlView(overrides: Record<string, unknown>) {
 
 function storeFullDraft(draft: { query: string; params?: Record<string, string>; view?: string }) {
   localStorage.setItem(
-    "llmobs.sql.draft.acme/support-bot",
+    "cetra.sql.draft.acme/support-bot",
     JSON.stringify({ params: {}, ...draft }),
   );
 }
 
 function storedDraft(): unknown {
-  return JSON.parse(localStorage.getItem("llmobs.sql.draft.acme/support-bot") ?? "null");
+  return JSON.parse(localStorage.getItem("cetra.sql.draft.acme/support-bot") ?? "null");
 }
 
 function storedHistory(): Record<string, unknown>[] {
-  return JSON.parse(localStorage.getItem("llmobs.sql.history.acme/support-bot") ?? "[]");
+  return JSON.parse(localStorage.getItem("cetra.sql.history.acme/support-bot") ?? "[]");
 }
 
 function asRole(role: string) {
@@ -1253,7 +1253,7 @@ function problemAnswer(status: number, code: string, detail: string) {
 30. **"loads saved params and runs them with Ctrl+Enter"**: `server.use(...savedViewHandlers([sqlView({ shared: false, state: { query: "SELECT {n:Int}", params: { n: "5" }, range: "24h" } })]))`; `const sql = captureSql();` render `?view=${SHARED_VIEW}`; `expect(await screen.findByLabelText("n (Int)")).toHaveValue("5")`; focus the editor; Ctrl+Enter; `waitFor` `single(sql.bodies).params` deep-equals `{ n: 5 }`.
 31. **"loading another query replaces unsaved edits"**: `server.use(...savedViewHandlers([sqlView({ shared: false }), sqlView({ id: COST_VIEW, name: "Other", shared: false, state: { query: "SELECT 2", params: {}, range: "24h" } })]))`; render `?view=${SHARED_VIEW}`; focus; `await user.keyboard("{Control>}{End}{/Control} + 1")`; open the menu; click `Other`; `waitFor` the editor text is `SELECT 2` and search `view` is `COST_VIEW`.
 32. **"an example clears the parameters and keeps the view"**: `storeFullDraft({ query: "SELECT {n:Int}", params: { n: "3" }, view: COST_VIEW })`; render `?view=${COST_VIEW}&range=24h`; `findByLabelText("n (Int)")`; click `getByRole("button", { name: "Examples" })`; click `getByRole("menuitem", { name: "Users by spend" })`; `waitFor` the editor text contains `ORDER BY cost DESC`; `queryByLabelText("n (Int)")` is null; `waitFor` `storedDraft()` has `params: {}` and `view: COST_VIEW`; `findByRole("status", { name: "Unsaved changes" })`; after `await new Promise((resolve) => setTimeout(resolve, 50))`, the editor text still contains `ORDER BY cost DESC`.
-33. **"a history pick keeps a stale ?view= from reloading"**: store history `[{ query: "SELECT 9", params: {}, ranAt: "2026-01-01T00:00:00.000Z", rows: 1 }]` under `llmobs.sql.history.acme/support-bot`; render `?view=${COST_VIEW}`; `waitFor` the editor text is `SEED_QUERY`; open History; click `getByRole("menuitem", { name: /^SELECT 9/ })`; `waitFor` the editor text is `SELECT 9`; after `await new Promise((resolve) => setTimeout(resolve, 50))` it is still `SELECT 9`.
+33. **"a history pick keeps a stale ?view= from reloading"**: store history `[{ query: "SELECT 9", params: {}, ranAt: "2026-01-01T00:00:00.000Z", rows: 1 }]` under `cetra.sql.history.acme/support-bot`; render `?view=${COST_VIEW}`; `waitFor` the editor text is `SEED_QUERY`; open History; click `getByRole("menuitem", { name: /^SELECT 9/ })`; `waitFor` the editor text is `SELECT 9`; after `await new Promise((resolve) => setTimeout(resolve, 50))` it is still `SELECT 9`.
 34. **"records runs with only the used params and restores them"**: `storeFullDraft({ query: "SELECT {n:Int}", params: { n: "4", stale: "x" } })`; `captureSql()`; render; click Run; `findByRole("grid", { name: "Query results" })`; `waitFor` `storedHistory()[0]` matches `{ query: "SELECT {n:Int}", params: { n: "4" }, rows: resultDocument.rows.length }`; focus the editor, `await user.keyboard("{Control>}a{/Control}SELECT 2")`; open History; click `getByRole("menuitem", { name: /^SELECT \{n:Int\}/ })`; `waitFor` the editor text is `SELECT {n:Int}` and `getByLabelText("n (Int)")` has value `4`. Then open History, click "Clear history", open it again: `getByRole("menuitem", { name: "No runs yet" })`.
 35. **"keeps one history entry for a repeated run"**: `storeDraft("SELECT 1")`; `captureSql()`; click Run; wait for the grid; click Run again; wait for the status line to reappear; `waitFor` `storedHistory()` has length 1.
 36. **"records a failed run"**: `storeDraft("SELECT nope")`; `captureSql(() => HttpResponse.json({ type: "about:blank", title: "Bad Request", status: 400, code: "invalid_filter", detail: "invalid query", errors: [{ field: "query", message: "unknown column nope" }] }, { status: 400, headers: PROBLEM_JSON }))`; click Run; `findByRole("alert")`; `waitFor` `storedHistory()[0]` has no `rows`; open History: the item for `SELECT nope` contains `failed`.

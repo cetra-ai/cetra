@@ -12,10 +12,10 @@ use std::time::Instant;
 use arrow::array::{Array, AsArray, RecordBatch, UInt32Array};
 use arrow::compute::{concat_batches, take_record_batch};
 use arrow::datatypes::TimestampNanosecondType;
+use cetra_core::ids::{ProjectId, TraceId};
+use cetra_core::schema::{spans, spans_schema, traces};
 use chrono::{Datelike, NaiveDate};
 use futures::StreamExt;
-use llmobs_core::ids::{ProjectId, TraceId};
-use llmobs_core::schema::{spans, spans_schema, traces};
 use object_store::path::Path as ObjectPath;
 use parquet::arrow::ProjectionMask;
 #[allow(deprecated)]
@@ -446,11 +446,11 @@ mod tests {
     use arrow::array::{AsArray, FixedSizeBinaryBuilder, RecordBatch, UInt32Array};
     use arrow::compute::take_record_batch;
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit, TimestampNanosecondType};
+    use cetra_core::batch::spans_to_record_batch;
+    use cetra_core::enums::{SpanKind, SpanStatus};
+    use cetra_core::ids::{ProjectId, SpanId, TraceId};
+    use cetra_core::span::Span;
     use chrono::{Duration as ChronoDuration, NaiveDate};
-    use llmobs_core::batch::spans_to_record_batch;
-    use llmobs_core::enums::{SpanKind, SpanStatus};
-    use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-    use llmobs_core::span::Span;
     use parquet::arrow::ArrowWriter;
     use parquet::file::properties::{EnabledStatistics, WriterProperties};
 

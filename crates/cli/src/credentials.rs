@@ -1,4 +1,4 @@
-//! The credentials file of `llmobs login` (spec 08): one saved personal access token per server URL, mode 0600.
+//! The credentials file of `cetra login` (spec 08): one saved personal access token per server URL, mode 0600.
 
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
@@ -21,7 +21,7 @@ pub(crate) struct SavedToken {
 
 pub(crate) fn credentials_path() -> anyhow::Result<PathBuf> {
     let config = dirs::config_dir().context("finding the config directory")?;
-    Ok(config.join("llmobs").join("credentials.toml"))
+    Ok(config.join("cetra").join("credentials.toml"))
 }
 
 pub(crate) fn load(path: &Path) -> anyhow::Result<CredentialsFile> {

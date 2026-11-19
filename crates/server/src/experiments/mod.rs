@@ -8,15 +8,15 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use llmobs_core::enums::ScoreDataType;
-use llmobs_core::ids::{OrgId, TraceId};
-use llmobs_storage::{ExperimentScore, ExperimentTrace};
+use cetra_core::enums::ScoreDataType;
+use cetra_core::ids::{OrgId, TraceId};
+use cetra_storage::{ExperimentScore, ExperimentTrace};
 use serde_json::Value;
 use uuid::Uuid;
 
 use crate::api::experiments::{
-    CompareCell, CompareRow, ExperimentComparison, ExperimentSummary, ResultRow, ResultScore,
-    ScoreDelta, ScoreDeltas, ScoreSummary,
+    CompareCell, CompareOnly, CompareRow, ExperimentComparison, ExperimentSummary, ResultRow,
+    ResultScore, ScoreDelta, ScoreDeltas, ScoreSummary,
 };
 use crate::entitlements::Visibility;
 use crate::http::AppState;
@@ -43,7 +43,7 @@ pub(crate) struct Loaded {
 
 impl Loaded {
     /// Loads `experiment` from its reads: `keys` (every result), `scores` (the live scores whose
-    /// `experiment_id` is the experiment) and `traces` (the traces whose `llmobs.experiment_id`
+    /// `experiment_id` is the experiment) and `traces` (the traces whose `cetra.experiment_id`
     /// is the experiment). Builds the index once.
     pub(crate) fn new(
         experiment: ExperimentRow,
@@ -248,6 +248,30 @@ fn nearest_rank(sorted: &[i64], percent: usize) -> Option<i64> {
     sorted.get(rank.saturating_sub(1).min(n - 1)).copied()
 }
 
+/// The histogram of a numeric score's values, sorted ascending: 10 equal-width buckets from the
+/// smallest to the largest value, or one bucket when they are all equal. Empty for other types
+/// and for no values.
+fn histogram(data_type: &ScoreDataType, values: &[f64]) -> Vec<i64> {
+    if !matches!(data_type, ScoreDataType::Numeric) || values.is_empty() {
+        return Vec::new();
+    }
+    let (Some(&min), Some(&max)) = (values.first(), values.last()) else {
+        return Vec::new();
+    };
+    if max == min {
+        return vec![to_i64(values.len())];
+    }
+    let mut buckets = vec![0_i64; 10];
+    for value in values {
+        // The float-to-int cast saturates, and a NaN becomes 0, so the clamp keeps it in 0..=9.
+        let index = (((value - min) / (max - min)) * 10.0).floor() as i64;
+        if let Some(count) = buckets.get_mut(index.clamp(0, 9) as usize) {
+            *count += 1;
+        }
+    }
+    buckets
+}
+
 /// The score summary of one kept name over the experiment's rows (rule 4).
 fn score_summary(
     loaded: &Loaded,
@@ -292,6 +316,7 @@ fn score_summary(
         max,
         pass_rate: if boolean { mean_value } else { None },
         labels,
+        histogram: histogram(data_type, &values),
     }
 }
 
@@ -439,28 +464,49 @@ fn regressed(candidate: &Cell, baseline: &Cell, threshold: f64) -> bool {
     lower || (!baseline.has_error && candidate.has_error)
 }
 
-fn item_regressed(
+/// Whether a candidate cell improved against the baseline's: a score it shares with the baseline
+/// is higher by more than the threshold, or the baseline failed and the candidate did not. It
+/// mirrors [`regressed`].
+fn improved(candidate: &Cell, baseline: &Cell, threshold: f64) -> bool {
+    let higher = candidate.scores.iter().any(|(name, value)| {
+        baseline
+            .scores
+            .get(name)
+            .is_some_and(|base| *value > *base + threshold)
+    });
+    higher || (baseline.has_error && !candidate.has_error)
+}
+
+/// Whether one of the candidates' cells of `item` matches `only` against the baseline's cell.
+/// An item the baseline lacks matches nothing.
+fn item_matches(
     baseline: &BTreeMap<Uuid, Cell>,
     candidates: &[BTreeMap<Uuid, Cell>],
     item: &Uuid,
     threshold: f64,
+    only: CompareOnly,
 ) -> bool {
     let Some(base) = baseline.get(item) else {
         return false;
     };
     candidates.iter().any(|cells| {
-        cells
-            .get(item)
-            .is_some_and(|cell| regressed(cell, base, threshold))
+        cells.get(item).is_some_and(|cell| match only {
+            CompareOnly::Regressed => regressed(cell, base, threshold),
+            CompareOnly::Improved => improved(cell, base, threshold),
+            CompareOnly::Changed => {
+                regressed(cell, base, threshold) || improved(cell, base, threshold)
+            }
+        })
     })
 }
 
 /// Rules 8, 9 and 12: the page's item ids and the next cursor, from the keys and scores only.
-/// The first experiment is the baseline.
+/// The first experiment is the baseline. `only` keeps the items with a matching cell; `None`
+/// keeps every item.
 pub(crate) fn compare_items(
     loaded: &[Loaded],
     threshold: f64,
-    regressions_only: bool,
+    only: Option<CompareOnly>,
     limit: usize,
     cursor: Option<&str>,
 ) -> Result<(Vec<Uuid>, Option<String>), ApiError> {
@@ -476,7 +522,9 @@ pub(crate) fn compare_items(
     let mut selected: Vec<Uuid> = items
         .into_iter()
         .filter(|item| after.is_none_or(|after| *item > after))
-        .filter(|item| !regressions_only || item_regressed(baseline, candidates, item, threshold))
+        .filter(|item| {
+            only.is_none_or(|only| item_matches(baseline, candidates, item, threshold, only))
+        })
         .collect();
     let more = selected.len() > limit;
     selected.truncate(limit);
@@ -489,14 +537,18 @@ pub(crate) fn compare_items(
 }
 
 /// Rule 10: the candidate's mean minus the baseline's, over the items both ran without error and
-/// scored with `name`. `None` when no item is compared.
+/// scored with `name`. `None` when no item is compared. The counts are over the same items: those
+/// whose candidate value is higher, or lower, by more than the threshold.
 fn score_delta(
     baseline: &BTreeMap<Uuid, Cell>,
     candidate: &BTreeMap<Uuid, Cell>,
     name: &str,
+    threshold: f64,
 ) -> Option<ScoreDelta> {
     let mut base_values = Vec::new();
     let mut candidate_values = Vec::new();
+    let mut improved = 0_i64;
+    let mut regressed = 0_i64;
     for (item, cell) in candidate {
         let Some(base) = baseline.get(item) else {
             continue;
@@ -507,12 +559,20 @@ fn score_delta(
         if let (Some(base_value), Some(value)) = (base.scores.get(name), cell.scores.get(name)) {
             base_values.push(*base_value);
             candidate_values.push(*value);
+            let difference = *value - *base_value;
+            if difference > threshold {
+                improved += 1;
+            } else if difference < -threshold {
+                regressed += 1;
+            }
         }
     }
     let delta = mean(&candidate_values)? - mean(&base_values)?;
     Some(ScoreDelta {
         delta,
         n_compared: to_i64(base_values.len()),
+        improved,
+        regressed,
     })
 }
 
@@ -548,12 +608,28 @@ pub(crate) fn compare(
         let scores = names
             .into_iter()
             .filter_map(|name| {
-                score_delta(baseline, candidate, name).map(|delta| (name.to_owned(), delta))
+                score_delta(baseline, candidate, name, threshold)
+                    .map(|delta| (name.to_owned(), delta))
             })
             .collect();
+        // Over every item the baseline also has, not only the page's.
+        let (improved_items, regressed_items) = candidate
+            .iter()
+            .filter_map(|(item, cell)| baseline.get(item).map(|base| (cell, base)))
+            .fold(
+                (0_i64, 0_i64),
+                |(improved_items, regressed_items), (cell, base)| {
+                    (
+                        improved_items + i64::from(improved(cell, base, threshold)),
+                        regressed_items + i64::from(regressed(cell, base, threshold)),
+                    )
+                },
+            );
         deltas.push(ScoreDeltas {
             experiment_id: experiment.experiment.id,
             scores,
+            improved_items,
+            regressed_items,
         });
     }
 
@@ -633,6 +709,10 @@ pub(crate) fn compare(
                     && baseline
                         .get(item)
                         .is_some_and(|base| regressed(cell, base, threshold)),
+                improved: index > 0
+                    && baseline
+                        .get(item)
+                        .is_some_and(|base| improved(cell, base, threshold)),
             });
         }
         let source = source.ok_or_else(|| corrupt("experiment_items", "dataset_item_id"))?;
@@ -655,7 +735,7 @@ pub(crate) fn compare(
 
 #[cfg(test)]
 mod tests {
-    use llmobs_core::ids::ProjectId;
+    use cetra_core::ids::ProjectId;
 
     use super::*;
 
@@ -934,7 +1014,13 @@ mod tests {
         );
         let failed = loaded(&[(1, 0, None, true, None)], &[], &[]);
         let page = |candidate: Loaded| {
-            let (items, _) = match compare_items(&[base(), candidate], 0.1, true, 10, None) {
+            let (items, _) = match compare_items(
+                &[base(), candidate],
+                0.1,
+                Some(CompareOnly::Regressed),
+                10,
+                None,
+            ) {
                 Ok(page) => page,
                 Err(_) => panic!("compare_items failed"),
             };
@@ -944,7 +1030,7 @@ mod tests {
         assert!(page(close).is_empty());
         assert_eq!(page(failed), vec![uuid_of(1)]);
 
-        // regressions_only keeps only the regressed items: item 1 drops, item 2 does not.
+        // Regressed keeps only the regressed items: item 1 drops, item 2 does not.
         let pair = || {
             [
                 loaded(
@@ -965,16 +1051,196 @@ mod tests {
                 ),
             ]
         };
-        let (all, _) = match compare_items(&pair(), 0.1, false, 10, None) {
+        let (all, _) = match compare_items(&pair(), 0.1, None, 10, None) {
             Ok(page) => page,
             Err(_) => panic!("compare_items failed"),
         };
         assert_eq!(all, vec![uuid_of(1), uuid_of(2)]);
-        let (only, _) = match compare_items(&pair(), 0.1, true, 10, None) {
+        let (only, _) = match compare_items(&pair(), 0.1, Some(CompareOnly::Regressed), 10, None) {
             Ok(page) => page,
             Err(_) => panic!("compare_items failed"),
         };
         assert_eq!(only, vec![uuid_of(1)]);
+    }
+
+    /// The items `compare_items` keeps for `only`, with the threshold 0.1.
+    fn items_for(loaded: &[Loaded], only: Option<CompareOnly>) -> Vec<Uuid> {
+        match compare_items(loaded, 0.1, only, 10, None) {
+            Ok((items, _)) => items,
+            Err(_) => panic!("compare_items failed"),
+        }
+    }
+
+    #[test]
+    fn only_selects_regressed_improved_or_changed_items() {
+        // Item 1 regresses (1 to 0), item 2 improves (0 to 1), item 3 stays.
+        let baseline = loaded(
+            &[
+                (1, 0, Some(11), false, None),
+                (2, 0, Some(12), false, None),
+                (3, 0, Some(13), false, None),
+            ],
+            &[
+                (11, "exact", "numeric", Some(1.0), None),
+                (12, "exact", "numeric", Some(0.0), None),
+                (13, "exact", "numeric", Some(1.0), None),
+            ],
+            &[],
+        );
+        let candidate = loaded(
+            &[
+                (1, 0, Some(21), false, None),
+                (2, 0, Some(22), false, None),
+                (3, 0, Some(23), false, None),
+            ],
+            &[
+                (21, "exact", "numeric", Some(0.0), None),
+                (22, "exact", "numeric", Some(1.0), None),
+                (23, "exact", "numeric", Some(1.0), None),
+            ],
+            &[],
+        );
+        let pair = [baseline, candidate];
+        assert_eq!(
+            items_for(&pair, Some(CompareOnly::Regressed)),
+            vec![uuid_of(1)]
+        );
+        assert_eq!(
+            items_for(&pair, Some(CompareOnly::Improved)),
+            vec![uuid_of(2)]
+        );
+        assert_eq!(
+            items_for(&pair, Some(CompareOnly::Changed)),
+            vec![uuid_of(1), uuid_of(2)]
+        );
+        assert_eq!(
+            items_for(&pair, None),
+            vec![uuid_of(1), uuid_of(2), uuid_of(3)]
+        );
+    }
+
+    #[test]
+    fn improved_cells_and_the_counts_over_all_items() {
+        // Item 1 improves, item 2 regresses, item 3 stays, item 4 fails in the baseline only.
+        let baseline = loaded(
+            &[
+                (1, 0, Some(11), false, None),
+                (2, 0, Some(12), false, None),
+                (3, 0, Some(13), false, None),
+                (4, 0, None, true, None),
+            ],
+            &[
+                (11, "exact", "numeric", Some(0.0), None),
+                (12, "exact", "numeric", Some(1.0), None),
+                (13, "exact", "numeric", Some(0.0), None),
+            ],
+            &[],
+        );
+        let candidate = loaded(
+            &[
+                (1, 0, Some(21), false, None),
+                (2, 0, Some(22), false, None),
+                (3, 0, Some(23), false, None),
+                (4, 0, Some(24), false, None),
+            ],
+            &[
+                (21, "exact", "numeric", Some(1.0), None),
+                (22, "exact", "numeric", Some(0.0), None),
+                (23, "exact", "numeric", Some(0.0), None),
+                (24, "exact", "numeric", Some(0.0), None),
+            ],
+            &[],
+        );
+        let texts = vec![
+            vec![
+                stored(1, 0, None),
+                stored(2, 0, None),
+                stored(3, 0, None),
+                stored(4, 0, Some("boom")),
+            ],
+            vec![
+                stored(1, 0, None),
+                stored(2, 0, None),
+                stored(3, 0, None),
+                stored(4, 0, None),
+            ],
+        ];
+        let items = [uuid_of(1), uuid_of(2), uuid_of(3), uuid_of(4)];
+        let comparison = match compare(&[baseline, candidate], &texts, &items, 0.1, None) {
+            Ok(comparison) => comparison,
+            Err(_) => panic!("compare failed"),
+        };
+        // The delta compares items 1 to 3: one rises and one falls by more than the threshold.
+        // Item 4 failed in the baseline, so it is not compared.
+        assert_eq!(
+            comparison.deltas[0].scores.get("exact"),
+            Some(&ScoreDelta {
+                delta: 0.0,
+                n_compared: 3,
+                improved: 1,
+                regressed: 1,
+            })
+        );
+        // Over all items: item 1 and item 4 (the baseline failed, the candidate did not) improve;
+        // item 2 regresses.
+        assert_eq!(comparison.deltas[0].improved_items, 2);
+        assert_eq!(comparison.deltas[0].regressed_items, 1);
+        assert!(comparison.rows[0].cells[1].improved);
+        assert!(!comparison.rows[0].cells[1].regressed);
+        assert!(comparison.rows[1].cells[1].regressed);
+        assert!(!comparison.rows[1].cells[1].improved);
+        assert!(comparison.rows[3].cells[1].improved);
+        assert!(!comparison.rows[2].cells[1].improved);
+        // The baseline column is never marked.
+        assert!(comparison.rows.iter().all(|row| !row.cells[0].improved));
+    }
+
+    #[test]
+    fn histogram_buckets_a_spread() {
+        let rows: Vec<RowSpec> = (1..=4).map(|n| (n, 0, Some(n), false, None)).collect();
+        let scores: Vec<ScoreSpec> = vec![
+            (1, "q", "numeric", Some(0.0), None),
+            (2, "q", "numeric", Some(0.25), None),
+            (3, "q", "numeric", Some(0.5), None),
+            (4, "q", "numeric", Some(1.0), None),
+        ];
+        let summary = summary_of(&loaded(&rows, &scores, &[]));
+        // Buckets of width 0.1 from 0 to 1: 0.25 falls in the third, and the maximum in the last.
+        assert_eq!(
+            summary.scores[0].histogram,
+            vec![1, 0, 1, 0, 0, 1, 0, 0, 0, 1]
+        );
+    }
+
+    #[test]
+    fn histogram_of_equal_values_is_one_bucket() {
+        let rows: Vec<RowSpec> = (1..=3).map(|n| (n, 0, Some(n), false, None)).collect();
+        let scores: Vec<ScoreSpec> = (1..=3)
+            .map(|n| (n, "q", "numeric", Some(0.5), None))
+            .collect();
+        let summary = summary_of(&loaded(&rows, &scores, &[]));
+        assert_eq!(summary.scores[0].histogram, vec![3]);
+    }
+
+    #[test]
+    fn histogram_is_empty_for_other_types() {
+        let rows: Vec<RowSpec> = (1..=2).map(|n| (n, 0, Some(n), false, None)).collect();
+        let boolean: Vec<ScoreSpec> = vec![
+            (1, "ok", "boolean", Some(1.0), None),
+            (2, "ok", "boolean", Some(0.0), None),
+        ];
+        let categorical: Vec<ScoreSpec> = vec![
+            (1, "tone", "categorical", Some(1.0), Some("good")),
+            (2, "tone", "categorical", Some(0.0), Some("bad")),
+        ];
+        let text: Vec<ScoreSpec> = vec![
+            (1, "note", "text", None, Some("a")),
+            (2, "note", "text", None, Some("b")),
+        ];
+        for scores in [boolean, categorical, text] {
+            let summary = summary_of(&loaded(&rows, &scores, &[]));
+            assert!(summary.scores[0].histogram.is_empty());
+        }
     }
 
     #[test]
@@ -1038,7 +1304,9 @@ mod tests {
             comparison.deltas[0].scores.get("exact"),
             Some(&ScoreDelta {
                 delta: -0.5,
-                n_compared: 1
+                n_compared: 1,
+                improved: 0,
+                regressed: 1,
             })
         );
     }
@@ -1079,7 +1347,9 @@ mod tests {
             comparison.deltas[0].scores.get("exact"),
             Some(&ScoreDelta {
                 delta: 0.0,
-                n_compared: 1
+                n_compared: 1,
+                improved: 0,
+                regressed: 0,
             })
         );
         let warning = format!(

@@ -92,7 +92,7 @@
 Add imports `afterEach` (from `vitest`) and `setExternalNavigator` (from `@/lib/external-navigation`), `afterEach(() => { setExternalNavigator(undefined); });`, and the helpers:
 
 ```ts
-const CLOUD = { id: "oidc:cloud", display_name: "llmobs Cloud" };
+const CLOUD = { id: "oidc:cloud", display_name: "cetra Cloud" };
 const START = authorizeHref("oidc:cloud", { redirect: URL_PATH });
 
 function onlyCloud(overrides: Partial<typeof authConfig> = {}) {
@@ -118,12 +118,12 @@ function recordReplace() {
 
 (import `authorizeHref` from `@/lib/redirect`; it builds the same URL the page does.)
 
-1. `starts the only provider for a visitor without an account`: `signedOut(); onlyCloud(); const replaced = recordReplace();` render `URL_PATH`; `await waitFor(() => expect(replaced).toEqual([START]))`; the text `Redirecting to llmobs Cloud…` and the heading `Join Acme` are shown.
+1. `starts the only provider for a visitor without an account`: `signedOut(); onlyCloud(); const replaced = recordReplace();` render `URL_PATH`; `await waitFor(() => expect(replaced).toEqual([START]))`; the text `Redirecting to cetra Cloud…` and the heading `Join Acme` are shown.
 2. `starts the only provider for a visitor with an account`: as 1 with the preview overridden to `account_exists: true` (as `asks an existing user to sign in` does).
 3. `keeps the sign-up-disabled message`: `signedOut(); onlyCloud({ signup: "disabled" });` → the text `/^Sign-up is disabled on this server/` is shown and `replaced` is empty.
 4. `starts the provider for an existing account even when sign-up is disabled`: `signedOut(); onlyCloud({ signup: "disabled" });` with `account_exists: true` → `replaced` equals `[START]`.
 5. `does not start the provider for a signed-in invitee`: `onlyCloud()`, `/api/auth/me` answers the invited user (`{ user: GUEST, orgs: [] }`, the `signedInAsGuest` helper) → the "Join Acme" button shows, `replaced` is empty.
-6. `does not start the provider again after signing out of another account`: the setup of `asks a different signed-in user to sign out` plus `onlyCloud()` and `const replaced = recordReplace();`; after clicking "Sign out", the link "Continue with llmobs Cloud" shows (find it with `findByRole`), the text `/^You're signed out here\./` is shown, and `replaced` is empty.
+6. `does not start the provider again after signing out of another account`: the setup of `asks a different signed-in user to sign out` plus `onlyCloud()` and `const replaced = recordReplace();`; after clicking "Sign out", the link "Continue with cetra Cloud" shows (find it with `findByRole`), the text `/^You're signed out here\./` is shown, and `replaced` is empty.
 7. `keeps the page with password sign-in on`: `signedOut(); withConfig({ providers: [CLOUD] }); const replaced = recordReplace();` → the "Create account and join" button shows, `replaced` is empty.
 
 Existing tests keep passing: the default config has password sign-in on and two providers. After each render, wait for something on the page before asserting that `replaced` is empty.

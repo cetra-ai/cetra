@@ -1,8 +1,8 @@
-//! The local control socket of `llmobs serve` (N M2, D-N-17).
+//! The local control socket of `cetra serve` (N M2, D-N-17).
 //!
 //! `<data_dir>/admin.sock` answers one request per connection: the client writes
 //! one JSON line and reads one JSON line back, then the server closes the
-//! connection. `llmobs admin backup` is the only client in M2.
+//! connection. `cetra admin backup` is the only client in M2.
 //!
 //! The socket is bound as `admin.tmp`, made `0600`, then renamed, so it never
 //! exists under its real name with a wider mode. A connecting process is accepted
@@ -102,7 +102,7 @@ pub enum AdminProtocolError {
     #[error("the server's answer is not JSON")]
     NotJson,
     #[error(
-        "the server speaks admin protocol {found}, this command speaks {ADMIN_PROTOCOL}; run the llmobs binary of the server's release"
+        "the server speaks admin protocol {found}, this command speaks {ADMIN_PROTOCOL}; run the cetra binary of the server's release"
     )]
     OtherProtocol { found: String },
     #[error("the server's answer has an unknown shape")]
@@ -310,7 +310,7 @@ fn unsupported_protocol(found: &str) -> AdminResponse {
     AdminResponse::failed(
         "unsupported_protocol",
         format!(
-            "this server (llmobs {}) speaks admin protocol {ADMIN_PROTOCOL}; the request has {found}; run the llmobs binary of the server's release",
+            "this server (cetra {}) speaks admin protocol {ADMIN_PROTOCOL}; the request has {found}; run the cetra binary of the server's release",
             env!("CARGO_PKG_VERSION")
         ),
     )
@@ -569,13 +569,13 @@ mod tests {
             BackupError::TargetNotEmpty,
             BackupError::TargetInsideDataDir,
             BackupError::MetaOnlyNeedsS3,
-            BackupError::Flush(llmobs_storage::FlushNowError::Timeout {
+            BackupError::Flush(cetra_storage::FlushNowError::Timeout {
                 table: "spans",
                 timeout: Duration::from_secs(1),
             }),
             BackupError::Meta(sqlx::Error::PoolClosed),
-            BackupError::Snapshot(llmobs_storage::SnapshotError::Exists),
-            BackupError::Objects(llmobs_storage::CopyObjectsError::RemoteStore),
+            BackupError::Snapshot(cetra_storage::SnapshotError::Exists),
+            BackupError::Objects(cetra_storage::CopyObjectsError::RemoteStore),
             BackupError::Io(io::Error::other("x")),
         ];
         // Exhaustive: a new `BackupError` variant stops this test from compiling until its

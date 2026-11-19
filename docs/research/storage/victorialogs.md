@@ -1,4 +1,4 @@
-# VictoriaLogs storage engine — research notes for llmobs spec 03
+# VictoriaLogs storage engine — research notes for cetra spec 03
 
 Repo: `/home/sebastien/travaux/VictoriaLogs` (Go). HEAD `8befc88`, cloned 2026-09-21. The `tip` section of `docs/victorialogs/CHANGELOG.md` sits above v1.52.0 (released 2026-07-16). I could not run `git log` because this session's sandbox blocks git commands outside its own worktree, so the exact commit date is unknown: it is on or before 2026-09-21. The lessons in §13 come from the CHANGELOG instead of the git log.
 
@@ -170,7 +170,7 @@ This repo has no trace-specific storage. VictoriaTraces is a separate repo built
 | v0.4.0 (:1682, :1694) | read-only mode, then a false read-only bug | The free-space check is cached for 2 s (`fs.go:296-311`); be careful with thresholds. |
 | v1.11.0 / v1.17.0 (:957, :890) | format changes that can't be downgraded, for per-field locality | Column locality in wide events dominated query cost. |
 
-## 14. Recommendations for llmobs spec 03
+## 14. Recommendations for cetra spec 03
 
 **Adopt (as ideas):**
 

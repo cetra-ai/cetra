@@ -19,9 +19,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use arrow::array::{Array, RecordBatch, StringArray};
+use cetra_core::ids::ProjectId;
 use chrono::NaiveDate;
 use datafusion::execution::runtime_env::{RuntimeEnv, RuntimeEnvBuilder};
-use llmobs_core::ids::ProjectId;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -94,20 +94,28 @@ pub use crate::media::{MediaBlob, MediaRead, MediaReport};
 pub use crate::read_cache::ReadCacheStats;
 pub use query_error::{InvalidQuery, Position, RunError};
 pub use reads::{
-    AlertMeasure, AlertValue, AlertValueRequest, Bucket, BucketWidth, ExperimentScore,
-    ExperimentTrace, FilterDeletionRequest, Kpi, KpiName, LATEST_SCORE_COLUMNS, ListScope,
-    MAX_EXPERIMENT_SCORES, MAX_EXPERIMENT_TRACES, MAX_FILTER_DELETION_TRACES, MAX_MATCH_COUNT,
+    ACTIVITY_BUCKETS, Agg, AlertMeasure, AlertValue, AlertValueRequest, Breakdown, Bucket,
+    BucketWidth, DEFAULT_BREAKDOWN_LIMIT, ERROR_TRACE_COUNT, ExperimentScore, ExperimentScoreMean,
+    ExperimentTrace, FacetData, FacetKind, FacetRequest, FacetValue, FacetView, FieldError,
+    FilterDeletionRequest, GroupBy, HISTOGRAM_BUCKETS, Histogram, HistogramBucket,
+    LATEST_SCORE_COLUMNS, ListScope, MAX_BREAKDOWN_LIMIT, MAX_EXPERIMENT_SCORES,
+    MAX_EXPERIMENT_TRACES, MAX_FACET_KEY, MAX_FACET_LIMIT, MAX_FACET_QUERY,
+    MAX_FILTER_DELETION_TRACES, MAX_MAP_KEY, MAX_MATCH_COUNT, MAX_MEAN_EXPERIMENTS, MAX_MEASURES,
     MAX_PAGE, MAX_REFRESH_IDS, MAX_REFRESH_SPANS_PER_TRACE, MAX_SESSION_TURNS, MAX_TRACE_SPANS,
-    MAX_USER_SESSIONS, MatchCountRequest, MetricsData, MetricsGroupBy, MetricsRequest,
-    ModelUsageRow, Page, Point, SPAN_LIST_COLUMNS, SPAN_REFRESH_COLUMNS, ScoreListRequest,
-    ScoreTargets, Series, SeriesName, SessionDetailData, SessionListRequest, SessionSort,
-    SortOrder, SpanListRequest, SpanRefreshRequest, SpanSort, TRACE_REFRESH_STRICT_COLUMNS,
-    TraceDetailData, TraceListRequest, TraceRefreshRequest, TraceSort, TraceSpansData,
-    TraceSpansRequest, USER_COLUMNS, UserDeletionScope, UserDetailData, UserListRequest, UserSort,
-    alert_value, eval_trace_ids, experiment_scores, experiment_traces, filter_trace_ids,
-    latest_scores, match_count, metrics::metrics, score_list, scores_by_id, session_detail,
-    session_list, span_detail, span_list, span_refresh, trace_detail, trace_list, trace_list_plan,
-    trace_refresh, trace_spans, user_deletion_scope, user_detail, user_list, validate_filter,
+    MAX_USER_METADATA_KEYS, MAX_USER_SESSIONS, MatchCountRequest, Measure, Page,
+    SESSION_ERROR_TRACE_COUNT, SESSION_FIRST_INPUT_PREVIEW, SESSION_LAST_OUTPUT_PREVIEW,
+    SPAN_LIST_COLUMNS, SPAN_REFRESH_COLUMNS, ScoreListRequest, ScoreTargets, SessionDetailData,
+    SessionExtrasRequest, SessionListRequest, SessionSort, Shape, SortOrder, SpanListRequest,
+    SpanRefreshRequest, SpanSort, TRACE_REFRESH_STRICT_COLUMNS, TotalRow, TraceDetailData,
+    TraceListRequest, TraceRefreshRequest, TraceSort, TraceSpansData, TraceSpansRequest,
+    USER_COLUMNS, UserDeletionScope, UserDetailData, UserExtras, UserExtrasRequest,
+    UserListRequest, UserSort, WidgetData, WidgetError, WidgetPoint, WidgetQuery, WidgetRequest,
+    WidgetSeries, WidgetSource, alert_value, eval_trace_ids, experiment_score_means,
+    experiment_scores, experiment_traces, facet, filter_trace_ids, latest_scores, match_count,
+    score_list, scores_by_id, session_detail, session_extras, session_list, span_detail, span_list,
+    span_refresh, trace_detail, trace_list, trace_list_plan, trace_refresh, trace_spans,
+    user_deletion_scope, user_detail, user_extras, user_list, validate_expressions,
+    validate_filter, validate_shape, widget_query,
 };
 pub use snapshot::CopyReport;
 pub use snapshot::{CatalogSnapshot, LiveObject};
@@ -1848,7 +1856,7 @@ fn spawn_writer(
 }
 
 fn project_of(batch: &RecordBatch) -> Result<ProjectId, WalError> {
-    let Some(column) = batch.column_by_name(llmobs_core::schema::spans::PROJECT_ID) else {
+    let Some(column) = batch.column_by_name(cetra_core::schema::spans::PROJECT_ID) else {
         return Err(WalError::InvalidPayload {
             reason: "batch is missing project_id",
         });
@@ -1917,7 +1925,7 @@ fn validate_batch(
         });
     }
     let Some(values) = batch
-        .column_by_name(llmobs_core::schema::spans::PROJECT_ID)
+        .column_by_name(cetra_core::schema::spans::PROJECT_ID)
         .and_then(|column| column.as_any().downcast_ref::<StringArray>())
     else {
         return Err(AppendError::InvalidBatch {
@@ -2023,11 +2031,11 @@ mod tests {
     use arrow::compute::concat_batches;
     use arrow::datatypes::{DataType, Field, Schema};
     use bytesize::ByteSize;
-    use llmobs_core::batch::scores_to_record_batch;
-    use llmobs_core::enums::ScoreSource;
-    use llmobs_core::ids::{ProjectId, TraceId};
-    use llmobs_core::schema::{spans, spans_schema};
-    use llmobs_core::score::{Score, ScoreTarget, ScoreValue};
+    use cetra_core::batch::scores_to_record_batch;
+    use cetra_core::enums::ScoreSource;
+    use cetra_core::ids::{ProjectId, TraceId};
+    use cetra_core::schema::{spans, spans_schema};
+    use cetra_core::score::{Score, ScoreTarget, ScoreValue};
     use object_store::ObjectStoreExt;
     use sqlx::sqlite::SqliteConnectOptions;
     use sqlx::{ConnectOptions, Connection};
@@ -2762,7 +2770,7 @@ mod tests {
         let spans: Vec<_> = (1..=20_000_u64)
             .map(|index| {
                 let mut span = span_row(1, 0, i64::try_from(index).unwrap(), 1);
-                span.span_id = llmobs_core::ids::SpanId::from_bytes(index.to_be_bytes()).unwrap();
+                span.span_id = cetra_core::ids::SpanId::from_bytes(index.to_be_bytes()).unwrap();
                 span.name = "n".repeat(200);
                 span
             })
@@ -2836,7 +2844,7 @@ mod tests {
         let spans: Vec<_> = (1..=40_000_u64)
             .map(|index| {
                 let mut span = span_row(1, 0, i64::try_from(index).unwrap(), 1);
-                span.span_id = llmobs_core::ids::SpanId::from_bytes(index.to_be_bytes()).unwrap();
+                span.span_id = cetra_core::ids::SpanId::from_bytes(index.to_be_bytes()).unwrap();
                 span.input = Some("i".repeat(1024));
                 span
             })
@@ -3821,7 +3829,7 @@ mod tests {
 
     /// A lossy crash that keeps part of the unsynced tail after an interval
     /// rotation: the segment the rotation synced is whole, and the store reopens.
-    /// Sixteen seeds per `LLMOBS_LOSSY_SEEDS`.
+    /// Sixteen seeds per `CETRA_LOSSY_SEEDS`.
     #[test]
     fn a_lossy_crash_after_an_interval_rotation_reopens() {
         for seed in 0..16 * crash_tests::seeds() {

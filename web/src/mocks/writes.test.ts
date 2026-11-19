@@ -132,7 +132,7 @@ it("creates a public key", async () => {
   expect(key.kind).toBe("public");
   expect(key.scopes).toEqual(["feedback"]);
   expect(key.name).toBe("Web");
-  expect(response.json?.secret).toMatch(/^pk-llmobs-/);
+  expect(response.json?.secret).toMatch(/^pk-cetra-/);
 });
 
 it("omits the name of an unnamed key", async () => {
@@ -220,6 +220,36 @@ it("answers the channel and alert rule writes", async () => {
   expect((await send("DELETE", `${PROJECT}/alert-rules/${FIRING_RULE_ID}`)).status).toBe(204);
 });
 
+it("refuses a direction on a text definition and a numeric one without a range", async () => {
+  const text = await send(
+    "POST",
+    `${PROJECT}/score-definitions`,
+    JSON.stringify({ name: "summary", data_type: "text", direction: "higher" }),
+  );
+  expect(text.status).toBe(400);
+  expect(text.json?.errors).toEqual([
+    { field: "direction", message: "a text score has no direction" },
+  ]);
+
+  const unranged = await send(
+    "POST",
+    `${PROJECT}/score-definitions`,
+    JSON.stringify({ name: "accuracy", data_type: "numeric", direction: "lower" }),
+  );
+  expect(unranged.status).toBe(400);
+  expect(unranged.json?.errors).toEqual([
+    { field: "direction", message: "direction needs min_value and max_value" },
+  ]);
+
+  const created = await send(
+    "POST",
+    `${PROJECT}/score-definitions`,
+    JSON.stringify({ name: "accuracy", data_type: "numeric", min_value: 0, max_value: 1 }),
+  );
+  expect(created.status).toBe(201);
+  expect(created.json?.direction).toBe("none");
+});
+
 it("answers the score writes", async () => {
   const created = await send(
     "POST",
@@ -250,6 +280,42 @@ it("creates a dataset with the given name", async () => {
   const response = await send("POST", `${PROJECT}/datasets`, JSON.stringify({ name: "golden" }));
   expect(response.status).toBe(201);
   expect(response.json?.name).toBe("golden");
+});
+
+it("answers the batch edit, batch delete, restore and bulk trace writes", async () => {
+  const edited = await send(
+    "PATCH",
+    `${PROJECT}/datasets/faq/items`,
+    JSON.stringify({ items: [{ id: ITEM_ID, metadata: { topic: "exports" } }] }),
+  );
+  expect(edited.status).toBe(200);
+  expect(part(edited.json ?? {}, "version").edited).toBe(1);
+  expect(Array.isArray(edited.json?.items)).toBe(true);
+
+  const deleted = await send(
+    "POST",
+    `${PROJECT}/datasets/faq/items/delete`,
+    JSON.stringify({ ids: [ITEM_ID] }),
+  );
+  expect(deleted.status).toBe(200);
+  expect(deleted.json?.deleted).toBe(2);
+
+  const restored = await send(
+    "POST",
+    `${PROJECT}/datasets/faq/restore`,
+    JSON.stringify({ version: 1 }),
+  );
+  expect(restored.status).toBe(200);
+  expect(restored.json?.description).toBe("restore version 1");
+
+  const copied = await send(
+    "POST",
+    `${PROJECT}/datasets/faq/items/from-traces`,
+    JSON.stringify({ items: [{ trace_id: "a1000000000000000000000000000001" }] }),
+  );
+  expect(copied.status).toBe(201);
+  expect(part(copied.json ?? {}, "version").added).toBe(1);
+  expect(Array.isArray(copied.json?.skipped)).toBe(true);
 });
 
 it("answers the experiment writes", async () => {

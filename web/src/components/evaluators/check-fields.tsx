@@ -195,7 +195,7 @@ export function CheckFields({
       return (
         <div className="flex flex-col gap-3">
           <div className="flex flex-col gap-2">
-            <span className="text-sm leading-none font-medium">Text to find</span>
+            <span className="text-body leading-none font-medium">Text to find</span>
             {value.needles.map((row, index) => (
               <div key={row.id} className="flex items-center gap-2">
                 <Input
@@ -236,12 +236,12 @@ export function CheckFields({
               Add text
             </Button>
             {value.needles.every((row) => row.text.trim().length === 0) ? (
-              <p className="text-xs text-muted-foreground">
+              <p className="text-caption text-muted-foreground">
                 No text: the output is compared with the expected value.
               </p>
             ) : null}
             {errors.values ? (
-              <p role="alert" className="text-xs text-destructive">
+              <p role="alert" className="text-caption text-destructive">
                 {errors.values}
               </p>
             ) : null}
@@ -287,11 +287,11 @@ export function CheckFields({
               patch({ pattern: event.target.value });
             }}
           />
-          <p id="check-pattern-description" className="text-xs text-muted-foreground">
+          <p id="check-pattern-description" className="text-caption text-muted-foreground">
             Rust regex syntax, searched anywhere in the output.
           </p>
           {errors.pattern ? (
-            <p role="alert" className="text-xs text-destructive">
+            <p role="alert" className="text-caption text-destructive">
               {errors.pattern}
             </p>
           ) : null}
@@ -299,7 +299,7 @@ export function CheckFields({
       );
     case "json_valid":
       return (
-        <p className="text-sm text-muted-foreground">
+        <p className="text-body text-muted-foreground">
           Passes when the whole output parses as JSON.
         </p>
       );
@@ -318,7 +318,7 @@ export function CheckFields({
             }}
           />
           {errors.schema ? (
-            <p role="alert" className="text-xs text-destructive">
+            <p role="alert" className="text-caption text-destructive">
               {errors.schema}
             </p>
           ) : null}

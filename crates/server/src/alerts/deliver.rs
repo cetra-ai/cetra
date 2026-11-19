@@ -2,9 +2,9 @@
 
 use std::time::Duration;
 
+use cetra_core::ids::OrgId;
+use cetra_eval::{EgressError, EgressRequest, SIGNATURE_HEADER, Secret, sign_payload};
 use futures::StreamExt;
-use llmobs_core::ids::OrgId;
-use llmobs_eval::{EgressError, EgressRequest, SIGNATURE_HEADER, Secret, sign_payload};
 use reqwest::Url;
 use reqwest::header::{HeaderName, HeaderValue};
 use uuid::Uuid;
@@ -33,8 +33,8 @@ const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 /// Events and finished deliveries kept (D-K-10).
 pub(crate) const EVENT_RETENTION_NS: i64 = 90 * 86_400_000_000_000;
 pub(crate) const DELIVERY_RETENTION_NS: i64 = 30 * 86_400_000_000_000;
-/// Delivery id header, lower case. D46 renames it with the product.
-pub(crate) const DELIVERY_HEADER: &str = "x-llmobs-delivery";
+/// Delivery id header, lower case. A rename of the product changes it.
+pub(crate) const DELIVERY_HEADER: &str = "x-cetra-delivery";
 
 const INVALID_HEADER: &str = "invalid header";
 
@@ -68,7 +68,7 @@ fn retryable(message: &str) -> SendError {
 }
 
 /// Sends `notice` once to the channel `config` of org `org_id`. `delivery_id` goes into
-/// `X-Llmobs-Delivery`.
+/// `X-Cetra-Delivery`.
 pub(crate) async fn send_one(
     state: &AppState,
     org_id: OrgId,
@@ -353,6 +353,7 @@ fn notice_of(state: &AppState, due: &DueDelivery) -> Notice {
     let kind = match event.kind {
         crate::api::alerts::AlertEventKind::Fired => MessageKind::Fired,
         crate::api::alerts::AlertEventKind::Resolved => MessageKind::Resolved,
+        crate::api::alerts::AlertEventKind::NoData => MessageKind::NoData,
         crate::api::alerts::AlertEventKind::Reminder => MessageKind::Reminder,
     };
     let public_url = &state.config.public_url;

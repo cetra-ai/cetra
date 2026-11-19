@@ -9,10 +9,10 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
+use cetra_core::names::PRODUCT;
 use lettre::message::{Mailbox, Message, MultiPart};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
-use llmobs_core::names::PRODUCT;
 use minijinja::{AutoEscape, Environment, Value, context};
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
@@ -85,7 +85,7 @@ pub(crate) enum Email {
     Test,
     /// An alert notification (D-K-8).
     Alert {
-        /// `Firing`, `Resolved`, `Still firing` or `Test`.
+        /// `Firing`, `Resolved`, `No data`, `Still firing` or `Test`.
         state: &'static str,
         rule_name: String,
         project_name: String,
@@ -224,7 +224,7 @@ pub(crate) struct Mailer {
     transport: Transport,
     from: Mailbox,
     templates: Environment<'static>,
-    /// `llmobs_emails_total`. A clone of the registry's family, so both count into one series.
+    /// `cetra_emails_total`. A clone of the registry's family, so both count into one series.
     emails: Family<EmailOutcomeLabel, Counter>,
 }
 
@@ -403,7 +403,7 @@ impl Mailer {
     /// Send on a background task. Up to three attempts, waiting 1 s then 2 s.
     ///
     /// The log line carries `template`, `message_id`, and `attempt`. A failure
-    /// also carries `kind`. The recipient is not logged. `llmobs_emails_total`
+    /// also carries `kind`. The recipient is not logged. `cetra_emails_total`
     /// counts the message once, at its final outcome.
     pub(crate) fn send_in_background(self: &Arc<Self>, to: String, email: Email) {
         if matches!(self.transport, Transport::Off) {
@@ -668,7 +668,7 @@ mod tests {
     use crate::telemetry::{EmailOutcome, EmailOutcomeLabel};
 
     fn mailer() -> Mailer {
-        Mailer::stub("llmobs <noreply@example.com>", Default::default())
+        Mailer::stub("cetra <noreply@example.com>", Default::default())
     }
 
     #[tokio::test]
@@ -681,7 +681,7 @@ mod tests {
             port: 2525,
             credentials: None,
         });
-        cfg.email_from = Some("llmobs <noreply@example.com>".to_owned());
+        cfg.email_from = Some("cetra <noreply@example.com>".to_owned());
         cfg.restore_mode = true;
         let mailer = Arc::new(
             Mailer::from_config(&cfg, Default::default())
@@ -718,7 +718,7 @@ mod tests {
     #[tokio::test]
     async fn sent_and_refused_mail_are_counted() {
         let emails = Family::<EmailOutcomeLabel, Counter>::default();
-        let stub = Mailer::stub("llmobs <noreply@example.com>", emails.clone());
+        let stub = Mailer::stub("cetra <noreply@example.com>", emails.clone());
         stub.send_now("ada@example.com", &Email::Test)
             .await
             .expect("the stub accepts");
@@ -729,7 +729,7 @@ mod tests {
 
         let refusing = Mailer {
             transport: Transport::Off,
-            from: "llmobs <noreply@example.com>".parse().expect("mailbox"),
+            from: "cetra <noreply@example.com>".parse().expect("mailbox"),
             templates: templates().expect("templates parse"),
             emails: emails.clone(),
         };
@@ -885,7 +885,7 @@ mod tests {
             let rendered = notice(threshold, paid);
             assert_eq!(
                 rendered.subject,
-                format!("llmobs: Acme used {threshold}% of its monthly units")
+                format!("cetra: Acme used {threshold}% of its monthly units")
             );
             assert!(rendered.text.starts_with(sentence), "{}", rendered.text);
             assert!(
@@ -914,9 +914,9 @@ mod tests {
         let sent = mailer.sent();
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].to, "ada@example.com");
-        assert_eq!(sent[0].subject, "llmobs test email");
-        assert!(sent[0].text.contains("llmobs"));
-        assert!(sent[0].html.contains("llmobs"));
+        assert_eq!(sent[0].subject, "cetra test email");
+        assert!(sent[0].text.contains("cetra"));
+        assert!(sent[0].html.contains("cetra"));
 
         let error = mailer
             .send_now("not-an-email", &Email::Test)

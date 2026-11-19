@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use llmobs_core::ids::{OrgId, ProjectId};
+use cetra_core::ids::{OrgId, ProjectId};
 use serde::{Deserialize, Serialize};
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
@@ -755,6 +755,36 @@ pub(crate) async fn list_events(
          ORDER BY created_at DESC, id DESC LIMIT ?4",
     )
     .bind(rule_id.to_string())
+    .bind(before_at)
+    .bind(before_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    records.iter().map(event_from).collect()
+}
+
+/// Events of every rule of `project_id`, newest first (`created_at DESC, id DESC`), strictly
+/// before `before` when given, at most `limit` rows.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or a stored value does not decode.
+pub(crate) async fn list_project_events(
+    pool: &SqlitePool,
+    project_id: ProjectId,
+    before: Option<(i64, Uuid)>,
+    limit: i64,
+) -> Result<Vec<EventRow>, MetaError> {
+    let before_at = before.map(|cursor| cursor.0);
+    let before_id = before.map(|cursor| cursor.1.to_string());
+    let records: Vec<EventRecord> = sqlx::query_as(
+        "SELECT e.id, e.rule_id, e.kind, e.value, e.count, e.threshold, e.window_from, \
+         e.window_to, e.details, e.created_at FROM alert_events e \
+         JOIN alert_rules r ON r.id = e.rule_id WHERE r.project_id = ?1 \
+         AND (?2 IS NULL OR e.created_at < ?2 OR (e.created_at = ?2 AND e.id < ?3)) \
+         ORDER BY e.created_at DESC, e.id DESC LIMIT ?4",
+    )
+    .bind(project_id.to_string())
     .bind(before_at)
     .bind(before_id)
     .bind(limit)

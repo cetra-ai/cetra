@@ -1,5 +1,12 @@
 import { expect, it } from "vitest";
-import { isDateType, isNumericType, isTextType, isTimestampType } from "@/lib/sql/types";
+import {
+  isBooleanType,
+  isDateType,
+  isNestedType,
+  isNumericType,
+  isTextType,
+  isTimestampType,
+} from "@/lib/sql/types";
 
 it("recognises numeric Arrow types", () => {
   for (const type of [
@@ -43,4 +50,24 @@ it("recognises text Arrow types", () => {
     expect(isTextType(type), type).toBe(true);
   }
   expect(isTextType("Int64")).toBe(false);
+});
+
+it("recognises boolean Arrow types", () => {
+  expect(isBooleanType("Boolean")).toBe(true);
+  expect(isBooleanType("Int64")).toBe(false);
+});
+
+it("recognises nested Arrow types", () => {
+  for (const type of [
+    "List(Int64)",
+    "LargeList(Utf8)",
+    "FixedSizeList(Float32, 3)",
+    "Struct(a: Int64)",
+    "Map(Utf8, Int64)",
+  ]) {
+    expect(isNestedType(type), type).toBe(true);
+  }
+  for (const type of ["Utf8", "Boolean", "Date32"]) {
+    expect(isNestedType(type), type).toBe(false);
+  }
 });

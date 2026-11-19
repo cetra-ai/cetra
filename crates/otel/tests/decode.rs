@@ -5,7 +5,7 @@
 
 #![allow(clippy::expect_used)]
 
-use llmobs_otel::{
+use cetra_otel::{
     DecodeError, ExportTraceServiceRequest, JsonErrorCategory, decode_json, decode_protobuf,
 };
 use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span};

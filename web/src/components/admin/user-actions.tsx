@@ -48,7 +48,7 @@ export function UserActions(props: {
           {user.disabled ? "Enable account" : "Disable account"}
         </DropdownMenuItem>
         {self ? (
-          <p className="px-2 py-1.5 text-xs text-muted-foreground">
+          <p className="px-2 py-1.5 text-caption text-muted-foreground">
             You can't change your own account
           </p>
         ) : null}
@@ -57,7 +57,7 @@ export function UserActions(props: {
           Create reset link
         </DropdownMenuItem>
         {user.disabled ? (
-          <p className="px-2 py-1.5 text-xs text-muted-foreground">
+          <p className="px-2 py-1.5 text-caption text-muted-foreground">
             Enable the account to create a reset link
           </p>
         ) : null}

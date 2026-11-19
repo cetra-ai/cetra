@@ -8,6 +8,8 @@ import { traceIsRecent } from "@/components/trace/trace-view";
 import { server } from "@/mocks/node";
 import { type StreamEmit, spanStreamHandler, traceStreamHandler } from "@/mocks/sse";
 import { renderApp } from "@/test/render";
+import firstTrace from "../../../../fixtures/api/responses/traces/a1000000000000000000000000000001.json";
+import thirdTrace from "../../../../fixtures/api/responses/traces/a1000000000000000000000000000003.json";
 import deletionFixture from "../../../../fixtures/api/static/deletion.json";
 import projectFixture from "../../../../fixtures/api/static/project.json";
 
@@ -32,7 +34,7 @@ describe("trace header", () => {
     expect(within(header).getByText("production")).toBeInTheDocument();
     expect(within(header).getByText("v1.4.0")).toBeInTheDocument();
     expect(within(header).getByText("beta")).toBeInTheDocument();
-    expect(within(header).getByText("helpfulness 0.9")).toBeInTheDocument();
+    expect(header).toHaveTextContent("helpfulness 0.9");
     expect(within(header).getByRole("link", { name: "Open full page" })).toHaveAttribute(
       "href",
       `/acme/support-bot/traces/${TRACE}?span=${ROOT}`,
@@ -325,3 +327,106 @@ it("disables the header delete for members, with the reason", async () => {
   expect(button).toBeDisabled();
   expect(button.parentElement).toHaveAccessibleDescription("Only project admins can delete traces");
 });
+
+describe("trace switch and span prefetch", () => {
+  const TRACE_3 = "a1000000000000000000000000000003";
+  const TOOL_SPAN = "b100000000000013";
+
+  it("switches to a cached trace without dimming it", async () => {
+    const { router } = await renderApp(`/acme/support-bot/traces?mock=fixtures&trace=${TRACE}`);
+    await screen.findByRole("region", { name: "Trace" });
+    router.history.push(`/acme/support-bot/traces?mock=fixtures&trace=${TRACE_3}`);
+    await waitFor(() => expect(traceBody()).toHaveAttribute("aria-busy", "false"));
+
+    const dimmed: number[] = [];
+    const observer = new MutationObserver(() => dimmed.push(dimmedBodies().length));
+    observer.observe(document.body, { subtree: true, childList: true, attributes: true });
+    try {
+      router.history.push(`/acme/support-bot/traces?mock=fixtures&trace=${TRACE}`);
+      await waitFor(() => expect(router.state.location.search).toMatchObject({ trace: TRACE }));
+      await waitFor(() => expect(traceBody()).toHaveAttribute("aria-busy", "false"));
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    } finally {
+      observer.disconnect();
+    }
+    expect(dimmed.every((count) => count === 0)).toBe(true);
+    expect(traceBody()).not.toHaveClass("trace-swap");
+    expect(traceBody()).toHaveTextContent("support-agent");
+  });
+
+  it("dims a slow trace switch after 200ms and fades the new trace in", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    server.use(
+      http.get("/api/v1/projects/:project/traces/:trace_id", ({ params }) => {
+        if (params.trace_id === TRACE_3) {
+          return gate.then(() => HttpResponse.json(thirdTrace));
+        }
+        return HttpResponse.json(firstTrace);
+      }),
+    );
+    const { router } = await renderApp(`/acme/support-bot/traces?mock=fixtures&trace=${TRACE}`);
+    await screen.findByRole("region", { name: "Trace" });
+    router.history.push(`/acme/support-bot/traces?mock=fixtures&trace=${TRACE_3}`);
+    expect(dimmedBodies()).toHaveLength(0);
+
+    await waitFor(() => expect(dimmedBodies()).toHaveLength(1));
+    release();
+    await waitFor(() => expect(traceBody()).toHaveAttribute("aria-busy", "false"));
+    expect(traceBody()).toHaveClass("trace-swap");
+    expect(traceBody()).not.toHaveClass("opacity-60");
+  });
+
+  it("prefetches a span's detail once the pointer rests on its row", async () => {
+    const requests: string[] = [];
+    const onStart = ({ request }: { request: Request }) => {
+      const url = new URL(request.url);
+      if (url.pathname.endsWith(`/spans/${TOOL_SPAN}`)) {
+        requests.push(url.pathname);
+      }
+    };
+    server.events.on("request:start", onStart);
+    try {
+      const { user } = await renderApp(`/acme/support-bot/traces?mock=fixtures&trace=${TRACE}`);
+      const grid = await screen.findByRole("grid", { name: "Trace" });
+      const row = within(grid).getByText("get_order_status").closest("[role=row]") as HTMLElement;
+      await user.hover(row);
+      await waitFor(() => expect(requests).toHaveLength(1));
+    } finally {
+      server.events.removeListener("request:start", onStart);
+    }
+  });
+
+  it("does not prefetch when the pointer leaves a row before 100ms", async () => {
+    const requests: string[] = [];
+    const onStart = ({ request }: { request: Request }) => {
+      const url = new URL(request.url);
+      if (url.pathname.endsWith(`/spans/${TOOL_SPAN}`)) {
+        requests.push(url.pathname);
+      }
+    };
+    server.events.on("request:start", onStart);
+    try {
+      const { user } = await renderApp(`/acme/support-bot/traces?mock=fixtures&trace=${TRACE}`);
+      const grid = await screen.findByRole("grid", { name: "Trace" });
+      const row = within(grid).getByText("get_order_status").closest("[role=row]") as HTMLElement;
+      await user.hover(row);
+      await user.unhover(row);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(requests).toHaveLength(0);
+    } finally {
+      server.events.removeListener("request:start", onStart);
+    }
+  });
+});
+
+/** The trace body: the element that carries `aria-busy` around the trace header. */
+function traceBody(): HTMLElement {
+  return screen.getByRole("region", { name: "Trace" }).closest("[aria-busy]") as HTMLElement;
+}
+
+function dimmedBodies(): Element[] {
+  return [...document.querySelectorAll("[aria-busy='true'].opacity-60")];
+}

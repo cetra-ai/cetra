@@ -1,13 +1,13 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "tools/capture", "tools/license"]
+members = ["crates/*", "tools/capture", "tools/demo", "tools/license"]
 
 [workspace.package]
 version = "0.0.0"
 edition = "2024"
 rust-version = "1.99"
 publish = false
-repository = "https://github.com/sebastiencs/llmobs"
+repository = "https://github.com/cetra-ai/cetra"
 # D172, D-P-2: MIT core; the `ee` directories are Elastic-2.0 (see LICENSE).
 license = "MIT"
 
@@ -35,14 +35,14 @@ inefficient_to_string = "warn"
 
 [workspace.dependencies]
 # workspace crates
-llmobs-core = { path = "crates/core" }
-llmobs-eval = { path = "crates/eval" }
-llmobs-otel = { path = "crates/otel" }
-llmobs-storage = { path = "crates/storage" }
-llmobs-token = { path = "crates/token" }
-llmobs-server = { path = "crates/server" }
-llmobs-ui = { path = "crates/ui" }
-llmobs-capture = { path = "tools/capture" }
+cetra-core = { path = "crates/core" }
+cetra-eval = { path = "crates/eval" }
+cetra-otel = { path = "crates/otel" }
+cetra-storage = { path = "crates/storage" }
+cetra-token = { path = "crates/token" }
+cetra-server = { path = "crates/server" }
+cetra-ui = { path = "crates/ui" }
+cetra-capture = { path = "tools/capture" }
 
 # --- pinned families (must stay mutually compatible) ---
 # datafusion 55.2.0 depends on arrow/parquet 59.2 and object_store 0.13.2.
@@ -109,9 +109,9 @@ minijinja = { version = "3.1.0", default-features = false, features = [
     "json",
 ] }
 thiserror = "2.0"
-# Server config (spec 12). `env` is enabled because `LLMOBS_*` is an env source;
+# Server config (spec 12). `env` is enabled because `CETRA_*` is an env source;
 # the loader builds that source from an explicit map so tests do not touch the
-# process environment. `toml` reads `llmobs.toml`.
+# process environment. `toml` reads `cetra.toml`.
 figment = { version = "0.10.19", features = ["toml", "env"] }
 # `trusted_proxies` CIDRs (D142).
 ipnet = { version = "2.12.2", features = ["serde"] }
@@ -119,7 +119,7 @@ ipnet = { version = "2.12.2", features = ["serde"] }
 url = "2.5.8"
 # SMTP (spec 08). Default features include `native-tls`; rustls only.
 # `hostname` is the EHLO and generated `Message-ID` domain.
-lettre = { version = "0.11.23", default-features = false, features = [
+lettre = { version = "0.11.24", default-features = false, features = [
     "builder",
     "hostname",
     "smtp-transport",
@@ -176,11 +176,14 @@ sysinfo = { version = "0.40.1", default-features = false, features = ["system"] 
 rustix = { version = "1.1.6", default-features = false, features = ["std", "fs"] }
 # Same prost as `opentelemetry-proto` 0.33.1 (`Cargo.lock`). Decode only; no `derive`.
 prost = { version = "0.14.4", default-features = false, features = ["std"] }
-# OTLP messages and the tonic `TraceService` (server and test client).
+# OTLP messages and the tonic `TraceService`, `LogsService` and `MetricsService` (server and
+# test client).
 opentelemetry-proto = { version = "0.33.1", default-features = false, features = [
     "gen-tonic",
     "gen-tonic-messages",
     "trace",
+    "logs",
+    "metrics",
     "with-serde",
 ] }
 # gRPC server for `TraceService/Export` (D-G-29). `router` is needed for `Server::builder().add_service`.
@@ -229,13 +232,13 @@ utoipa = { version = "6.0.0", features = ["uuid"] }
 # Same major as axum 0.8's query decoding.
 serde_urlencoded = "0.7.1"
 tempfile = "3.27.0"
-# OTLP property tests in llmobs-otel. MSRV 1.88. Tests enable `std` only.
+# OTLP property tests in cetra-otel. MSRV 1.88. Tests enable `std` only.
 proptest = "1.12.0"
 # Mock identity-provider RS256 keys (tests only). `rand_core` 0.10 matches workspace `rand`.
 rsa = { version = "0.10.0", features = ["pkcs1v15"] }
 # axum 0.8.9's body trait. The capture mock's stream implements it; axum does not re-export `Frame`.
 http-body = "1.1.0"
-# Capped request body reads (`Limited`) for OTLP ingest, and `oneshot` tests of the axum apps in llmobs-capture.
+# Capped request body reads (`Limited`) for OTLP ingest, and `oneshot` tests of the axum apps in cetra-capture.
 http-body-util = "0.1.5"
 # gzip and deflate OTLP request bodies. Same version as `parquet`'s `flate2-zlib-rs` pin (`Cargo.lock`).
 # `zlib-rs` is the backend parquet already uses, so no `miniz_oxide` is added.

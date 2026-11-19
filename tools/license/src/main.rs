@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Elastic-2.0
-//! Signs llmobs licence keys and entitlement tokens with a seed file (D-P-5, D-P-6).
+//! Signs cetra licence keys and entitlement tokens with a seed file (D-P-5, D-P-6).
 //!
 //! Development fixtures and trial licences only; the tool is never shipped. Its output
-//! format is the one `llmobs_token` (`crates/token`) signs and verifies:
-//! `llmobs1.<kid>.<payload>.<signature>`.
+//! format is the one `cetra_token` (`crates/token`) signs and verifies:
+//! `cetra1.<kid>.<payload>.<signature>`.
 
 // A CLI tool prints its result to stdout and its errors to stderr.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
@@ -44,8 +44,8 @@ enum ToolError {
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "llmobs-license",
-    about = "Sign llmobs licence keys (development and trials)"
+    name = "cetra-license",
+    about = "Sign cetra licence keys (development and trials)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -80,7 +80,7 @@ fn main() -> ExitCode {
     match run(Cli::parse().command) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("llmobs-license: {error}");
+            eprintln!("cetra-license: {error}");
             ExitCode::FAILURE
         }
     }
@@ -99,13 +99,13 @@ fn run(command: Command) -> Result<(), ToolError> {
     Ok(())
 }
 
-/// Signs `payload` as `llmobs1.<kid>.<base64url(json)>.<base64url(signature)>`.
+/// Signs `payload` as `cetra1.<kid>.<base64url(json)>.<base64url(signature)>`.
 fn sign(seed: &[u8; 32], kid: &str, payload: &serde_json::Value) -> Result<String, ToolError> {
     if !payload.is_object() {
         return Err(ToolError::NotObject);
     }
     let json = serde_json::to_vec(payload).map_err(|_| ToolError::Encode)?;
-    llmobs_token::sign_raw(&SigningKey::from_bytes(seed), kid, &json).map_err(|_| ToolError::BadKid)
+    cetra_token::sign_raw(&SigningKey::from_bytes(seed), kid, &json).map_err(|_| ToolError::BadKid)
 }
 
 fn public_key(seed: &[u8; 32]) -> String {
@@ -206,7 +206,7 @@ mod tests {
             Err(ToolError::BadKid)
         ));
         assert!(matches!(
-            sign(&seed, "prod-1", &json!([1])),
+            sign(&seed, "license-offline-1", &json!([1])),
             Err(ToolError::NotObject)
         ));
     }

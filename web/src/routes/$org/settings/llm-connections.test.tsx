@@ -10,6 +10,7 @@ import meFixture from "../../../../../fixtures/api/static/me.json";
 
 const CONNECTION_ID = "01900000-0000-7000-8000-000000000400";
 const CONNECTION = connectionsFixture.data[0];
+const CONNECTION_NAME = "OpenAI";
 const BASE_URL_MESSAGE =
   "base_url must be an http or https URL without credentials, fragment or query other than api-version";
 
@@ -24,37 +25,113 @@ function meAs(role: string) {
   );
 }
 
-async function openCreateDialog() {
-  const { user } = await renderApp("/acme/settings/llm-connections");
-  await screen.findByRole("table", { name: "LLM connections" });
-  await user.click(screen.getByRole("button", { name: "Add connection" }));
-  const dialog = await screen.findByRole("dialog");
-  return { user, dialog };
+const LIST = "/acme/settings/llm-connections";
+
+/** Opens the panel of the one connection through its row. */
+async function openConnection(path = LIST) {
+  const rendered = await renderApp(path);
+  const grid = await screen.findByRole("grid", { name: "LLM connections" });
+  await rendered.user.click(within(grid).getByText(CONNECTION_NAME));
+  const form = await screen.findByRole("form", { name: "Edit connection" });
+  return { ...rendered, form };
 }
 
-async function openEditDialog() {
-  const { user } = await renderApp("/acme/settings/llm-connections");
-  await screen.findByRole("table", { name: "LLM connections" });
-  await user.click(screen.getByRole("button", { name: "Edit" }));
-  const dialog = await screen.findByRole("dialog");
-  return { user, dialog };
+/** Opens the add panel from the header button. */
+async function openCreate() {
+  const rendered = await renderApp(LIST);
+  await screen.findByRole("grid", { name: "LLM connections" });
+  await rendered.user.click(screen.getByRole("button", { name: "Add connection" }));
+  const form = await screen.findByRole("form", { name: "New connection" });
+  return { ...rendered, form };
 }
 
-it("lists connections with their status and key hint", async () => {
-  await renderApp("/acme/settings/llm-connections");
+function searchOf(router: { state: { location: { search: unknown } } }) {
+  return router.state.location.search as Record<string, unknown>;
+}
 
-  const table = await screen.findByRole("table", { name: "LLM connections" });
-  expect(within(table).getByText("OpenAI")).toBeInTheDocument();
-  expect(within(table).getByText("gpt-5-mini")).toBeInTheDocument();
-  expect(within(table).getByText("••••WXYZ")).toBeInTheDocument();
-  expect(within(table).getByText("OK")).toBeInTheDocument();
+it("lists connections with provider, model and status", async () => {
+  await renderApp(LIST);
+
+  const grid = await screen.findByRole("grid", { name: "LLM connections" });
+  expect(within(grid).getByText("OpenAI")).toBeInTheDocument();
+  expect(within(grid).getByText("OpenAI-compatible")).toBeInTheDocument();
+  expect(within(grid).getByText("gpt-5-mini")).toBeInTheDocument();
+  expect(within(grid).getByText("OK")).toBeInTheDocument();
   expect(orgNav().getByRole("link", { name: "LLM connections" })).toHaveAttribute(
     "aria-current",
     "page",
   );
 });
 
-it("adds a connection", async () => {
+it("opens the row's panel and writes its id to the URL", async () => {
+  const { router } = await openConnection();
+
+  expect(searchOf(router)).toMatchObject({ open: CONNECTION_ID });
+  expect(screen.getByRole("button", { name: "Test connection" })).toBeEnabled();
+});
+
+it("opens the panel from the URL", async () => {
+  await renderApp(`${LIST}?open=${CONNECTION_ID}`);
+
+  expect(await screen.findByRole("form", { name: "Edit connection" })).toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "Name" })).toHaveValue("OpenAI");
+});
+
+it("filters the list by name, provider or model", async () => {
+  const { user } = await renderApp(LIST);
+  await screen.findByRole("grid", { name: "LLM connections" });
+  const search = screen.getByRole("searchbox", { name: "Search connections" });
+
+  await user.type(search, "anthropic");
+  expect(await screen.findByText("No connection matches.")).toBeInTheDocument();
+
+  await user.clear(search);
+  await user.type(search, "gpt-5");
+  expect(await screen.findByRole("grid", { name: "LLM connections" })).toHaveTextContent("OpenAI");
+});
+
+it("sorts the list by a column and keeps the sort in the URL", async () => {
+  server.use(
+    http.get("/api/v1/orgs/:org/llm-connections", () =>
+      HttpResponse.json({
+        data: [
+          { ...CONNECTION, name: "Zeta" },
+          { ...CONNECTION, id: "01900000-0000-7000-8000-000000000401", name: "Alpha" },
+        ],
+        next_cursor: null,
+      }),
+    ),
+  );
+
+  const { user, router } = await renderApp(LIST);
+  const grid = await screen.findByRole("grid", { name: "LLM connections" });
+  expect(
+    within(grid)
+      .getAllByText(/^(Alpha|Zeta)$/)
+      .map((node) => node.textContent),
+  ).toEqual(["Zeta", "Alpha"]);
+
+  // A new column sorts descending first, then ascending.
+  const header = screen.getByRole("columnheader", { name: "Name" });
+  await user.click(within(header).getByRole("button"));
+  await waitFor(() => expect(searchOf(router)).toMatchObject({ sort: "name", desc: true }));
+  expect(
+    within(grid)
+      .getAllByText(/^(Alpha|Zeta)$/)
+      .map((node) => node.textContent),
+  ).toEqual(["Zeta", "Alpha"]);
+
+  await user.click(within(header).getByRole("button"));
+  await waitFor(() => expect(searchOf(router)).toMatchObject({ sort: "name" }));
+  expect(searchOf(router).desc).toBeUndefined();
+  expect(
+    within(grid)
+      .getAllByText(/^(Alpha|Zeta)$/)
+      .map((node) => node.textContent),
+  ).toEqual(["Alpha", "Zeta"]);
+});
+
+it("adds a connection from the add panel", async () => {
   let body: unknown;
   server.use(
     http.post("/api/v1/orgs/:org/llm-connections", async ({ request }) => {
@@ -63,11 +140,11 @@ it("adds a connection", async () => {
     }),
   );
 
-  const { user, dialog } = await openCreateDialog();
-  await user.type(within(dialog).getByLabelText("Name"), "Prod");
-  await user.type(within(dialog).getByLabelText("API key"), "sk-secret");
-  await user.type(within(dialog).getByLabelText("Default model"), "gpt-5-mini");
-  await user.click(within(dialog).getByRole("button", { name: "Add connection" }));
+  const { user, form, router } = await openCreate();
+  await user.type(within(form).getByLabelText("Name"), "Prod");
+  await user.type(within(form).getByLabelText("API key"), "sk-secret");
+  await user.type(within(form).getByLabelText("Default model"), "gpt-5-mini");
+  await user.click(within(form).getByRole("button", { name: "Add connection" }));
 
   await waitFor(() =>
     expect(body).toEqual({
@@ -77,24 +154,37 @@ it("adds a connection", async () => {
       default_model: "gpt-5-mini",
     }),
   );
-  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  await waitFor(() => expect(searchOf(router).open).toBeUndefined());
 });
 
-it("clears the API key when the add dialog reopens", async () => {
-  server.use(
-    http.post("/api/v1/orgs/:org/llm-connections", () =>
-      HttpResponse.json({ ...CONNECTION, name: "Prod" }, { status: 201 }),
-    ),
-  );
+it("asks before discarding a dirty form, and keeps editing on request", async () => {
+  const { user, router } = await openCreate();
+  await user.type(screen.getByRole("textbox", { name: "Name" }), "Prod");
 
-  const { user, dialog } = await openCreateDialog();
-  await user.type(within(dialog).getByLabelText("Name"), "Prod");
-  await user.type(within(dialog).getByLabelText("API key"), "sk-secret");
-  await user.click(within(dialog).getByRole("button", { name: "Add connection" }));
-  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  await user.click(screen.getByRole("button", { name: "Close panel" }));
+  const dialog = await screen.findByRole("alertdialog", { name: "Discard unsaved changes?" });
+  await user.click(within(dialog).getByRole("button", { name: "Keep editing" }));
+  expect(screen.getByRole("textbox", { name: "Name" })).toHaveValue("Prod");
+  expect(searchOf(router).open).toBe("new");
+
+  await user.click(screen.getByRole("button", { name: "Close panel" }));
+  const again = await screen.findByRole("alertdialog", { name: "Discard unsaved changes?" });
+  await user.click(within(again).getByRole("button", { name: "Discard" }));
+  await waitFor(() => expect(searchOf(router).open).toBeUndefined());
+});
+
+it("clears the API key when the add panel opens again", async () => {
+  const { user, router } = await openCreate();
+  await user.type(screen.getByLabelText("API key"), "sk-secret");
+  await user.click(screen.getByRole("button", { name: "Close panel" }));
+  const dialog = await screen.findByRole("alertdialog", { name: "Discard unsaved changes?" });
+  await user.click(within(dialog).getByRole("button", { name: "Discard" }));
+  await waitFor(() => expect(searchOf(router).open).toBeUndefined());
+  // The closing panel leaves the DOM once its slide-out ends.
+  await waitFor(() => expect(screen.queryByRole("form", { name: "New connection" })).toBeNull());
 
   await user.click(screen.getByRole("button", { name: "Add connection" }));
-  const reopened = await screen.findByRole("dialog");
+  const reopened = await screen.findByRole("form", { name: "New connection" });
   expect(within(reopened).getByLabelText("API key")).toHaveValue("");
 });
 
@@ -107,19 +197,19 @@ it("sends one extra header and the picked structured output mode", async () => {
     }),
   );
 
-  const { user, dialog } = await openCreateDialog();
-  await user.type(within(dialog).getByLabelText("Name"), "Prod");
-  await user.type(within(dialog).getByLabelText("API key"), "sk-secret");
-  await user.click(within(dialog).getByRole("combobox", { name: "Structured output" }));
+  const { user, form } = await openCreate();
+  await user.type(within(form).getByLabelText("Name"), "Prod");
+  await user.type(within(form).getByLabelText("API key"), "sk-secret");
+  await user.click(within(form).getByRole("combobox", { name: "Structured output" }));
   await user.click(await screen.findByRole("option", { name: "Tool call" }));
-  await user.click(within(dialog).getByText("Advanced"));
-  await user.click(within(dialog).getByRole("button", { name: "Add header" }));
-  await user.type(within(dialog).getByLabelText("Header name 1"), "x-a");
-  const headerValue = within(dialog).getByLabelText("Header value 1");
+  await user.click(within(form).getByText("Advanced"));
+  await user.click(within(form).getByRole("button", { name: "Add header" }));
+  await user.type(within(form).getByLabelText("Header name 1"), "x-a");
+  const headerValue = within(form).getByLabelText("Header value 1");
   expect(headerValue).toHaveAttribute("type", "password");
   expect(headerValue).toHaveAttribute("autocomplete", "off");
   await user.type(headerValue, "secret-value");
-  await user.click(within(dialog).getByRole("button", { name: "Add connection" }));
+  await user.click(within(form).getByRole("button", { name: "Add connection" }));
 
   await waitFor(() =>
     expect(body).toEqual({
@@ -132,7 +222,7 @@ it("sends one extra header and the picked structured output mode", async () => {
   );
 });
 
-it("refuses an empty key without calling the server", async () => {
+it("keeps Save disabled for an empty key and shows the error once the field is touched", async () => {
   let calls = 0;
   server.use(
     http.post("/api/v1/orgs/:org/llm-connections", () => {
@@ -141,11 +231,16 @@ it("refuses an empty key without calling the server", async () => {
     }),
   );
 
-  const { user, dialog } = await openCreateDialog();
-  await user.type(within(dialog).getByLabelText("Name"), "Prod");
-  await user.click(within(dialog).getByRole("button", { name: "Add connection" }));
+  const { user, form } = await openCreate();
+  await user.type(within(form).getByLabelText("Name"), "Prod");
+  const save = within(form).getByRole("button", { name: "Add connection" });
+  expect(save).toBeDisabled();
+  expect(within(form).queryByText("Enter the API key.")).toBeNull();
 
-  expect(await within(dialog).findByText("Enter the API key.")).toBeInTheDocument();
+  await user.type(within(form).getByLabelText("API key"), "x");
+  await user.clear(within(form).getByLabelText("API key"));
+  expect(await within(form).findByText("Enter the API key.")).toBeInTheDocument();
+  expect(save).toBeDisabled();
   expect(calls).toBe(0);
 });
 
@@ -158,11 +253,11 @@ it("edits without resending the key", async () => {
     }),
   );
 
-  const { user, dialog } = await openEditDialog();
-  const name = within(dialog).getByLabelText("Name");
+  const { user, form } = await openConnection();
+  const name = within(form).getByLabelText("Name");
   await user.clear(name);
   await user.type(name, "Renamed");
-  await user.click(within(dialog).getByRole("button", { name: "Save" }));
+  await user.click(within(form).getByRole("button", { name: "Save" }));
 
   await waitFor(() => expect(body).toEqual({ name: "Renamed" }));
 });
@@ -176,9 +271,9 @@ it("clears the default model with an empty string", async () => {
     }),
   );
 
-  const { user, dialog } = await openEditDialog();
-  await user.clear(within(dialog).getByLabelText("Default model"));
-  await user.click(within(dialog).getByRole("button", { name: "Save" }));
+  const { user, form } = await openConnection();
+  await user.clear(within(form).getByLabelText("Default model"));
+  await user.click(within(form).getByRole("button", { name: "Save" }));
 
   await waitFor(() => expect(body).toEqual({ default_model: "" }));
 });
@@ -192,13 +287,13 @@ it("shows a server field error under its field", async () => {
     ),
   );
 
-  const { user, dialog } = await openCreateDialog();
-  await user.type(within(dialog).getByLabelText("Name"), "Prod");
-  await user.type(within(dialog).getByLabelText("API key"), "sk-secret");
-  await user.click(within(dialog).getByRole("button", { name: "Add connection" }));
+  const { user, form } = await openCreate();
+  await user.type(within(form).getByLabelText("Name"), "Prod");
+  await user.type(within(form).getByLabelText("API key"), "sk-secret");
+  await user.click(within(form).getByRole("button", { name: "Add connection" }));
 
-  expect(await within(dialog).findByText(BASE_URL_MESSAGE)).toBeInTheDocument();
-  expect(within(dialog).getByLabelText("Base URL")).toHaveAttribute("aria-invalid", "true");
+  expect(await within(form).findByText(BASE_URL_MESSAGE)).toBeInTheDocument();
+  expect(within(form).getByLabelText("Base URL")).toHaveAttribute("aria-invalid", "true");
 });
 
 it("shows field errors without a rendered field above the submit button", async () => {
@@ -213,12 +308,12 @@ it("shows field errors without a rendered field above the submit button", async 
     ),
   );
 
-  const { user, dialog } = await openCreateDialog();
-  await user.type(within(dialog).getByLabelText("Name"), "Prod");
-  await user.type(within(dialog).getByLabelText("API key"), "sk-secret");
-  await user.click(within(dialog).getByRole("button", { name: "Add connection" }));
+  const { user, form } = await openCreate();
+  await user.type(within(form).getByLabelText("Name"), "Prod");
+  await user.type(within(form).getByLabelText("API key"), "sk-secret");
+  await user.click(within(form).getByRole("button", { name: "Add connection" }));
 
-  expect(await within(dialog).findByText("unknown adapter unknown mode")).toBeInTheDocument();
+  expect(await within(form).findByText("unknown adapter unknown mode")).toBeInTheDocument();
 });
 
 it("opens the Advanced section when an error lands inside it", async () => {
@@ -235,15 +330,37 @@ it("opens the Advanced section when an error lands inside it", async () => {
     ),
   );
 
-  const { user, dialog } = await openCreateDialog();
-  await user.type(within(dialog).getByLabelText("Name"), "Prod");
-  await user.type(within(dialog).getByLabelText("API key"), "sk-secret");
-  await user.click(within(dialog).getByRole("button", { name: "Add connection" }));
+  const { user, form } = await openCreate();
+  await user.type(within(form).getByLabelText("Name"), "Prod");
+  await user.type(within(form).getByLabelText("API key"), "sk-secret");
+  await user.click(within(form).getByRole("button", { name: "Add connection" }));
 
   expect(
-    await within(dialog).findByText("requests_per_minute must be between 1 and 10000"),
+    await within(form).findByText("requests_per_minute must be between 1 and 10000"),
   ).toBeInTheDocument();
-  expect(within(dialog).getByText("Advanced").closest("details")).toHaveAttribute("open");
+  expect(within(form).getByText("Advanced").closest("details")).toHaveAttribute("open");
+});
+
+it("refuses a requests-per-minute value outside 1 to 10000 before saving", async () => {
+  let calls = 0;
+  server.use(
+    http.patch("/api/v1/orgs/:org/llm-connections/:id", () => {
+      calls += 1;
+      return HttpResponse.json(CONNECTION);
+    }),
+  );
+
+  const { user, form } = await openConnection();
+  await user.click(within(form).getByText("Advanced"));
+  const rpm = within(form).getByLabelText("Requests per minute");
+  await user.clear(rpm);
+  await user.type(rpm, "20000");
+
+  expect(
+    await within(form).findByText("Enter a whole number from 1 to 10000."),
+  ).toBeInTheDocument();
+  expect(within(form).getByRole("button", { name: "Save" })).toBeDisabled();
+  expect(calls).toBe(0);
 });
 
 it("shows a 409 detail above the submit button", async () => {
@@ -255,17 +372,17 @@ it("shows a 409 detail above the submit button", async () => {
     ),
   );
 
-  const { user, dialog } = await openCreateDialog();
-  await user.type(within(dialog).getByLabelText("Name"), "Prod");
-  await user.type(within(dialog).getByLabelText("API key"), "sk-secret");
-  await user.click(within(dialog).getByRole("button", { name: "Add connection" }));
+  const { user, form } = await openCreate();
+  await user.type(within(form).getByLabelText("Name"), "Prod");
+  await user.type(within(form).getByLabelText("API key"), "sk-secret");
+  await user.click(within(form).getByRole("button", { name: "Add connection" }));
 
-  const detail = await within(dialog).findByText("a connection with this name already exists");
-  const submit = within(dialog).getByRole("button", { name: "Add connection" });
+  const detail = await within(form).findByText("a connection with this name already exists");
+  const submit = within(form).getByRole("button", { name: "Add connection" });
   expect(detail.compareDocumentPosition(submit)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
 });
 
-it("tests a connection", async () => {
+it("tests a connection from its panel", async () => {
   let body: unknown;
   server.use(
     http.post("/api/v1/orgs/:org/llm-connections/:id/test", async ({ request }) => {
@@ -274,9 +391,8 @@ it("tests a connection", async () => {
     }),
   );
 
-  const { user } = await renderApp("/acme/settings/llm-connections");
-  await screen.findByRole("table", { name: "LLM connections" });
-  await user.click(screen.getByRole("button", { name: "Test" }));
+  const { user } = await openConnection();
+  await user.click(screen.getByRole("button", { name: "Test connection" }));
   const dialog = await screen.findByRole("dialog");
   await user.click(within(dialog).getByRole("button", { name: "Run test" }));
 
@@ -295,14 +411,23 @@ it("tests with an empty model sends an empty body", async () => {
     }),
   );
 
-  const { user } = await renderApp("/acme/settings/llm-connections");
-  await screen.findByRole("table", { name: "LLM connections" });
-  await user.click(screen.getByRole("button", { name: "Test" }));
+  const { user } = await openConnection();
+  await user.click(screen.getByRole("button", { name: "Test connection" }));
   const dialog = await screen.findByRole("dialog");
   await user.clear(within(dialog).getByLabelText("Model"));
   await user.click(within(dialog).getByRole("button", { name: "Run test" }));
 
   await waitFor(() => expect(body).toEqual({}));
+});
+
+it("blocks Test while the connection has unsaved edits", async () => {
+  const { user, form } = await openConnection();
+  await user.type(within(form).getByLabelText("Name"), " edited");
+
+  expect(screen.getByRole("button", { name: "Test connection" })).toBeDisabled();
+  expect(
+    screen.getByRole("button", { name: "Test connection" }).parentElement,
+  ).toHaveAccessibleDescription("Save your changes before testing.");
 });
 
 it("shows the rate limit message in the test dialog", async () => {
@@ -312,9 +437,8 @@ it("shows the rate limit message in the test dialog", async () => {
     ),
   );
 
-  const { user } = await renderApp("/acme/settings/llm-connections");
-  await screen.findByRole("table", { name: "LLM connections" });
-  await user.click(screen.getByRole("button", { name: "Test" }));
+  const { user } = await openConnection();
+  await user.click(screen.getByRole("button", { name: "Test connection" }));
   const dialog = await screen.findByRole("dialog");
   await user.click(within(dialog).getByRole("button", { name: "Run test" }));
 
@@ -333,9 +457,8 @@ it("shows a failed test with its hint", async () => {
     ),
   );
 
-  const { user } = await renderApp("/acme/settings/llm-connections");
-  await screen.findByRole("table", { name: "LLM connections" });
-  await user.click(screen.getByRole("button", { name: "Test" }));
+  const { user } = await openConnection();
+  await user.click(screen.getByRole("button", { name: "Test connection" }));
   const dialog = await screen.findByRole("dialog");
   await user.click(within(dialog).getByRole("button", { name: "Run test" }));
 
@@ -348,7 +471,7 @@ it("shows a failed test with its hint", async () => {
   ).toBeInTheDocument();
 });
 
-it("shows a failing connection's error", async () => {
+it("shows a failing connection's status with its error as the title", async () => {
   server.use(
     http.get("/api/v1/orgs/:org/llm-connections", () =>
       HttpResponse.json({
@@ -358,10 +481,9 @@ it("shows a failing connection's error", async () => {
     ),
   );
 
-  await renderApp("/acme/settings/llm-connections");
+  await renderApp(LIST);
 
-  expect(await screen.findByText("Failing")).toBeInTheDocument();
-  expect(screen.getByText("provider status 401")).toBeInTheDocument();
+  expect(await screen.findByText("Failing")).toHaveAttribute("title", "provider status 401");
 });
 
 it("shows a malformed base URL as stored instead of throwing", async () => {
@@ -374,10 +496,9 @@ it("shows a malformed base URL as stored instead of throwing", async () => {
     ),
   );
 
-  await renderApp("/acme/settings/llm-connections");
+  const { form } = await openConnection();
 
-  const table = await screen.findByRole("table", { name: "LLM connections" });
-  expect(within(table).getByText("not-a-url")).toBeInTheDocument();
+  expect(within(form).getByLabelText("Base URL")).toHaveValue("not-a-url");
 });
 
 it("refuses a header without a value", async () => {
@@ -389,13 +510,13 @@ it("refuses a header without a value", async () => {
     }),
   );
 
-  const { user, dialog } = await openEditDialog();
-  await user.click(within(dialog).getByText("Advanced"));
-  await user.click(within(dialog).getByRole("button", { name: "Add header" }));
-  await user.type(within(dialog).getByLabelText("Header name 1"), "x-a");
-  await user.click(within(dialog).getByRole("button", { name: "Save" }));
+  const { user, form } = await openConnection();
+  await user.click(within(form).getByText("Advanced"));
+  await user.click(within(form).getByRole("button", { name: "Add header" }));
+  await user.type(within(form).getByLabelText("Header name 1"), "x-a");
 
-  expect(await within(dialog).findByText("Enter a value for each header.")).toBeInTheDocument();
+  expect(await within(form).findByText("Enter a value for each header.")).toBeInTheDocument();
+  expect(within(form).getByRole("button", { name: "Save" })).toBeDisabled();
   expect(calls).toBe(0);
 });
 
@@ -408,21 +529,21 @@ it("refuses duplicate header names without calling the server", async () => {
     }),
   );
 
-  const { user, dialog } = await openEditDialog();
-  await user.click(within(dialog).getByText("Advanced"));
-  await user.click(within(dialog).getByRole("button", { name: "Add header" }));
-  await user.click(within(dialog).getByRole("button", { name: "Add header" }));
-  await user.type(within(dialog).getByLabelText("Header name 1"), "x-a");
-  await user.type(within(dialog).getByLabelText("Header value 1"), "1");
-  await user.type(within(dialog).getByLabelText("Header name 2"), "X-A");
-  await user.type(within(dialog).getByLabelText("Header value 2"), "2");
-  await user.click(within(dialog).getByRole("button", { name: "Save" }));
+  const { user, form } = await openConnection();
+  await user.click(within(form).getByText("Advanced"));
+  await user.click(within(form).getByRole("button", { name: "Add header" }));
+  await user.click(within(form).getByRole("button", { name: "Add header" }));
+  await user.type(within(form).getByLabelText("Header name 1"), "x-a");
+  await user.type(within(form).getByLabelText("Header value 1"), "1");
+  await user.type(within(form).getByLabelText("Header name 2"), "X-A");
+  await user.type(within(form).getByLabelText("Header value 2"), "2");
 
-  expect(await within(dialog).findByText("Duplicate header name.")).toBeInTheDocument();
+  expect(await within(form).findByText("Duplicate header name.")).toBeInTheDocument();
+  expect(within(form).getByRole("button", { name: "Save" })).toBeDisabled();
   expect(calls).toBe(0);
 });
 
-it("deletes after confirming", async () => {
+it("deletes after typing the connection name", async () => {
   let pathId = "";
   server.use(
     http.delete("/api/v1/orgs/:org/llm-connections/:id", ({ params }) => {
@@ -431,13 +552,16 @@ it("deletes after confirming", async () => {
     }),
   );
 
-  const { user } = await renderApp("/acme/settings/llm-connections");
-  await screen.findByRole("table", { name: "LLM connections" });
-  await user.click(screen.getByRole("button", { name: "Delete" }));
-  const dialog = await screen.findByRole("alertdialog");
-  await user.click(within(dialog).getByRole("button", { name: "Delete" }));
+  const { user, router } = await openConnection();
+  await user.click(screen.getByRole("button", { name: "Delete…" }));
+  const dialog = await screen.findByRole("alertdialog", { name: "Delete connection?" });
+  const confirm = within(dialog).getByRole("button", { name: "Delete" });
+  expect(confirm).toBeDisabled();
+  await user.type(within(dialog).getByRole("textbox"), CONNECTION_NAME);
+  await user.click(confirm);
 
   await waitFor(() => expect(pathId).toBe(CONNECTION_ID));
+  await waitFor(() => expect(searchOf(router).open).toBeUndefined());
 });
 
 it("shows a failed delete error", async () => {
@@ -447,28 +571,31 @@ it("shows a failed delete error", async () => {
     ),
   );
 
-  const { user } = await renderApp("/acme/settings/llm-connections");
-  await screen.findByRole("table", { name: "LLM connections" });
-  await user.click(screen.getByRole("button", { name: "Delete" }));
-  const dialog = await screen.findByRole("alertdialog");
+  const { user } = await openConnection();
+  await user.click(screen.getByRole("button", { name: "Delete…" }));
+  const dialog = await screen.findByRole("alertdialog", { name: "Delete connection?" });
+  await user.type(within(dialog).getByRole("textbox"), CONNECTION_NAME);
   await user.click(within(dialog).getByRole("button", { name: "Delete" }));
 
   expect(await within(dialog).findByText("Wait a minute before deleting.")).toBeInTheDocument();
 });
 
-it("a member sees the list but cannot manage", async () => {
+it("a member sees the list and the details, but cannot manage", async () => {
   server.use(meAs("member"));
 
-  await renderApp("/acme/settings/llm-connections");
-
-  const table = await screen.findByRole("table", { name: "LLM connections" });
-  expect(within(table).getByText("OpenAI")).toBeInTheDocument();
+  const { user, router } = await renderApp(LIST);
+  const grid = await screen.findByRole("grid", { name: "LLM connections" });
   const add = screen.getByRole("button", { name: "Add connection" });
   expect(add).toBeDisabled();
   expect(add.parentElement).toHaveAccessibleDescription(
     "Only admins and owners can add connections",
   );
-  for (const label of ["Test", "Edit", "Delete"]) {
-    expect(screen.getByRole("button", { name: label })).toBeDisabled();
-  }
+
+  await user.click(within(grid).getByText(CONNECTION_NAME));
+  expect(await screen.findByText("Extra headers")).toBeInTheDocument();
+  expect(searchOf(router)).toMatchObject({ open: CONNECTION_ID });
+  expect(screen.queryByRole("form", { name: "Edit connection" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Test connection" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Delete…" })).toBeNull();
+  expect(screen.getByText("••••WXYZ")).toBeInTheDocument();
 });

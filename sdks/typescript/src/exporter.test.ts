@@ -14,7 +14,7 @@ import { QuotaState } from "./quota.js";
 import { type FetchLike, type ResponseLike, runtimeGlobals } from "./web.js";
 
 const URL_UNDER_TEST = "http://127.0.0.1:9/v1/traces";
-const API_KEY = "sk-llmobs-test";
+const API_KEY = "sk-cetra-test";
 
 interface RecordedCall {
   url: string;
@@ -92,9 +92,9 @@ function finishedSpans(): ReadableSpan[] {
   const provider = new TracerProvider({
     spanProcessors: [new SimpleSpanProcessor({ exporter: memory })],
   });
-  const tracer = provider.getTracer("llmobs", "0.0.0");
-  const span = tracer.startSpan("hello", { attributes: { "llmobs.span.kind": "chain" } });
-  span.setAttribute("llmobs.input", "hi");
+  const tracer = provider.getTracer("cetra", "0.0.0");
+  const span = tracer.startSpan("hello", { attributes: { "cetra.span.kind": "chain" } });
+  span.setAttribute("cetra.input", "hi");
   span.end();
   return memory.getFinishedSpans();
 }
@@ -364,7 +364,7 @@ describe("FetchTraceExporter", () => {
       expect(first.code).toBe(ExportResultCode.FAILED);
       expect(second.code).toBe(ExportResultCode.FAILED);
       expect(warn).toHaveBeenCalledTimes(1);
-      expect(warn).toHaveBeenCalledWith("llmobs: fetch is not available; spans are not exported");
+      expect(warn).toHaveBeenCalledWith("cetra: fetch is not available; spans are not exported");
     } finally {
       warn.mockRestore();
       Object.defineProperty(globalThis, "fetch", { value: previous, configurable: true });

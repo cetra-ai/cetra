@@ -1,11 +1,13 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { retryQuery } from "@/api/client";
 import { savedViewQuery } from "@/api/queries";
 import { CLIPPED, NO_CHART } from "@/components/sql/result-chart";
 import { DEFAULT_QUERY } from "@/lib/sql/draft";
 import { EXPORT_ROLE_REASON } from "@/lib/sql/export";
+import { formatSql } from "@/lib/sql/format-sql";
+import { tabsKey } from "@/lib/sql/tabs";
 import { server } from "@/mocks/node";
 import { savedViewHandlers } from "@/mocks/saved-views";
 import { ADA_ID, BOB_ID } from "@/test/fixtures";
@@ -25,16 +27,45 @@ function single<T>(items: readonly T[]): T {
   return item;
 }
 
+/** The editor of the shown tab. Every tab keeps its editor mounted, so hidden ones are skipped. */
 function editorContent(): HTMLElement {
-  const content = document.querySelector(".cm-content");
+  const content = Array.from(document.querySelectorAll(".cm-content")).find(
+    (node) => node.closest("[hidden]") === null,
+  );
   if (!(content instanceof HTMLElement)) {
     throw new Error("SQL editor did not mount");
   }
   return content;
 }
 
+type StoredTab = { query: string; params?: Record<string, string>; view?: string };
+
+/** Stores the project's query tabs; the one at `active` (0-based) is shown. */
+function storeTabs(tabs: StoredTab[], active = 0, ref = "acme/support-bot") {
+  const stored = tabs.map((tab, index) => ({
+    id: `tab-${index + 1}`,
+    number: index + 1,
+    draft: { params: {}, ...tab },
+  }));
+  localStorage.setItem(tabsKey(ref), JSON.stringify({ tabs: stored, active: `tab-${active + 1}` }));
+}
+
 function storeDraft(query: string, ref = "acme/support-bot") {
-  localStorage.setItem(`llmobs.sql.draft.${ref}`, JSON.stringify({ query }));
+  storeTabs([{ query }], 0, ref);
+}
+
+function sidebar(): HTMLElement {
+  return screen.getByRole("complementary", { name: "SQL sidebar" });
+}
+
+/** The query tabs of the strip, not the sidebar's or the result's tabs. */
+function queryTabs(): HTMLElement[] {
+  return within(screen.getByRole("tablist", { name: "Query tabs" })).getAllByRole("tab");
+}
+
+/** Opens the sidebar's Saved list. */
+async function showSaved(user: { click: (element: Element) => Promise<void> }) {
+  await user.click(within(sidebar()).getByRole("tab", { name: "Saved" }));
 }
 
 function captureSql(
@@ -65,8 +96,11 @@ it("lists SQL in the sidebar and opens the console", async () => {
   await waitFor(() => {
     expect(router.state.location.pathname).toBe("/acme/support-bot/sql");
   });
-  expect(await screen.findByRole("heading", { name: "SQL" })).toBeInTheDocument();
-  expect(screen.getByText("Run a query to see results.")).toBeInTheDocument();
+  expect(
+    screen.getAllByRole("heading", { level: 1 }).map((heading) => heading.textContent),
+  ).toEqual(["SQL"]);
+  expect(await screen.findByRole("button", { name: "Schema" })).toBeInTheDocument();
+  expect(screen.getByText("Run a query to see results")).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "SQL" })).toHaveAttribute("aria-current", "page");
   expect(screen.getByRole("button", { name: "Run" })).toHaveAttribute("title", "Run (Ctrl↵)");
 });
@@ -156,9 +190,10 @@ it("saves typing to the draft", async () => {
   const content = await waitFor(editorContent);
   await user.type(content, "SELECT 7");
   await waitFor(() => {
-    expect(JSON.parse(localStorage.getItem("llmobs.sql.draft.acme/support-bot") ?? "null")).toEqual(
-      { query: "SELECT 7", params: {} },
-    );
+    expect(storedDraft()).toEqual({
+      query: "SELECT 7",
+      params: {},
+    });
   });
 });
 
@@ -170,7 +205,7 @@ it("restores the draft from localStorage", async () => {
   });
 });
 
-it("keeps one draft per project", async () => {
+it("keeps each project's tabs apart", async () => {
   storeDraft("SELECT 'bot'");
   storeDraft("SELECT 'play'", "acme/playground");
   const { router } = await renderApp("/acme/support-bot/sql");
@@ -214,10 +249,13 @@ it("shows Running… and blocks a second run", async () => {
   await user.click(screen.getByRole("button", { name: "Run" }));
   const status = await screen.findByRole("status");
   expect(status).toHaveTextContent("Running…");
-  expect(screen.getByRole("button", { name: "Run" })).toBeDisabled();
+  // While a run is pending the toolbar button is Cancel, so no second Run can start.
+  expect(screen.queryByRole("button", { name: "Run" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
   release();
   await screen.findByRole("grid", { name: "Query results" });
   expect(screen.queryByText("Running…")).toBeNull();
+  expect(screen.getByRole("button", { name: "Run" })).toBeEnabled();
 });
 
 it("underlines the reported position", async () => {
@@ -244,12 +282,12 @@ it("underlines the reported position", async () => {
   await user.click(screen.getByRole("button", { name: "Run" }));
   const alert = await screen.findByRole("alert");
   expect(alert).toHaveTextContent("table 'nme' not found");
-  expect(alert).toHaveAttribute("id", "sql-error");
+  expect(alert.id).toMatch(/^sql-error-/);
   await waitFor(() => {
     expect(document.querySelector(".cm-sql-error")?.textContent).toBe("nme");
   });
   expect(editorContent()).toHaveAttribute("aria-invalid", "true");
-  expect(editorContent()).toHaveAttribute("aria-describedby", "sql-error");
+  expect(editorContent()).toHaveAttribute("aria-describedby", alert.id);
   expect(screen.queryByRole("grid", { name: "Query results" })).toBeNull();
   editorContent().focus();
   await user.keyboard("{Control>}{End}{/Control}x");
@@ -396,18 +434,24 @@ function sqlView(overrides: Record<string, unknown>) {
 }
 
 function storeFullDraft(draft: { query: string; params?: Record<string, string>; view?: string }) {
-  localStorage.setItem(
-    "llmobs.sql.draft.acme/support-bot",
-    JSON.stringify({ params: {}, ...draft }),
-  );
+  storeTabs([draft]);
 }
 
+/** The draft of the shown tab as stored. */
 function storedDraft(): unknown {
-  return JSON.parse(localStorage.getItem("llmobs.sql.draft.acme/support-bot") ?? "null");
+  const stored = storedTabs();
+  return stored.tabs.find((tab) => tab.id === stored.active)?.draft;
+}
+
+function storedTabs(): {
+  tabs: { id: string; number: number; draft: unknown }[];
+  active: string;
+} {
+  return JSON.parse(localStorage.getItem(tabsKey("acme/support-bot")) ?? "null");
 }
 
 function storedHistory(): Record<string, unknown>[] {
-  return JSON.parse(localStorage.getItem("llmobs.sql.history.acme/support-bot") ?? "[]");
+  return JSON.parse(localStorage.getItem("cetra.sql.history.acme/support-bot") ?? "[]");
 }
 
 function asRole(role: string) {
@@ -478,17 +522,19 @@ it("clears a parameter error when its placeholder goes", async () => {
   });
 });
 
-it("lists saved queries and loads one", async () => {
+it("lists saved queries in the sidebar and opens one", async () => {
   const { router, user } = await renderApp("/acme/support-bot/sql?range=1h");
-  await user.click(await screen.findByRole("button", { name: "Saved queries" }));
-  await user.click(await screen.findByRole("menuitem", { name: /Cost per model per day/ }));
+  await showSaved(user);
+  await user.click(
+    await within(sidebar()).findByRole("button", { name: "Cost per model per day" }),
+  );
   await waitFor(() => {
     expect(router.state.location.search).toEqual({ range: "24h", view: COST_VIEW });
   });
   await waitFor(() => {
     expect(editorContent().textContent).toBe(SEED_QUERY);
   });
-  await screen.findByRole("button", { name: /Cost per model per day/ });
+  await screen.findByRole("button", { name: /Cost per model per day/, expanded: false });
   expect(screen.queryByRole("status", { name: "Unsaved changes" })).toBeNull();
   await waitFor(() => {
     expect(storedDraft()).toMatchObject({ view: COST_VIEW });
@@ -500,8 +546,8 @@ it("does not list another user's private query", async () => {
     ...savedViewHandlers([sqlView({ owner_user_id: BOB_ID, shared: false, name: "Bob's" })]),
   );
   const { user } = await renderApp("/acme/support-bot/sql");
-  await user.click(await screen.findByRole("button", { name: "Saved queries" }));
-  expect(await screen.findByRole("menuitem", { name: "No saved queries" })).toBeInTheDocument();
+  await showSaved(user);
+  expect(await within(sidebar()).findByText(/No saved queries yet/)).toBeInTheDocument();
 });
 
 it("opens a ?view= link over another draft", async () => {
@@ -540,7 +586,7 @@ it("loads a ?view= link that is on the second page of the list", async () => {
   await waitFor(() => {
     expect(editorContent().textContent).toBe("SELECT 'late'");
   });
-  expect(await screen.findByRole("button", { name: /Late arrival/ })).toBeInTheDocument();
+  expect(await screen.findByRole("tab", { name: "Late arrival" })).toBeInTheDocument();
   expect(cursors[0]).toBeNull();
   expect(cursors).toContain(PAGE_TWO);
 });
@@ -610,7 +656,9 @@ it("does not reopen a deleted view from the cache", async () => {
     savedViewQuery("acme", "support-bot", COST_VIEW).queryKey,
     sqlView({ id: COST_VIEW, name: "Cost per model per day" }),
   );
-  await user.click(await screen.findByRole("button", { name: /Cost per model per day/ }));
+  await user.click(
+    await screen.findByRole("button", { name: /Cost per model per day/, expanded: false }),
+  );
   await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
   await user.click(screen.getByRole("button", { name: "Delete query" }));
   await waitFor(() => {
@@ -638,7 +686,7 @@ it("shows no dot for a view link without range", async () => {
   await waitFor(() => {
     expect(editorContent().textContent).toBe(SEED_QUERY);
   });
-  await screen.findByRole("button", { name: /Cost per model per day/ });
+  await screen.findByRole("button", { name: /Cost per model per day/, expanded: false });
   expect(screen.queryByRole("status", { name: "Unsaved changes" })).toBeNull();
 });
 
@@ -653,7 +701,7 @@ it("shows no dot for a saved state with an extra unused param", async () => {
   );
   await renderApp(`/acme/support-bot/sql?view=${SHARED_VIEW}`);
   expect(await screen.findByLabelText("n (Int)")).toHaveValue("5");
-  await screen.findByRole("button", { name: /Shared one/ });
+  await screen.findByRole("button", { name: /Shared one/, expanded: false });
   expect(screen.queryByRole("status", { name: "Unsaved changes" })).toBeNull();
   await waitFor(() => {
     expect(storedDraft()).toEqual({
@@ -783,7 +831,7 @@ it("saves the current query", async () => {
     await waitFor(() => {
       expect(String(router.state.location.search.view)).toMatch(/^[0-9a-f-]{36}$/);
     });
-    await screen.findByRole("button", { name: /Mine/ });
+    await screen.findByRole("button", { name: /Mine/, expanded: false });
   } finally {
     capture.stop();
   }
@@ -814,7 +862,9 @@ it("Save as on a loaded query keeps the text and switches the id", async () => {
   });
   editorContent().focus();
   await user.keyboard("{Control>}{End}{/Control} LIMIT 9");
-  await user.click(await screen.findByRole("button", { name: /Cost per model per day/ }));
+  await user.click(
+    await screen.findByRole("button", { name: /Cost per model per day/, expanded: false }),
+  );
   await user.click(screen.getByRole("menuitem", { name: "Save as…" }));
   await user.type(screen.getByLabelText("Name"), "Copy");
   await user.click(screen.getByRole("button", { name: "Save query" }));
@@ -826,7 +876,7 @@ it("Save as on a loaded query keeps the text and switches the id", async () => {
   expect(editorContent().textContent).toBe(`${SEED_QUERY} LIMIT 9`);
   await new Promise((resolve) => setTimeout(resolve, 50));
   expect(editorContent().textContent).toBe(`${SEED_QUERY} LIMIT 9`);
-  await screen.findByRole("button", { name: /Copy/ });
+  await screen.findByRole("button", { name: /Copy/, expanded: false });
 });
 
 it("shows a refused save in the dialog and clears it on close", async () => {
@@ -858,7 +908,9 @@ it("marks edits and saves over the loaded query", async () => {
     editorContent().focus();
     await user.keyboard("{Control>}{End}{/Control} LIMIT 5");
     await screen.findByRole("status", { name: "Unsaved changes" });
-    await user.click(screen.getByRole("button", { name: /Cost per model per day/ }));
+    await user.click(
+      screen.getByRole("button", { name: /Cost per model per day/, expanded: false }),
+    );
     await user.click(await screen.findByRole("menuitem", { name: "Save" }));
     await waitFor(() => {
       expect(single(capture.bodies)).toEqual({
@@ -886,7 +938,9 @@ it("shows a failed save in the menu", async () => {
       problemAnswer(400, "bad_request", "state is too large"),
     ),
   );
-  await user.click(await screen.findByRole("button", { name: /Cost per model per day/ }));
+  await user.click(
+    await screen.findByRole("button", { name: /Cost per model per day/, expanded: false }),
+  );
   await user.click(await screen.findByRole("menuitem", { name: "Save" }));
   expect(await within(screen.getByRole("menu")).findByRole("alert")).toHaveTextContent(
     "state is too large",
@@ -901,7 +955,7 @@ it("discards changes", async () => {
   editorContent().focus();
   await user.keyboard("{Control>}{End}{/Control} LIMIT 5");
   await screen.findByRole("status", { name: "Unsaved changes" });
-  await user.click(screen.getByRole("button", { name: /Cost per model per day/ }));
+  await user.click(screen.getByRole("button", { name: /Cost per model per day/, expanded: false }));
   await user.click(await screen.findByRole("menuitem", { name: "Discard changes" }));
   await waitFor(() => {
     expect(editorContent().textContent).toBe(SEED_QUERY);
@@ -911,12 +965,14 @@ it("discards changes", async () => {
 
 it("renames the loaded query", async () => {
   const { user } = await renderApp(`/acme/support-bot/sql?view=${COST_VIEW}`);
-  await user.click(await screen.findByRole("button", { name: /Cost per model per day/ }));
+  await user.click(
+    await screen.findByRole("button", { name: /Cost per model per day/, expanded: false }),
+  );
   await user.click(await screen.findByRole("menuitem", { name: "Rename…" }));
   await user.clear(screen.getByLabelText("Name"));
   await user.type(screen.getByLabelText("Name"), "Costs");
   await user.click(screen.getByRole("button", { name: "Rename" }));
-  await screen.findByRole("button", { name: /Costs/ });
+  await screen.findByRole("button", { name: /Costs/, expanded: false });
 });
 
 it("shows a refused rename in the dialog", async () => {
@@ -927,7 +983,9 @@ it("shows a refused rename in the dialog", async () => {
     ),
   );
   const { user } = await renderApp(`/acme/support-bot/sql?view=${COST_VIEW}`);
-  await user.click(await screen.findByRole("button", { name: /Cost per model per day/ }));
+  await user.click(
+    await screen.findByRole("button", { name: /Cost per model per day/, expanded: false }),
+  );
   await user.click(await screen.findByRole("menuitem", { name: "Rename…" }));
   await user.clear(screen.getByLabelText("Name"));
   await user.type(screen.getByLabelText("Name"), "Costs");
@@ -941,12 +999,13 @@ it("shares a query as a member", async () => {
   const capture = captureWrites("PATCH");
   try {
     const { user } = await renderApp(`/acme/support-bot/sql?view=${COST_VIEW}`);
-    await user.click(await screen.findByRole("button", { name: /Cost per model per day/ }));
+    await user.click(
+      await screen.findByRole("button", { name: /Cost per model per day/, expanded: false }),
+    );
     await user.click(await screen.findByRole("menuitem", { name: "Share with project" }));
     await waitFor(() => {
       expect(single(capture.bodies)).toEqual({ shared: true });
     });
-    await screen.findByRole("img", { name: "Shared" });
   } finally {
     capture.stop();
   }
@@ -957,7 +1016,7 @@ it("stops sharing an owned query", async () => {
   const capture = captureWrites("PATCH");
   try {
     const { user } = await renderApp(`/acme/support-bot/sql?view=${SHARED_VIEW}`);
-    await user.click(await screen.findByRole("button", { name: /Shared one/ }));
+    await user.click(await screen.findByRole("button", { name: /Shared one/, expanded: false }));
     await user.click(await screen.findByRole("menuitem", { name: "Stop sharing" }));
     await waitFor(() => {
       expect(single(capture.bodies)).toEqual({ shared: false });
@@ -970,12 +1029,11 @@ it("stops sharing an owned query", async () => {
 it("lets an admin moderate someone else's shared query", async () => {
   server.use(...savedViewHandlers([sqlView({ owner_user_id: BOB_ID })]));
   const { user } = await renderApp(`/acme/support-bot/sql?view=${SHARED_VIEW}`);
-  await user.click(await screen.findByRole("button", { name: /Shared one/ }));
+  await user.click(await screen.findByRole("button", { name: /Shared one/, expanded: false }));
   expect(await screen.findByRole("menuitem", { name: "Stop sharing" })).toBeInTheDocument();
   expect(screen.getByRole("menuitem", { name: "Delete" })).toBeInTheDocument();
   expect(screen.queryByRole("menuitem", { name: "Save" })).toBeNull();
   expect(screen.queryByRole("menuitem", { name: "Rename…" })).toBeNull();
-  expect(screen.getByRole("img", { name: "Shared" })).toBeInTheDocument();
 });
 
 it("hides Stop sharing for an ownerless shared query", async () => {
@@ -983,7 +1041,7 @@ it("hides Stop sharing for an ownerless shared query", async () => {
   delete (orphan as { owner_user_id?: string }).owner_user_id;
   server.use(...savedViewHandlers([orphan]));
   const { user } = await renderApp(`/acme/support-bot/sql?view=${SHARED_VIEW}`);
-  await user.click(await screen.findByRole("button", { name: /Shared one/ }));
+  await user.click(await screen.findByRole("button", { name: /Shared one/, expanded: false }));
   await screen.findByRole("menuitem", { name: "Delete" });
   expect(screen.queryByRole("menuitem", { name: "Stop sharing" })).toBeNull();
 });
@@ -991,12 +1049,14 @@ it("hides Stop sharing for an ownerless shared query", async () => {
 it("viewers cannot share", async () => {
   asRole("viewer");
   const { user } = await renderApp(`/acme/support-bot/sql?view=${COST_VIEW}`);
-  await user.click(await screen.findByRole("button", { name: /Cost per model per day/ }));
+  await user.click(
+    await screen.findByRole("button", { name: /Cost per model per day/, expanded: false }),
+  );
   const share = await screen.findByRole("menuitem", { name: /^Share with project/ });
   expect(share).toHaveAttribute("aria-disabled", "true");
   expect(share).toHaveTextContent("Needs the member role");
   await user.keyboard("{Escape}");
-  await user.click(screen.getByRole("button", { name: /Cost per model per day/ }));
+  await user.click(screen.getByRole("button", { name: /Cost per model per day/, expanded: false }));
   await user.click(await screen.findByRole("menuitem", { name: "Save as…" }));
   expect(screen.getByRole("switch", { name: "Share with project" })).toBeDisabled();
 });
@@ -1005,7 +1065,7 @@ it("a viewer cannot change their shared query but may delete it", async () => {
   asRole("viewer");
   server.use(...savedViewHandlers([sqlView({})]));
   const { user } = await renderApp(`/acme/support-bot/sql?view=${SHARED_VIEW}`);
-  await user.click(await screen.findByRole("button", { name: /Shared one/ }));
+  await user.click(await screen.findByRole("button", { name: /Shared one/, expanded: false }));
   await screen.findByRole("menuitem", { name: /^Rename…/ });
   const items = screen.getAllByRole("menuitem");
   const save = items.find(
@@ -1033,14 +1093,17 @@ it("deletes the loaded query", async () => {
   await waitFor(() => {
     expect(router.state.location.search).toEqual({ range: "24h", view: COST_VIEW });
   });
-  await user.click(await screen.findByRole("button", { name: /Cost per model per day/ }));
+  await user.click(
+    await screen.findByRole("button", { name: /Cost per model per day/, expanded: false }),
+  );
   await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
   await user.click(screen.getByRole("button", { name: "Delete query" }));
   await waitFor(() => {
     expect(router.state.location.search).toEqual({ range: "24h" });
   });
-  await user.click(await screen.findByRole("button", { name: /Saved queries/ }));
-  expect(await screen.findByRole("menuitem", { name: "No saved queries" })).toBeInTheDocument();
+  await user.click(await screen.findByRole("button", { name: "Saved queries" }));
+  expect(await screen.findByRole("menuitem", { name: "Save as…" })).toBeInTheDocument();
+  expect(screen.queryByRole("menuitem", { name: "Delete" })).toBeNull();
 });
 
 it("shows a refused delete in the dialog", async () => {
@@ -1051,7 +1114,9 @@ it("shows a refused delete in the dialog", async () => {
     ),
   );
   const { user } = await renderApp(`/acme/support-bot/sql?view=${COST_VIEW}`);
-  await user.click(await screen.findByRole("button", { name: /Cost per model per day/ }));
+  await user.click(
+    await screen.findByRole("button", { name: /Cost per model per day/, expanded: false }),
+  );
   await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
   await user.click(screen.getByRole("button", { name: "Delete query" }));
   expect(await screen.findByText("cannot delete")).toBeInTheDocument();
@@ -1087,8 +1152,8 @@ it("saves and reloads an absolute range", async () => {
       params: { org: "acme", project: "support-bot" },
       search: { range: "1h" },
     });
-    await user.click(await screen.findByRole("button", { name: "Saved queries" }));
-    await user.click(await screen.findByRole("menuitem", { name: /Day/ }));
+    await showSaved(user);
+    await user.click(await within(sidebar()).findByRole("button", { name: "Day" }));
     await waitFor(() => {
       expect(router.state.location.search).toEqual({
         from: "2026-01-01T00:00:00Z",
@@ -1120,7 +1185,7 @@ it("loads saved params and runs them with Ctrl+Enter", async () => {
   });
 });
 
-it("loading another query replaces unsaved edits", async () => {
+it("opening another query opens it in a new tab and keeps this one's edits", async () => {
   server.use(
     ...savedViewHandlers([
       sqlView({ shared: false }),
@@ -1138,11 +1203,16 @@ it("loading another query replaces unsaved edits", async () => {
   });
   editorContent().focus();
   await user.keyboard("{Control>}{End}{/Control} + 1");
-  await user.click(await screen.findByRole("button", { name: /Shared one/ }));
-  await user.click(await screen.findByRole("menuitem", { name: "Other" }));
+  await showSaved(user);
+  await user.click(await within(sidebar()).findByRole("button", { name: "Other" }));
   await waitFor(() => {
     expect(editorContent().textContent).toBe("SELECT 2");
     expect(router.state.location.search.view).toBe(COST_VIEW);
+  });
+  await user.click(screen.getByRole("tab", { name: "Shared one" }));
+  await waitFor(() => {
+    expect(editorContent().textContent).toBe("SELECT 1 + 1");
+    expect(router.state.location.search.view).toBe(SHARED_VIEW);
   });
 });
 
@@ -1166,7 +1236,7 @@ it("an example clears the parameters and keeps the view", async () => {
 
 it("a history pick keeps a stale ?view= from reloading", async () => {
   localStorage.setItem(
-    "llmobs.sql.history.acme/support-bot",
+    "cetra.sql.history.acme/support-bot",
     JSON.stringify([{ query: "SELECT 9", params: {}, ranAt: "2026-01-01T00:00:00.000Z", rows: 1 }]),
   );
   const { user } = await renderApp(`/acme/support-bot/sql?view=${COST_VIEW}`);
@@ -1711,15 +1781,286 @@ it("hides the schema browser and remembers it", async () => {
   await user.click(await screen.findByRole("button", { name: "Schema" }));
   expect(screen.queryByRole("navigation", { name: "Schema" })).toBeNull();
   expect(screen.getByRole("button", { name: "Schema" })).toHaveAttribute("aria-pressed", "false");
-  expect(localStorage.getItem("llmobs.sql.schema")).toBe("closed");
+  expect(screen.queryByRole("complementary", { name: "SQL sidebar" })).toBeNull();
+  expect(localStorage.getItem("cetra.sql.schema")).toBe("closed");
+  await user.click(screen.getByRole("button", { name: "Schema" }));
+  expect(await screen.findByRole("navigation", { name: "Schema" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Schema" })).toHaveAttribute("aria-pressed", "true");
+  expect(localStorage.getItem("cetra.sql.schema")).toBe("open");
 });
 
 it("starts closed when it was closed", async () => {
-  localStorage.setItem("llmobs.sql.schema", "closed");
+  localStorage.setItem("cetra.sql.schema", "closed");
   await renderApp("/acme/support-bot/sql");
   expect(await screen.findByRole("button", { name: "Schema" })).toHaveAttribute(
     "aria-pressed",
     "false",
   );
   expect(screen.queryByRole("navigation", { name: "Schema" })).toBeNull();
+});
+
+/** The separator that resizes the panel which `startPanelId` names. */
+function splitSeparator(startPanelId: string): Element | null {
+  return document.querySelector(`[role="separator"][aria-controls="${startPanelId}"]`);
+}
+
+/**
+ * jsdom lays nothing out, so every rect is zero and a press at (0, 0) is over every separator.
+ * react-resizable-panels then focuses a separator on any press in the page, which steals the
+ * editor's focus and closes open menus. Parking the separators away from the origin keeps the
+ * press where it was made.
+ */
+beforeEach(() => {
+  const real = HTMLElement.prototype.getBoundingClientRect;
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (
+    this: HTMLElement,
+  ) {
+    return this.getAttribute("role") === "separator"
+      ? new DOMRect(10_000, 10_000)
+      : real.call(this);
+  });
+});
+
+it("lists the examples on the empty state and loads one into the editor", async () => {
+  const { user } = await renderApp("/acme/support-bot/sql");
+  await waitFor(editorContent);
+  expect(screen.getByText("Run a query to see results")).toBeInTheDocument();
+  expect(screen.getByText("Or start from an example:")).toBeInTheDocument();
+  // A card's name is followed by its query preview, so match the name as a prefix.
+  await user.click(screen.getByRole("button", { name: /^Users by spend/ }));
+  await waitFor(() => {
+    expect(editorContent().textContent).toContain("ORDER BY cost DESC");
+  });
+});
+
+it("renders the editor and results panels with a separator between them", async () => {
+  await renderApp("/acme/support-bot/sql");
+  await waitFor(editorContent);
+  expect(splitSeparator("editor")).not.toBeNull();
+  expect(splitSeparator("editor")?.getAttribute("aria-valuenow")).toBe("40");
+});
+
+it("restores a stored editor and results split", async () => {
+  localStorage.setItem("cetra.sql.split", JSON.stringify({ editor: 70, results: 30 }));
+  await renderApp("/acme/support-bot/sql");
+  await waitFor(() => {
+    expect(splitSeparator("editor")?.getAttribute("aria-valuenow")).toBe("70");
+  });
+});
+
+it("cancels a running query without showing an error", async () => {
+  storeDraft("SELECT 1");
+  // Never answers: only the cancel ends the request.
+  const sql = captureSql(() => new Promise<Response>(() => {}));
+  const { user } = await renderApp("/acme/support-bot/sql");
+  await user.click(screen.getByRole("button", { name: "Run" }));
+  await user.click(await screen.findByRole("button", { name: "Cancel" }));
+  expect(await screen.findByText("Query cancelled.")).toHaveAttribute("role", "status");
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(editorContent()).toHaveAttribute("aria-invalid", "false");
+  expect(screen.getByRole("button", { name: "Run" })).toBeEnabled();
+  expect(single(sql.bodies).query).toBe("SELECT 1");
+  // A cancelled run is recorded in history like a failed one.
+  expect(storedHistory()).toHaveLength(1);
+});
+
+it("a new tab starts empty and becomes the shown one", async () => {
+  storeDraft("SELECT 1");
+  const { user } = await renderApp("/acme/support-bot/sql");
+  await waitFor(() => {
+    expect(editorContent().textContent).toBe("SELECT 1");
+  });
+  await user.click(screen.getByRole("button", { name: "New query tab" }));
+  expect(queryTabs()).toHaveLength(2);
+  expect(screen.getByRole("tab", { name: "Query 2" })).toHaveAttribute("aria-selected", "true");
+  expect(screen.getByRole("tab", { name: "Query 1" })).toHaveAttribute("aria-selected", "false");
+  expect(screen.getByRole("button", { name: "Run" })).toBeDisabled();
+});
+
+it("switching tabs keeps each tab's editor text and its own result", async () => {
+  storeDraft("SELECT 1");
+  captureSql();
+  const { user } = await renderApp("/acme/support-bot/sql");
+  await user.click(screen.getByRole("button", { name: "Run" }));
+  await screen.findByRole("grid", { name: "Query results" });
+  await user.click(screen.getByRole("button", { name: "New query tab" }));
+  expect(screen.queryByRole("grid", { name: "Query results" })).toBeNull();
+  const content = await waitFor(editorContent);
+  content.focus();
+  await user.keyboard("SELECT 2");
+  await user.click(screen.getByRole("tab", { name: "Query 1" }));
+  await waitFor(() => {
+    expect(editorContent().textContent).toBe("SELECT 1");
+  });
+  expect(screen.getByRole("grid", { name: "Query results" })).toBeInTheDocument();
+  await user.click(screen.getByRole("tab", { name: "Query 2" }));
+  await waitFor(() => {
+    expect(editorContent().textContent).toBe("SELECT 2");
+  });
+  expect(screen.queryByRole("grid", { name: "Query results" })).toBeNull();
+});
+
+it("closing the shown tab shows its right neighbour", async () => {
+  storeTabs([{ query: "SELECT 'a'" }, { query: "SELECT 'b'" }, { query: "SELECT 'c'" }], 1);
+  const { user } = await renderApp("/acme/support-bot/sql");
+  await waitFor(() => {
+    expect(editorContent().textContent).toBe("SELECT 'b'");
+  });
+  await user.click(screen.getByRole("button", { name: "Close Query 2" }));
+  await waitFor(() => {
+    expect(editorContent().textContent).toBe("SELECT 'c'");
+  });
+  expect(queryTabs().map((tab) => tab.getAttribute("aria-label"))).toEqual(["Query 1", "Query 3"]);
+  expect(screen.getByRole("tab", { name: "Query 3" })).toHaveAttribute("aria-selected", "true");
+});
+
+it("keeps the tabs and their text when the page remounts", async () => {
+  const first = await renderApp("/acme/support-bot/sql");
+  await first.user.click(screen.getByRole("button", { name: "New query tab" }));
+  await first.user.type(editorContent(), "SELECT 9");
+  await waitFor(() => {
+    expect(storedDraft()).toEqual({ query: "SELECT 9", params: {} });
+  });
+  first.unmount();
+  await renderApp("/acme/support-bot/sql");
+  await waitFor(() => {
+    expect(editorContent().textContent).toBe("SELECT 9");
+  });
+  expect(queryTabs()).toHaveLength(2);
+});
+
+it("opens a saved query from the sidebar in a new tab, and selects that tab when opened again", async () => {
+  const { router, user } = await renderApp("/acme/support-bot/sql");
+  await showSaved(user);
+  await user.click(
+    await within(sidebar()).findByRole("button", { name: "Cost per model per day" }),
+  );
+  await waitFor(() => {
+    expect(editorContent().textContent).toBe(SEED_QUERY);
+  });
+  expect(queryTabs()).toHaveLength(2);
+  await user.click(screen.getByRole("tab", { name: "Query 1" }));
+  await waitFor(() => {
+    expect(router.state.location.search.view).toBeUndefined();
+  });
+  await user.click(within(sidebar()).getByRole("button", { name: "Cost per model per day" }));
+  await waitFor(() => {
+    expect(router.state.location.search.view).toBe(COST_VIEW);
+    expect(editorContent().textContent).toBe(SEED_QUERY);
+  });
+  expect(queryTabs()).toHaveLength(2);
+  expect(screen.getByRole("tab", { name: "Cost per model per day" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+});
+
+it("a ?view= link opens its query in a new tab beside the others", async () => {
+  storeDraft("SELECT 'kept'");
+  const { router, user } = await renderApp(`/acme/support-bot/sql?view=${COST_VIEW}`);
+  await waitFor(() => {
+    expect(editorContent().textContent).toBe(SEED_QUERY);
+  });
+  expect(queryTabs()).toHaveLength(2);
+  await user.click(screen.getByRole("tab", { name: "Query 1" }));
+  await waitFor(() => {
+    expect(editorContent().textContent).toBe("SELECT 'kept'");
+    expect(router.state.location.search.view).toBeUndefined();
+  });
+});
+
+it("selecting a tab moves ?view= to that tab's saved query", async () => {
+  storeTabs([{ query: SEED_QUERY, view: COST_VIEW }, { query: "SELECT 'plain'" }], 1);
+  const { router, user } = await renderApp("/acme/support-bot/sql");
+  await user.click(await screen.findByRole("tab", { name: "Cost per model per day" }));
+  await waitFor(() => {
+    expect(router.state.location.search.view).toBe(COST_VIEW);
+  });
+  expect(editorContent().textContent).toBe(SEED_QUERY);
+  await user.click(screen.getByRole("tab", { name: "Query 2" }));
+  await waitFor(() => {
+    expect(router.state.location.search.view).toBeUndefined();
+    expect(editorContent().textContent).toBe("SELECT 'plain'");
+  });
+});
+
+it("Format rewrites the editor text with the allowed functions", async () => {
+  const text = "select name, count(*) from traces";
+  const names = schemaFixture.functions.filter((fn) => fn.in_sql).map((fn) => fn.name);
+  storeDraft(text);
+  const { user } = await renderApp("/acme/support-bot/sql");
+  await waitFor(() => {
+    expect(editorContent().textContent).toBe(text);
+  });
+  await user.click(screen.getByRole("button", { name: "Format" }));
+  await waitFor(() => {
+    expect(editorContent().textContent).toBe(formatSql(text, names).replaceAll("\n", ""));
+  });
+});
+
+it("Format is disabled for a blank query", async () => {
+  storeDraft("   ");
+  await renderApp("/acme/support-bot/sql");
+  expect(await screen.findByRole("button", { name: "Format" })).toBeDisabled();
+});
+
+it("a tab whose query runs shows a spinner on its tab", async () => {
+  storeDraft("SELECT 1");
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  captureSql(async () => {
+    await gate;
+    return HttpResponse.json(resultDocument);
+  });
+  const { user } = await renderApp("/acme/support-bot/sql");
+  await user.click(screen.getByRole("button", { name: "Run" }));
+  await screen.findByText("Running…");
+  await user.click(screen.getByRole("button", { name: "New query tab" }));
+  expect(
+    within(screen.getByRole("tab", { name: "Query 1" })).getByRole("img", { name: "Running" }),
+  ).toBeInTheDocument();
+  expect(
+    within(screen.getByRole("tab", { name: "Query 2" })).queryByRole("img", { name: "Running" }),
+  ).toBeNull();
+  release();
+  await user.click(screen.getByRole("tab", { name: "Query 1" }));
+  await screen.findByRole("grid", { name: "Query results" });
+  expect(screen.queryByRole("img", { name: "Running" })).toBeNull();
+});
+
+it("New query tab is disabled at 20 tabs", async () => {
+  storeTabs(
+    Array.from({ length: 20 }, (_, index) => ({ query: `SELECT ${index}` })),
+    0,
+  );
+  await renderApp("/acme/support-bot/sql");
+  expect(await screen.findByRole("button", { name: "New query tab" })).toBeDisabled();
+  expect(queryTabs()).toHaveLength(20);
+});
+
+it("a saved query opened from the sidebar reuses a blank tab", async () => {
+  storeDraft("");
+  const { router, user } = await renderApp("/acme/support-bot/sql");
+  // The placeholder shows in an empty editor, so only wait for the editor to mount.
+  await waitFor(editorContent);
+  await showSaved(user);
+  await user.click(
+    await within(sidebar()).findByRole("button", { name: "Cost per model per day" }),
+  );
+  await waitFor(() => {
+    expect(editorContent().textContent).toBe(SEED_QUERY);
+    expect(router.state.location.search.view).toBe(COST_VIEW);
+  });
+  expect(queryTabs()).toHaveLength(1);
+});
+
+it("a ?view= link reuses a blank tab", async () => {
+  storeDraft("   ");
+  await renderApp(`/acme/support-bot/sql?view=${COST_VIEW}`);
+  await waitFor(() => {
+    expect(editorContent().textContent).toBe(SEED_QUERY);
+  });
+  expect(queryTabs()).toHaveLength(1);
 });

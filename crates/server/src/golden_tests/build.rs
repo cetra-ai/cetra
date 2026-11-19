@@ -20,9 +20,11 @@ use crate::admin_socket::{ADMIN_PROTOCOL, AdminEnvelope, AdminRequest, decode_re
 use crate::alerts::channel::{ChannelConfig, seal_config};
 use crate::api::account::OrgRole;
 use crate::api::alerts::AlertCondition;
+use crate::api::dashboards::Definition;
 use crate::api::evaluators::EvaluatorKind;
 use crate::api::org_sso::JitRole;
 use crate::api::saved_views::SavedViewKind;
+use crate::api::score_definitions::ScoreDirection;
 use crate::auth::password::Hasher;
 use crate::auth::roles::{KeyScope, ProjectOverride};
 use crate::auth::secret::hash_token;
@@ -35,6 +37,7 @@ use crate::meta::{
     api_keys::{self, NewApiKey},
     backfills::{self, BackfillEnd, NewBackfill},
     connections::{self, ConnectionFields},
+    dashboards::{self, NewDashboard},
     datasets::{self, DatasetFields, NewRevision, VersionChange},
     deletions::{self, ActorKind, DeletionKind, DeletionState, NewDeletion, RequestDetails},
     email_verifications, entitlements,
@@ -55,10 +58,10 @@ use crate::meta::{
     web_sessions::{self, NewSession},
 };
 use crate::test_support;
-use llmobs_core::enums::ScoreDataType;
-use llmobs_core::ids::{OrgId, ProjectId, SpanId, TraceId};
-use llmobs_eval::OutputScore;
-use llmobs_otel::{PriceRow, PriceScope};
+use cetra_core::enums::ScoreDataType;
+use cetra_core::ids::{OrgId, ProjectId, SpanId, TraceId};
+use cetra_eval::OutputScore;
+use cetra_otel::{PriceRow, PriceScope};
 
 /// One call on the admin socket: the request line as sent (with `to` replaced) and the response.
 #[derive(Debug, Clone)]
@@ -627,6 +630,11 @@ async fn populate(conn: &mut SqliteConnection, s: &Scenario) -> Result<(), MetaE
                 min_value: (data_type == ScoreDataType::Numeric).then_some(0.0),
                 max_value: (data_type == ScoreDataType::Numeric).then_some(1.0),
                 description: Some(format!("golden {kind}")),
+                direction: if data_type == ScoreDataType::Numeric {
+                    ScoreDirection::Higher
+                } else {
+                    ScoreDirection::None
+                },
                 archived_at: None,
             },
             now,
@@ -649,6 +657,39 @@ async fn populate(conn: &mut SqliteConnection, s: &Scenario) -> Result<(), MetaE
         now,
     )
     .await?;
+
+    // Dashboards: one custom dashboard and the project's stored Overview (kind 'overview').
+    let definition: Definition = serde_json::from_value(json!({"widgets": [
+        {
+            "id": "heading", "title": "Traffic",
+            "layout": {"x": 0, "y": 0, "w": 60, "h": 1},
+            "kind": "heading"
+        },
+        {
+            "id": "requests", "title": "Requests",
+            "layout": {"x": 0, "y": 1, "w": 6, "h": 4},
+            "kind": "chart", "chart": {"type": "line"},
+            "query": {
+                "source": "traces",
+                "measures": [{"agg": "count", "label": "Requests"}],
+                "breakdown": {"field": "models", "limit": 5}
+            }
+        }
+    ]}))
+    .expect("the golden dashboard definition parses");
+    dashboards::insert(
+        conn,
+        NewDashboard {
+            project_id: p1.id,
+            name: "golden dashboard".to_owned(),
+            description: Some("golden".to_owned()),
+            definition: definition.clone(),
+            user: owner.id,
+        },
+        now,
+    )
+    .await?;
+    dashboards::save_overview(conn, p1.id, None, &definition, owner.id, now).await?;
 
     // Alerts: one channel of each kind, a rule on two of them, one event with a delivered and a
     // failed delivery (the dispatcher leaves finished deliveries alone).

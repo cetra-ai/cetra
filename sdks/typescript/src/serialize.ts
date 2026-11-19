@@ -15,8 +15,8 @@ export const MAX_DEPTH = 32;
 
 const DATA_URI_PREFIX = "data:application/octet-stream;base64,";
 const BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-const MAX_DEPTH_MARKER = "[llmobs: max depth]";
-const CYCLE_MARKER = "[llmobs: cycle]";
+const MAX_DEPTH_MARKER = "[cetra: max depth]";
+const CYCLE_MARKER = "[cetra: cycle]";
 
 /** § Serialization rules 2-4: convert `value` to a JSON-compatible value. */
 export function toJsonable(value: unknown): unknown {
@@ -60,7 +60,7 @@ export function truncate(text: string, format: Format): [string, Format] {
     cut--;
   }
   const head = utf8Decode(bytes.subarray(0, cut));
-  return [`${head}…[llmobs: truncated, original ${bytes.length} bytes]`, "text"];
+  return [`${head}…[cetra: truncated, original ${bytes.length} bytes]`, "text"];
 }
 
 /** § Span attributes: a metadata value as an OTel attribute value. */

@@ -4,14 +4,14 @@
 //! attribute is consumed. Fallback keys are peeked and left unread for later
 //! phases.
 
-use llmobs_core::enums::SpanKind;
+use cetra_core::enums::SpanKind;
 
 use crate::bag::AttrBag;
 use crate::value::as_str;
 
 /// Kind of one span. Missing and unrecognized values fall through to `span`.
 pub(crate) fn span_kind(bag: &mut AttrBag<'_>) -> SpanKind {
-    if let Some(kind) = decide(bag, "llmobs.span.kind", |text| SpanKind::parse(text).ok()) {
+    if let Some(kind) = decide(bag, "cetra.span.kind", |text| SpanKind::parse(text).ok()) {
         return kind;
     }
     if let Some(kind) = decide(bag, "gen_ai.operation.name", genai_operation) {
@@ -195,7 +195,7 @@ mod tests {
     }
 
     #[test]
-    fn llmobs_span_kind_is_the_parsed_kind() {
+    fn cetra_span_kind_is_the_parsed_kind() {
         for (text, kind) in [
             ("llm", SpanKind::Llm),
             ("embedding", SpanKind::Embedding),
@@ -209,29 +209,29 @@ mod tests {
             ("span", SpanKind::Span),
         ] {
             let attrs = [
-                string_attr("llmobs.span.kind", text),
+                string_attr("cetra.span.kind", text),
                 string_attr("gen_ai.operation.name", "chat"),
             ];
             let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
             assert_eq!(span_kind(&mut bag), kind, "{text}");
-            assert_eq!(bag.state("llmobs.span.kind"), Some(Use::Consumed));
+            assert_eq!(bag.state("cetra.span.kind"), Some(Use::Consumed));
             assert_eq!(bag.state("gen_ai.operation.name"), Some(Use::Unread));
         }
         assert_eq!(
-            kind_of(&[string_attr("llmobs.span.kind", "LLM")]),
+            kind_of(&[string_attr("cetra.span.kind", "LLM")]),
             SpanKind::Span
         );
     }
 
     #[test]
-    fn an_invalid_llmobs_span_kind_falls_through() {
+    fn an_invalid_cetra_span_kind_falls_through() {
         let attrs = [
-            string_attr("llmobs.span.kind", "nope"),
+            string_attr("cetra.span.kind", "nope"),
             string_attr("gen_ai.operation.name", "chat"),
         ];
         let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
         assert_eq!(span_kind(&mut bag), SpanKind::Llm);
-        assert_eq!(bag.state("llmobs.span.kind"), Some(Use::Unread));
+        assert_eq!(bag.state("cetra.span.kind"), Some(Use::Unread));
         assert_eq!(bag.state("gen_ai.operation.name"), Some(Use::Consumed));
     }
 

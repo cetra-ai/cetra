@@ -120,20 +120,46 @@ export type DatasetTab = "items" | "versions" | "experiments" | "settings";
 
 const DATASET_TABS: readonly DatasetTab[] = ["items", "versions", "experiments", "settings"];
 
-/**
- * The dataset page's search params. An unknown `tab` is dropped; `version` is a non-negative
- * integer, given as a number or a string of digits, and anything else is dropped.
- */
-export function parseDatasetSearch(search: Record<string, unknown>): {
+/** The dataset page's search params (see `parseDatasetSearch`). */
+export type DatasetSearch = {
   tab?: DatasetTab;
   version?: number;
-} {
+  /** The open item's id. */
+  item?: string;
+  /** The item search text, trimmed (D-J-22). */
+  q?: string;
+};
+
+/** The longest item search, in characters (D-J-22). */
+export const MAX_SEARCH_CHARS = 200;
+
+/**
+ * The dataset page's search params. An unknown `tab` is dropped; `version` is a non-negative
+ * integer, given as a number or a string of digits, and anything else is dropped; `item` is a
+ * non-empty string, and anything else is dropped; `q` is trimmed and kept when it is 1 to 200
+ * characters, and dropped otherwise.
+ */
+export function parseDatasetSearch(search: Record<string, unknown>): DatasetSearch {
   const tab = DATASET_TABS.find((candidate) => candidate === search.tab);
   const version = parseVersion(search.version);
+  const item = typeof search.item === "string" && search.item !== "" ? search.item : undefined;
+  const q = parseSearchText(search.q);
   return {
     ...(tab ? { tab } : {}),
     ...(version !== undefined ? { version } : {}),
+    ...(item !== undefined ? { item } : {}),
+    ...(q !== undefined ? { q } : {}),
   };
+}
+
+/** The trimmed text when it is 1 to 200 characters (code points, as the server counts), else undefined. */
+export function parseSearchText(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const text = value.trim();
+  const length = [...text].length;
+  return length >= 1 && length <= MAX_SEARCH_CHARS ? text : undefined;
 }
 
 function parseVersion(value: unknown): number | undefined {
@@ -240,4 +266,128 @@ export function mappingProblems(rows: { column: string; target: ImportTarget }[]
     }
   }
   return problems;
+}
+
+const FIELD_SEPARATOR = " · ";
+
+/**
+ * The lines of `text` joined into one, whitespace collapsed, with the Markdown markers that start
+ * a line (headings, quotes, list bullets) removed, so a Markdown prompt previews by its words.
+ */
+function oneLine(text: string): string {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^\s*(?:#{1,6}\s+|>\s*|[-*+]\s+|\d+[.)]\s+)/, "").trim())
+    .filter((line) => line.length > 0)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** `text` cut to at most `max` characters, the last one being "…" when it is cut. */
+function cutText(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, Math.max(0, max - 1))}…` : text;
+}
+
+type Message = Record<string, unknown> & { role: string };
+
+/** A non-empty array whose every element is an object with a string `role`. */
+function isMessages(value: unknown[]): value is Message[] {
+  return (
+    value.length > 0 &&
+    value.every(
+      (item) =>
+        typeof item === "object" &&
+        item !== null &&
+        !Array.isArray(item) &&
+        typeof (item as { role?: unknown }).role === "string",
+    )
+  );
+}
+
+/** The content of the last user message, else of the last message with string content; none gives undefined. */
+function messagesContent(messages: Message[]): string | undefined {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message?.role === "user" && typeof message.content === "string") {
+      return message.content;
+    }
+  }
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const content = messages[index]?.content;
+    if (typeof content === "string") {
+      return content;
+    }
+  }
+  return undefined;
+}
+
+/** A value inside a top-level object: a string is its first line (quoted when empty or containing " · "). */
+function fieldText(value: unknown): string {
+  if (value === undefined) {
+    return "—";
+  }
+  if (typeof value === "string") {
+    const line = oneLine(value);
+    return line === "" || line.includes(FIELD_SEPARATOR) ? `"${line}"` : line;
+  }
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    if (isMessages(value)) {
+      const content = messagesContent(value);
+      return content === undefined ? `[${value.length}]` : fieldText(content);
+    }
+    return `[${value.length}]`;
+  }
+  return Object.keys(value).length === 0 ? "{}" : "{…}";
+}
+
+/** A top-level value, before the cut. */
+function previewTop(value: unknown): string {
+  if (value === undefined || value === null) {
+    return "—";
+  }
+  if (typeof value === "string") {
+    const line = oneLine(value);
+    return line === "" ? "—" : line;
+  }
+  if (typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    if (isMessages(value)) {
+      const content = messagesContent(value);
+      return content === undefined ? `[${value.length}]` : previewTop(content);
+    }
+    if (value.length === 0) {
+      return "[0]";
+    }
+    return `[${value.length}] ${previewTop(value[0])}`;
+  }
+  const fields = Object.entries(value).filter(([, member]) => member !== undefined);
+  if (fields.length === 0) {
+    return "{}";
+  }
+  return fields.map(([key, member]) => `${key}: ${fieldText(member)}`).join(FIELD_SEPARATOR);
+}
+
+/**
+ * A one-line preview of a dataset item's value, at most `max` characters (the "…" counts).
+ * A string shows its first line; an object shows `key: value` pairs joined by " · " (only the top
+ * level is expanded: nested objects are `{…}`, nested arrays `[n]`); a chat array (objects with a
+ * string `role`) shows the content of its last user message, the last string otherwise, else `[n]`;
+ * another array shows `[n]` and its first element; null and undefined show "—".
+ */
+export function previewFields(value: unknown, max = 160): string {
+  return cutText(previewTop(value), max);
+}
+
+/**
+ * The short form of a dataset item or revision id: its last 8 hex digits. UUIDv7 ids made in the
+ * same millisecond (an import, a batch add) share their first 8, so `shortId` would repeat.
+ */
+export function itemShortId(id: string): string {
+  return id.replace(/-/g, "").slice(-8);
 }

@@ -67,6 +67,55 @@ const ALTERING_CASES: &[AlteringCase] = &[
             FROM web_sessions w JOIN users u ON u.id = w.user_id",
         expected: "NULL|0",
     },
+    AlteringCase {
+        version: 18,
+        seed: &[
+            "INSERT INTO usage_daily (org_id, project_id, day, spans, bytes, scores,
+            judge_input_tokens, judge_output_tokens, judge_cost_usd)
+            VALUES ('018f6b4e-7c1a-7c1a-8c1a-0000000000d1', '018f6b4e-7c1a-7c1a-8c1a-0000000000d2',
+            '2026-11-01', 5, 600, 2, 30, 40, 0.5)",
+        ],
+        read: "SELECT org_id || '|' || project_id || '|' || day || '|' || spans || '|' || bytes
+            || '|' || scores || '|' || judge_input_tokens || '|' || judge_output_tokens || '|'
+            || judge_cost_usd || '|' || genai_log_events FROM usage_daily",
+        expected: "018f6b4e-7c1a-7c1a-8c1a-0000000000d1|018f6b4e-7c1a-7c1a-8c1a-0000000000d2|2026-11-01|5|600|2|30|40|0.5|0",
+    },
+    AlteringCase {
+        version: 19,
+        seed: &[
+            "INSERT INTO orgs (id, name, slug, state, created_at, updated_at)
+            VALUES ('018f6b4e-7c1a-7c1a-8c1a-0000000000e1', 'Acme', 'acme', 'active', 1, 2)",
+            "INSERT INTO projects (id, org_id, name, slug, created_at, updated_at)
+            VALUES ('018f6b4e-7c1a-7c1a-8c1a-0000000000e2', '018f6b4e-7c1a-7c1a-8c1a-0000000000e1',
+            'P', 'p', 1, 2)",
+            "INSERT INTO score_definitions (id, project_id, name, data_type, categories, min_value,
+            max_value, description, archived_at, created_at, updated_at)
+            VALUES ('018f6b4e-7c1a-7c1a-8c1a-0000000000e3', '018f6b4e-7c1a-7c1a-8c1a-0000000000e2',
+            'accuracy', 'numeric', NULL, 0.0, 1.0, 'kept', NULL, 3, 4)",
+        ],
+        read: "SELECT id || '|' || project_id || '|' || name || '|' || data_type || '|'
+            || min_value || '|' || max_value || '|' || description || '|' || created_at || '|'
+            || updated_at || '|' || direction FROM score_definitions",
+        expected: "018f6b4e-7c1a-7c1a-8c1a-0000000000e3|018f6b4e-7c1a-7c1a-8c1a-0000000000e2|accuracy|numeric|0.0|1.0|kept|3|4|none",
+    },
+    AlteringCase {
+        version: 22,
+        seed: &[
+            "INSERT INTO orgs (id, name, slug, state, created_at, updated_at)
+            VALUES ('018f6b4e-7c1a-7c1a-8c1a-0000000000f1', 'Acme', 'acme', 'active', 1, 2)",
+            "INSERT INTO projects (id, org_id, name, slug, created_at, updated_at)
+            VALUES ('018f6b4e-7c1a-7c1a-8c1a-0000000000f2', '018f6b4e-7c1a-7c1a-8c1a-0000000000f1',
+            'P', 'p', 1, 2)",
+            "INSERT INTO dashboards (id, project_id, name, description, definition, version,
+            created_at, updated_at)
+            VALUES ('018f6b4e-7c1a-7c1a-8c1a-0000000000f3', '018f6b4e-7c1a-7c1a-8c1a-0000000000f2',
+            'Costs', 'kept', '{\"widgets\":[]}', 3, 5, 6)",
+        ],
+        read: "SELECT id || '|' || project_id || '|' || name || '|' || description || '|'
+            || definition || '|' || version || '|' || created_at || '|' || updated_at || '|'
+            || kind FROM dashboards",
+        expected: "018f6b4e-7c1a-7c1a-8c1a-0000000000f3|018f6b4e-7c1a-7c1a-8c1a-0000000000f2|Costs|kept|{\"widgets\":[]}|3|5|6|custom",
+    },
 ];
 
 /// The statements of a migration: `--` comments dropped, split on `;`, whitespace

@@ -4,9 +4,9 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 const DEFAULT_DATASET = "my-dataset";
 
 function pythonSnippet(name: string): string {
-  return `import llmobs
+  return `import cetra
 
-llmobs.init()  # LLMOBS_API_KEY: a secret key with the ingest, read and write scopes
+cetra.init()  # CETRA_API_KEY: a secret key with the ingest, read and write scopes
 
 def task(input):
     return my_app(input)
@@ -14,17 +14,17 @@ def task(input):
 def exact(output, expected):
     return output == expected
 
-result = llmobs.evaluate(dataset=${name}, task=task, scorers=[exact])
+result = cetra.evaluate(dataset=${name}, task=task, scorers=[exact])
 print(result.summary())
 `;
 }
 
 function typescriptSnippet(name: string): string {
-  return `import * as llmobs from "llmobs";
+  return `import * as cetra from "@cetra-ai/sdk";
 
-llmobs.init(); // LLMOBS_API_KEY: a secret key with the ingest, read and write scopes
+cetra.init(); // CETRA_API_KEY: a secret key with the ingest, read and write scopes
 
-const result = await llmobs.evaluate({
+const result = await cetra.evaluate({
   dataset: ${name},
   task: async (input) => myApp(input),
   scorers: [function exact({ output, expected }) { return output === expected; }],
@@ -47,7 +47,7 @@ export function EvaluateSnippet({ datasetName }: { datasetName?: string }) {
       </TabsList>
       <TabsContent value="python">
         <div className="relative">
-          <pre className="overflow-x-auto rounded-md border bg-muted p-3 text-xs">
+          <pre className="overflow-x-auto rounded-md border bg-muted p-3 text-body">
             <code>{snippets.python}</code>
           </pre>
           <div className="absolute top-2 right-2">
@@ -57,7 +57,7 @@ export function EvaluateSnippet({ datasetName }: { datasetName?: string }) {
       </TabsContent>
       <TabsContent value="typescript">
         <div className="relative">
-          <pre className="overflow-x-auto rounded-md border bg-muted p-3 text-xs">
+          <pre className="overflow-x-auto rounded-md border bg-muted p-3 text-body">
             <code>{snippets.typescript}</code>
           </pre>
           <div className="absolute top-2 right-2">

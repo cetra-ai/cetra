@@ -1,4 +1,4 @@
-# OpenObserve OTLP trace ingestion — research notes for llmobs B1 (`llmobs-otel`, spec 02)
+# OpenObserve OTLP trace ingestion — research notes for cetra B1 (`cetra-otel`, spec 02)
 
 Repo: `/home/sebastien/travaux/openobserve`, local checkout HEAD `8dcaf5e8e` (2026-09-20). Paths are relative to `src/` unless they start with `tests/` or `Cargo.toml`. This session did not run `git` on that repo. History comes from `gh search issues/commits` and `gh issue/pr view` on `openobserve/openobserve`, up to 2026-11-10. Issues and PRs newer than HEAD are marked "(post-HEAD)": the local code still has those bugs.
 
@@ -191,7 +191,7 @@ Short version: OpenObserve converts every span to a **flat JSON object**, one co
 
 ---
 
-## Recommendations for llmobs B1
+## Recommendations for cetra B1
 
 **Adopt**
 1. **Gate the LLM work with cheap checks**, like `is_llm_trace` (`gen_ai_operation.rs:187`), but only on convention-specific keys. Never on bare `input`, `model` or `prompt`.

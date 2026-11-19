@@ -1,4 +1,10 @@
-import { queryOptions } from "@tanstack/react-query";
+import {
+  keepPreviousData,
+  type QueryClient,
+  queryOptions,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { $api, api } from "./client";
 import { projectRef } from "./project-ref";
 import type { Schema } from "./types";
@@ -144,6 +150,7 @@ export function scoresQuery(
     span_id?: string;
     session_id?: string;
     rule_id?: string;
+    evaluator_id?: string;
     target?: Schema<"ScoreTargetKind">;
     limit?: number;
   },
@@ -273,16 +280,48 @@ export function userListOptions(
   };
 }
 
+/** The users with the highest cost in a list's scope (UP-7). */
+export function topUsersQuery(
+  org: string,
+  project: string,
+  query: {
+    from: string;
+    to: string;
+    filter?: string;
+    includeEval?: boolean;
+    includeExperiments?: boolean;
+    limit: number;
+  },
+) {
+  return $api.queryOptions("get", "/api/v1/projects/{project}/users", {
+    params: {
+      path: { project: projectRef(org, project) },
+      query: {
+        limit: query.limit,
+        from: query.from,
+        to: query.to,
+        sort: "cost_total",
+        order: "desc",
+        ...(query.filter ? { filter: query.filter } : {}),
+        ...(query.includeEval ? { include_eval: true } : {}),
+        ...(query.includeExperiments ? { include_experiments: true } : {}),
+      },
+    },
+  });
+}
+
 export function userQuery(
   org: string,
   project: string,
   userId: string,
-  flags: { includeEval?: boolean; includeExperiments?: boolean },
+  flags: { from?: string; to?: string; includeEval?: boolean; includeExperiments?: boolean },
 ) {
   return $api.queryOptions("get", "/api/v1/projects/{project}/users/{user_id}", {
     params: {
       path: { project: projectRef(org, project), user_id: userId },
       query: {
+        ...(flags.from ? { from: flags.from } : {}),
+        ...(flags.to ? { to: flags.to } : {}),
         ...(flags.includeEval ? { include_eval: true } : {}),
         ...(flags.includeExperiments ? { include_experiments: true } : {}),
       },
@@ -290,32 +329,102 @@ export function userQuery(
   });
 }
 
-export function metricsQuery(
-  org: string,
-  project: string,
-  query: {
-    from: string;
-    to: string;
-    filter?: string;
-    groupBy?: Schema<"MetricsGroupBy">;
-    includeEval?: boolean;
-    includeExperiments?: boolean;
-  },
-) {
-  return $api.queryOptions("get", "/api/v1/projects/{project}/metrics", {
-    params: {
-      path: { project: projectRef(org, project) },
-      query: {
-        from: query.from,
-        to: query.to,
-        bucket: "auto",
-        ...(query.filter ? { filter: query.filter } : {}),
-        ...(query.groupBy ? { group_by: query.groupBy } : {}),
-        ...(query.includeEval ? { include_eval: true } : {}),
-        ...(query.includeExperiments ? { include_experiments: true } : {}),
+/**
+ * One facet of a list (D1). The client caches each answer for 30 seconds; the server keeps none.
+ * Every facet request goes through here, so readers of one URL share one query shape.
+ */
+export type FacetAsk = {
+  view: Schema<"FacetView">;
+  field: string;
+  from: string;
+  to: string;
+  filter?: string;
+  search?: string;
+  includeEval?: boolean;
+  includeExperiments?: boolean;
+  q?: string;
+  limit?: number;
+};
+
+export function facetQuery(org: string, project: string, query: FacetAsk) {
+  return {
+    ...$api.queryOptions("get", "/api/v1/projects/{project}/facets", {
+      params: {
+        path: { project: projectRef(org, project) },
+        query: {
+          view: query.view,
+          field: query.field,
+          from: query.from,
+          to: query.to,
+          ...(query.filter ? { filter: query.filter } : {}),
+          ...(query.search ? { search: query.search } : {}),
+          ...(query.includeEval ? { include_eval: true } : {}),
+          ...(query.includeExperiments ? { include_experiments: true } : {}),
+          ...(query.q ? { q: query.q } : {}),
+          ...(query.limit === undefined ? {} : { limit: query.limit }),
+        },
       },
-    },
+    }),
+    staleTime: 30_000,
+    // Keeps the previous answer on screen while a filter, q or limit change refetches.
+    placeholderData: keepPreviousData,
+  };
+}
+
+/**
+ * A facet the panel shows. A list fixes "now" when it opens, so coming back to it asks for a
+ * slightly later window that is not cached yet. Until that answer arrives, this shows the
+ * latest cached answer to the same question over a window of the same length, instead of a
+ * loading state.
+ */
+export function useFacetQuery(org: string, project: string, query: FacetAsk) {
+  const client = useQueryClient();
+  const options = facetQuery(org, project, query);
+  return useQuery({
+    ...options,
+    placeholderData: (previous) => previous ?? latestFacetAnswer(client, options.queryKey),
   });
+}
+
+type FacetKey = ReturnType<typeof facetQuery>["queryKey"];
+type FacetAnswer = Schema<"FacetsResponse">;
+
+function windowLength(from: string | undefined, to: string | undefined): number | undefined {
+  return from === undefined || to === undefined ? undefined : Date.parse(to) - Date.parse(from);
+}
+
+/** The newest cached answer whose key differs from `key` only by a window of the same length. */
+export function latestFacetAnswer(client: QueryClient, key: FacetKey): FacetAnswer | undefined {
+  const [method, path, init] = key;
+  const wanted = init?.params;
+  if (wanted === undefined) {
+    return undefined;
+  }
+  const { from, to, ...rest } = wanted.query;
+  const length = windowLength(from, to);
+  if (length === undefined) {
+    return undefined;
+  }
+  const same = JSON.stringify([wanted.path, rest]);
+  let best: { at: number; data: FacetAnswer } | undefined;
+  for (const cached of client.getQueryCache().findAll({ queryKey: [method, path] })) {
+    const data = cached.state.data as FacetAnswer | undefined;
+    const params = (cached.queryKey[2] as typeof init)?.params;
+    if (data === undefined || params === undefined) {
+      continue;
+    }
+    const { from: cachedFrom, to: cachedTo, ...cachedRest } = params.query;
+    if (
+      windowLength(cachedFrom, cachedTo) !== length ||
+      JSON.stringify([params.path, cachedRest]) !== same
+    ) {
+      continue;
+    }
+    if (best === undefined || cached.state.dataUpdatedAt > best.at) {
+      best = { at: cached.state.dataUpdatedAt, data };
+    }
+  }
+  return best?.data;
 }
 
 export function savedViewsQuery(org: string, project: string, kind: Schema<"SavedViewKind">) {

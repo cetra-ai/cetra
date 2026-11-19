@@ -3,7 +3,7 @@
 //! Spec 01 § Canonical message format. Part keys are accepted in both camelCase
 //! and snake_case. `role: "model"` becomes `assistant`.
 
-use llmobs_core::message::{Message, Modality, Part, Role};
+use cetra_core::message::{Message, Modality, Part, Role};
 use serde_json::{Map, Value as Json};
 
 use super::ConvertError;
@@ -317,7 +317,7 @@ fn parts_json(parts: &[Part]) -> Json {
 mod tests {
     use super::{gemini_contents, gemini_system_instruction};
     use crate::convert::ConvertError;
-    use llmobs_core::message::messages_to_json;
+    use cetra_core::message::messages_to_json;
     use serde_json::json;
 
     fn contents(value: &serde_json::Value) -> String {

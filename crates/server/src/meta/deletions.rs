@@ -3,7 +3,7 @@
 //! The rows outlive their org and project: there are no foreign keys to
 //! `orgs` or `projects`, and nothing here deletes a row.
 
-use llmobs_core::ids::{OrgId, ProjectId, TraceId};
+use cetra_core::ids::{OrgId, ProjectId, TraceId};
 use serde::{Deserialize, Serialize};
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
@@ -1164,7 +1164,7 @@ fn guard_project(text: Option<String>) -> Result<ProjectId, MetaError> {
 
 #[cfg(test)]
 mod tests {
-    use llmobs_core::ids::{OrgId, ProjectId, TraceId};
+    use cetra_core::ids::{OrgId, ProjectId, TraceId};
     use uuid::Uuid;
 
     use super::*;

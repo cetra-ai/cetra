@@ -4,7 +4,7 @@ import { getFetch, gzip, runtimeGlobals, timeoutSignal, utf8Decode, utf8Encode }
 
 describe("gzip", () => {
   it("round-trips through DecompressionStream", async () => {
-    const text = "llmobs traces go brrr — with multi-byte characters 🎉".repeat(50);
+    const text = "cetra traces go brrr — with multi-byte characters 🎉".repeat(50);
     const compressed = await gzip(utf8Encode(text));
     const { Blob, DecompressionStream, Response } = runtimeGlobals();
     if (compressed === undefined) {

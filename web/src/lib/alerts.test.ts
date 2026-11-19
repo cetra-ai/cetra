@@ -11,7 +11,8 @@ import {
   formFromRule,
   previewCondition,
   previewParams,
-  previewSeries,
+  previewQuery,
+  previewRows,
   type RuleFormValues,
   thresholdInPercent,
   thresholdUnit,
@@ -331,29 +332,71 @@ it("previews over buckets as wide as the window", () => {
   expect(previewParams("1h", now).bucket).toBe("1h");
 });
 
-it("previews a pass rate score as the average series of the score", () => {
+it("previews a pass rate score as the average of the score", () => {
   expect(
-    previewSeries(formWith({ metric: "score", aggregation: "pass_rate", scoreName: " ok " })),
-  ).toEqual({ metric: "score_avg", group: "ok" });
+    previewQuery(formWith({ metric: "score", aggregation: "pass_rate", scoreName: " ok " })),
+  ).toEqual({
+    query: {
+      source: "scores",
+      filter: "name = 'ok'",
+      measures: [{ agg: "avg", field: "value_num" }],
+    },
+    divisor: 1,
+  });
 });
 
-it("picks the series to preview", () => {
-  expect(previewSeries({ metric: "error_rate", target: "trace", scoreName: "" })).toEqual({
-    metric: "error_rate",
+it("picks the widget query to preview", () => {
+  expect(previewQuery({ metric: "error_rate", target: "trace", scoreName: "" })).toEqual({
+    query: { source: "traces", measures: [{ agg: "rate", where: "status = 'error'" }] },
+    divisor: 1,
   });
-  expect(previewSeries({ metric: "cost", target: "trace", scoreName: "" })).toEqual({
-    metric: "cost",
+  expect(previewQuery({ metric: "cost", target: "trace", scoreName: "" })).toEqual({
+    query: { source: "traces", measures: [{ agg: "sum", field: "cost_total" }] },
+    divisor: 1,
   });
-  expect(previewSeries({ metric: "latency_p95", target: "trace", scoreName: "" })).toEqual({
-    metric: "latency_p95",
+  expect(previewQuery({ metric: "latency_p95", target: "trace", scoreName: "" })).toEqual({
+    query: { source: "traces", measures: [{ agg: "p95", field: "duration_ns" }] },
+    divisor: 1_000_000,
   });
-  expect(previewSeries({ metric: "latency_p95", target: "llm_span", scoreName: "" })).toBe(
+  expect(previewQuery({ metric: "latency_p95", target: "llm_span", scoreName: "" })).toBe(
     undefined,
   );
-  expect(previewSeries({ metric: "score", target: "trace", scoreName: "ok" })).toEqual({
-    metric: "score_avg",
-    group: "ok",
+  expect(previewQuery({ metric: "score", target: "trace", scoreName: "ok" })).toEqual({
+    query: {
+      source: "scores",
+      filter: "name = 'ok'",
+      measures: [{ agg: "avg", field: "value_num" }],
+    },
+    divisor: 1,
   });
+});
+
+it("turns an answer into preview rows in the condition's unit", () => {
+  const query = {
+    source: "traces" as const,
+    measures: [{ agg: "p95" as const, field: "duration_ns" }],
+  };
+  const answer = {
+    shape: "series" as const,
+    bucket_ns: 60_000_000_000,
+    series: [
+      {
+        measure: 0,
+        group: undefined,
+        other: false,
+        points: [
+          { time: "2026-01-03T00:00:00Z", value: 2_000_000_000, rows: 3 },
+          { time: "2026-01-03T00:02:00Z", value: 500_000_000, rows: 1 },
+        ],
+      },
+    ],
+  };
+  expect(previewRows(query, answer, 1_000_000)).toEqual([
+    { time: Date.parse("2026-01-03T00:00:00Z"), all: 2000 },
+    { time: Date.parse("2026-01-03T00:01:00Z"), all: null },
+    { time: Date.parse("2026-01-03T00:02:00Z"), all: 500 },
+  ]);
+  expect(previewRows(query, undefined, 1)).toEqual([]);
 });
 
 it("previews a zero threshold while the form is invalid", () => {

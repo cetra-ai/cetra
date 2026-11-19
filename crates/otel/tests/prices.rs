@@ -28,7 +28,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
-use llmobs_otel::{PriceRow, PriceScope, PriceTable, PriceTier, builtin_price_rows};
+use cetra_otel::{PriceRow, PriceScope, PriceTable, PriceTier, builtin_price_rows};
 use serde_json::{Map, Value};
 
 const KEEP_MODES: &[&str] = &["chat", "completion", "responses", "embedding"];
@@ -382,11 +382,11 @@ fn case_variants_sort_by_provider_rank() {
     );
 }
 
-/// Rewrites `prices/builtin.json` when `LLMOBS_LITELLM_JSON` points at a download.
+/// Rewrites `prices/builtin.json` when `CETRA_LITELLM_JSON` points at a download.
 #[test]
 #[allow(clippy::print_stderr)]
 fn refresh() {
-    let Ok(path) = std::env::var("LLMOBS_LITELLM_JSON") else {
+    let Ok(path) = std::env::var("CETRA_LITELLM_JSON") else {
         return;
     };
     let text = fs::read_to_string(&path).expect("LiteLLM JSON reads");

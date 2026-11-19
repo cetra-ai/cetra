@@ -38,16 +38,21 @@ fi
 
 sed -i.bak "/^\[workspace\.package\]/,/^\[/{s/^version = \".*\"$/version = \"$new\"/;}" Cargo.toml
 sed -i.bak -e "s/^version: .*/version: $new/" -e "s/^appVersion: .*/appVersion: \"$new\"/" \
-  deploy/helm/llmobs/Chart.yaml
-sed -i.bak "s|ghcr.io/sebastiencs/llmobs:$old}|ghcr.io/sebastiencs/llmobs:$new}|" deploy/compose/compose.yaml
-sed -i.bak "s|^#LLMOBS_IMAGE=ghcr.io/sebastiencs/llmobs:$old$|#LLMOBS_IMAGE=ghcr.io/sebastiencs/llmobs:$new|" \
+  deploy/helm/cetra/Chart.yaml
+sed -i.bak "s|ghcr.io/cetra-ai/cetra:$old}|ghcr.io/cetra-ai/cetra:$new}|" deploy/compose/compose.yaml
+sed -i.bak "s|^#CETRA_IMAGE=ghcr.io/cetra-ai/cetra:$old$|#CETRA_IMAGE=ghcr.io/cetra-ai/cetra:$new|" \
   deploy/compose/.env.example
 today="$(date -u +%Y-%m-%d)"
 sed -i.bak "s/^## \[Unreleased\]$/## [Unreleased]\n\n## [$new] - $today/" CHANGELOG.md
-rm -f Cargo.toml.bak deploy/helm/llmobs/Chart.yaml.bak deploy/compose/compose.yaml.bak \
+rm -f Cargo.toml.bak deploy/helm/cetra/Chart.yaml.bak deploy/compose/compose.yaml.bak \
   deploy/compose/.env.example.bak CHANGELOG.md.bak
 
 cargo update --workspace --offline
 tools/packaging/versions-check.sh
+# A stable release writes its golden data directory (spec 03 § 12, D-R-30) and its golden server
+# backup (spec 04 § Format versions, D-R-38) with this build; a pre-release gets neither.
+if [[ "$new" != *-* ]]; then
+  just golden-dir "$new"
+fi
 echo "release-prep: $old -> $new. Review the diff, commit 'Release $new', merge to main, then:"
-echo "  git tag -a v$new -m 'llmobs $new' <merged commit> && git push origin v$new"
+echo "  git tag -a v$new -m 'cetra $new' <merged commit> && git push origin v$new"

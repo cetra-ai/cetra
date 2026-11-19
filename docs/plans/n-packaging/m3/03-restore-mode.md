@@ -2,7 +2,7 @@
 
 Read [00-design.md](00-design.md) first, especially § Restore mode (D-N-25, D-N-27) and § What exists › Outbound calls.
 
-**Goal:** `restore_mode = true` (or `LLMOBS_RESTORE_MODE=true`) starts a server that makes no outbound connection.
+**Goal:** `restore_mode = true` (or `CETRA_RESTORE_MODE=true`) starts a server that makes no outbound connection.
 - The five outbound choke points are closed.
 - Only the outbound background loops are left unstarted.
 - The storage's object deletion (D-N-34) is wired by phase 02, which runs after phase 01's storage switch; this phase does not touch storage.
@@ -35,11 +35,11 @@ Phase 04 adds the clear 503 answers of the user-triggered handlers. This phase m
 - `crates/server/src/email/mod.rs`: `Transport`, `Mailer::from_config`, `send_now`, `send_in_background`, `MailError` and its `label`.
 - `crates/server/src/auth/oidc/mod.rs`: `Providers::from_config`, `identity_client`.
 - `crates/server/src/test_support/mod.rs` lines 190–330: how `TestApp` builds the same pieces.
-- `crates/server/src/config.rs`: how a top-level key like `grpc_addr` is declared, defaulted and read from `LLMOBS_*`, and the config tests near the end of the file.
+- `crates/server/src/config.rs`: how a top-level key like `grpc_addr` is declared, defaulted and read from `CETRA_*`, and the config tests near the end of the file.
 
 ## Changes
 
-### 1. `EgressPolicy` (llmobs-eval)
+### 1. `EgressPolicy` (cetra-eval)
 
 ```rust
 pub struct EgressPolicy {
@@ -65,7 +65,7 @@ pub struct EgressPolicy {
 
   `grep -rn "EgressPolicy {" crates` must show a `restore_mode` in each.
 
-### 2. Config (llmobs-server)
+### 2. Config (cetra-server)
 
 `ServerConfig` gets:
 
@@ -76,8 +76,8 @@ pub restore_mode: bool,
 ```
 
 - Place it after `grpc_addr`.
-- Make sure `LLMOBS_RESTORE_MODE=true` sets it: follow how the env source maps a top-level key, and add a case to the env test that covers top-level keys.
-- `docs/spec/12-operations.md` § Configuration gets the key in its table or list, in that section's format: `restore_mode` (`LLMOBS_RESTORE_MODE`), default `false`, "no outbound work: alert deliveries, webhooks, judges, email and identity providers are off; for restore drills (D-N-25)".
+- Make sure `CETRA_RESTORE_MODE=true` sets it: follow how the env source maps a top-level key, and add a case to the env test that covers top-level keys.
+- `docs/spec/12-operations.md` § Configuration gets the key in its table or list, in that section's format: `restore_mode` (`CETRA_RESTORE_MODE`), default `false`, "no outbound work: alert deliveries, webhooks, judges, email and identity providers are off; for restore drills (D-N-25)".
 
 ### 3. The constructors (`serve.rs` and `TestApp`)
 
@@ -130,7 +130,7 @@ Say so in the report, so Q's drill reads with an API key. D-N-27 is the planner'
 
 ## Tests
 
-**llmobs-eval (`egress.rs` tests):**
+**cetra-eval (`egress.rs` tests):**
 - `restore_mode_refuses_before_sending`:
   - Start a local listener with the existing helper (`tokio::net::TcpListener` on `127.0.0.1:0`, as the open-policy tests do), with `allow_private_network: true, restore_mode: true`.
   - `post` gives `Err(EgressError::RestoreMode)`.
@@ -138,8 +138,8 @@ Say so in the report, so Q's drill reads with an API key. D-N-27 is the planner'
 - `restore_mode_denies_every_url`: `allows_url` is `false` for `https://example.com/` and `http://127.0.0.1/`.
 - `identity_client_in_restore_mode_cannot_resolve`: `identity_http_client(policy with restore_mode)` sends a GET to `http://localhost:<port>/` of a local listener and gets an error. Nothing is accepted.
 
-**llmobs-server:**
-- `config.rs`: `restore_mode` defaults to `false`; `restore_mode = true` in TOML sets it; `LLMOBS_RESTORE_MODE=true` sets it.
+**cetra-server:**
+- `config.rs`: `restore_mode` defaults to `false`; `restore_mode = true` in TOML sets it; `CETRA_RESTORE_MODE=true` sets it.
 - `email/mod.rs`:
   - `restore_mode_mailer_refuses`: build the mailer with `Mailer::from_config` on a config with `smtp_url`, `email_from` and `restore_mode = true`. Not through `TestApp::with_mailer_config`: that installs the stub transport, which still "sends". `send_now` is `Err(MailError::RestoreMode)`, and `send_in_background` logs `email not sent: restore mode` (use `capture_logs`) and no address.
   - Without `smtp_url` the mailer is `None`.
@@ -154,8 +154,8 @@ Say so in the report, so Q's drill reads with an API key. D-N-27 is the planner'
 ## Verify
 
 ```bash
-cargo test -p llmobs-eval --all-features restore_mode
-cargo test -p llmobs-server --all-features restore_mode
+cargo test -p cetra-eval --all-features restore_mode
+cargo test -p cetra-server --all-features restore_mode
 just check
 ```
 

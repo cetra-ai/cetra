@@ -1,5 +1,4 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
-import type { UserEvent } from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { expect, it } from "vitest";
 import { $api } from "@/api/client";
@@ -22,23 +21,94 @@ function meAs(role: string, orgs = [{ id: ORG_ID, slug: "acme", name: "Acme", ro
   );
 }
 
+const MEMBERS = "/acme/settings/members";
 const orgNav = () => within(screen.getByRole("list", { name: "Organization settings" }));
 
-async function openRowMenu(user: UserEvent, email: string) {
-  await user.click(screen.getByRole("button", { name: `Actions for ${email}` }));
-  await screen.findByRole("menu");
+function searchOf(router: { state: { location: { search: unknown } } }) {
+  return router.state.location.search as Record<string, unknown>;
 }
 
-it("lists members and pending invitations", async () => {
-  await renderApp("/acme/settings/members");
+/** Opens the panel of a member through its row. */
+async function openMember(email: string, path = MEMBERS) {
+  const rendered = await renderApp(path);
+  const grid = await screen.findByRole("grid", { name: "Members" });
+  const row = within(grid).getByRole("row", { name: new RegExp(email) });
+  await rendered.user.click(within(row).getByText(email));
+  const form = await screen.findByRole("form", { name: `Role of ${email}` });
+  return { ...rendered, form };
+}
 
-  const table = await screen.findByRole("table", { name: "Members" });
-  expect(within(table).getByRole("row", { name: /ada@example.com/ })).toHaveTextContent("You");
-  expect(within(table).getByRole("row", { name: /bob@example.com/ })).toBeInTheDocument();
-  expect(await screen.findByRole("table", { name: "Pending invitations" })).toHaveTextContent(
-    "guest@example.com",
-  );
+/** Picks a role in a member's panel and saves it. */
+async function changeRoleTo(
+  user: Awaited<ReturnType<typeof renderApp>>["user"],
+  form: HTMLElement,
+  role: string,
+) {
+  await user.click(within(form).getByRole("combobox"));
+  await user.click(await screen.findByRole("option", { name: role }));
+  await user.click(within(form).getByRole("button", { name: "Save" }));
+}
+
+it("lists members and marks you", async () => {
+  await renderApp(MEMBERS);
+
+  const grid = await screen.findByRole("grid", { name: "Members" });
+  expect(within(grid).getByRole("row", { name: /ada@example.com/ })).toHaveTextContent("You");
+  expect(within(grid).getByRole("row", { name: /bob@example.com/ })).toBeInTheDocument();
   expect(orgNav().getByRole("link", { name: "Members" })).toHaveAttribute("aria-current", "page");
+});
+
+it("lists pending invitations on the Invites tab", async () => {
+  const { user, router } = await renderApp(MEMBERS);
+  await screen.findByRole("grid", { name: "Members" });
+
+  await user.click(screen.getByRole("tab", { name: "Invites" }));
+
+  const invites = await screen.findByRole("grid", { name: "Pending invitations" });
+  expect(invites).toHaveTextContent("guest@example.com");
+  expect(searchOf(router)).toMatchObject({ tab: "invites" });
+});
+
+it("opens a member's panel from its row and writes the id to the URL", async () => {
+  const { form, router } = await openMember("bob@example.com");
+
+  expect(searchOf(router)).toMatchObject({ open: BOB_ID });
+  expect(within(form).getByRole("combobox")).toHaveTextContent("Member");
+});
+
+it("opens a member's panel from the URL", async () => {
+  await renderApp(`${MEMBERS}?open=${BOB_ID}`);
+
+  expect(await screen.findByRole("form", { name: "Role of bob@example.com" })).toBeInTheDocument();
+});
+
+it("filters members by name or email", async () => {
+  const { user } = await renderApp(MEMBERS);
+  const grid = await screen.findByRole("grid", { name: "Members" });
+  const search = screen.getByRole("searchbox", { name: "Search members" });
+
+  await user.type(search, "bob");
+  await waitFor(() => expect(within(grid).queryByText("Ada Example")).toBeNull());
+  expect(within(grid).getByText("Bob Example")).toBeInTheDocument();
+
+  await user.clear(search);
+  await user.type(search, "nobody");
+  expect(await screen.findByText("No member matches.")).toBeInTheDocument();
+});
+
+it("sorts members by role, first descending, and keeps the sort in the URL", async () => {
+  const { user, router } = await renderApp(MEMBERS);
+  const grid = await screen.findByRole("grid", { name: "Members" });
+  const header = screen.getByRole("columnheader", { name: "Role" });
+
+  await user.click(within(header).getByRole("button"));
+
+  await waitFor(() => expect(searchOf(router)).toMatchObject({ sort: "role", desc: true }));
+  expect(
+    within(grid)
+      .getAllByText(/@example\.com$/)
+      .map((node) => node.textContent),
+  ).toEqual(["ada@example.com", "bob@example.com"]);
 });
 
 it("changes a member's role", async () => {
@@ -56,8 +126,7 @@ it("changes a member's role", async () => {
     }),
   );
 
-  const { user, queryClient } = await renderApp("/acme/settings/members");
-  await screen.findByRole("table", { name: "Members" });
+  const { user, queryClient, form } = await openMember("bob@example.com");
   // A role change also invalidates every cached project and project-member entry.
   const project = projectQuery("acme", "support-bot");
   const projectMembers = $api.queryOptions(
@@ -68,8 +137,7 @@ it("changes a member's role", async () => {
   await queryClient.ensureQueryData(project);
   await queryClient.ensureQueryData(projectMembers);
 
-  await user.click(screen.getByRole("combobox", { name: "Role of bob@example.com" }));
-  await user.click(await screen.findByRole("option", { name: "Admin" }));
+  await changeRoleTo(user, form, "Admin");
 
   await waitFor(() => expect(body).toEqual({ role: "admin" }));
   expect(pathUser).toBe(BOB_ID);
@@ -86,13 +154,11 @@ it("explains the last-owner rule", async () => {
     ),
   );
 
-  const { user } = await renderApp("/acme/settings/members");
-  await screen.findByRole("table", { name: "Members" });
-  await user.click(screen.getByRole("combobox", { name: "Role of ada@example.com" }));
-  await user.click(await screen.findByRole("option", { name: "Member" }));
+  const { user, form } = await openMember("ada@example.com");
+  await changeRoleTo(user, form, "Member");
 
   expect(
-    await screen.findByText(
+    await within(form).findByText(
       "An organization needs at least one owner. Make someone else an owner first.",
     ),
   ).toBeInTheDocument();
@@ -105,13 +171,11 @@ it("explains a seat limit on a role change and offers an upgrade", async () => {
     ),
   );
 
-  const { user } = await renderApp("/acme/settings/members");
-  await screen.findByRole("table", { name: "Members" });
-  await user.click(screen.getByRole("combobox", { name: "Role of bob@example.com" }));
-  await user.click(await screen.findByRole("option", { name: "Admin" }));
+  const { user, form } = await openMember("bob@example.com");
+  await changeRoleTo(user, form, "Admin");
 
-  expect(await screen.findByText("Your plan allows 1 seat.")).toBeInTheDocument();
-  expect(await screen.findByRole("link", { name: "Upgrade" })).toHaveAttribute(
+  expect(await within(form).findByText("Your plan allows 1 seat.")).toBeInTheDocument();
+  expect(await within(form).findByRole("link", { name: "Upgrade" })).toHaveAttribute(
     "href",
     entitlementsFixture.upgrade_url,
   );
@@ -123,32 +187,35 @@ it("explains a role above the caller's", async () => {
     http.patch("/api/v1/orgs/:org/members/:user", () => problemResponse(403, "forbidden")),
   );
 
-  const { user } = await renderApp("/acme/settings/members");
-  await screen.findByRole("table", { name: "Members" });
-  await user.click(screen.getByRole("combobox", { name: "Role of bob@example.com" }));
-  await user.click(await screen.findByRole("option", { name: "Viewer" }));
+  const { user, form } = await openMember("bob@example.com");
+  await changeRoleTo(user, form, "Viewer");
 
-  expect(await screen.findByText("You can't give that role.")).toBeInTheDocument();
+  expect(await within(form).findByText("You can't give that role.")).toBeInTheDocument();
 });
 
 it("offers only roles up to the caller's", async () => {
   server.use(meAs("admin"));
 
-  const { user } = await renderApp("/acme/settings/members");
-  await screen.findByRole("table", { name: "Members" });
-  await user.click(screen.getByRole("combobox", { name: "Role of bob@example.com" }));
+  const { user, form } = await openMember("bob@example.com");
+  await user.click(within(form).getByRole("combobox"));
   const names = (await screen.findAllByRole("option")).map((option) => option.textContent);
   expect(names).toEqual(["Admin", "Member", "Viewer"]);
   await user.keyboard("{Escape}");
+});
 
-  const adaRole = screen.getByRole("combobox", { name: "Role of ada@example.com" });
-  expect(adaRole).toBeDisabled();
-  expect(adaRole.parentElement).toHaveAccessibleDescription(
+it("disables a role an admin cannot change, and says why", async () => {
+  server.use(meAs("admin"));
+
+  const { form } = await openMember("ada@example.com");
+
+  const role = within(form).getByRole("combobox");
+  expect(role).toBeDisabled();
+  expect(role.parentElement).toHaveAccessibleDescription(
     "Only an owner can change an owner's role",
   );
 });
 
-it("removes a member after confirmation", async () => {
+it("removes a member after typing their email", async () => {
   const users: string[] = [];
   server.use(
     http.delete("/api/v1/orgs/:org/members/:user", ({ params }) => {
@@ -157,18 +224,16 @@ it("removes a member after confirmation", async () => {
     }),
   );
 
-  const { user } = await renderApp("/acme/settings/members");
-  await screen.findByRole("table", { name: "Members" });
-  await openRowMenu(user, "bob@example.com");
-  await user.click(screen.getByRole("menuitem", { name: "Remove from organization" }));
+  const { user, router } = await openMember("bob@example.com");
+  await user.click(screen.getByRole("button", { name: "Remove…" }));
   const dialog = await screen.findByRole("alertdialog", { name: "Remove member?" });
-  await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
-  await user.click(within(dialog).getByRole("button", { name: "Remove" }));
+  const confirm = within(dialog).getByRole("button", { name: "Remove" });
+  expect(confirm).toBeDisabled();
+  await user.type(within(dialog).getByRole("textbox"), "bob@example.com");
+  await user.click(confirm);
 
   expect(users).toEqual([BOB_ID]);
-  await waitFor(() =>
-    expect(screen.queryByRole("alertdialog", { name: "Remove member?" })).toBeNull(),
-  );
+  await waitFor(() => expect(searchOf(router).open).toBeUndefined());
 });
 
 it("keeps the dialog open when the last owner tries to leave", async () => {
@@ -178,12 +243,10 @@ it("keeps the dialog open when the last owner tries to leave", async () => {
     ),
   );
 
-  const { user } = await renderApp("/acme/settings/members");
-  await screen.findByRole("table", { name: "Members" });
-  await openRowMenu(user, "ada@example.com");
-  await user.click(screen.getByRole("menuitem", { name: "Leave organization" }));
+  const { user } = await openMember("ada@example.com");
+  await user.click(screen.getByRole("button", { name: "Leave…" }));
   const dialog = await screen.findByRole("alertdialog", { name: "Leave organization?" });
-  await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+  await user.type(within(dialog).getByRole("textbox"), "ada@example.com");
   await user.click(within(dialog).getByRole("button", { name: "Leave" }));
 
   const open = await screen.findByRole("alertdialog", { name: "Leave organization?" });
@@ -209,12 +272,10 @@ it("lets a member leave and goes home", async () => {
     }),
   );
 
-  const { router, user } = await renderApp("/acme/settings/members");
-  await screen.findByRole("table", { name: "Members" });
-  await openRowMenu(user, "ada@example.com");
-  await user.click(screen.getByRole("menuitem", { name: "Leave organization" }));
+  const { router, user } = await openMember("ada@example.com");
+  await user.click(screen.getByRole("button", { name: "Leave…" }));
   const dialog = await screen.findByRole("alertdialog", { name: "Leave organization?" });
-  await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+  await user.type(within(dialog).getByRole("textbox"), "ada@example.com");
   await user.click(within(dialog).getByRole("button", { name: "Leave" }));
 
   await waitFor(() => expect(router.state.location.pathname).toBe("/"));
@@ -231,18 +292,17 @@ it("disables actions a viewer cannot take", async () => {
     }),
   );
 
-  await renderApp("/acme/settings/members");
-  await screen.findByRole("table", { name: "Members" });
+  const { form } = await openMember("bob@example.com");
 
-  const role = screen.getByRole("combobox", { name: "Role of bob@example.com" });
+  const role = within(form).getByRole("combobox");
   expect(role).toBeDisabled();
   expect(role.parentElement).toHaveAccessibleDescription("Only admins and owners can change roles");
-  const actions = screen.getByRole("button", { name: "Actions for bob@example.com" });
-  expect(actions).toBeDisabled();
-  expect(actions.parentElement).toHaveAccessibleDescription(
+  const remove = screen.getByRole("button", { name: "Remove…" });
+  expect(remove).toBeDisabled();
+  expect(remove.parentElement).toHaveAccessibleDescription(
     "Only admins and owners can remove members",
   );
-  expect(screen.queryByRole("heading", { name: "Pending invitations" })).toBeNull();
+  expect(screen.queryByRole("tab", { name: "Invites" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Invite member" })).toBeNull();
   expect(invitesCalls).toBe(0);
 });
@@ -274,12 +334,29 @@ it("loads more members", async () => {
     }),
   );
 
-  const { user } = await renderApp("/acme/settings/members");
-  await screen.findByRole("table", { name: "Members" });
+  const { user } = await renderApp(MEMBERS);
+  await screen.findByRole("grid", { name: "Members" });
   await user.click(screen.getByRole("button", { name: "Load more" }));
 
-  expect(await screen.findByRole("row", { name: /carol@example.com/ })).toBeInTheDocument();
+  const grid = await screen.findByRole("grid", { name: "Members" });
+  expect(await within(grid).findByText("carol@example.com")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
+});
+
+it("asks before discarding an unsaved role change", async () => {
+  const { user, form, router } = await openMember("bob@example.com");
+  await user.click(within(form).getByRole("combobox"));
+  await user.click(await screen.findByRole("option", { name: "Admin" }));
+
+  await user.click(screen.getByRole("button", { name: "Close panel" }));
+  const dialog = await screen.findByRole("alertdialog", { name: "Discard unsaved changes?" });
+  await user.click(within(dialog).getByRole("button", { name: "Keep editing" }));
+  expect(searchOf(router)).toMatchObject({ open: BOB_ID });
+
+  await user.click(screen.getByRole("button", { name: "Close panel" }));
+  const again = await screen.findByRole("alertdialog", { name: "Discard unsaved changes?" });
+  await user.click(within(again).getByRole("button", { name: "Discard" }));
+  await waitFor(() => expect(searchOf(router).open).toBeUndefined());
 });
 
 it("invites a member and shows the link without SMTP", async () => {
@@ -291,8 +368,8 @@ it("invites a member and shows the link without SMTP", async () => {
     }),
   );
 
-  const { user } = await renderApp("/acme/settings/members");
-  await screen.findByRole("table", { name: "Members" });
+  const { user } = await renderApp(MEMBERS);
+  await screen.findByRole("grid", { name: "Members" });
   await user.click(screen.getByRole("button", { name: "Invite member" }));
   const dialog = await screen.findByRole("dialog", { name: "Invite member" });
   await user.type(within(dialog).getByLabelText("Email"), "guest@example.com");
@@ -316,8 +393,8 @@ it("invites with another role", async () => {
     }),
   );
 
-  const { user } = await renderApp("/acme/settings/members");
-  await screen.findByRole("table", { name: "Members" });
+  const { user } = await renderApp(MEMBERS);
+  await screen.findByRole("grid", { name: "Members" });
   await user.click(screen.getByRole("button", { name: "Invite member" }));
   const dialog = await screen.findByRole("dialog", { name: "Invite member" });
   await user.type(within(dialog).getByLabelText("Email"), "guest@example.com");
@@ -336,8 +413,8 @@ it("says the invitation was emailed when SMTP is on", async () => {
     http.post("/api/v1/orgs/:org/invites", () => HttpResponse.json(inviteCreated, { status: 201 })),
   );
 
-  const { user } = await renderApp("/acme/settings/members");
-  await screen.findByRole("table", { name: "Members" });
+  const { user } = await renderApp(MEMBERS);
+  await screen.findByRole("grid", { name: "Members" });
   await user.click(screen.getByRole("button", { name: "Invite member" }));
   const dialog = await screen.findByRole("dialog", { name: "Invite member" });
   await user.type(within(dialog).getByLabelText("Email"), "guest@example.com");
@@ -353,15 +430,15 @@ it("shows an existing member", async () => {
     ),
   );
 
-  const { user } = await renderApp("/acme/settings/members");
-  await screen.findByRole("table", { name: "Members" });
+  const { user } = await renderApp(MEMBERS);
+  await screen.findByRole("grid", { name: "Members" });
   await user.click(screen.getByRole("button", { name: "Invite member" }));
   const dialog = await screen.findByRole("dialog", { name: "Invite member" });
   await user.type(within(dialog).getByLabelText("Email"), "guest@example.com");
   await user.click(within(dialog).getByRole("button", { name: "Send invitation" }));
 
   expect(await screen.findByText("This person is already a member.")).toBeInTheDocument();
-  expect(screen.getByLabelText("Email")).toHaveAttribute("aria-invalid", "true");
+  expect(within(dialog).getByLabelText("Email")).toHaveAttribute("aria-invalid", "true");
 });
 
 it("shows the server's email error", async () => {
@@ -373,8 +450,8 @@ it("shows the server's email error", async () => {
     ),
   );
 
-  const { user } = await renderApp("/acme/settings/members");
-  await screen.findByRole("table", { name: "Members" });
+  const { user } = await renderApp(MEMBERS);
+  await screen.findByRole("grid", { name: "Members" });
   await user.click(screen.getByRole("button", { name: "Invite member" }));
   const dialog = await screen.findByRole("dialog", { name: "Invite member" });
   await user.type(within(dialog).getByLabelText("Email"), "nope");
@@ -390,8 +467,8 @@ it("explains a seat limit on invite and offers an upgrade", async () => {
     ),
   );
 
-  const { user } = await renderApp("/acme/settings/members");
-  await screen.findByRole("table", { name: "Members" });
+  const { user } = await renderApp(MEMBERS);
+  await screen.findByRole("grid", { name: "Members" });
   await user.click(screen.getByRole("button", { name: "Invite member" }));
   const dialog = await screen.findByRole("dialog", { name: "Invite member" });
   await user.type(within(dialog).getByLabelText("Email"), "guest@example.com");
@@ -410,8 +487,8 @@ it("drops the link when the dialog closes", async () => {
     http.post("/api/v1/orgs/:org/invites", () => HttpResponse.json(inviteCreated, { status: 201 })),
   );
 
-  const { user, queryClient } = await renderApp("/acme/settings/members");
-  await screen.findByRole("table", { name: "Members" });
+  const { user, queryClient } = await renderApp(MEMBERS);
+  await screen.findByRole("grid", { name: "Members" });
   await user.click(screen.getByRole("button", { name: "Invite member" }));
   const dialog = await screen.findByRole("dialog", { name: "Invite member" });
   await user.type(within(dialog).getByLabelText("Email"), "guest@example.com");
@@ -447,8 +524,8 @@ it("keeps the invite dialog open while the request runs", async () => {
     }),
   );
 
-  const { user } = await renderApp("/acme/settings/members");
-  await screen.findByRole("table", { name: "Members" });
+  const { user } = await renderApp(MEMBERS);
+  await screen.findByRole("grid", { name: "Members" });
   await user.click(screen.getByRole("button", { name: "Invite member" }));
   const dialog = await screen.findByRole("dialog", { name: "Invite member" });
   await user.type(within(dialog).getByLabelText("Email"), "guest@example.com");
@@ -467,7 +544,7 @@ it("keeps the invite dialog open while the request runs", async () => {
   );
 });
 
-it("revokes an invitation", async () => {
+it("revokes an invitation after typing its email", async () => {
   const ids: string[] = [];
   server.use(
     http.delete("/api/v1/orgs/:org/invites/:id", ({ params }) => {
@@ -476,15 +553,17 @@ it("revokes an invitation", async () => {
     }),
   );
 
-  const { user } = await renderApp("/acme/settings/members");
-  await screen.findByRole("table", { name: "Pending invitations" });
-  await openRowMenu(user, "guest@example.com");
-  await user.click(screen.getByRole("menuitem", { name: "Revoke invitation" }));
+  const { user, router } = await renderApp(`${MEMBERS}?tab=invites`);
+  const invites = await screen.findByRole("grid", { name: "Pending invitations" });
+  await user.click(within(invites).getByText("guest@example.com"));
+  await screen.findByRole("button", { name: "Revoke…" });
+  await user.click(screen.getByRole("button", { name: "Revoke…" }));
   const dialog = await screen.findByRole("alertdialog", { name: "Revoke invitation?" });
-  await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+  await user.type(within(dialog).getByRole("textbox"), "guest@example.com");
   await user.click(within(dialog).getByRole("button", { name: "Revoke" }));
 
   expect(ids).toEqual([INVITE_ID]);
+  await waitFor(() => expect(searchOf(router).open).toBeUndefined());
 });
 
 it("shows a failed removal in the dialog", async () => {
@@ -492,12 +571,10 @@ it("shows a failed removal in the dialog", async () => {
     http.delete("/api/v1/orgs/:org/members/:user", () => problemResponse(500, "internal")),
   );
 
-  const { user } = await renderApp("/acme/settings/members");
-  await screen.findByRole("table", { name: "Members" });
-  await openRowMenu(user, "bob@example.com");
-  await user.click(screen.getByRole("menuitem", { name: "Remove from organization" }));
+  const { user } = await openMember("bob@example.com");
+  await user.click(screen.getByRole("button", { name: "Remove…" }));
   const dialog = await screen.findByRole("alertdialog", { name: "Remove member?" });
-  await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+  await user.type(within(dialog).getByRole("textbox"), "bob@example.com");
   await user.click(within(dialog).getByRole("button", { name: "Remove" }));
 
   const open = await screen.findByRole("alertdialog", { name: "Remove member?" });
@@ -507,12 +584,10 @@ it("shows a failed removal in the dialog", async () => {
 it("shows a failed revoke in the dialog", async () => {
   server.use(http.delete("/api/v1/orgs/:org/invites/:id", () => HttpResponse.error()));
 
-  const { user } = await renderApp("/acme/settings/members");
-  await screen.findByRole("table", { name: "Pending invitations" });
-  await openRowMenu(user, "guest@example.com");
-  await user.click(screen.getByRole("menuitem", { name: "Revoke invitation" }));
+  const { user } = await renderApp(`${MEMBERS}?tab=invites&open=${INVITE_ID}`);
+  await user.click(await screen.findByRole("button", { name: "Revoke…" }));
   const dialog = await screen.findByRole("alertdialog", { name: "Revoke invitation?" });
-  await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+  await user.type(within(dialog).getByRole("textbox"), "guest@example.com");
   await user.click(within(dialog).getByRole("button", { name: "Revoke" }));
 
   const open = await screen.findByRole("alertdialog", { name: "Revoke invitation?" });
@@ -522,21 +597,23 @@ it("shows a failed revoke in the dialog", async () => {
 it("explains an invitation above the caller's role", async () => {
   server.use(http.post("/api/v1/orgs/:org/invites", () => problemResponse(403, "forbidden")));
 
-  const { user } = await renderApp("/acme/settings/members");
-  await screen.findByRole("table", { name: "Members" });
+  const { user } = await renderApp(MEMBERS);
+  await screen.findByRole("grid", { name: "Members" });
   await user.click(screen.getByRole("button", { name: "Invite member" }));
   const dialog = await screen.findByRole("dialog", { name: "Invite member" });
   await user.type(within(dialog).getByLabelText("Email"), "guest@example.com");
   await user.click(within(dialog).getByRole("button", { name: "Send invitation" }));
 
-  expect(await screen.findByRole("alert")).toHaveTextContent("You can't invite with that role.");
+  expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+    "You can't invite with that role.",
+  );
 });
 
 it("offers an admin only roles up to admin when inviting", async () => {
   server.use(meAs("admin"));
 
-  const { user } = await renderApp("/acme/settings/members");
-  await screen.findByRole("table", { name: "Members" });
+  const { user } = await renderApp(MEMBERS);
+  await screen.findByRole("grid", { name: "Members" });
   await user.click(screen.getByRole("button", { name: "Invite member" }));
   const dialog = await screen.findByRole("dialog", { name: "Invite member" });
   await user.click(within(dialog).getByRole("combobox", { name: "Role" }));

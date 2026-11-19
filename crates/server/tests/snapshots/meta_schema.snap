@@ -103,6 +103,25 @@ CREATE INDEX backfills_rule ON backfills(rule_id, created_at)
 index backfills_running
 CREATE UNIQUE INDEX backfills_running ON backfills(rule_id) WHERE status = 'running'
 
+table dashboards
+CREATE TABLE dashboards (
+  id TEXT PRIMARY KEY,                -- UUIDv7
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  description TEXT,
+  definition TEXT NOT NULL,           -- JSON: {widgets: [Widget]}, validated by the server
+  version INTEGER NOT NULL DEFAULT 1, -- +1 on every update; a PATCH names the version it read
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+, kind TEXT NOT NULL DEFAULT 'custom' CHECK (kind IN ('custom', 'overview')))
+
+index dashboards_overview
+CREATE UNIQUE INDEX dashboards_overview ON dashboards(project_id) WHERE kind = 'overview'
+
+index dashboards_project
+CREATE INDEX dashboards_project ON dashboards(project_id, name)
+
 table dataset_items
 CREATE TABLE dataset_items (
   revision_id TEXT PRIMARY KEY,
@@ -263,6 +282,19 @@ CREATE INDEX eval_jobs_ready ON eval_jobs(status, priority, not_before)
 
 index eval_jobs_rule
 CREATE INDEX eval_jobs_rule ON eval_jobs(rule_id, created_at)
+
+table evaluator_versions
+CREATE TABLE evaluator_versions (
+  evaluator_id TEXT NOT NULL REFERENCES evaluators(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  config TEXT NOT NULL,               -- as evaluators.config: no sealed value
+  output_score TEXT NOT NULL,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (evaluator_id, version)
+)
 
 table evaluators
 CREATE TABLE evaluators (
@@ -656,7 +688,7 @@ CREATE TABLE score_definitions (
   archived_at INTEGER,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
-)
+, direction TEXT NOT NULL DEFAULT 'none')
 
 index score_definitions_live
 CREATE UNIQUE INDEX score_definitions_live ON score_definitions(project_id, name) WHERE archived_at IS NULL
@@ -674,6 +706,8 @@ index sqlite_autoindex_api_keys_1
 index sqlite_autoindex_api_keys_2
 
 index sqlite_autoindex_backfills_1
+
+index sqlite_autoindex_dashboards_1
 
 index sqlite_autoindex_dataset_items_1
 
@@ -696,6 +730,8 @@ index sqlite_autoindex_email_verifications_1
 index sqlite_autoindex_eval_jobs_1
 
 index sqlite_autoindex_eval_jobs_2
+
+index sqlite_autoindex_evaluator_versions_1
 
 index sqlite_autoindex_evaluators_1
 
@@ -783,7 +819,7 @@ CREATE TABLE usage_daily (
   spans INTEGER NOT NULL DEFAULT 0, bytes INTEGER NOT NULL DEFAULT 0,
   scores INTEGER NOT NULL DEFAULT 0,
   judge_input_tokens INTEGER NOT NULL DEFAULT 0, judge_output_tokens INTEGER NOT NULL DEFAULT 0,
-  judge_cost_usd REAL NOT NULL DEFAULT 0,
+  judge_cost_usd REAL NOT NULL DEFAULT 0, genai_log_events INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (org_id, project_id, day)
 )
 

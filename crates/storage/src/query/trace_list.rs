@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use cetra_core::schema::traces;
 use datafusion::common::ScalarValue;
 use datafusion::common::config::ConfigOptions;
 use datafusion::common::tree_node::{Transformed, TransformedResult, TreeNode};
@@ -21,7 +22,6 @@ use datafusion::physical_plan::sorts::sort::SortExec;
 use datafusion::physical_plan::{
     coalesce_partitions::CoalescePartitionsExec, repartition::RepartitionExec,
 };
-use llmobs_core::schema::traces;
 
 use super::traces::{TracesExec, rewrite_list};
 

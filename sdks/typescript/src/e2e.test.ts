@@ -1,6 +1,6 @@
-// End-to-end: the SDK against a running `llmobs serve` (`just e2e`, D-G-20).
-// tools/e2e/run.sh starts the server and sets LLMOBS_E2E_BASE_URL and
-// LLMOBS_E2E_API_KEY; without them the suite is skipped.
+// End-to-end: the SDK against a running `cetra serve` (`just e2e`, D-G-20).
+// tools/e2e/run.sh starts the server and sets CETRA_E2E_BASE_URL and
+// CETRA_E2E_API_KEY; without them the suite is skipped.
 
 import { describe, expect, it } from "vitest";
 
@@ -16,8 +16,8 @@ import {
   uuid7,
 } from "./index.js";
 
-const baseUrl = process.env.LLMOBS_E2E_BASE_URL ?? "";
-const apiKey = process.env.LLMOBS_E2E_API_KEY ?? "";
+const baseUrl = process.env.CETRA_E2E_BASE_URL ?? "";
+const apiKey = process.env.CETRA_E2E_API_KEY ?? "";
 
 const POLL_LIMIT_MS = 10_000;
 const POLL_INTERVAL_MS = 250;

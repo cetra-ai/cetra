@@ -41,15 +41,15 @@
           },
           "spans": [
             {
-              "traceId": "8d0efa6c9444aac4b193115d5fedefdb",
-              "spanId": "80e5dd83bdd0ba3e",
+              "traceId": "08f1f08a7155a1ebb470fc3d0f065395",
+              "spanId": "471f245880d145f8",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
               "name": "openai.chat",
               "kind": 3,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590041000000",
+              "endTimeUnixNano": "1767225590097000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",
@@ -168,15 +168,15 @@
               "status": null
             },
             {
-              "traceId": "5fbf3717471fe1ff10a9444c41cabf66",
-              "spanId": "eb83fad19de08984",
+              "traceId": "9db0a4a5e2e7262fe98688b3aa26c605",
+              "spanId": "800ea70e659442fa",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
               "name": "openai.chat",
               "kind": 3,
-              "startTimeUnixNano": "1767225590043000000",
-              "endTimeUnixNano": "1767225590076000000",
+              "startTimeUnixNano": "1767225590099000000",
+              "endTimeUnixNano": "1767225590132000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",

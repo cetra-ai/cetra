@@ -18,7 +18,7 @@ use arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
 use datafusion::datasource::file_format::parquet::ParquetFormat;
 use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl};
 use datafusion::prelude::{SessionConfig, SessionContext};
-use llmobs_core::batch::spans_to_record_batch;
+use cetra_core::batch::spans_to_record_batch;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::{EnabledStatistics, WriterProperties};
@@ -175,10 +175,10 @@ async fn generate(dir: &Path, traces: usize, files: usize) -> R<()> {
             let path = sub.join(format!("{i:03}.parquet"));
             let f = std::fs::File::create(&path)?;
             let mut w = ArrowWriter::try_new(f, b.schema(), Some(parquet_props(variant, &b.schema(), b.num_rows())))?;
-            let rg_rows = if *variant == "pq_llmobs" { 100_000 } else { usize::MAX };
+            let rg_rows = if *variant == "pq_cetra" { 100_000 } else { usize::MAX };
             for off in (0..b.num_rows()).step_by(8192) {
                 w.write(&b.slice(off, 8192.min(b.num_rows() - off)))?;
-                if (*variant == "pq_llmobs" && w.in_progress_size() >= 64 << 20) || w.in_progress_rows() >= rg_rows {
+                if (*variant == "pq_cetra" && w.in_progress_size() >= 64 << 20) || w.in_progress_rows() >= rg_rows {
                     w.flush()?;
                 }
             }
@@ -222,7 +222,7 @@ async fn generate(dir: &Path, traces: usize, files: usize) -> R<()> {
     Ok(())
 }
 
-const PQ_VARIANTS: &[&str] = &["pq_default", "pq_tuned", "pq_llmobs"];
+const PQ_VARIANTS: &[&str] = &["pq_default", "pq_tuned", "pq_cetra"];
 const VX_VARIANTS: &[&str] = &["vx_default", "vx_compact"];
 
 fn parquet_props(variant: &str, schema: &Schema, rows: usize) -> WriterProperties {

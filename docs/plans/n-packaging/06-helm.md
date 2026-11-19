@@ -3,7 +3,7 @@
 Read [README.md](README.md) first, especially § Design › Helm chart.
 
 **Goal:**
-- `deploy/helm/llmobs/`: a minimal chart that runs llmobs as one StatefulSet pod with a
+- `deploy/helm/cetra/`: a minimal chart that runs cetra as one StatefulSet pod with a
   persistent volume, optional S3, and config through values, environment variables and Secrets
   (D-N-10).
 - `just helm-check` lints the chart and validates the rendered manifests with kubeconform, for
@@ -11,7 +11,7 @@ Read [README.md](README.md) first, especially § Design › Helm chart.
 - `just helm-smoke [tag]` installs the chart on a throwaway kind cluster and smoke-tests it.
 
 **Edit only:**
-- `deploy/helm/llmobs/Chart.yaml`, `values.yaml`, `.helmignore`, `README.md`,
+- `deploy/helm/cetra/Chart.yaml`, `values.yaml`, `.helmignore`, `README.md`,
   `templates/_helpers.tpl`, `templates/statefulset.yaml`, `templates/service.yaml`,
   `templates/configmap.yaml`, `templates/secret.yaml`, `templates/ingress.yaml`,
   `templates/NOTES.txt`, `ci/s3-values.yaml`, `ci/full-values.yaml` (new);
@@ -29,17 +29,17 @@ it needs network), kind v0.33.0, kubectl, Docker, python3.
   directory, so the chart offers no way to run two.
 - **Rolling update.** `updateStrategy: RollingUpdate` on a one-pod StatefulSet deletes the old
   pod before it creates the new one, so two pods never share the volume.
-- **`config`.** It is rendered with Helm's `toToml` into a ConfigMap key `llmobs.toml`, mounted
-  at `/etc/llmobs` and named by `LLMOBS_CONFIG`. With `config: {}` there is no ConfigMap, mount
+- **`config`.** It is rendered with Helm's `toToml` into a ConfigMap key `cetra.toml`, mounted
+  at `/etc/cetra` and named by `CETRA_CONFIG`. With `config: {}` there is no ConfigMap, mount
   or variable.
 - **Restarts on change.** The pod template carries `checksum/config` and `checksum/secret`
   annotations, so a change to either restarts the pod.
-- **Environment order.** The fixed variables come first (`LLMOBS_DATA_DIR`,
-  `LLMOBS_PUBLIC_URL`, `LLMOBS_CONFIG`, the S3 ones), then `env`. `envFrom` holds the chart's
+- **Environment order.** The fixed variables come first (`CETRA_DATA_DIR`,
+  `CETRA_PUBLIC_URL`, `CETRA_CONFIG`, the S3 ones), then `env`. `envFrom` holds the chart's
   Secret, then `existingSecret`. In Kubernetes, `env` wins over `envFrom` for the same name.
 - **No service links.** `enableServiceLinks: false`: otherwise Kubernetes injects
-  `LLMOBS_PORT=tcp://…` and similar variables for the Service named `llmobs`, and the config
-  loader rejects them as unknown `LLMOBS_*` keys, so the pod crash-loops.
+  `CETRA_PORT=tcp://…` and similar variables for the Service named `cetra`, and the config
+  loader rejects them as unknown `CETRA_*` keys, so the pod crash-loops.
 - **Secrets.** The chart generates none: no `randAlphaNum`, no `lookup`.
 - **Guards.** `fail` stops the render when `s3.enabled` has no `s3.bucket`, or when
   `ingress.enabled` has no `ingress.host`.
@@ -47,7 +47,7 @@ it needs network), kind v0.33.0, kubectl, Docker, python3.
   N8's `release-prep` rewrites both lines and `versions-check` checks them, so keep them exactly
   as given.
 - **`helm-smoke.sh`:**
-  1. Creates a kind cluster named `llmobs-smoke-<pid>` and `kind load`s the image.
+  1. Creates a kind cluster named `cetra-smoke-<pid>` and `kind load`s the image.
   2. Installs with `image.pullPolicy=Never`, `persistence.size=1Gi` and the smoke init variables
      in `secret.values`, then waits for the pod to be ready.
   3. Port-forwards the Service's 8080 and 4318 and runs `smoke.sh`.
@@ -57,22 +57,22 @@ it needs network), kind v0.33.0, kubectl, Docker, python3.
 
 ## Files
 
-### `deploy/helm/llmobs/Chart.yaml`
+### `deploy/helm/cetra/Chart.yaml`
 
 ```yaml
 apiVersion: v2
-name: llmobs
+name: cetra
 description: LLM observability and evaluation in one binary (one StatefulSet, one volume).
 type: application
 # Chart version = app version = the workspace version (D-N-5); `just release-prep` sets both.
 version: 0.0.0
 appVersion: "0.0.0"
-home: https://github.com/sebastiencs/llmobs
+home: https://github.com/cetra-ai/cetra
 sources:
-  - https://github.com/sebastiencs/llmobs
+  - https://github.com/cetra-ai/cetra
 ```
 
-### `deploy/helm/llmobs/.helmignore`
+### `deploy/helm/cetra/.helmignore`
 
 ```text
 # Not packaged into the chart archive.
@@ -80,25 +80,25 @@ ci/
 .helmignore
 ```
 
-### `deploy/helm/llmobs/values.yaml`
+### `deploy/helm/cetra/values.yaml`
 
 ```yaml
-# Values of the llmobs chart (D-N-10). Reference: deploy/helm/llmobs/README.md.
-# llmobs runs as exactly one pod: its data directory is a single volume that one process locks
+# Values of the cetra chart (D-N-10). Reference: deploy/helm/cetra/README.md.
+# cetra runs as exactly one pod: its data directory is a single volume that one process locks
 # (spec 12 § Packaging). There is no replica count.
 
 image:
-  repository: ghcr.io/sebastiencs/llmobs
+  repository: ghcr.io/cetra-ai/cetra
   # Empty: the chart's appVersion.
   tag: ""
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
 
-# The URL users open (LLMOBS_PUBLIC_URL): links in emails and OAuth redirects use it.
+# The URL users open (CETRA_PUBLIC_URL): links in emails and OAuth redirects use it.
 publicUrl: http://localhost:8080
 
-# Settings written to llmobs.toml (spec 12 § Configuration), as nested keys. Empty: no file.
+# Settings written to cetra.toml (spec 12 § Configuration), as nested keys. Empty: no file.
 # Example:
 #   config:
 #     storage:
@@ -108,13 +108,13 @@ publicUrl: http://localhost:8080
 #       signup: invite_only
 config: {}
 
-# Extra environment variables of the llmobs container (Kubernetes EnvVar list).
+# Extra environment variables of the cetra container (Kubernetes EnvVar list).
 env: []
 
 secret:
   # Name of an existing Secret in the release namespace. Each of its keys becomes an
-  # environment variable (envFrom), e.g. LLMOBS_ENCRYPTION_KEY, LLMOBS_SMTP_URL,
-  # LLMOBS_LICENSE_KEY, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY.
+  # environment variable (envFrom), e.g. CETRA_ENCRYPTION_KEY, CETRA_SMTP_URL,
+  # CETRA_LICENSE_KEY, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY.
   existingSecret: ""
   # Variables for a Secret this chart creates, as NAME: value. Prefer existingSecret: values
   # given here are stored in the Helm release.
@@ -155,7 +155,7 @@ ingress:
   className: ""
   annotations: {}
   host: ""
-  # Example: [{secretName: llmobs-tls, hosts: [llmobs.example.com]}]
+  # Example: [{secretName: cetra-tls, hosts: [cetra.example.com]}]
   tls: []
 
 podAnnotations: {}
@@ -165,16 +165,16 @@ tolerations: []
 affinity: {}
 ```
 
-### `deploy/helm/llmobs/templates/_helpers.tpl`
+### `deploy/helm/cetra/templates/_helpers.tpl`
 
 ```gotemplate
-{{/* Names and labels of the llmobs chart (D-N-10). */}}
+{{/* Names and labels of the cetra chart (D-N-10). */}}
 
-{{- define "llmobs.name" -}}
+{{- define "cetra.name" -}}
 {{- .Chart.Name | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
-{{- define "llmobs.fullname" -}}
+{{- define "cetra.fullname" -}}
 {{- if contains .Chart.Name .Release.Name -}}
 {{- .Release.Name | trunc 63 | trimSuffix "-" -}}
 {{- else -}}
@@ -182,23 +182,23 @@ affinity: {}
 {{- end -}}
 {{- end -}}
 
-{{- define "llmobs.selectorLabels" -}}
-app.kubernetes.io/name: {{ include "llmobs.name" . }}
+{{- define "cetra.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "cetra.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
-{{- define "llmobs.labels" -}}
-{{ include "llmobs.selectorLabels" . }}
+{{- define "cetra.labels" -}}
+{{ include "cetra.selectorLabels" . }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
 {{- end -}}
 
-{{- define "llmobs.image" -}}
+{{- define "cetra.image" -}}
 {{- printf "%s:%s" .Values.image.repository (default .Chart.AppVersion .Values.image.tag) -}}
 {{- end -}}
 
-{{- define "llmobs.objectStore" -}}
+{{- define "cetra.objectStore" -}}
 {{- if .Values.s3.prefix -}}
 {{- printf "s3://%s/%s" .Values.s3.bucket (trimAll "/" .Values.s3.prefix) -}}
 {{- else -}}
@@ -207,7 +207,7 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | 
 {{- end -}}
 ```
 
-### `deploy/helm/llmobs/templates/statefulset.yaml`
+### `deploy/helm/cetra/templates/statefulset.yaml`
 
 ```yaml
 {{- if and .Values.s3.enabled (not .Values.s3.bucket) }}
@@ -216,13 +216,13 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | 
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: {{ include "llmobs.fullname" . }}
+  name: {{ include "cetra.fullname" . }}
   labels:
-    {{- include "llmobs.labels" . | nindent 4 }}
+    {{- include "cetra.labels" . | nindent 4 }}
 spec:
   # Exactly one: one process locks the data directory (spec 12 § Packaging, D-N-10).
   replicas: 1
-  serviceName: {{ include "llmobs.fullname" . }}-headless
+  serviceName: {{ include "cetra.fullname" . }}-headless
   podManagementPolicy: OrderedReady
   updateStrategy:
     type: RollingUpdate
@@ -231,11 +231,11 @@ spec:
     whenScaled: Retain
   selector:
     matchLabels:
-      {{- include "llmobs.selectorLabels" . | nindent 6 }}
+      {{- include "cetra.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "llmobs.selectorLabels" . | nindent 8 }}
+        {{- include "cetra.selectorLabels" . | nindent 8 }}
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -247,8 +247,8 @@ spec:
         {{- end }}
     spec:
       automountServiceAccountToken: false
-      # Service links would inject LLMOBS_PORT=tcp://... and friends, which the config loader
-      # rejects as unknown LLMOBS_* keys.
+      # Service links would inject CETRA_PORT=tcp://... and friends, which the config loader
+      # rejects as unknown CETRA_* keys.
       enableServiceLinks: false
       # Shutdown drains requests (20 s) and flushes memtables (30 s) (spec 12).
       terminationGracePeriodSeconds: 60
@@ -265,8 +265,8 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       containers:
-        - name: llmobs
-          image: {{ include "llmobs.image" . | quote }}
+        - name: cetra
+          image: {{ include "cetra.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: ["serve"]
           ports:
@@ -280,28 +280,28 @@ spec:
               containerPort: 4318
               protocol: TCP
           env:
-            - name: LLMOBS_DATA_DIR
+            - name: CETRA_DATA_DIR
               value: /data
-            - name: LLMOBS_PUBLIC_URL
+            - name: CETRA_PUBLIC_URL
               value: {{ .Values.publicUrl | quote }}
             {{- if .Values.config }}
-            - name: LLMOBS_CONFIG
-              value: /etc/llmobs/llmobs.toml
+            - name: CETRA_CONFIG
+              value: /etc/cetra/cetra.toml
             {{- end }}
             {{- if .Values.s3.enabled }}
-            - name: LLMOBS_OBJECT_STORE
-              value: {{ include "llmobs.objectStore" . | quote }}
+            - name: CETRA_OBJECT_STORE
+              value: {{ include "cetra.objectStore" . | quote }}
             {{- with .Values.s3.region }}
             - name: AWS_REGION
               value: {{ . | quote }}
             {{- end }}
             {{- with .Values.s3.endpoint }}
-            - name: LLMOBS_STORAGE__S3__ENDPOINT
+            - name: CETRA_STORAGE__S3__ENDPOINT
               value: {{ . | quote }}
             {{- end }}
-            - name: LLMOBS_STORAGE__S3__FORCE_PATH_STYLE
+            - name: CETRA_STORAGE__S3__FORCE_PATH_STYLE
               value: {{ .Values.s3.forcePathStyle | quote }}
-            - name: LLMOBS_STORAGE__S3__ALLOW_HTTP
+            - name: CETRA_STORAGE__S3__ALLOW_HTTP
               value: {{ .Values.s3.allowHttp | quote }}
             {{- end }}
             {{- with .Values.env }}
@@ -311,7 +311,7 @@ spec:
           envFrom:
             {{- if .Values.secret.values }}
             - secretRef:
-                name: {{ include "llmobs.fullname" . }}
+                name: {{ include "cetra.fullname" . }}
             {{- end }}
             {{- with .Values.secret.existingSecret }}
             - secretRef:
@@ -353,14 +353,14 @@ spec:
               mountPath: /data
             {{- if .Values.config }}
             - name: config
-              mountPath: /etc/llmobs
+              mountPath: /etc/cetra
               readOnly: true
             {{- end }}
       {{- if .Values.config }}
       volumes:
         - name: config
           configMap:
-            name: {{ include "llmobs.fullname" . }}
+            name: {{ include "cetra.fullname" . }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
@@ -378,7 +378,7 @@ spec:
     - metadata:
         name: data
         labels:
-          {{- include "llmobs.selectorLabels" . | nindent 10 }}
+          {{- include "cetra.selectorLabels" . | nindent 10 }}
       spec:
         accessModes: ["ReadWriteOnce"]
         {{- with .Values.persistence.storageClassName }}
@@ -389,15 +389,15 @@ spec:
             storage: {{ .Values.persistence.size | quote }}
 ```
 
-### `deploy/helm/llmobs/templates/service.yaml`
+### `deploy/helm/cetra/templates/service.yaml`
 
 ```yaml
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "llmobs.fullname" . }}
+  name: {{ include "cetra.fullname" . }}
   labels:
-    {{- include "llmobs.labels" . | nindent 4 }}
+    {{- include "cetra.labels" . | nindent 4 }}
   {{- with .Values.service.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
@@ -405,7 +405,7 @@ metadata:
 spec:
   type: {{ .Values.service.type }}
   selector:
-    {{- include "llmobs.selectorLabels" . | nindent 4 }}
+    {{- include "cetra.selectorLabels" . | nindent 4 }}
   ports:
     - name: http
       port: 8080
@@ -425,13 +425,13 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "llmobs.fullname" . }}-headless
+  name: {{ include "cetra.fullname" . }}-headless
   labels:
-    {{- include "llmobs.labels" . | nindent 4 }}
+    {{- include "cetra.labels" . | nindent 4 }}
 spec:
   clusterIP: None
   selector:
-    {{- include "llmobs.selectorLabels" . | nindent 4 }}
+    {{- include "cetra.selectorLabels" . | nindent 4 }}
   ports:
     - name: http
       port: 8080
@@ -439,32 +439,32 @@ spec:
       protocol: TCP
 ```
 
-### `deploy/helm/llmobs/templates/configmap.yaml`
+### `deploy/helm/cetra/templates/configmap.yaml`
 
 ```yaml
 {{- if .Values.config }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "llmobs.fullname" . }}
+  name: {{ include "cetra.fullname" . }}
   labels:
-    {{- include "llmobs.labels" . | nindent 4 }}
+    {{- include "cetra.labels" . | nindent 4 }}
 data:
-  llmobs.toml: |
+  cetra.toml: |
     {{- toToml .Values.config | nindent 4 }}
 {{- end }}
 ```
 
-### `deploy/helm/llmobs/templates/secret.yaml`
+### `deploy/helm/cetra/templates/secret.yaml`
 
 ```yaml
 {{- if .Values.secret.values }}
 apiVersion: v1
 kind: Secret
 metadata:
-  name: {{ include "llmobs.fullname" . }}
+  name: {{ include "cetra.fullname" . }}
   labels:
-    {{- include "llmobs.labels" . | nindent 4 }}
+    {{- include "cetra.labels" . | nindent 4 }}
 type: Opaque
 stringData:
   {{- range $name, $value := .Values.secret.values }}
@@ -473,7 +473,7 @@ stringData:
 {{- end }}
 ```
 
-### `deploy/helm/llmobs/templates/ingress.yaml`
+### `deploy/helm/cetra/templates/ingress.yaml`
 
 ```yaml
 {{- if .Values.ingress.enabled }}
@@ -483,9 +483,9 @@ stringData:
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: {{ include "llmobs.fullname" . }}
+  name: {{ include "cetra.fullname" . }}
   labels:
-    {{- include "llmobs.labels" . | nindent 4 }}
+    {{- include "cetra.labels" . | nindent 4 }}
   {{- with .Values.ingress.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
@@ -506,48 +506,48 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: {{ include "llmobs.fullname" . }}
+                name: {{ include "cetra.fullname" . }}
                 port:
                   name: http
 {{- end }}
 ```
 
-### `deploy/helm/llmobs/templates/NOTES.txt`
+### `deploy/helm/cetra/templates/NOTES.txt`
 
 ```text
-llmobs {{ .Chart.AppVersion }} is installed as the StatefulSet {{ include "llmobs.fullname" . }} (one pod).
+cetra {{ .Chart.AppVersion }} is installed as the StatefulSet {{ include "cetra.fullname" . }} (one pod).
 
 Open the UI:
-  kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "llmobs.fullname" . }} 8080:8080
-  then http://localhost:8080 (the setup page creates the first admin, unless LLMOBS_INIT_* is set).
+  kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "cetra.fullname" . }} 8080:8080
+  then http://localhost:8080 (the setup page creates the first admin, unless CETRA_INIT_* is set).
 
-Send OTLP to the Service {{ include "llmobs.fullname" . }}: port 4318 (HTTP) or 4317 (gRPC), with an
-sk-llmobs- key of the project as "Authorization: Bearer <key>".
+Send OTLP to the Service {{ include "cetra.fullname" . }}: port 4318 (HTTP) or 4317 (gRPC), with an
+sk-cetra- key of the project as "Authorization: Bearer <key>".
 
 Back up the volume, and the bucket when s3.enabled, as in docs/self-hosting/backup.md.
 ```
 
-### `deploy/helm/llmobs/ci/s3-values.yaml`
+### `deploy/helm/cetra/ci/s3-values.yaml`
 
 ```yaml
 # `just helm-check` renders the chart with this file (S3 mode, existing secret).
 s3:
   enabled: true
-  bucket: llmobs
+  bucket: cetra
   prefix: cell-1
   region: garage
   endpoint: http://garage:3900
   forcePathStyle: true
   allowHttp: true
 secret:
-  existingSecret: llmobs-s3
+  existingSecret: cetra-s3
 ```
 
-### `deploy/helm/llmobs/ci/full-values.yaml`
+### `deploy/helm/cetra/ci/full-values.yaml`
 
 ```yaml
 # `just helm-check` renders the chart with this file (every optional block on).
-publicUrl: https://llmobs.example.com
+publicUrl: https://cetra.example.com
 config:
   storage:
     flush:
@@ -555,19 +555,19 @@ config:
   auth:
     signup: invite_only
 env:
-  - name: LLMOBS_LOG
+  - name: CETRA_LOG
     value: debug
 secret:
   values:
-    LLMOBS_SMTP_URL: smtps://user:password@smtp.example.com:465
-    LLMOBS_EMAIL_FROM: llmobs <llmobs@example.com>
+    CETRA_SMTP_URL: smtps://user:password@smtp.example.com:465
+    CETRA_EMAIL_FROM: cetra <noreply@cetra.sh>
 ingress:
   enabled: true
   className: nginx
-  host: llmobs.example.com
+  host: cetra.example.com
   tls:
-    - secretName: llmobs-tls
-      hosts: [llmobs.example.com]
+    - secretName: cetra-tls
+      hosts: [cetra.example.com]
 persistence:
   size: 50Gi
   storageClassName: fast
@@ -583,31 +583,31 @@ nodeSelector:
   kubernetes.io/os: linux
 ```
 
-### `deploy/helm/llmobs/README.md`
+### `deploy/helm/cetra/README.md`
 
 ````markdown
-# llmobs Helm chart
+# cetra Helm chart
 
-Runs llmobs as a StatefulSet with one pod and one PersistentVolumeClaim (`/data`). Guide:
+Runs cetra as a StatefulSet with one pod and one PersistentVolumeClaim (`/data`). Guide:
 [docs/self-hosting/kubernetes.md](../../../docs/self-hosting/kubernetes.md).
 
 ```bash
-helm install llmobs oci://ghcr.io/sebastiencs/charts/llmobs --version <version> \
-  --namespace llmobs --create-namespace --set publicUrl=https://llmobs.example.com
+helm install cetra oci://ghcr.io/cetra-ai/charts/cetra --version <version> \
+  --namespace cetra --create-namespace --set publicUrl=https://cetra.example.com
 ```
 
-The chart version is the llmobs version.
+The chart version is the cetra version.
 
 ## Values
 
 | Value | Default | Description |
 |---|---|---|
-| `image.repository` | `ghcr.io/sebastiencs/llmobs` | image |
+| `image.repository` | `ghcr.io/cetra-ai/cetra` | image |
 | `image.tag` | `""` | empty: the chart's `appVersion` |
 | `image.pullPolicy` | `IfNotPresent` | |
 | `imagePullSecrets` | `[]` | e.g. `[{name: ghcr}]` for a private registry |
-| `publicUrl` | `http://localhost:8080` | `LLMOBS_PUBLIC_URL`: the URL users open |
-| `config` | `{}` | nested settings rendered to `/etc/llmobs/llmobs.toml` (`LLMOBS_CONFIG`); empty: no file |
+| `publicUrl` | `http://localhost:8080` | `CETRA_PUBLIC_URL`: the URL users open |
+| `config` | `{}` | nested settings rendered to `/etc/cetra/cetra.toml` (`CETRA_CONFIG`); empty: no file |
 | `env` | `[]` | extra container environment variables (`EnvVar` list) |
 | `secret.existingSecret` | `""` | Secret whose keys become environment variables |
 | `secret.values` | `{}` | `NAME: value` pairs of a Secret the chart creates (stored in the release; prefer `existingSecret`) |
@@ -633,7 +633,7 @@ The chart version is the llmobs version.
 
 S3 credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) and other secrets go in
 `secret.existingSecret` or `secret.values`. The chart never generates secrets: without
-`LLMOBS_ENCRYPTION_KEY`, llmobs generates `/data/secret.key` on the volume on its first start.
+`CETRA_ENCRYPTION_KEY`, cetra generates `/data/secret.key` on the volume on its first start.
 
 Fixed by the chart: one replica, `terminationGracePeriodSeconds: 60`, uid/gid 65532, read-only
 root filesystem, no capabilities, `automountServiceAccountToken: false`, the PVC kept when the
@@ -643,22 +643,22 @@ release is deleted.
 The link to `docs/self-hosting/kubernetes.md` resolves once N11 adds that file, and so does the
 `docs/self-hosting/backup.md` path in `NOTES.txt`; leave both as they are.
 
-With the release name `llmobs`, the chart's fullname is `llmobs` (the `contains` branch of
-`llmobs.fullname`), so the StatefulSet, Service, ConfigMap and Secret are all named `llmobs`
-(different kinds, which is legal) and the pod is `llmobs-0`.
+With the release name `cetra`, the chart's fullname is `cetra` (the `contains` branch of
+`cetra.fullname`), so the StatefulSet, Service, ConfigMap and Secret are all named `cetra`
+(different kinds, which is legal) and the pod is `cetra-0`.
 
 ### `tools/packaging/helm-check.sh` (executable)
 
 ```bash
 #!/usr/bin/env bash
 # Lints the chart and validates its rendered manifests against the Kubernetes schemas, with the
-# default values and each file in deploy/helm/llmobs/ci/, and checks the two template guards
+# default values and each file in deploy/helm/cetra/ci/, and checks the two template guards
 # (D-N-10). Needs helm and kubeconform; kubeconform downloads the schemas.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$root"
-chart=deploy/helm/llmobs
+chart=deploy/helm/cetra
 
 for values in "" "$chart/ci/s3-values.yaml" "$chart/ci/full-values.yaml"; do
   args=()
@@ -667,15 +667,15 @@ for values in "" "$chart/ci/s3-values.yaml" "$chart/ci/full-values.yaml"; do
   fi
   echo "helm-check: ${values:-default values}"
   helm lint --strict "$chart" "${args[@]}"
-  helm template llmobs "$chart" "${args[@]}" | kubeconform -strict -summary
+  helm template cetra "$chart" "${args[@]}" | kubeconform -strict -summary
 done
 
 # The guards fail the render.
-if helm template llmobs "$chart" --set s3.enabled=true >/dev/null 2>&1; then
+if helm template cetra "$chart" --set s3.enabled=true >/dev/null 2>&1; then
   echo "helm-check: s3.enabled without s3.bucket rendered" >&2
   exit 1
 fi
-if helm template llmobs "$chart" --set ingress.enabled=true >/dev/null 2>&1; then
+if helm template cetra "$chart" --set ingress.enabled=true >/dev/null 2>&1; then
   echo "helm-check: ingress.enabled without ingress.host rendered" >&2
   exit 1
 fi
@@ -689,9 +689,9 @@ echo "helm-check: passed"
 # Creates a kind cluster, loads an image, installs the chart with it and runs smoke.sh through
 # `kubectl port-forward`, then deletes the cluster (D-N-10, D-N-13).
 #
-# Usage: helm-smoke.sh <image>, e.g. helm-smoke.sh llmobs:dev. Needs docker, kind, kubectl, helm,
-# python3. The release is named llmobs, so the chart's fullname, the Service and the Secret are
-# all `llmobs` and the pod is `llmobs-0`.
+# Usage: helm-smoke.sh <image>, e.g. helm-smoke.sh cetra:dev. Needs docker, kind, kubectl, helm,
+# python3. The release is named cetra, so the chart's fullname, the Service and the Secret are
+# all `cetra` and the pod is `cetra-0`.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -703,9 +703,9 @@ fi
 image="$1"
 repository="${image%:*}"
 tag="${image##*:}"
-cluster="llmobs-smoke-$$"
+cluster="cetra-smoke-$$"
 context="kind-$cluster"
-key="sk-llmobs-SMOKE0123456789ABCDEFGHIJKLMNOPQ"
+key="sk-cetra-SMOKE0123456789ABCDEFGHIJKLMNOPQ"
 forward_pid=""
 log="$(mktemp)"
 
@@ -721,19 +721,19 @@ trap cleanup EXIT
 kind create cluster --name "$cluster" --wait 180s
 kind load docker-image "$image" --name "$cluster"
 
-if ! helm install llmobs deploy/helm/llmobs --kube-context "$context" \
+if ! helm install cetra deploy/helm/cetra --kube-context "$context" \
   --set image.repository="$repository" \
   --set image.tag="$tag" \
   --set image.pullPolicy=Never \
   --set persistence.size=1Gi \
-  --set-string secret.values.LLMOBS_INIT_ADMIN_EMAIL=smoke@example.com \
-  --set-string secret.values.LLMOBS_INIT_ADMIN_PASSWORD=llmobs-smoke-1 \
-  --set-string secret.values.LLMOBS_INIT_ORG=Smoke \
-  --set-string secret.values.LLMOBS_INIT_PROJECT=Smoke \
-  --set-string secret.values.LLMOBS_INIT_SECRET_KEY="$key" \
+  --set-string secret.values.CETRA_INIT_ADMIN_EMAIL=smoke@example.com \
+  --set-string secret.values.CETRA_INIT_ADMIN_PASSWORD=cetra-smoke-1 \
+  --set-string secret.values.CETRA_INIT_ORG=Smoke \
+  --set-string secret.values.CETRA_INIT_PROJECT=Smoke \
+  --set-string secret.values.CETRA_INIT_SECRET_KEY="$key" \
   --wait --timeout 11m; then
-  kubectl --context "$context" describe pod llmobs-0 >&2 || true
-  kubectl --context "$context" logs llmobs-0 >&2 || true
+  kubectl --context "$context" describe pod cetra-0 >&2 || true
+  kubectl --context "$context" logs cetra-0 >&2 || true
   exit 1
 fi
 
@@ -751,12 +751,12 @@ if [[ -z "${http_port:-}" || -z "${otlp_port:-}" ]]; then
   echo "helm-smoke: could not pick free ports (is python3 installed?)" >&2
   exit 1
 fi
-kubectl --context "$context" port-forward svc/llmobs "$http_port:8080" "$otlp_port:4318" >"$log" 2>&1 &
+kubectl --context "$context" port-forward svc/cetra "$http_port:8080" "$otlp_port:4318" >"$log" 2>&1 &
 forward_pid=$!
 
 if ! tools/packaging/smoke.sh "http://127.0.0.1:$http_port" "http://127.0.0.1:$otlp_port" "$key"; then
   cat "$log" >&2
-  kubectl --context "$context" logs llmobs-0 >&2 || true
+  kubectl --context "$context" logs cetra-0 >&2 || true
   exit 1
 fi
 echo "helm-smoke: $image passed on kind"
@@ -772,7 +772,7 @@ helm-check:
     tools/packaging/helm-check.sh
 
 # Install the chart with an image on a throwaway kind cluster and smoke-test it (D-N-10)
-helm-smoke tag="llmobs:dev":
+helm-smoke tag="cetra:dev":
     tools/packaging/helm-smoke.sh {{tag}}
 ```
 
@@ -781,9 +781,9 @@ helm-smoke tag="llmobs:dev":
 ```bash
 export PATH="$HOME/.local/share/nvm/v26.13.0/bin:$PATH"
 just helm-check
-helm template llmobs deploy/helm/llmobs -f deploy/helm/llmobs/ci/full-values.yaml | grep -A5 'llmobs.toml: |'
-just image llmobs:dev            # after just dist, as in N4
-just helm-smoke llmobs:dev
+helm template cetra deploy/helm/cetra -f deploy/helm/cetra/ci/full-values.yaml | grep -A5 'cetra.toml: |'
+just image cetra:dev            # after just dist, as in N4
+just helm-smoke cetra:dev
 just check
 just assert-clean
 ```
@@ -793,8 +793,8 @@ Expected:
   summary reports `Invalid: 0, Errors: 0`. It ends with `helm-check: passed`.
 - The rendered TOML holds `[auth]` with `signup = "invite_only"` and `[storage.flush]` with
   `max_age = "60s"`. Helm's `toToml` decides the table order; any order is fine.
-- `helm-smoke` ends with `helm-smoke: llmobs:dev passed on kind`, and `kind get clusters` no
-  longer lists `llmobs-smoke-*`.
+- `helm-smoke` ends with `helm-smoke: cetra:dev passed on kind`, and `kind get clusters` no
+  longer lists `cetra-smoke-*`.
 
 If `helm lint --strict` warns about a missing `icon` in `Chart.yaml`, that is information only and
 does not fail. Any other warning fails `--strict`: fix the template so it matches this file
@@ -804,5 +804,5 @@ exactly, and report if it already does.
 
 - [ ] The chart's 13 files and the two scripts exist (scripts mode `100755`); the two recipes are
       in the `justfile`.
-- [ ] `just helm-check` and `just helm-smoke llmobs:dev` pass.
+- [ ] `just helm-check` and `just helm-smoke cetra:dev` pass.
 - [ ] `just check` and `just assert-clean` pass. One commit: `Add the Helm chart`.

@@ -17,7 +17,7 @@
   - `smtps://user:pass@host:465`: implicit TLS (`Tls::Wrapper`);
   - `smtp://host:25?tls=none`: no TLS (local relays);
   - default ports 587 / 465 / 25; user and password percent-decoded; any other scheme or query → error naming `smtp_url` (never its value: it holds a password).
-- `email_from` is required when `smtp_url` is set, and parses as a mailbox (`"llmobs <noreply@acme.com>"` or a bare address); error names the key.
+- `email_from` is required when `smtp_url` is set, and parses as a mailbox (`"cetra <noreply@acme.com>"` or a bare address); error names the key.
 
 ### `email/mod.rs`
 
@@ -39,7 +39,7 @@ impl Mailer {
 ```
 
 - Templates: `templates/{invite,password_reset,verify_email,test}.{txt,html}` loaded with `include_str!` into the environment at construction. The `.html` ones auto-escape (minijinja picks auto-escaping by template name extension). A global `product` holds the name constant of P7. The HTML is the simple inline-styled layout of spec 08 with no external assets.
-- Subjects: "You're invited to <org> on llmobs", "Reset your llmobs password", "Verify your email for llmobs", "llmobs test email" (built from the name constant).
+- Subjects: "You're invited to <org> on cetra", "Reset your cetra password", "Verify your email for cetra", "cetra test email" (built from the name constant).
 - Messages are `multipart/alternative` (text first, then HTML), built with lettre's builder; lettre generates the `Message-ID`.
 - `send_in_background`: `tokio::spawn`; up to 3 attempts, waiting 1 s then 2 s between them; logs at `info` (sent) or `warn` (failed after retries) with `template`, `message_id` and `attempt`. Never the recipient, the subject variables or the body (spec 08 § Email, D150).
 - `MailError` messages carry no address and no SMTP server text (lettre errors can quote the server's reply, which may contain the address): map to fixed kinds (`Connect`, `Tls`, `Auth`, `Rejected`, `Template`, `InvalidAddress`) and keep the lettre error only as a `#[source]` that is never formatted into responses. Logging the source chain at `warn` is allowed only if it cannot contain an address; if unsure, log the kind only.

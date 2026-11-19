@@ -41,15 +41,15 @@
           },
           "spans": [
             {
-              "traceId": "21f470416598f9c239cd97edeac73263",
-              "spanId": "1b9dcc265ceb7806",
+              "traceId": "2a3d83191508b31974354d455a9d5f8e",
+              "spanId": "75c54e3af5931125",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
               "name": "embeddings text-embedding-3-small",
               "kind": 3,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590036000000",
+              "endTimeUnixNano": "1767225590035000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",

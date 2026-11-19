@@ -1,4 +1,4 @@
-import { screen } from "@testing-library/react";
+import { act, screen, within } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
 import { expect, it } from "vitest";
 import { server } from "@/mocks/node";
@@ -93,4 +93,23 @@ it("exposes the header, the projects table, and a keyboard-operable org menu", a
   await user.keyboard("{ArrowDown}");
   await user.keyboard("{Enter}");
   expect(router.state.location.pathname).toBe("/beta");
+});
+
+it("leaves the theme and account menus to the project sidebar on project pages", async () => {
+  await renderApp("/acme/support-bot/traces");
+
+  const header = screen.getByRole("banner");
+  expect(within(header).queryByRole("button", { name: "Theme" })).toBeNull();
+  expect(within(header).queryByRole("button", { name: "Ada Example" })).toBeNull();
+});
+
+it("keeps the theme and account menus in the top bar on project settings and org pages", async () => {
+  const { router } = await renderApp("/acme/support-bot/settings/general");
+  expect(within(screen.getByRole("banner")).getByRole("button", { name: "Theme" })).toBeVisible();
+  expect(
+    within(screen.getByRole("banner")).getByRole("button", { name: "Ada Example" }),
+  ).toBeVisible();
+
+  await act(() => router.navigate({ to: "/$org", params: { org: "acme" } }));
+  expect(within(screen.getByRole("banner")).getByRole("button", { name: "Theme" })).toBeVisible();
 });

@@ -41,15 +41,15 @@
           },
           "spans": [
             {
-              "traceId": "764e9363f97559d4bd1e102f3f4ba29e",
-              "spanId": "8771755696e85858",
+              "traceId": "9f2c9f38130b0a351548707f845011d7",
+              "spanId": "a654ebbc2755889b",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
               "name": "invoke_agent LangGraph",
               "kind": 1,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590086000000",
+              "endTimeUnixNano": "1767225590091000000",
               "attributes": [
                 {
                   "key": "gen_ai.provider.name",
@@ -108,15 +108,15 @@
               "status": null
             },
             {
-              "traceId": "764e9363f97559d4bd1e102f3f4ba29e",
-              "spanId": "7a1bcf7b2462aa1d",
+              "traceId": "9f2c9f38130b0a351548707f845011d7",
+              "spanId": "727de60dc86763f0",
               "traceState": "",
-              "parentSpanId": "8771755696e85858",
+              "parentSpanId": "a654ebbc2755889b",
               "flags": 256,
               "name": "LangGraph.workflow",
               "kind": 1,
-              "startTimeUnixNano": "1767225590001000000",
-              "endTimeUnixNano": "1767225590086000000",
+              "startTimeUnixNano": "1767225590002000000",
+              "endTimeUnixNano": "1767225590090000000",
               "attributes": [
                 {
                   "key": "traceloop.workflow.name",
@@ -211,15 +211,15 @@
               "status": null
             },
             {
-              "traceId": "764e9363f97559d4bd1e102f3f4ba29e",
-              "spanId": "61fca5eac67633f0",
+              "traceId": "9f2c9f38130b0a351548707f845011d7",
+              "spanId": "cd2d7e251da73f42",
               "traceState": "",
-              "parentSpanId": "7a1bcf7b2462aa1d",
+              "parentSpanId": "727de60dc86763f0",
               "flags": 256,
               "name": "execute_task model",
               "kind": 1,
-              "startTimeUnixNano": "1767225590002000000",
-              "endTimeUnixNano": "1767225590045000000",
+              "startTimeUnixNano": "1767225590003000000",
+              "endTimeUnixNano": "1767225590047000000",
               "attributes": [
                 {
                   "key": "traceloop.workflow.name",
@@ -365,15 +365,15 @@
               "status": null
             },
             {
-              "traceId": "764e9363f97559d4bd1e102f3f4ba29e",
-              "spanId": "95779dd186ae104c",
+              "traceId": "9f2c9f38130b0a351548707f845011d7",
+              "spanId": "f93672ef90611a97",
               "traceState": "",
-              "parentSpanId": "61fca5eac67633f0",
+              "parentSpanId": "cd2d7e251da73f42",
               "flags": 256,
               "name": "ChatOpenAI.chat",
               "kind": 3,
-              "startTimeUnixNano": "1767225590003000000",
-              "endTimeUnixNano": "1767225590044000000",
+              "startTimeUnixNano": "1767225590004000000",
+              "endTimeUnixNano": "1767225590045000000",
               "attributes": [
                 {
                   "key": "traceloop.workflow.name",
@@ -567,15 +567,15 @@
               "status": null
             },
             {
-              "traceId": "764e9363f97559d4bd1e102f3f4ba29e",
-              "spanId": "09df1bd89f4bfabf",
+              "traceId": "9f2c9f38130b0a351548707f845011d7",
+              "spanId": "48a74ae0812cfcb4",
               "traceState": "",
-              "parentSpanId": "7a1bcf7b2462aa1d",
+              "parentSpanId": "727de60dc86763f0",
               "flags": 256,
               "name": "execute_task tools",
               "kind": 1,
-              "startTimeUnixNano": "1767225590046000000",
-              "endTimeUnixNano": "1767225590049000000",
+              "startTimeUnixNano": "1767225590049000000",
+              "endTimeUnixNano": "1767225590052000000",
               "attributes": [
                 {
                   "key": "traceloop.workflow.name",
@@ -724,15 +724,15 @@
               "status": null
             },
             {
-              "traceId": "764e9363f97559d4bd1e102f3f4ba29e",
-              "spanId": "75faca0953a17027",
+              "traceId": "9f2c9f38130b0a351548707f845011d7",
+              "spanId": "7d5cc3b5181b0f9e",
               "traceState": "",
-              "parentSpanId": "09df1bd89f4bfabf",
+              "parentSpanId": "48a74ae0812cfcb4",
               "flags": 256,
               "name": "execute_tool get_weather",
               "kind": 1,
-              "startTimeUnixNano": "1767225590047000000",
-              "endTimeUnixNano": "1767225590047000000",
+              "startTimeUnixNano": "1767225590049000000",
+              "endTimeUnixNano": "1767225590050000000",
               "attributes": [
                 {
                   "key": "traceloop.workflow.name",
@@ -887,15 +887,15 @@
               "status": null
             },
             {
-              "traceId": "764e9363f97559d4bd1e102f3f4ba29e",
-              "spanId": "c5763a9bfb18f9c8",
+              "traceId": "9f2c9f38130b0a351548707f845011d7",
+              "spanId": "ace5dfa7d6524462",
               "traceState": "",
-              "parentSpanId": "7a1bcf7b2462aa1d",
+              "parentSpanId": "727de60dc86763f0",
               "flags": 256,
               "name": "execute_task model",
               "kind": 1,
-              "startTimeUnixNano": "1767225590050000000",
-              "endTimeUnixNano": "1767225590085000000",
+              "startTimeUnixNano": "1767225590053000000",
+              "endTimeUnixNano": "1767225590089000000",
               "attributes": [
                 {
                   "key": "traceloop.workflow.name",
@@ -1041,15 +1041,15 @@
               "status": null
             },
             {
-              "traceId": "764e9363f97559d4bd1e102f3f4ba29e",
-              "spanId": "2ecc2ba093667360",
+              "traceId": "9f2c9f38130b0a351548707f845011d7",
+              "spanId": "52ac74627fc61071",
               "traceState": "",
-              "parentSpanId": "c5763a9bfb18f9c8",
+              "parentSpanId": "ace5dfa7d6524462",
               "flags": 256,
               "name": "ChatOpenAI.chat",
               "kind": 3,
-              "startTimeUnixNano": "1767225590050000000",
-              "endTimeUnixNano": "1767225590084000000",
+              "startTimeUnixNano": "1767225590054000000",
+              "endTimeUnixNano": "1767225590088000000",
               "attributes": [
                 {
                   "key": "traceloop.workflow.name",

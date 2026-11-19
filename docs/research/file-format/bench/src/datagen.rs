@@ -4,9 +4,9 @@
 
 use std::collections::BTreeMap;
 
-use llmobs_core::enums::{Convention, CostSource, PayloadFormat, SpanKind, SpanStatus};
-use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-use llmobs_core::span::{Span, SpanEvent};
+use cetra_core::enums::{Convention, CostSource, PayloadFormat, SpanKind, SpanStatus};
+use cetra_core::ids::{ProjectId, SpanId, TraceId};
+use cetra_core::span::{Span, SpanEvent};
 use serde_json::json;
 
 pub const NS: i64 = 1_000_000_000;

@@ -40,7 +40,7 @@ export interface RequestOptions {
   retry?: boolean;
 }
 
-/** An error answer from the llmobs API, or a network failure (`status` 0). */
+/** An error answer from the cetra API, or a network failure (`status` 0). */
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string | undefined;

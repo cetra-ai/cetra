@@ -1,8 +1,8 @@
-# llmobs — Technical specification (MVP)
+# cetra — Technical specification (MVP)
 
 Status: draft v0.1 · Scope: everything in `../mvp-decisions.md`.
 
-`llmobs` is a working name. Every `llmobs` identifier (binary, crates, env prefix `LLMOBS_`, attribute namespace `llmobs.*`, key prefixes) will be renamed mechanically once the product name is chosen.
+The product is `cetra` (cetra.sh; D46). Its identifiers are the binary, the crates, the env prefix `CETRA_`, the attribute namespace `cetra.*` and the key prefixes.
 
 ## Documents
 
@@ -13,7 +13,7 @@ Status: draft v0.1 · Scope: everything in `../mvp-decisions.md`.
 | 02 | [ingestion.md](02-ingestion.md) | OTLP endpoints, convention detection and mapping tables, media extraction, truncation, cost |
 | 03 | [storage.md](03-storage.md) | WAL, memtable, Parquet layout, catalog, flush, compaction, query path, deletion, retention, media GC |
 | 04 | [metadata-db.md](04-metadata-db.md) | SQLite schema (orgs, users, keys, datasets, rules, ...) |
-| 05 | [query.md](05-query.md) | filter DSL, SQL console sandbox, full-text search, dashboard metrics |
+| 05 | [query.md](05-query.md) | filter DSL, SQL console sandbox, full-text search, dashboard queries |
 | 06 | [evaluation.md](06-evaluation.md) | evaluators, online rules, datasets, experiments, scores |
 | 07 | [alerts.md](07-alerts.md) | alert rules, evaluation loop, channels |
 | 08 | [auth.md](08-auth.md) | users, sessions, OAuth/OIDC, RBAC, API keys, email |
@@ -24,7 +24,7 @@ Status: draft v0.1 · Scope: everything in `../mvp-decisions.md`.
 
 ## Goals
 
-1. One binary, one machine, one data directory (or bucket). `llmobs serve` and it works.
+1. One binary, one machine, one data directory (or bucket). `cetra serve` and it works.
 2. Accept traces from any OpenTelemetry GenAI instrumentation without our SDK.
 3. Ingested spans visible in the UI in < 2 s.
 4. GDPR erasure that actually erases.
@@ -38,7 +38,7 @@ Gateway/proxy, prompt registry, playground, annotation queues, custom dashboards
 ## Architecture
 
 ```
-                    ┌──────────────────────────── llmobs serve (one process) ─────────────────────────────┐
+                    ┌──────────────────────────── cetra serve (one process) ─────────────────────────────┐
  OTLP gRPC :4317 ──►│ ingest ─► normalize ─► media extract ─► cost ─► WAL (group commit) ─► memtable      │
  OTLP HTTP :8080 ──►│   │                                                    │            │               │
                     │   │ auth / rate limit / metering                       │            ├─► live bus (SSE)
@@ -59,20 +59,20 @@ Single tokio runtime. CPU-heavy work (Parquet encode, compaction, DataFusion exe
 
 ## Crate layout (monorepo)
 
-D52. The earlier split (`llmobs-query`, `llmobs-meta`, `llmobs-auth`, `llmobs-alerts`, `llmobs-mail`, `llmobs-api`, and a `crates/llmobs/` binary) is folded in as follows: query lives in `llmobs-storage`; meta, auth, alerts, mail and api are modules of `llmobs-server`; evaluator execution is the `llmobs-eval` crate (D155); the binary is `llmobs-cli`. `web/` is embedded into the binary by `llmobs-server` (`memory-serve`).
+D52. The earlier split (`cetra-query`, `cetra-meta`, `cetra-auth`, `cetra-alerts`, `cetra-mail`, `cetra-api`, and a `crates/cetra/` binary) is folded in as follows: query lives in `cetra-storage`; meta, auth, alerts, mail and api are modules of `cetra-server`; evaluator execution is the `cetra-eval` crate (D155); the binary is `cetra-cli`. `web/` is embedded into the binary by `cetra-server` (`memory-serve`).
 
 ```
 crates/
-  core/      llmobs-core     shared contracts: IDs, enums, names, messages, Span/Score,
+  core/      cetra-core     shared contracts: IDs, enums, names, messages, Span/Score,
                              Arrow schemas + batch conversion, OpenAPI schemas,
                              no config (D59)                                          (spec 01)
-  otel/      llmobs-otel     OTLP decode, normalization, media, truncation, cost      (spec 02)
-  eval/      llmobs-eval     evaluator execution: checks, mapping, templates, judges,
+  otel/      cetra-otel     OTLP decode, normalization, media, truncation, cost      (spec 02)
+  eval/      cetra-eval     evaluator execution: checks, mapping, templates, judges,
                              webhooks, judge traces                                   (spec 06)
-  storage/   llmobs-storage  WAL, memtable, Parquet, catalog, compaction, deletion,
+  storage/   cetra-storage  WAL, memtable, Parquet, catalog, compaction, deletion,
                              DataFusion providers, filter DSL, SQL sandbox            (specs 03, 05)
-  server/    llmobs-server   API, auth, metadata DB, evaluation, alerts, email, MCP   (specs 04, 06–09)
-  cli/       llmobs-cli      the `llmobs` binary                                       (spec 09 § CLI)
+  server/    cetra-server   API, auth, metadata DB, evaluation, alerts, email, MCP   (specs 04, 06–09)
+  cli/       cetra-cli      the `cetra` binary                                       (spec 09 § CLI)
 web/                         React UI (Vite, TanStack, shadcn/ui, pnpm)               (spec 11)
 sdks/python/                 Python SDK (uv)                                           (spec 10)
 sdks/typescript/             TypeScript SDK (pnpm)                                     (spec 10)
@@ -101,13 +101,13 @@ These were made while writing the spec and approved afterwards; S3, S4 and S7 we
 | S4 | Time-sliced files, rows sorted by `trace_id, start_time` inside each file (Opik/LangWatch/Laminar pattern); `traces` table sorted by time for lists; trace lookup via time hint, then bloom filters, `trace_index` table post-MVP | 03 |
 | S5 | Deletion cut-off = request time: data ingested after the request is not deleted | 03 |
 | S6 | Trace-level online rules fire when the root span ended + 5 s idle, or after 60 s idle (configurable) | 06 |
-| S7 | Evaluator executions are traced into the user's project with reserved environment `llmobs-eval`; excluded from rules, lists, dashboards and alerts by default; score links to the judge trace; GDPR deletion cascades to judge traces | 03, 05, 06, 07 |
+| S7 | Evaluator executions are traced into the user's project with reserved environment `cetra-eval`; excluded from rules, lists, dashboards and alerts by default; score links to the judge trace; GDPR deletion cascades to judge traces | 03, 05, 06, 07 |
 | S8 | Sign-up default after bootstrap is `invite_only` | 08 |
-| S9 | API key prefixes `sk-llmobs-`, `pk-llmobs-`, `pat-llmobs-`; keys are project-bound; PATs for CLI/MCP | 08 |
+| S9 | API key prefixes `sk-cetra-`, `pk-cetra-`, `pat-cetra-`; keys are project-bound; PATs for CLI/MCP | 08 |
 | S10 | MCP tools are read-only in MVP; MCP auth via PAT bearer (OAuth for MCP later) | 09 |
 | S11 | Ports: 8080 (HTTP: UI, API, OTLP/HTTP, MCP), 4317 (OTLP/gRPC), 4318 (OTLP/HTTP only, standard port) | 09, 12 |
 | S12 | Static assets embedded with `memory-serve` | 11 |
-| S13 | MVP backups are a documented cold snapshot (stop, copy, start); the online `llmobs admin backup` command is track N's M2 (D-N-11) | 12 |
+| S13 | MVP backups are a documented cold snapshot (stop, copy, start); the online `cetra admin backup` command is track N's M2 (D-N-11) | 12 |
 | S14 | SSRF guard on all outbound calls, with an opt-in for private networks (local Ollama/vLLM) | 12 |
 | S15 | Saved views (list pages) and saved SQL queries in MVP, private or shared, with per-page defaults | 04, 05, 09, 11 |
 
@@ -122,5 +122,5 @@ These were made while writing the spec and approved afterwards; S3, S4 and S7 we
 | JSON in columns | UTF-8 strings containing JSON (`input`, `output`, attribute values). |
 | Errors | RFC 7807 `application/problem+json`. |
 | Pagination | Opaque cursor (`next_cursor`), `limit` ≤ 1000. |
-| Config | Env vars `LLMOBS_*` override optional `llmobs.toml`. |
+| Config | Env vars `CETRA_*` override optional `cetra.toml`. |
 | Logging | `tracing` crate, JSON or pretty; no payload content in logs. |

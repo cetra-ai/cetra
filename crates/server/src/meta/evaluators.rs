@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use llmobs_core::ids::ProjectId;
+use cetra_core::ids::ProjectId;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
@@ -142,7 +142,8 @@ pub(crate) async fn get_evaluator_tx(
 }
 
 /// Inserts an evaluator. `id` is chosen by the caller, because the AAD of the
-/// sealed column needs it before the insert.
+/// sealed column needs it before the insert. Also writes the evaluator's first
+/// `evaluator_versions` row.
 ///
 /// A duplicate name is [`MetaError::Conflict`] `"an evaluator with this name
 /// already exists"`; the project's 501st evaluator is `"a project has at most
@@ -188,6 +189,7 @@ pub(crate) async fn insert_evaluator(
     .execute(&mut *conn)
     .await
     .map_err(|error| unique_or(error, "an evaluator with this name already exists"))?;
+    record_version(conn, id, created_by, now).await?;
     get_evaluator_tx(conn, project, id)
         .await?
         .ok_or(MetaError::Corrupt {
@@ -198,7 +200,8 @@ pub(crate) async fn insert_evaluator(
 
 /// Replaces every editable column and bumps `updated_at`. `None` means the
 /// evaluator is missing or belongs to another project. `kind` and `created_by`
-/// are kept.
+/// are kept. Writes an `evaluator_versions` row when `fields.version` differs from
+/// the stored version, authored by `updated_by`.
 ///
 /// # Errors
 ///
@@ -208,9 +211,21 @@ pub(crate) async fn update_evaluator(
     project: ProjectId,
     id: Uuid,
     fields: EvaluatorFields,
+    updated_by: Option<Uuid>,
     now: i64,
 ) -> Result<Option<EvaluatorRow>, MetaError> {
-    let result = sqlx::query(
+    let previous: Option<i64> =
+        sqlx::query_scalar("SELECT version FROM evaluators WHERE project_id = ? AND id = ?")
+            .bind(project.to_string())
+            .bind(id.to_string())
+            .fetch_optional(&mut *conn)
+            .await?;
+    let Some(previous) = previous else {
+        return Ok(None);
+    };
+    let version = fields.version;
+    // The writer holds `BEGIN IMMEDIATE`, so the row cannot vanish between the two statements.
+    sqlx::query(
         "UPDATE evaluators SET name = ?, config = ?, output_score = ?, connection_id = ?, \
          secret_enc = ?, version = ?, updated_at = ? \
          WHERE project_id = ? AND id = ?",
@@ -220,15 +235,15 @@ pub(crate) async fn update_evaluator(
     .bind(fields.output_score)
     .bind(fields.connection_id.map(|value| value.to_string()))
     .bind(fields.secret_enc)
-    .bind(i64::from(fields.version))
+    .bind(i64::from(version))
     .bind(now)
     .bind(project.to_string())
     .bind(id.to_string())
     .execute(&mut *conn)
     .await
     .map_err(|error| unique_or(error, "an evaluator with this name already exists"))?;
-    if result.rows_affected() == 0 {
-        return Ok(None);
+    if i64::from(version) != previous {
+        record_version(conn, id, updated_by, now).await?;
     }
     get_evaluator_tx(conn, project, id)
         .await?
@@ -255,6 +270,93 @@ pub(crate) async fn delete_evaluator(
         .execute(&mut *conn)
         .await?;
     Ok(result.rows_affected() > 0)
+}
+
+/// Copies the current row of `id` into `evaluator_versions`, as the version it now has.
+async fn record_version(
+    conn: &mut SqliteConnection,
+    id: Uuid,
+    created_by: Option<Uuid>,
+    now: i64,
+) -> Result<(), MetaError> {
+    sqlx::query(
+        "INSERT INTO evaluator_versions \
+         (evaluator_id, version, name, kind, config, output_score, created_by, created_at) \
+         SELECT id, version, name, kind, config, output_score, ?, ? FROM evaluators WHERE id = ?",
+    )
+    .bind(created_by.map(|user| user.to_string()))
+    .bind(now)
+    .bind(id.to_string())
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// One stored version of an evaluator. `Debug` is written by hand and prints the
+/// lengths of `config` and `output_score` only, because a judge config holds the
+/// prompt template.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct EvaluatorVersionRow {
+    /// The evaluator this version belongs to.
+    pub(crate) evaluator_id: Uuid,
+    /// Version number, starting at 1.
+    pub(crate) version: u32,
+    /// Display name when this version was made.
+    pub(crate) name: String,
+    /// Stored kind name (`EvaluatorKind::as_str`).
+    pub(crate) kind: String,
+    /// JSON text of the kind's configuration, redacted as `EvaluatorRow::config`.
+    pub(crate) config: String,
+    /// JSON text of the output score.
+    pub(crate) output_score: String,
+    /// User who made this version.
+    pub(crate) created_by: Option<Uuid>,
+    /// When this version was made, nanoseconds.
+    pub(crate) created_at: i64,
+}
+
+impl fmt::Debug for EvaluatorVersionRow {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EvaluatorVersionRow")
+            .field("evaluator_id", &self.evaluator_id)
+            .field("version", &self.version)
+            .field("name", &self.name)
+            .field("kind", &self.kind)
+            .field("config_bytes", &self.config.len())
+            .field("output_score_bytes", &self.output_score.len())
+            .field("created_by", &self.created_by)
+            .field("created_at", &self.created_at)
+            .finish()
+    }
+}
+
+/// The versions of evaluator `id` of `project`, newest first: those below `before` when given, at most `limit`.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or a stored value does not decode.
+pub(crate) async fn list_evaluator_versions(
+    pool: &SqlitePool,
+    project: ProjectId,
+    id: Uuid,
+    before: Option<i64>,
+    limit: i64,
+) -> Result<Vec<EvaluatorVersionRow>, MetaError> {
+    let records: Vec<EvaluatorVersionRecord> = sqlx::query_as(
+        "SELECT v.evaluator_id, v.version, v.name, v.kind, v.config, v.output_score, \
+         v.created_by, v.created_at \
+         FROM evaluator_versions v JOIN evaluators e ON e.id = v.evaluator_id \
+         WHERE e.project_id = ? AND v.evaluator_id = ? AND v.version < ? \
+         ORDER BY v.version DESC LIMIT ?",
+    )
+    .bind(project.to_string())
+    .bind(id.to_string())
+    .bind(before.unwrap_or(i64::MAX))
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    records.into_iter().map(version_row_from).collect()
 }
 
 /// True when any evaluator, in any project, uses connection `id`.
@@ -306,6 +408,31 @@ fn row_from(record: EvaluatorRecord) -> Result<EvaluatorRow, MetaError> {
     })
 }
 
+#[derive(sqlx::FromRow)]
+struct EvaluatorVersionRecord {
+    evaluator_id: String,
+    version: i64,
+    name: String,
+    kind: String,
+    config: String,
+    output_score: String,
+    created_by: Option<String>,
+    created_at: i64,
+}
+
+fn version_row_from(record: EvaluatorVersionRecord) -> Result<EvaluatorVersionRow, MetaError> {
+    Ok(EvaluatorVersionRow {
+        evaluator_id: parse_uuid(&record.evaluator_id, "id")?,
+        version: u32::try_from(record.version).map_err(|_| corrupt("version"))?,
+        name: record.name,
+        kind: record.kind,
+        config: record.config,
+        output_score: record.output_score,
+        created_by: optional_uuid(record.created_by, "created_by")?,
+        created_at: record.created_at,
+    })
+}
+
 fn corrupt(column: &'static str) -> MetaError {
     MetaError::Corrupt {
         table: "evaluators",
@@ -323,7 +450,7 @@ fn optional_uuid(value: Option<String>, column: &'static str) -> Result<Option<U
 
 #[cfg(test)]
 mod tests {
-    use llmobs_core::ids::{OrgId, ProjectId};
+    use cetra_core::ids::{OrgId, ProjectId};
     use uuid::Uuid;
 
     use super::{EvaluatorFields, EvaluatorRow, PROJECT_CAP};
@@ -607,7 +734,8 @@ mod tests {
         let missing = db
             .write(move |conn| {
                 Box::pin(async move {
-                    update_evaluator(conn, support, Uuid::now_v7(), fields("nope"), NOW + 1).await
+                    update_evaluator(conn, support, Uuid::now_v7(), fields("nope"), None, NOW + 1)
+                        .await
                 })
             })
             .await
@@ -631,6 +759,7 @@ mod tests {
                             secret_enc: Some(vec![7]),
                             version: 2,
                         },
+                        None,
                         later,
                     )
                     .await
@@ -749,7 +878,7 @@ mod tests {
         let (_dir, db) = crate::meta::test_db().await;
         let acme = org(&db).await;
         let support = project(&db, acme).await;
-        insert(&db, support, "gone").await;
+        let row = insert(&db, support, "gone").await;
         db.write(move |conn| {
             Box::pin(async move {
                 sqlx::query("DELETE FROM orgs WHERE id = ?")
@@ -766,6 +895,296 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 0);
+        let versions = version_count(&db, row.id).await;
+        assert_eq!(versions, 0);
+    }
+
+    /// The number of `evaluator_versions` rows of evaluator `id`.
+    async fn version_count(db: &MetaDb, id: Uuid) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM evaluator_versions WHERE evaluator_id = ?")
+            .bind(id.to_string())
+            .fetch_one(db.reader())
+            .await
+            .unwrap()
+    }
+
+    /// The `evaluator_versions` rows of evaluator `id`, oldest first.
+    async fn version_rows(db: &MetaDb, id: Uuid) -> Vec<super::EvaluatorVersionRow> {
+        let records: Vec<super::EvaluatorVersionRecord> = sqlx::query_as(
+            "SELECT evaluator_id, version, name, kind, config, output_score, created_by, created_at \
+             FROM evaluator_versions WHERE evaluator_id = ? ORDER BY version",
+        )
+        .bind(id.to_string())
+        .fetch_all(db.reader())
+        .await
+        .unwrap();
+        records
+            .into_iter()
+            .map(|record| super::version_row_from(record).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn insert_writes_version_one() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let acme = org(&db).await;
+        let support = project(&db, acme).await;
+        let author = user(&db).await;
+        let id = Uuid::now_v7();
+        let row = db
+            .write(move |conn| {
+                Box::pin(async move {
+                    insert_evaluator(
+                        conn,
+                        id,
+                        support,
+                        "llm_judge",
+                        fields("first"),
+                        Some(author),
+                        NOW,
+                    )
+                    .await
+                })
+            })
+            .await
+            .unwrap();
+        let versions = version_rows(&db, id).await;
+        assert_eq!(versions.len(), 1);
+        let first = &versions[0];
+        assert_eq!(first.version, 1);
+        assert_eq!(first.name, row.name);
+        assert_eq!(first.kind, row.kind);
+        assert_eq!(first.config, row.config);
+        assert_eq!(first.output_score, row.output_score);
+        assert_eq!(first.created_by, Some(author));
+        assert_eq!(first.created_at, NOW);
+    }
+
+    #[tokio::test]
+    async fn update_writes_a_row_only_when_the_version_moves() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let acme = org(&db).await;
+        let support = project(&db, acme).await;
+        let author = user(&db).await;
+        let row = insert(&db, support, "before").await;
+        let id = row.id;
+        let later = NOW + 500;
+
+        // Same version: a rename-like change writes no row.
+        db.write(move |conn| {
+            Box::pin(async move {
+                update_evaluator(
+                    conn,
+                    support,
+                    id,
+                    EvaluatorFields {
+                        name: "renamed".to_owned(),
+                        ..fields("renamed")
+                    },
+                    Some(author),
+                    later,
+                )
+                .await
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(version_count(&db, id).await, 1);
+
+        db.write(move |conn| {
+            Box::pin(async move {
+                update_evaluator(
+                    conn,
+                    support,
+                    id,
+                    EvaluatorFields {
+                        config: r#"{"model":"other"}"#.to_owned(),
+                        version: 2,
+                        ..fields("second")
+                    },
+                    Some(author),
+                    later + 1,
+                )
+                .await
+            })
+        })
+        .await
+        .unwrap();
+        let versions = version_rows(&db, id).await;
+        assert_eq!(versions.len(), 2);
+        assert_eq!(versions[0].version, 1);
+        // The rename wrote no row: version 1 keeps the name it was made with.
+        assert_eq!(versions[0].name, "before");
+        assert_eq!(versions[0].config, r#"{"model":"gpt-5-mini"}"#);
+        assert_eq!(versions[1].version, 2);
+        assert_eq!(versions[1].name, "second");
+        assert_eq!(versions[1].config, r#"{"model":"other"}"#);
+        assert_eq!(versions[1].created_by, Some(author));
+        assert_eq!(versions[1].created_at, later + 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_update_writes_no_row() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let acme = org(&db).await;
+        let support = project(&db, acme).await;
+        insert(&db, support, "a").await;
+        let row = insert(&db, support, "b").await;
+        let id = row.id;
+        let error = db
+            .write(move |conn| {
+                Box::pin(async move {
+                    update_evaluator(
+                        conn,
+                        support,
+                        id,
+                        EvaluatorFields {
+                            version: 2,
+                            ..fields("a")
+                        },
+                        None,
+                        NOW + 1,
+                    )
+                    .await
+                })
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(error, MetaError::Conflict(_)), "{error}");
+        assert_eq!(version_count(&db, id).await, 1);
+        let stored = get_evaluator(db.reader(), support, id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.version, 1);
+    }
+
+    #[tokio::test]
+    async fn versions_list_newest_first_with_before() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let acme = org(&db).await;
+        let support = project(&db, acme).await;
+        let row = insert(&db, support, "v").await;
+        let id = row.id;
+        for version in [2_u32, 3] {
+            db.write(move |conn| {
+                Box::pin(async move {
+                    update_evaluator(
+                        conn,
+                        support,
+                        id,
+                        EvaluatorFields {
+                            config: format!(r#"{{"model":"m{version}"}}"#),
+                            version,
+                            ..fields("v")
+                        },
+                        None,
+                        NOW + i64::from(version),
+                    )
+                    .await
+                })
+            })
+            .await
+            .unwrap();
+        }
+        let versions: Vec<u32> = super::list_evaluator_versions(db.reader(), support, id, None, 2)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|version| version.version)
+            .collect();
+        assert_eq!(versions, [3, 2]);
+        let rest: Vec<u32> = super::list_evaluator_versions(db.reader(), support, id, Some(2), 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|version| version.version)
+            .collect();
+        assert_eq!(rest, [1]);
+        let other = ProjectId::from_uuid(Uuid::now_v7());
+        assert!(
+            super::list_evaluator_versions(db.reader(), other, id, None, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_the_evaluator_cascades_to_its_versions() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let acme = org(&db).await;
+        let support = project(&db, acme).await;
+        let row = insert(&db, support, "gone").await;
+        assert_eq!(version_count(&db, row.id).await, 1);
+        let id = row.id;
+        db.write(move |conn| Box::pin(async move { delete_evaluator(conn, support, id).await }))
+            .await
+            .unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM evaluator_versions")
+            .fetch_one(db.reader())
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn version_row_debug_hides_config() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let acme = org(&db).await;
+        let support = project(&db, acme).await;
+        let id = Uuid::now_v7();
+        let config = r#"{"prompt":"Grade the answer against the hidden rubric"}"#;
+        db.write(move |conn| {
+            Box::pin(async move {
+                insert_evaluator(
+                    conn,
+                    id,
+                    support,
+                    "llm_judge",
+                    EvaluatorFields {
+                        config: config.to_owned(),
+                        ..fields("judge")
+                    },
+                    None,
+                    NOW,
+                )
+                .await
+            })
+        })
+        .await
+        .unwrap();
+        let versions = version_rows(&db, id).await;
+        let text = format!("{:?}", versions[0]);
+        assert!(
+            text.contains(&format!("config_bytes: {}", config.len())),
+            "{text}"
+        );
+        assert!(!text.contains("hidden rubric"), "{text}");
+    }
+
+    /// A user to author evaluator versions.
+    async fn user(db: &MetaDb) -> Uuid {
+        db.write(|conn| {
+            Box::pin(async move {
+                insert_user(
+                    conn,
+                    NewUser {
+                        email: "grace@example.com".to_owned(),
+                        name: None,
+                        password_hash: None,
+                        email_verified_at: None,
+                        email_verified_via: None,
+                        is_instance_admin: false,
+                    },
+                    NOW,
+                )
+                .await
+            })
+        })
+        .await
+        .unwrap()
+        .id
     }
 
     #[tokio::test]

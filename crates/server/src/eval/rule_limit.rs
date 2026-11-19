@@ -1,6 +1,6 @@
 //! The active online rule limit of an org (D-I-32).
 
-use llmobs_core::ids::OrgId;
+use cetra_core::ids::OrgId;
 
 use crate::http::AppState;
 use crate::http::error::ApiError;

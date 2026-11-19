@@ -5,7 +5,7 @@ Read [README.md](README.md) first, especially § Design › Install script.
 **Goal:**
 - `deploy/install.sh` installs the right release binary on Linux x86_64/aarch64 and macOS arm64,
   after checking its SHA-256 (D-N-15). Users run it as
-  `curl -fsSL https://github.com/sebastiencs/llmobs/releases/latest/download/install.sh | sh`;
+  `curl -fsSL https://github.com/cetra-ai/cetra/releases/latest/download/install.sh | sh`;
   N10 attaches it to every release.
 - `just install-smoke` serves `target/dist` on loopback and runs the script against it.
 
@@ -23,19 +23,19 @@ Read [README.md](README.md) first, especially § Design › Install script.
 - **Target.** `uname -s`/`uname -m` map to `x86_64-unknown-linux-musl`,
   `aarch64-unknown-linux-musl` or `aarch64-apple-darwin`. Anything else fails with a pointer to
   the Docker image.
-- **Version.** `LLMOBS_VERSION` if set; otherwise the last path segment of the URL that
+- **Version.** `CETRA_VERSION` if set; otherwise the last path segment of the URL that
   `/releases/latest` redirects to (`…/releases/tag/v0.1.0`). Drafts and pre-releases are never
   "latest", so this finds the newest stable release.
-- **Download.** It fetches `llmobs-<version>-<target>.tar.gz` and `SHA256SUMS` from
-  `LLMOBS_DOWNLOAD_BASE` (default `https://github.com/sebastiencs/llmobs/releases/download/v<version>`),
+- **Download.** It fetches `cetra-<version>-<target>.tar.gz` and `SHA256SUMS` from
+  `CETRA_DOWNLOAD_BASE` (default `https://github.com/cetra-ai/cetra/releases/download/v<version>`),
   checks the archive with `sha256sum`, or `shasum -a 256` on macOS, and extracts it.
-- **Install.** It copies the binary to `$dir/llmobs.tmp` and renames it to `$dir/llmobs`, so a
-  running `llmobs` is never half-written. `dir` is `LLMOBS_INSTALL_DIR`, default
+- **Install.** It copies the binary to `$dir/cetra.tmp` and renames it to `$dir/cetra`, so a
+  running `cetra` is never half-written. `dir` is `CETRA_INSTALL_DIR`, default
   `$HOME/.local/bin`.
 - **`install-smoke.sh`.** Copies the archives for the current version from `target/dist` into a
   temporary web root and writes their `SHA256SUMS` with N3's `checksums.sh`. It serves the root
   with `python3 -m http.server` on a free loopback port, runs the script with the three variables,
-  and checks that the installed `llmobs version` prints the workspace version.
+  and checks that the installed `cetra version` prints the workspace version.
 
 ## Files
 
@@ -43,20 +43,20 @@ Read [README.md](README.md) first, especially § Design › Install script.
 
 ```bash
 #!/bin/sh
-# Installs the llmobs binary from a GitHub release (D-N-15):
-#   curl -fsSL https://github.com/sebastiencs/llmobs/releases/latest/download/install.sh | sh
+# Installs the cetra binary from a GitHub release (D-N-15):
+#   curl -fsSL https://github.com/cetra-ai/cetra/releases/latest/download/install.sh | sh
 #
 # Environment:
-#   LLMOBS_VERSION        version to install, e.g. 0.1.0 (default: the latest release)
-#   LLMOBS_INSTALL_DIR    where to put `llmobs` (default: $HOME/.local/bin)
-#   LLMOBS_DOWNLOAD_BASE  base URL of the release files (default: the GitHub release of
-#                         LLMOBS_VERSION); tests point it at a local server
+#   CETRA_VERSION        version to install, e.g. 0.1.0 (default: the latest release)
+#   CETRA_INSTALL_DIR    where to put `cetra` (default: $HOME/.local/bin)
+#   CETRA_DOWNLOAD_BASE  base URL of the release files (default: the GitHub release of
+#                         CETRA_VERSION); tests point it at a local server
 #
-# Downloads llmobs-<version>-<target>.tar.gz and SHA256SUMS, checks the archive's checksum,
+# Downloads cetra-<version>-<target>.tar.gz and SHA256SUMS, checks the archive's checksum,
 # and copies the binary. Linux x86_64 and aarch64 (static) and macOS arm64 only.
 set -eu
 
-repo="https://github.com/sebastiencs/llmobs"
+repo="https://github.com/cetra-ai/cetra"
 
 fail() {
   echo "install.sh: $*" >&2
@@ -77,10 +77,10 @@ case "$os/$machine" in
   Linux/x86_64 | Linux/amd64) target=x86_64-unknown-linux-musl ;;
   Linux/aarch64 | Linux/arm64) target=aarch64-unknown-linux-musl ;;
   Darwin/arm64) target=aarch64-apple-darwin ;;
-  *) fail "no llmobs binary for $os $machine; use the Docker image instead" ;;
+  *) fail "no cetra binary for $os $machine; use the Docker image instead" ;;
 esac
 
-version="${LLMOBS_VERSION:-}"
+version="${CETRA_VERSION:-}"
 if [ -z "$version" ]; then
   # /releases/latest redirects to /releases/tag/v<version>.
   url="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$repo/releases/latest")" ||
@@ -92,13 +92,13 @@ if [ -z "$version" ]; then
 fi
 version="${version#v}"
 
-if [ -z "${LLMOBS_INSTALL_DIR:-}" ] && [ -z "${HOME:-}" ]; then
-  fail "HOME is not set; set LLMOBS_INSTALL_DIR"
+if [ -z "${CETRA_INSTALL_DIR:-}" ] && [ -z "${HOME:-}" ]; then
+  fail "HOME is not set; set CETRA_INSTALL_DIR"
 fi
 
-base="${LLMOBS_DOWNLOAD_BASE:-$repo/releases/download/v$version}"
-name="llmobs-$version-$target"
-dir="${LLMOBS_INSTALL_DIR:-$HOME/.local/bin}"
+base="${CETRA_DOWNLOAD_BASE:-$repo/releases/download/v$version}"
+name="cetra-$version-$target"
+dir="${CETRA_INSTALL_DIR:-$HOME/.local/bin}"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT INT TERM
@@ -120,14 +120,14 @@ fi
 
 tar -xzf "$tmp/$name.tar.gz" -C "$tmp"
 mkdir -p "$dir"
-cp "$tmp/$name/llmobs" "$dir/llmobs.tmp"
-chmod 0755 "$dir/llmobs.tmp"
-mv "$dir/llmobs.tmp" "$dir/llmobs"
+cp "$tmp/$name/cetra" "$dir/cetra.tmp"
+chmod 0755 "$dir/cetra.tmp"
+mv "$dir/cetra.tmp" "$dir/cetra"
 
-echo "Installed llmobs $version to $dir/llmobs"
+echo "Installed cetra $version to $dir/cetra"
 case ":$PATH:" in
   *":$dir:"*) ;;
-  *) echo "Add $dir to your PATH to run llmobs." ;;
+  *) echo "Add $dir to your PATH to run cetra." ;;
 esac
 echo "Licences: LICENSE, LICENSE-ELASTIC and THIRD-PARTY-NOTICES.md in $base/$name.tar.gz"
 ```
@@ -159,9 +159,9 @@ trap cleanup EXIT
 
 mkdir -p "$dir/www" "$dir/bin"
 shopt -s nullglob
-archives=(target/dist/llmobs-"$version"-*.tar.gz)
+archives=(target/dist/cetra-"$version"-*.tar.gz)
 if (( ${#archives[@]} == 0 )); then
-  echo "install-smoke: no target/dist/llmobs-$version-*.tar.gz; run just dist <target> first" >&2
+  echo "install-smoke: no target/dist/cetra-$version-*.tar.gz; run just dist <target> first" >&2
   exit 1
 fi
 cp "${archives[@]}" "$dir/www/"
@@ -179,13 +179,13 @@ if ! curl -sf "http://127.0.0.1:$port/SHA256SUMS" >/dev/null; then
   exit 1
 fi
 
-LLMOBS_VERSION="$version" \
-LLMOBS_INSTALL_DIR="$dir/bin" \
-LLMOBS_DOWNLOAD_BASE="http://127.0.0.1:$port" \
+CETRA_VERSION="$version" \
+CETRA_INSTALL_DIR="$dir/bin" \
+CETRA_DOWNLOAD_BASE="http://127.0.0.1:$port" \
   sh deploy/install.sh
 
-"$dir/bin/llmobs" version | grep -qx "llmobs $version"
-echo "install-smoke: install.sh installed llmobs $version"
+"$dir/bin/cetra" version | grep -qx "cetra $version"
+echo "install-smoke: install.sh installed cetra $version"
 ```
 
 ### `justfile`
@@ -209,12 +209,12 @@ just check
 just assert-clean
 ```
 
-`install-smoke` prints `Downloading llmobs-0.0.0-x86_64-unknown-linux-musl.tar.gz`, then
-`Installed llmobs 0.0.0 to /tmp/…/bin/llmobs` and a PATH hint, then
-`install-smoke: install.sh installed llmobs 0.0.0`.
+`install-smoke` prints `Downloading cetra-0.0.0-x86_64-unknown-linux-musl.tar.gz`, then
+`Installed cetra 0.0.0 to /tmp/…/bin/cetra` and a PATH hint, then
+`install-smoke: install.sh installed cetra 0.0.0`.
 
 The latest-version lookup is not covered by `install-smoke`, which always sets
-`LLMOBS_VERSION`. Check the technique by hand on any public repository with releases:
+`CETRA_VERSION`. Check the technique by hand on any public repository with releases:
 `curl -fsSLI -o /dev/null -w '%{url_effective}\n' https://github.com/clap-rs/clap/releases/latest`
 prints `…/releases/tag/v<version>`, and the script keeps what follows the last `/v`.
 
@@ -222,7 +222,7 @@ Negative check, by hand and not committed: corrupt the served archive and the sc
 with `checksum mismatch`.
 
 1. In `install-smoke.sh`, temporarily add
-   `printf x >> "$dir/www/llmobs-$version-x86_64-unknown-linux-musl.tar.gz"` after the
+   `printf x >> "$dir/www/cetra-$version-x86_64-unknown-linux-musl.tar.gz"` after the
    `checksums.sh` line.
 2. Run `just install-smoke` and see it fail with `install.sh: checksum mismatch for …`.
 3. Revert the line.

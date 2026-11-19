@@ -193,7 +193,7 @@ pub enum SnapshotError {
 ## Verify
 
 ```bash
-cargo test -p llmobs-storage --all-features snapshot
+cargo test -p cetra-storage --all-features snapshot
 just check
 ```
 

@@ -27,13 +27,13 @@
       "input_preview": "Hello",
       "output_preview": "Hi",
       "attributes": {
+        "cetra.normalize_warning": "[\"input_excludes_cache\"]",
         "gen_ai.request.model": "claude-sonnet-4-5",
         "gen_ai.system": "anthropic",
         "gen_ai.usage.cache_read_input_tokens": "40",
         "gen_ai.usage.completion_tokens": "5",
         "gen_ai.usage.prompt_tokens": "10",
-        "llm.request.type": "chat",
-        "llmobs.normalize_warning": "[\"input_excludes_cache\"]"
+        "llm.request.type": "chat"
       },
       "scope_name": "opentelemetry.instrumentation.anthropic",
       "scope_version": "0.63.0",

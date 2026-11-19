@@ -1,33 +1,33 @@
 //! The S3 target of the benches and the soak (D119, track R M7).
 
+use cetra_storage::config::{ObjectStoreUrl, S3Config};
 use futures::{StreamExt, TryStreamExt};
-use llmobs_storage::config::{ObjectStoreUrl, S3Config};
 use object_store::aws::AmazonS3Builder;
 use object_store::{ObjectMeta, ObjectStore};
 
 /// The S3 target of a benchmark (D119), from the environment.
 #[derive(Debug, Clone)]
 pub(crate) struct S3Env {
-    /// `LLMOBS_TEST_S3_ENDPOINT`.
+    /// `CETRA_TEST_S3_ENDPOINT`.
     pub(crate) endpoint: String,
-    /// `LLMOBS_TEST_S3_BUCKET`.
+    /// `CETRA_TEST_S3_BUCKET`.
     pub(crate) bucket: String,
-    /// `LLMOBS_TEST_S3_REGION`, default "us-east-1".
+    /// `CETRA_TEST_S3_REGION`, default "us-east-1".
     pub(crate) region: String,
-    /// `LLMOBS_TEST_S3_PATH_STYLE`, default true; "false" or "0" turn it off.
+    /// `CETRA_TEST_S3_PATH_STYLE`, default true; "false" or "0" turn it off.
     pub(crate) path_style: bool,
 }
 
 impl S3Env {
     /// Pure parser: `lookup(name)` returns the variable's value. `None` when
-    /// LLMOBS_TEST_S3_ENDPOINT is absent; panics when the endpoint is set but the bucket is not.
+    /// CETRA_TEST_S3_ENDPOINT is absent; panics when the endpoint is set but the bucket is not.
     pub(crate) fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Option<Self> {
-        let endpoint = lookup("LLMOBS_TEST_S3_ENDPOINT")?;
-        let bucket = lookup("LLMOBS_TEST_S3_BUCKET")
-            .expect("LLMOBS_TEST_S3_BUCKET must be set with LLMOBS_TEST_S3_ENDPOINT");
-        let region = lookup("LLMOBS_TEST_S3_REGION").unwrap_or_else(|| "us-east-1".to_owned());
+        let endpoint = lookup("CETRA_TEST_S3_ENDPOINT")?;
+        let bucket = lookup("CETRA_TEST_S3_BUCKET")
+            .expect("CETRA_TEST_S3_BUCKET must be set with CETRA_TEST_S3_ENDPOINT");
+        let region = lookup("CETRA_TEST_S3_REGION").unwrap_or_else(|| "us-east-1".to_owned());
         let path_style = !matches!(
-            lookup("LLMOBS_TEST_S3_PATH_STYLE").as_deref(),
+            lookup("CETRA_TEST_S3_PATH_STYLE").as_deref(),
             Some("false" | "0")
         );
         Some(Self {

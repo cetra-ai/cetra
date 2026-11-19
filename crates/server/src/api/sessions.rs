@@ -20,11 +20,11 @@ pub struct SessionSummary {
     /// Session id.
     pub session_id: String,
     /// Earliest trace start, nanoseconds since the Unix epoch. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub start_time: i64,
     /// Latest trace end, nanoseconds since the Unix epoch. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub end_time: i64,
     /// `end_time - start_time`, nanoseconds.
@@ -46,6 +46,14 @@ pub struct SessionSummary {
     pub tags: Vec<String>,
     /// Latest score of each name attached to this session.
     pub scores: Vec<ScoreBrief>,
+    /// Number of the session's traces whose status is `error`.
+    pub error_trace_count: i64,
+    /// `input_preview` of the session's earliest-starting trace. Omitted when there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_input_preview: Option<String>,
+    /// `output_preview` of the session's latest-starting trace. Omitted when there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_output_preview: Option<String>,
 }
 
 /// One trace in a session, oldest first, with the root span's payloads.
@@ -133,9 +141,9 @@ pub struct SessionListParams {
 mod tests {
     use std::collections::BTreeMap;
 
-    use llmobs_core::enums::{ScoreSource, SpanStatus};
-    use llmobs_core::ids::TraceId;
-    use llmobs_core::score::ScoreValue;
+    use cetra_core::enums::{ScoreSource, SpanStatus};
+    use cetra_core::ids::TraceId;
+    use cetra_core::score::ScoreValue;
     use serde::Serialize;
     use uuid::Uuid;
 
@@ -169,6 +177,9 @@ mod tests {
                     value: ScoreValue::Boolean(true),
                     source: ScoreSource::Human,
                 }],
+                error_trace_count: 0,
+                first_input_preview: None,
+                last_output_preview: None,
             },
             turns: vec![SessionTurn {
                 trace: TraceSummary {

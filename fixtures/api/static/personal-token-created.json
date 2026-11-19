@@ -2,12 +2,12 @@
   "token": {
     "id": "01900000-0000-7000-8000-000000000201",
     "name": "CLI",
-    "prefix": "pat-llmobs-EXAMPL",
+    "prefix": "pat-cetra-EXAMPL",
     "scopes": [
       "read",
       "write"
     ],
     "created_at": "2026-01-01T09:00:00.000000000Z"
   },
-  "secret": "pat-llmobs-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0"
+  "secret": "pat-cetra-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0"
 }

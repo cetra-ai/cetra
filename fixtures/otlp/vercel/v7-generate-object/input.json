@@ -41,15 +41,15 @@
           },
           "spans": [
             {
-              "traceId": "0e40cfbbd5879de77fbd85199a4856b0",
-              "spanId": "762aeb55d6185fc0",
+              "traceId": "ea9bba7adf5e5e20265310ed60d1905c",
+              "spanId": "649e2c588d9e7ca4",
               "traceState": "",
               "parentSpanId": "",
               "flags": 257,
               "name": "invoke_agent gpt-4o-mini-2024-07-18",
               "kind": 1,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590062000000",
+              "endTimeUnixNano": "1767225590070000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",
@@ -126,15 +126,15 @@
               "status": null
             },
             {
-              "traceId": "0e40cfbbd5879de77fbd85199a4856b0",
-              "spanId": "1ddb2a8c5d8b1e39",
+              "traceId": "ea9bba7adf5e5e20265310ed60d1905c",
+              "spanId": "a20f3d0bcd2b94a7",
               "traceState": "",
-              "parentSpanId": "762aeb55d6185fc0",
+              "parentSpanId": "649e2c588d9e7ca4",
               "flags": 257,
               "name": "step 1",
               "kind": 1,
               "startTimeUnixNano": "1767225590002000000",
-              "endTimeUnixNano": "1767225590059000000",
+              "endTimeUnixNano": "1767225590066000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",
@@ -151,15 +151,15 @@
               "status": null
             },
             {
-              "traceId": "0e40cfbbd5879de77fbd85199a4856b0",
-              "spanId": "ccdfcd5fff6a92aa",
+              "traceId": "ea9bba7adf5e5e20265310ed60d1905c",
+              "spanId": "f20453e3bd61e14c",
               "traceState": "",
-              "parentSpanId": "1ddb2a8c5d8b1e39",
+              "parentSpanId": "a20f3d0bcd2b94a7",
               "flags": 257,
               "name": "chat gpt-4o-mini-2024-07-18",
               "kind": 3,
-              "startTimeUnixNano": "1767225590002000000",
-              "endTimeUnixNano": "1767225590056000000",
+              "startTimeUnixNano": "1767225590003000000",
+              "endTimeUnixNano": "1767225590063000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",
@@ -188,7 +188,7 @@
                 {
                   "key": "gen_ai.client.operation.duration",
                   "value": {
-                    "doubleValue": 0.05364389900000004
+                    "doubleValue": 0.059120506999999975
                   }
                 },
                 {

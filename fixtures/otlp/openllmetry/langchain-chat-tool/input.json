@@ -41,8 +41,8 @@
           },
           "spans": [
             {
-              "traceId": "e52167418c1e71e60a03dff5d277866c",
-              "spanId": "ebe775eb6d14c6de",
+              "traceId": "a71dd8188c3c5efefc271b640eb71622",
+              "spanId": "9b3dd3211e541caa",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
@@ -192,15 +192,15 @@
               "status": null
             },
             {
-              "traceId": "80d2b04c7c4e7834c41b962a0a018bd5",
-              "spanId": "20a13e0a22ab4bca",
+              "traceId": "e0844873b9399d6a1e0ffcef21bf95a2",
+              "spanId": "bc24e571efc95635",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
               "name": "execute_tool get_weather",
               "kind": 1,
               "startTimeUnixNano": "1767225590043000000",
-              "endTimeUnixNano": "1767225590043000000",
+              "endTimeUnixNano": "1767225590044000000",
               "attributes": [
                 {
                   "key": "traceloop.workflow.name",
@@ -295,15 +295,15 @@
               "status": null
             },
             {
-              "traceId": "d4e86cadef5f34068ff4f3e44f6dbd78",
-              "spanId": "d3d973696253fbcf",
+              "traceId": "ec96feac28a085f71c226c13f7890a8c",
+              "spanId": "35c1b08c49d46b9a",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
               "name": "ChatOpenAI.chat",
               "kind": 3,
-              "startTimeUnixNano": "1767225590044000000",
-              "endTimeUnixNano": "1767225590076000000",
+              "startTimeUnixNano": "1767225590045000000",
+              "endTimeUnixNano": "1767225590079000000",
               "attributes": [
                 {
                   "key": "traceloop.workflow.name",

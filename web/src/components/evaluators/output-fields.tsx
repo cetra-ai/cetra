@@ -238,7 +238,7 @@ export function OutputFields({
       ) : null}
       {value.type === "categorical" ? (
         <div className="flex flex-col gap-2">
-          <span className="text-sm leading-none font-medium">Labels</span>
+          <span className="text-body leading-none font-medium">Labels</span>
           {value.labels.map((row, index) => (
             <div key={row.id} className="flex items-center gap-2">
               <Input
@@ -295,7 +295,7 @@ export function OutputFields({
             Add label
           </Button>
           {errors.labels ? (
-            <p role="alert" className="text-xs text-destructive">
+            <p role="alert" className="text-caption text-destructive">
               {errors.labels}
             </p>
           ) : null}

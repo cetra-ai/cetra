@@ -10,8 +10,8 @@ use uuid::Uuid;
 use crate::test_support::mock_idp::Grant;
 use crate::test_support::{TestApp, TestResponse};
 
-pub(crate) const OAUTH_NAME: &str = llmobs_core::llmobs_name!("_oauth");
-pub(crate) const SESSION_NAME: &str = llmobs_core::llmobs_name!("_session");
+pub(crate) const OAUTH_NAME: &str = cetra_core::cetra_name!("_oauth");
+pub(crate) const SESSION_NAME: &str = cetra_core::cetra_name!("_session");
 
 #[derive(Deserialize)]
 pub(crate) struct MeBody {

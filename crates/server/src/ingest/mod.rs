@@ -6,6 +6,7 @@ pub(crate) mod environment;
 #[cfg(test)]
 mod fixtures_tests;
 pub(crate) mod grpc;
+pub(crate) mod last_ingest;
 pub(crate) mod otlp;
 
 use std::collections::HashMap;
@@ -13,18 +14,19 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bytes::Bytes;
-use futures::{StreamExt, stream};
-use llmobs_core::batch::spans_to_record_batch;
-use llmobs_core::error::CoreError;
-use llmobs_core::ids::{OrgId, ProjectId};
-use llmobs_core::media::MediaBlob as CoreBlob;
-use llmobs_core::names::environment::EVAL as EVAL_ENVIRONMENT;
-use llmobs_otel::{
+use cetra_core::batch::spans_to_record_batch;
+use cetra_core::error::CoreError;
+use cetra_core::ids::{OrgId, ProjectId};
+use cetra_core::media::MediaBlob as CoreBlob;
+use cetra_core::names::environment::EVAL as EVAL_ENVIRONMENT;
+use cetra_otel::{
     DecodeError, ExportTraceServiceRequest, IngestContext, IngestLimits, Normalized, PriceTable,
-    decode_json, decode_protobuf, normalize,
+    count_genai_log_records, decode_json, decode_logs_json, decode_logs_protobuf, decode_protobuf,
+    normalize,
 };
-use llmobs_storage::error::{AppendError, MediaError};
-use llmobs_storage::{MediaBlob, Storage};
+use cetra_storage::error::{AppendError, MediaError};
+use cetra_storage::{MediaBlob, Storage};
+use futures::{StreamExt, stream};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
 use crate::config::{IngestConfig, MediaConfig};
@@ -251,7 +253,7 @@ impl Ingest {
     pub(crate) async fn accept(
         &self,
         raw: Bytes,
-        mut reservation: Reservation,
+        reservation: Reservation,
         format: BodyFormat,
         encoding: BodyEncoding,
         project: &ProjectRow,
@@ -259,7 +261,35 @@ impl Ingest {
         now_ns: i64,
     ) -> Result<Accepted, IngestError> {
         let request_bytes = raw.len();
-        self.fit(&mut reservation, request_bytes)?;
+        let (request, decompressed_bytes, reservation) = self
+            .inflate(raw, reservation, encoding, move |body| match format {
+                BodyFormat::Protobuf => decode_protobuf(body),
+                BodyFormat::Json => decode_json(body),
+            })
+            .await?;
+        self.accept_request(
+            request,
+            reservation,
+            u64::try_from(request_bytes).unwrap_or(u64::MAX),
+            u64::try_from(decompressed_bytes).unwrap_or(u64::MAX),
+            project,
+            retention_cap,
+            now_ns,
+        )
+        .await
+    }
+
+    /// Fits `reservation` to `raw`, decompresses it (the output is reserved as it is produced)
+    /// and decodes it with `decode`, off the async threads. Returns the decoded value, the
+    /// decompressed size and the reservation.
+    async fn inflate<T: Send + 'static>(
+        &self,
+        raw: Bytes,
+        mut reservation: Reservation,
+        encoding: BodyEncoding,
+        decode: impl FnOnce(&[u8]) -> Result<T, DecodeError> + Send + 'static,
+    ) -> Result<(T, usize, Reservation), IngestError> {
+        self.fit(&mut reservation, raw.len())?;
         let max_bytes = self.max_request_bytes;
         let semaphore = Arc::clone(&self.budget);
         let work = tokio::task::spawn_blocking(move || -> Result<_, IngestError> {
@@ -282,27 +312,35 @@ impl Ingest {
                 })?
             };
             let decompressed_bytes = decompressed.len();
-            let request = match format {
-                BodyFormat::Protobuf => decode_protobuf(&decompressed),
-                BodyFormat::Json => decode_json(&decompressed),
-            }
-            .map_err(IngestError::Decode)?;
-            Ok((request, decompressed_bytes, reservation))
+            let value = decode(&decompressed).map_err(IngestError::Decode)?;
+            Ok((value, decompressed_bytes, reservation))
         });
-        let (request, decompressed_bytes, reservation) = match work.await {
-            Ok(result) => result?,
-            Err(error) => return Err(IngestError::Join(error)),
-        };
-        self.accept_request(
-            request,
-            reservation,
-            u64::try_from(request_bytes).unwrap_or(u64::MAX),
-            u64::try_from(decompressed_bytes).unwrap_or(u64::MAX),
-            project,
-            retention_cap,
-            now_ns,
-        )
-        .await
+        match work.await {
+            Ok(result) => result,
+            Err(error) => Err(IngestError::Join(error)),
+        }
+    }
+
+    /// Decodes an OTLP logs request and returns how many of its records look like GenAI
+    /// content events (D-G-40). Nothing is stored. The body is held to the same size and
+    /// budget limits as a trace request.
+    pub(crate) async fn count_genai_logs(
+        &self,
+        raw: Bytes,
+        reservation: Reservation,
+        format: BodyFormat,
+        encoding: BodyEncoding,
+    ) -> Result<u64, IngestError> {
+        let (count, _, _reservation) = self
+            .inflate(raw, reservation, encoding, move |body| {
+                let request = match format {
+                    BodyFormat::Protobuf => decode_logs_protobuf(body),
+                    BodyFormat::Json => decode_logs_json(body),
+                }?;
+                Ok(count_genai_log_records(&request))
+            })
+            .await?;
+        Ok(count)
     }
 
     /// Counts, normalizes and rewrites a decoded request (D-G-2, D-G-7). Used by OTLP/HTTP after
@@ -452,7 +490,7 @@ pub(crate) async fn commit_in_task(
 
 /// The newest `start_time` of the spans that reference each blob, keyed by the blob's hash
 /// (the spans' `media_refs`, hex). A blob no span references has no entry (D-P-21).
-pub(crate) fn newest_span_starts(spans: &[llmobs_core::span::Span]) -> HashMap<String, i64> {
+pub(crate) fn newest_span_starts(spans: &[cetra_core::span::Span]) -> HashMap<String, i64> {
     let mut newest: HashMap<String, i64> = HashMap::new();
     for span in spans {
         for sha in &span.media_refs {
@@ -574,14 +612,14 @@ mod tests {
     use axum::http::{StatusCode, header};
     use axum::response::IntoResponse;
     use bytesize::ByteSize;
-    use llmobs_core::enums::{CostSource, SpanKind};
-    use llmobs_core::ids::ProjectId;
-    use llmobs_core::media::MediaBlob as CoreBlob;
-    use llmobs_otel::{
+    use cetra_core::enums::{CostSource, SpanKind};
+    use cetra_core::ids::ProjectId;
+    use cetra_core::media::MediaBlob as CoreBlob;
+    use cetra_otel::{
         ExportTraceServiceRequest, PriceRow, PriceScope, Rejections, builtin_price_rows,
         decode_json,
     };
-    use llmobs_storage::error::ObjectError;
+    use cetra_storage::error::ObjectError;
     use prost::Message;
     use sha2::{Digest, Sha256};
     use uuid::Uuid;
@@ -765,7 +803,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn too_many_spans_are_refused_before_normalizing() {
-        let body = fixture("llmobs/input-output-formats/input.json");
+        let body = fixture("cetra/input-output-formats/input.json");
         let spans = span_count(&decode_json(&body).expect("fixture decodes"));
         assert!(spans >= 3, "the fixture has {spans} spans");
         let app = TestApp::with_config(|config| config.ingest.max_spans_per_request = 2).await;
@@ -925,7 +963,7 @@ mod tests {
     }
 
     /// The embedding span of the cost fixture, which has one million input tokens.
-    fn embedding(normalized: &Normalized) -> &llmobs_core::span::Span {
+    fn embedding(normalized: &Normalized) -> &cetra_core::span::Span {
         normalized
             .spans
             .iter()
@@ -1092,7 +1130,7 @@ mod tests {
         let app = TestApp::with_config(|config| config.media.min_bytes = ByteSize::b(1)).await;
         let seeded = app.seed().await;
         let normalized =
-            accepted_fixture(&app, &seeded.project, "llmobs/sdk-media-bytes/input.json").await;
+            accepted_fixture(&app, &seeded.project, "cetra/sdk-media-bytes/input.json").await;
         let blob = normalized
             .media
             .first()
@@ -1153,7 +1191,7 @@ mod tests {
         let app = TestApp::with_config(|config| config.media.min_bytes = ByteSize::b(1)).await;
         let seeded = app.seed().await;
         let mut normalized =
-            accepted_fixture(&app, &seeded.project, "llmobs/sdk-media-bytes/input.json").await;
+            accepted_fixture(&app, &seeded.project, "cetra/sdk-media-bytes/input.json").await;
         normalized.media = vec![CoreBlob {
             sha256: "ab".repeat(32),
             mime_type: "image/png".to_owned(),
@@ -1197,7 +1235,7 @@ mod tests {
         let app = TestApp::with_config(|config| config.media.min_bytes = ByteSize::b(1)).await;
         let seeded = app.seed().await;
         let mut normalized =
-            accepted_fixture(&app, &seeded.project, "llmobs/sdk-media-bytes/input.json").await;
+            accepted_fixture(&app, &seeded.project, "cetra/sdk-media-bytes/input.json").await;
         let bytes = b"long mime".to_vec();
         normalized.media = vec![CoreBlob {
             sha256: hex::encode(Sha256::digest(&bytes)),
@@ -1291,7 +1329,7 @@ mod tests {
             Some("production".to_owned()),
         ]
         .into_iter()
-        .map(|environment| llmobs_core::span::Span {
+        .map(|environment| cetra_core::span::Span {
             environment,
             ..base.clone()
         })
@@ -1342,19 +1380,19 @@ mod tests {
             .first()
             .cloned()
             .expect("the fixture has a span");
-        let other_trace = llmobs_core::ids::TraceId::from_bytes([9; 16]).expect("not all zero");
-        let production = llmobs_core::span::Span {
+        let other_trace = cetra_core::ids::TraceId::from_bytes([9; 16]).expect("not all zero");
+        let production = cetra_core::span::Span {
             environment: Some("production".to_owned()),
             ..base.clone()
         };
-        let judge = llmobs_core::span::Span {
+        let judge = cetra_core::span::Span {
             environment: Some(EVAL_ENVIRONMENT.to_owned()),
             trace_id: other_trace,
             ..base.clone()
         };
         let pending = &app.state.pending;
         pending.set_tracked(std::collections::HashSet::from([seeded.project.id]));
-        let commit = |spans: Vec<llmobs_core::span::Span>| {
+        let commit = |spans: Vec<cetra_core::span::Span>| {
             app.state.ingest.commit(
                 &app.state.storage,
                 &app.state.usage,
@@ -1416,12 +1454,8 @@ mod tests {
     async fn a_commit_finishes_after_its_request_is_dropped() {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
-        let normalized = accepted_fixture(
-            &app,
-            &seeded.project,
-            "llmobs/sdk-observe-nested/input.json",
-        )
-        .await;
+        let normalized =
+            accepted_fixture(&app, &seeded.project, "cetra/sdk-observe-nested/input.json").await;
         let spans = normalized.spans.len();
         assert!(spans > 0);
         // A receiver must exist, or `publish` builds nothing.
@@ -1590,7 +1624,7 @@ mod tests {
             ),
             (
                 IngestError::Media(MediaError::Catalog(
-                    llmobs_storage::error::CatalogError::Corrupt { what: "test" },
+                    cetra_storage::error::CatalogError::Corrupt { what: "test" },
                 )),
                 503,
                 "busy",

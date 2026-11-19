@@ -199,9 +199,9 @@ Also add a `#[test] fn reads_by_post_needs_post_and_query()`: `Access::Project {
 
 ```bash
 export PATH="$HOME/.local/share/nvm/v26.13.0/bin:$PATH"
-cargo test -p llmobs-server access
-cargo clippy -p llmobs-server --all-targets -- -D warnings
-cargo test -p llmobs-server roles
+cargo test -p cetra-server access
+cargo clippy -p cetra-server --all-targets -- -D warnings
+cargo test -p cetra-server roles
 just check
 ```
 

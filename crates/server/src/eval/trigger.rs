@@ -4,8 +4,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use llmobs_core::ids::{OrgId, ProjectId, TraceId};
-use llmobs_storage::{
+use cetra_core::ids::{OrgId, ProjectId, TraceId};
+use cetra_storage::{
     MAX_REFRESH_IDS, MAX_REFRESH_SPANS_PER_TRACE, QueryContext, RunError, SpanRefreshRequest,
     TraceRefreshRequest,
 };
@@ -383,7 +383,7 @@ async fn read_candidates<'a>(
     for rule in rules {
         let span_rule = rule.target == "span";
         let read = if span_rule {
-            llmobs_storage::span_refresh(
+            cetra_storage::span_refresh(
                 &ctx,
                 SpanRefreshRequest {
                     filter: rule.filter.as_deref(),
@@ -395,7 +395,7 @@ async fn read_candidates<'a>(
             )
             .await
         } else {
-            llmobs_storage::trace_refresh(
+            cetra_storage::trace_refresh(
                 &ctx,
                 TraceRefreshRequest {
                     filter: rule.filter.as_deref(),
@@ -580,7 +580,7 @@ fn timeout_ns(stored: Option<i64>) -> i64 {
 mod faults {
     use std::cell::{Cell, RefCell};
 
-    use llmobs_storage::RunError;
+    use cetra_storage::RunError;
 
     thread_local! {
         static READ: RefCell<Option<RunError>> = const { RefCell::new(None) };
@@ -669,7 +669,7 @@ mod tests {
         use std::collections::HashSet;
 
         use crate::eval::pending::MAX_CHANGES_PER_TAKE;
-        use llmobs_core::ids::{OrgId, ProjectId, TraceId};
+        use cetra_core::ids::{OrgId, ProjectId, TraceId};
         use uuid::Uuid;
 
         use super::super::*;
@@ -682,7 +682,7 @@ mod tests {
         const SECOND: i64 = 1_000_000_000;
 
         /// A span of the dataset without a parent, so its trace has a root.
-        fn rooted_span() -> llmobs_core::span::Span {
+        fn rooted_span() -> cetra_core::span::Span {
             let mut span = dataset_span(0);
             span.parent_span_id = None;
             span.environment = None;
@@ -923,7 +923,7 @@ mod tests {
             let project = seeded.project.id;
             app.state.pending.set_tracked(HashSet::from([project]));
             let total = MAX_CHANGES_PER_TAKE + 5;
-            let spans: Vec<llmobs_core::span::Span> = (0..total)
+            let spans: Vec<cetra_core::span::Span> = (0..total)
                 .map(|index| {
                     let mut span = rooted_span();
                     let mut bytes = [0u8; 16];
@@ -950,9 +950,9 @@ mod tests {
         use std::time::{Duration, Instant};
 
         use axum::http::{Method, header};
-        use llmobs_core::enums::{PayloadFormat, SpanKind, SpanStatus};
-        use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-        use llmobs_core::span::Span;
+        use cetra_core::enums::{PayloadFormat, SpanKind, SpanStatus};
+        use cetra_core::ids::{ProjectId, SpanId, TraceId};
+        use cetra_core::span::Span;
         use serde_json::{Value, json};
         use uuid::Uuid;
 
@@ -1377,14 +1377,14 @@ mod tests {
                 &app,
                 project,
                 "trace",
-                Some("environment = 'llmobs-eval'"),
+                Some("environment = 'cetra-eval'"),
                 1.0,
             )
             .await;
             let at = set_clock(&app);
             let start = at - 30 * SECOND;
             let mut eval_span = span(trace_id(1), 1, true, start);
-            eval_span.environment = Some(llmobs_core::names::environment::EVAL.to_owned());
+            eval_span.environment = Some(cetra_core::names::environment::EVAL.to_owned());
             app.commit_spans(&seeded.project, vec![eval_span]).await;
             assert_eq!(
                 app.state.pending.len(),

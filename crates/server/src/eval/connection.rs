@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use llmobs_eval::{Adapter, JudgeConnection, StructuredOutput};
+use cetra_eval::{Adapter, JudgeConnection, StructuredOutput};
 use uuid::Uuid;
 
 use crate::crypto::{Aad, CryptoError, SecretBox};
@@ -88,7 +88,7 @@ fn build(secrets: &SecretBox, row: &ConnectionRow) -> Result<JudgeConnection, Co
             let map: BTreeMap<String, String> = serde_json::from_slice(&bytes)
                 .map_err(|_error| ConnectionError::Corrupt("extra_headers_enc"))?;
             map.into_iter()
-                .map(|(name, value)| (name, llmobs_eval::Secret::new(value)))
+                .map(|(name, value)| (name, cetra_eval::Secret::new(value)))
                 .collect()
         }
         None => Vec::new(),
@@ -102,7 +102,7 @@ fn build(secrets: &SecretBox, row: &ConnectionRow) -> Result<JudgeConnection, Co
             }
             None => None,
         },
-        api_key: llmobs_eval::Secret::new(api_key),
+        api_key: cetra_eval::Secret::new(api_key),
         extra_headers,
         structured_output: StructuredOutput::from_name(&row.structured_output)
             .map_err(|_error| ConnectionError::Corrupt("structured_output"))?,
@@ -122,7 +122,7 @@ pub(crate) enum ConnectionError {
 
 #[cfg(test)]
 mod tests {
-    use llmobs_core::ids::OrgId;
+    use cetra_core::ids::OrgId;
 
     use super::ConnectionCache;
     use crate::crypto::{Aad, SecretBox};

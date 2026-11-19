@@ -110,5 +110,5 @@ In `sql/encode.rs`, inside its `#[cfg(test)] mod tests`. Create the module if th
 
 ## Done when
 
-- `cargo test -p llmobs-storage --lib sql::` passes.
+- `cargo test -p cetra-storage --lib sql::` passes.
 - `just check` passes.

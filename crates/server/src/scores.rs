@@ -5,9 +5,9 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use llmobs_core::enums::ScoreSource;
-use llmobs_core::ids::ProjectId;
-use llmobs_core::score::{Score, ScoreTarget, ScoreValue};
+use cetra_core::enums::ScoreSource;
+use cetra_core::ids::ProjectId;
+use cetra_core::score::{Score, ScoreTarget, ScoreValue};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -30,7 +30,7 @@ const TEXT_MAX: usize = 255;
 const HOUR_NS: i64 = 3_600_000_000_000;
 const DAY_NS: i64 = 86_400_000_000_000;
 /// Prefix of the derived-id input (spec 06).
-const DERIVE_TAG: &[u8] = b"llmobs.score.v1";
+const DERIVE_TAG: &[u8] = b"cetra.score.v1";
 
 /// Who is writing, which decides `source`, the author and the ownership check (D-G-27, D-I-36).
 #[derive(Debug, Clone, Copy)]
@@ -589,7 +589,7 @@ async fn live_scores(
     }
     let ctx = open_query(state, project.org_id, project.id, None).await?;
     let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
-    let batches = llmobs_storage::scores_by_id(&ctx, &refs, READ_TIMEOUT)
+    let batches = cetra_storage::scores_by_id(&ctx, &refs, READ_TIMEOUT)
         .await
         .map_err(|error| {
             tracing::warn!(kind = error.kind(), "score lookup failed");
@@ -606,7 +606,7 @@ async fn live_scores(
 
 /// Appends `rows` as one batch (spec 06 § Score write rules, step 7).
 async fn append(state: &AppState, project: ProjectId, rows: &[Score]) -> Result<(), ApiError> {
-    let batch = llmobs_core::batch::scores_to_record_batch(rows)
+    let batch = cetra_core::batch::scores_to_record_batch(rows)
         .map_err(|error| ApiError::Internal(Box::new(error)))?;
     state
         .storage
@@ -620,15 +620,15 @@ async fn append(state: &AppState, project: ProjectId, rows: &[Score]) -> Result<
 mod tests {
     use std::collections::BTreeMap;
 
-    use llmobs_core::ids::OrgId;
+    use cetra_core::ids::OrgId;
 
     use super::*;
     use crate::meta::datasets::{DatasetFields, insert_dataset};
     use crate::meta::experiments::{NewExperiment, insert_tx};
     use crate::meta::score_definitions::{DefinitionCategory, DefinitionFields, insert_definition};
     use crate::test_support::{Seeded, TestApp, set_limits};
-    use llmobs_core::enums::ScoreDataType;
-    use llmobs_storage::ScoreListRequest;
+    use cetra_core::enums::ScoreDataType;
+    use cetra_storage::ScoreListRequest;
 
     /// The fixed project of the derived-id tests.
     const PROJECT: &str = "018f6b4e-7c1a-7c1a-8c1a-000000000001";
@@ -636,7 +636,7 @@ mod tests {
     const SPAN: &str = "b100000000000012";
     const AUTHOR: &str = "01900000-0000-7000-8000-000000000402";
     /// Computed from the spec's byte layout with SHA-256 outside this code, then pinned.
-    const DERIVED: &str = "119b8f11-8f63-8b55-a76d-e39b7f513b86";
+    const DERIVED: &str = "3045b5df-b53a-8192-ae21-1b4122917dfe";
     /// UUIDv7 with Unix time 1_717_986_918_400 ms (2024-06-10).
     const V7_FIXED: &str = "01900000-0000-7000-8000-000000000401";
     const V7_FIXED_MS: i64 = 1_717_986_918_400;
@@ -685,7 +685,7 @@ mod tests {
     /// Every stored live score of `project`, read through storage.
     async fn stored(app: &TestApp, org: OrgId, project: ProjectId) -> Vec<Score> {
         let ctx = open_query(&app.state, org, project, None).await.unwrap();
-        let page = llmobs_storage::score_list(
+        let page = cetra_storage::score_list(
             &ctx,
             ScoreListRequest {
                 target: None,
@@ -1901,6 +1901,7 @@ mod tests {
             min_value: Some(0.0),
             max_value: Some(1.0),
             description: None,
+            direction: crate::api::score_definitions::ScoreDirection::None,
             archived_at,
         }
     }
@@ -1918,6 +1919,7 @@ mod tests {
             min_value: None,
             max_value: None,
             description: None,
+            direction: crate::api::score_definitions::ScoreDirection::None,
             archived_at: None,
         }
     }

@@ -6,12 +6,12 @@
 
 use std::collections::BTreeMap;
 
+use cetra_core::enums::{SpanKind, SpanStatus};
+use cetra_core::ids::{ProjectId, SpanId, TraceId};
+use cetra_core::names::{environment, metadata_key};
+use cetra_core::score::{Score, ScoreTarget, ScoreValue};
+use cetra_core::span::Span;
 use chrono::{Datelike, Days, NaiveDate};
-use llmobs_core::enums::{SpanKind, SpanStatus};
-use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-use llmobs_core::names::{environment, metadata_key};
-use llmobs_core::score::{Score, ScoreTarget, ScoreValue};
-use llmobs_core::span::Span;
 use uuid::Uuid;
 
 use super::ops::TRACES;
@@ -224,7 +224,7 @@ pub(super) struct ScoreKey {
     pub(super) name: u8,
 }
 
-/// What a model score is attached to. Named apart from `llmobs_core::score::ScoreTarget`.
+/// What a model score is attached to. Named apart from `cetra_core::score::ScoreTarget`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) enum Target {
     Trace(u8),

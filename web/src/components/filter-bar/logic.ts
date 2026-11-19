@@ -6,12 +6,13 @@ import {
   type ChipValue,
   type CompareOp,
   type Field,
-  hasTopLevelOr,
   parseChip,
+  quoteString,
   serializeChip,
   type Token,
   tokenize,
 } from "@/lib/dsl/dsl";
+import { FACETS, type FacetView, type SelectKind, sameField } from "@/lib/facets";
 
 type ColumnType = Schema<"ColumnType">;
 type ViewName = Schema<"ViewName">;
@@ -195,14 +196,6 @@ export function stringContains(column: string, value: string): string {
   return serializeChip({ kind: "contains", field: { column }, values: [value] });
 }
 
-export function appendFilter(current: string, conjunct: string): string {
-  const base = current.trim();
-  if (base.length === 0) {
-    return conjunct;
-  }
-  return hasTopLevelOr(base) ? `(${base}) AND ${conjunct}` : `${base} AND ${conjunct}`;
-}
-
 export function filterMessage(problem: Problem): string {
   const field = problem.errors?.find((error) => error.field === "filter");
   return field?.message ?? problem.detail ?? problem.title;
@@ -242,6 +235,10 @@ export function completeFilter(
     return { from: context.pos, options: [{ label: "'", detail: "string key", apply: "'" }] };
   }
   const columns = columnMap(schema, view);
+  // A value position belongs to the value source (editor.tsx), not to the columns.
+  if (valueSlot(context.state.doc.toString(), context.pos, view, columns)) {
+    return null;
+  }
   const word = context.matchBefore(/[A-Za-z_][A-Za-z0-9_]*|!=|<>|<=|>=|@>|[=!<>]/);
   const prefix = word?.text ?? "";
   const head = tokenize(context.state.doc.sliceString(0, word?.from ?? context.pos));
@@ -295,6 +292,193 @@ export function completeFilter(
     }
   }
   return listing(word?.from ?? context.pos, options, /^[A-Za-z_][A-Za-z0-9_]*$/);
+}
+
+/**
+ * A value position of the filter text: the field, whether it is inside a list, and what is typed.
+ * `from`..`to` is the text a completion replaces: the typed value, or a closed string around the
+ * cursor through its closing quote (D7).
+ */
+export type ValueSlot = { field: Field; inList: boolean; prefix: string; from: number; to: number };
+
+const LITERAL_WORDS = new Set(["true", "false", "null"]);
+const COMPARE_BEFORE_VALUE = new Set(["=", "!=", "<>"]);
+
+/**
+ * The value position the cursor (`pos`) is in, for a facet-able field of `view` (D7). A scalar
+ * field takes a value after `=`, `!=`, `<>`, or inside the list of `IN (` / `NOT IN (`. A list
+ * field (`tags`, `models`) takes one only inside `@> [`. A field the view cannot facet is not a
+ * value slot, so the columns and literals completion keeps working there. Null everywhere else.
+ */
+export function valueSlot(
+  text: string,
+  pos: number,
+  view: ViewName,
+  columns: ReadonlyMap<string, ColumnSchema>,
+): ValueSlot | null {
+  const facetView = facetViewOf(view);
+  if (!facetView) {
+    return null;
+  }
+  const closed = tokenize(text).find(
+    (token) => token.kind === "string" && token.start < pos && pos < token.end,
+  );
+  if (closed) {
+    const found = valueContext(tokenize(text.slice(0, closed.start)), columns, facetView);
+    const prefix = closed.text.slice(1, pos - closed.start).replaceAll("''", "'");
+    return found ? { ...found, prefix, from: closed.start, to: closed.end } : null;
+  }
+  const tokens = tokenize(text.slice(0, pos));
+  const last = tokens.at(-1);
+  let head = tokens;
+  let from = pos;
+  let prefix = "";
+  if (last?.kind === "other" && last.text.startsWith("'")) {
+    head = tokens.slice(0, -1);
+    from = last.start;
+    prefix = last.text.slice(1).replaceAll("''", "'");
+  } else if (last && (last.kind === "ident" || last.kind === "number") && last.end === pos) {
+    head = tokens.slice(0, -1);
+    from = last.start;
+    prefix = last.text;
+  }
+  const found = valueContext(head, columns, facetView);
+  return found ? { ...found, prefix, from, to: pos } : null;
+}
+
+function valueContext(
+  tokens: readonly Token[],
+  columns: ReadonlyMap<string, ColumnSchema>,
+  view: FacetView,
+): { field: Field; inList: boolean } | null {
+  const last = tokens.at(-1);
+  if (last?.kind === "op" && COMPARE_BEFORE_VALUE.has(last.text)) {
+    const field = facetFieldBefore(tokens.slice(0, -1), columns, view, false);
+    return field ? { field, inList: false } : null;
+  }
+  if (last?.kind !== "lparen" && last?.kind !== "lbracket" && last?.kind !== "comma") {
+    return null;
+  }
+  let index = tokens.length - 1;
+  while (index >= 0) {
+    const token = tokens[index];
+    if (token?.kind === "lparen" || token?.kind === "lbracket") {
+      break;
+    }
+    const literal =
+      token?.kind === "comma" ||
+      token?.kind === "string" ||
+      token?.kind === "number" ||
+      (token?.kind === "keyword" && LITERAL_WORDS.has(token.text.toLowerCase()));
+    if (!literal) {
+      return null;
+    }
+    index -= 1;
+  }
+  const open = tokens[index];
+  if (open === undefined) {
+    return null;
+  }
+  const before = tokens.slice(0, index);
+  const lead = before.at(-1);
+  if (open.kind === "lparen") {
+    if (lead?.kind !== "keyword" || lead.text.toLowerCase() !== "in") {
+      return null;
+    }
+    let rest = before.slice(0, -1);
+    const not = rest.at(-1);
+    if (not?.kind === "keyword" && not.text.toLowerCase() === "not") {
+      rest = rest.slice(0, -1);
+    }
+    const field = facetFieldBefore(rest, columns, view, false);
+    return field ? { field, inList: true } : null;
+  }
+  if (lead?.kind !== "op" || lead.text !== "@>") {
+    return null;
+  }
+  const field = facetFieldBefore(before.slice(0, -1), columns, view, true);
+  return field ? { field, inList: true } : null;
+}
+
+/** The field before an operator when the view facets it, as a list field or not (`list`). */
+function facetFieldBefore(
+  tokens: readonly Token[],
+  columns: ReadonlyMap<string, ColumnSchema>,
+  view: FacetView,
+  list: boolean,
+): Field | null {
+  const field = fieldBefore(tokens, columns);
+  const target = field ? facetTarget(view, field) : undefined;
+  if (field === null || target === undefined || (target === "list") !== list) {
+    return null;
+  }
+  return field;
+}
+
+/** The field an expression ends with: a column, or `map['key']` of a map column. */
+function fieldBefore(
+  tokens: readonly Token[],
+  columns: ReadonlyMap<string, ColumnSchema>,
+): Field | null {
+  const last = tokens.at(-1);
+  if (last?.kind === "ident") {
+    const column = columns.get(last.text.toLowerCase());
+    return column ? { column: column.name } : null;
+  }
+  if (last?.kind === "rbracket" && mapAccess(tokens)) {
+    const column = columns.get(tokens.at(-4)?.text.toLowerCase() ?? "");
+    const key = tokens.at(-2);
+    if (!column || !isMapColumn(column.name) || key?.kind !== "string") {
+      return null;
+    }
+    return { column: column.name, key: stripQuotes(key.text) };
+  }
+  return null;
+}
+
+/**
+ * The facet kind whose values suggest a value of `field` in `view`, or undefined when the view
+ * does not facet it (D7): a values, list or bool field, or `map['key']` of a keys field.
+ */
+export function facetTarget(view: FacetView, field: Field): SelectKind | undefined {
+  for (const def of FACETS[view]) {
+    if (def.kind === "keys") {
+      if ("key" in field && field.key.length > 0 && def.field.column === field.column) {
+        return "values";
+      }
+      continue;
+    }
+    if (
+      (def.kind === "values" || def.kind === "list" || def.kind === "bool") &&
+      sameField(def.field, field)
+    ) {
+      return def.kind;
+    }
+  }
+  return undefined;
+}
+
+/** The list view a facet request names; `users` counts traces and is not a list view of its own. */
+export function facetViewOf(view: ViewName): FacetView | undefined {
+  return view === "traces" || view === "spans" || view === "sessions" ? view : undefined;
+}
+
+/** The operators whose value is a token list (D7): `IN`, `NOT IN` and `@>`. */
+export function isListOp(op: string): boolean {
+  return op === "IN" || op === "NOT IN" || op === "@>";
+}
+
+/** The values of a list draft (`IN`, `NOT IN`, `@>`) as text, one per token (D7). */
+export function listTokens(op: string, value: string): string[] {
+  if (op === "@>") {
+    return containsValues(value) ?? [];
+  }
+  return inValues(value)?.map(literalText) ?? [];
+}
+
+/** The draft text of a list of tokens: quoted string literals, or the tokens as they are. */
+export function listValueText(tokens: readonly string[], quoted: boolean): string {
+  return tokens.map((token) => (quoted ? quoteString(token) : token)).join(", ");
 }
 
 export function targetKind(target: string, columns: readonly ColumnSchema[]): TargetKind {
@@ -384,7 +568,7 @@ function mapAccess(tokens: readonly Token[]): boolean {
   );
 }
 
-function columnMap(
+export function columnMap(
   schema: Schema<"SchemaResponse"> | undefined,
   view: ViewName,
 ): Map<string, ColumnSchema> {
@@ -443,7 +627,8 @@ function formatLiteral(value: ChipValue): string {
   }
 }
 
-function fieldOf(target: string, name: string, type: TargetKind): Field | null {
+/** The field a chip draft names: `column`, or `map['name']` for a map column. */
+export function fieldOf(target: string, name: string, type: TargetKind): Field | null {
   if (type === "string_map") {
     if (!isMapColumn(target) || name.length === 0) {
       return null;

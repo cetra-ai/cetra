@@ -4,7 +4,7 @@ Date: 2026-11-15. Status: research. No decision is taken here, and nothing in th
 
 **Question.** Is there a file format faster than Parquet for LLM-observability data, and if not, what would one look like?
 
-**Scope.** This research is independent of the llmobs storage spec. Formats are judged as general-purpose columnar files on five workload classes:
+**Scope.** This research is independent of the cetra storage spec. Formats are judged as general-purpose columnar files on five workload classes:
 - **(A)** filtered scans over narrow columns;
 - **(B)** point lookups by a sorted key;
 - **(C)** large, repetitive strings and substring search over them;
@@ -78,7 +78,7 @@ The generator does **not** model history repeated across the traces of one chat 
 |---|---|
 | `pq_default` | arrow-rs `WriterProperties` defaults + zstd-3: v1 pages, dictionary on, 1 MiB pages, 1M-row row groups |
 | `pq_tuned` | "Point-lookup tuned": v2 pages, 64 KiB / 8,192-row pages, 128k-row row groups, page statistics, bloom filters on the ID columns, dictionary off for large strings |
-| `pq_llmobs` | Today's llmobs writer settings, as a reference point only |
+| `pq_cetra` | Today's cetra writer settings, as a reference point only |
 | `vx_default` | Vortex `write_options()` defaults |
 | `vx_compact` | Vortex with `BtrBlocksCompressorBuilder::with_compact()` (zstd for strings, pco for numbers) |
 
@@ -104,7 +104,7 @@ Vortex has no `FixedSizeBinary`, so the IDs are cast to `Binary` for Vortex only
 |---|---|---|
 | pq_default | 332 MiB | 6.7 s |
 | pq_tuned | 622 MiB | 11.3 s |
-| pq_llmobs | 438 MiB | 8.9 s |
+| pq_cetra | 438 MiB | 8.9 s |
 | vx_default | 487 MiB | 4.2 s |
 | vx_compact | **316 MiB** | **4.0 s** |
 
@@ -114,7 +114,7 @@ Vortex has no `FixedSizeBinary`, so the IDs are cast to `Binary` for Vortex only
 |---|---|---|
 | pq_default | 151 MiB | 5.2 s |
 | pq_tuned | 191 MiB | 5.3 s |
-| pq_llmobs | 161 MiB | 4.8 s |
+| pq_cetra | 161 MiB | 4.8 s |
 | vx_default | 210 MiB | **1.6 s** |
 | vx_compact | **136 MiB** | 1.8 s |
 
@@ -148,7 +148,7 @@ Per lookup, *payload* dataset. "Full" is `SELECT *`; "light" is 9 narrow columns
 |---|---|---|---|---|---|
 | pq_default | 26.4 | 6.3 MB | 112 | 7.0 | 1.7 MB |
 | pq_tuned | **12.7** | 3.4 MB | 101 | 7.1 | 2.3 MB |
-| pq_llmobs | 17.0 | **2.6 MB** | 74 | 6.1 | **0.56 MB** |
+| pq_cetra | 17.0 | **2.6 MB** | 74 | 6.1 | **0.56 MB** |
 | vx_default | 16.1 | **75.9 MB** | 12 | **4.2** | 17.8 MB |
 | vx_compact | 31.6 | 79.9 MB | 11 | 4.2 | 11.4 MB |
 
@@ -169,7 +169,7 @@ Parquet's cost, in turn, is the request count: about 100 dependent ranged reads 
 |---|---|---|---|---|
 | pq_default | 191 | 125 MB | 335 | 258 MB |
 | pq_tuned | 231 | 160 MB | 427 | 327 MB |
-| pq_llmobs | 137 | 125 MB | 246 | 258 MB |
+| pq_cetra | 137 | 125 MB | 246 | 258 MB |
 | vx_default | 136 | 236 MB | 210 | 405 MB |
 | vx_compact | **93** | 113 MB | **162** | 253 MB |
 

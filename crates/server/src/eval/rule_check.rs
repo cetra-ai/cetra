@@ -3,8 +3,8 @@
 
 use std::collections::BTreeSet;
 
-use llmobs_eval::{Adapter, Check, EvaluatorConfig, JudgeConfig, PromptTemplate, VariableMapping};
-use llmobs_otel::PriceTable;
+use cetra_eval::{Adapter, Check, EvaluatorConfig, JudgeConfig, PromptTemplate, VariableMapping};
+use cetra_otel::PriceTable;
 
 use crate::api::common::FieldError;
 use crate::api::evaluators::EvaluatorKind;
@@ -169,7 +169,7 @@ pub(crate) fn field_error(field: &str, message: &str) -> FieldError {
 
 #[cfg(test)]
 mod tests {
-    use llmobs_eval::JudgeOutput;
+    use cetra_eval::JudgeOutput;
     use serde_json::{Value, json};
     use uuid::Uuid;
 
@@ -385,13 +385,13 @@ mod tests {
         let with_needles = Subject::Check(Check::Contains {
             value: None,
             values: vec!["refund".to_owned()],
-            mode: llmobs_eval::ContainsMode::Any,
+            mode: cetra_eval::ContainsMode::Any,
             case_sensitive: false,
         });
         let without = Subject::Check(Check::Contains {
             value: None,
             values: Vec::new(),
-            mode: llmobs_eval::ContainsMode::Any,
+            mode: cetra_eval::ContainsMode::Any,
             case_sensitive: false,
         });
         let mapped = [("output", "trace.output")];
@@ -462,7 +462,7 @@ mod tests {
     fn a_webhook_row_is_read_without_its_secret() {
         let row = EvaluatorRow {
             id: Uuid::from_u128(9),
-            project_id: llmobs_core::ids::ProjectId::from_uuid(Uuid::from_u128(8)),
+            project_id: cetra_core::ids::ProjectId::from_uuid(Uuid::from_u128(8)),
             name: "hook".to_owned(),
             kind: "webhook".to_owned(),
             config:

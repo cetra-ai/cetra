@@ -1,0 +1,78 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "conformance"
+            }
+          },
+          {
+            "key": "telemetry.distro.name",
+            "value": {
+              "stringValue": "cetra"
+            }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "cetra",
+            "version": "0.0.0"
+          },
+          "spans": [
+            {
+              "traceId": "00000000000000000000000000000001",
+              "spanId": "0000000000000001",
+              "name": "rerank",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590001000000",
+              "endTimeUnixNano": "1767225590999000000",
+              "attributes": [
+                {
+                  "key": "cetra.input",
+                  "value": {
+                    "stringValue": "[\"a\",\"b\"]"
+                  }
+                },
+                {
+                  "key": "cetra.input.format",
+                  "value": {
+                    "stringValue": "json"
+                  }
+                },
+                {
+                  "key": "cetra.metadata.model",
+                  "value": {
+                    "stringValue": "bge"
+                  }
+                },
+                {
+                  "key": "cetra.output",
+                  "value": {
+                    "stringValue": "[\"b\",\"a\"]"
+                  }
+                },
+                {
+                  "key": "cetra.output.format",
+                  "value": {
+                    "stringValue": "json"
+                  }
+                },
+                {
+                  "key": "cetra.span.kind",
+                  "value": {
+                    "stringValue": "reranker"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

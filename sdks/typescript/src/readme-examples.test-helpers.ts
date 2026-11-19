@@ -19,7 +19,7 @@ import { observe } from "./span.js";
 
 // readme:quick-start
 export async function quickStart(): Promise<void> {
-  init({ apiKey: process.env.LLMOBS_API_KEY });
+  init({ apiKey: process.env.CETRA_API_KEY });
   const searchDocs = observe(({ query }: { query: string }) => `results for ${query}`, {
     kind: "tool",
     name: "search_docs",
@@ -65,7 +65,7 @@ export function scoreExample(): string | undefined {
 // readme:ai-telemetry
 export function aiTelemetryExample(): void {
   // Pass `telemetry` as `experimental_telemetry` to the Vercel AI SDK; the
-  // tracer it hands out is the llmobs one, so AI spans land in llmobs.
+  // tracer it hands out is the cetra one, so AI spans land in cetra.
   const telemetry = aiTelemetry({ sessionId: "chat-42", functionId: "chat" });
   telemetry.tracer?.startSpan("ai.chat").end();
 }

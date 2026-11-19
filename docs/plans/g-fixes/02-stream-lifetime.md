@@ -159,5 +159,5 @@ A stream does not re-check access while open, but every stream ends 15 minutes a
 
 ## Done when
 
-- `cargo test -p llmobs-server routes::streams` passes, with the five tests above, twice in a row.
+- `cargo test -p cetra-server routes::streams` passes, with the five tests above, twice in a row.
 - `just check` passes.

@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Elastic-2.0
 //! Signed tokens: licence keys, org entitlement tokens and control-plane requests (D-P-5).
 //!
-//! A token is `llmobs1.<kid>.<payload>.<signature>`. `<payload>` and `<signature>` are
+//! A token is `cetra1.<kid>.<payload>.<signature>`. `<payload>` and `<signature>` are
 //! base64url without padding. The signature is ed25519 over the ASCII bytes of
-//! `llmobs1.<kid>.<payload>`, checked before the payload is decoded as JSON, so the JSON
+//! `cetra1.<kid>.<payload>`, checked before the payload is decoded as JSON, so the JSON
 //! is never re-serialised. Release builds trust only the release keys; debug builds also
 //! trust the development key (D-P-6). Each key may sign only the kinds it is bound to
 //! (D-P-27). No config can add a key.
 //!
-//! Shared by `llmobs-server`, `tools/license` and the control plane. Depends on no other
+//! Shared by `cetra-server`, `tools/license` and the control plane. Depends on no other
 //! workspace crate.
 
 #![warn(missing_docs)]
@@ -26,8 +26,8 @@ mod rfc3339;
 
 pub use keys::{BuiltInKey, built_in_keys};
 
-/// Format tag. Renamed with the product (D46).
-pub const TOKEN_TAG: &str = "llmobs1";
+/// Format tag. Renamed with the product.
+pub const TOKEN_TAG: &str = "cetra1";
 
 /// Largest accepted token, in bytes.
 pub const MAX_TOKEN_BYTES: usize = 16 * 1024;
@@ -452,8 +452,39 @@ mod tests {
             assert!(!key.kinds.contains(&Kind::License), "{kid} signs licences");
             assert_eq!(key.kinds, &[Kind::Org, Kind::ControlPlane]);
         }
-        let prod = built_in_keys().find(|key| key.kid == "prod-1").unwrap();
-        assert_eq!(prod.kinds, &[Kind::License]);
+    }
+
+    #[test]
+    fn licence_keys_sign_licences_only() {
+        let control_plane = r#"{"kind":"control_plane","id":"0193a3b4-0000-7000-8000-000000000001",
+            "issued_at":"2026-11-14T00:00:00Z","expires_at":"2099-01-01T00:00:00Z",
+            "audience":"https://eu1.example.com","scope":"orgs","method":"PUT",
+            "path":"/api/internal/v1/orgs/0193a3b4-0000-7000-8000-000000000002"}"#;
+        assert!(verify(&dev_sign(control_plane.as_bytes())).is_ok());
+
+        for kid in ["license-offline-1", "license-1", "license-2"] {
+            let key = built_in_keys().find(|key| key.kid == kid).unwrap();
+            assert_eq!(key.kinds, &[Kind::License], "{kid}");
+
+            // The same binding, with the dev key's halves standing in for this key's.
+            let bound = BuiltInKey {
+                kid: "dev-1",
+                public: "",
+                kinds: key.kinds,
+            };
+            let keys = [(&bound, dev_key().verifying_key())];
+            assert!(
+                verify_with(&dev_sign(fixture("payloads/active.json").as_bytes()), &keys).is_ok(),
+                "{kid}"
+            );
+            for payload in [fixture("payloads/org-pro.json"), control_plane.to_owned()] {
+                assert_eq!(
+                    verify_with(&dev_sign(payload.as_bytes()), &keys),
+                    Err(TokenError::KeyNotAllowed),
+                    "{kid}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -508,16 +539,13 @@ mod tests {
         let sig = URL_SAFE_NO_PAD.encode([0_u8; 64]);
         let cases = [
             String::new(),
-            "llmobs1.dev-1.abc".to_owned(),
-            format!("llmobs1.dev-1.{body}.{sig}.extra"),
-            format!("llmobs2.dev-1.{body}.{sig}"),
-            format!("llmobs1.Dev-1.{body}.{sig}"),
-            format!("llmobs1.{}.{body}.{sig}", "a".repeat(33)),
-            format!("llmobs1.dev-1.!!.{sig}"),
-            format!(
-                "llmobs1.dev-1.{body}.{}",
-                URL_SAFE_NO_PAD.encode([0_u8; 10])
-            ),
+            "cetra1.dev-1.abc".to_owned(),
+            format!("cetra1.dev-1.{body}.{sig}.extra"),
+            format!("cetra2.dev-1.{body}.{sig}"),
+            format!("cetra1.Dev-1.{body}.{sig}"),
+            format!("cetra1.{}.{body}.{sig}", "a".repeat(33)),
+            format!("cetra1.dev-1.!!.{sig}"),
+            format!("cetra1.dev-1.{body}.{}", URL_SAFE_NO_PAD.encode([0_u8; 10])),
         ];
         for token in cases {
             assert_eq!(verify(&token), Err(TokenError::Malformed), "{token}");
@@ -534,16 +562,19 @@ mod tests {
 
     #[test]
     fn release_key_needs_prod_signature() {
-        let token =
-            dev_sign(fixture("payloads/active.json").as_bytes()).replacen(".dev-1.", ".prod-1.", 1);
+        let token = dev_sign(fixture("payloads/active.json").as_bytes()).replacen(
+            ".dev-1.",
+            ".license-offline-1.",
+            1,
+        );
         assert_eq!(verify(&token), Err(TokenError::BadSignature));
     }
 
     #[test]
     fn keys_are_bound_to_kinds() {
-        // A payload of kind `org` under `prod-1` fails on the signature, before the kind check.
+        // A payload of kind `org` under `license-offline-1` fails on the signature, before the kind check.
         let org = fixture("payloads/org-pro.json");
-        let token = dev_sign(org.as_bytes()).replacen(".dev-1.", ".prod-1.", 1);
+        let token = dev_sign(org.as_bytes()).replacen(".dev-1.", ".license-offline-1.", 1);
         assert_eq!(verify(&token), Err(TokenError::BadSignature));
 
         // Every kind verifies under the development key, which is bound to all three.
@@ -600,7 +631,7 @@ mod tests {
             TokenError::Payload,
             TokenError::WrongKind,
         ] {
-            assert!(!error.to_string().contains("llmobs1."), "{error}");
+            assert!(!error.to_string().contains("cetra1."), "{error}");
         }
     }
 

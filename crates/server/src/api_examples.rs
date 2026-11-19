@@ -5,15 +5,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use axum::http::{Method, StatusCode};
-use llmobs_core::ids::ProjectId;
-use llmobs_core::score::Score;
+use cetra_core::ids::ProjectId;
+use cetra_core::score::Score;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::api::common::Page;
-use crate::api::datasets::{Dataset, DatasetItem, DatasetVersion};
-use crate::api::metrics::MetricsResponse;
+use crate::api::dashboards::WidgetQueryResponse;
+use crate::api::datasets::{Dataset, DatasetItem, DatasetVersion, ExperimentTrends, ItemChange};
+use crate::api::facets::FacetsResponse;
 use crate::api::schema::SchemaResponse;
 use crate::api::sessions::{SessionDetail, SessionSummary};
 use crate::api::sql::SqlQueryResult;
@@ -382,18 +383,97 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
         &format!("responses/datasets/{EXAMPLE_DATASET}/items/{EXAMPLE_ITEM}.json"),
         &item,
     );
-
-    let metrics: MetricsResponse = fetch(
+    // Version 2 edited `EXAMPLE_ITEM`: one changed item, its revision before and after.
+    let changes: Page<ItemChange> = fetch(
         &app,
         cookie,
-        "/metrics?from=2026-01-01T10:00:00Z&to=2026-01-01T11:00:00Z&bucket=10m",
+        &format!("/datasets/{EXAMPLE_DATASET}/versions/2/changes"),
     )
     .await;
-    out.add("get_metrics", &[], &[], "responses/metrics.json", &metrics);
+    out.add(
+        "list_dataset_version_changes",
+        &[("dataset", EXAMPLE_DATASET), ("version", "2")],
+        &[],
+        &format!("responses/datasets/{EXAMPLE_DATASET}/versions/2/changes.json"),
+        &changes,
+    );
+    let trends: ExperimentTrends = fetch(
+        &app,
+        cookie,
+        &format!("/dataset-trends?ids={EXAMPLE_DATASET}"),
+    )
+    .await;
+    out.add(
+        "list_experiment_trends",
+        &[],
+        &[("ids", EXAMPLE_DATASET)],
+        "responses/dataset-trends.json",
+        &trends,
+    );
+
+    // Every facet the web shows open by default, and every preset field, has an answer here.
+    const FACET_WINDOW: &str = "from=2026-01-01T00:00:00Z&to=2026-01-02T00:00:00Z";
+    const FACETS: &[(&str, &str)] = &[
+        ("traces", "status"),
+        ("traces", "name"),
+        ("traces", "environment"),
+        ("traces", "tags"),
+        ("traces", "models"),
+        ("traces", "metadata"),
+        ("traces", "duration_ms"),
+        ("traces", "cost_total"),
+        ("spans", "span_kind"),
+        ("spans", "status"),
+        ("spans", "name"),
+        ("spans", "model"),
+        ("spans", "duration_ms"),
+        ("spans", "cost_total"),
+        ("sessions", "user_id"),
+        ("sessions", "tags"),
+        ("sessions", "duration_ms"),
+        ("sessions", "cost_total"),
+    ];
+    for (view, field) in FACETS {
+        let facet: FacetsResponse = fetch(
+            &app,
+            cookie,
+            &format!("/facets?view={view}&field={field}&{FACET_WINDOW}"),
+        )
+        .await;
+        out.add(
+            "get_facets",
+            &[],
+            &[("view", view), ("field", field)],
+            &format!("responses/facets-{view}-{field}.json"),
+            &facet,
+        );
+    }
 
     let request: Value = read_json(&api_dir().join("requests/sql-query.json"));
     let sql: SqlQueryResult = post_json(&app, cookie, "/sql", &request).await;
     out.add("run_sql", &[], &[], "static/sql-result.json", &sql);
+
+    // Widget queries (spec 05 § Dashboard queries): a series and a total with `compare`.
+    let series_request: Value = read_json(&api_dir().join("requests/dashboard-query-series.json"));
+    let series: WidgetQueryResponse =
+        post_json(&app, cookie, "/dashboards/query", &series_request).await;
+    out.add(
+        "query_widget",
+        &[],
+        &[],
+        "responses/dashboard-query-series.json",
+        &series,
+    );
+    let total_request: Value = read_json(&api_dir().join("requests/dashboard-query-total.json"));
+    let total: WidgetQueryResponse =
+        post_json(&app, cookie, "/dashboards/query", &total_request).await;
+    out.add(
+        "query_widget",
+        &[],
+        &[],
+        "responses/dashboard-query-total.json",
+        &total,
+    );
 
     // Checked against the static files, not written.
     let schema: SchemaResponse = fetch(&app, cookie, "/schema").await;
@@ -462,6 +542,32 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
             "post_dataset_item_from_trace",
             params(&[("dataset", EXAMPLE_DATASET)]),
             "static/dataset-item-from-trace.json",
+        ),
+        example(
+            "patch_dataset_items",
+            params(&[("dataset", EXAMPLE_DATASET)]),
+            BTreeMap::new(),
+            "static/dataset-items-edited.json",
+            "application/json",
+        ),
+        example(
+            "post_dataset_items_delete",
+            params(&[("dataset", EXAMPLE_DATASET)]),
+            BTreeMap::new(),
+            "static/dataset-items-deleted.json",
+            "application/json",
+        ),
+        example_created(
+            "post_dataset_items_from_traces",
+            params(&[("dataset", EXAMPLE_DATASET)]),
+            "static/dataset-items-from-traces.json",
+        ),
+        example(
+            "restore_dataset",
+            params(&[("dataset", EXAMPLE_DATASET)]),
+            BTreeMap::new(),
+            "static/dataset-restored.json",
+            "application/json",
         ),
         example(
             "list_admin_users",
@@ -622,11 +728,48 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
             "static/alert-rule.json",
             "application/json",
         ),
+        // The other two rules, so the mocked list can open each in its panel.
+        example(
+            "get_alert_rule",
+            params(&[("id", "01900000-0000-7000-8000-000000000511")]),
+            BTreeMap::new(),
+            "static/alert-rule-0511.json",
+            "application/json",
+        ),
+        example(
+            "get_alert_rule",
+            params(&[("id", "01900000-0000-7000-8000-000000000512")]),
+            BTreeMap::new(),
+            "static/alert-rule-0512.json",
+            "application/json",
+        ),
         example(
             "list_alert_events",
             params(&[("id", "01900000-0000-7000-8000-000000000510")]),
             BTreeMap::new(),
             "static/alert-events.json",
+            "application/json",
+        ),
+        // The other two rules have no events yet.
+        example(
+            "list_alert_events",
+            params(&[("id", "01900000-0000-7000-8000-000000000511")]),
+            BTreeMap::new(),
+            "static/alert-events-empty.json",
+            "application/json",
+        ),
+        example(
+            "list_alert_events",
+            params(&[("id", "01900000-0000-7000-8000-000000000512")]),
+            BTreeMap::new(),
+            "static/alert-events-empty.json",
+            "application/json",
+        ),
+        example(
+            "list_project_alert_events",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "static/project-alert-events.json",
             "application/json",
         ),
         example_status("post_api_key", "static/api-key-created.json", 201),
@@ -685,10 +828,24 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
         ),
         example_created("post_evaluator", BTreeMap::new(), "static/evaluator.json"),
         example(
+            "list_evaluator_versions",
+            params(&[("id", "01900000-0000-7000-8000-000000000500")]),
+            BTreeMap::new(),
+            "static/evaluator-versions.json",
+            "application/json",
+        ),
+        example(
             "list_evaluator_templates",
             BTreeMap::new(),
             BTreeMap::new(),
             "static/evaluator-templates.json",
+            "application/json",
+        ),
+        example(
+            "get_evaluator_stats",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "static/evaluator-stats.json",
             "application/json",
         ),
         example(
@@ -747,6 +904,16 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
             "application/json",
         ),
         example(
+            "get_experiment_summaries",
+            BTreeMap::new(),
+            params(&[(
+                "ids",
+                "01900000-0000-7000-8000-000000000e02,01900000-0000-7000-8000-000000000e01",
+            )]),
+            "static/experiment-summaries.json",
+            "application/json",
+        ),
+        example(
             "list_models",
             BTreeMap::new(),
             BTreeMap::new(),
@@ -792,6 +959,50 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
             "application/json",
         ),
         example(
+            "list_dashboards",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "static/dashboards.json",
+            "application/json",
+        ),
+        example(
+            "get_dashboard",
+            params(&[("id", "01900000-0000-7000-8000-000000000f01")]),
+            BTreeMap::new(),
+            "static/dashboard.json",
+            "application/json",
+        ),
+        example_created("create_dashboard", BTreeMap::new(), "static/dashboard.json"),
+        example(
+            "update_dashboard",
+            params(&[("id", "01900000-0000-7000-8000-000000000f01")]),
+            BTreeMap::new(),
+            "static/dashboard.json",
+            "application/json",
+        ),
+        Example {
+            operation_id: "update_dashboard".to_owned(),
+            path_params: params(&[("id", "01900000-0000-7000-8000-000000000f01")]),
+            query: BTreeMap::new(),
+            status: 409,
+            content_type: "application/problem+json".to_owned(),
+            file: "static/dashboard-stale.json".to_owned(),
+        },
+        example(
+            "get_overview",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "static/dashboard-overview.json",
+            "application/json",
+        ),
+        example(
+            "save_overview",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "static/dashboard-overview.json",
+            "application/json",
+        ),
+        example(
             "list_deletions",
             BTreeMap::new(),
             BTreeMap::new(),
@@ -832,10 +1043,25 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
             "application/json",
         ),
         example(
+            "get_online_rule_stats",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "static/online-rule-stats.json",
+            "application/json",
+        ),
+        example(
             "get_online_rule",
             params(&[("id", "01900000-0000-7000-8000-000000000700")]),
             BTreeMap::new(),
             "static/online-rule.json",
+            "application/json",
+        ),
+        // The second rule, so the mocked list can open it in its panel.
+        example(
+            "get_online_rule",
+            params(&[("id", "01900000-0000-7000-8000-000000000701")]),
+            BTreeMap::new(),
+            "static/online-rule-0701.json",
             "application/json",
         ),
         example_created(
@@ -922,11 +1148,11 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
 }
 
 fn examples_write_requested() -> bool {
-    match std::env::var("LLMOBS_API_EXAMPLES_WRITE") {
+    match std::env::var("CETRA_API_EXAMPLES_WRITE") {
         Err(std::env::VarError::NotPresent) => false,
         Ok(value) if value == "1" => true,
         Ok(value) if value.is_empty() => false,
-        Ok(_) | Err(_) => panic!("set LLMOBS_API_EXAMPLES_WRITE=1 to write, or unset it"),
+        Ok(_) | Err(_) => panic!("set CETRA_API_EXAMPLES_WRITE=1 to write, or unset it"),
     }
 }
 

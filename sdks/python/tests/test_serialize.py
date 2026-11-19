@@ -1,4 +1,4 @@
-"""Tests for ``llmobs._serialize`` (F plan § Serialization)."""
+"""Tests for ``cetra._serialize`` (F plan § Serialization)."""
 
 import asyncio
 import dataclasses
@@ -10,7 +10,7 @@ import pathlib
 import types
 import uuid
 
-from llmobs._serialize import MAX_PAYLOAD_BYTES, attribute_value, serialize, truncate
+from cetra._serialize import MAX_PAYLOAD_BYTES, attribute_value, serialize, truncate
 
 
 def compact(value: object) -> str:
@@ -241,10 +241,10 @@ def test_surrogates_replaced_inside_json() -> None:
 def test_cycles() -> None:
     lst: list[object] = [1]
     lst.append(lst)
-    assert as_json(lst) == '[1,"[llmobs: cycle]"]'
+    assert as_json(lst) == '[1,"[cetra: cycle]"]'
     dct: dict[str, object] = {"a": 1}
     dct["self"] = dct
-    assert as_json(dct) == '{"a":1,"self":"[llmobs: cycle]"}'
+    assert as_json(dct) == '{"a":1,"self":"[cetra: cycle]"}'
 
 
 def test_shared_reference_is_not_a_cycle() -> None:
@@ -273,8 +273,8 @@ def test_depth_32_has_no_marker() -> None:
 
 def test_depth_33_gets_marker() -> None:
     parsed = json.loads(as_json(nested_lists(33)))
-    assert unwrap(parsed, 32) == "[llmobs: max depth]"
-    assert "[llmobs: max depth]" not in json.loads(as_json(nested_lists(32)))
+    assert unwrap(parsed, 32) == "[cetra: max depth]"
+    assert "[cetra: max depth]" not in json.loads(as_json(nested_lists(32)))
 
 
 def test_never_raises() -> None:
@@ -290,7 +290,7 @@ def test_never_raises() -> None:
 
 
 def marker(n: int) -> str:
-    return f"…[llmobs: truncated, original {n} bytes]"
+    return f"…[cetra: truncated, original {n} bytes]"
 
 
 def test_text_exactly_at_limit_is_unchanged() -> None:

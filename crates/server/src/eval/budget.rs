@@ -4,9 +4,9 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+use cetra_eval::Adapter;
+use cetra_otel::{PriceRow, PriceTable};
 use chrono::{DateTime, Datelike, Utc};
-use llmobs_eval::Adapter;
-use llmobs_otel::{PriceRow, PriceTable};
 use uuid::Uuid;
 
 use crate::api::online_rules::BudgetPeriod;
@@ -198,7 +198,7 @@ impl Budgets {
 
 #[cfg(test)]
 mod tests {
-    use llmobs_otel::PriceScope;
+    use cetra_otel::PriceScope;
 
     use super::*;
 

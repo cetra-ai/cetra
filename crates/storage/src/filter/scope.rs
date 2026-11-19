@@ -4,12 +4,12 @@
 use std::ops::Not;
 use std::sync::Arc;
 
+use cetra_core::names::{environment, metadata_key};
+use cetra_core::schema::{spans, traces};
 use datafusion::error::DataFusionError;
 use datafusion::logical_expr::{
     Expr, Like, Operator, binary_expr, col, in_subquery, lit, not_in_subquery,
 };
-use llmobs_core::names::{environment, metadata_key};
-use llmobs_core::schema::{spans, traces};
 
 use super::FilterView;
 use crate::query_error::RunError;
@@ -173,7 +173,7 @@ pub(crate) async fn search(
 }
 
 /// `%<escaped>%`, with `\`, `%` and `_` escaped for `ESCAPE '\'`.
-fn like_pattern(query: &str) -> String {
+pub(crate) fn like_pattern(query: &str) -> String {
     let mut escaped = String::with_capacity(query.len());
     for character in query.chars() {
         if matches!(character, '\\' | '%' | '_') {

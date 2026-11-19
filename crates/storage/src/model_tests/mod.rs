@@ -24,7 +24,7 @@ use harness::{
     Harness, HarnessOptions, MODEL_PUT_SIZES, REMOTE_PUT_SIZES, memory_store, s3_tweaks,
 };
 use model::Model;
-use observe::{ALL_ROWS, observe_scores, observe_spans, observe_traces};
+use observe::{ALL_ROWS, context, observe_scores, observe_spans, observe_traces};
 use ops::{Op, apply, new_model, settle};
 use shape::{HOUR_NS, P, day, midnight, trace_id};
 use uuid::Uuid;
@@ -43,9 +43,9 @@ use object_store::path::Path as ObjectPath;
 use object_store::prefix::PrefixStore;
 use object_store::{ObjectStore, ObjectStoreExt};
 
-/// Cases per run: `LLMOBS_MODEL_CASES`, else 8 (D-R-14).
+/// Cases per run: `CETRA_MODEL_CASES`, else 8 (D-R-14).
 fn cases() -> u32 {
-    std::env::var("LLMOBS_MODEL_CASES")
+    std::env::var("CETRA_MODEL_CASES")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(8)
@@ -56,11 +56,11 @@ fn interval_cases() -> u32 {
     (cases() / 2).max(2)
 }
 
-/// Cases of the S3 mode: `LLMOBS_MODEL_S3_CASES`, else 8 (R4.5). A
+/// Cases of the S3 mode: `CETRA_MODEL_S3_CASES`, else 8 (R4.5). A
 /// restart's shutdown switches the fault schedule off 3 s in, so a flush that keeps failing
 /// commits on its next retry. Measured in debug at 8 cases over six runs: 11 s to 32 s.
 fn s3_cases() -> u32 {
-    std::env::var("LLMOBS_MODEL_S3_CASES")
+    std::env::var("CETRA_MODEL_S3_CASES")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(8)
@@ -133,10 +133,10 @@ fn run_case_with(ops: &[Op], change: impl FnOnce(&mut StorageConfig), pair: (P, 
     )
 }
 
-/// `LLMOBS_MODEL_S3_REMOTE=1` (R4.8): the S3-mode case runs against the bucket of the
-/// `LLMOBS_TEST_S3_*` variables instead of an in-memory one.
+/// `CETRA_MODEL_S3_REMOTE=1` (R4.8): the S3-mode case runs against the bucket of the
+/// `CETRA_TEST_S3_*` variables instead of an in-memory one.
 fn remote_mode() -> bool {
-    std::env::var("LLMOBS_MODEL_S3_REMOTE").is_ok_and(|value| value == "1")
+    std::env::var("CETRA_MODEL_S3_REMOTE").is_ok_and(|value| value == "1")
 }
 
 /// One S3-mode case against the bucket (R4.8), in a prefix of its own, with `REMOTE_PUT_SIZES`.
@@ -166,17 +166,17 @@ fn run_case_s3_remote(ops: &[Op], seed: u64, pair: (P, P)) {
     deleted.expect("delete the objects of an S3 model case");
 }
 
-/// The bucket of an `LLMOBS_MODEL_S3_REMOTE=1` run: `LLMOBS_TEST_S3_ENDPOINT` and
-/// `LLMOBS_TEST_S3_BUCKET`, with the region and addressing style `tests/s3.rs` reads, and the
+/// The bucket of a`CETRA_MODEL_S3_REMOTE=1` run: `CETRA_TEST_S3_ENDPOINT` and
+/// `CETRA_TEST_S3_BUCKET`, with the region and addressing style `tests/s3.rs` reads, and the
 /// `AWS_*` credentials from the environment.
 fn remote_bucket() -> AmazonS3 {
-    let endpoint = std::env::var("LLMOBS_TEST_S3_ENDPOINT")
-        .expect("LLMOBS_TEST_S3_ENDPOINT is set when LLMOBS_MODEL_S3_REMOTE=1");
-    let bucket = std::env::var("LLMOBS_TEST_S3_BUCKET")
-        .expect("LLMOBS_TEST_S3_BUCKET is set when LLMOBS_MODEL_S3_REMOTE=1");
-    let region = std::env::var("LLMOBS_TEST_S3_REGION").unwrap_or_else(|_| "us-east-1".to_owned());
+    let endpoint = std::env::var("CETRA_TEST_S3_ENDPOINT")
+        .expect("CETRA_TEST_S3_ENDPOINT is set when CETRA_MODEL_S3_REMOTE=1");
+    let bucket = std::env::var("CETRA_TEST_S3_BUCKET")
+        .expect("CETRA_TEST_S3_BUCKET is set when CETRA_MODEL_S3_REMOTE=1");
+    let region = std::env::var("CETRA_TEST_S3_REGION").unwrap_or_else(|_| "us-east-1".to_owned());
     let path_style = !matches!(
-        std::env::var("LLMOBS_TEST_S3_PATH_STYLE").as_deref(),
+        std::env::var("CETRA_TEST_S3_PATH_STYLE").as_deref(),
         Ok("false")
     );
     AmazonS3Builder::from_env()
@@ -186,7 +186,7 @@ fn remote_bucket() -> AmazonS3 {
         .with_virtual_hosted_style_request(!path_style)
         .with_allow_http(endpoint.starts_with("http://"))
         .build()
-        .expect("an S3 client for the LLMOBS_TEST_S3_* bucket")
+        .expect("an S3 client for the CETRA_TEST_S3_* bucket")
 }
 
 /// Deletes every object under `prefix`. It lists the bucket itself, not a chaos store, so the
@@ -363,7 +363,7 @@ static STATS: Mutex<S3Stats> = Mutex::new(S3Stats {
     faulty_read_errors: 0,
 });
 
-/// Adds one finished S3 case to `STATS`. With `LLMOBS_MODEL_S3_STATS=1`, prints them every 50
+/// Adds one finished S3 case to `STATS`. With `CETRA_MODEL_S3_STATS=1`, prints them every 50
 /// cases.
 fn record_stats(harness: &Harness) {
     let Some(chaos) = harness.chaos() else {
@@ -378,7 +378,7 @@ fn record_stats(harness: &Harness) {
     stats.abandoned_uploads +=
         u64::try_from(chaos.abandoned_uploads().len()).expect("a count of uploads fits in u64");
     stats.faulty_read_errors += harness.faulty_read_errors.load(Ordering::Relaxed);
-    if std::env::var("LLMOBS_MODEL_S3_STATS").is_ok_and(|value| value == "1")
+    if std::env::var("CETRA_MODEL_S3_STATS").is_ok_and(|value| value == "1")
         && stats.cases.is_multiple_of(50)
     {
         eprintln!("S3 model statistics: {stats:?}");
@@ -492,23 +492,26 @@ fn drop_keeps_project_a() {
         "project B has a deletion to check after the drop"
     );
     let storage = harness.storage();
+    let ctx = harness
+        .block_on(context(storage, P::B))
+        .expect("query context on the dropped project");
     assert!(
         harness
-            .block_on(observe_spans(storage, P::B, MAX_PAGE))
+            .block_on(observe_spans(&ctx, MAX_PAGE))
             .expect("span_list on the dropped project")
             .is_empty(),
         "dropped project B still lists spans"
     );
     assert!(
         harness
-            .block_on(observe_traces(storage, P::B, ALL_ROWS, MAX_PAGE))
+            .block_on(observe_traces(&ctx, ALL_ROWS, MAX_PAGE))
             .expect("trace_list on the dropped project")
             .is_empty(),
         "dropped project B still lists traces"
     );
     assert!(
         harness
-            .block_on(observe_scores(storage, P::B, MAX_PAGE))
+            .block_on(observe_scores(&ctx, MAX_PAGE))
             .expect("score_list on the dropped project")
             .is_empty(),
         "dropped project B still lists scores"
@@ -1129,5 +1132,29 @@ fn s3_mode_uses_both_upload_paths() {
     assert!(
         chaos.count(Call::Complete) > 0,
         "no multipart upload was completed"
+    );
+}
+
+/// Found by CI on main (2026-11-17). Two synced appends to B, then `DropB`, then a lossy crash.
+/// Dropping the storage without shutdown woke the flush task into a last flush before its abort.
+/// B's rows are dropped, so that flush wrote no file and committed only its sequence to the
+/// catalog, which the lossy shim does not freeze: replay then found none of the durable records.
+/// It failed about one run in five with 48 runs at once; `drop_tests` holds the direct test.
+#[test]
+fn regression_lossy_crash_after_drop_project() {
+    run_case(
+        &[
+            Op::Append {
+                project: P::B,
+                trace: 0,
+                count: 2,
+                split: true,
+            },
+            Op::DropB,
+            Op::LossyCrash {
+                seed: 4_929_351_266_769_504_054,
+            },
+        ],
+        (P::A, P::B),
     );
 }

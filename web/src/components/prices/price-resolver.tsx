@@ -68,7 +68,7 @@ export function PriceResolver({ org, project }: { org: string; project: string }
         <FormError message={problemMessage(query.error, "Could not check the price.")} />
       ) : null}
       {submitted !== undefined && query.data !== undefined ? (
-        <p role="status" className="text-sm">
+        <p role="status" className="text-body">
           {price === undefined
             ? "No price matches this model. Its spans get no cost, and a budgeted online rule cannot use it as a judge."
             : `Priced by the ${SCOPE_LABELS[price.scope]} price “${price.model_name}”: input ${formatUnitPrice(price.price_input)}, output ${formatUnitPrice(price.price_output)} per 1M tokens.`}

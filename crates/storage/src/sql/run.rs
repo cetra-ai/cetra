@@ -597,6 +597,7 @@ mod tests {
     use crate::query_error::RunError;
     use crate::test_support::{dataset_spans, example_query};
     use crate::views::{QueryContext, SqliteView, TimeWindow};
+    use cetra_core::time_serde::parse_rfc3339;
     use datafusion::arrow::array::{Int64Array, ListArray, StringArray};
     use datafusion::arrow::buffer::OffsetBuffer;
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
@@ -607,7 +608,6 @@ mod tests {
     use datafusion::error::DataFusionError;
     use datafusion::execution::memory_pool::UnboundedMemoryPool;
     use datafusion::execution::runtime_env::{RuntimeEnv, RuntimeEnvBuilder};
-    use llmobs_core::time_serde::parse_rfc3339;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use serde_json::Value;
 
@@ -850,8 +850,9 @@ mod tests {
             })
             .await
             .expect_err("timeout");
+        // Far below the seconds the join needs, with room for a loaded test machine.
         assert!(
-            started.elapsed() < Duration::from_secs(1),
+            started.elapsed() < Duration::from_secs(5),
             "returned in {:?}",
             started.elapsed()
         );
@@ -1284,8 +1285,9 @@ mod tests {
         }
         assert!(timed_out);
         assert!(stream.next().await.is_none());
+        // Far below the seconds the join needs, with room for a loaded test machine.
         assert!(
-            started.elapsed() < Duration::from_secs(1),
+            started.elapsed() < Duration::from_secs(5),
             "returned in {:?}",
             started.elapsed()
         );

@@ -11,12 +11,12 @@
       "status": "unset",
       "service_name": "pipeline",
       "attributes": {
-        "llmobs.span.kind": "chain"
+        "cetra.span.kind": "chain"
       },
-      "scope_name": "llmobs",
+      "scope_name": "cetra",
       "scope_version": "0.0.0",
       "conventions": [
-        "llmobs"
+        "cetra"
       ],
       "ingest_time": "2026-01-01T00:00:00.000000000Z",
       "schema_version": 1
@@ -33,12 +33,12 @@
       "status": "unset",
       "service_name": "pipeline",
       "attributes": {
-        "llmobs.span.kind": "chain"
+        "cetra.span.kind": "chain"
       },
-      "scope_name": "llmobs",
+      "scope_name": "cetra",
       "scope_version": "0.0.0",
       "conventions": [
-        "llmobs"
+        "cetra"
       ],
       "ingest_time": "2026-01-01T00:00:00.000000000Z",
       "schema_version": 1

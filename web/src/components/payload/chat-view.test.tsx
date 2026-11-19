@@ -1,6 +1,10 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { ChatView } from "@/components/payload/chat-view";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 it("collapses system instructions to one line with a line count", () => {
   render(
@@ -63,17 +67,29 @@ it("highlights tools that this span called", () => {
   expect(screen.getByText("unused").closest("mark")).toBeNull();
 });
 
-it("collapses a message longer than 40 lines", () => {
-  const lines = Array.from({ length: 45 }, (_, index) => `line-${index + 1}`);
+it("shows each message as a card with its role", () => {
   render(
     <ChatView
-      input={[{ role: "user", parts: [{ type: "text", content: lines.join("\n") }] }]}
+      input={[{ role: "user", parts: [{ type: "text", content: "Where is my order?" }] }]}
+      output={[{ role: "assistant", parts: [{ type: "text", content: "On its way." }] }]}
+      projectRef="acme/bot"
+    />,
+  );
+  expect(screen.getByText("User")).toBeInTheDocument();
+  expect(screen.getByText("Assistant")).toBeInTheDocument();
+  expect(screen.getByText("Where is my order?")).toBeInTheDocument();
+});
+
+it("clips a long message until it is expanded", () => {
+  vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(2_000);
+  vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(400);
+  render(
+    <ChatView
+      input={[{ role: "user", parts: [{ type: "text", content: "long message" }] }]}
       output={[]}
       projectRef="acme/bot"
     />,
   );
-  expect(screen.getByText(/line-40/)).toBeInTheDocument();
-  expect(screen.queryByText(/line-41/)).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Show 5 more lines" }));
-  expect(screen.getByText(/line-45/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Show more" }));
+  expect(screen.getByRole("button", { name: "Show less" })).toBeInTheDocument();
 });

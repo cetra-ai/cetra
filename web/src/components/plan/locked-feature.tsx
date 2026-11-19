@@ -14,7 +14,7 @@ export function LockedFeature({
     <div
       role="note"
       aria-label="Locked feature"
-      className="flex flex-wrap items-center gap-2 rounded-md border px-3 py-2 text-sm"
+      className="flex flex-wrap items-center gap-2 rounded-md border px-3 py-2 text-body"
     >
       <Lock className="size-4 text-muted-foreground" aria-hidden="true" />
       <span>{featureOffer(feature)}.</span>

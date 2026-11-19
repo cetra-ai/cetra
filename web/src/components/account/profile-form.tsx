@@ -1,12 +1,10 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, useState } from "react";
+import { useState } from "react";
 import { $api } from "@/api/client";
 import { fieldErrors, problemMessage } from "@/api/problem";
 import { meQuery } from "@/api/queries";
-import { FormError } from "@/components/form/form-error";
-import { FormSuccess } from "@/components/form/form-success";
-import { SubmitButton } from "@/components/form/submit-button";
 import { TextField } from "@/components/form/text-field";
+import { SettingsFormCard } from "@/components/settings/settings-card";
 
 export function ProfileForm() {
   const { data: me } = $api.useSuspenseQuery("get", "/api/auth/me");
@@ -15,10 +13,12 @@ export function ProfileForm() {
   const [name, setName] = useState(me.user.name ?? "");
   const [saved, setSaved] = useState(false);
 
-  function onSubmit(event: FormEvent) {
-    event.preventDefault();
+  const trimmed = name.trim();
+  const dirty = trimmed !== (me.user.name ?? "");
+  const nameError = fieldErrors(save.error).name;
+
+  function onSubmit() {
     setSaved(false);
-    const trimmed = name.trim();
     save.mutate(
       { body: trimmed.length > 0 ? { name: trimmed } : {} },
       {
@@ -32,11 +32,18 @@ export function ProfileForm() {
   }
 
   return (
-    <form
-      noValidate
+    <SettingsFormCard
+      title="Profile"
+      description="How your name shows across cetra."
       onSubmit={onSubmit}
-      className="flex max-w-md flex-col gap-4"
-      aria-labelledby="profile-heading"
+      dirty={dirty}
+      pending={save.isPending}
+      saved={saved}
+      error={
+        save.error && !nameError
+          ? problemMessage(save.error, "Could not save your name. Try again.")
+          : undefined
+      }
     >
       <TextField
         id="profile-email"
@@ -54,24 +61,13 @@ export function ProfileForm() {
         maxLength={100}
         autoComplete="name"
         description="Leave empty to show your email instead."
-        error={fieldErrors(save.error).name}
+        error={nameError}
         disabled={save.isPending}
         onChange={(value) => {
           setName(value);
           setSaved(false);
         }}
       />
-      <FormError
-        message={
-          save.error && !fieldErrors(save.error).name
-            ? problemMessage(save.error, "Could not save your name. Try again.")
-            : undefined
-        }
-      />
-      <FormSuccess message={saved ? "Name saved." : undefined} />
-      <div>
-        <SubmitButton pending={save.isPending}>Save name</SubmitButton>
-      </div>
-    </form>
+    </SettingsFormCard>
   );
 }

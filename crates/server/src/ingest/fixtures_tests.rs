@@ -15,16 +15,16 @@ use arrow::compute::{cast, concat_batches};
 use arrow::datatypes::SchemaRef;
 use axum::http::{Method, StatusCode};
 use bytesize::ByteSize;
-use datafusion::prelude::{SessionConfig, SessionContext};
-use llmobs_core::batch::spans_to_record_batch;
-use llmobs_core::ids::ProjectId;
-use llmobs_core::span::Span;
-use llmobs_core::time_serde::parse_rfc3339;
-use llmobs_otel::{IngestContext, PriceRow, PriceTable, decode_json, normalize};
-use llmobs_storage::Storage;
-use llmobs_storage::config::{
+use cetra_core::batch::spans_to_record_batch;
+use cetra_core::ids::ProjectId;
+use cetra_core::span::Span;
+use cetra_core::time_serde::parse_rfc3339;
+use cetra_otel::{IngestContext, PriceRow, PriceTable, decode_json, normalize};
+use cetra_storage::Storage;
+use cetra_storage::config::{
     AnchorConfig, FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
 };
+use datafusion::prelude::{SessionConfig, SessionContext};
 
 use crate::test_support::raw_query;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceResponse;
@@ -35,8 +35,8 @@ use tokio::net::TcpStream;
 
 use crate::clock::Clock;
 use crate::config::{
-    AuthSettings, EntitlementsConfig, EvalConfig, IngestConfig, InitConfig, LogConfig, MediaConfig,
-    OrgsConfig, PublicUrl, SecurityConfig, ServerConfig,
+    AuthSettings, DemoConfig, EntitlementsConfig, EvalConfig, IngestConfig, InitConfig, LogConfig,
+    MediaConfig, OrgsConfig, PublicUrl, SecurityConfig, ServerConfig,
 };
 use crate::ingest::environment::rewrite_reserved_environment;
 use crate::meta::MetaDb;
@@ -48,7 +48,7 @@ const DEFAULT_INGEST_TIME: &str = "2026-01-01T00:00:00.000000000Z";
 const DEFAULT_MAX_ATTRIBUTE_BYTES: u64 = 8_388_608;
 const DEFAULT_MEDIA_MIN_BYTES: u64 = 4_096;
 const DEFAULT_MEDIA_MAX_BYTES: u64 = 33_554_432;
-const OTLP_KEY: &str = "sk-llmobs-0123456789ABCDEFGHIJKLMNOPQRSTUV";
+const OTLP_KEY: &str = "sk-cetra-0123456789ABCDEFGHIJKLMNOPQRSTUV";
 
 /// The `settings` that change the app's configuration. Cases with equal bounds share an app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -186,8 +186,8 @@ fn load_cases(root: &Path) -> (Vec<Case>, usize) {
 fn span_key(
     span: &Span,
 ) -> (
-    llmobs_core::ids::TraceId,
-    llmobs_core::ids::SpanId,
+    cetra_core::ids::TraceId,
+    cetra_core::ids::SpanId,
     i64,
     i64,
     &str,
@@ -460,6 +460,7 @@ fn serve_config(data_dir: &Path) -> ServerConfig {
         security: SecurityConfig::default(),
         entitlements: EntitlementsConfig::default(),
         orgs: OrgsConfig::default(),
+        demo: DemoConfig::default(),
         encryption_key: None,
         license_key: None,
         auth: AuthSettings::default(),
@@ -470,7 +471,7 @@ fn serve_config(data_dir: &Path) -> ServerConfig {
     };
     config.init = serde_json::from_value(serde_json::json!({
         "admin_email": "ada@example.com",
-        "admin_password": "llmobs-ok1",
+        "admin_password": "cetra-ok-1",
         "org": "Acme",
         "project": "Support bot",
         "secret_key": OTLP_KEY,

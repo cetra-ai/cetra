@@ -87,7 +87,7 @@ web/
     **/*.test.ts(x)             next to the code they test
 sdks/python/
   pyproject.toml  uv.lock  .python-version  LICENSE  README.md
-  src/llmobs/__init__.py  py.typed  _config.py
+  src/cetra/__init__.py  py.typed  _config.py
   tests/test_version.py  tests/test_config.py
 sdks/typescript/
   package.json  tsconfig.json  tsdown.config.ts  vitest.config.ts  LICENSE  README.md
@@ -106,7 +106,7 @@ sdks/typescript/
 - `package.json`:
   ```json
   {
-    "name": "llmobs-workspace",
+    "name": "cetra-workspace",
     "private": true,
     "packageManager": "pnpm@<exact>",
     "engines": { "node": ">=<.node-version major>" },
@@ -133,7 +133,7 @@ sdks/typescript/
 
 ### `web/package.json`
 
-`"name": "@llmobs/web"`, `"private": true`, `"type": "module"`. Scripts:
+`"name": "@cetra/web"`, `"private": true`, `"type": "module"`. Scripts:
 
 | Script | Command |
 |---|---|
@@ -161,11 +161,11 @@ Dependencies (S1 only; later sub-phases add theirs): `react`, `react-dom`, `tail
 
 ```ts
 /** Display name of the product. Renamed mechanically with the rest (D46). */
-export const PRODUCT_NAME = "llmobs";
+export const PRODUCT_NAME = "cetra";
 /** Prefix of every localStorage key the UI writes. */
 export const STORAGE_PREFIX = `${PRODUCT_NAME}.`;
 ```
-No other file hard-codes `llmobs` as UI text or a storage key.
+No other file hard-codes `cetra` as UI text or a storage key.
 
 ### Theme
 
@@ -182,7 +182,7 @@ No other file hard-codes `llmobs` as UI text or a storage key.
 
 `main.tsx` renders `<ThemeProvider><header>` with `PRODUCT_NAME` and `<ThemeToggle/>`. S4 replaces this with the router.
 
-`index.html`: `<title>llmobs</title>` is the one allowed copy of the name outside `product.ts` (HTML cannot import it); say so in an HTML comment. `lang="en"`, viewport meta, favicon only if you add a local SVG (no network).
+`index.html`: `<title>cetra</title>` is the one allowed copy of the name outside `product.ts` (HTML cannot import it); say so in an HTML comment. `lang="en"`, viewport meta, favicon only if you add a local SVG (no network).
 
 ### Test setup
 
@@ -437,24 +437,24 @@ Loaders fetch through `ensureQueryData` and components read with `useSuspenseQue
 
 ## S5 — Python SDK scaffold
 
-**Goal:** an installable, typed `llmobs` package with spec 10's configuration resolution, checked by `just check`.
+**Goal:** an installable, typed `cetra` package with spec 10's configuration resolution, checked by `just check`.
 
 ### `sdks/python/pyproject.toml`
 
-- `[project]`: `name = "llmobs"`, `version = "0.0.0"`, `description`, `readme = "README.md"`, `license = "MIT"`, `license-files = ["LICENSE"]`, `requires-python = ">=3.11"` (D77), `dependencies = []` (OpenTelemetry arrives with tracing; no unused dependency now), classifiers (Python 3.11–latest, `Typing :: Typed`, `Private :: Do Not Upload` until release).
+- `[project]`: `name = "cetra"`, `version = "0.0.0"`, `description`, `readme = "README.md"`, `license = "MIT"`, `license-files = ["LICENSE"]`, `requires-python = ">=3.11"` (D77), `dependencies = []` (OpenTelemetry arrives with tracing; no unused dependency now), classifiers (Python 3.11–latest, `Typing :: Typed`, `Private :: Do Not Upload` until release).
 - `[build-system]`: `uv_build` (exact version range per uv's docs).
 - `[dependency-groups] dev = ["ruff>=…", "mypy>=…", "pytest>=…"]`.
 - `[tool.ruff]`: `target-version = "py311"`, `line-length = 100`; `[tool.ruff.lint] select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "PT", "ANN", "S", "BLE", "N"]`, with `S101` (assert) ignored under `tests/`.
 - `[tool.mypy]`: `strict = true`, `python_version = "3.11"`, `files = ["src", "tests"]`.
 - `[tool.pytest.ini_options]`: `testpaths = ["tests"]`, `addopts = "-ra --strict-markers --strict-config"`, `xfail_strict = true`, `filterwarnings = ["error"]`.
 - `.python-version`: `3.11` (develop on the minimum so newer stdlib APIs fail locally; CI adds the newest, step 6).
-- `uv.lock` committed. `LICENSE`: MIT, `Copyright (c) 2026 the llmobs authors`.
+- `uv.lock` committed. `LICENSE`: MIT, `Copyright (c) 2026 the cetra authors`.
 
-### `src/llmobs/__init__.py`
+### `src/cetra/__init__.py`
 
-Module docstring (one paragraph, pointing to spec 10), `__version__ = importlib.metadata.version("llmobs")`, `__all__ = ["__version__"]`. `py.typed` (empty). Nothing else is public yet.
+Module docstring (one paragraph, pointing to spec 10), `__version__ = importlib.metadata.version("cetra")`, `__all__ = ["__version__"]`. `py.typed` (empty). Nothing else is public yet.
 
-### `src/llmobs/_config.py`
+### `src/cetra/_config.py`
 
 Private module; `init()` (later wave) is its only future caller.
 
@@ -490,10 +490,10 @@ def resolve_config(
 ```
 
 Implement the rules of spec 10 § Configuration exactly (numbered 1–11). Details:
-- Env names come from module constants (`ENV_API_KEY = "LLMOBS_API_KEY"`, …); the `LLMOBS_` prefix and the `sk-llmobs-` prefix are written once each (D46: mechanical rename later).
-- The reserved environment string comes from one constant with a comment pointing to `llmobs_core::names::environment::EVAL`.
+- Env names come from module constants (`ENV_API_KEY = "CETRA_API_KEY"`, …); the `CETRA_` prefix and the `sk-cetra-` prefix are written once each (D46: mechanical rename later).
+- The reserved environment string comes from one constant with a comment pointing to `cetra_core::names::environment::EVAL`.
 - Booleans passed as arguments must be `bool` (not `0`/`1`); `sample_rate` accepts `int` or `float` but not `bool`; `instrument` rejects `str` and `bytes` and non-string items.
-- The `ConfigError` message format: `"<option>: <problem>"` where `<option>` is the argument name, or the env var name when the value came from env. Examples: `"LLMOBS_SAMPLE_RATE: must be a number between 0 and 1"`, `"api_key: required"`, `"api_key: must start with sk-llmobs-"`.
+- The `ConfigError` message format: `"<option>: <problem>"` where `<option>` is the argument name, or the env var name when the value came from env. Examples: `"CETRA_SAMPLE_RATE: must be a number between 0 and 1"`, `"api_key: required"`, `"api_key: must start with sk-cetra-"`.
 - `api_key` has `repr=False`; also make sure `str(config)` and `dataclasses.asdict` users are documented: add a docstring line "Never log `asdict(config)`; it contains the API key." (asdict cannot be overridden without a wrapper, and a wrapper is not wanted.)
 
 ### Tests (`tests/test_config.py`, `tests/test_version.py`)
@@ -502,13 +502,13 @@ Implement the rules of spec 10 § Configuration exactly (numbered 1–11). Detai
 - Defaults: only `api_key` given → the spec 10 defaults.
 - Precedence: argument beats env beats default, for every option that has an env var (parametrized).
 - Empty and whitespace-only env values count as unset.
-- `enabled`: `LLMOBS_ENABLED=false` with an invalid `LLMOBS_SAMPLE_RATE` and no key → disabled config with defaults, no error; `enabled=False` argument overrides `LLMOBS_ENABLED=true`.
-- Boolean parsing: each accepted spelling in both cases; `"maybe"` → `ConfigError` naming `LLMOBS_CAPTURE_CONTENT`.
+- `enabled`: `CETRA_ENABLED=false` with an invalid `CETRA_SAMPLE_RATE` and no key → disabled config with defaults, no error; `enabled=False` argument overrides `CETRA_ENABLED=true`.
+- Boolean parsing: each accepted spelling in both cases; `"maybe"` → `ConfigError` naming `CETRA_CAPTURE_CONTENT`.
 - `api_key`: missing → error; wrong prefix → error; the error message and `repr(config)` never contain the key (use a distinctive key and assert it is absent).
 - `base_url`: trailing slashes removed; `https://host/prefix/` → `https://host/prefix`; `ftp://…`, `localhost:8080` (no scheme), `http://h/?q=1`, `http://h/#f` → errors.
 - `sample_rate`: `0`, `1`, `0.25` ok; `-0.1`, `1.5`, `nan`, `inf`, `"abc"` (env), `True` → errors.
-- `environment="llmobs-eval"` (and via env) → error.
-- `release`: `GIT_COMMIT` used when nothing else set; `SOURCE_VERSION` when `GIT_COMMIT` is unset; `LLMOBS_RELEASE` wins over both; the argument wins over all.
+- `environment="cetra-eval"` (and via env) → error.
+- `release`: `GIT_COMMIT` used when nothing else set; `SOURCE_VERSION` when `GIT_COMMIT` is unset; `CETRA_RELEASE` wins over both; the argument wins over all.
 - `instrument`: `["openai"]` → `("openai",)`; `"openai"` → error; `["", "x"]` → error. `mask`: a non-callable → error.
 - `env=` injection: tests never touch `os.environ` (except one test that checks `env=None` reads `os.environ`, using pytest's `monkeypatch`).
 
@@ -527,13 +527,13 @@ check-py:
 
 ## S6 — TypeScript SDK scaffold
 
-**Goal:** the `llmobs` npm package builds as ESM with types, passes export checks, and has the same configuration resolution as Python.
+**Goal:** the `cetra` npm package builds as ESM with types, passes export checks, and has the same configuration resolution as Python.
 
 ### `sdks/typescript/package.json`
 
 ```json
 {
-  "name": "llmobs",
+  "name": "cetra",
   "version": "0.0.0",
   "private": true,
   "description": "…",
@@ -564,7 +564,7 @@ check-py:
 ### `src/config.ts`
 
 ```ts
-export interface LlmobsOptions {
+export interface CetraOptions {
   apiKey?: string; baseUrl?: string; environment?: string; release?: string;
   captureContent?: boolean; sampleRate?: number; instrument?: readonly string[];
   mask?: (value: unknown) => unknown; enabled?: boolean;
@@ -581,7 +581,7 @@ export interface Config {
   readonly mask: ((value: unknown) => unknown) | undefined;
 }
 export class ConfigError extends Error { readonly option: string }
-export function resolveConfig(options?: LlmobsOptions, env?: Readonly<Record<string, string | undefined>>): Config
+export function resolveConfig(options?: CetraOptions, env?: Readonly<Record<string, string | undefined>>): Config
 ```
 
 - Same rules and messages as Python (spec 10 § Configuration), with camelCase option names in messages (`"sampleRate: …"`) and env var names when the value came from env. No `GIT_COMMIT`/`SOURCE_VERSION` fallback (spec: Python only).
@@ -657,12 +657,12 @@ This sub-phase does not change S1–S7 of this plan. Where S1–S7 say "Node ≥
 
 | Topic | Decision | Who |
 |---|---|---|
-| Missing API key | Stays a `ConfigError` at `init()`: a misconfigured deployment fails at startup. `enabled=false` is how to run without llmobs. Nothing raises after `init()` returns. | user |
+| Missing API key | Stays a `ConfigError` at `init()`: a misconfigured deployment fails at startup. `enabled=false` is how to run without cetra. Nothing raises after `init()` returns. | user |
 | Baggage | Opt-in per call: `context(..., propagate=True)` / `withContext({ ..., propagate: true }, fn)`. Default is in-process span attributes only. | user |
 | TS process exit | `init()` registers one `beforeExit` listener that calls `shutdown()`. No signal handlers. `process.exit()`, signals and serverless handlers need an explicit `flush()`/`shutdown()`. | user |
 | Own provider vs. OTel-native libraries | The own provider is never registered globally. `tracer_provider()` / `tracerProvider()` exposes it; `aiTelemetry()` returns a `tracer` built from it. | plan |
 | Generator output | Yielded items joined into one string when all are strings, else a JSON list; `reduce_output` / `reduceOutput` overrides. | plan |
-| SDK identification | Tracer scope `llmobs` + SDK version; resource `telemetry.distro.name` / `telemetry.distro.version`. | plan |
+| SDK identification | Tracer scope `cetra` + SDK version; resource `telemetry.distro.name` / `telemetry.distro.version`. | plan |
 | Buffers | Spans: OTel `BatchSpanProcessor` queue (drops when full). Scores: at most 10 000 buffered, new scores dropped when full; dropped counts logged at warning level at most once per minute. | plan |
 | Node minimum | 22.12, the first release where `require()` of an ES module works without a flag, so CommonJS apps can load the ESM-only package. | plan |
 
@@ -673,7 +673,7 @@ Not adopted, for the record in your report only: pytest/vitest test-runner helpe
 1. D77 row: replace `Node ≥ 22` with `Node ≥ 22.12 (first release with unflagged \`require()\` of ES modules)`. Keep the rest of the row.
 2. Add a row after D79:
 
-| D80 | SDK runtime behaviour | `init()` raises `ConfigError` for an invalid configuration, a missing API key included; after `init()` nothing raises into the app. The own `TracerProvider` is never registered globally; `tracer_provider()` exposes it and `aiTelemetry()` passes a tracer from it. Session/user go into W3C baggage only with `context(propagate=True)`. Exit: Python `atexit`, TypeScript `beforeExit`, no signal handlers. Generator output: joined strings or a JSON list, `reduce_output` overrides. Spans use scope `llmobs`; the resource carries `telemetry.distro.*`. Scores buffer up to 10 000, dropping new ones when full (spec 10). |
+| D80 | SDK runtime behaviour | `init()` raises `ConfigError` for an invalid configuration, a missing API key included; after `init()` nothing raises into the app. The own `TracerProvider` is never registered globally; `tracer_provider()` exposes it and `aiTelemetry()` passes a tracer from it. Session/user go into W3C baggage only with `context(propagate=True)`. Exit: Python `atexit`, TypeScript `beforeExit`, no signal handlers. Generator output: joined strings or a JSON list, `reduce_output` overrides. Spans use scope `cetra`; the resource carries `telemetry.distro.*`. Scores buffer up to 10 000, dropping new ones when full (spec 10). |
 
 ### `docs/spec/10-sdk.md`
 
@@ -681,37 +681,37 @@ Apply these edits. Keep the wording; fix only grammar or a broken reference, and
 
 **E1 — Design rule 1**, replace the whole item with:
 
-> 1. **Own `TracerProvider` by default.** `init()` creates a dedicated provider + `BatchSpanProcessor` + OTLP exporter and never registers it as the global provider, so we don't hijack the app's existing OTel setup. `init(use_global_provider=True)` instead adds our processor/exporter to the global provider (for apps already using OTel that want one pipeline). `llmobs.tracer_provider()` (TS `llmobs.tracerProvider()`) returns the provider in use (a no-op provider before `init()` or when disabled), for libraries that emit OTel spans themselves and accept a provider or tracer (pydantic-ai, the Vercel AI SDK, …). Spans such libraries send to the global provider reach llmobs only with `use_global_provider=True`.
+> 1. **Own `TracerProvider` by default.** `init()` creates a dedicated provider + `BatchSpanProcessor` + OTLP exporter and never registers it as the global provider, so we don't hijack the app's existing OTel setup. `init(use_global_provider=True)` instead adds our processor/exporter to the global provider (for apps already using OTel that want one pipeline). `cetra.tracer_provider()` (TS `cetra.tracerProvider()`) returns the provider in use (a no-op provider before `init()` or when disabled), for libraries that emit OTel spans themselves and accept a provider or tracer (pydantic-ai, the Vercel AI SDK, …). Spans such libraries send to the global provider reach cetra only with `use_global_provider=True`.
 
 **E2 — Design rule 4**, replace the whole item with:
 
-> 4. **Never break the app after `init()`.** `init()` raises `ConfigError` for an invalid configuration, a missing API key included (D80): a misconfigured deployment fails at startup, where it is noticed. Use `enabled=false` to run without llmobs. Decorators, context managers and `score()` used before `init()` or with `enabled=false` do nothing. After `init()` returns, nothing the SDK does raises into the app: exporter errors are logged at debug level, serialization failures fall back to `repr()`, and full buffers drop data (§ Lifecycle). The SDK has no required dependencies beyond `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http` and an HTTP client.
+> 4. **Never break the app after `init()`.** `init()` raises `ConfigError` for an invalid configuration, a missing API key included (D80): a misconfigured deployment fails at startup, where it is noticed. Use `enabled=false` to run without cetra. Decorators, context managers and `score()` used before `init()` or with `enabled=false` do nothing. After `init()` returns, nothing the SDK does raises into the app: exporter errors are logged at debug level, serialization failures fall back to `repr()`, and full buffers drop data (§ Lifecycle). The SDK has no required dependencies beyond `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http` and an HTTP client.
 
 **E3 — Configuration rule 11**, append one sentence:
 
-> A missing API key says how to fix it: `api_key: required; set LLMOBS_API_KEY, or LLMOBS_ENABLED=false to run without llmobs` (TS: `apiKey: …`).
+> A missing API key says how to fix it: `api_key: required; set CETRA_API_KEY, or CETRA_ENABLED=false to run without cetra` (TS: `apiKey: …`).
 
 **E4 — new section `## Lifecycle`**, inserted between `## Configuration` and `## Python API`:
 
 > ## Lifecycle
 >
-> - **Exit.** Python: `init()` registers an `atexit` hook that calls `shutdown()`. TypeScript: where `process` exists, `init()` registers one `process.once("beforeExit", …)` listener that calls `shutdown()`; calling `init()` again does not add a second one. `beforeExit` fires when the event loop empties, not on `process.exit()` or a signal, and the SDK installs no signal handlers: apps that exit that way, and serverless handlers, `await llmobs.flush()` (or `shutdown()`) themselves (D80).
+> - **Exit.** Python: `init()` registers an `atexit` hook that calls `shutdown()`. TypeScript: where `process` exists, `init()` registers one `process.once("beforeExit", …)` listener that calls `shutdown()`; calling `init()` again does not add a second one. `beforeExit` fires when the event loop empties, not on `process.exit()` or a signal, and the SDK installs no signal handlers: apps that exit that way, and serverless handlers, `await cetra.flush()` (or `shutdown()`) themselves (D80).
 > - **`flush()`** blocks (Python) or resolves (TS) when pending spans and scores are exported or the export timeout expires. **`shutdown()`** flushes, then stops the exporters; it is idempotent, and spans and scores after it are dropped.
 > - **Buffers.** Spans go through the OTel `BatchSpanProcessor` with its default queue size; when it is full, new spans are dropped (OTel behaviour). Scores are buffered up to 10 000; when full, new scores are dropped. Dropped counts are logged at warning level at most once per minute, with counts only.
-> - **Identification.** Spans created by the SDK use the instrumentation scope name `llmobs` and the SDK version as scope version (instrumentor spans keep their own scope). The provider's resource carries `telemetry.distro.name = "llmobs"` and `telemetry.distro.version = <SDK version>` (OTel semantic conventions), so the server can tell SDK versions apart. Storing the version server-side is not in the MVP; `scope_name` is stored (01).
+> - **Identification.** Spans created by the SDK use the instrumentation scope name `cetra` and the SDK version as scope version (instrumentor spans keep their own scope). The provider's resource carries `telemetry.distro.name = "cetra"` and `telemetry.distro.version = <SDK version>` (OTel semantic conventions), so the server can tell SDK versions apart. Storing the version server-side is not in the MVP; `scope_name` is stored (01).
 
 **E5 — Python example**, change the context line and its comment to:
 
 ```python
 # Context: applied to every span started inside (contextvars), including instrumentor spans.
 # propagate=True also sends session/user to downstream services in W3C baggage.
-with llmobs.context(session_id="chat-42", user_id="u-17", tags=["beta"], metadata={"plan": "pro"}):
+with cetra.context(session_id="chat-42", user_id="u-17", tags=["beta"], metadata={"plan": "pro"}):
     agent.run(...)
 ```
 
 **E6 — Python implementation notes**, replace the `context()` bullet with:
 
-> - `context()` is implemented as a `SpanProcessor.on_start` hook reading a `ContextVar`, so instrumentor spans get the attributes too. `context(..., propagate=True)` also writes `session_id` and `user_id` to OTel **baggage** as `llmobs.session.id` and `llmobs.user.id`, so they cross service boundaries when the app uses W3C propagation. It is opt-in because baggage is sent as an HTTP header on every outgoing request, third-party APIs included (D80). Tags and metadata never go into baggage. The `on_start` hook reads the `ContextVar` first, then those two baggage keys, so a downstream service running the llmobs SDK picks them up without calling `context()`; a service on plain OTel adds OTel's baggage span processor (the keys are the attribute names the server reads, 02).
+> - `context()` is implemented as a `SpanProcessor.on_start` hook reading a `ContextVar`, so instrumentor spans get the attributes too. `context(..., propagate=True)` also writes `session_id` and `user_id` to OTel **baggage** as `cetra.session.id` and `cetra.user.id`, so they cross service boundaries when the app uses W3C propagation. It is opt-in because baggage is sent as an HTTP header on every outgoing request, third-party APIs included (D80). Tags and metadata never go into baggage. The `on_start` hook reads the `ContextVar` first, then those two baggage keys, so a downstream service running the cetra SDK picks them up without calling `context()`; a service on plain OTel adds OTel's baggage span processor (the keys are the attribute names the server reads, 02).
 
 and add after the `observe`/`span` bullet:
 
@@ -723,21 +723,21 @@ and add after the `observe`/`span` bullet:
 - After the `AsyncLocalStorage` bullet add: `` `withContext({ ..., propagate: true }, fn)` writes baggage with the same rules as Python. `observe` applies the Python generator rules when the wrapped function returns a generator or async generator (`reduceOutput` option). ``
 - Replace the Vercel AI SDK bullet with:
 
-> - **Vercel AI SDK:** no instrumentor needed; the server normalizes `ai.*` attributes (02). The AI SDK sends spans to the global tracer unless it is given one, so `llmobs.aiTelemetry({ sessionId, userId, tags })` returns `{ isEnabled: true, tracer, metadata }` with a tracer from the llmobs provider, and users pass it as `experimental_telemetry`. With `useGlobalProvider: true`, a plain `experimental_telemetry: { isEnabled: true, metadata: { sessionId, userId } }` works too.
+> - **Vercel AI SDK:** no instrumentor needed; the server normalizes `ai.*` attributes (02). The AI SDK sends spans to the global tracer unless it is given one, so `cetra.aiTelemetry({ sessionId, userId, tags })` returns `{ isEnabled: true, tracer, metadata }` with a tracer from the cetra provider, and users pass it as `experimental_telemetry`. With `useGlobalProvider: true`, a plain `experimental_telemetry: { isEnabled: true, metadata: { sessionId, userId } }` works too.
 
 Check after editing that spec 10 nowhere else says `init()` registers the global provider or that baggage is always written.
 
 ### Code
 
-Python (`sdks/python/src/llmobs/_config.py`): the missing-key error becomes `ConfigError("api_key: required; set LLMOBS_API_KEY, or LLMOBS_ENABLED=false to run without llmobs")`. Build it from `ENV_API_KEY` and `ENV_ENABLED`, not literals. Nothing else in resolution changes.
+Python (`sdks/python/src/cetra/_config.py`): the missing-key error becomes `ConfigError("api_key: required; set CETRA_API_KEY, or CETRA_ENABLED=false to run without cetra")`. Build it from `ENV_API_KEY` and `ENV_ENABLED`, not literals. Nothing else in resolution changes.
 
-TypeScript (`sdks/typescript/src/config.ts`): `new ConfigError("apiKey", "required; set LLMOBS_API_KEY, or LLMOBS_ENABLED=false to run without llmobs")`, built from `ENV_API_KEY` and `ENV_ENABLED`. `error.option` stays `"apiKey"`.
+TypeScript (`sdks/typescript/src/config.ts`): `new ConfigError("apiKey", "required; set CETRA_API_KEY, or CETRA_ENABLED=false to run without cetra")`, built from `ENV_API_KEY` and `ENV_ENABLED`. `error.option` stays `"apiKey"`.
 
 `sdks/typescript/package.json`: `"engines": { "node": ">=22.12" }`. `sdks/typescript/README.md`: `Node ≥ 22.12`. Search the repo (`rg -n "22\b|≥ 22|>=22"` in `docs/`, `sdks/`, `AGENTS.md`) and update any other statement of the TS SDK minimum, except S1–S7 of this plan.
 
 ### Tests
 
-- Python `tests/test_config.py`: with no argument and an empty `env`, `resolve_config()` raises `ConfigError` whose message contains `LLMOBS_API_KEY` and `LLMOBS_ENABLED`; with `env={"LLMOBS_ENABLED": "false"}` and no key it returns a disabled config (keep the existing test if it already covers this). Update any test that matched the old message exactly.
+- Python `tests/test_config.py`: with no argument and an empty `env`, `resolve_config()` raises `ConfigError` whose message contains `CETRA_API_KEY` and `CETRA_ENABLED`; with `env={"CETRA_ENABLED": "false"}` and no key it returns a disabled config (keep the existing test if it already covers this). Update any test that matched the old message exactly.
 - TypeScript `src/config.test.ts`: the same two cases; `error.option === "apiKey"`.
 
 ### Review

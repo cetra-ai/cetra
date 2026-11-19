@@ -3,7 +3,7 @@
 use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, patch, post};
-use llmobs_otel::{PriceRow, PriceScope};
+use cetra_otel::{PriceRow, PriceScope};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -227,8 +227,8 @@ async fn resolve_model_price(
 /// that raced the lookup answers without them.
 async fn stored_json(
     state: &AppState,
-    org: llmobs_core::ids::OrgId,
-    project: llmobs_core::ids::ProjectId,
+    org: cetra_core::ids::OrgId,
+    project: cetra_core::ids::ProjectId,
     row: &PriceRow,
 ) -> Result<ModelPrice, ApiError> {
     let records = store::list_org_all(state.meta.reader(), org).await?;
@@ -442,8 +442,8 @@ fn outcome_error(outcome: WriteOutcome) -> ApiError {
 #[cfg(test)]
 mod tests {
     use axum::http::{Method, header};
-    use llmobs_core::ids::{OrgId, ProjectId};
-    use llmobs_otel::exact_pattern;
+    use cetra_core::ids::{OrgId, ProjectId};
+    use cetra_otel::exact_pattern;
     use serde_json::{Value, json};
 
     use super::*;
@@ -460,7 +460,7 @@ mod tests {
     use crate::test_support::capture_logs;
     use crate::test_support::session_cookie_via;
     use crate::test_support::{Seeded, TestApp, TestResponse};
-    use llmobs_core::span::Span;
+    use cetra_core::span::Span;
 
     fn path(project: ProjectId) -> String {
         format!("/api/v1/projects/{project}/models")

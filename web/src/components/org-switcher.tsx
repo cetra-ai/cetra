@@ -1,10 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
-import { Plus } from "lucide-react";
+import { ChevronsUpDown, Plus } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { authConfigQuery } from "@/api/auth";
 import { $api } from "@/api/client";
 import { NewOrgDialog } from "@/components/settings/new-org-dialog";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -21,6 +22,8 @@ export function OrgSwitcher() {
   const navigate = useNavigate();
   const { data: me } = $api.useSuspenseQuery("get", "/api/auth/me");
   const membership = me.orgs.find((org) => org.slug === current);
+  const demo = me.orgs.find((org) => org.demo);
+  const ownOrgs = me.orgs.filter((org) => !org.demo);
   const [creating, setCreating] = useState(false);
   const { data: config } = useQuery(authConfigQuery);
   // While the config loads, creating is offered. Off on a cloud cell (D-P-31).
@@ -49,22 +52,38 @@ export function OrgSwitcher() {
     <>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
-          <Button variant="outline" aria-label={membership?.name ?? current}>
-            {membership?.name ?? current}
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-label={membership?.name ?? current}
+            className="h-7 gap-1 px-1.5 font-medium"
+          >
+            <span className="max-w-48 truncate">{membership?.name ?? current}</span>
+            {membership?.demo ? <Badge variant="secondary">Demo</Badge> : null}
+            <ChevronsUpDown className="size-3.5 text-muted-foreground" aria-hidden />
           </Button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="start">
+        <DropdownMenuContent align="start" className="min-w-48 whitespace-nowrap">
           <DropdownMenuRadioGroup
             value={current}
             onValueChange={(slug) => {
               void navigate({ to: "/$org", params: { org: slug } });
             }}
           >
-            {me.orgs.map((org) => (
+            {ownOrgs.map((org) => (
               <DropdownMenuRadioItem key={org.id} value={org.slug}>
                 {org.name}
               </DropdownMenuRadioItem>
             ))}
+            {demo === undefined ? null : (
+              <>
+                {ownOrgs.length === 0 ? null : <DropdownMenuSeparator />}
+                <DropdownMenuRadioItem value={demo.slug}>
+                  {demo.name}
+                  <Badge variant="secondary">Demo</Badge>
+                </DropdownMenuRadioItem>
+              </>
+            )}
           </DropdownMenuRadioGroup>
           {createItem === null ? null : (
             <>

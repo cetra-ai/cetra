@@ -7,7 +7,7 @@ use datafusion::logical_expr::{Expr, LogicalPlan};
 
 use super::{TimeWindow, map_plan, view_plan};
 use crate::query_error::RunError;
-use llmobs_core::schema::{scores, scores_schema};
+use cetra_core::schema::{scores, scores_schema};
 
 pub(crate) fn scores_view(
     raw: Arc<dyn TableProvider>,

@@ -233,3 +233,35 @@ it("separates an insert from the word that follows it", async () => {
     expect(editorText()).toBe("SELECT x FROM t");
   });
 });
+
+it("formats the document on Shift-Alt-f, and one undo restores it", async () => {
+  const user = userEvent.setup();
+  const original = "select approx_percentile_cont(d, 0.5) from traces";
+  const schema: Schema<"SchemaResponse"> = {
+    ...schemaDocument,
+    functions: [
+      {
+        name: "approx_percentile_cont",
+        description: "",
+        in_filter: false,
+        in_sql: true,
+        signature: "",
+      },
+    ],
+  };
+  render(<Harness initial={original} schema={schema} />);
+  const content = document.querySelector(".cm-content");
+  if (!(content instanceof HTMLElement)) {
+    throw new Error("SQL editor did not mount");
+  }
+  content.focus();
+  await user.keyboard("{Shift>}{Alt>}f{/Alt}{/Shift}");
+  const formatted = "SELECT\n  approx_percentile_cont(d, 0.5)\nFROM\n  traces";
+  await waitFor(() => {
+    expect(screen.getByLabelText("Value").textContent).toBe(formatted);
+  });
+  await user.keyboard("{Control>}z{/Control}");
+  await waitFor(() => {
+    expect(screen.getByLabelText("Value").textContent).toBe(original);
+  });
+});

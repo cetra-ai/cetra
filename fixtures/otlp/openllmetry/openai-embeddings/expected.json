@@ -2,12 +2,12 @@
   "spans": [
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "a9a442bd759b5c6f123bff9ac4c04332",
-      "span_id": "88d9dbade2f0782d",
+      "trace_id": "8a8ab2a41b264d8ca0e3e61d69688cd8",
+      "span_id": "2b57a90ead52398a",
       "name": "openai.embeddings",
       "span_kind": "embedding",
       "start_time": "2025-12-31T23:59:50.000000000Z",
-      "end_time": "2025-12-31T23:59:50.036000000Z",
+      "end_time": "2025-12-31T23:59:50.096000000Z",
       "status": "unset",
       "service_name": "capture-app",
       "provider": "openai",

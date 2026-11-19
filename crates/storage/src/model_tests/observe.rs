@@ -1,9 +1,11 @@
 //! Reading storage the way the server does: the public `reads` functions over a `QueryContext`
 //! of the project's snapshot, every page followed (docs/plans/r-hardening/01-m1-model.md § R1.3).
 //!
-//! Each function takes the storage it reads, runs one query on one snapshot, and returns a
-//! [`ReadFailure`] instead of panicking, so the checks and the reader threads of the concurrent
-//! mode can use the same functions (docs/plans/r-hardening/06-m6-concurrency.md § R6.3).
+//! Each function runs its query on the [`QueryContext`] it is given (or, for the ones that take a
+//! storage, on a context it builds), and returns a [`ReadFailure`] instead of panicking, so the
+//! checks and the reader threads of the concurrent mode can use the same functions
+//! (docs/plans/r-hardening/06-m6-concurrency.md § R6.3). Reads that must agree with each other
+//! share one context, so they see one snapshot.
 
 use std::time::Duration;
 
@@ -14,19 +16,19 @@ use super::model::{ExpectedScore, ExpectedTrace};
 use super::ops::{SESSIONS, TRACES};
 use super::shape::{P, hex, span_id, trace_id};
 use crate::error::QueryError;
-use crate::reads::metrics::metrics;
 use crate::reads::{
-    AlertMeasure, AlertValue, AlertValueRequest, Bucket, BucketWidth, FilterDeletionRequest, Kpi,
-    ListScope, MAX_FILTER_DELETION_TRACES, MAX_PAGE, MetricsRequest, ScoreListRequest,
-    ScoreTargets, SessionListRequest, SessionSort, SortOrder, SpanListRequest, SpanSort,
-    TraceListRequest, TraceSort, UserDeletionScope, UserListRequest, UserSort, alert_value,
-    eval_trace_ids, filter_trace_ids, latest_scores, score_list, scores_by_id, session_list,
-    span_detail, span_list, trace_detail, trace_list, user_deletion_scope, user_list,
+    AlertMeasure, AlertValue, AlertValueRequest, FilterDeletionRequest, ListScope,
+    MAX_FILTER_DELETION_TRACES, MAX_PAGE, ScoreListRequest, ScoreTargets, SessionListRequest,
+    SessionSort, SortOrder, SpanListRequest, SpanSort, TraceListRequest, TraceSort,
+    UserDeletionScope, UserListRequest, UserSort, alert_value, eval_trace_ids, filter_trace_ids,
+    latest_scores, score_list, scores_by_id, session_list, span_detail, span_list, trace_detail,
+    trace_list, user_deletion_scope, user_list,
 };
+use crate::test_support::headline_kpis;
 use crate::views::{QueryContext, TimeWindow};
 use crate::{RunError, Storage};
-use llmobs_core::ids::TraceId;
-use llmobs_core::schema::{scores, spans, traces};
+use cetra_core::ids::TraceId;
+use cetra_core::schema::{scores, spans, traces};
 use std::collections::HashSet;
 
 /// Time allowed for each read request.
@@ -99,7 +101,7 @@ pub(super) async fn observe_eval_trace_ids(
 
 /// A query context on `project`'s snapshot, as the server's read handlers build one. A read takes
 /// one, and every page it reads comes from it.
-async fn context(storage: &Storage, project: P) -> Result<QueryContext, ReadFailure> {
+pub(super) async fn context(storage: &Storage, project: P) -> Result<QueryContext, ReadFailure> {
     let query = storage
         .query(project.id(), crate::QueryOptions::new(None, None))
         .await?;
@@ -109,16 +111,14 @@ async fn context(storage: &Storage, project: P) -> Result<QueryContext, ReadFail
 /// `(start_time, trace_id hex, span_id hex)` of every `span_list` row, duplicates kept, in list
 /// order. Pages of `limit` rows each.
 pub(super) async fn observe_spans(
-    storage: &Storage,
-    project: P,
+    ctx: &QueryContext,
     limit: usize,
 ) -> Result<Vec<(i64, String, String)>, ReadFailure> {
-    let ctx = context(storage, project).await?;
     let mut keys = Vec::new();
     let mut cursor: Option<String> = None;
     loop {
         let page = span_list(
-            &ctx,
+            ctx,
             SpanListRequest {
                 filter: None,
                 search: None,
@@ -154,17 +154,15 @@ pub(super) async fn observe_spans(
 /// Every `traces` row `trace_list` returns for `scope`, in list order (`start_time DESC`),
 /// read in pages of `limit` rows.
 pub(super) async fn observe_traces(
-    storage: &Storage,
-    project: P,
+    ctx: &QueryContext,
     scope: ListScope,
     limit: usize,
 ) -> Result<Vec<ExpectedTrace>, ReadFailure> {
-    let ctx = context(storage, project).await?;
     let mut rows = Vec::new();
     let mut cursor: Option<String> = None;
     loop {
         let page = trace_list(
-            &ctx,
+            ctx,
             TraceListRequest {
                 filter: None,
                 search: None,
@@ -254,16 +252,14 @@ pub(super) async fn observe_span_detail(
 
 /// Every live `scores` row of `project`, in list order, read in pages of `limit` rows.
 pub(super) async fn observe_scores(
-    storage: &Storage,
-    project: P,
+    ctx: &QueryContext,
     limit: usize,
 ) -> Result<Vec<ExpectedScore>, ReadFailure> {
-    let ctx = context(storage, project).await?;
     let mut rows = Vec::new();
     let mut cursor: Option<String> = None;
     loop {
         let page = score_list(
-            &ctx,
+            ctx,
             ScoreListRequest {
                 target: None,
                 trace_id: None,
@@ -438,28 +434,51 @@ pub(super) async fn observe_users(
     Ok(rows)
 }
 
-/// The KPIs of the dashboard metrics over `window`, as the dashboard requests them: one day per
-/// bucket, no filter, no grouping, evaluation traces excluded, experiments kept.
+/// One headline KPI of the model test: its value over the window and over the previous window
+/// of the same length. The dashboard's totals give them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct Kpi {
+    pub(super) name: KpiName,
+    pub(super) value: Option<f64>,
+    pub(super) previous: Option<f64>,
+}
+
+/// The headline KPIs the model test compares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum KpiName {
+    Traces,
+    ErrorRate,
+    LatencyP95,
+    CostTotal,
+    TotalTokens,
+}
+
+/// The KPIs of `window`, as the dashboard's totals give them (see `headline_kpis`).
 pub(super) async fn observe_kpis(
     storage: &Storage,
     project: P,
     window: (i64, i64),
 ) -> Result<Vec<Kpi>, ReadFailure> {
+    const NAMES: [KpiName; 5] = [
+        KpiName::Traces,
+        KpiName::ErrorRate,
+        KpiName::LatencyP95,
+        KpiName::CostTotal,
+        KpiName::TotalTokens,
+    ];
     let ctx = context(storage, project).await?;
-    let response = metrics(
-        &ctx,
-        MetricsRequest {
-            window: window_of(window),
-            bucket: Bucket::Fixed(BucketWidth::D1),
-            filter: None,
-            group_by: None,
-            include_eval: false,
-            include_experiments: true,
-            timeout: TIMEOUT,
-        },
-    )
-    .await?;
-    Ok(response.kpis)
+    let values = headline_kpis(&ctx, window_of(window))
+        .await
+        .map_err(ReadFailure::Error)?;
+    Ok(NAMES
+        .into_iter()
+        .zip(values)
+        .map(|(name, (value, previous))| Kpi {
+            name,
+            value,
+            previous,
+        })
+        .collect())
 }
 
 /// The hex trace ids `filter_trace_ids` returns for `window`, evaluation traces excluded.
@@ -554,7 +573,7 @@ fn latest_from_batch(batch: &RecordBatch, row: usize) -> Result<LatestScore, Rea
     })
 }
 
-/// A column of `batch` by name. The view names are the constants of `llmobs_core::schema`.
+/// A column of `batch` by name. The view names are the constants of `cetra_core::schema`.
 fn column<'a>(batch: &'a RecordBatch, name: &str) -> &'a arrow::array::ArrayRef {
     batch
         .column_by_name(name)

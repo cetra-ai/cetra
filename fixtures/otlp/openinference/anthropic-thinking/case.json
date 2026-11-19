@@ -10,7 +10,7 @@
       "openinference-instrumentation-anthropic": "3.3.0",
       "opentelemetry-sdk": "1.45.2"
     },
-    "captured_at": "2026-11-11T11:18:18Z"
+    "captured_at": "2026-11-16T08:54:24Z"
   },
   "spec_refs": [
     "02 § Convention detection",

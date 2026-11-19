@@ -69,9 +69,9 @@ it("builds the cancel callback without a secret", () => {
 });
 
 it("builds the authorize callback as a form post with the token in the body", () => {
-  expect(cliCallbackForm({ port: 54321, state: "xyz" }, "pat-llmobs-A+B")).toEqual({
+  expect(cliCallbackForm({ port: 54321, state: "xyz" }, "pat-cetra-A+B")).toEqual({
     action: "http://127.0.0.1:54321/callback",
-    fields: { token: "pat-llmobs-A+B", state: "xyz" },
+    fields: { token: "pat-cetra-A+B", state: "xyz" },
   });
 });
 

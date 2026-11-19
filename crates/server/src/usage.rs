@@ -2,13 +2,13 @@
 //!
 //! [`Usage::add`] sums accepted spans, request bytes and appended scores per org, project
 //! and UTC day. [`Usage::flush`] upserts the sums into `usage_daily` and clears them.
-//! `llmobs serve` flushes every 10 s and once at shutdown.
+//! `cetra serve` flushes every 10 s and once at shutdown.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use cetra_core::ids::{OrgId, ProjectId};
 use chrono::{DateTime, Datelike, Months, NaiveDate};
-use llmobs_core::ids::{OrgId, ProjectId};
 use sqlx::SqlitePool;
 
 use crate::meta::MetaDb;
@@ -85,6 +85,8 @@ struct UsageCounts {
     judge_input_tokens: u64,
     judge_output_tokens: u64,
     judge_cost_usd: f64,
+    /// GenAI content log records received on `/v1/logs` and dropped (D-G-40).
+    genai_log_events: u64,
 }
 
 impl UsageCounts {
@@ -99,6 +101,7 @@ impl UsageCounts {
             .judge_output_tokens
             .saturating_add(other.judge_output_tokens);
         self.judge_cost_usd += other.judge_cost_usd;
+        self.genai_log_events = self.genai_log_events.saturating_add(other.genai_log_events);
     }
 }
 
@@ -227,6 +230,29 @@ impl Usage {
         );
     }
 
+    /// Adds GenAI content log records, received and dropped, to the day of `now_ns` (UTC)
+    /// (D-G-40). Zero changes nothing.
+    pub(crate) fn add_log_events(
+        &self,
+        org_id: OrgId,
+        project_id: ProjectId,
+        now_ns: i64,
+        events: u64,
+    ) {
+        if events == 0 {
+            return;
+        }
+        self.merge_into(
+            org_id,
+            project_id,
+            now_ns,
+            UsageCounts {
+                genai_log_events: events,
+                ..UsageCounts::default()
+            },
+        );
+    }
+
     fn merge_into(&self, org_id: OrgId, project_id: ProjectId, now_ns: i64, counts: UsageCounts) {
         let key = UsageKey {
             org_id,
@@ -308,15 +334,17 @@ impl Usage {
                 for (key, counts) in rows {
                     sqlx::query(
                         "INSERT INTO usage_daily (org_id, project_id, day, spans, bytes, scores, \
-                         judge_input_tokens, judge_output_tokens, judge_cost_usd) \
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                         judge_input_tokens, judge_output_tokens, judge_cost_usd, \
+                         genai_log_events) \
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                          ON CONFLICT (org_id, project_id, day) DO UPDATE SET \
                          spans = spans + excluded.spans, \
                          bytes = bytes + excluded.bytes, \
                          scores = scores + excluded.scores, \
                          judge_input_tokens = judge_input_tokens + excluded.judge_input_tokens, \
                          judge_output_tokens = judge_output_tokens + excluded.judge_output_tokens, \
-                         judge_cost_usd = judge_cost_usd + excluded.judge_cost_usd",
+                         judge_cost_usd = judge_cost_usd + excluded.judge_cost_usd, \
+                         genai_log_events = genai_log_events + excluded.genai_log_events",
                     )
                     .bind(key.org_id.to_string())
                     .bind(key.project_id.to_string())
@@ -327,6 +355,7 @@ impl Usage {
                     .bind(i64::try_from(counts.judge_input_tokens).unwrap_or(i64::MAX))
                     .bind(i64::try_from(counts.judge_output_tokens).unwrap_or(i64::MAX))
                     .bind(counts.judge_cost_usd)
+                    .bind(i64::try_from(counts.genai_log_events).unwrap_or(i64::MAX))
                     .execute(&mut *conn)
                     .await?;
                 }
@@ -413,6 +442,30 @@ mod tests {
                 ("2026-01-01".to_owned(), 3, 150, 3),
                 ("2026-01-02".to_owned(), 4, 7, 0),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn log_events_are_summed_per_project() {
+        let (_dir, meta) = test_db().await;
+        let (org, project) = (OrgId::new_v7(), ProjectId::new_v7());
+        let usage = Usage::default();
+        usage.add_log_events(org, project, DAY_ONE, 0);
+        usage.add_log_events(org, project, DAY_ONE, 2);
+        usage.add_log_events(org, project, DAY_TWO, 3);
+        usage.flush(&meta).await.unwrap();
+        usage.add_log_events(org, project, DAY_TWO, 4);
+        usage.flush(&meta).await.unwrap();
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT day, genai_log_events FROM usage_daily WHERE project_id = ? ORDER BY day",
+        )
+        .bind(project.to_string())
+        .fetch_all(meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![("2026-01-01".to_owned(), 2), ("2026-01-02".to_owned(), 7)]
         );
     }
 

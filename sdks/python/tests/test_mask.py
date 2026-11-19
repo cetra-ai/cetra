@@ -12,9 +12,9 @@ from opentelemetry.sdk.trace.export import SpanExportResult
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.util import types as otel_types
 
-from llmobs._config import resolve_config
-from llmobs._mask import MaskingExporter, apply
-from llmobs._runtime import Runtime, flush, install, reset
+from cetra._config import resolve_config
+from cetra._mask import MaskingExporter, apply
+from cetra._runtime import Runtime, flush, install, reset
 
 Memory = tuple[InMemorySpanExporter, Callable[..., Runtime]]
 Spans = Callable[[InMemorySpanExporter], list[ReadableSpan]]
@@ -61,10 +61,10 @@ def test_apply_fails_closed_when_mask_raises(
 ) -> None:
     _, start = memory
     start(mask=_boom)
-    with caplog.at_level(logging.DEBUG, logger="llmobs"):
-        assert apply("anything") == "[llmobs: mask failed]"
-    messages = [record.getMessage() for record in caplog.records if record.name == "llmobs"]
-    assert messages == ["llmobs: mask raised ValueError"]
+    with caplog.at_level(logging.DEBUG, logger="cetra"):
+        assert apply("anything") == "[cetra: mask failed]"
+    messages = [record.getMessage() for record in caplog.records if record.name == "cetra"]
+    assert messages == ["cetra: mask raised ValueError"]
 
 
 def _redact(value: object) -> object:
@@ -122,7 +122,7 @@ def test_instrumentor_span_payloads_are_masked(memory: Memory, spans: Spans) -> 
     assert any(isinstance(value, list) for value in seen)
 
 
-def test_llmobs_scope_spans_are_not_remasked(memory: Memory, spans: Spans) -> None:
+def test_cetra_scope_spans_are_not_remasked(memory: Memory, spans: Spans) -> None:
     calls = 0
 
     def mask(value: object) -> object:
@@ -133,10 +133,10 @@ def test_llmobs_scope_spans_are_not_remasked(memory: Memory, spans: Spans) -> No
     exporter, start = memory
     runtime = start(mask=mask)
     with runtime.tracer.start_as_current_span("work") as span:
-        span.set_attribute("llmobs.input", "already masked")
+        span.set_attribute("cetra.input", "already masked")
     finished = spans(exporter)
     assert finished[0].attributes is not None
-    assert finished[0].attributes["llmobs.input"] == "already masked"
+    assert finished[0].attributes["cetra.input"] == "already masked"
     assert calls == 0
 
 
@@ -205,12 +205,12 @@ def test_mask_raising_marks_the_value_at_export(
     tracer = runtime.provider.get_tracer(OPENINFERENCE_SCOPE, "0.1.69")
     with tracer.start_as_current_span("chat") as span:
         span.set_attribute("input.value", "a@b")
-    with caplog.at_level(logging.DEBUG, logger="llmobs"):
+    with caplog.at_level(logging.DEBUG, logger="cetra"):
         attributes = spans(exporter)[0].attributes
     assert attributes is not None
-    assert attributes["input.value"] == "[llmobs: mask failed]"
-    messages = [record.getMessage() for record in caplog.records if record.name == "llmobs"]
-    assert messages == ["llmobs: mask raised ValueError"]
+    assert attributes["input.value"] == "[cetra: mask failed]"
+    messages = [record.getMessage() for record in caplog.records if record.name == "cetra"]
+    assert messages == ["cetra: mask raised ValueError"]
 
 
 def test_masking_pass_not_installed_without_mask_or_capture_off() -> None:
@@ -274,12 +274,12 @@ def test_span_without_payload_keys_is_returned_unchanged() -> None:
 def test_masking_failure_drops_the_batch(caplog: pytest.LogCaptureFixture) -> None:
     inner = InMemorySpanExporter()
     exporter = MaskingExporter(inner, mask=_redact, capture_content=True)
-    with caplog.at_level(logging.WARNING, logger="llmobs"):
+    with caplog.at_level(logging.WARNING, logger="cetra"):
         result = exporter.export([_ExplodingSpan("s")])
     assert result == SpanExportResult.FAILURE
     assert inner.get_finished_spans() == ()
-    messages = [record.getMessage() for record in caplog.records if record.name == "llmobs"]
-    assert messages == ["llmobs: masking failed; dropped 1 spans"]
+    messages = [record.getMessage() for record in caplog.records if record.name == "cetra"]
+    assert messages == ["cetra: masking failed; dropped 1 spans"]
 
 
 def test_shutdown_and_flush_delegate_to_the_inner_exporter() -> None:

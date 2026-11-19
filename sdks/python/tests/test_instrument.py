@@ -13,11 +13,11 @@ from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.util.types import AnyValue
 
-import llmobs
-import llmobs._runtime as runtime_module
-from llmobs._config import ConfigError
-from llmobs._instrument import REGISTRY, Instrumentor, resolve
-from llmobs._runtime import Runtime
+import cetra
+import cetra._runtime as runtime_module
+from cetra._config import ConfigError
+from cetra._instrument import REGISTRY, Instrumentor, resolve
+from cetra._runtime import Runtime
 
 Memory = tuple[InMemorySpanExporter, Callable[..., Runtime]]
 Spans = Callable[[InMemorySpanExporter], list[ReadableSpan]]
@@ -68,18 +68,18 @@ def test_resolve_missing_module_names_the_extra(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     entry = Instrumentor(
-        name="fake", extra="fake", module="llmobs_tests_missing_module", cls="FakeInstrumentor"
+        name="fake", extra="fake", module="cetra_tests_missing_module", cls="FakeInstrumentor"
     )
     monkeypatch.setitem(REGISTRY, entry.name, entry)
     with pytest.raises(ConfigError) as info:
         resolve(["fake"])
-    assert str(info.value) == "instrument: 'fake' needs `pip install llmobs[fake]`"
+    assert str(info.value) == "instrument: 'fake' needs `pip install cetra-sdk[fake]`"
 
 
 def test_init_with_bad_name_installs_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("LLMOBS_API_KEY", raising=False)
+    monkeypatch.delenv("CETRA_API_KEY", raising=False)
     with pytest.raises(ConfigError):
-        llmobs.init(api_key="sk-llmobs-test", instrument=["nope"])
+        cetra.init(api_key="sk-cetra-test", instrument=["nope"])
     assert runtime_module.current() is None
 
 
@@ -104,23 +104,23 @@ def test_conflicting_dependency_maps_to_the_extra_hint(
             conflict = DependencyConflict(required="openai>=99", found="openai 1.0.0")
             raise DependencyConflictError(conflict)
 
-    module = types.ModuleType("llmobs_tests_conflict")
+    module = types.ModuleType("cetra_tests_conflict")
     module.ConflictInstrumentor = ConflictInstrumentor  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "llmobs_tests_conflict", module)
+    monkeypatch.setitem(sys.modules, "cetra_tests_conflict", module)
     monkeypatch.setitem(
         REGISTRY,
         "conflict",
         Instrumentor(
             name="conflict",
             extra="conflict",
-            module="llmobs_tests_conflict",
+            module="cetra_tests_conflict",
             cls="ConflictInstrumentor",
         ),
     )
     _, start = memory
     with pytest.raises(ConfigError) as info:
         start(instrument=["conflict"])
-    assert str(info.value) == "instrument: 'conflict' needs `pip install llmobs[conflict]`"
+    assert str(info.value) == "instrument: 'conflict' needs `pip install cetra-sdk[conflict]`"
     assert runtime_module.current() is None
 
 
@@ -129,14 +129,14 @@ def test_openai_end_to_end(memory: Memory, spans: Spans, http_recorder: Recorder
     start(instrument=["openai"])
     client = openai.OpenAI(base_url=f"{http_recorder.url}/v1", api_key="test")
 
-    @llmobs.observe(name="ask")
+    @cetra.observe(name="ask")
     def ask(question: str) -> str:
         completion = client.chat.completions.create(
             model="gpt-4o-mini", messages=[{"role": "user", "content": question}]
         )
         return completion.choices[0].message.content or ""
 
-    with llmobs.context(session_id="s1"):
+    with cetra.context(session_id="s1"):
         answer = ask("hello")
     assert answer == "hi"
 
@@ -147,7 +147,7 @@ def test_openai_end_to_end(memory: Memory, spans: Spans, http_recorder: Recorder
     assert instrumented.parent is not None
     assert instrumented.parent.span_id == ours.context.span_id
     assert attrs(instrumented)["openinference.span.kind"] == "LLM"
-    assert attrs(instrumented)["llmobs.session.id"] == "s1"
+    assert attrs(instrumented)["cetra.session.id"] == "s1"
 
 
 def test_anthropic_end_to_end(memory: Memory, spans: Spans, http_recorder: Recorder) -> None:
@@ -156,7 +156,7 @@ def test_anthropic_end_to_end(memory: Memory, spans: Spans, http_recorder: Recor
     # The Anthropic SDK prepends /v1 itself; base_url is the recorder root.
     client = anthropic.Anthropic(base_url=http_recorder.url, api_key="test")
 
-    @llmobs.observe(name="ask")
+    @cetra.observe(name="ask")
     def ask(question: str) -> str:
         message = client.messages.create(
             model="claude-opus-4-6",
@@ -167,7 +167,7 @@ def test_anthropic_end_to_end(memory: Memory, spans: Spans, http_recorder: Recor
             return message.content[0].text
         return ""
 
-    with llmobs.context(session_id="s1"):
+    with cetra.context(session_id="s1"):
         answer = ask("hello")
     assert answer == "hi"
 
@@ -178,7 +178,7 @@ def test_anthropic_end_to_end(memory: Memory, spans: Spans, http_recorder: Recor
     assert instrumented.parent is not None
     assert instrumented.parent.span_id == ours.context.span_id
     assert attrs(instrumented)["openinference.span.kind"] == "LLM"
-    assert attrs(instrumented)["llmobs.session.id"] == "s1"
+    assert attrs(instrumented)["cetra.session.id"] == "s1"
 
 
 def test_capture_content_false_hides_instrumentor_payloads(
@@ -226,5 +226,7 @@ OTHER_ENTRIES = [entry for entry in REGISTRY.values() if entry.name not in ("ope
 @pytest.mark.parametrize("entry", OTHER_ENTRIES, ids=[entry.name for entry in OTHER_ENTRIES])
 def test_other_registry_entries_import(entry: Instrumentor) -> None:
     """The eight other names: module and class exist when the extra is installed."""
-    module: Any = pytest.importorskip(entry.module, reason=f"llmobs[{entry.extra}] not installed")
+    module: Any = pytest.importorskip(
+        entry.module, reason=f"cetra-sdk[{entry.extra}] not installed"
+    )
     assert getattr(module, entry.cls, None) is not None

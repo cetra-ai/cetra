@@ -328,7 +328,7 @@ const SPANS: &[ColumnInfo] = &[
         "environment",
         ColumnKind::String,
         true,
-        "Deployment environment. llmobs-eval is reserved for evaluator runs.",
+        "Deployment environment. cetra-eval is reserved for evaluator runs.",
     ),
     col(
         "release",

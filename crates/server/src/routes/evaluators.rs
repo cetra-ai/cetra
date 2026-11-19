@@ -3,22 +3,29 @@
 //! lists and reads.
 
 use axum::extract::{Extension, State};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use axum::http::StatusCode;
 use axum::routing::{delete, get, patch, post};
-use llmobs_core::ids::{OrgId, ProjectId};
-use llmobs_eval::{Adapter, EvaluatorConfig, JudgeOutput, OutputScore, VariableMapping};
-use llmobs_otel::PriceTable;
-use serde::Deserialize;
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use cetra_core::enums::ScoreDataType;
+use cetra_core::ids::{OrgId, ProjectId};
+use cetra_eval::{Adapter, EvaluatorConfig, JudgeOutput, OutputScore, VariableMapping};
+use cetra_otel::PriceTable;
+use cetra_storage::TimeWindow;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use crate::api::common::{FieldError, Page, PageParams};
 use crate::api::evaluators::{
-    CreateEvaluatorRequest, Evaluator, EvaluatorKind, EvaluatorTemplateList, EvaluatorTestRequest,
-    EvaluatorTestResult, OutputScoreBody, UpdateEvaluatorRequest, builtin_template_list,
+    CreateEvaluatorRequest, Evaluator, EvaluatorKind, EvaluatorScoreStats, EvaluatorStats,
+    EvaluatorStatsParams, EvaluatorStatsResponse, EvaluatorTemplateList, EvaluatorTestRequest,
+    EvaluatorTestResult, EvaluatorVersion, ExperimentWithScore, ExperimentsWithScore,
+    OutputScoreBody, StatsWindow, UpdateEvaluatorRequest, builtin_template_list,
 };
 use crate::api::online_rules::RuleTarget;
 use crate::auth::principal::{self, Principal};
@@ -27,16 +34,21 @@ use crate::crypto::{Aad, SecretBox};
 use crate::eval::definitions::fits_definition;
 use crate::eval::evaluator::{self, EvaluatorError, Prepared, WebhookSecrets};
 use crate::eval::rule_check::{RuleShape, Subject, check_rule};
+use crate::eval::stats::{self, ScoredExperiment};
 use crate::eval::test_run;
+use crate::experiments::visible_from;
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
 use crate::http::restore::refuse_outbound;
 use crate::meta::MetaError;
 use crate::meta::connections;
+use crate::meta::eval_jobs::{self, DAY_NS};
 use crate::meta::evaluators::{self as store, EvaluatorFields, EvaluatorRow};
+use crate::meta::experiments::{self as experiment_store, ExperimentRow};
 use crate::meta::online_rules::{self as rules, RuleRow};
 use crate::meta::score_definitions::list_definitions;
+use crate::routes::read::{Deadline, open_query_windowed};
 
 use super::orgs::page_named;
 
@@ -53,6 +65,16 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             },
             documented: true,
             handler: get(list_evaluators),
+        },
+        RouteDef {
+            method: axum::http::Method::GET,
+            path: "/api/v1/projects/{project}/evaluators/stats",
+            access: Access::Project {
+                perm: ProjectPerm::View,
+                session_only: false,
+            },
+            documented: true,
+            handler: get(get_evaluator_stats),
         },
         RouteDef {
             method: axum::http::Method::POST,
@@ -83,6 +105,16 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             },
             documented: true,
             handler: get(get_evaluator),
+        },
+        RouteDef {
+            method: axum::http::Method::GET,
+            path: "/api/v1/projects/{project}/evaluators/{id}/versions",
+            access: Access::Project {
+                perm: ProjectPerm::View,
+                session_only: false,
+            },
+            documented: true,
+            handler: get(list_evaluator_versions),
         },
         RouteDef {
             method: axum::http::Method::PATCH,
@@ -159,6 +191,164 @@ async fn list_evaluators(
     )?))
 }
 
+/// The ids of `evaluator_ids`: 1 to 50 distinct UUIDs, comma-separated. `None` when absent.
+fn stats_ids(raw: Option<&str>) -> Result<Option<BTreeSet<Uuid>>, ApiError> {
+    let Some(raw) = raw else { return Ok(None) };
+    let invalid = || {
+        bad_request(vec![field_error(
+            "evaluator_ids",
+            "evaluator_ids must be 1 to 50 distinct UUIDs, comma-separated",
+        )])
+    };
+    let mut ids = BTreeSet::new();
+    for part in raw.split(',') {
+        let id = part.trim().parse::<Uuid>().map_err(|_| invalid())?;
+        if !ids.insert(id) {
+            return Err(invalid());
+        }
+    }
+    if ids.is_empty() || ids.len() > stats::MAX_RESTRICT {
+        return Err(invalid());
+    }
+    Ok(Some(ids))
+}
+
+/// `GET /evaluators/stats`: the 7-day figures of every evaluator, or of the named ones (D-I-48).
+/// Not cached: the statements are narrowed by the ids and share one deadline.
+async fn get_evaluator_stats(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Query(params): error::Query<EvaluatorStatsParams>,
+) -> Result<error::Json<EvaluatorStatsResponse>, ApiError> {
+    let wanted = stats_ids(params.evaluator_ids.as_deref())?;
+    let deadline = Deadline::start();
+    let project = access.project.id;
+    let org = access.project.org_id;
+    let now = state.clock.now_ns();
+    let (from, to) = stats::window(now);
+    let window = StatsWindow { from, to };
+
+    let mut rows = store::list_evaluators(state.meta.reader(), project).await?;
+    if let Some(wanted) = &wanted {
+        rows.retain(|row| wanted.contains(&row.id));
+    }
+    rows.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+    if rows.is_empty() {
+        return Ok(error::Json(EvaluatorStatsResponse {
+            window,
+            data: Vec::new(),
+        }));
+    }
+    let outputs = rows
+        .iter()
+        .map(|row| {
+            serde_json::from_str::<OutputScore>(&row.output_score)
+                .map_err(|_| corrupt("output_score"))
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+
+    let jobs = eval_jobs::finished_stats(state.meta.reader(), project, from, to).await?;
+    let latencies = eval_jobs::latency_percentiles(state.meta.reader(), project, from, to).await?;
+
+    let restrict: Option<Vec<Uuid>> = wanted.as_ref().map(|ids| ids.iter().copied().collect());
+    let has_categorical = outputs
+        .iter()
+        .any(|output| output.data_type == ScoreDataType::Categorical);
+    let scores_ctx =
+        open_query_windowed(&state, org, project, Some(TimeWindow::new(from, to)?)).await?;
+    let aggregates = stats::read_scores(
+        &scores_ctx,
+        stats::ScoreGroup::Evaluator,
+        from,
+        restrict.as_deref(),
+        has_categorical,
+        deadline,
+    )
+    .await?;
+
+    // Experiments: a score named like the output score of a kept evaluator (D-I-48).
+    let names: Option<Vec<String>> = wanted.as_ref().map(|_| {
+        outputs
+            .iter()
+            .map(|output| output.name.clone())
+            .collect::<BTreeSet<String>>()
+            .into_iter()
+            .collect()
+    });
+    let experiment_ctx = open_query_windowed(
+        &state,
+        org,
+        project,
+        Some(TimeWindow::new(
+            now - stats::EXPERIMENT_DAYS * DAY_NS,
+            i64::MAX,
+        )?),
+    )
+    .await?;
+    let scored = stats::read_experiment_scores(&experiment_ctx, names.as_deref(), deadline).await?;
+    let experiment_ids: Vec<Uuid> = outputs
+        .iter()
+        .flat_map(|output| stats::experiments_for(&scored, &output.name))
+        .map(|score| score.experiment_id)
+        .collect::<BTreeSet<Uuid>>()
+        .into_iter()
+        .collect();
+    let visible = visible_from(&state, org);
+    let mut experiments: HashMap<Uuid, ExperimentRow> = HashMap::new();
+    for chunk in experiment_ids.chunks(1000) {
+        for row in experiment_store::get_many(state.meta.reader(), project, chunk, visible).await? {
+            experiments.insert(row.id, row);
+        }
+    }
+
+    let mut data = Vec::with_capacity(rows.len());
+    for (row, output) in rows.iter().zip(&outputs) {
+        let resolved: Vec<(&ScoredExperiment, &ExperimentRow)> =
+            stats::experiments_for(&scored, &output.name)
+                .into_iter()
+                .filter_map(|score| {
+                    experiments
+                        .get(&score.experiment_id)
+                        .map(|experiment| (score, experiment))
+                })
+                .collect();
+        let experiments_with_score = ExperimentsWithScore {
+            total: u64::try_from(resolved.len()).unwrap_or(u64::MAX),
+            recent: resolved
+                .iter()
+                .take(stats::RECENT_EXPERIMENTS)
+                .map(|(score, experiment)| ExperimentWithScore {
+                    id: score.experiment_id,
+                    name: experiment.name.clone(),
+                    last_scored_at: score.last_scored_at,
+                })
+                .collect(),
+        };
+        let aggregate = aggregates.get(&row.id);
+        let summary = stats::score_summary(
+            output.data_type,
+            aggregate,
+            from,
+            DAY_NS,
+            stats::ScoreGroup::Evaluator.buckets(),
+        );
+        data.push(EvaluatorStats {
+            evaluator_id: row.id,
+            jobs: stats::job_stats(jobs.get(&row.id), latencies.get(&row.id).copied(), from),
+            scores: EvaluatorScoreStats {
+                data_type: output.data_type,
+                count: aggregate.map_or(0, |aggregate| aggregate.count),
+                average: summary.average,
+                pass_rate: summary.pass_rate,
+                top_category: summary.top_category,
+                daily: summary.series,
+            },
+            experiments_with_score,
+        });
+    }
+    Ok(error::Json(EvaluatorStatsResponse { window, data }))
+}
+
 async fn get_evaluator(
     State(state): State<AppState>,
     Extension(access): Extension<ProjectAccess>,
@@ -168,6 +358,47 @@ async fn get_evaluator(
         .await?
         .ok_or(ApiError::NotFound)?;
     Ok(error::Json(evaluator_json(&row)?))
+}
+
+async fn list_evaluator_versions(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(IdPath { id }): error::Path<IdPath>,
+    error::Query(params): error::Query<PageParams>,
+) -> Result<error::Json<Page<EvaluatorVersion>>, ApiError> {
+    let project = access.project.id;
+    store::get_evaluator(state.meta.reader(), project, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let before = params
+        .cursor
+        .as_deref()
+        .map(decode_version_cursor)
+        .transpose()?;
+    let limit = params.limit.get();
+    let limit_usize = usize::try_from(limit).unwrap_or(usize::MAX);
+    let mut rows = store::list_evaluator_versions(
+        state.meta.reader(),
+        project,
+        id,
+        before,
+        i64::from(limit) + 1,
+    )
+    .await?;
+    let more = rows.len() > limit_usize;
+    rows.truncate(limit_usize);
+    let next_cursor = if more {
+        rows.last()
+            .map(|row| encode_version_cursor(i64::from(row.version)))
+            .transpose()?
+    } else {
+        None
+    };
+    let data = rows
+        .iter()
+        .map(version_json)
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    Ok(error::Json(Page { data, next_cursor }))
 }
 
 async fn create_evaluator(
@@ -346,7 +577,17 @@ async fn update_evaluator(
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                write_update(conn, org, project, id, expected, fields, &checks).await
+                write_update(
+                    conn,
+                    org,
+                    project,
+                    id,
+                    expected,
+                    fields,
+                    Some(user_id),
+                    &checks,
+                )
+                .await
             })
         })
         .await;
@@ -457,6 +698,7 @@ struct RuleChecks {
 /// writes `fields`. A judge's connection is read in the same transaction, and so are the
 /// rules of the evaluator: a change of the config or the connection that breaks one of them is
 /// refused (D-I-19). Other changes (a rename, the webhook values) leave the rules alone.
+#[allow(clippy::too_many_arguments)] // the transaction, the ids, the row read before, the new values, their author and the rule checks
 async fn write_update(
     conn: &mut SqliteConnection,
     org: OrgId,
@@ -464,6 +706,7 @@ async fn write_update(
     id: Uuid,
     expected: EvaluatorRow,
     fields: EvaluatorFields,
+    updated_by: Option<Uuid>,
     checks: &RuleChecks,
 ) -> Result<Outcome, MetaError> {
     let Some(current) = store::get_evaluator_tx(conn, project, id).await? else {
@@ -496,7 +739,7 @@ async fn write_update(
         }
     }
     Ok(
-        match store::update_evaluator(conn, project, id, fields, checks.now).await? {
+        match store::update_evaluator(conn, project, id, fields, updated_by, checks.now).await? {
             Some(row) => Outcome::Updated(Box::new(row)),
             None => Outcome::Gone,
         },
@@ -524,7 +767,7 @@ async fn broken_rules(
     };
     let mut broken = Vec::new();
     for rule in rules::rules_of_evaluator(conn, id).await? {
-        let value: serde_json::Value =
+        let value: Value =
             serde_json::from_str(&rule.variable_mapping).map_err(|_| MetaError::Corrupt {
                 table: "online_rules",
                 column: "variable_mapping",
@@ -602,15 +845,35 @@ fn evaluator_json(row: &EvaluatorRow) -> Result<Evaluator, ApiError> {
         id: row.id,
         name: row.name.clone(),
         kind: EvaluatorKind::from_name(&row.kind).ok_or_else(|| corrupt("kind"))?,
-        config: serde_json::from_str(&row.config).map_err(|_| corrupt("config"))?,
-        output_score: serde_json::from_str::<OutputScore>(&row.output_score)
-            .map(|output| body_of(&output))
-            .map_err(|_| corrupt("output_score"))?,
+        config: parse_config(&row.config)?,
+        output_score: parse_output(&row.output_score)?,
         has_signing_secret: row.secret_enc.is_some(),
         version: i64::from(row.version),
         created_by: row.created_by,
         created_at: row.created_at,
         updated_at: row.updated_at,
+    })
+}
+
+fn parse_config(text: &str) -> Result<Value, ApiError> {
+    serde_json::from_str(text).map_err(|_| corrupt("config"))
+}
+
+fn parse_output(text: &str) -> Result<OutputScoreBody, ApiError> {
+    serde_json::from_str::<OutputScore>(text)
+        .map(|output| body_of(&output))
+        .map_err(|_| corrupt("output_score"))
+}
+
+fn version_json(row: &store::EvaluatorVersionRow) -> Result<EvaluatorVersion, ApiError> {
+    Ok(EvaluatorVersion {
+        version: i64::from(row.version),
+        name: row.name.clone(),
+        kind: EvaluatorKind::from_name(&row.kind).ok_or_else(|| corrupt("kind"))?,
+        config: parse_config(&row.config)?,
+        output_score: parse_output(&row.output_score)?,
+        created_by: row.created_by,
+        created_at: row.created_at,
     })
 }
 
@@ -691,6 +954,27 @@ fn internal(error: impl std::error::Error + Send + Sync + 'static) -> ApiError {
     ApiError::Internal(Box::new(error))
 }
 
+/// The position of a version page: the version the next page starts below.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VersionCursor {
+    version: i64,
+}
+
+fn encode_version_cursor(version: i64) -> Result<String, ApiError> {
+    let bytes = serde_json::to_vec(&VersionCursor { version })
+        .map_err(|error| ApiError::Internal(Box::new(error)))?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
+}
+
+/// Decodes a version cursor. Any malformed one is a `400` on field `cursor`.
+fn decode_version_cursor(text: &str) -> Result<i64, ApiError> {
+    let invalid = || bad_request(vec![field_error("cursor", "invalid cursor")]);
+    let bytes = URL_SAFE_NO_PAD.decode(text).map_err(|_| invalid())?;
+    let cursor: VersionCursor = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    Ok(cursor.version)
+}
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
@@ -701,13 +985,17 @@ mod tests {
     use super::*;
     use crate::auth::roles::OrgRole;
     use crate::meta::connections::{ConnectionFields, insert_connection};
+    use crate::meta::eval_jobs::{self, KIND_MANUAL, NewJob};
     use crate::meta::orgs::insert_org;
     use crate::test_support::mock_llm::{MockLlm, Reply, completion};
     use crate::test_support::mock_webhook::MockWebhook;
-    use crate::test_support::{Seeded, TestApp, TestResponse, capture_logs, dataset_span};
-    use llmobs_core::enums::PayloadFormat;
-    use llmobs_core::ids::{SpanId, TraceId};
-    use llmobs_core::span::Span;
+    use crate::test_support::{
+        Seeded, TestApp, TestResponse, TestScore, capture_logs, dataset_span, put_score,
+    };
+    use cetra_core::enums::PayloadFormat;
+    use cetra_core::ids::{SpanId, TraceId};
+    use cetra_core::score::ScoreValue;
+    use cetra_core::span::Span;
 
     /// The fixture judge's connection (`fixtures/api/README.md`).
     const FIXTURE_CONNECTION: &str = "01900000-0000-7000-8000-000000000400";
@@ -1452,6 +1740,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        let versions_before = version_count(&app, id).await;
         // Another write lands between the PATCH's read and its write.
         app.state
             .meta
@@ -1484,7 +1773,7 @@ mod tests {
             .meta
             .write(move |conn| {
                 Box::pin(async move {
-                    write_update(conn, org, project, id, expected, fields, &checks).await
+                    write_update(conn, org, project, id, expected, fields, None, &checks).await
                 })
             })
             .await;
@@ -1492,6 +1781,7 @@ mod tests {
             stale,
             Err(MetaError::Conflict("evaluator changed, retry"))
         ));
+        assert_eq!(version_count(&app, id).await, versions_before);
 
         // A judge whose connection row is gone is reported, not written.
         let current = store::get_evaluator(app.state.meta.reader(), project, id)
@@ -1516,7 +1806,7 @@ mod tests {
             .meta
             .write(move |conn| {
                 Box::pin(async move {
-                    write_update(conn, org, project, id, current, fields, &checks).await
+                    write_update(conn, org, project, id, current, fields, None, &checks).await
                 })
             })
             .await
@@ -1762,7 +2052,7 @@ mod tests {
             .meta
             .write(move |conn| {
                 Box::pin(async move {
-                    write_update(conn, org, project, id, current, fields, &checks).await
+                    write_update(conn, org, project, id, current, fields, None, &checks).await
                 })
             })
             .await
@@ -1938,6 +2228,378 @@ mod tests {
     }
 
     /// The trace of the test-run tests, and its root, child and evaluation-trace ids.
+    /// The number of `evaluator_versions` rows of evaluator `id`.
+    async fn version_count(app: &TestApp, id: Uuid) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM evaluator_versions WHERE evaluator_id = ?")
+            .bind(id.to_string())
+            .fetch_one(app.state.meta.reader())
+            .await
+            .unwrap()
+    }
+
+    /// `GET {evaluator}/versions{query}` as `seeded`'s owner.
+    async fn get_versions(app: &TestApp, seeded: &Seeded, id: &str, query: &str) -> TestResponse {
+        app.request(
+            Method::GET,
+            &format!("{}/{id}/versions{query}", path(seeded.project.id)),
+        )
+        .header(header::COOKIE.as_str(), &seeded.cookie)
+        .send()
+        .await
+    }
+
+    /// The version numbers of a versions answer, newest first.
+    fn version_numbers(page: &Value) -> Vec<i64> {
+        page["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|version| version["version"].as_i64().unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn versions_follow_creates_and_updates() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        fixture_connection(&app, &seeded).await;
+        let created = create_ok(&app, &seeded, &judge_body()).await;
+        let id = id_of(&created);
+        let original = judge_body()["config"]["prompt"].clone();
+        patch_ok(
+            &app,
+            &seeded,
+            &id,
+            &json!({"config": judge_config_with_prompt("Rate the answer again.")}),
+        )
+        .await;
+
+        let response = get_versions(&app, &seeded, &id, "").await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let page: Value = response.json();
+        assert_eq!(version_numbers(&page), [2, 1]);
+        assert_eq!(
+            page["data"][0]["config"]["prompt"],
+            "Rate the answer again."
+        );
+        assert_eq!(page["data"][1]["config"]["prompt"], original);
+        assert!(page["data"][0]["created_by"].is_string());
+        assert!(page["data"][1]["created_by"].is_string());
+        assert!(page["next_cursor"].is_null());
+        assert!(
+            page["data"][0]["created_at"].as_str().unwrap()
+                >= page["data"][1]["created_at"].as_str().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn versions_match_the_evaluator_after_many_patches() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let created = create_ok(&app, &seeded, &check_body("Counted")).await;
+        let id = id_of(&created);
+        for value in ["one", "two", "three", "four"] {
+            patch_ok(
+                &app,
+                &seeded,
+                &id,
+                &json!({"config": {"check": "contains", "value": value}}),
+            )
+            .await;
+        }
+        let read = app
+            .request(Method::GET, &format!("{}/{id}", path(seeded.project.id)))
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await
+            .json::<Value>();
+        assert_eq!(read["version"], 5);
+        let uuid = Uuid::from_str(&id).unwrap();
+        let (max, count): (i64, i64) = sqlx::query_as(
+            "SELECT MAX(version), COUNT(*) FROM evaluator_versions WHERE evaluator_id = ?",
+        )
+        .bind(uuid.to_string())
+        .fetch_one(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!((max, count), (5, 5));
+        let page: Value = get_versions(&app, &seeded, &id, "").await.json();
+        assert_eq!(version_numbers(&page), [5, 4, 3, 2, 1]);
+    }
+
+    #[tokio::test]
+    async fn a_patch_that_changes_nothing_writes_no_version() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let created = create_ok(&app, &seeded, &check_body("Still")).await;
+        let id = id_of(&created);
+        let same = patch_ok(
+            &app,
+            &seeded,
+            &id,
+            &json!({
+                "config": {"check": "contains", "value": "refund"},
+                "output_score": {"name": "mentions_refund", "data_type": "boolean"}
+            }),
+        )
+        .await;
+        assert_eq!(same["version"], 1);
+        let uuid = Uuid::from_str(&id).unwrap();
+        assert_eq!(version_count(&app, uuid).await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_rename_writes_no_version() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let created = create_ok(&app, &seeded, &check_body("Refund")).await;
+        let id = id_of(&created);
+        patch_ok(&app, &seeded, &id, &json!({"name": "Renamed"})).await;
+        let page: Value = get_versions(&app, &seeded, &id, "").await.json();
+        assert_eq!(version_numbers(&page), [1]);
+        assert_eq!(page["data"][0]["name"], "Refund");
+        let read: Value = app
+            .request(Method::GET, &format!("{}/{id}", path(seeded.project.id)))
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await
+            .json();
+        assert_eq!(read["version"], 1);
+        assert_eq!(read["name"], "Renamed");
+    }
+
+    #[tokio::test]
+    async fn a_patch_that_breaks_a_rule_writes_no_version() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        fixture_connection(&app, &seeded).await;
+        let created = create_ok(&app, &seeded, &judge_body()).await;
+        let id = id_of(&created);
+        rule_on(
+            &app,
+            &seeded,
+            Uuid::from_str(&id).unwrap(),
+            "Maps both",
+            None,
+        )
+        .await;
+        let config = judge_config_with_prompt("Q: {{ input }} A: {{ output }} C: {{ context }}");
+        let response = patch(&app, &seeded, &id, &json!({"config": config})).await;
+        assert_eq!(response.status, 409, "{}", text(&response));
+        let uuid = Uuid::from_str(&id).unwrap();
+        assert_eq!(version_count(&app, uuid).await, 1);
+        let read: Value = app
+            .request(Method::GET, &format!("{}/{id}", path(seeded.project.id)))
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await
+            .json();
+        assert_eq!(read["version"], 1);
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_name_patch_writes_no_version() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, &check_body("First")).await;
+        let second = create_ok(&app, &seeded, &check_body("Second")).await;
+        let id = id_of(&second);
+        let response = patch(
+            &app,
+            &seeded,
+            &id,
+            &json!({
+                "name": "First",
+                "config": {"check": "contains", "value": "changed"}
+            }),
+        )
+        .await;
+        assert_eq!(response.status, 409, "{}", text(&response));
+        let uuid = Uuid::from_str(&id).unwrap();
+        assert_eq!(version_count(&app, uuid).await, 1);
+        let read: Value = app
+            .request(Method::GET, &format!("{}/{id}", path(seeded.project.id)))
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await
+            .json();
+        assert_eq!(read["version"], 1);
+    }
+
+    #[tokio::test]
+    async fn versions_page_with_a_cursor() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let created = create_ok(&app, &seeded, &check_body("Paged")).await;
+        let id = id_of(&created);
+        for value in ["one", "two", "three"] {
+            patch_ok(
+                &app,
+                &seeded,
+                &id,
+                &json!({"config": {"check": "contains", "value": value}}),
+            )
+            .await;
+        }
+        let first: Value = get_versions(&app, &seeded, &id, "?limit=3").await.json();
+        assert_eq!(version_numbers(&first), [4, 3, 2]);
+        let cursor = first["next_cursor"].as_str().unwrap().to_owned();
+        let second: Value = get_versions(&app, &seeded, &id, &format!("?limit=3&cursor={cursor}"))
+            .await
+            .json();
+        assert_eq!(version_numbers(&second), [1]);
+        assert!(second["next_cursor"].is_null());
+        let bad = get_versions(&app, &seeded, &id, "?cursor=nope").await;
+        assert_eq!(
+            field_errors(&bad),
+            [("cursor".to_owned(), "invalid cursor".to_owned())]
+        );
+    }
+
+    #[tokio::test]
+    async fn versions_never_hold_webhook_values() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let created = create_ok(&app, &seeded, &webhook_body("Hooked")).await;
+        let id = id_of(&created);
+        patch_ok(
+            &app,
+            &seeded,
+            &id,
+            &json!({
+                "config": {"url": MOVED_URL, "headers": {"X-Team": MOVED_HEADER}},
+                "webhook_secret": MOVED_SECRET
+            }),
+        )
+        .await;
+        let response = get_versions(&app, &seeded, &id, "").await;
+        let body = text(&response);
+        for (index, secret) in [
+            WEBHOOK_SECRET,
+            WEBHOOK_HEADER_VALUE,
+            MOVED_SECRET,
+            MOVED_HEADER,
+            "/private/path",
+            "query-secret",
+            "/second/route",
+            "moved-query-secret",
+            "secret_enc",
+            "signing_secret",
+            "has_signing_secret",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(
+                !body.contains(secret),
+                "forbidden value #{index} in the versions page"
+            );
+        }
+        let page: Value = response.json();
+        let evaluator: Value = app
+            .request(Method::GET, &format!("{}/{id}", path(seeded.project.id)))
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await
+            .json();
+        assert_eq!(page["data"][0]["config"], evaluator["config"]);
+        let stored: String = sqlx::query_scalar(
+            "SELECT group_concat(config || output_score) FROM evaluator_versions",
+        )
+        .fetch_one(app.state.meta.reader())
+        .await
+        .unwrap();
+        for (index, secret) in [
+            WEBHOOK_SECRET,
+            MOVED_SECRET,
+            WEBHOOK_HEADER_VALUE,
+            MOVED_HEADER,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(!stored.contains(secret), "secret #{index} in the history");
+        }
+    }
+
+    #[tokio::test]
+    async fn viewer_reads_versions() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let created = create_ok(&app, &seeded, &check_body("Visible")).await;
+        let id = id_of(&created);
+        let viewer = app
+            .add_member(&seeded, "viewer@example.com", OrgRole::Viewer)
+            .await;
+        let response = app
+            .request(
+                Method::GET,
+                &format!("{}/{id}/versions", path(seeded.project.id)),
+            )
+            .header(header::COOKIE.as_str(), &viewer.cookie)
+            .send()
+            .await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+    }
+
+    #[tokio::test]
+    async fn a_read_api_key_reads_versions() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let created = create_ok(&app, &seeded, &check_body("Keyed")).await;
+        let id = id_of(&created);
+        let response = app
+            .request(
+                Method::GET,
+                &format!("{}/{id}/versions", path(seeded.project.id)),
+            )
+            .header(
+                header::AUTHORIZATION.as_str(),
+                &format!("Bearer {}", seeded.read_key),
+            )
+            .send()
+            .await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+    }
+
+    #[tokio::test]
+    async fn another_projects_evaluator_versions_are_404() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let (other, _) = app.add_project(&seeded, "other", None).await;
+        let created = create_ok(&app, &seeded, &check_body("Mine")).await;
+        let id = id_of(&created);
+        let foreign = app
+            .request(Method::GET, &format!("{}/{id}/versions", path(other.id)))
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(foreign.status, 404);
+        let unknown = get_versions(&app, &seeded, &Uuid::now_v7().to_string(), "").await;
+        assert_eq!(unknown.status, 404);
+    }
+
+    #[tokio::test]
+    async fn deleting_an_evaluator_removes_its_versions() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let created = create_ok(&app, &seeded, &check_body("Going")).await;
+        let id = id_of(&created);
+        let uuid = Uuid::from_str(&id).unwrap();
+        assert_eq!(version_count(&app, uuid).await, 1);
+        let removed = app
+            .request(Method::DELETE, &format!("{}/{id}", path(seeded.project.id)))
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(removed.status, 204);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM evaluator_versions")
+            .fetch_one(app.state.meta.reader())
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
     const RUN_TRACE: &str = "a1000000000000000000000000000001";
     const EVAL_TRACE: &str = "a1000000000000000000000000000002";
     const ROOT: &str = "b100000000000001";
@@ -2106,8 +2768,8 @@ mod tests {
             .await;
         assert_eq!(read.status, 200, "{}", text(&read));
         assert!(
-            text(&read).contains("llmobs-eval"),
-            "the judge trace is in llmobs-eval"
+            text(&read).contains("cetra-eval"),
+            "the judge trace is in cetra-eval"
         );
 
         app.state
@@ -2224,7 +2886,7 @@ mod tests {
                 None,
                 "judge input",
                 "judge output",
-                "llmobs-eval",
+                "cetra-eval",
             )],
         )
         .await;
@@ -2413,7 +3075,7 @@ mod tests {
         assert_eq!(requests.len(), 1);
         let signature = requests[0]
             .0
-            .get("x-llmobs-signature")
+            .get("x-cetra-signature")
             .expect("a signature header")
             .to_str()
             .unwrap();
@@ -2453,7 +3115,7 @@ mod tests {
         assert_eq!(answer["ok"], true, "{answer}");
         let requests = hook.requests();
         assert_eq!(requests.len(), 1, "the saved URL was called");
-        assert!(requests[0].0.get("x-llmobs-signature").is_some());
+        assert!(requests[0].0.get("x-cetra-signature").is_some());
     }
 
     #[tokio::test]
@@ -2758,5 +3420,392 @@ mod tests {
         });
         let response = run_test(&app, &seeded, &seeded.cookie, &body).await;
         crate::http::restore::tests::assert_refused(&response, "evaluator test");
+    }
+
+    const DAY: i64 = 86_400_000_000_000;
+    /// `2026-01-01T12:00:00Z`: the clock of the stats tests (see `eval::stats`).
+    const STATS_NOW: i64 = 1_767_268_800_000_000_000;
+
+    /// `GET {project}/evaluators/stats{query}` with `seeded`'s cookie.
+    async fn stats(app: &TestApp, seeded: &Seeded, query: &str) -> TestResponse {
+        app.request(
+            Method::GET,
+            &format!("{}/stats{query}", path(seeded.project.id)),
+        )
+        .header(header::COOKIE.as_str(), &seeded.cookie)
+        .send()
+        .await
+    }
+
+    /// Writes a manual job of `evaluator` in `project` that finished at `finished_at` with the
+    /// given status, cost and latency.
+    async fn finished_job(
+        app: &TestApp,
+        project: ProjectId,
+        evaluator: Uuid,
+        status: &'static str,
+        finished_at: i64,
+        cost: Option<f64>,
+        latency: Option<i64>,
+    ) {
+        let id = Uuid::now_v7();
+        let trace_id: TraceId = format!("{:032x}", id.as_u128()).parse().unwrap();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    eval_jobs::insert_job(
+                        conn,
+                        NewJob {
+                            id,
+                            project_id: project,
+                            kind: KIND_MANUAL,
+                            rule_id: None,
+                            evaluator_id: evaluator,
+                            variable_mapping: Some("{}".to_owned()),
+                            trace_id,
+                            span_id: None,
+                            trace_start_ns: finished_at,
+                        },
+                        finished_at,
+                    )
+                    .await?;
+                    sqlx::query(
+                        "UPDATE eval_jobs SET status = ?, finished_at = ?, cost_usd = ?, \
+                         latency_ms = ? WHERE id = ?",
+                    )
+                    .bind(status)
+                    .bind(finished_at)
+                    .bind(cost)
+                    .bind(latency)
+                    .bind(id.to_string())
+                    .execute(&mut *conn)
+                    .await?;
+                    Ok::<(), MetaError>(())
+                })
+            })
+            .await
+            .unwrap();
+    }
+
+    /// Writes an experiment named `name` in `project`, over a dataset of its own, created at
+    /// `created_at`. Returns its id.
+    async fn add_experiment(
+        app: &TestApp,
+        project: ProjectId,
+        name: &str,
+        created_at: i64,
+    ) -> Uuid {
+        let id = Uuid::now_v7();
+        let dataset = Uuid::now_v7();
+        let name = name.to_owned();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    crate::meta::datasets::insert_dataset(
+                        conn,
+                        dataset,
+                        project,
+                        crate::meta::datasets::DatasetFields {
+                            name: format!("set {dataset}"),
+                            description: None,
+                            input_schema: None,
+                            expected_schema: None,
+                        },
+                        created_at,
+                    )
+                    .await?;
+                    crate::meta::experiments::insert_tx(
+                        conn,
+                        &crate::meta::experiments::NewExperiment {
+                            id,
+                            project_id: project,
+                            dataset_id: dataset,
+                            dataset_name: "faq".to_owned(),
+                            dataset_version: 1,
+                            name,
+                            description: None,
+                            metadata: "{}".to_owned(),
+                            repetitions: 1,
+                            item_count: 0,
+                            created_by: None,
+                            created_at,
+                        },
+                    )
+                    .await?;
+                    Ok::<(), MetaError>(())
+                })
+            })
+            .await
+            .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn stats_lists_every_evaluator_with_zeros() {
+        let app = TestApp::new().await;
+        app.state.clock.set(STATS_NOW);
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, &check_body("Beta")).await;
+        create_ok(&app, &seeded, &check_body("Alpha")).await;
+
+        let response = stats(&app, &seeded, "").await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let body: EvaluatorStatsResponse = response.json();
+        assert_eq!(
+            body.window.to - body.window.from,
+            6 * DAY + 12 * 3_600_000_000_000,
+            "six days back from the start of today, then the rest of today"
+        );
+        assert_eq!(body.data.len(), 2);
+        let alpha = &body.data[0];
+        assert_eq!(alpha.jobs.done, 0);
+        assert_eq!(alpha.jobs.runs_daily.len(), 7);
+        assert!(
+            alpha
+                .jobs
+                .runs_daily
+                .iter()
+                .all(|point| point.value == Some(0.0))
+        );
+        assert_eq!(alpha.scores.count, 0);
+        assert_eq!(alpha.scores.average, None);
+        assert_eq!(alpha.experiments_with_score.total, 0);
+        assert!(alpha.experiments_with_score.recent.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stats_combine_jobs_scores_and_experiments() {
+        let app = TestApp::new().await;
+        app.state.clock.set(STATS_NOW);
+        let seeded = app.seed().await;
+        let now = app.state.clock.now_ns();
+        let at = |k: i64| now - 1 - k * DAY;
+        let created = create_ok(&app, &seeded, &check_body("Refund check")).await;
+        let evaluator: Uuid = created["id"].as_str().unwrap().parse().unwrap();
+        for (cost, latency) in [(0.01, 100), (0.02, 200), (0.03, 300)] {
+            finished_job(
+                &app,
+                seeded.project.id,
+                evaluator,
+                "done",
+                at(0),
+                Some(cost),
+                Some(latency),
+            )
+            .await;
+        }
+        finished_job(
+            &app,
+            seeded.project.id,
+            evaluator,
+            "failed",
+            at(0),
+            None,
+            None,
+        )
+        .await;
+        for (k, value) in [(0, true), (2, true), (2, false)] {
+            put_score(
+                &app,
+                seeded.project.id,
+                TestScore {
+                    name: "mentions_refund",
+                    value: ScoreValue::Boolean(value),
+                    evaluator_id: Some(evaluator),
+                    experiment_id: None,
+                    created_at: at(k),
+                    deleted: false,
+                    score_id: None,
+                    updated_at: None,
+                },
+            )
+            .await;
+        }
+        let experiment = add_experiment(&app, seeded.project.id, "candidate", now).await;
+        put_score(
+            &app,
+            seeded.project.id,
+            TestScore {
+                name: "mentions_refund",
+                value: ScoreValue::Boolean(true),
+                evaluator_id: None,
+                experiment_id: Some(experiment),
+                created_at: at(1),
+                deleted: false,
+                score_id: None,
+                updated_at: None,
+            },
+        )
+        .await;
+
+        let response = stats(&app, &seeded, &format!("?evaluator_ids={evaluator}")).await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let body: EvaluatorStatsResponse = response.json();
+        assert_eq!(body.data.len(), 1);
+        let mine = &body.data[0];
+        assert_eq!(mine.jobs.done, 3);
+        assert_eq!(mine.jobs.failed, 1);
+        assert_eq!(mine.jobs.latency_p50_ms, Some(200));
+        assert_eq!(mine.jobs.latency_p95_ms, Some(300));
+        assert!((mine.jobs.cost_usd_total - 0.06).abs() < 1e-12);
+        assert!((mine.jobs.cost_usd_avg.unwrap() - 0.02).abs() < 1e-12);
+        assert_eq!(mine.scores.count, 3);
+        assert!((mine.scores.pass_rate.unwrap() - 2.0 / 3.0).abs() < 1e-9);
+        assert_eq!(mine.scores.daily[6].value, Some(1.0));
+        assert_eq!(mine.scores.daily[4].value, Some(0.5));
+        assert_eq!(mine.experiments_with_score.total, 1);
+        assert_eq!(mine.experiments_with_score.recent[0].name, "candidate");
+        assert_eq!(mine.experiments_with_score.recent[0].id, experiment);
+    }
+
+    #[tokio::test]
+    async fn evaluator_ids_filters_and_rejects_bad_values() {
+        let app = TestApp::new().await;
+        app.state.clock.set(STATS_NOW);
+        let seeded = app.seed().await;
+        let first = create_ok(&app, &seeded, &check_body("First")).await;
+        create_ok(&app, &seeded, &check_body("Second")).await;
+        let first_id = first["id"].as_str().unwrap().to_owned();
+
+        let response = stats(&app, &seeded, &format!("?evaluator_ids={first_id}")).await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let body: EvaluatorStatsResponse = response.json();
+        assert_eq!(body.data.len(), 1);
+        assert_eq!(body.data[0].evaluator_id.to_string(), first_id);
+
+        let unknown = Uuid::from_u128(0xdead).to_string();
+        let response = stats(&app, &seeded, &format!("?evaluator_ids={unknown}")).await;
+        let body: EvaluatorStatsResponse = response.json();
+        assert!(body.data.is_empty());
+
+        let all_ids: Vec<String> = (1..=51u128)
+            .map(|n| Uuid::from_u128(n).to_string())
+            .collect();
+        let bad = [
+            "not-a-uuid".to_owned(),
+            String::new(),
+            format!("{first_id},{first_id}"),
+            all_ids.join(","),
+            format!("{first_id},not-a-uuid"),
+        ];
+        for query in bad {
+            let response = stats(&app, &seeded, &format!("?evaluator_ids={query}")).await;
+            let errors = field_errors(&response);
+            assert_eq!(errors[0].0, "evaluator_ids", "{query}");
+            let body: Value = response.json();
+            assert_eq!(body["code"], "bad_request");
+        }
+    }
+
+    #[tokio::test]
+    async fn stats_do_not_leak_across_projects() {
+        let app = TestApp::new().await;
+        app.state.clock.set(STATS_NOW);
+        let seeded = app.seed().await;
+        let now = app.state.clock.now_ns();
+        let created = create_ok(&app, &seeded, &check_body("Leak")).await;
+        let evaluator: Uuid = created["id"].as_str().unwrap().parse().unwrap();
+        let (other, _) = app.add_project(&seeded, "other", None).await;
+        put_score(
+            &app,
+            other.id,
+            TestScore {
+                name: "mentions_refund",
+                value: ScoreValue::Boolean(true),
+                evaluator_id: Some(evaluator),
+                experiment_id: None,
+                created_at: now - 1,
+                deleted: false,
+                score_id: None,
+                updated_at: None,
+            },
+        )
+        .await;
+        finished_job(
+            &app,
+            other.id,
+            evaluator,
+            "done",
+            now - 1,
+            Some(0.5),
+            Some(10),
+        )
+        .await;
+
+        let response = stats(&app, &seeded, &format!("?evaluator_ids={evaluator}")).await;
+        let body: EvaluatorStatsResponse = response.json();
+        assert_eq!(body.data[0].scores.count, 0);
+        assert_eq!(body.data[0].jobs.done, 0);
+
+        let response = app
+            .request(Method::POST, &path(other.id))
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .json(&check_body("OnlyB"))
+            .send()
+            .await;
+        assert_eq!(response.status, 201, "{}", text(&response));
+        let only_b: Value = response.json();
+        let only_b = only_b["id"].as_str().unwrap().to_owned();
+        let response = stats(&app, &seeded, &format!("?evaluator_ids={only_b}")).await;
+        let body: EvaluatorStatsResponse = response.json();
+        assert!(body.data.is_empty());
+    }
+
+    #[tokio::test]
+    async fn viewer_can_read_stats_and_anonymous_cannot() {
+        let app = TestApp::new().await;
+        app.state.clock.set(STATS_NOW);
+        let seeded = app.seed().await;
+        let viewer = app
+            .add_member(&seeded, "v@example.com", OrgRole::Viewer)
+            .await;
+        let response = app
+            .request(Method::GET, &format!("{}/stats", path(seeded.project.id)))
+            .header(header::COOKIE.as_str(), &viewer.cookie)
+            .send()
+            .await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let response = app
+            .request(Method::GET, &format!("{}/stats", path(seeded.project.id)))
+            .send()
+            .await;
+        assert_eq!(response.status, 401, "{}", text(&response));
+    }
+
+    #[tokio::test]
+    async fn old_experiment_scores_are_left_out() {
+        let app = TestApp::new().await;
+        app.state.clock.set(STATS_NOW);
+        let seeded = app.seed().await;
+        let now = app.state.clock.now_ns();
+        let created = create_ok(&app, &seeded, &check_body("Refund")).await;
+        let evaluator: Uuid = created["id"].as_str().unwrap().parse().unwrap();
+        let old = add_experiment(&app, seeded.project.id, "old", now - DAY).await;
+        let recent = add_experiment(&app, seeded.project.id, "recent", now - DAY).await;
+        for (experiment, days) in [(old, 31), (recent, 29)] {
+            put_score(
+                &app,
+                seeded.project.id,
+                TestScore {
+                    name: "mentions_refund",
+                    value: ScoreValue::Boolean(true),
+                    evaluator_id: None,
+                    experiment_id: Some(experiment),
+                    created_at: now - days * DAY,
+                    deleted: false,
+                    score_id: None,
+                    updated_at: None,
+                },
+            )
+            .await;
+        }
+
+        let response = stats(&app, &seeded, &format!("?evaluator_ids={evaluator}")).await;
+        let body: EvaluatorStatsResponse = response.json();
+        let experiments = &body.data[0].experiments_with_score;
+        assert_eq!(experiments.total, 1);
+        assert_eq!(experiments.recent[0].id, recent);
     }
 }

@@ -1,0 +1,27 @@
+{
+  "version": {
+    "version": 3,
+    "description": "edit item 01900000-0000-7000-8000-000000000d02",
+    "created_at": "2026-01-01T00:00:00.000000000Z",
+    "added": 0,
+    "edited": 1,
+    "deleted": 0
+  },
+  "items": [
+    {
+      "id": "01900000-0000-7000-8000-000000000d02",
+      "revision_id": "01900000-0000-7000-8000-000000000d16",
+      "version": 3,
+      "input": {
+        "question": "Can I export my traces?"
+      },
+      "expected_output": {
+        "answer": "Yes, as JSONL or CSV."
+      },
+      "metadata": {
+        "topic": "exports"
+      },
+      "created_at": "2026-01-01T00:00:00.000000000Z"
+    }
+  ]
+}

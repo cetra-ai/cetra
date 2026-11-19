@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Starts `<binary> serve` on free loopback ports with a fresh data directory and runs smoke.sh
-# against it, then `llmobs health` (D-N-4, D-N-13).
+# against it, then `cetra health` (D-N-4, D-N-13).
 #
-# Usage: binary-smoke.sh <path to the llmobs binary>
+# Usage: binary-smoke.sh <path to the cetra binary>
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -40,18 +40,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
-key="sk-llmobs-SMOKE0123456789ABCDEFGHIJKLMNOPQ"
+key="sk-cetra-SMOKE0123456789ABCDEFGHIJKLMNOPQ"
 
-LLMOBS_DATA_DIR="$dir/data" \
-LLMOBS_PUBLIC_URL="http://127.0.0.1:${http_port}" \
-LLMOBS_HTTP_ADDR="127.0.0.1:${http_port}" \
-LLMOBS_OTLP_HTTP_ADDR="127.0.0.1:${otlp_port}" \
-LLMOBS_GRPC_ADDR="127.0.0.1:${grpc_port}" \
-LLMOBS_INIT_ADMIN_EMAIL="smoke@example.com" \
-LLMOBS_INIT_ADMIN_PASSWORD="llmobs-smoke-1" \
-LLMOBS_INIT_ORG="Smoke" \
-LLMOBS_INIT_PROJECT="Smoke" \
-LLMOBS_INIT_SECRET_KEY="$key" \
+CETRA_DATA_DIR="$dir/data" \
+CETRA_PUBLIC_URL="http://127.0.0.1:${http_port}" \
+CETRA_HTTP_ADDR="127.0.0.1:${http_port}" \
+CETRA_OTLP_HTTP_ADDR="127.0.0.1:${otlp_port}" \
+CETRA_GRPC_ADDR="127.0.0.1:${grpc_port}" \
+CETRA_INIT_ADMIN_EMAIL="smoke@example.com" \
+CETRA_INIT_ADMIN_PASSWORD="cetra-smoke-1" \
+CETRA_INIT_ORG="Smoke" \
+CETRA_INIT_PROJECT="Smoke" \
+CETRA_INIT_SECRET_KEY="$key" \
   "$bin" serve >"$dir/serve.log" 2>&1 &
 server_pid=$!
 

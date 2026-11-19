@@ -3,7 +3,7 @@
 //! Spec 01 § Canonical message format. The top-level `system` value is returned
 //! separately and is not inserted into the message list (spec 02 rule 5).
 
-use llmobs_core::message::{Message, Modality, Part, Role};
+use cetra_core::message::{Message, Modality, Part, Role};
 use serde_json::{Map, Value as Json};
 
 use super::ConvertError;
@@ -246,7 +246,7 @@ fn parts_json(parts: &[Part]) -> Json {
 mod tests {
     use super::anthropic_messages;
     use crate::convert::ConvertError;
-    use llmobs_core::message::messages_to_json;
+    use cetra_core::message::messages_to_json;
     use serde_json::{Value as Json, json};
 
     fn messages(value: &Json) -> String {

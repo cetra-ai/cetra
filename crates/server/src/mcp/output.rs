@@ -143,7 +143,7 @@ fn set_prefix(body: &mut Map<String, Value>, list: &str, items: &[Value], len: u
 
 #[cfg(test)]
 mod tests {
-    use llmobs_storage::{InvalidQuery, Position, RunError};
+    use cetra_storage::{InvalidQuery, Position, RunError};
     use serde_json::{Map, Value, json};
 
     use super::{char_len, cut, failure, fit_list, max_chars, render};

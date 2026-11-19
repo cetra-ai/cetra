@@ -24,7 +24,7 @@
                   }
                 },
                 {
-                  "key": "llmobs.normalize_warning",
+                  "key": "cetra.normalize_warning",
                   "value": {
                     "stringValue": "client"
                   }

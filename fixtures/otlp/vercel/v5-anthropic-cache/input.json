@@ -41,15 +41,15 @@
           },
           "spans": [
             {
-              "traceId": "68cb3a5f859860503082a90b4040f47d",
-              "spanId": "715ec1cb7d1f067a",
+              "traceId": "e9aca2d2ab78dab07c1b3904d12a9f24",
+              "spanId": "36c650a19c706a49",
               "traceState": "",
               "parentSpanId": "",
               "flags": 257,
               "name": "ai.generateText",
               "kind": 1,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590079000000",
+              "endTimeUnixNano": "1767225590059000000",
               "attributes": [
                 {
                   "key": "operation.name",
@@ -144,15 +144,15 @@
               "status": null
             },
             {
-              "traceId": "68cb3a5f859860503082a90b4040f47d",
-              "spanId": "45f24540d453260b",
+              "traceId": "e9aca2d2ab78dab07c1b3904d12a9f24",
+              "spanId": "6a76315973e0ab2e",
               "traceState": "",
-              "parentSpanId": "715ec1cb7d1f067a",
+              "parentSpanId": "36c650a19c706a49",
               "flags": 257,
               "name": "ai.generateText.doGenerate",
               "kind": 1,
               "startTimeUnixNano": "1767225590002000000",
-              "endTimeUnixNano": "1767225590074000000",
+              "endTimeUnixNano": "1767225590057000000",
               "attributes": [
                 {
                   "key": "operation.name",
@@ -247,7 +247,7 @@
                 {
                   "key": "ai.response.timestamp",
                   "value": {
-                    "stringValue": "2025-12-31T23:59:50.073Z"
+                    "stringValue": "2025-12-31T23:59:50.056Z"
                   }
                 },
                 {

@@ -21,16 +21,17 @@ use axum::body::{Body, Bytes};
 use axum::extract::ConnectInfo;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode};
 use bytesize::ByteSize;
-use http_body_util::BodyExt;
-use llmobs_core::batch::{scores_to_record_batch, spans_to_record_batch};
-use llmobs_core::ids::{OrgId, ProjectId, SpanId, TraceId};
-use llmobs_core::names::PRODUCT;
-use llmobs_core::score::Score;
-use llmobs_core::span::Span;
-use llmobs_storage::config::{
+use cetra_core::batch::{scores_to_record_batch, spans_to_record_batch};
+use cetra_core::enums::ScoreSource;
+use cetra_core::ids::{OrgId, ProjectId, SpanId, TraceId};
+use cetra_core::names::PRODUCT;
+use cetra_core::score::{Score, ScoreTarget, ScoreValue};
+use cetra_core::span::Span;
+use cetra_storage::config::{
     AnchorConfig, FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
 };
-use llmobs_storage::{MediaBlob, ProjectQuery, QueryContext, Storage};
+use cetra_storage::{MediaBlob, ProjectQuery, QueryContext, Storage};
+use http_body_util::BodyExt;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sqlx::SqliteConnection;
@@ -45,8 +46,8 @@ use crate::auth::secret::{self, KeyKind, NewKey};
 use crate::auth::session::{SessionOrigin, start_session};
 use crate::clock::Clock;
 use crate::config::{
-    AuthSettings, EntitlementsConfig, EvalConfig, IngestConfig, InitConfig, LogConfig, MediaConfig,
-    OrgsConfig, PublicUrl, SecurityConfig, ServerConfig,
+    AuthSettings, DemoConfig, EntitlementsConfig, EvalConfig, IngestConfig, InitConfig, LogConfig,
+    MediaConfig, OrgsConfig, PublicUrl, SecurityConfig, ServerConfig,
 };
 use crate::http::access::RouteDef;
 use crate::http::{AppInner, AppState, router, router_with, serve_router};
@@ -90,7 +91,7 @@ pub(crate) fn sign_token(payload: &serde_json::Value) -> String {
 
 /// Signs the bytes `payload` as a `dev-1` token, whatever they are (not necessarily JSON).
 pub(crate) fn sign_raw(payload: &[u8]) -> String {
-    llmobs_token::sign_raw(&dev_signing_key(), "dev-1", payload).expect("dev key signs")
+    cetra_token::sign_raw(&dev_signing_key(), "dev-1", payload).expect("dev key signs")
 }
 
 /// A `dev-1` licence listing `features`, issued 2025-01-01, active until 2099-01-01.
@@ -312,7 +313,7 @@ impl TestApp {
         .await
         .expect("check value");
         let eval_runner = Arc::new(
-            llmobs_eval::EvalRunner::new(llmobs_eval::EgressPolicy {
+            cetra_eval::EvalRunner::new(cetra_eval::EgressPolicy {
                 allow_private_network: config.security.allow_private_network_egress,
                 restore_mode: config.restore_mode,
             })
@@ -340,7 +341,7 @@ impl TestApp {
         if let Some(issuer) = google_issuer {
             providers.retarget_google(issuer);
         }
-        let prices = llmobs_otel::PriceTable::new(llmobs_otel::builtin_price_rows())
+        let prices = cetra_otel::PriceTable::new(cetra_otel::builtin_price_rows())
             .expect("built-in price table");
         let ingest = crate::ingest::Ingest::new(
             &config.ingest,
@@ -362,20 +363,21 @@ impl TestApp {
         .expect("stored org tokens load");
         let eval = crate::eval::EvalQueue::new(config.eval.workers);
         let org_sso = crate::ee::org_sso::OrgSso::new(
-            llmobs_eval::EgressPolicy {
+            cetra_eval::EgressPolicy {
                 allow_private_network: config.security.allow_private_network_egress,
                 restore_mode: config.restore_mode,
             },
             crate::ee::org_sso::dns::TxtResolver::fixed(),
         )
         .expect("org SSO state");
+        let limits = Limits::new(&config.demo);
         let state = AppState::new(AppInner {
             config,
             meta,
             storage: Arc::new(storage),
             ready: crate::http::health::ReadyCache::default(),
             clock: Clock::Manual(Arc::new(AtomicI64::new(MANUAL_NOW_NS))),
-            limits: Limits::new(),
+            limits,
             key_cache: crate::auth::principal::ApiKeyCache::new(),
             pat_cache: crate::auth::principal::PatCache::new(),
             last_used: crate::auth::last_used::LastUsed::new(),
@@ -386,8 +388,9 @@ impl TestApp {
             providers,
             oauth_key: crate::auth::oidc::random_key().expect("oauth key"),
             ingest,
+            last_ingest: crate::ingest::last_ingest::LastIngest::default(),
             live: crate::live::LiveBus::new(crate::live::StreamTiming::TEST),
-            metrics_cache: crate::routes::metrics::MetricsCache::default(),
+            widget_cache: crate::routes::dashboards::WidgetCache::default(),
             usage: crate::usage::Usage::default(),
             alert_email_count: crate::alerts::quota::DailyEmailCount::default(),
             deletions: crate::deletion::Deletions::new(),
@@ -457,11 +460,11 @@ pub(crate) struct Seeded {
     pub(crate) org_id: OrgId,
     pub(crate) project: ProjectRow,
     pub(crate) cookie: String,
-    /// `sk-llmobs-…` with `["ingest"]`.
+    /// `sk-cetra-…` with `["ingest"]`.
     pub(crate) ingest_key: String,
-    /// `sk-llmobs-…` with `["read"]`.
+    /// `sk-cetra-…` with `["read"]`.
     pub(crate) read_key: String,
-    /// `pk-llmobs-…` with `["feedback"]`.
+    /// `pk-cetra-…` with `["feedback"]`.
     pub(crate) public_key: String,
 }
 
@@ -571,7 +574,7 @@ impl TestApp {
 pub(crate) struct Member {
     /// `users.id`.
     pub(crate) id: Uuid,
-    /// `llmobs_session=…`, ready for a `cookie` header.
+    /// `cetra_session=…`, ready for a `cookie` header.
     pub(crate) cookie: String,
 }
 
@@ -769,7 +772,7 @@ impl TestApp {
             .unwrap();
     }
 
-    /// A `sk-llmobs-…` key with `["read", "write"]` on `seeded.project`, as its plaintext.
+    /// A `sk-cetra-…` key with `["read", "write"]` on `seeded.project`, as its plaintext.
     pub(crate) async fn write_key(&self, seeded: &Seeded) -> String {
         let key = secret::new_key(KeyKind::Secret).unwrap();
         let plaintext = key.plaintext.clone();
@@ -886,10 +889,10 @@ impl TestApp {
                     request_bytes: 0,
                     now_ns: self.state.clock.now_ns(),
                 },
-                llmobs_otel::Normalized {
+                cetra_otel::Normalized {
                     spans,
                     media: Vec::new(),
-                    rejections: llmobs_otel::Rejections::default(),
+                    rejections: cetra_otel::Rejections::default(),
                 },
             )
             .await
@@ -975,7 +978,7 @@ async fn insert_key(
 }
 
 /// A session for `user_id`, started through `sso_org`'s provider when given, as a `cookie`
-/// header value (`llmobs_session=<token>`): the `Set-Cookie` value up to its first `;`.
+/// header value (`cetra_session=<token>`): the `Set-Cookie` value up to its first `;`.
 pub(crate) async fn session_cookie_via(
     app: &TestApp,
     user_id: Uuid,
@@ -1036,6 +1039,7 @@ fn default_config(data_dir: &std::path::Path) -> ServerConfig {
             ..EntitlementsConfig::default()
         },
         orgs: OrgsConfig::default(),
+        demo: DemoConfig::default(),
         encryption_key: None,
         license_key: None,
         auth: AuthSettings::default(),
@@ -1537,13 +1541,13 @@ pub(crate) async fn org_sso_app_with(
 }
 
 /// The OTLP key the tests send with, also the project key of [`with_init`].
-pub(crate) const OTLP_KEY: &str = "sk-llmobs-0123456789ABCDEFGHIJKLMNOPQRSTUV";
+pub(crate) const OTLP_KEY: &str = "sk-cetra-0123456789ABCDEFGHIJKLMNOPQRSTUV";
 
 /// A server config with `init` set, so `bind` seeds an admin, an org, a project and [`OTLP_KEY`].
 pub(crate) fn with_init(mut config: ServerConfig) -> ServerConfig {
     config.init = serde_json::from_value(serde_json::json!({
         "admin_email": "ada@example.com",
-        "admin_password": "llmobs-ok1",
+        "admin_password": "cetra-ok-1",
         "org": "Acme",
         "project": "Support bot",
         "secret_key": OTLP_KEY,
@@ -1584,6 +1588,7 @@ pub(crate) fn config(data_dir: &std::path::Path) -> ServerConfig {
         security: SecurityConfig::default(),
         entitlements: EntitlementsConfig::default(),
         orgs: OrgsConfig::default(),
+        demo: DemoConfig::default(),
         encryption_key: None,
         license_key: None,
         auth: AuthSettings::default(),
@@ -1592,4 +1597,52 @@ pub(crate) fn config(data_dir: &std::path::Path) -> ServerConfig {
         init: InitConfig::default(),
         log: LogConfig::default(),
     }
+}
+
+/// A score for [`put_score`]. It is on a fixed trace.
+pub(crate) struct TestScore {
+    pub(crate) name: &'static str,
+    pub(crate) value: ScoreValue,
+    pub(crate) evaluator_id: Option<Uuid>,
+    pub(crate) experiment_id: Option<Uuid>,
+    pub(crate) created_at: i64,
+    pub(crate) deleted: bool,
+    /// Scores with the same id replace each other by `(updated_at, ingest_time)`; `None` for a
+    /// new id.
+    pub(crate) score_id: Option<Uuid>,
+    /// Write time of the version. `None` takes `created_at`.
+    pub(crate) updated_at: Option<i64>,
+}
+
+/// Appends `score` to `project` through storage, as the ingest path does.
+pub(crate) async fn put_score(app: &TestApp, project: ProjectId, score: TestScore) {
+    let score = Score {
+        project_id: project,
+        score_id: score.score_id.unwrap_or_else(Uuid::now_v7),
+        target: ScoreTarget::Trace {
+            trace_id: "0102030405060708090a0b0c0d0e0f10".parse().unwrap(),
+        },
+        session_id: None,
+        user_id: None,
+        name: score.name.to_owned(),
+        value: score.value,
+        reason: None,
+        source: ScoreSource::LlmJudge,
+        evaluator_id: score.evaluator_id,
+        rule_id: None,
+        experiment_id: score.experiment_id,
+        dataset_item_id: score.experiment_id.map(|_| Uuid::now_v7()),
+        author_user_id: None,
+        metadata: Default::default(),
+        created_at: score.created_at,
+        updated_at: score.updated_at.unwrap_or(score.created_at),
+        deleted: score.deleted,
+        ingest_time: score.created_at,
+    };
+    let batch = scores_to_record_batch(&[score]).unwrap();
+    app.state
+        .storage
+        .append_scores(project, batch)
+        .await
+        .unwrap();
 }

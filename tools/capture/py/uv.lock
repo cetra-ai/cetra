@@ -237,6 +237,83 @@ wheels = [
 ]
 
 [[package]]
+name = "cetra-capture-scenarios"
+version = "0.0.0"
+source = { editable = "." }
+dependencies = [
+    { name = "anthropic" },
+    { name = "google-adk" },
+    { name = "google-genai" },
+    { name = "langchain" },
+    { name = "langchain-openai" },
+    { name = "langfuse" },
+    { name = "langgraph" },
+    { name = "lmnr" },
+    { name = "openai" },
+    { name = "openai-agents" },
+    { name = "openinference-instrumentation-anthropic" },
+    { name = "openinference-instrumentation-google-adk" },
+    { name = "openinference-instrumentation-google-genai" },
+    { name = "openinference-instrumentation-langchain" },
+    { name = "openinference-instrumentation-openai" },
+    { name = "openinference-instrumentation-openai-agents" },
+    { name = "opentelemetry-exporter-otlp-proto-http" },
+    { name = "opentelemetry-instrumentation-anthropic" },
+    { name = "opentelemetry-instrumentation-google-genai" },
+    { name = "opentelemetry-instrumentation-google-generativeai" },
+    { name = "opentelemetry-instrumentation-langchain" },
+    { name = "opentelemetry-instrumentation-openai" },
+    { name = "opentelemetry-instrumentation-openai-agents" },
+    { name = "opentelemetry-instrumentation-openai-v2" },
+    { name = "opentelemetry-sdk" },
+    { name = "opentelemetry-util-genai" },
+    { name = "traceloop-sdk" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "anthropic", specifier = "==2.4.0" },
+    { name = "google-adk", specifier = "==2.14.0" },
+    { name = "google-genai", specifier = "==2.34.0" },
+    { name = "langchain", specifier = "==1.4.8" },
+    { name = "langchain-openai", specifier = "==1.7.3" },
+    { name = "langfuse", specifier = "==5.1.0" },
+    { name = "langgraph", specifier = "==1.2.19" },
+    { name = "lmnr", specifier = "==0.8.8" },
+    { name = "openai", specifier = "==3.45.0" },
+    { name = "openai-agents", specifier = "==0.24.0" },
+    { name = "openinference-instrumentation-anthropic", specifier = "==3.3.0" },
+    { name = "openinference-instrumentation-google-adk", specifier = "==1.1.0" },
+    { name = "openinference-instrumentation-google-genai", specifier = "==1.5.0" },
+    { name = "openinference-instrumentation-langchain", specifier = "==0.1.81" },
+    { name = "openinference-instrumentation-openai", specifier = "==0.1.69" },
+    { name = "openinference-instrumentation-openai-agents", specifier = "==2.7.0" },
+    { name = "opentelemetry-exporter-otlp-proto-http", specifier = "==1.45.2" },
+    { name = "opentelemetry-instrumentation-anthropic", specifier = "==0.62.4" },
+    { name = "opentelemetry-instrumentation-google-genai", specifier = "==1.1b1" },
+    { name = "opentelemetry-instrumentation-google-generativeai", specifier = "==0.62.4" },
+    { name = "opentelemetry-instrumentation-langchain", specifier = "==0.62.4" },
+    { name = "opentelemetry-instrumentation-openai", specifier = "==0.62.4" },
+    { name = "opentelemetry-instrumentation-openai-agents", specifier = "==0.62.4" },
+    { name = "opentelemetry-instrumentation-openai-v2", specifier = "==2.4b0" },
+    { name = "opentelemetry-sdk", specifier = "==1.45.2" },
+    { name = "opentelemetry-util-genai", specifier = "==1.1b0" },
+    { name = "traceloop-sdk", specifier = "==0.62.4" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "mypy", specifier = "==2.4.1" },
+    { name = "ruff", specifier = "==0.17.3" },
+]
+
+[[package]]
 name = "cffi"
 version = "2.1.1"
 source = { registry = "https://pypi.org/simple" }
@@ -973,83 +1050,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/93/93/303b8592909bd583f83f02818ffbea3f7647ca1e22b1cd5465d04b8145fe/librt-0.16.0-cp313-cp313-win32.whl", hash = "sha256:02d89c813d5ff74b17df72d3a34819d132cd168e56b81bf755b809bd9e46b8c4", size = 106236, upload-time = "2026-09-29T00:53:27.43Z" },
     { url = "https://files.pythonhosted.org/packages/cf/24/80bbb463c60ed18e29cb26aba386ddb76609580e4e7160710e550587018c/librt-0.16.0-cp313-cp313-win_amd64.whl", hash = "sha256:14ed6ebe3e4f85f326d7920011ad30ff49ed9334e62cf88caef9ba973d9e3a92", size = 126180, upload-time = "2026-09-29T00:53:28.7Z" },
     { url = "https://files.pythonhosted.org/packages/43/80/b1a6fbdd7da825cdd55c71aa81eb6cfa82c513c360774152eacb50b4a771/librt-0.16.0-cp313-cp313-win_arm64.whl", hash = "sha256:83d4041a3d9b2fd053a8a4e1f22878b3e5833e2712956382d5c048d791454e91", size = 116557, upload-time = "2026-09-29T00:53:30.012Z" },
-]
-
-[[package]]
-name = "llmobs-capture-scenarios"
-version = "0.0.0"
-source = { editable = "." }
-dependencies = [
-    { name = "anthropic" },
-    { name = "google-adk" },
-    { name = "google-genai" },
-    { name = "langchain" },
-    { name = "langchain-openai" },
-    { name = "langfuse" },
-    { name = "langgraph" },
-    { name = "lmnr" },
-    { name = "openai" },
-    { name = "openai-agents" },
-    { name = "openinference-instrumentation-anthropic" },
-    { name = "openinference-instrumentation-google-adk" },
-    { name = "openinference-instrumentation-google-genai" },
-    { name = "openinference-instrumentation-langchain" },
-    { name = "openinference-instrumentation-openai" },
-    { name = "openinference-instrumentation-openai-agents" },
-    { name = "opentelemetry-exporter-otlp-proto-http" },
-    { name = "opentelemetry-instrumentation-anthropic" },
-    { name = "opentelemetry-instrumentation-google-genai" },
-    { name = "opentelemetry-instrumentation-google-generativeai" },
-    { name = "opentelemetry-instrumentation-langchain" },
-    { name = "opentelemetry-instrumentation-openai" },
-    { name = "opentelemetry-instrumentation-openai-agents" },
-    { name = "opentelemetry-instrumentation-openai-v2" },
-    { name = "opentelemetry-sdk" },
-    { name = "opentelemetry-util-genai" },
-    { name = "traceloop-sdk" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "mypy" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "anthropic", specifier = "==2.4.0" },
-    { name = "google-adk", specifier = "==2.14.0" },
-    { name = "google-genai", specifier = "==2.34.0" },
-    { name = "langchain", specifier = "==1.4.8" },
-    { name = "langchain-openai", specifier = "==1.7.3" },
-    { name = "langfuse", specifier = "==5.1.0" },
-    { name = "langgraph", specifier = "==1.2.19" },
-    { name = "lmnr", specifier = "==0.8.8" },
-    { name = "openai", specifier = "==3.45.0" },
-    { name = "openai-agents", specifier = "==0.24.0" },
-    { name = "openinference-instrumentation-anthropic", specifier = "==3.3.0" },
-    { name = "openinference-instrumentation-google-adk", specifier = "==1.1.0" },
-    { name = "openinference-instrumentation-google-genai", specifier = "==1.5.0" },
-    { name = "openinference-instrumentation-langchain", specifier = "==0.1.81" },
-    { name = "openinference-instrumentation-openai", specifier = "==0.1.69" },
-    { name = "openinference-instrumentation-openai-agents", specifier = "==2.7.0" },
-    { name = "opentelemetry-exporter-otlp-proto-http", specifier = "==1.45.2" },
-    { name = "opentelemetry-instrumentation-anthropic", specifier = "==0.62.4" },
-    { name = "opentelemetry-instrumentation-google-genai", specifier = "==1.1b1" },
-    { name = "opentelemetry-instrumentation-google-generativeai", specifier = "==0.62.4" },
-    { name = "opentelemetry-instrumentation-langchain", specifier = "==0.62.4" },
-    { name = "opentelemetry-instrumentation-openai", specifier = "==0.62.4" },
-    { name = "opentelemetry-instrumentation-openai-agents", specifier = "==0.62.4" },
-    { name = "opentelemetry-instrumentation-openai-v2", specifier = "==2.4b0" },
-    { name = "opentelemetry-sdk", specifier = "==1.45.2" },
-    { name = "opentelemetry-util-genai", specifier = "==1.1b0" },
-    { name = "traceloop-sdk", specifier = "==0.62.4" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "mypy", specifier = "==2.4.1" },
-    { name = "ruff", specifier = "==0.17.3" },
 ]
 
 [[package]]

@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 use arrow::datatypes::SchemaRef;
 
-use llmobs_core::schema::{scores_schema, spans_schema};
+use cetra_core::schema::{scores_schema, spans_schema};
 
 use crate::fs;
 
@@ -56,16 +56,16 @@ impl Table {
     /// Spans use `start_time` until the trace anchor lands. Scores use `created_at`.
     pub(crate) fn time_column(self) -> &'static str {
         match self {
-            Self::Spans => llmobs_core::schema::spans::START_TIME,
-            Self::Scores => llmobs_core::schema::scores::CREATED_AT,
+            Self::Spans => cetra_core::schema::spans::START_TIME,
+            Self::Scores => cetra_core::schema::scores::CREATED_AT,
         }
     }
 
     /// The `ingest_time` column, non-null in both tables (spec 03 §7).
     pub(crate) fn ingest_column(self) -> &'static str {
         match self {
-            Self::Spans => llmobs_core::schema::spans::INGEST_TIME,
-            Self::Scores => llmobs_core::schema::scores::INGEST_TIME,
+            Self::Spans => cetra_core::schema::spans::INGEST_TIME,
+            Self::Scores => cetra_core::schema::scores::INGEST_TIME,
         }
     }
 }
@@ -164,10 +164,10 @@ pub(crate) fn spans_keyed(
 ) -> arrow::array::RecordBatch {
     use std::collections::BTreeMap;
 
-    use llmobs_core::batch::spans_to_record_batch;
-    use llmobs_core::enums::{SpanKind, SpanStatus};
-    use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-    use llmobs_core::span::Span;
+    use cetra_core::batch::spans_to_record_batch;
+    use cetra_core::enums::{SpanKind, SpanStatus};
+    use cetra_core::ids::{ProjectId, SpanId, TraceId};
+    use cetra_core::span::Span;
 
     let project_id = "018f6b4e-7c1a-7c1a-8c1a-000000000001"
         .parse::<ProjectId>()

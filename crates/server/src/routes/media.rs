@@ -100,8 +100,8 @@ fn parse_sha256(text: &str) -> Result<[u8; 32], ApiError> {
 }
 
 /// Maps a storage failure. Nothing here names an object path or a hash.
-fn media_error(error: &llmobs_storage::error::MediaError) -> ApiError {
-    use llmobs_storage::error::MediaError;
+fn media_error(error: &cetra_storage::error::MediaError) -> ApiError {
+    use cetra_storage::error::MediaError;
     match error {
         MediaError::NotFound | MediaError::ProjectDropped => ApiError::NotFound,
         MediaError::Object(_) | MediaError::Catalog(_) | MediaError::Query(_) => {
@@ -355,7 +355,7 @@ mod tests {
             }
         }
         let mut export: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../fixtures/otlp/llmobs/sdk-media-bytes/input.json"
+            "../../../../fixtures/otlp/cetra/sdk-media-bytes/input.json"
         ))
         .unwrap();
         rewrite(&mut export, start);

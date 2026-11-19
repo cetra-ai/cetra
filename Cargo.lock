@@ -767,6 +767,283 @@ dependencies = [
 ]
 
 [[package]]
+name = "cetra-capture"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "base64 0.23.1",
+ "chrono",
+ "clap",
+ "hex",
+ "http-body",
+ "http-body-util",
+ "opentelemetry-proto",
+ "prost",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "thiserror 2.0.21",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "cetra-cli"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.23.1",
+ "bytes",
+ "cetra-capture",
+ "cetra-core",
+ "cetra-server",
+ "cetra-ui",
+ "chrono",
+ "clap",
+ "dirs",
+ "insta",
+ "mimalloc",
+ "opentelemetry-proto",
+ "parquet",
+ "prost",
+ "rand 0.10.3",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml 1.2.1+spec-1.1.0",
+ "tonic",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "cetra-core"
+version = "0.0.0"
+dependencies = [
+ "arrow",
+ "bytes",
+ "chrono",
+ "hex",
+ "insta",
+ "parquet",
+ "serde",
+ "serde_json",
+ "strum",
+ "thiserror 2.0.21",
+ "utoipa",
+ "uuid",
+]
+
+[[package]]
+name = "cetra-demo"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "clap",
+ "rand 0.10.3",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "cetra-eval"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "bytes",
+ "cetra-core",
+ "cetra-otel",
+ "hex",
+ "hmac 0.13.0",
+ "insta",
+ "jsonschema",
+ "minijinja",
+ "opentelemetry-proto",
+ "proptest",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_json_path",
+ "sha2 0.11.1",
+ "strsim",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "cetra-license-tool"
+version = "0.0.0"
+dependencies = [
+ "base64 0.23.1",
+ "cetra-token",
+ "clap",
+ "ed25519-dalek",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "cetra-otel"
+version = "0.0.0"
+dependencies = [
+ "base64 0.23.1",
+ "cetra-core",
+ "opentelemetry-proto",
+ "proptest",
+ "prost",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "cetra-server"
+version = "0.0.0"
+dependencies = [
+ "aes-gcm",
+ "argon2",
+ "arrow",
+ "axum",
+ "axum-extra",
+ "base64 0.23.1",
+ "bytes",
+ "bytesize",
+ "cetra-core",
+ "cetra-eval",
+ "cetra-otel",
+ "cetra-storage",
+ "cetra-token",
+ "chrono",
+ "csv",
+ "datafusion",
+ "ed25519-dalek",
+ "figment",
+ "flate2",
+ "futures",
+ "hex",
+ "hickory-resolver",
+ "hmac 0.13.0",
+ "http-body",
+ "http-body-util",
+ "humantime-serde",
+ "insta",
+ "ipnet",
+ "jsonschema",
+ "lettre",
+ "minijinja",
+ "oauth2",
+ "openidconnect",
+ "opentelemetry-proto",
+ "prometheus-client",
+ "prost",
+ "rand 0.10.3",
+ "reqwest",
+ "rmcp",
+ "rsa 0.10.0",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "serde_urlencoded",
+ "sha2 0.11.1",
+ "sqlx",
+ "strum",
+ "subtle",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tonic",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "unicode-normalization",
+ "url",
+ "utoipa",
+ "uuid",
+ "zstd 0.14.4",
+]
+
+[[package]]
+name = "cetra-storage"
+version = "0.0.0"
+dependencies = [
+ "arbitrary",
+ "arrow",
+ "async-trait",
+ "bytes",
+ "bytesize",
+ "cetra-core",
+ "chrono",
+ "crc32c",
+ "datafusion",
+ "datafusion-datasource",
+ "flate2",
+ "futures",
+ "hex",
+ "humantime-serde",
+ "lz4_flex",
+ "object_store",
+ "parquet",
+ "proptest",
+ "reqwest",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "sqlx",
+ "sysinfo",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "toml 1.2.1+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "cetra-token"
+version = "0.0.0"
+dependencies = [
+ "base64 0.23.1",
+ "chrono",
+ "ed25519-dalek",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "uuid",
+]
+
+[[package]]
+name = "cetra-ui"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "flate2",
+ "hex",
+ "http-body-util",
+ "sha2 0.11.1",
+ "tokio",
+ "tower",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3294,9 +3571,9 @@ dependencies = [
 
 [[package]]
 name = "lettre"
-version = "0.11.23"
+version = "0.11.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2c646bd5cc763b1087b15493e29a64be6147ba8f19342004fa52048ee596eae"
+checksum = "f294f3d7cdb313e578acef7d7727d4e8d897e0fcd0d6d58c19959cec95073f19"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -3429,264 +3706,6 @@ name = "litemap"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
-
-[[package]]
-name = "llmobs-capture"
-version = "0.0.0"
-dependencies = [
- "axum",
- "base64 0.23.1",
- "chrono",
- "clap",
- "hex",
- "http-body",
- "http-body-util",
- "opentelemetry-proto",
- "prost",
- "serde",
- "serde_json",
- "sha2 0.11.1",
- "thiserror 2.0.21",
- "tokio",
- "tower",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "llmobs-cli"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "axum",
- "base64 0.23.1",
- "bytes",
- "chrono",
- "clap",
- "dirs",
- "insta",
- "llmobs-capture",
- "llmobs-core",
- "llmobs-server",
- "llmobs-ui",
- "mimalloc",
- "opentelemetry-proto",
- "parquet",
- "prost",
- "rand 0.10.3",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "toml 1.2.1+spec-1.1.0",
- "tonic",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "llmobs-core"
-version = "0.0.0"
-dependencies = [
- "arrow",
- "bytes",
- "chrono",
- "hex",
- "insta",
- "parquet",
- "serde",
- "serde_json",
- "strum",
- "thiserror 2.0.21",
- "utoipa",
- "uuid",
-]
-
-[[package]]
-name = "llmobs-eval"
-version = "0.0.0"
-dependencies = [
- "axum",
- "bytes",
- "hex",
- "hmac 0.13.0",
- "insta",
- "jsonschema",
- "llmobs-core",
- "llmobs-otel",
- "minijinja",
- "opentelemetry-proto",
- "proptest",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "serde_json_path",
- "sha2 0.11.1",
- "strsim",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "llmobs-license-tool"
-version = "0.0.0"
-dependencies = [
- "base64 0.23.1",
- "clap",
- "ed25519-dalek",
- "llmobs-token",
- "serde_json",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "llmobs-otel"
-version = "0.0.0"
-dependencies = [
- "base64 0.23.1",
- "llmobs-core",
- "opentelemetry-proto",
- "proptest",
- "prost",
- "regex",
- "serde",
- "serde_json",
- "sha2 0.11.1",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "llmobs-server"
-version = "0.0.0"
-dependencies = [
- "aes-gcm",
- "argon2",
- "arrow",
- "axum",
- "axum-extra",
- "base64 0.23.1",
- "bytes",
- "bytesize",
- "chrono",
- "csv",
- "datafusion",
- "ed25519-dalek",
- "figment",
- "flate2",
- "futures",
- "hex",
- "hickory-resolver",
- "hmac 0.13.0",
- "http-body",
- "http-body-util",
- "insta",
- "ipnet",
- "jsonschema",
- "lettre",
- "llmobs-core",
- "llmobs-eval",
- "llmobs-otel",
- "llmobs-storage",
- "llmobs-token",
- "minijinja",
- "oauth2",
- "openidconnect",
- "opentelemetry-proto",
- "prometheus-client",
- "prost",
- "rand 0.10.3",
- "reqwest",
- "rmcp",
- "rsa 0.10.0",
- "serde",
- "serde_json",
- "serde_path_to_error",
- "serde_urlencoded",
- "sha2 0.11.1",
- "sqlx",
- "strum",
- "subtle",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tonic",
- "tower",
- "tracing",
- "tracing-subscriber",
- "unicode-normalization",
- "url",
- "utoipa",
- "uuid",
- "zstd 0.14.4",
-]
-
-[[package]]
-name = "llmobs-storage"
-version = "0.0.0"
-dependencies = [
- "arbitrary",
- "arrow",
- "async-trait",
- "bytes",
- "bytesize",
- "chrono",
- "crc32c",
- "datafusion",
- "datafusion-datasource",
- "flate2",
- "futures",
- "hex",
- "humantime-serde",
- "llmobs-core",
- "lz4_flex",
- "object_store",
- "parquet",
- "proptest",
- "reqwest",
- "rustix",
- "serde",
- "serde_json",
- "sha2 0.11.1",
- "sqlx",
- "sysinfo",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "toml 1.2.1+spec-1.1.0",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "llmobs-token"
-version = "0.0.0"
-dependencies = [
- "base64 0.23.1",
- "chrono",
- "ed25519-dalek",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "uuid",
-]
-
-[[package]]
-name = "llmobs-ui"
-version = "0.0.0"
-dependencies = [
- "axum",
- "flate2",
- "hex",
- "http-body-util",
- "sha2 0.11.1",
- "tokio",
- "tower",
-]
 
 [[package]]
 name = "lock_api"

@@ -1,9 +1,15 @@
 export const GO_TARGETS = {
-  t: { id: "go-traces", to: "/$org/$project/traces" },
-  s: { id: "go-spans", to: "/$org/$project/spans" },
-  e: { id: "go-sessions", to: "/$org/$project/sessions" },
-  u: { id: "go-users", to: "/$org/$project/users" },
   d: { id: "go-dashboard", to: "/$org/$project/dashboard" },
+  t: { id: "go-traces", to: "/$org/$project/traces" },
+  p: { id: "go-spans", to: "/$org/$project/spans" },
+  s: { id: "go-sessions", to: "/$org/$project/sessions" },
+  u: { id: "go-users", to: "/$org/$project/users" },
+  a: { id: "go-alerts", to: "/$org/$project/alerts" },
+  q: { id: "go-sql", to: "/$org/$project/sql" },
+  e: { id: "go-evaluators", to: "/$org/$project/evaluators" },
+  o: { id: "go-online-rules", to: "/$org/$project/online-rules" },
+  i: { id: "go-datasets", to: "/$org/$project/datasets" },
+  x: { id: "go-experiments", to: "/$org/$project/experiments" },
 } as const;
 
 type GoTarget = (typeof GO_TARGETS)[keyof typeof GO_TARGETS];
@@ -69,7 +75,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
   },
   {
     keys: "t",
-    description: "Toggle Tree / Transcript",
+    description: "Cycle Tree / Timeline / Transcript",
     scope: "trace view",
     bindings: [{ id: "toggle-mode", key: "t" }],
   },
@@ -86,8 +92,8 @@ export const SHORTCUTS: readonly Shortcut[] = [
     bindings: [],
   },
   {
-    keys: "g then t / s / e / u / d",
-    description: "Go to traces, spans, sessions, users, or dashboard",
+    keys: "g then a letter",
+    description: "Go to a project page (the letters are in each sidebar tooltip)",
     scope: "project",
     bindings: [],
   },
@@ -124,6 +130,16 @@ export function goDestination(id: ShortcutId): GoTarget["to"] | undefined {
   for (const target of Object.values(GO_TARGETS)) {
     if (target.id === id) {
       return target.to;
+    }
+  }
+  return undefined;
+}
+
+/** The letter that goes to the page `to` (after `g`), used for sidebar tooltips. */
+export function goKeyOf(to: string): string | undefined {
+  for (const [key, target] of Object.entries(GO_TARGETS)) {
+    if (target.to === to) {
+      return key;
     }
   }
   return undefined;

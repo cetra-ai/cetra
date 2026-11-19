@@ -14,25 +14,25 @@ use arrow::array::{
 };
 use arrow::compute::cast;
 use arrow::datatypes::{DataType, TimeUnit};
-use llmobs_core::enums::{
+use cetra_core::enums::{
     Convention, CostSource, PayloadFormat, ScoreDataType, ScoreSource, ScoreTargetKind, SpanKind,
     SpanStatus,
 };
-use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-use llmobs_core::schema::{event_field, link_field, scores, spans, traces};
-use llmobs_core::score::{Score, ScoreTarget, ScoreValue};
-use llmobs_core::span::{Span, SpanEvent, SpanLink};
+use cetra_core::ids::{ProjectId, SpanId, TraceId};
+use cetra_core::schema::{event_field, link_field, scores, spans, traces};
+use cetra_core::score::{Score, ScoreTarget, ScoreValue};
+use cetra_core::span::{Span, SpanEvent, SpanLink};
 use uuid::Uuid;
 
-use super::metrics::{
-    Kpi, KpiMetric, MetricName, MetricPoint, MetricSeries, MetricsGroupBy, MetricsResponse,
-    ModelUsage,
+use super::dashboards::{
+    TotalRow, WidgetPoint, WidgetQueryResponse, WidgetSeries, WidgetSeriesResponse,
+    WidgetTotalResponse,
 };
 use super::payload::Payload;
 use super::schema::{ColumnSchema, ColumnType, FunctionSchema, SchemaResponse, ViewSchema};
 use super::sessions::SessionSummary;
 use super::traces::{ScoreBrief, SpanSummary, TraceSummary, stored_payload};
-use super::users::EndUserSummary;
+use super::users::{EndUserSummary, UserScore};
 use crate::http::error::ApiError;
 
 /// `duration_ns` of the traces view. The spans table has the same name.
@@ -43,6 +43,14 @@ const TARGET_KEY: &str = "target_key";
 const TRACE_COUNT: &str = "trace_count";
 /// `session_count` of the users view.
 const SESSION_COUNT: &str = "session_count";
+/// `bucket` of the user activity batches.
+const ACTIVITY_BUCKET: &str = "bucket";
+/// `avg` of the user score batches.
+const SCORE_AVG: &str = "avg";
+/// `count` of the user score batches.
+const SCORE_COUNT: &str = "count";
+/// Prefix of the trace metadata keys shown on a user (spec 09 `EndUserSummary.metadata`).
+const USER_METADATA_PREFIX: &str = "user.";
 /// `first_seen` of the users view.
 const FIRST_SEEN: &str = "first_seen";
 /// `last_seen` of the users view.
@@ -166,6 +174,10 @@ fn opt_i64(array: &Int64Array, row: usize) -> Option<i64> {
 
 fn req_i64(array: &Int64Array, row: usize, name: &'static str) -> Result<i64, ConvertError> {
     opt_i64(array, row).ok_or(ConvertError::Null(name))
+}
+
+fn req_f64(array: &Float64Array, row: usize, name: &'static str) -> Result<f64, ConvertError> {
+    opt_f64(array, row).ok_or(ConvertError::Null(name))
 }
 
 fn opt_f64(array: &Float64Array, row: usize) -> Option<f64> {
@@ -762,7 +774,49 @@ fn session_batch(batch: &RecordBatch) -> Result<Vec<SessionSummary>, ConvertErro
             user_id: opt_string(&user_id, row),
             tags: list_strings(&tags, row, traces::TAGS)?,
             scores: Vec::new(),
+            // Filled by `session_extras` in the route, which has the extra batches.
+            error_trace_count: 0,
+            first_input_preview: None,
+            last_output_preview: None,
         });
+    }
+    Ok(out)
+}
+
+/// The extras of one session, from [`cetra_storage::session_extras`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SessionExtra {
+    /// Traces of the session whose status is `error`.
+    pub(crate) error_trace_count: i64,
+    /// `input_preview` of the earliest-starting trace.
+    pub(crate) first_input_preview: Option<String>,
+    /// `output_preview` of the latest-starting trace.
+    pub(crate) last_output_preview: Option<String>,
+}
+
+/// Session extras keyed by session id. A session without a row is absent.
+pub(crate) fn session_extras(
+    batches: &[RecordBatch],
+) -> Result<HashMap<String, SessionExtra>, ConvertError> {
+    let mut out = HashMap::new();
+    for batch in batches {
+        let session_id = strings(batch, traces::SESSION_ID)?;
+        let error_trace_count = ints(batch, cetra_storage::SESSION_ERROR_TRACE_COUNT)?;
+        let first_input_preview = strings(batch, cetra_storage::SESSION_FIRST_INPUT_PREVIEW)?;
+        let last_output_preview = strings(batch, cetra_storage::SESSION_LAST_OUTPUT_PREVIEW)?;
+        for row in 0..batch.num_rows() {
+            let id = req_string(&session_id, row, traces::SESSION_ID)?;
+            let extra = SessionExtra {
+                error_trace_count: req_i64(
+                    &error_trace_count,
+                    row,
+                    cetra_storage::SESSION_ERROR_TRACE_COUNT,
+                )?,
+                first_input_preview: opt_string(&first_input_preview, row),
+                last_output_preview: opt_string(&last_output_preview, row),
+            };
+            out.insert(id, extra);
+        }
     }
     Ok(out)
 }
@@ -785,6 +839,7 @@ fn end_user_batch(batch: &RecordBatch) -> Result<Vec<EndUserSummary>, ConvertErr
     let trace_count = ints(batch, TRACE_COUNT)?;
     let session_count = ints(batch, SESSION_COUNT)?;
     let error_count = ints(batch, traces::ERROR_COUNT)?;
+    let error_trace_count = ints(batch, cetra_storage::ERROR_TRACE_COUNT)?;
     let total_tokens = ints(batch, traces::TOTAL_TOKENS)?;
     let cost_total = floats(batch, traces::COST_TOTAL)?;
 
@@ -797,9 +852,86 @@ fn end_user_batch(batch: &RecordBatch) -> Result<Vec<EndUserSummary>, ConvertErr
             trace_count: req_i64(&trace_count, row, TRACE_COUNT)?,
             session_count: req_i64(&session_count, row, SESSION_COUNT)?,
             error_count: req_i64(&error_count, row, traces::ERROR_COUNT)?,
+            error_trace_count: req_i64(&error_trace_count, row, cetra_storage::ERROR_TRACE_COUNT)?,
             total_tokens: opt_i64(&total_tokens, row),
             cost_total: opt_f64(&cost_total, row),
+            // Filled by `user_extras` in the route, which has the extra batches.
+            activity: Vec::new(),
+            scores: Vec::new(),
+            metadata: BTreeMap::new(),
         });
+    }
+    Ok(out)
+}
+
+/// The extras of one user, from [`cetra_storage::UserExtras`].
+#[derive(Debug, Default)]
+pub(crate) struct UserExtra {
+    /// [`cetra_storage::ACTIVITY_BUCKETS`] trace counts.
+    pub(crate) activity: Vec<i64>,
+    /// Score averages, sorted by name then data type.
+    pub(crate) scores: Vec<UserScore>,
+    /// `user.*` metadata of the latest trace, prefix removed.
+    pub(crate) metadata: BTreeMap<String, String>,
+}
+
+/// Per-user extras keyed by user id. Buckets outside the activity range are clamped to it.
+pub(crate) fn user_extras(
+    extras: &cetra_storage::UserExtras,
+) -> Result<HashMap<String, UserExtra>, ConvertError> {
+    let mut out: HashMap<String, UserExtra> = HashMap::new();
+    for batch in &extras.activity {
+        let user_id = strings(batch, traces::USER_ID)?;
+        let bucket = ints(batch, ACTIVITY_BUCKET)?;
+        let trace_count = ints(batch, TRACE_COUNT)?;
+        for row in 0..batch.num_rows() {
+            let id = req_string(&user_id, row, traces::USER_ID)?;
+            let index = req_i64(&bucket, row, ACTIVITY_BUCKET)?.clamp(
+                0,
+                i64::try_from(cetra_storage::ACTIVITY_BUCKETS).unwrap_or(i64::MAX) - 1,
+            );
+            let index = usize::try_from(index).map_err(|_| ConvertError::Value(ACTIVITY_BUCKET))?;
+            let entry = out.entry(id).or_default();
+            if entry.activity.is_empty() {
+                entry.activity = vec![0; cetra_storage::ACTIVITY_BUCKETS];
+            }
+            entry.activity[index] += req_i64(&trace_count, row, TRACE_COUNT)?;
+        }
+    }
+    for batch in &extras.scores {
+        let user_id = strings(batch, traces::USER_ID)?;
+        let name = strings(batch, scores::NAME)?;
+        let data_type = strings(batch, scores::DATA_TYPE)?;
+        let avg = floats(batch, SCORE_AVG)?;
+        let count = ints(batch, SCORE_COUNT)?;
+        for row in 0..batch.num_rows() {
+            let id = req_string(&user_id, row, traces::USER_ID)?;
+            let data_type = req_parsed(&data_type, row, scores::DATA_TYPE, ScoreDataType::parse)?;
+            let score = UserScore {
+                name: req_string(&name, row, scores::NAME)?,
+                data_type,
+                avg: req_f64(&avg, row, SCORE_AVG)?,
+                count: req_i64(&count, row, SCORE_COUNT)?,
+            };
+            out.entry(id).or_default().scores.push(score);
+        }
+    }
+    for batch in &extras.metadata {
+        let user_id = strings(batch, traces::USER_ID)?;
+        let metadata = maps(batch, traces::METADATA)?;
+        for row in 0..batch.num_rows() {
+            let id = req_string(&user_id, row, traces::USER_ID)?;
+            let all = map_strings(&metadata, row, traces::METADATA)?;
+            let entry = out.entry(id).or_default();
+            entry.metadata = all
+                .into_iter()
+                .filter_map(|(key, value)| {
+                    let key = key.strip_prefix(USER_METADATA_PREFIX)?;
+                    (!key.is_empty()).then(|| (key.to_owned(), value))
+                })
+                .take(cetra_storage::MAX_USER_METADATA_KEYS)
+                .collect();
+        }
     }
     Ok(out)
 }
@@ -1044,95 +1176,51 @@ fn score_batch(batch: &RecordBatch, project_id: ProjectId) -> Result<Vec<Score>,
     Ok(out)
 }
 
-/// The API dashboard response. Storage names map variant by variant.
-pub(crate) fn metrics_response(
-    data: llmobs_storage::MetricsData,
-    from: i64,
-    to: i64,
-    group_by: Option<MetricsGroupBy>,
-) -> MetricsResponse {
-    MetricsResponse {
-        from,
-        to,
-        bucket_ns: data.bucket_ns,
-        group_by,
-        kpis: data
-            .kpis
-            .into_iter()
-            .map(|kpi| Kpi {
-                metric: kpi_metric(kpi.name),
-                value: kpi.value,
-                previous: kpi.previous,
-            })
-            .collect(),
-        series: data
-            .series
-            .into_iter()
-            .map(|series| MetricSeries {
-                metric: metric_name(series.name),
-                group: series.group,
-                points: series
-                    .points
+/// The API widget answer. Storage names map variant by variant.
+pub(crate) fn widget_response(data: cetra_storage::WidgetData) -> WidgetQueryResponse {
+    match data {
+        cetra_storage::WidgetData::Series { bucket_ns, series } => {
+            WidgetQueryResponse::Series(WidgetSeriesResponse {
+                bucket_ns,
+                series: series
                     .into_iter()
-                    .map(|point| MetricPoint {
-                        time: point.time,
-                        value: point.value,
+                    .map(|series| WidgetSeries {
+                        measure: series.measure,
+                        group: series.group,
+                        other: series.other,
+                        points: series
+                            .points
+                            .into_iter()
+                            .map(|point| WidgetPoint {
+                                time: point.time,
+                                value: point.value,
+                                rows: point.rows,
+                            })
+                            .collect(),
                     })
                     .collect(),
             })
-            .collect(),
-        top_models: data
-            .top_models
-            .into_iter()
-            .map(|row| ModelUsage {
-                model: row.model,
-                llm_count: row.llm_count,
-                total_tokens: row.total_tokens,
-                cost_total: row.cost_total,
+        }
+        cetra_storage::WidgetData::Total { rows } => {
+            WidgetQueryResponse::Total(WidgetTotalResponse {
+                rows: rows
+                    .into_iter()
+                    .map(|row| TotalRow {
+                        group: row.group,
+                        other: row.other,
+                        values: row.values,
+                        previous: row.previous,
+                    })
+                    .collect(),
             })
-            .collect(),
-    }
-}
-
-fn kpi_metric(name: llmobs_storage::KpiName) -> KpiMetric {
-    use llmobs_storage::KpiName;
-    match name {
-        KpiName::Traces => KpiMetric::Traces,
-        KpiName::ErrorRate => KpiMetric::ErrorRate,
-        KpiName::LatencyP95 => KpiMetric::LatencyP95,
-        KpiName::CostTotal => KpiMetric::CostTotal,
-        KpiName::TotalTokens => KpiMetric::TotalTokens,
-    }
-}
-
-fn metric_name(name: llmobs_storage::SeriesName) -> MetricName {
-    use llmobs_storage::SeriesName;
-    match name {
-        SeriesName::Traces => MetricName::Traces,
-        SeriesName::Errors => MetricName::Errors,
-        SeriesName::ErrorRate => MetricName::ErrorRate,
-        SeriesName::LatencyP50 => MetricName::LatencyP50,
-        SeriesName::LatencyP95 => MetricName::LatencyP95,
-        SeriesName::LatencyP99 => MetricName::LatencyP99,
-        SeriesName::Cost => MetricName::Cost,
-        SeriesName::InputTokens => MetricName::InputTokens,
-        SeriesName::OutputTokens => MetricName::OutputTokens,
-        SeriesName::CacheReadTokens => MetricName::CacheReadTokens,
-        SeriesName::CacheWriteTokens => MetricName::CacheWriteTokens,
-        SeriesName::TtftP50 => MetricName::TtftP50,
-        SeriesName::TtftP95 => MetricName::TtftP95,
-        SeriesName::LlmLatencyP50 => MetricName::LlmLatencyP50,
-        SeriesName::LlmLatencyP95 => MetricName::LlmLatencyP95,
-        SeriesName::CostByModel => MetricName::CostByModel,
-        SeriesName::ScoreAvg => MetricName::ScoreAvg,
-        SeriesName::EvalCost => MetricName::EvalCost,
+        }
     }
 }
 
 /// The API catalog of views and functions. Storage names map variant by variant.
 pub(crate) fn schema_response() -> SchemaResponse {
     SchemaResponse {
-        views: llmobs_storage::view_catalog()
+        views: cetra_storage::view_catalog()
             .into_iter()
             .chain(crate::datasets::sql_views::catalog())
             .map(|view| ViewSchema {
@@ -1150,7 +1238,7 @@ pub(crate) fn schema_response() -> SchemaResponse {
                     .collect(),
             })
             .collect(),
-        functions: llmobs_storage::function_catalog()
+        functions: cetra_storage::function_catalog()
             .into_iter()
             .map(|function| FunctionSchema {
                 name: function.name.to_owned(),
@@ -1163,9 +1251,9 @@ pub(crate) fn schema_response() -> SchemaResponse {
     }
 }
 
-fn view_name(name: llmobs_storage::ViewName) -> super::schema::ViewName {
+fn view_name(name: cetra_storage::ViewName) -> super::schema::ViewName {
     use super::schema::ViewName as Api;
-    use llmobs_storage::ViewName;
+    use cetra_storage::ViewName;
     match name {
         ViewName::Traces => Api::Traces,
         ViewName::Spans => Api::Spans,
@@ -1176,8 +1264,8 @@ fn view_name(name: llmobs_storage::ViewName) -> super::schema::ViewName {
     }
 }
 
-fn column_type(kind: llmobs_storage::ColumnKind) -> ColumnType {
-    use llmobs_storage::ColumnKind;
+fn column_type(kind: cetra_storage::ColumnKind) -> ColumnType {
+    use cetra_storage::ColumnKind;
     match kind {
         ColumnKind::String => ColumnType::String,
         ColumnKind::Integer => ColumnType::Integer,
@@ -1193,7 +1281,7 @@ fn column_type(kind: llmobs_storage::ColumnKind) -> ColumnType {
 #[cfg(test)]
 mod tests {
     use arrow::datatypes::{FieldRef, Fields, Schema};
-    use llmobs_storage::{
+    use cetra_storage::{
         QueryContext, ScoreTargets, SortOrder as StorageSortOrder, SpanListRequest, SpanSort,
         TraceListRequest, TraceSort,
     };
@@ -1214,7 +1302,7 @@ mod tests {
     }
 
     async fn trace_rows(ctx: &QueryContext, include_eval: bool) -> Vec<TraceSummary> {
-        let page = llmobs_storage::trace_list(
+        let page = cetra_storage::trace_list(
             ctx,
             TraceListRequest {
                 filter: None,
@@ -1233,8 +1321,8 @@ mod tests {
         trace_summaries(&page.batches).unwrap()
     }
 
-    async fn span_page(ctx: &QueryContext) -> llmobs_storage::Page {
-        llmobs_storage::span_list(
+    async fn span_page(ctx: &QueryContext) -> cetra_storage::Page {
+        cetra_storage::span_list(
             ctx,
             SpanListRequest {
                 filter: None,
@@ -1329,7 +1417,7 @@ mod tests {
             "a1000000000000000000000000000003",
         ];
         let batches =
-            llmobs_storage::latest_scores(&ctx, ScoreTargets::Traces(&targets), READ_TIMEOUT)
+            cetra_storage::latest_scores(&ctx, ScoreTargets::Traces(&targets), READ_TIMEOUT)
                 .await
                 .unwrap();
         let briefs = score_briefs(&batches).unwrap();

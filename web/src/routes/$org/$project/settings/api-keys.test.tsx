@@ -13,6 +13,38 @@ import projectFixture from "../../../../../../fixtures/api/static/project.json";
 
 const projectNav = () => within(screen.getByRole("list", { name: "Project settings" }));
 
+const CI = apiKeysFixture.data[0];
+const STAGING_ID = "01900000-0000-7000-8000-000000000201";
+const OLD_ID = "01900000-0000-7000-8000-000000000202";
+const DAY = 86_400_000;
+
+/** Three keys: CI never expires, Staging expires in 3 days, Old expired in 2020. */
+function threeKeys() {
+  return http.get("/api/v1/projects/:project/api-keys", () =>
+    HttpResponse.json({
+      data: [
+        CI,
+        {
+          ...CI,
+          id: STAGING_ID,
+          name: "Staging",
+          prefix: "sk-cetra-STAGIN",
+          scopes: ["ingest"],
+          expires_at: new Date(Date.now() + 3 * DAY).toISOString(),
+        },
+        {
+          ...CI,
+          id: OLD_ID,
+          name: "Old",
+          prefix: "sk-cetra-OLDKEY",
+          expires_at: "2020-01-01T00:00:00.000Z",
+        },
+      ],
+      next_cursor: null,
+    }),
+  );
+}
+
 function projectAs(role: string) {
   return http.get("/api/v1/projects/:project", () =>
     HttpResponse.json({ ...projectFixture, role }),
@@ -31,16 +63,84 @@ function submit(user: UserEvent, dialog: HTMLElement) {
 it("lists keys", async () => {
   await renderApp("/acme/support-bot/settings/api-keys");
 
-  const table = await screen.findByRole("table", { name: "API keys" });
+  const table = await screen.findByRole("grid", { name: "API keys" });
   const row = within(table).getByRole("row", { name: /^CI\b/ });
-  expect(row).toHaveTextContent("sk-llmobs-EXAMPL…");
+  expect(row).toHaveTextContent("sk-cetra-EXAMPL…");
   expect(row).toHaveTextContent("Secret");
   expect(row).toHaveTextContent("ingest, read, write");
+  expect(row).toHaveTextContent("Active");
   expect(within(row).getAllByText("Never")).toHaveLength(2);
   expect(projectNav().getByRole("link", { name: "API keys" })).toHaveAttribute(
     "aria-current",
     "page",
   );
+});
+
+it("shows a status pill for expired and soon-expiring keys", async () => {
+  server.use(threeKeys());
+
+  await renderApp("/acme/support-bot/settings/api-keys");
+
+  const table = await screen.findByRole("grid", { name: "API keys" });
+  expect(within(table).getByRole("row", { name: /^Staging\b/ })).toHaveTextContent("Expires soon");
+  expect(within(table).getByRole("row", { name: /^Old\b/ })).toHaveTextContent("Expired");
+});
+
+it("opens the panel from a row and closes it", async () => {
+  server.use(threeKeys());
+
+  const { user } = await renderApp("/acme/support-bot/settings/api-keys");
+  const table = await screen.findByRole("grid", { name: "API keys" });
+  await user.click(within(table).getByRole("row", { name: /^Staging\b/ }));
+
+  expect(await screen.findByRole("button", { name: "Revoke key…" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "Staging" })).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Close panel" }));
+  await waitFor(() => expect(screen.queryByRole("button", { name: "Revoke key…" })).toBeNull());
+});
+
+it("opens the panel from the URL", async () => {
+  await renderApp(`/acme/support-bot/settings/api-keys?open=${API_KEY_ID}`);
+
+  expect(await screen.findByRole("heading", { name: "CI" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Revoke key…" })).toBeInTheDocument();
+});
+
+it("filters keys by name as you type", async () => {
+  server.use(threeKeys());
+
+  const { user } = await renderApp("/acme/support-bot/settings/api-keys");
+  await screen.findByRole("grid", { name: "API keys" });
+  await user.type(screen.getByRole("searchbox", { name: "Search API keys" }), "stag");
+
+  const table = screen.getByRole("grid", { name: "API keys" });
+  expect(within(table).getByRole("row", { name: /^Staging\b/ })).toBeInTheDocument();
+  expect(within(table).queryByRole("row", { name: /^CI\b/ })).toBeNull();
+  expect(screen.getByText("1 key")).toBeInTheDocument();
+});
+
+it("shows an empty result when no key matches", async () => {
+  server.use(threeKeys());
+
+  const { user } = await renderApp("/acme/support-bot/settings/api-keys");
+  await screen.findByRole("grid", { name: "API keys" });
+  await user.type(screen.getByRole("searchbox", { name: "Search API keys" }), "zzz");
+
+  expect(await screen.findByText("No key matches")).toBeInTheDocument();
+  expect(screen.queryByRole("grid", { name: "API keys" })).toBeNull();
+});
+
+it("sorts by name from the URL", async () => {
+  server.use(threeKeys());
+
+  await renderApp("/acme/support-bot/settings/api-keys?sort=name&desc=true");
+
+  const table = await screen.findByRole("grid", { name: "API keys" });
+  const names = within(table)
+    .getAllByRole("row")
+    .slice(1)
+    .map((row) => within(row).getAllByRole("gridcell")[0]?.textContent);
+  expect(names).toEqual(["Staging", "Old", "CI"]);
 });
 
 it("creates a secret key and shows it once", async () => {
@@ -53,7 +153,7 @@ it("creates a secret key and shows it once", async () => {
   );
 
   const { user, queryClient } = await renderApp("/acme/support-bot/settings/api-keys");
-  await screen.findByRole("table", { name: "API keys" });
+  await screen.findByRole("grid", { name: "API keys" });
   const dialog = await openCreate(user);
   await user.type(within(dialog).getByLabelText("Name (optional)"), "CI");
   await submit(user, dialog);
@@ -61,7 +161,7 @@ it("creates a secret key and shows it once", async () => {
   await waitFor(() => expect(body).toEqual({ kind: "secret", name: "CI" }));
   const secret = await screen.findByRole("dialog", { name: "Secret key created" });
   expect(within(secret).getByLabelText("Secret")).toHaveValue(
-    "sk-llmobs-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0",
+    "sk-cetra-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0",
   );
   expect(within(secret).getByRole("tab", { name: "OTel env vars" })).toBeInTheDocument();
   await user.click(within(secret).getByRole("button", { name: "Done" }));
@@ -75,7 +175,7 @@ it("creates a secret key and shows it once", async () => {
           .getAll()
           .map((mutation) => mutation.state.data ?? null),
       ),
-    ).not.toContain("sk-llmobs-EXAMPLE0"),
+    ).not.toContain("sk-cetra-EXAMPLE0"),
   );
 });
 
@@ -89,7 +189,7 @@ it("creates an ingest-only key with an expiry", async () => {
   );
 
   const { user } = await renderApp("/acme/support-bot/settings/api-keys");
-  await screen.findByRole("table", { name: "API keys" });
+  await screen.findByRole("grid", { name: "API keys" });
   const dialog = await openCreate(user);
   await user.click(within(dialog).getByRole("radio", { name: "Ingest only" }));
   await user.click(within(dialog).getByRole("combobox", { name: "Expires" }));
@@ -117,9 +217,9 @@ it("creates a public key without snippets", async () => {
             ...apiKeyCreated.key,
             kind: "public",
             scopes: ["feedback"],
-            prefix: "pk-llmobs-EXAMPL",
+            prefix: "pk-cetra-EXAMPL",
           },
-          secret: "pk-llmobs-EXAMPLE0EXAMPLE0EXAMPLE0",
+          secret: "pk-cetra-EXAMPLE0EXAMPLE0EXAMPLE0",
         },
         { status: 201 },
       );
@@ -127,7 +227,7 @@ it("creates a public key without snippets", async () => {
   );
 
   const { user } = await renderApp("/acme/support-bot/settings/api-keys");
-  await screen.findByRole("table", { name: "API keys" });
+  await screen.findByRole("grid", { name: "API keys" });
   const dialog = await openCreate(user);
   await user.click(within(dialog).getByRole("radio", { name: "Public key" }));
   expect(screen.queryByRole("radiogroup", { name: "Scopes" })).toBeNull();
@@ -148,14 +248,14 @@ it("shows the server's expiry error", async () => {
   );
 
   const { user } = await renderApp("/acme/support-bot/settings/api-keys");
-  await screen.findByRole("table", { name: "API keys" });
+  await screen.findByRole("grid", { name: "API keys" });
   const dialog = await openCreate(user);
   await submit(user, dialog);
 
   expect(await within(dialog).findByText("must be in the future")).toBeInTheDocument();
 });
 
-it("revokes a key after confirmation", async () => {
+it("revokes a key after its name is typed", async () => {
   const ids: string[] = [];
   server.use(
     http.delete("/api/v1/projects/:project/api-keys/:id", ({ params }) => {
@@ -164,18 +264,19 @@ it("revokes a key after confirmation", async () => {
     }),
   );
 
-  const { user } = await renderApp("/acme/support-bot/settings/api-keys");
-  await screen.findByRole("table", { name: "API keys" });
-  await user.click(screen.getByRole("button", { name: "Actions for CI" }));
-  await user.click(screen.getByRole("menuitem", { name: "Revoke" }));
+  const { user } = await renderApp(`/acme/support-bot/settings/api-keys?open=${API_KEY_ID}`);
+  await user.click(await screen.findByRole("button", { name: "Revoke key…" }));
   const dialog = await screen.findByRole("alertdialog", { name: "Revoke key?" });
-  await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
-  await user.click(within(dialog).getByRole("button", { name: "Revoke key" }));
+  const revokeButton = within(dialog).getByRole("button", { name: "Revoke key" });
+  expect(revokeButton).toBeDisabled();
+  await user.type(within(dialog).getByLabelText('Type "CI" to confirm'), "CI");
+  await user.click(revokeButton);
 
-  expect(ids).toEqual([API_KEY_ID]);
+  await waitFor(() => expect(ids).toEqual([API_KEY_ID]));
   await waitFor(() =>
     expect(screen.queryByRole("alertdialog", { name: "Revoke key?" })).toBeNull(),
   );
+  await waitFor(() => expect(screen.queryByRole("button", { name: "Revoke key…" })).toBeNull());
 });
 
 it("keeps the revoke dialog open on failure", async () => {
@@ -183,16 +284,14 @@ it("keeps the revoke dialog open on failure", async () => {
     http.delete("/api/v1/projects/:project/api-keys/:id", () => problemResponse(500, "internal")),
   );
 
-  const { user } = await renderApp("/acme/support-bot/settings/api-keys");
-  await screen.findByRole("table", { name: "API keys" });
-  await user.click(screen.getByRole("button", { name: "Actions for CI" }));
-  await user.click(screen.getByRole("menuitem", { name: "Revoke" }));
+  const { user } = await renderApp(`/acme/support-bot/settings/api-keys?open=${API_KEY_ID}`);
+  await user.click(await screen.findByRole("button", { name: "Revoke key…" }));
   const dialog = await screen.findByRole("alertdialog", { name: "Revoke key?" });
-  await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+  await user.type(within(dialog).getByLabelText('Type "CI" to confirm'), "CI");
   await user.click(within(dialog).getByRole("button", { name: "Revoke key" }));
 
   const open = await screen.findByRole("alertdialog", { name: "Revoke key?" });
-  expect(within(open).getByRole("alert")).toHaveTextContent("Internal Server Error");
+  expect(await within(open).findByRole("alert")).toHaveTextContent("Internal Server Error");
 });
 
 it("is forbidden for a member", async () => {
@@ -252,7 +351,7 @@ it("loads more keys", async () => {
               ...ci,
               id: "01900000-0000-7000-8000-000000000202",
               name: "Staging",
-              prefix: "sk-llmobs-STAGIN",
+              prefix: "sk-cetra-STAGIN",
             },
           ],
           next_cursor: null,
@@ -262,12 +361,9 @@ it("loads more keys", async () => {
     }),
   );
 
-  const { user } = await renderApp("/acme/support-bot/settings/api-keys");
-  await screen.findByRole("table", { name: "API keys" });
-  await user.click(screen.getByRole("button", { name: "Load more" }));
+  await renderApp("/acme/support-bot/settings/api-keys");
 
   expect(await screen.findByRole("row", { name: /^Staging\b/ })).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
 });
 
 it("explains a refused creation", async () => {
@@ -276,7 +372,7 @@ it("explains a refused creation", async () => {
   );
 
   const { user } = await renderApp("/acme/support-bot/settings/api-keys");
-  await screen.findByRole("table", { name: "API keys" });
+  await screen.findByRole("grid", { name: "API keys" });
   const dialog = await openCreate(user);
   await submit(user, dialog);
 
@@ -296,7 +392,7 @@ it("shows the server's name error", async () => {
   );
 
   const { user } = await renderApp("/acme/support-bot/settings/api-keys");
-  await screen.findByRole("table", { name: "API keys" });
+  await screen.findByRole("grid", { name: "API keys" });
   const dialog = await openCreate(user);
   await user.type(within(dialog).getByLabelText("Name (optional)"), "CI");
   await submit(user, dialog);
@@ -307,7 +403,7 @@ it("shows the server's name error", async () => {
 
 it("cancels without creating a key", async () => {
   const { user } = await renderApp("/acme/support-bot/settings/api-keys");
-  await screen.findByRole("table", { name: "API keys" });
+  await screen.findByRole("grid", { name: "API keys" });
   const dialog = await openCreate(user);
   await user.type(within(dialog).getByLabelText("Name (optional)"), "CI");
   await user.click(within(dialog).getByRole("button", { name: "Cancel" }));

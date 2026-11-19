@@ -41,15 +41,15 @@
           },
           "spans": [
             {
-              "traceId": "ff4e3b87abff486c76822b4a393bcf54",
-              "spanId": "0e236324e366ee9a",
+              "traceId": "87b9ba8d592d9a46b876159eb1ddf986",
+              "spanId": "be38c40efbfa183c",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
               "name": "Agent Workflow",
               "kind": 1,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590172000000",
+              "endTimeUnixNano": "1767225590202000000",
               "attributes": [
                 {
                   "key": "traceloop.span.kind",
@@ -81,15 +81,15 @@
               }
             },
             {
-              "traceId": "ff4e3b87abff486c76822b4a393bcf54",
-              "spanId": "45bf23bb69d40264",
+              "traceId": "87b9ba8d592d9a46b876159eb1ddf986",
+              "spanId": "c273ac56ba221369",
               "traceState": "",
-              "parentSpanId": "0e236324e366ee9a",
+              "parentSpanId": "be38c40efbfa183c",
               "flags": 256,
               "name": "weather.agent",
               "kind": 1,
-              "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590172000000",
+              "startTimeUnixNano": "1767225590001000000",
+              "endTimeUnixNano": "1767225590202000000",
               "attributes": [
                 {
                   "key": "traceloop.span.kind",
@@ -127,15 +127,15 @@
               }
             },
             {
-              "traceId": "ff4e3b87abff486c76822b4a393bcf54",
-              "spanId": "c5dfc4befc5d9386",
+              "traceId": "87b9ba8d592d9a46b876159eb1ddf986",
+              "spanId": "395757a6252cc8d4",
               "traceState": "",
-              "parentSpanId": "45bf23bb69d40264",
+              "parentSpanId": "c273ac56ba221369",
               "flags": 256,
               "name": "openai.response",
               "kind": 3,
-              "startTimeUnixNano": "1767225590001000000",
-              "endTimeUnixNano": "1767225590132000000",
+              "startTimeUnixNano": "1767225590002000000",
+              "endTimeUnixNano": "1767225590159000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",
@@ -227,15 +227,15 @@
               }
             },
             {
-              "traceId": "ff4e3b87abff486c76822b4a393bcf54",
-              "spanId": "bb82b103acc95994",
+              "traceId": "87b9ba8d592d9a46b876159eb1ddf986",
+              "spanId": "07ebfed489241fa2",
               "traceState": "",
-              "parentSpanId": "45bf23bb69d40264",
+              "parentSpanId": "c273ac56ba221369",
               "flags": 256,
               "name": "get_weather.tool",
               "kind": 1,
-              "startTimeUnixNano": "1767225590135000000",
-              "endTimeUnixNano": "1767225590136000000",
+              "startTimeUnixNano": "1767225590162000000",
+              "endTimeUnixNano": "1767225590163000000",
               "attributes": [
                 {
                   "key": "traceloop.span.kind",
@@ -291,15 +291,15 @@
               }
             },
             {
-              "traceId": "ff4e3b87abff486c76822b4a393bcf54",
-              "spanId": "d5da0442322a814e",
+              "traceId": "87b9ba8d592d9a46b876159eb1ddf986",
+              "spanId": "26e0095400313822",
               "traceState": "",
-              "parentSpanId": "45bf23bb69d40264",
+              "parentSpanId": "c273ac56ba221369",
               "flags": 256,
               "name": "openai.response",
               "kind": 3,
-              "startTimeUnixNano": "1767225590137000000",
-              "endTimeUnixNano": "1767225590170000000",
+              "startTimeUnixNano": "1767225590164000000",
+              "endTimeUnixNano": "1767225590200000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",

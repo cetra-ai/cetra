@@ -1,0 +1,26 @@
+{
+  "view": "traces",
+  "field": "name",
+  "kind": "values",
+  "total": 5,
+  "missing": 0,
+  "values": [
+    {
+      "value": "support-agent",
+      "count": 2
+    },
+    {
+      "value": "answer-question",
+      "count": 1
+    },
+    {
+      "value": "chat claude-sonnet-4-5",
+      "count": 1
+    },
+    {
+      "value": "describe-image",
+      "count": 1
+    }
+  ],
+  "more": false
+}

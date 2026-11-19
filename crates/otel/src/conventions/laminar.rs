@@ -4,7 +4,7 @@
 //! messages when they are canonical (`parts`) or OpenAI-style. Anything else
 //! follows rule 10. `lmnr.span.path` is not a payload key.
 
-use llmobs_core::message::{Message, parse_messages};
+use cetra_core::message::{Message, parse_messages};
 use opentelemetry_proto::tonic::common::v1::AnyValue;
 use serde_json::Value as Json;
 
@@ -94,8 +94,8 @@ mod tests {
     use crate::bag::AttrBag;
     use crate::payload::{Payload, ReadContext};
     use crate::warn::Warnings;
-    use llmobs_core::enums::SpanKind;
-    use llmobs_core::message::messages_to_json;
+    use cetra_core::enums::SpanKind;
+    use cetra_core::message::messages_to_json;
     use opentelemetry_proto::tonic::common::v1::any_value::Value;
     use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
 

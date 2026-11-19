@@ -8,19 +8,19 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use arrow::array::RecordBatch;
-use chrono::{DateTime, NaiveDate, Utc};
-use llmobs_core::batch::{scores_to_record_batch, spans_to_record_batch};
-use llmobs_core::enums::ScoreSource;
-use llmobs_core::ids::{ProjectId, TraceId};
-use llmobs_core::score::{Score, ScoreTarget, ScoreValue};
-use llmobs_core::span::Span;
-use llmobs_storage::error::AppendError;
-use llmobs_storage::{
-    Bucket, BucketWidth, Deletion, DeletionScope, DeletionStatus, ListScope, MetricsRequest,
-    QueryContext, QueryOptions, ScoreListRequest, SessionListRequest, SessionSort, SortOrder,
-    Storage, TimeWindow, TraceListRequest, TraceSort, metrics, score_list, session_list,
-    trace_detail, trace_list,
+use cetra_core::batch::{scores_to_record_batch, spans_to_record_batch};
+use cetra_core::enums::ScoreSource;
+use cetra_core::ids::{ProjectId, TraceId};
+use cetra_core::score::{Score, ScoreTarget, ScoreValue};
+use cetra_core::span::Span;
+use cetra_storage::error::AppendError;
+use cetra_storage::{
+    Agg, Bucket, BucketWidth, Deletion, DeletionScope, DeletionStatus, ListScope, Measure,
+    QueryContext, QueryOptions, ScoreListRequest, SessionListRequest, SessionSort, Shape,
+    SortOrder, Storage, TimeWindow, TraceListRequest, TraceSort, WidgetQuery, WidgetRequest,
+    WidgetSource, score_list, session_list, trace_detail, trace_list, widget_query,
 };
+use chrono::{DateTime, NaiveDate, Utc};
 use tokio::sync::watch;
 use uuid::Uuid;
 
@@ -889,16 +889,52 @@ async fn run_query(
             .map_err(|error| error.to_string())?;
         }
         QueryKind::Metrics => {
+            // The dashboard overview's headline measures as one hourly series (the mix name is kept).
             let ctx = context(&shared.storage, project, None).await?;
-            metrics(
+            let query = WidgetQuery {
+                source: WidgetSource::Traces,
+                filter: None,
+                measures: vec![
+                    Measure {
+                        agg: Agg::Count,
+                        field: None,
+                        condition: None,
+                    },
+                    Measure {
+                        agg: Agg::Rate,
+                        field: None,
+                        condition: Some("error_count > 0".to_owned()),
+                    },
+                    Measure {
+                        agg: Agg::P95,
+                        field: Some("duration_ns".to_owned()),
+                        condition: None,
+                    },
+                    Measure {
+                        agg: Agg::Sum,
+                        field: Some("cost_total".to_owned()),
+                        condition: None,
+                    },
+                    Measure {
+                        agg: Agg::Sum,
+                        field: Some("total_tokens".to_owned()),
+                        condition: None,
+                    },
+                ],
+                breakdown: None,
+            };
+            widget_query(
                 &ctx,
-                MetricsRequest {
+                WidgetRequest {
                     window: day,
                     bucket: Bucket::Fixed(BucketWidth::H1),
-                    filter: None,
+                    dashboard_filter: None,
                     group_by: None,
                     include_eval: false,
                     include_experiments: true,
+                    query: &query,
+                    shape: Shape::Series,
+                    compare: false,
                     timeout,
                 },
             )

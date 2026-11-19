@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
+use cetra_core::ids::ProjectId;
 use chrono::NaiveDate;
-use llmobs_core::ids::ProjectId;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous};
 use sqlx::{AssertSqlSafe, ConnectOptions, Connection, Row, SqliteConnection};
 use uuid::Uuid;
@@ -1395,14 +1395,14 @@ mod tests {
             })
             .collect();
 
-        if std::env::var("LLMOBS_BLESS_SCHEMA").as_deref() == Ok("1") {
+        if std::env::var("CETRA_BLESS_SCHEMA").as_deref() == Ok("1") {
             std::fs::write(SCHEMA_DUMP, &actual).unwrap();
             return;
         }
         let committed = std::fs::read_to_string(SCHEMA_DUMP).expect("read src/catalog/schema.txt");
         assert!(
             actual == committed,
-            "the schema of a fresh catalog differs from src/catalog/schema.txt. A migration changed the schema: update the SQL in docs/spec/03-storage.md § 4 by hand, then rewrite the file with LLMOBS_BLESS_SCHEMA=1 cargo test -p llmobs-storage the_schema_matches_the_committed_dump",
+            "the schema of a fresh catalog differs from src/catalog/schema.txt. A migration changed the schema: update the SQL in docs/spec/03-storage.md § 4 by hand, then rewrite the file with CETRA_BLESS_SCHEMA=1 cargo test -p cetra-storage the_schema_matches_the_committed_dump",
         );
     }
 }

@@ -7,8 +7,8 @@ use std::time::Duration;
 use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
-use llmobs_core::ids::{OrgId, ProjectId};
-use llmobs_storage::RunError;
+use cetra_core::ids::{OrgId, ProjectId};
+use cetra_storage::RunError;
 use serde::Deserialize;
 use sqlx::SqliteConnection;
 use uuid::Uuid;
@@ -329,10 +329,10 @@ fn internal(error: impl std::error::Error + Send + Sync + 'static) -> ApiError {
 #[cfg(test)]
 mod tests {
     use axum::http::{Method, header};
-    use llmobs_core::enums::SpanStatus;
-    use llmobs_core::ids::{SpanId, TraceId};
-    use llmobs_core::span::Span;
-    use llmobs_eval::Adapter;
+    use cetra_core::enums::SpanStatus;
+    use cetra_core::ids::{SpanId, TraceId};
+    use cetra_core::span::Span;
+    use cetra_eval::Adapter;
     use serde_json::{Value, json};
 
     use super::*;

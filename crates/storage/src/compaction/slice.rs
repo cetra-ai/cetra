@@ -136,7 +136,7 @@ mod tests {
     use crate::parquet::write_file;
     use crate::test_support::{span_row, span_rows};
 
-    fn project() -> llmobs_core::ids::ProjectId {
+    fn project() -> cetra_core::ids::ProjectId {
         "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().unwrap()
     }
 
@@ -300,7 +300,7 @@ mod tests {
         let values = time_values(
             Arc::clone(&store),
             &[Arc::new(first), Arc::new(second)],
-            llmobs_core::schema::spans::START_TIME,
+            cetra_core::schema::spans::START_TIME,
         )
         .await
         .unwrap();

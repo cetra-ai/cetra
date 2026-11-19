@@ -10,7 +10,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, MutexGuard, PoisonError};
 
-use llmobs_core::ids::ProjectId;
+use cetra_core::ids::ProjectId;
 use sqlx::{ConnectOptions, Connection};
 use tokio::sync::OwnedRwLockWriteGuard;
 

@@ -50,7 +50,7 @@ fn draw_ops(runner: &mut TestRunner, pair: (P, P)) -> Vec<Op> {
     ops.into_iter().filter(|op| !is_barrier(op)).collect()
 }
 
-/// Reads one `LLMOBS_STRESS_*` variable, or `default` when it is unset. A value that does not
+/// Reads one `CETRA_STRESS_*` variable, or `default` when it is unset. A value that does not
 /// parse fails the test.
 fn setting<T: std::str::FromStr>(name: &str, default: T) -> T {
     match std::env::var(name) {
@@ -91,37 +91,37 @@ fn barrier(round: usize, harness: &mut Harness, lanes: &mut [LaneState]) {
 }
 
 /// Several lanes write at once while readers check every read. Release mode, minutes long:
-/// `just stress [secs]`. Every `LLMOBS_STRESS_*` variable is printed at the start, with the seed.
+/// `just stress [secs]`. Every `CETRA_STRESS_*` variable is printed at the start, with the seed.
 #[test]
 #[ignore = "minutes long; run with just stress"]
 fn concurrent_lanes_match_the_model() {
-    let secs: u64 = setting("LLMOBS_STRESS_SECS", 300);
-    let lanes_count: usize = setting("LLMOBS_STRESS_LANES", 6);
-    let readers: usize = setting("LLMOBS_STRESS_READERS", 8);
-    let workers: usize = setting("LLMOBS_STRESS_WORKERS", 8);
-    let remote_flag: String = setting("LLMOBS_STRESS_REMOTE", "0".to_owned());
-    let seed: u64 = setting("LLMOBS_STRESS_SEED", wall_clock_ns());
+    let secs: u64 = setting("CETRA_STRESS_SECS", 300);
+    let lanes_count: usize = setting("CETRA_STRESS_LANES", 6);
+    let readers: usize = setting("CETRA_STRESS_READERS", 8);
+    let workers: usize = setting("CETRA_STRESS_WORKERS", 8);
+    let remote_flag: String = setting("CETRA_STRESS_REMOTE", "0".to_owned());
+    let seed: u64 = setting("CETRA_STRESS_SEED", wall_clock_ns());
     assert!(
         secs > 0,
-        "LLMOBS_STRESS_SECS is {secs}; it must be at least 1"
+        "CETRA_STRESS_SECS is {secs}; it must be at least 1"
     );
     assert!(
         readers > 0,
-        "LLMOBS_STRESS_READERS is {readers}; it must be at least 1"
+        "CETRA_STRESS_READERS is {readers}; it must be at least 1"
     );
     assert!(
         workers > 0,
-        "LLMOBS_STRESS_WORKERS is {workers}; it must be at least 1"
+        "CETRA_STRESS_WORKERS is {workers}; it must be at least 1"
     );
     assert!(
         (1..=16).contains(&lanes_count),
-        "LLMOBS_STRESS_LANES is {lanes_count}; it must be 1 to 16 (32 projects)"
+        "CETRA_STRESS_LANES is {lanes_count}; it must be 1 to 16 (32 projects)"
     );
     let remote = match remote_flag.as_str() {
         "0" => false,
         "1" => true,
         other => panic!(
-            "LLMOBS_STRESS_REMOTE is {other:?}; it must be 0 (the local store) or 1 (the \
+            "CETRA_STRESS_REMOTE is {other:?}; it must be 0 (the local store) or 1 (the \
              in-memory store)"
         ),
     };

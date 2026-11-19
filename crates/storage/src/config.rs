@@ -1252,10 +1252,10 @@ mod tests {
 
     #[test]
     fn the_default_object_store_is_under_data_dir() {
-        let config = parse(r#"{"data_dir":"/var/lib/llmobs"}"#).unwrap();
+        let config = parse(r#"{"data_dir":"/var/lib/cetra"}"#).unwrap();
         assert_eq!(
             config.object_store_url(),
-            ObjectStoreUrl::Local(PathBuf::from("/var/lib/llmobs/objects"))
+            ObjectStoreUrl::Local(PathBuf::from("/var/lib/cetra/objects"))
         );
     }
 

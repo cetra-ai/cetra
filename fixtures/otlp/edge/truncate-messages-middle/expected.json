@@ -9,14 +9,14 @@
       "start_time": "2025-12-31T23:59:50.000000000Z",
       "end_time": "2025-12-31T23:59:51.000000000Z",
       "status": "unset",
-      "input": "[{\"role\":\"system\",\"parts\":[{\"type\":\"text\",\"content\":\"rules\"}]},{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"hello\"}]},{\"role\":\"system\",\"parts\":[{\"type\":\"text\",\"content\":\"[llmobs: 2 messages truncated]\"}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"end\"}]}]",
+      "input": "[{\"role\":\"system\",\"parts\":[{\"type\":\"text\",\"content\":\"rules\"}]},{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"hello\"}]},{\"role\":\"system\",\"parts\":[{\"type\":\"text\",\"content\":\"[cetra: 2 messages truncated]\"}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"end\"}]}]",
       "input_format": "messages",
       "input_preview": "hello",
       "truncated": [
         "input"
       ],
       "conventions": [
-        "llmobs"
+        "cetra"
       ],
       "ingest_time": "2026-01-01T00:00:00.000000000Z",
       "schema_version": 1

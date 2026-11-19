@@ -29,6 +29,11 @@ const KINDS = {
   { icon: LucideIcon; label: string; className: string }
 >;
 
+/** The human label for a span kind, e.g. `LLM` for `llm`. Unknown kinds show the raw value. */
+export function kindLabel(kind: Schema<"SpanKind">): string {
+  return KINDS[kind]?.label ?? kind;
+}
+
 export function KindIcon({ kind }: { kind: Schema<"SpanKind"> }) {
   const entry = KINDS[kind] ?? { icon: Circle, label: kind, className: "text-kind-span" };
   const Icon = entry.icon;

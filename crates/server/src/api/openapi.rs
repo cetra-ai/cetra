@@ -4,8 +4,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use llmobs_core::enums::{ScoreSource, ScoreTargetKind};
-use llmobs_core::score::Score;
+use cetra_core::enums::{ScoreSource, ScoreTargetKind};
+use cetra_core::score::Score;
 use utoipa::openapi::path::{
     HttpMethod, OperationBuilder, Parameter, ParameterBuilder, ParameterIn, PathItem, Paths,
     PathsBuilder,
@@ -46,12 +46,21 @@ use super::connections::{
     LlmConnectionTestError, LlmConnectionTestResult, StructuredOutputMode, TestErrorClass,
     TestLlmConnectionRequest, UpdateLlmConnectionRequest,
 };
+use super::dashboards::{
+    AggBody, BreakdownBody, Chart, ChartType, CreateDashboard, Dashboard, DashboardListParams,
+    DashboardSummary, Definition, Layout, MeasureBody, SaveOverview, TotalRow, UpdateDashboard,
+    Widget, WidgetKind, WidgetPoint, WidgetQueryBody, WidgetQueryRequest, WidgetQueryResponse,
+    WidgetSeries, WidgetSeriesResponse, WidgetShape, WidgetSourceBody, WidgetTotalResponse,
+};
 use super::datasets::{
-    AddItemsRequest, AddItemsResponse, CreateDatasetRequest, Dataset, DatasetItem,
-    DatasetItemListParams, DatasetItemParams, DatasetListParams, DatasetVersion,
-    DatasetVersionListParams, ExportFormat, ExportParams, FromTraceRequest, ImportColumn,
+    AddItemsRequest, AddItemsResponse, ChangeLimit, CreateDatasetRequest, Dataset, DatasetItem,
+    DatasetItemListParams, DatasetItemParams, DatasetListParams, DatasetTrend, DatasetVersion,
+    DatasetVersionListParams, DeleteItemsRequest, EditItem, EditItemsRequest, EditItemsResponse,
+    ExperimentScoreMean, ExperimentTrend, ExperimentTrendParams, ExperimentTrends, ExportFormat,
+    ExportParams, FromTraceRequest, FromTracesRequest, FromTracesResult, ImportColumn,
     ImportFormat, ImportMapping, ImportParams, ImportPreview, ImportResult, ImportRowError,
-    NewDatasetItem, PreviewParams, UpdateDatasetRequest, UpdateItemRequest,
+    ItemChange, ItemChangeKind, ItemChangeListParams, NewDatasetItem, PreviewParams,
+    RestoreRequest, SkippedTrace, TraceRef, UpdateDatasetRequest, UpdateItemRequest,
 };
 use super::deletions::{
     CreateDeletion, Deletion, DeletionPreview, DeletionPreviewRequest, DropParams,
@@ -64,17 +73,19 @@ use super::eval_jobs::{
     EvalJob, EvalJobKind, EvalJobListParams, EvalJobStatus, RunEvaluatorRequest,
 };
 use super::evaluators::{
-    CreateEvaluatorRequest, Evaluator, EvaluatorKind, EvaluatorTemplate, EvaluatorTemplateList,
-    EvaluatorTestError, EvaluatorTestRequest, EvaluatorTestResult, EvaluatorTestUsage,
-    OutputScoreBody, TemplateMapping, TestEvaluatorBody, UpdateEvaluatorRequest,
+    CreateEvaluatorRequest, Evaluator, EvaluatorKind, EvaluatorStatsParams, EvaluatorStatsResponse,
+    EvaluatorTemplate, EvaluatorTemplateList, EvaluatorTestError, EvaluatorTestRequest,
+    EvaluatorTestResult, EvaluatorTestUsage, EvaluatorVersion, OutputScoreBody, TemplateMapping,
+    TestEvaluatorBody, UpdateEvaluatorRequest,
 };
 use super::experiments::{
-    CompareCell, CompareParams, CompareRow, CreateExperimentRequest, CreateExperimentResponse,
-    Experiment, ExperimentComparison, ExperimentListParams, ExperimentResult, ExperimentResults,
-    ExperimentResultsRequest, ExperimentResultsResponse, ExperimentStatus, ExperimentSummary,
-    FinishExperimentRequest, ResultRow, ResultScore, ResultsParams, ScoreDelta, ScoreDeltas,
-    ScoreSummary,
+    CompareCell, CompareOnly, CompareParams, CompareRow, CreateExperimentRequest,
+    CreateExperimentResponse, Experiment, ExperimentComparison, ExperimentListParams,
+    ExperimentResult, ExperimentResults, ExperimentResultsRequest, ExperimentResultsResponse,
+    ExperimentStatus, ExperimentSummaries, ExperimentSummary, FinishExperimentRequest, ResultRow,
+    ResultScore, ResultsParams, ScoreDelta, ScoreDeltas, ScoreSummary, SummariesParams,
 };
+use super::facets::{FacetsParams, FacetsResponse};
 use super::internal::{
     CreateInternalOrgRequest, InternalDrop, InternalDropKind, InternalDropsQuery, InternalMember,
     InternalMembers, InternalMembersQuery, InternalOrg, InternalOwner, InternalUsageQuery,
@@ -87,15 +98,15 @@ use super::keys::{
     CreatedPersonalToken, PersonalToken,
 };
 use super::members::{OrgMember, ProjectMember, SetProjectOverrideRequest, UpdateOrgMemberRequest};
-use super::metrics::{MetricsBucket, MetricsGroupBy, MetricsParams, MetricsResponse};
+use super::metrics::{MetricsBucket, MetricsGroupBy};
 use super::model_prices::{
     ModelPrice, ModelPriceInput, ModelPriceListParams, ModelPriceResolution,
     ModelPriceResolveParams, ModelPriceScope, ModelPriceTier,
 };
 use super::online_rules::{
     BudgetPeriod, CreateOnlineRuleRequest, JobCounts, OnlineRule, OnlineRulePage,
-    OnlineRulePreview, OnlineRulePreviewRequest, PauseReason, RuleSpend, RuleTarget,
-    UpdateOnlineRuleRequest,
+    OnlineRulePreview, OnlineRulePreviewRequest, OnlineRuleStatsResponse, PauseReason, RuleSpend,
+    RuleTarget, UpdateOnlineRuleRequest,
 };
 use super::org_sso::{
     AddOrgSsoDomain, DomainStatus, JitRole, OrgSso, OrgSsoDomain, OrgSsoProvider, PatchOrgSso,
@@ -105,7 +116,7 @@ use super::saved_views::{CreateSavedView, SavedView, SavedViewListParams, Update
 use super::schema::SchemaResponse;
 use super::score_definitions::{
     CreateScoreDefinitionRequest, ScoreDefinition, ScoreDefinitionCategory,
-    ScoreDefinitionListParams, UpdateScoreDefinitionRequest,
+    ScoreDefinitionListParams, ScoreDirection, UpdateScoreDefinitionRequest,
 };
 use super::scores::{
     FeedbackRequest, FeedbackResult, FeedbackValue, ScoreBatch, ScoreCreate, ScoreListParams,
@@ -118,10 +129,12 @@ use super::traces::{
     TraceListParams, TraceSort, TraceStreamParams, TraceSummary,
 };
 use super::usage::{OrgUsage, UsageDay, UsageParams};
-use super::users::{EndUserDetail, EndUserSummary, UserListParams, UserSort};
+use super::users::{
+    EndUserDetail, EndUserSummary, UserDetailParams, UserListParams, UserScore, UserSort,
+};
 
 const PROJECT: &str = "/api/v1/projects/{project}";
-const COOKIE_NAME: &str = concat!(llmobs_core::llmobs_name!(), "_session");
+const COOKIE_NAME: &str = concat!(cetra_core::cetra_name!(), "_session");
 
 const AUTH_ERRORS: &[u16] = &[401, 403, 404, 429];
 const QUERY_ERRORS: &[u16] = &[400, 401, 403, 404, 429];
@@ -261,6 +274,7 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<SessionDetail>();
     set.insert::<EndUserSummary>();
     set.insert::<EndUserDetail>();
+    set.insert::<UserScore>();
     set.insert::<Score>();
     set.insert::<ScoreCreate>();
     set.insert::<ScoreBatch>();
@@ -272,7 +286,31 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<SavedView>();
     set.insert::<CreateSavedView>();
     set.insert::<UpdateSavedView>();
-    set.insert::<MetricsResponse>();
+    set.insert::<Dashboard>();
+    set.insert::<DashboardSummary>();
+    set.insert::<CreateDashboard>();
+    set.insert::<UpdateDashboard>();
+    set.insert::<SaveOverview>();
+    set.insert::<Definition>();
+    set.insert::<Widget>();
+    set.insert::<Layout>();
+    set.insert::<Chart>();
+    set.insert::<ChartType>();
+    set.insert::<WidgetKind>();
+    set.insert::<WidgetQueryBody>();
+    set.insert::<WidgetSourceBody>();
+    set.insert::<MeasureBody>();
+    set.insert::<AggBody>();
+    set.insert::<BreakdownBody>();
+    set.insert::<WidgetQueryRequest>();
+    set.insert::<WidgetShape>();
+    set.insert::<WidgetQueryResponse>();
+    set.insert::<WidgetSeriesResponse>();
+    set.insert::<WidgetSeries>();
+    set.insert::<WidgetPoint>();
+    set.insert::<WidgetTotalResponse>();
+    set.insert::<TotalRow>();
+    set.insert::<FacetsResponse>();
     set.insert::<SqlQueryRequest>();
     set.insert::<SqlQueryResult>();
     set.insert::<SqlColumnInfo>();
@@ -288,6 +326,7 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert_page::<ProjectApiKey>("ApiKeyPage");
     set.insert_page::<PersonalToken>("PersonalTokenPage");
     set.insert_page::<SavedView>("SavedViewPage");
+    set.insert_page::<DashboardSummary>("DashboardPage");
     set.insert::<EvaluatorKind>();
     set.insert::<OutputScoreBody>();
     set.insert::<Evaluator>();
@@ -301,8 +340,11 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<EvaluatorTestError>();
     set.insert::<EvaluatorTestUsage>();
     set.insert::<EvaluatorTestResult>();
+    set.insert::<EvaluatorStatsResponse>();
     set.insert_page::<Evaluator>("EvaluatorPage");
+    set.insert_page::<EvaluatorVersion>("EvaluatorVersionPage");
     set.insert::<ScoreDefinitionCategory>();
+    set.insert::<ScoreDirection>();
     set.insert::<ScoreDefinition>();
     set.insert::<CreateScoreDefinitionRequest>();
     set.insert::<UpdateScoreDefinitionRequest>();
@@ -317,7 +359,24 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<AddItemsRequest>();
     set.insert::<AddItemsResponse>();
     set.insert::<UpdateItemRequest>();
+    set.insert::<EditItem>();
+    set.insert::<EditItemsRequest>();
+    set.insert::<EditItemsResponse>();
+    set.insert::<DeleteItemsRequest>();
+    set.insert::<RestoreRequest>();
+    set.insert::<TraceRef>();
+    set.insert::<FromTracesRequest>();
+    set.insert::<SkippedTrace>();
+    set.insert::<FromTracesResult>();
+    set.insert::<ExperimentScoreMean>();
+    set.insert::<ExperimentTrend>();
+    set.insert::<DatasetTrend>();
+    set.insert::<ExperimentTrends>();
     set.insert::<FromTraceRequest>();
+    set.insert::<ItemChangeKind>();
+    set.insert::<ItemChange>();
+    set.insert::<ChangeLimit>();
+    set.insert_page::<ItemChange>("ItemChangePage");
     set.insert_page::<DatasetVersion>("DatasetVersionPage");
     set.insert_page::<DatasetItem>("DatasetItemPage");
     set.insert::<ImportFormat>();
@@ -346,6 +405,8 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<ScoreDelta>();
     set.insert::<ScoreDeltas>();
     set.insert::<ExperimentComparison>();
+    set.insert::<CompareOnly>();
+    set.insert::<ExperimentSummaries>();
     set.insert::<ModelPriceScope>();
     set.insert::<ModelPriceTier>();
     set.insert::<ModelPrice>();
@@ -386,6 +447,7 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<UpdateOnlineRuleRequest>();
     set.insert::<OnlineRulePreviewRequest>();
     set.insert::<OnlineRulePreview>();
+    set.insert::<OnlineRuleStatsResponse>();
     set.insert::<EvalJobKind>();
     set.insert::<EvalJobStatus>();
     set.insert::<EvalJob>();
@@ -450,7 +512,7 @@ pub fn openapi() -> OpenApi {
     let mut document = OpenApiBuilder::new()
         .info(
             InfoBuilder::new()
-                .title(concat!(llmobs_core::llmobs_name!(), " API"))
+                .title(concat!(cetra_core::cetra_name!(), " API"))
                 .version(env!("CARGO_PKG_VERSION"))
                 .description(Some(
                     "Observability read API. The rules are in docs/spec/09-api.md.",
@@ -493,8 +555,11 @@ pub fn openapi() -> OpenApi {
             tag("model_prices", "Custom and built-in model prices"),
             tag("schema", "Filter and SQL catalog."),
             tag("saved_views", "Saved list views and SQL queries."),
+            tag(
+                "dashboards",
+                "Custom dashboards and their widget definitions.",
+            ),
             tag("sql", "SQL console over the project's views."),
-            tag("metrics", "Dashboard metrics."),
             tag("media", "Extracted media blobs."),
             tag("deletions", "GDPR deletions and their status."),
             tag(
@@ -577,8 +642,8 @@ fn take_null_is_a_value(name: &str, schema: &mut RefOr<Schema>) -> BTreeMap<Stri
 
 fn d65_component_names() -> BTreeSet<String> {
     let mut names = BTreeSet::new();
-    names.insert(<llmobs_core::message::Message as ToSchema>::name().into_owned());
-    for name in llmobs_core::message::part_component_names() {
+    names.insert(<cetra_core::message::Message as ToSchema>::name().into_owned());
+    for name in cetra_core::message::part_component_names() {
         names.insert((*name).to_owned());
     }
     names
@@ -820,6 +885,7 @@ fn paths() -> Paths {
     let paths = model_price_paths(paths);
     let paths = org_model_price_paths(paths);
     let paths = saved_view_paths(paths);
+    let paths = dashboard_paths(paths);
     let paths = sql_paths(paths);
     let paths = deletion_paths(paths);
     let paths = channel_paths(paths);
@@ -935,7 +1001,7 @@ fn auth_paths(paths: PathsBuilder) -> PathsBuilder {
         "Start an OAuth or OIDC login",
     )
     .description(Some(
-        "Redirects to the provider and sets the `llmobs_oauth` cookie. `redirect` is kept when it \
+        "Redirects to the provider and sets the `cetra_oauth` cookie. `redirect` is kept when it \
          starts with `/`, does not start with `//` or `/\\`, is at most 1024 bytes, and contains \
          no ASCII control character. Otherwise the browser returns to `/`. An unknown provider is \
          404. When metadata cannot be loaded, the response redirects to \
@@ -1350,7 +1416,7 @@ fn org_sso_paths(paths: PathsBuilder) -> PathsBuilder {
         "Verify an email domain with its DNS TXT record",
     )
     .description(Some(
-        "Looks up `_llmobs-verify.<domain>` and verifies the domain when its value `llmobs-verify=<token>` is there (D-P-54, D-P-64). An already verified domain answers 200 without a lookup. A domain another org holds moves to this org only when the holder's record is gone from the answer. At most 10 lookups per minute per org. A failed lookup answers 503. Needs the Teams add-on or an enterprise licence (D-P-61). Owners only, session only.",
+        "Looks up `_cetra-verify.<domain>` and verifies the domain when its value `cetra-verify=<token>` is there (D-P-54, D-P-64). An already verified domain answers 200 without a lookup. A domain another org holds moves to this org only when the holder's record is gone from the answer. At most 10 lookups per minute per org. A failed lookup answers 503. Needs the Teams add-on or an enterprise licence (D-P-61). Owners only, session only.",
     ))
     .securities(Some(vec![SecurityRequirement::new("session", [] as [&str; 0])]))
     .parameters(Some(vec![
@@ -2310,7 +2376,7 @@ fn session_paths(paths: PathsBuilder) -> PathsBuilder {
         .description(Some(format!(
             "{EXCLUSIONS} Sessions are the user's 100 most recent."
         )))
-        .parameters(Some(with_query::<ExclusionParams>(vec![
+        .parameters(Some(with_query::<UserDetailParams>(vec![
             project_param(),
             path_string("user_id", "End-user id."),
         ])))
@@ -2418,14 +2484,14 @@ fn score_paths(paths: PathsBuilder) -> PathsBuilder {
             AUTH_ERRORS,
         ))
         .build();
-    let metrics = operation("get_metrics", "metrics", "Get metrics")
+    let facets = operation("get_facets", "traces", "Get facets")
         .description(Some(format!(
-            "{EXCLUSIONS} Series have one point per bucket. Latencies and TTFT are nanoseconds. Costs are USD. Results are cached for 10 seconds. The evaluation cost series always counts evaluation traces (spec 05 § Dashboard metrics)."
+            "{EXCLUSIONS} A facet describes one field over the rows the list would show: the window, the default exclusions, `search` and `filter`, but not the list's cursor, sort or limit. The field is a column of the view, or `map['key']` of a map column; a bare map column facets its keys. `kind` is `values` (strings, booleans, lists and `map['key']`), `keys` (a bare map) or `histogram` (numbers: min, max, approximate p50, p95 and p99, and 20 equal buckets below p99 plus one bucket from p99 to max). `total` counts rows, `missing` the rows with no value (null, or an empty list or map). Values are counted per row: a list counts a row once under each distinct element. Keys starting with `cetra.` are left out. `q` keeps values containing it, ignoring case. Spans count stored copies separately. Sessions take no `search`. Nothing is cached on the server; a facet is computed on each call."
         )))
-        .parameters(Some(with_query::<MetricsParams>(vec![project_param()])))
+        .parameters(Some(with_query::<FacetsParams>(vec![project_param()])))
         .responses(responses(
             "200",
-            json_of::<MetricsResponse>("Dashboard metrics."),
+            json_of::<FacetsResponse>("A facet: values, keys or a histogram."),
             READ_ERRORS,
         ))
         .build();
@@ -2455,8 +2521,8 @@ fn score_paths(paths: PathsBuilder) -> PathsBuilder {
             PathItem::new(HttpMethod::Get, schema),
         )
         .path(
-            format!("{PROJECT}/metrics"),
-            PathItem::new(HttpMethod::Get, metrics),
+            format!("{PROJECT}/facets"),
+            PathItem::new(HttpMethod::Get, facets),
         )
 }
 
@@ -2512,6 +2578,15 @@ fn evaluator_paths(paths: PathsBuilder) -> PathsBuilder {
             &[400, 401, 403, 404, 429],
         ))
         .build();
+    let versions = operation("list_evaluator_versions", "evaluation", "List evaluator versions")
+        .description(Some("Any project member can read. Newest first. The config is shown as `get_evaluator` shows it: sealed webhook values are never included. A version is kept until the evaluator is deleted."))
+        .parameters(Some(with_query::<PageParams>(vec![project_param(), id.clone()])))
+        .responses(responses(
+            "200",
+            json_named("EvaluatorVersionPage", "One page of versions, newest first."),
+            QUERY_ERRORS,
+        ))
+        .build();
     let patch = operation("patch_evaluator", "evaluation", "Update an evaluator")
         .description(Some("Project members and above. API keys cannot call it."))
         .parameters(Some(vec![project_param(), id.clone()]))
@@ -2550,7 +2625,7 @@ fn evaluator_paths(paths: PathsBuilder) -> PathsBuilder {
     .build();
     let test = operation("post_evaluator_test", "evaluation", "Run an evaluator once")
         .description(Some(
-            "Project members and above. API keys cannot call it. Runs synchronously, writes the judge trace (environment `llmobs-eval`) and the judge usage, and writes no score. Shares the 10 per minute per user limit with connection tests.",
+            "Project members and above. API keys cannot call it. Runs synchronously, writes the judge trace (environment `cetra-eval`) and the judge usage, and writes no score. Shares the 10 per minute per user limit with connection tests.",
         ))
         .parameters(Some(vec![project_param()]))
         .request_body(Some(json_body("EvaluatorTestRequest")))
@@ -2562,10 +2637,19 @@ fn evaluator_paths(paths: PathsBuilder) -> PathsBuilder {
             &[400, 401, 403, 404, 429, 503],
         ))
         .build();
+    let stats = operation("get_evaluator_stats", "evaluation", "Get evaluator stats")
+        .description(Some("Any project member can read. Jobs, costs, latencies and scores cover the last 7 UTC days (finished jobs are kept 7 days). `experiments_with_score` lists experiments that have a score named like the evaluator's output score in the last 30 days (D-I-48). Not cached."))
+        .parameters(Some(with_query::<EvaluatorStatsParams>(vec![project_param()])))
+        .responses(responses("200", json_of::<EvaluatorStatsResponse>("One entry per evaluator."), READ_ERRORS))
+        .build();
     paths
         .path(
             format!("{PROJECT}/evaluators"),
             PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/evaluators/stats"),
+            PathItem::new(HttpMethod::Get, stats),
         )
         .path(
             format!("{PROJECT}/evaluators"),
@@ -2574,6 +2658,10 @@ fn evaluator_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/evaluators/{{id}}"),
             PathItem::new(HttpMethod::Get, get),
+        )
+        .path(
+            format!("{PROJECT}/evaluators/{{id}}/versions"),
+            PathItem::new(HttpMethod::Get, versions),
         )
         .path(
             format!("{PROJECT}/evaluators/{{id}}"),
@@ -2605,6 +2693,11 @@ fn online_rule_paths(paths: PathsBuilder) -> PathsBuilder {
             json_named("OnlineRulePage", "One page of online rules."),
             QUERY_ERRORS,
         ))
+        .build();
+    let stats = operation("get_online_rule_stats", "evaluation", "Get online rule stats")
+        .description(Some("Any project member can read. Jobs and scores cover the last 24 hours, per hour: the finished jobs (`done`, `failed`, `skipped`) by finished time, and the live scores of each rule read with its evaluator's current output type (D-I-50). One entry per rule, none left out. Not cached."))
+        .parameters(Some(vec![project_param()]))
+        .responses(responses("200", json_of::<OnlineRuleStatsResponse>("One entry per online rule."), READ_ERRORS))
         .build();
     let create = operation("post_online_rule", "evaluation", "Create an online rule")
         .description(Some(
@@ -2685,6 +2778,10 @@ fn online_rule_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/online-rules"),
             PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/online-rules/stats"),
+            PathItem::new(HttpMethod::Get, stats),
         )
         .path(
             format!("{PROJECT}/online-rules"),
@@ -3080,6 +3177,32 @@ fn dataset_paths(paths: PathsBuilder) -> PathsBuilder {
         QUERY_ERRORS,
     ))
     .build();
+    let version_number = ParameterBuilder::new()
+        .name("version")
+        .parameter_in(ParameterIn::Path)
+        .required(Required::True)
+        .description(Some("Version number, starting at 1."))
+        .schema(Some(ObjectBuilder::new().schema_type(Type::Integer)))
+        .build();
+    let changes_list = operation(
+        "list_dataset_version_changes",
+        "datasets",
+        "List the items a version changed",
+    )
+    .description(Some(
+        "Any project member, or an API key with `read`. The items the version added, edited or deleted, each with its revision before and after, paged by item id (D-J-24). A version outside 1 to the current one is 404.",
+    ))
+    .parameters(Some(with_query::<ItemChangeListParams>(vec![
+        project_param(),
+        dataset.clone(),
+        version_number,
+    ])))
+    .responses(responses(
+        "200",
+        json_named("ItemChangePage", "One page of changes, by item id."),
+        QUERY_ERRORS,
+    ))
+    .build();
     let item_list = operation(
         "list_dataset_items",
         "datasets",
@@ -3144,6 +3267,69 @@ fn dataset_paths(paths: PathsBuilder) -> PathsBuilder {
             &[400, 401, 403, 404, 429],
         ))
         .build();
+    let items_edit = operation("patch_dataset_items", "datasets", "Edit items in one batch")
+        .description(Some(
+            "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5, D-J-23). Creates one new version holding every item that changes; items that change nothing are left out. A batch with any failing item writes nothing; the error lists the failing items.",
+        ))
+        .parameters(Some(vec![project_param(), dataset.clone()]))
+        .request_body(Some(json_body("EditItemsRequest")))
+        .responses(responses(
+            "200",
+            json_of::<EditItemsResponse>("The new version, or null when nothing changed, and the items."),
+            &[400, 401, 403, 404, 413, 429],
+        ))
+        .build();
+    let items_delete = operation("post_dataset_items_delete", "datasets", "Delete items in one batch")
+        .description(Some(
+            "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5, D-J-23). Creates one new version in which the listed items are gone; older versions still hold them.",
+        ))
+        .parameters(Some(vec![project_param(), dataset.clone()]))
+        .request_body(Some(json_body("DeleteItemsRequest")))
+        .responses(responses(
+            "200",
+            json_of::<DatasetVersion>("The new version."),
+            &[400, 401, 403, 404, 413, 429],
+        ))
+        .build();
+    let restore = operation("restore_dataset", "datasets", "Restore the items of an earlier version")
+        .description(Some(
+            "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5, D-J-24). Creates one new version whose live items are those of the given earlier version. A version that changes nothing is a 400 on `version` and writes nothing.",
+        ))
+        .parameters(Some(vec![project_param(), dataset.clone()]))
+        .request_body(Some(json_body("RestoreRequest")))
+        .responses(responses(
+            "200",
+            json_of::<DatasetVersion>("The new version."),
+            &[400, 401, 403, 404, 409, 413, 429],
+        ))
+        .build();
+    let from_traces = operation("post_dataset_items_from_traces", "datasets", "Add items from several traces")
+        .description(Some(
+            "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5, D-J-25). Copies 1 to 100 traces as `from-trace` does, in one new version. A trace that cannot be copied is listed in `skipped`; no copyable trace is a 400.",
+        ))
+        .parameters(Some(vec![project_param(), dataset.clone()]))
+        .request_body(Some(json_body("FromTracesRequest")))
+        .responses(responses(
+            "201",
+            json_of::<FromTracesResult>("The new version, the items added and the traces skipped."),
+            &[400, 401, 403, 404, 409, 413, 429, 503],
+        ))
+        .build();
+    let trends = operation(
+        "list_experiment_trends",
+        "datasets",
+        "The latest experiments of several datasets, with score means",
+    )
+    .description(Some(
+        "Any project member, or an API key with `read`. For each dataset of `ids` in the project, its 10 newest visible experiments with result and error counts, and their numeric and boolean score means (D-J-26). Storage busy or slow answers without `scores` and with `scores_unavailable: true`.",
+    ))
+    .parameters(Some(with_query::<ExperimentTrendParams>(vec![project_param()])))
+    .responses(responses(
+        "200",
+        json_of::<ExperimentTrends>("The trends of each dataset, in request order."),
+        QUERY_ERRORS,
+    ))
+    .build();
     let item_from_trace = operation(
         "post_dataset_item_from_trace",
         "datasets",
@@ -3212,6 +3398,10 @@ fn dataset_paths(paths: PathsBuilder) -> PathsBuilder {
             PathItem::new(HttpMethod::Get, version_list),
         )
         .path(
+            format!("{PROJECT}/datasets/{{dataset}}/versions/{{version}}/changes"),
+            PathItem::new(HttpMethod::Get, changes_list),
+        )
+        .path(
             format!("{PROJECT}/datasets/{{dataset}}/items"),
             PathItem::new(HttpMethod::Get, item_list),
         )
@@ -3250,6 +3440,26 @@ fn dataset_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/datasets/{{dataset}}"),
             PathItem::new(HttpMethod::Delete, delete),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}/items"),
+            PathItem::new(HttpMethod::Patch, items_edit),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}/items/delete"),
+            PathItem::new(HttpMethod::Post, items_delete),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}/restore"),
+            PathItem::new(HttpMethod::Post, restore),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}/items/from-traces"),
+            PathItem::new(HttpMethod::Post, from_traces),
+        )
+        .path(
+            format!("{PROJECT}/dataset-trends"),
+            PathItem::new(HttpMethod::Get, trends),
         )
         .path(
             format!("{PROJECT}/datasets/{{dataset}}/items/from-trace"),
@@ -3388,6 +3598,21 @@ fn experiment_paths(paths: PathsBuilder) -> PathsBuilder {
             READ_ERRORS,
         ))
         .build();
+    let summaries = operation(
+        "get_experiment_summaries",
+        "experiments",
+        "Get experiment summaries",
+    )
+    .description(Some(EXPERIMENT_READ))
+    .parameters(Some(with_query::<SummariesParams>(vec![project_param()])))
+    .responses(responses(
+        "200",
+        json_of::<ExperimentSummaries>(
+            "The summaries of the experiments found, in request order, and the ids too large to summarize.",
+        ),
+        READ_ERRORS,
+    ))
+    .build();
     let finish = operation(
         "post_experiment_finish",
         "experiments",
@@ -3434,6 +3659,10 @@ fn experiment_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/experiments/compare"),
             PathItem::new(HttpMethod::Get, compare),
+        )
+        .path(
+            format!("{PROJECT}/experiments/summaries"),
+            PathItem::new(HttpMethod::Get, summaries),
         )
 }
 
@@ -3605,6 +3834,160 @@ fn saved_view_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/saved-views/{{id}}"),
             PathItem::new(HttpMethod::Delete, delete),
+        )
+}
+
+fn dashboard_paths(paths: PathsBuilder) -> PathsBuilder {
+    let list = operation("list_dashboards", "dashboards", "List dashboards")
+        .description(Some(
+            "Dashboards of the project, by name then id. Leaves out the definition; get one dashboard for its widgets. Readable with a read key and a read-only token.",
+        ))
+        .parameters(Some(with_query::<DashboardListParams>(vec![
+            project_param(),
+        ])))
+        .responses(responses(
+            "200",
+            json_named("DashboardPage", "One page of dashboards."),
+            QUERY_ERRORS,
+        ))
+        .build();
+    let create = operation("create_dashboard", "dashboards", "Create a dashboard")
+        .description(Some(
+            "Creates a dashboard at version 1. Every widget query is checked, and every filter is parsed, before the write. A project holds at most 100 dashboards (409). A session or a read-write personal access token with role member or above; API keys cannot write dashboards.",
+        ))
+        .parameters(Some(vec![project_param()]))
+        .request_body(Some(json_body("CreateDashboard")))
+        .responses(responses(
+            "201",
+            json_of::<Dashboard>("The created dashboard."),
+            &[400, 401, 403, 404, 409, 413, 415, 429],
+        ))
+        .build();
+    let get = operation("get_dashboard", "dashboards", "Get a dashboard")
+        .description(Some(
+            "One dashboard with its definition. Any other id is 404.",
+        ))
+        .parameters(Some(vec![
+            project_param(),
+            path_uuid("id", "Dashboard id."),
+        ]))
+        .responses(responses(
+            "200",
+            json_of::<Dashboard>("The dashboard."),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    let update = operation("update_dashboard", "dashboards", "Update a dashboard")
+        .description(Some(
+            "Changes the fields given; omitted fields are unchanged. `version` must be the stored version, else 409 with the stored version in `detail`. A successful update raises the version by one. Same roles as create.",
+        ))
+        .parameters(Some(vec![
+            project_param(),
+            path_uuid("id", "Dashboard id."),
+        ]))
+        .request_body(Some(json_body("UpdateDashboard")))
+        .responses(responses(
+            "200",
+            json_of::<Dashboard>("The updated dashboard."),
+            &[400, 401, 403, 404, 409, 413, 415, 429],
+        ))
+        .build();
+    let query = operation("query_widget", "dashboards", "Get one widget's data")
+        .description(Some(
+            "Answers one widget query over `[from, to)`: a series (one value per bucket) or a total (one value over the range, with `compare` also the previous range). Spec 05 § Dashboard queries. The dashboard's `filter` is a traces expression, and the default exclusions apply: evaluation traces (`environment = cetra-eval`) and experiment traces are left out unless `include_eval` or `include_experiments` is set. A read: a read-only personal access token and a `read` key may call it. Results are cached for 10 seconds per project and body.",
+        ))
+        .parameters(Some(vec![project_param()]))
+        .request_body(Some(json_body("WidgetQueryRequest")))
+        .responses(responses(
+            "200",
+            json_of::<WidgetQueryResponse>("The widget's answer, tagged by `shape`."),
+            &[400, 401, 403, 404, 413, 415, 422, 429, 503],
+        ))
+        .build();
+    let get_overview = operation("get_overview", "dashboards", "Get the project's Overview")
+        .description(Some(
+            "The Overview the project stored with a save: its widgets and version. Without a stored one, 404, and the client shows the built-in preset. Readable with a read key and a read-only token.",
+        ))
+        .parameters(Some(vec![project_param()]))
+        .responses(responses(
+            "200",
+            json_of::<Dashboard>("The stored Overview."),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    let save_overview = operation("save_overview", "dashboards", "Save the project's Overview")
+        .description(Some(
+            "Stores the widgets as the project's Overview. With nothing stored and no `version`, creates it at version 1 (201). Otherwise `version` must be the stored version: the save updates it (200) and raises the version by one. Any other `version` is 409 with the stored version in `detail`; without a stored Overview, a `version` is also 409 with 0. Every widget query is checked before the write. Same roles as create.",
+        ))
+        .parameters(Some(vec![project_param()]))
+        .request_body(Some(json_body("SaveOverview")))
+        .responses(responses_with(
+            [
+                ("200", json_of::<Dashboard>("The updated Overview.")),
+                ("201", json_of::<Dashboard>("The created Overview.")),
+            ],
+            &[400, 401, 403, 404, 409, 413, 415, 429],
+        ))
+        .build();
+    let reset_overview = operation("reset_overview", "dashboards", "Reset the project's Overview")
+        .description(Some(
+            "Deletes the project's stored Overview, so the built-in preset shows again. Answers 204 whether or not one was stored. Same roles as create.",
+        ))
+        .parameters(Some(vec![project_param()]))
+        .responses(responses(
+            "204",
+            ResponseBuilder::new().description("Reset.").build(),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    let delete = operation("delete_dashboard", "dashboards", "Delete a dashboard")
+        .description(Some("Deletes the dashboard. Same roles as create."))
+        .parameters(Some(vec![
+            project_param(),
+            path_uuid("id", "Dashboard id."),
+        ]))
+        .responses(responses(
+            "204",
+            ResponseBuilder::new().description("Deleted.").build(),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    paths
+        .path(
+            format!("{PROJECT}/dashboards"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/dashboards"),
+            PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/dashboards/{{id}}"),
+            PathItem::new(HttpMethod::Get, get),
+        )
+        .path(
+            format!("{PROJECT}/dashboards/{{id}}"),
+            PathItem::new(HttpMethod::Patch, update),
+        )
+        .path(
+            format!("{PROJECT}/dashboards/{{id}}"),
+            PathItem::new(HttpMethod::Delete, delete),
+        )
+        .path(
+            format!("{PROJECT}/dashboards/query"),
+            PathItem::new(HttpMethod::Post, query),
+        )
+        .path(
+            format!("{PROJECT}/dashboards/overview"),
+            PathItem::new(HttpMethod::Get, get_overview),
+        )
+        .path(
+            format!("{PROJECT}/dashboards/overview"),
+            PathItem::new(HttpMethod::Put, save_overview),
+        )
+        .path(
+            format!("{PROJECT}/dashboards/overview"),
+            PathItem::new(HttpMethod::Delete, reset_overview),
         )
 }
 
@@ -3830,6 +4213,24 @@ fn alert_rule_paths(paths: PathsBuilder) -> PathsBuilder {
             QUERY_ERRORS,
         ))
         .build();
+    let project_events = operation(
+        "list_project_alert_events",
+        "alerts",
+        "List the project's alert events",
+    )
+    .description(Some(
+        "Events of every rule of the project, newest first, with their deliveries.",
+    ))
+    .parameters(Some(with_query::<PageParams>(vec![project_param()])))
+    .responses(responses(
+        "200",
+        json_named(
+            "AlertEventPage",
+            "Events of all the project's rules, newest first, with their deliveries.",
+        ),
+        QUERY_ERRORS,
+    ))
+    .build();
     paths
         .path(
             format!("{PROJECT}/alert-rules"),
@@ -3854,6 +4255,10 @@ fn alert_rule_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/alert-rules/{{id}}/events"),
             PathItem::new(HttpMethod::Get, events),
+        )
+        .path(
+            format!("{PROJECT}/alert-events"),
+            PathItem::new(HttpMethod::Get, project_events),
         )
 }
 
@@ -3883,7 +4288,7 @@ fn media_paths(paths: PathsBuilder) -> PathsBuilder {
 
 const EXCLUSIONS: &str = concat!(
     "Evaluation traces (`environment = ",
-    llmobs_core::llmobs_name!("-eval"),
+    cetra_core::cetra_name!("-eval"),
     "`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set."
 );
 

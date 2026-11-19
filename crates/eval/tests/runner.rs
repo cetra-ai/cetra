@@ -11,17 +11,17 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use llmobs_core::enums::{PayloadFormat, ScoreDataType, SpanKind, SpanStatus};
-use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-use llmobs_core::names::{environment, metadata_key, score_metadata_key};
-use llmobs_core::score::ScoreValue;
-use llmobs_core::span::Span;
-use llmobs_eval::{
+use cetra_core::enums::{PayloadFormat, ScoreDataType, SpanKind, SpanStatus};
+use cetra_core::ids::{ProjectId, SpanId, TraceId};
+use cetra_core::names::{environment, metadata_key, score_metadata_key};
+use cetra_core::score::ScoreValue;
+use cetra_core::span::Span;
+use cetra_eval::{
     Adapter, Check, ErrorClass, EvalOrigin, EvalOutcome, EvalRun, EvalRunner, EvalTarget,
     Evaluator, EvaluatorConfig, JudgeConfig, JudgeConnection, JudgeOutput, OutputScore, RunInput,
     Secret, StructuredOutput, VariableMapping, Variables, WebhookConfig,
 };
-use llmobs_otel::{IngestContext, IngestLimits, PriceTable, builtin_price_rows};
+use cetra_otel::{IngestContext, IngestLimits, PriceTable, builtin_price_rows};
 use serde_json::json;
 use support::mock::{Mock, MockReply};
 use uuid::Uuid;
@@ -60,7 +60,7 @@ fn ingest() -> IngestContext {
 }
 
 fn runner() -> EvalRunner {
-    EvalRunner::new(llmobs_eval::EgressPolicy {
+    EvalRunner::new(cetra_eval::EgressPolicy {
         allow_private_network: true,
         restore_mode: false,
     })
@@ -94,8 +94,8 @@ fn judge_trace() -> TraceId {
 fn variables_from(text: &str) -> Variables {
     let span = text_span(text);
     let mapping = VariableMapping::from_json(&json!({"output": "span.output"})).expect("mapping");
-    let trace = llmobs_eval::TraceData::new(std::slice::from_ref(&span), Some(span.span_id));
-    llmobs_eval::resolve(&mapping, Some(&trace), None).expect("resolve")
+    let trace = cetra_eval::TraceData::new(std::slice::from_ref(&span), Some(span.span_id));
+    cetra_eval::resolve(&mapping, Some(&trace), None).expect("resolve")
 }
 
 fn text_span(text: &str) -> Span {
@@ -374,7 +374,7 @@ async fn webhook_resolves_a_span_and_posts_it() {
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].path, "/webhook");
     assert!(seen[0].body.to_string().contains("hello"));
-    assert!(seen[0].header("x-llmobs-signature").is_some());
+    assert!(seen[0].header("x-cetra-signature").is_some());
     let outcome = success(run);
     assert_eq!(outcome.value, ScoreValue::Boolean(true));
     assert_eq!(outcome.cost_usd, None);

@@ -129,15 +129,15 @@ function ConnectionTestForm({
       />
       {result ? (
         result.ok ? (
-          <p className="text-sm">
+          <p className="text-body">
             Connection works ({result.latency_ms} ms, model {result.model})
           </p>
         ) : (
           <div className="flex flex-col gap-1">
-            <p className="text-sm font-medium text-destructive">Test failed</p>
-            <p className="text-sm">{result.error?.message}</p>
+            <p className="text-body font-medium text-destructive">Test failed</p>
+            <p className="text-body">{result.error?.message}</p>
             {result.error ? (
-              <p className="text-xs text-muted-foreground">{HINTS[result.error.class]}</p>
+              <p className="text-caption text-muted-foreground">{HINTS[result.error.class]}</p>
             ) : null}
           </div>
         )

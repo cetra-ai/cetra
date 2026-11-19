@@ -12,6 +12,11 @@ use std::time::Duration;
 
 use uuid::Uuid;
 
+use crate::config::DemoConfig;
+
+/// Keys each in-memory map keeps at most (D143).
+const MAX_KEYS: usize = 100_000;
+
 /// How many checks are allowed, refilled evenly over `per`.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Bucket {
@@ -155,6 +160,64 @@ impl Lockout {
     }
 }
 
+/// Requests in progress per key, at most `max` for each key. A key with none has no entry, so
+/// the map holds only keys that have a request in progress.
+pub(crate) struct InFlight<K> {
+    max: u32,
+    counts: Arc<Mutex<HashMap<K, u32>>>,
+}
+
+impl<K: Hash + Eq + Clone> InFlight<K> {
+    pub(crate) fn new(max: u32) -> Self {
+        Self {
+            max,
+            counts: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Admits one request of `key`. It counts as in progress until the guard drops.
+    ///
+    /// # Errors
+    ///
+    /// [`RetryAfter`] of 1 s when `key` already has `max` requests in progress.
+    pub(crate) fn admit(&self, key: K) -> Result<InFlightGuard<K>, RetryAfter> {
+        let mut counts = lock(&self.counts);
+        let current = counts.get(&key).copied().unwrap_or(0);
+        if current >= self.max {
+            return Err(RetryAfter(Duration::from_secs(1)));
+        }
+        counts.insert(key.clone(), current + 1);
+        Ok(InFlightGuard {
+            counts: Arc::clone(&self.counts),
+            key,
+        })
+    }
+
+    /// Requests of `key` in progress. Tests only.
+    #[cfg(test)]
+    pub(crate) fn count(&self, key: &K) -> u32 {
+        lock(&self.counts).get(key).copied().unwrap_or(0)
+    }
+}
+
+/// One admitted request. Dropping it ends its in-progress slot.
+pub(crate) struct InFlightGuard<K: Hash + Eq + Clone> {
+    counts: Arc<Mutex<HashMap<K, u32>>>,
+    key: K,
+}
+
+impl<K: Hash + Eq + Clone> Drop for InFlightGuard<K> {
+    fn drop(&mut self) {
+        let mut counts = lock(&self.counts);
+        if let Some(count) = counts.get_mut(&self.key) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                counts.remove(&self.key);
+            }
+        }
+    }
+}
+
 /// `POST /mcp` requests one token may make per minute (D-H-10).
 pub(crate) const MCP_PER_MINUTE: u32 = 60;
 /// `POST /mcp` requests one token may have in progress at once (D-H-10).
@@ -163,8 +226,7 @@ pub(crate) const MCP_IN_FLIGHT: u32 = 4;
 /// Rate and concurrency of `POST /mcp`, per personal access token id.
 pub(crate) struct McpLimits {
     rate: KeyedLimiter<Uuid>,
-    /// Requests in progress per token. A token with none has no entry.
-    in_flight: Arc<Mutex<HashMap<Uuid, u32>>>,
+    in_flight: InFlight<Uuid>,
 }
 
 impl McpLimits {
@@ -177,7 +239,7 @@ impl McpLimits {
                 },
                 max_keys,
             ),
-            in_flight: Arc::new(Mutex::new(HashMap::new())),
+            in_flight: InFlight::new(MCP_IN_FLIGHT),
         }
     }
 
@@ -187,18 +249,10 @@ impl McpLimits {
     ///
     /// [`RetryAfter`] of 1 s when `token` already has [`MCP_IN_FLIGHT`] requests in progress
     /// (no rate token is spent), or the rate limiter's [`RetryAfter`].
-    pub(crate) fn admit(&self, token: Uuid, now: i64) -> Result<McpGuard, RetryAfter> {
-        let mut in_flight = lock(&self.in_flight);
-        let current = in_flight.get(&token).copied().unwrap_or(0);
-        if current >= MCP_IN_FLIGHT {
-            return Err(RetryAfter(Duration::from_secs(1)));
-        }
+    pub(crate) fn admit(&self, token: Uuid, now: i64) -> Result<InFlightGuard<Uuid>, RetryAfter> {
+        let slot = self.in_flight.admit(token)?;
         self.rate.check(&token, now)?;
-        in_flight.insert(token, current + 1);
-        Ok(McpGuard {
-            in_flight: Arc::clone(&self.in_flight),
-            token,
-        })
+        Ok(slot)
     }
 
     fn prune(&self, now: i64) {
@@ -208,26 +262,61 @@ impl McpLimits {
     /// Requests of `token` in progress. Tests only.
     #[cfg(test)]
     pub(crate) fn in_flight(&self, token: Uuid) -> u32 {
-        lock(&self.in_flight).get(&token).copied().unwrap_or(0)
+        self.in_flight.count(&token)
     }
 }
 
-/// One admitted `POST /mcp` request. Dropping it ends the request's in-progress slot.
-pub(crate) struct McpGuard {
-    in_flight: Arc<Mutex<HashMap<Uuid, u32>>>,
-    token: Uuid,
+/// Limits on the implicit visitors of the demo org (D187, spec 08 § Demo org). An admission
+/// takes one slot across all visitors, one of the visitor's own, and one rate token.
+pub(crate) struct DemoLimits {
+    /// Requests a minute per visitor.
+    rate: KeyedLimiter<Uuid>,
+    /// Requests in progress per visitor.
+    users: InFlight<Uuid>,
+    /// Requests in progress across all visitors.
+    org: InFlight<()>,
 }
 
-impl Drop for McpGuard {
-    fn drop(&mut self) {
-        let mut in_flight = lock(&self.in_flight);
-        if let Some(count) = in_flight.get_mut(&self.token) {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                in_flight.remove(&self.token);
-            }
+impl DemoLimits {
+    fn new(config: &DemoConfig) -> Self {
+        Self {
+            rate: KeyedLimiter::new(
+                Bucket {
+                    capacity: config.requests_per_minute,
+                    per: Duration::from_secs(60),
+                },
+                MAX_KEYS,
+            ),
+            users: InFlight::new(config.user_in_flight),
+            org: InFlight::new(config.org_in_flight),
         }
     }
+
+    /// Admits one request of the visitor `user`. The slots are held until the guard drops.
+    ///
+    /// # Errors
+    ///
+    /// [`RetryAfter`] of 1 s when the org or the visitor has no free slot, or the rate
+    /// limiter's [`RetryAfter`]. A refusal spends no rate token and holds no slot.
+    pub(crate) fn admit(&self, user: Uuid, now: i64) -> Result<DemoGuard, RetryAfter> {
+        let org = self.org.admit(())?;
+        let visitor = self.users.admit(user)?;
+        self.rate.check(&user, now)?;
+        Ok(DemoGuard {
+            _org: org,
+            _visitor: visitor,
+        })
+    }
+
+    fn prune(&self, now: i64) {
+        self.rate.prune(now);
+    }
+}
+
+/// One admitted request of an implicit visitor. Dropping it frees both slots.
+pub(crate) struct DemoGuard {
+    _org: InFlightGuard<()>,
+    _visitor: InFlightGuard<Uuid>,
 }
 
 /// The login, form, and mail limiters, plus the password lockout.
@@ -244,7 +333,7 @@ pub(crate) struct Limits {
     /// runs share this limiter.
     pub(crate) connection_tests: KeyedLimiter<Uuid>,
     /// Org domain verifications, D-P-54, D-P-64: 10 per minute per org.
-    pub(crate) sso_dns_checks: KeyedLimiter<llmobs_core::ids::OrgId>,
+    pub(crate) sso_dns_checks: KeyedLimiter<cetra_core::ids::OrgId>,
     /// Org SSO discovery and authorize, D-P-60: 300 per minute per client IP. Companies sit
     /// behind NAT, so the bucket is generous.
     pub(crate) sso_discover: KeyedLimiter<IpAddr>,
@@ -256,12 +345,13 @@ pub(crate) struct Limits {
     pub(crate) mcp: McpLimits,
     /// 20 failures lock password login for 15 minutes.
     pub(crate) lockout: Lockout,
+    /// Implicit visitors of the demo org (D187, spec 08 § Demo org).
+    pub(crate) demo: DemoLimits,
 }
 
 impl Limits {
-    /// The D143 limits. Each map keeps at most 100 000 keys.
-    pub(crate) fn new() -> Self {
-        const MAX_KEYS: usize = 100_000;
+    /// The D143 limits, and the demo limits of `demo`. Each map keeps at most 100 000 keys.
+    pub(crate) fn new(demo: &DemoConfig) -> Self {
         Self {
             login: KeyedLimiter::new(
                 Bucket {
@@ -328,6 +418,7 @@ impl Limits {
             ),
             mcp: McpLimits::new(MAX_KEYS),
             lockout: Lockout::new(20, Duration::from_secs(15 * 60), MAX_KEYS),
+            demo: DemoLimits::new(demo),
         }
     }
 
@@ -343,6 +434,7 @@ impl Limits {
         self.alert_tests_by_user.prune(now);
         self.alert_tests_by_channel.prune(now);
         self.mcp.prune(now);
+        self.demo.prune(now);
         self.lockout.prune(now);
     }
 }
@@ -516,7 +608,7 @@ mod tests {
 
     #[test]
     fn limits_use_the_d143_windows() {
-        let limits = Limits::new();
+        let limits = Limits::new(&DemoConfig::default());
         let ip: IpAddr = "127.0.0.1".parse().unwrap();
         limits
             .login
@@ -534,7 +626,7 @@ mod tests {
     fn mcp_admits_four_at_once_and_sixty_a_minute() {
         let limits = McpLimits::new(10);
         let token = Uuid::now_v7();
-        let mut guards: Vec<McpGuard> = (0..MCP_IN_FLIGHT)
+        let mut guards: Vec<InFlightGuard<Uuid>> = (0..MCP_IN_FLIGHT)
             .map(|_| limits.admit(token, 0).expect("under the in-flight cap"))
             .collect();
         let fifth = limits.admit(token, 0);
@@ -559,5 +651,80 @@ mod tests {
         assert!(later.is_ok());
         drop(later);
         assert_eq!(limits.in_flight(token), 0);
+    }
+
+    #[test]
+    fn in_flight_admits_up_to_the_maximum_per_key() {
+        let slots = InFlight::<&str>::new(2);
+        let first = slots.admit("a").unwrap();
+        let second = slots.admit("a").unwrap();
+        assert_eq!(
+            slots.admit("a").err(),
+            Some(RetryAfter(Duration::from_secs(1)))
+        );
+        assert!(slots.admit("b").is_ok());
+        drop(first);
+        let third = slots.admit("a").unwrap();
+        assert_eq!(slots.count(&"a"), 2);
+        drop(second);
+        drop(third);
+        assert!(lock(&slots.counts).is_empty());
+    }
+
+    fn demo_limits(
+        requests_per_minute: u32,
+        user_in_flight: u32,
+        org_in_flight: u32,
+    ) -> DemoLimits {
+        DemoLimits::new(&DemoConfig {
+            requests_per_minute,
+            user_in_flight,
+            org_in_flight,
+            ..DemoConfig::default()
+        })
+    }
+
+    #[test]
+    fn the_demo_caps_count_the_org_and_each_visitor() {
+        let (ada, bob) = (Uuid::now_v7(), Uuid::now_v7());
+        // One slot for the org: a second visitor waits for the first.
+        let limits = demo_limits(120, 1, 1);
+        let held = limits.admit(ada, 0).unwrap();
+        assert_eq!(
+            limits.admit(bob, 0).err(),
+            Some(RetryAfter(Duration::from_secs(1)))
+        );
+        drop(held);
+        assert!(limits.admit(bob, 0).is_ok());
+
+        // One slot per visitor: the same visitor waits for their first request, the other
+        // visitor does not.
+        let limits = demo_limits(120, 1, 16);
+        let held = limits.admit(ada, 0).unwrap();
+        assert_eq!(
+            limits.admit(ada, 0).err(),
+            Some(RetryAfter(Duration::from_secs(1)))
+        );
+        assert!(limits.admit(bob, 0).is_ok());
+        drop(held);
+        assert!(limits.admit(ada, 0).is_ok());
+    }
+
+    #[test]
+    fn a_refusal_spends_no_rate_token_and_the_rate_says_when_to_retry() {
+        let ada = Uuid::now_v7();
+        // Two a minute, one slot per visitor.
+        let limits = demo_limits(2, 1, 16);
+        let held = limits.admit(ada, 0).unwrap();
+        // Refused by the visitor's slot: this spends no rate token.
+        assert!(limits.admit(ada, 0).is_err());
+        drop(held);
+        assert!(limits.admit(ada, 0).is_ok());
+        // Both tokens are spent: the next one is 30 s away at two a minute.
+        assert_eq!(
+            limits.admit(ada, 0).err(),
+            Some(RetryAfter(Duration::from_secs(30)))
+        );
+        assert!(limits.admit(ada, 30_000_000_000).is_ok());
     }
 }

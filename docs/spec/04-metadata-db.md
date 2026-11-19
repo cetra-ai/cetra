@@ -1,8 +1,8 @@
 # 04 — Metadata database (SQLite)
 
-`meta.db`, SQLite ≥ 3.45, `journal_mode=WAL`, `synchronous=FULL`, `foreign_keys=ON`, `busy_timeout=5000`. Writes are rare; every commit is durable before the response (D136). Accessed through `sqlx` with one writer connection (serialized writes through a `Mutex`) and a read pool of 4 read-only connections. Migrations are embedded (`sqlx::migrate!`) and run in `llmobs serve`; downgrade is not supported (12 §Upgrades). `llmobs admin` commands open `meta.db` without running migrations and refuse a database at another migration version (D136). A `meta.db` of a newer format or with a migration the binary lacks is refused before anything is written (§ Format versions).
+`meta.db`, SQLite ≥ 3.45, `journal_mode=WAL`, `synchronous=FULL`, `foreign_keys=ON`, `busy_timeout=5000`. Writes are rare; every commit is durable before the response (D136). Accessed through `sqlx` with one writer connection (serialized writes through a `Mutex`) and a read pool of 4 read-only connections. Migrations are embedded (`sqlx::migrate!`) and run in `cetra serve`; downgrade is not supported (12 §Upgrades). `cetra admin` commands open `meta.db` without running migrations and refuse a database at another migration version (D136). A `meta.db` of a newer format or with a migration the binary lacks is refused before anything is written (§ Format versions).
 
-`meta.db` belongs to `llmobs-server`. The storage engine keeps its own catalog in `catalog.db` (03 §4, D83): data files, WAL checkpoints, media index and its side of deletions. The two databases share no transaction; the only link is the deletion handoff (§ Deletion requests).
+`meta.db` belongs to `cetra-server`. The storage engine keeps its own catalog in `catalog.db` (03 §4, D83): data files, WAL checkpoints, media index and its side of deletions. The two databases share no transaction; the only link is the deletion handoff (§ Deletion requests).
 
 The SQL is written in the common subset of SQLite and Postgres where practical (no `AUTOINCREMENT` except where noted, `TEXT` UUIDs, timestamps as `INTEGER` ns), to keep the later Postgres port mechanical.
 
@@ -109,7 +109,7 @@ CREATE TABLE api_keys (
   kind TEXT NOT NULL,                 -- 'public' | 'secret'
   scopes TEXT NOT NULL,               -- JSON array: ['ingest'] | ['ingest','read','write'] | ['feedback']
   name TEXT,
-  prefix TEXT NOT NULL,               -- type prefix + first 6 random characters, e.g. `sk-llmobs-a1B2c3` (D140)
+  prefix TEXT NOT NULL,               -- type prefix + first 6 random characters, e.g. `sk-cetra-a1B2c3` (D140)
   key_hash TEXT NOT NULL UNIQUE,      -- SHA-256 hex
   created_by TEXT REFERENCES users(id),
   created_at INTEGER NOT NULL, expires_at INTEGER, last_used_at INTEGER, revoked_at INTEGER
@@ -119,7 +119,7 @@ CREATE TABLE personal_tokens (        -- for CLI / MCP; act as the user, with th
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   name TEXT,
-  prefix TEXT NOT NULL,               -- type prefix + first 6 random characters, e.g. `pat-llmobs-a1B2c3` (D140)
+  prefix TEXT NOT NULL,               -- type prefix + first 6 random characters, e.g. `pat-cetra-a1B2c3` (D140)
   token_hash TEXT NOT NULL UNIQUE,
   scopes TEXT NOT NULL,               -- ['read'] | ['read','write']
   created_at INTEGER NOT NULL, expires_at INTEGER, last_used_at INTEGER, revoked_at INTEGER
@@ -153,7 +153,7 @@ Connections belong to the org (D-I-4). `secret_enc` and `extra_headers_enc` are 
 
 ## Deletion requests
 
-The storage catalog (data files, WAL checkpoints, media) is in `catalog.db` (03 §4). `meta.db` keeps the deletion requests (D-M-3). The API creates a row; a background worker then resolves its scope (the traces of a filter or of an end user, plus their evaluation traces), stores it here together with the `meta.db` cascades (03 §7), hands it to storage (`register_deletion`, idempotent by id) and sets `handed_over_at`, then polls `deletion_status` until it is applied. Project and org drops are created `pending` and run `drop_project` before their rows are deleted. At startup the worker picks up every open row. Rows and their scope are kept forever, with no foreign keys to `orgs` or `projects`, as the audit trail of erasure requests and so `llmobs admin reapply-deletions` can redo them after a restore (D-M-8, D-M-9).
+The storage catalog (data files, WAL checkpoints, media) is in `catalog.db` (03 §4). `meta.db` keeps the deletion requests (D-M-3). The API creates a row; a background worker then resolves its scope (the traces of a filter or of an end user, plus their evaluation traces), stores it here together with the `meta.db` cascades (03 §7), hands it to storage (`register_deletion`, idempotent by id) and sets `handed_over_at`, then polls `deletion_status` until it is applied. Project and org drops are created `pending` and run `drop_project` before their rows are deleted. At startup the worker picks up every open row. Rows and their scope are kept forever, with no foreign keys to `orgs` or `projects`, as the audit trail of erasure requests and so `cetra admin reapply-deletions` can redo them after a restore (D-M-8, D-M-9).
 
 ```sql
 CREATE TABLE deletions (
@@ -235,6 +235,7 @@ CREATE TABLE score_definitions (
   categories TEXT,                    -- JSON [{label, value?}]
   min_value REAL, max_value REAL,
   description TEXT,
+  direction TEXT NOT NULL DEFAULT 'none',  -- higher | lower | none
   archived_at INTEGER,
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );
@@ -262,6 +263,39 @@ CREATE INDEX saved_views_owner ON saved_views(project_id, owner_user_id);   -- t
 ```
 
 Names are not unique: several visible views may share a name. Visibility, sharing, moderation, the two default scopes and the limits (names 1–200 characters, state ≤ 64 KiB, 1,000 views per project and owner) are D-H-6. Preset ranges are stored relative (`range: "24h"`). A view whose filter no longer validates (column removed) still loads; the filter shows as a raw chip with the error.
+
+## Dashboards
+
+Custom dashboards (D-C-16) and each project's edited Overview (D-C-18). The built-in Overview preset is defined by the UI; a project stores its own Overview only once a member saves a change to it.
+
+```sql
+CREATE TABLE dashboards (
+  id TEXT PRIMARY KEY,                -- UUIDv7
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  description TEXT,
+  definition TEXT NOT NULL,           -- JSON: {widgets: [Widget]}, validated by the server
+  version INTEGER NOT NULL DEFAULT 1, -- +1 on every update; a PATCH names the version it read
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'custom' CHECK (kind IN ('custom', 'overview'))  -- added by migration 0022 (D-C-18)
+);
+CREATE INDEX dashboards_project ON dashboards(project_id, name);
+CREATE UNIQUE INDEX dashboards_overview ON dashboards(project_id) WHERE kind = 'overview';
+```
+
+A row of kind `overview` is the project's edited Overview: at most one per project, named `Overview`, with no description. It is read and written only through the `/dashboards/overview` endpoints (09): the list, the 100-dashboard cap and `/dashboards/{id}` ignore it (a `GET`, `PATCH` or `DELETE` of its id is a 404). Deleting it ("Reset to default") brings the built-in preset back.
+
+A **Widget** is `{id, title, layout: {x, y, w, h}, kind, chart?, query?}`:
+- `id`: 1–64 characters of `[A-Za-z0-9_-]`, unique in the dashboard.
+- `title`: 0–100 characters (a heading needs 1–100). `description` of the dashboard: 0–500.
+- `layout`: integers on the 60-column grid (D-C-19), `0 ≤ x ≤ 59`, `1 ≤ w ≤ 60`, `x + w ≤ 60`, `0 ≤ y ≤ 1000`, `1 ≤ h ≤ 40`.
+- `kind`: `chart` or `heading`. A heading has no `chart` and no `query`.
+- `chart`: `{type, stacked?, split?, fade_below?, share?}`. `type` is `line`, `bar`, `area`, `bar_h`, `number` or `table`. `stacked` applies to `bar` and `area`; `split` (one small chart per group; needs a breakdown with `limit` at most 6) to `line`; `fade_below` (1–1,000: buckets with fewer rows are faded) to `bar`; `share` (each row's share of the first measure's total, as a bar) to `table`.
+- `query`: a WidgetQuery (05 § Dashboard queries), checked with the same rules, plus a `label` (0–60 characters) on each measure. `line`, `bar` and `area` read the `series` shape; `bar_h`, `number` and `table` read `total`. `bar_h` needs a breakdown; `number` has one measure and no breakdown.
+
+Limits: names 1–100 characters (not unique), 50 widgets per dashboard, `definition` at most 256 KiB, 100 dashboards per project. An invalid definition is `400 bad_request` with the path of each error in `errors` (e.g. `widgets[3].query.measures[0].field`). A definition stored before a column was removed still loads; the widget's query answers its own 400.
 
 ## Datasets & experiments
 
@@ -367,6 +401,18 @@ CREATE TABLE evaluators (
 );
 CREATE INDEX evaluators_connection ON evaluators(connection_id) WHERE connection_id IS NOT NULL;
 
+CREATE TABLE evaluator_versions (
+  evaluator_id TEXT NOT NULL REFERENCES evaluators(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  config TEXT NOT NULL,               -- as evaluators.config: no sealed value
+  output_score TEXT NOT NULL,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (evaluator_id, version)
+);
+
 CREATE TABLE online_rules (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -460,6 +506,8 @@ CREATE TABLE backfills (
 CREATE UNIQUE INDEX backfills_running ON backfills(rule_id) WHERE status = 'running';
 CREATE INDEX backfills_rule ON backfills(rule_id, created_at);
 ```
+
+Every create, and every update that changes `version`, writes one `evaluator_versions` row in the same transaction, copied from the stored row: name, kind, the redacted config, the output score, the author and the time. It holds no sealed value. A rename alone does not change `version`, so it writes no row. The history lives as long as the evaluator and is deleted with it (cascade); it has no retention cap and no per-version delete, so text removed from a prompt stays readable in it until the evaluator is deleted (D-I-49).
 
 `pending_traces` is the persisted copy of the trigger's in-memory map (spec 06 § Online rules › Triggering, D-I-8): the flusher writes the changed entries every 5 s and at shutdown, and startup loads them. `first_seen` and `last_seen` are ingest times; `min_start` is the earliest span `start_time` seen.
 
@@ -595,7 +643,7 @@ CREATE TABLE instance_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 Usage counters are accumulated in memory and flushed to `usage_daily` every 10 s (upsert-add). A dropped org's rows stay 40 days after its org deletion is applied, then a daily task deletes them (D-P-46).
 
-`spans` counts billable spans: spans in the reserved `llmobs-eval` environment (judge traces) are stored but not counted (D-I-31). Judge calls add their tokens and cost to `judge_input_tokens`, `judge_output_tokens` and `judge_cost_usd`.
+`spans` counts billable spans: spans in the reserved `cetra-eval` environment (judge traces) are stored but not counted (D-I-31). Judge calls add their tokens and cost to `judge_input_tokens`, `judge_output_tokens` and `judge_cost_usd`.
 
 ## Per-org SSO (track P, `ee`)
 
@@ -635,9 +683,9 @@ Deleting an org deletes its provider and domains by cascade, and its identities 
 
 ## Encryption of secrets
 
-The key is 32 bytes in standard base64. Source order (D-I-1): the `encryption_key` config value (`LLMOBS_ENCRYPTION_KEY`) wins and the file is neither read nor written; otherwise `<data_dir>/secret.key`; otherwise the server generates a key, but only while `instance_settings` has no `encryption.check` — once a check value exists, a missing key fails startup. The file holds the base64 of the 32 key bytes plus one trailing newline, mode 0600, written through a `.tmp` file and a rename so a crash leaves either no file or a whole one; a mode readable by group or other is warned about and still used. `llmobs admin rotate-encryption-key` re-encrypts every sealed column in one transaction, writing `secret.key.new` first; a start that finds a `secret.key.new` whose check value matches the stored one renames it over `secret.key`, finishing an interrupted rotation, and otherwise deletes it (D-I-3).
+The key is 32 bytes in standard base64. Source order (D-I-1): the `encryption_key` config value (`CETRA_ENCRYPTION_KEY`) wins and the file is neither read nor written; otherwise `<data_dir>/secret.key`; otherwise the server generates a key, but only while `instance_settings` has no `encryption.check` — once a check value exists, a missing key fails startup. The file holds the base64 of the 32 key bytes plus one trailing newline, mode 0600, written through a `.tmp` file and a rename so a crash leaves either no file or a whole one; a mode readable by group or other is warned about and still used. `cetra admin rotate-encryption-key` re-encrypts every sealed column in one transaction, writing `secret.key.new` first; a start that finds a `secret.key.new` whose check value matches the stored one renames it over `secret.key`, finishing an interrupted rotation, and otherwise deletes it (D-I-3).
 
-A sealed value is `0x01` ‖ key id (4 bytes) ‖ nonce (12) ‖ AES-256-GCM ciphertext and tag (D-I-2). The key id is `HMAC-SHA256(key, "llmobs.key-id.v1")[0..4]`; the associated data is `table:column:row_id`, with the row id a hyphenated lowercase UUID; the nonce is 96 random bits. `instance_settings['encryption.check']` holds the lowercase hex of `HMAC-SHA256(key, "llmobs.encryption-check.v1")`: the server records it on the first start of a data directory and refuses a different key afterwards.
+A sealed value is `0x01` ‖ key id (4 bytes) ‖ nonce (12) ‖ AES-256-GCM ciphertext and tag (D-I-2). The key id is `HMAC-SHA256(key, "cetra.key-id.v1")[0..4]`; the associated data is `table:column:row_id`, with the row id a hyphenated lowercase UUID; the nonce is 96 random bits. `instance_settings['encryption.check']` holds the lowercase hex of `HMAC-SHA256(key, "cetra.encryption-check.v1")`: the server records it on the first start of a data directory and refuses a different key afterwards.
 
 ## Format versions (D-R-33 to D-R-38)
 
@@ -645,11 +693,11 @@ From the first public release (D185), a `meta.db`, `secret.key` and backup writt
 
 **Two numbers.** The applied migrations (`_sqlx_migrations`) are the schema. `PRAGMA user_version` holds `META_FORMAT_VERSION` (`crates/server/src/meta/mod.rs`, a `u16`, 1 at the first release): the format of what `meta.db` means, and of `secret.key` and the sealed envelope (§ Encryption of secrets). It is the high-water mark: a binary writes it before it first writes anything in a newer format, and never lowers it. `VACUUM INTO` keeps it, so pre-migration copies and backups carry it.
 
-**Opening.** One check runs before any write, in this order: a `user_version` other than 0 or this build's is refused (`meta.db has format version N, which this build … does not read`); an applied migration this build does not embed is refused (`meta.db has applied migration N, which this build does not have`); `user_version` 0 with a row in `users` or `orgs` is a pre-release database and is refused (`PreFormat`); `user_version` 0 without rows is stamped after the migrations. `llmobs serve`, `llmobs admin migrate` and `llmobs admin gc-orphans` run this check on `<data_dir>/meta.db` **before storage opens** (the preflight), so a newer `meta.db` stops them before `LOCK`, the WAL or the object store is touched; the other admin commands run it when they open `meta.db`. `reapply-deletions --from` accepts a newer schema of the same format (D-M-9) but not a newer format. Downgrading is not supported: restore the backup taken before the upgrade.
+**Opening.** One check runs before any write, in this order: a `user_version` other than 0 or this build's is refused (`meta.db has format version N, which this build … does not read`); an applied migration this build does not embed is refused (`meta.db has applied migration N, which this build does not have`); `user_version` 0 with a row in `users` or `orgs` is a pre-release database and is refused (`PreFormat`); `user_version` 0 without rows is stamped after the migrations. `cetra serve`, `cetra admin migrate` and `cetra admin gc-orphans` run this check on `<data_dir>/meta.db` **before storage opens** (the preflight), so a newer `meta.db` stops them before `LOCK`, the WAL or the object store is touched; the other admin commands run it when they open `meta.db`. `reapply-deletions --from` accepts a newer schema of the same format (D-M-9) but not a newer format. Downgrading is not supported: restore the backup taken before the upgrade.
 
 **What is a format change.** Not one: a migration that only adds (`CREATE TABLE`, `CREATE INDEX`, `CREATE UNIQUE INDEX`, `ALTER TABLE … ADD COLUMN` that is nullable or has a default). A format change, which bumps `META_FORMAT_VERSION`: any other migration (a dropped or renamed column or table, an `UPDATE` of existing rows, a table rebuild); a new value in a TEXT enum column (roles, kinds, states, statuses); a changed JSON shape in a JSON column; a changed sealed envelope, key id label, check label or associated data; a changed `secret.key` format. A lint requires migrations to be additive unless listed as format-changing (`0008`, which drops `orgs.limits`, is the one pre-release exception); every migration that alters a table has a test that its rows survive; the schema snapshot (`crates/server/tests/snapshots/meta_schema.snap`) shows every schema change. A migration that has been in a release is never edited.
 
-**`secret.key` and sealed values** keep the formats of § Encryption of secrets: no version byte in the file. A key file this build does not decode is refused and never rewritten; a new file format would bump `META_FORMAT_VERSION`, which is checked first. Key rotation is the offline `llmobs admin rotate-encryption-key` (D-I-3). Known-answer tests pin the file text, the key id, the check value and one sealed value for a fixed public test key.
+**`secret.key` and sealed values** keep the formats of § Encryption of secrets: no version byte in the file. A key file this build does not decode is refused and never rewritten; a new file format would bump `META_FORMAT_VERSION`, which is checked first. Key rotation is the offline `cetra admin rotate-encryption-key` (D-I-3). Known-answer tests pin the file text, the key id, the check value and one sealed value for a fixed public test key.
 
 **A release that changes the format** bumps `META_FORMAT_VERSION`, migrates at open (the migration or the open code rewrites what the older release wrote), has tests that restore the previous releases' golden backups, and adds a line under `### Upgrade notes` in `CHANGELOG.md`.
 

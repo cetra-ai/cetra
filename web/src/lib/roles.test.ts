@@ -6,6 +6,7 @@ import {
   canHaveOverride,
   canManageAlerts,
   canManageConnections,
+  canManageDashboards,
   canManageDatasets,
   canManageEvaluation,
   canRemoveMember,
@@ -76,6 +77,14 @@ it("lets members and above manage alerts", () => {
   expect(canManageAlerts("member")).toBe(true);
   expect(canManageAlerts("viewer")).toBe(false);
   expect(canManageAlerts(undefined)).toBe(false);
+});
+
+it("lets members and above manage dashboards", () => {
+  expect(canManageDashboards("owner")).toBe(true);
+  expect(canManageDashboards("admin")).toBe(true);
+  expect(canManageDashboards("member")).toBe(true);
+  expect(canManageDashboards("viewer")).toBe(false);
+  expect(canManageDashboards(undefined)).toBe(false);
 });
 
 it("lets members and above manage datasets", () => {

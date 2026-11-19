@@ -33,7 +33,8 @@ it("shows the history", async () => {
   const table = await screen.findByRole("table", { name: "Deletions" });
   expect(within(table).getByText("Hidden, erasing")).toBeInTheDocument();
   expect(within(table).getByText("Erased")).toBeInTheDocument();
-  expect(within(table).getByText("Failed")).toBeInTheDocument();
+  expect(within(table).getByText("Failed")).toHaveClass("text-status-error");
+  expect(within(table).getByText("Erased")).toHaveClass("text-status-ok");
   expect(within(table).getByText("user user-3")).toBeInTheDocument();
 });
 

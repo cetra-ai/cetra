@@ -41,15 +41,15 @@
           },
           "spans": [
             {
-              "traceId": "28ca5e27a1879788b6d396961bb11511",
-              "spanId": "512ddbb1e31547c9",
+              "traceId": "2469e32007008b3026b8bb7f0ca5447c",
+              "spanId": "93b684d32910d279",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
               "name": "chat gpt-4o-mini-2024-07-18",
               "kind": 3,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590168000000",
+              "endTimeUnixNano": "1767225590170000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",

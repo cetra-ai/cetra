@@ -1,5 +1,5 @@
 [package]
-name = "llmobs-eval"
+name = "cetra-eval"
 description = "Evaluator execution: checks, variable mapping, templates, LLM judges, webhooks"
 version.workspace = true
 edition.workspace = true
@@ -24,8 +24,8 @@ bytes.workspace = true
 hex.workspace = true
 hmac.workspace = true
 jsonschema.workspace = true
-llmobs-core.workspace = true
-llmobs-otel.workspace = true
+cetra-core.workspace = true
+cetra-otel.workspace = true
 opentelemetry-proto.workspace = true
 sha2.workspace = true
 tracing.workspace = true

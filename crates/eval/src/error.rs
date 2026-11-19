@@ -7,7 +7,7 @@
 
 use std::fmt;
 
-use llmobs_core::enums::ScoreDataType;
+use cetra_core::enums::ScoreDataType;
 use serde_json::error::Category;
 
 /// A configuration document or an assembled [`crate::Evaluator`] broke a rule.

@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use llmobs_core::enums::ScoreDataType;
+use cetra_core::enums::ScoreDataType;
 use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
@@ -35,7 +35,7 @@ const RESERVED_HEADERS: [&str; 4] = [
     "content-type",
     "content-length",
     "host",
-    "x-llmobs-signature",
+    "x-cetra-signature",
 ];
 
 const fn default_true() -> bool {
@@ -564,7 +564,7 @@ pub struct WebhookConfig {
     #[serde(default = "default_webhook_timeout")]
     pub timeout_ms: u32,
     /// Extra request headers. At most 20. Names are HTTP tokens and must not
-    /// be `content-type`, `content-length`, `host`, or `x-llmobs-signature`.
+    /// be `content-type`, `content-length`, `host`, or `x-cetra-signature`.
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
 }
@@ -733,7 +733,7 @@ mod tests {
         OutputScore, PROMPT_MAX_BYTES,
     };
     use crate::error::assert_no_payload;
-    use llmobs_core::enums::ScoreDataType;
+    use cetra_core::enums::ScoreDataType;
     use serde_json::{Value, json};
     use uuid::Uuid;
 
@@ -1457,7 +1457,7 @@ mod tests {
             "Content-Type",
             "content-length",
             "Host",
-            "X-Llmobs-Signature",
+            "X-Cetra-Signature",
         ] {
             assert_invalid(
                 "webhook",

@@ -1,0 +1,38 @@
+{
+  "view": "spans",
+  "field": "name",
+  "kind": "values",
+  "total": 12,
+  "missing": 0,
+  "values": [
+    {
+      "value": "chat claude-sonnet-4-5",
+      "count": 4
+    },
+    {
+      "value": "chat gpt-4o-mini",
+      "count": 2
+    },
+    {
+      "value": "support-agent",
+      "count": 2
+    },
+    {
+      "value": "answer-question",
+      "count": 1
+    },
+    {
+      "value": "describe-image",
+      "count": 1
+    },
+    {
+      "value": "get_order_status",
+      "count": 1
+    },
+    {
+      "value": "vector-search",
+      "count": 1
+    }
+  ],
+  "more": false
+}

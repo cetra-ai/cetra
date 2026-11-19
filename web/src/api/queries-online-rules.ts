@@ -13,6 +13,18 @@ export function onlineRulesKey(org: string, project: string) {
   }).queryKey;
 }
 
+/** Every online rule's stats of the last 24 hours, one entry per rule (D-I-50). */
+export function onlineRuleStatsQuery(org: string, project: string) {
+  return $api.queryOptions("get", "/api/v1/projects/{project}/online-rules/stats", {
+    params: { path: { project: projectRef(org, project) } },
+  });
+}
+
+/** The key of the rule stats query, for invalidation. */
+export function onlineRuleStatsKey(org: string, project: string) {
+  return onlineRuleStatsQuery(org, project).queryKey;
+}
+
 export function onlineRuleInit(org: string, project: string, ruleId: string) {
   return { params: { path: { project: projectRef(org, project), id: ruleId } } };
 }

@@ -11,11 +11,11 @@ use super::output::{self, DEFAULT_MAX_CHARS};
 use crate::api::convert;
 use crate::auth::principal::AuthUser;
 use crate::auth::roles::{self, ProjectPerm, Role};
+use crate::demo::orgs_for;
 use crate::http::AppState;
 use crate::http::access::user_project;
 use crate::http::error::ApiError;
 use crate::meta::members::project_override;
-use crate::meta::orgs::orgs_of_user;
 use crate::meta::projects::projects_of_org;
 
 pub(crate) const LIST_PROJECTS: &str = "list_projects";
@@ -48,7 +48,7 @@ pub(crate) fn tool_list() -> Vec<Tool> {
         tool(
             super::sql::QUERY_SQL,
             "Run a SQL query",
-            "Run one read-only SQL query (SELECT, WITH, UNION, VALUES or EXPLAIN) over the views traces, spans, sessions and scores; get_schema lists their columns. `from` and `to` are required and at most 30 days apart: they bound start_time on spans and traces and created_at on scores, in every part of the query; sessions are built from the windowed traces. No rows are hidden: evaluation traces (environment 'llmobs-eval') and experiment traces are included. Returns columns, rows, row_count, truncated and notes; string cells longer than 2000 characters are cut.",
+            "Run one read-only SQL query (SELECT, WITH, UNION, VALUES or EXPLAIN) over the views traces, spans, sessions and scores; get_schema lists their columns. `from` and `to` are required and at most 30 days apart: they bound start_time on spans and traces and created_at on scores, in every part of the query; sessions are built from the windowed traces. No rows are hidden: evaluation traces (environment 'cetra-eval') and experiment traces are included. Returns columns, rows, row_count, truncated and notes; string cells longer than 2000 characters are cut.",
             json!({
                 "type": "object",
                 "properties": {
@@ -92,7 +92,7 @@ pub(crate) fn tool_list() -> Vec<Tool> {
                     "filter": {"type": "string", "description": "Filter DSL: a SQL boolean expression over the traces view."},
                     "search": {"type": "string", "description": "Full-text search in span input, output, name and system instructions."},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20, "description": "Most traces to return."},
-                    "include_eval": {"type": "boolean", "description": "Include evaluation traces (environment 'llmobs-eval')."},
+                    "include_eval": {"type": "boolean", "description": "Include evaluation traces (environment 'cetra-eval')."},
                     "include_experiments": {"type": "boolean", "description": "Include experiment traces."},
                     "max_chars": {"type": "integer", "minimum": 1000, "maximum": 100000, "default": 20000, "description": "Most characters in the result; later traces are left out beyond it."}
                 },
@@ -173,9 +173,9 @@ struct ProjectArguments {
 }
 
 /// `{"projects": [{id, org, slug, name, role}], "truncated": false, "notes": []}`: the active
-/// projects of the user's active orgs that no override hides, ordered like `orgs_of_user`
-/// (org name, org id) then `projects_of_org` (project name, project id). `org` is the org slug;
-/// `role` is the effective project role, `viewer`, `member` or `admin`. Fitted to
+/// projects of the user's active orgs that no override hides, ordered like `orgs_for` (org name,
+/// org id, the demo org last, D187) then `projects_of_org` (project name, project id). `org` is
+/// the org slug; `role` is the effective project role, `viewer`, `member` or `admin`. Fitted to
 /// `DEFAULT_MAX_CHARS` with `fit_list` on `projects` and the note
 /// `"result cut at 20000 characters; later projects left out"`.
 ///
@@ -188,7 +188,7 @@ pub(crate) async fn list_projects(
 ) -> Result<Value, ApiError> {
     let _: NoArguments = arguments(raw)?;
     let mut projects = Vec::new();
-    for (org, org_role) in orgs_of_user(state.meta.reader(), user.id).await? {
+    for (org, org_role, _) in orgs_for(state, user.id, user.is_instance_admin).await? {
         if org.state != "active" {
             continue;
         }
@@ -242,4 +242,54 @@ pub(crate) async fn get_schema(
     user_project(state, user, &project, ProjectPerm::View).await?;
     serde_json::to_value(convert::schema_response())
         .map_err(|error| ApiError::Internal(Box::new(error)))
+}
+
+#[cfg(test)]
+mod tests {
+    use cetra_core::ids::OrgId;
+    use rmcp::model::JsonObject;
+
+    use super::list_projects;
+    use crate::api::account::OrgRole;
+    use crate::auth::principal::AuthUser;
+    use crate::demo::tests::{signed_in, world};
+    use crate::meta::members::add_org_member;
+    use crate::meta::orgs::insert_org;
+    use crate::meta::projects::insert_project;
+
+    #[tokio::test]
+    async fn list_projects_puts_the_demo_projects_last() {
+        let w = world().await;
+        let dual = signed_in(&w.app, "dual@example.com", false).await;
+        let own = OrgId::new_v7();
+        let now = w.app.state.clock.now_ns();
+        let dual_id = dual.id;
+        w.app
+            .state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    insert_org(conn, own, "Zeta", "zeta", now).await?;
+                    add_org_member(conn, own, dual_id, OrgRole::Owner, now).await?;
+                    insert_project(conn, own, "Alpha", "alpha", None, now).await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        let user = AuthUser {
+            id: dual.id,
+            is_instance_admin: false,
+            email: "dual@example.com".to_owned(),
+        };
+        let value = list_projects(&w.app.state, &user, JsonObject::new())
+            .await
+            .unwrap();
+        let projects = value["projects"].as_array().unwrap();
+        assert_eq!(projects.len(), 2, "{value}");
+        assert_eq!(projects[0]["org"], "zeta");
+        assert_eq!(projects[0]["role"], "admin");
+        assert_eq!(projects[1]["org"], "cetra-demo");
+        assert_eq!(projects[1]["role"], "viewer");
+    }
 }

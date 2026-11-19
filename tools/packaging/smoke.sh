@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Smoke-tests a running llmobs (D-N-13): readiness, the embedded UI, and one span sent over
+# Smoke-tests a running cetra (D-N-13): readiness, the embedded UI, and one span sent over
 # OTLP/HTTP and read back through the API.
 #
 # Usage: smoke.sh <http_url> <otlp_http_url> <secret_key>
 #   http_url       the UI and API listener, e.g. http://127.0.0.1:8080
 #   otlp_http_url  the OTLP/HTTP listener, e.g. http://127.0.0.1:4318
-#   secret_key     an `sk-llmobs-…` key of the project (LLMOBS_INIT_SECRET_KEY)
+#   secret_key     an `sk-cetra-…` key of the project (CETRA_INIT_SECRET_KEY)
 #
 # Needs bash, curl and python3. Waits up to 120 s for /readyz.
 set -euo pipefail
@@ -44,7 +44,7 @@ span_id="$(python3 -c 'import secrets; print(secrets.token_hex(8))')"
 start="$(python3 -c 'import time; print(time.time_ns() - 1_000_000_000)')"
 end="$(python3 -c 'import time; print(time.time_ns())')"
 body="$(cat <<EOF
-{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"llmobs-smoke"}}]},"scopeSpans":[{"scope":{"name":"llmobs-smoke"},"spans":[{"traceId":"$trace_id","spanId":"$span_id","name":"llmobs-smoke","kind":1,"startTimeUnixNano":"$start","endTimeUnixNano":"$end"}]}]}]}
+{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"cetra-smoke"}}]},"scopeSpans":[{"scope":{"name":"cetra-smoke"},"spans":[{"traceId":"$trace_id","spanId":"$span_id","name":"cetra-smoke","kind":1,"startTimeUnixNano":"$start","endTimeUnixNano":"$end"}]}]}]}
 EOF
 )"
 
@@ -62,7 +62,7 @@ echo "smoke: span sent to $otlp/v1/traces"
 for _ in $(seq 1 60); do
   if curl -sf -H "Authorization: Bearer $key" \
     "$base/api/v1/projects/current/traces/$trace_id" 2>/dev/null |
-    python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin)["trace"]["name"] == "llmobs-smoke" else 1)' 2>/dev/null; then
+    python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin)["trace"]["name"] == "cetra-smoke" else 1)' 2>/dev/null; then
     echo "smoke: trace $trace_id read back"
     exit 0
   fi

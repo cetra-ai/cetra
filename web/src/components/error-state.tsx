@@ -11,9 +11,9 @@ export function ErrorState({ error, reset }: ErrorComponentProps) {
 
   return (
     <div className="mx-auto flex max-w-md flex-col gap-3 px-4 py-16">
-      <h1 className="text-lg font-medium">{title}</h1>
+      <h1 className="text-title font-medium">{title}</h1>
       {detail ? <p>{detail}</p> : null}
-      {problem && !signedOut ? <p className="font-mono text-xs">{problem.code}</p> : null}
+      {problem && !signedOut ? <p className="font-mono text-caption">{problem.code}</p> : null}
       <Button
         type="button"
         className="w-fit"

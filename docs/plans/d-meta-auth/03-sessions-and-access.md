@@ -21,12 +21,12 @@ At the end of this part a user can set up the instance, sign up (open policy), l
 
 ### Cookie and lifecycle (`auth/session.rs`)
 
-- `SESSION_COOKIE`: `"llmobs_session"`, built from the single name constant of P7.
+- `SESSION_COOKIE`: `"cetra_session"`, built from the single name constant of P7.
 - `LIFETIME = 30 days`, `REFRESH_AFTER = 1 hour`.
-- `pub(crate) async fn start_session(state, user_id, user_agent, ip) -> Result<HeaderValue, ApiError>`: `new_opaque_token()`, insert its hash, return the `Set-Cookie` value: `llmobs_session=<token>; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`, plus `; Secure` when `public_url` is https.
+- `pub(crate) async fn start_session(state, user_id, user_agent, ip) -> Result<HeaderValue, ApiError>`: `new_opaque_token()`, insert its hash, return the `Set-Cookie` value: `cetra_session=<token>; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`, plus `; Secure` when `public_url` is https.
 - `pub(crate) fn clear_cookie(state) -> HeaderValue` (`Max-Age=0`, same attributes).
 - `pub(crate) async fn resolve_session(state, cookie_value, now) -> Result<Option<(SessionRow, Option<HeaderValue>)>, ApiError>`: rejects values that are not opaque tokens without a DB call; looks up by hash; when `now - last_seen_at >= REFRESH_AFTER`, slides (`last_seen_at = now`, `expires_at = now + LIFETIME`) and returns a fresh `Set-Cookie` with the same token so the browser's `Max-Age` slides too.
-- Cookie parsing uses `axum_extra::extract::CookieJar` (or the `cookie` crate's parser on the `Cookie` header). Several `llmobs_session` cookies: use the first that resolves.
+- Cookie parsing uses `axum_extra::extract::CookieJar` (or the `cookie` crate's parser on the `Cookie` header). Several `cetra_session` cookies: use the first that resolves.
 - `serve` purges expired sessions once an hour.
 
 ### Tests
@@ -137,7 +137,7 @@ Handlers extract `Extension<OrgAccess>` / `Extension<ProjectAccess>` / `Extensio
 
 ### OpenAPI security
 
-- Components: `session` = API key in cookie `llmobs_session`; `bearer` = HTTP bearer.
+- Components: `session` = API key in cookie `cetra_session`; `bearer` = HTTP bearer.
 - Per operation, from its `Access`: `Public` → `security: []`; `User`, `Org`, `Project` with `session_only: false` → `[{session: []}, {bearer: []}]`; `session_only` and `InstanceAdmin` → `[{session: []}]`.
 - Inspect how the current document expresses security (top-level vs per operation). Make every operation that P10 can see consistent with the rule above, including the read-API operations declared without handlers (they will be `Project { View }` routes: `[{session}, {bearer}]`). Regenerate with `just openapi`.
 
@@ -183,7 +183,7 @@ How the merge of method routers works in axum 0.8.9 and how `%2F` behaves.
 
 1. Re-check `count_users_tx == 0` inside the transaction; otherwise log `info` "init skipped: users exist" and return.
 2. Normalize the email; `check_policy` on the password (failure → `ServeError::Init { reason }` naming the rule, not the value: startup fails).
-3. `secret_key` given: `parse_key == Some(Secret)` else `ServeError::Init { reason: "LLMOBS_INIT_SECRET_KEY is not a secret key" }`.
+3. `secret_key` given: `parse_key == Some(Secret)` else `ServeError::Init { reason: "CETRA_INIT_SECRET_KEY is not a secret key" }`.
 4. Insert: user (`is_instance_admin`, `email_verified_at = now`), org (`init.org` as name, derived slug), owner membership, project (`init.project`, derived slug), and the secret key if given (`scopes = [ingest, read, write]`, name `"init"`, `created_by` = the user).
 5. Audit event: `init applied`, user, org, project ids.
 
@@ -205,7 +205,7 @@ Moves onto a handler. `setup_required = count_users == 0`; `password_enabled = !
 
 ### Examples
 
-`fixtures/api/static/setup-response.json` with the fixed ids of `fixtures/api/README.md` and a synthetic key (`sk-llmobs-` followed by 32 characters of an obviously fake pattern such as `EXAMPLE0EXAMPLE0…`; if a secret scanner covers `fixtures/api`, use the form it allows), plus its manifest entry. `auth-config.json` stays.
+`fixtures/api/static/setup-response.json` with the fixed ids of `fixtures/api/README.md` and a synthetic key (`sk-cetra-` followed by 32 characters of an obviously fake pattern such as `EXAMPLE0EXAMPLE0…`; if a secret scanner covers `fixtures/api`, use the form it allows), plus its manifest entry. `auth-config.json` stays.
 
 ### Tests
 
@@ -282,7 +282,7 @@ Standard.
 
 ## P13 — Password reset, account endpoints and the admin CLI
 
-**Goal:** reset links (consumed through the API), changing one's name and password, and `llmobs admin create-user | reset-password | list-users`.
+**Goal:** reset links (consumed through the API), changing one's name and password, and `cetra admin create-user | reset-password | list-users`.
 
 **Edit only:** `crates/server/src/meta/{password_resets.rs,personal_tokens.rs}` (new; `personal_tokens.rs` gets only `revoke_user_tokens` here), `crates/server/src/auth/reset.rs` (new), `crates/server/src/routes/{auth.rs,me.rs}`, `crates/server/src/admin.rs` (new), `crates/server/src/api/account.rs`, `crates/server/src/http/access.rs`, `crates/server/src/api/openapi.rs`, `crates/server/openapi.json`, `web/src/api/schema.gen.ts`, `fixtures/api/`, `crates/cli/src/main.rs`, `crates/cli/Cargo.toml`.
 
@@ -319,14 +319,14 @@ pub async fn list_users(config: &ServerConfig) -> Result<Vec<UserSummary>, Admin
 pub struct UserSummary { pub id: Uuid, pub email: String, pub name: Option<String>, pub instance_admin: bool, pub disabled: bool, pub created_at: i64 }
 ```
 
-They use `MetaDb::open_existing` (D136: no migration; `NotInitialized` → "run `llmobs serve` once to create the database"; `SchemaMismatch` → "this binary expects schema N, found M"). They do not take the data-dir lock. `create_user` normalizes the email, checks the policy, and creates a verified user (the operator vouches for it). `AdminError` is a `thiserror` enum; its messages name no email.
+They use `MetaDb::open_existing` (D136: no migration; `NotInitialized` → "run `cetra serve` once to create the database"; `SchemaMismatch` → "this binary expects schema N, found M"). They do not take the data-dir lock. `create_user` normalizes the email, checks the policy, and creates a verified user (the operator vouches for it). `AdminError` is a `thiserror` enum; its messages name no email.
 
 ### CLI
 
 ```
-llmobs admin create-user --email <e> [--name <n>] [--password-stdin] [--instance-admin] [--config <path>]
-llmobs admin reset-password --email <e> [--config <path>]
-llmobs admin list-users [--format table|json] [--config <path>]
+cetra admin create-user --email <e> [--name <n>] [--password-stdin] [--instance-admin] [--config <path>]
+cetra admin reset-password --email <e> [--config <path>]
+cetra admin list-users [--format table|json] [--config <path>]
 ```
 
 - `--password-stdin` reads one line from stdin (trailing newline removed). Without it, `create-user` prints the reset URL to stdout ("Set the password at: …").

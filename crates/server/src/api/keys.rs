@@ -2,7 +2,7 @@
 //!
 //! Spec 08 § API keys and spec 09 § Conventions.
 
-use llmobs_core::time_serde;
+use cetra_core::time_serde;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -13,9 +13,9 @@ use super::common::TimeParam;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ApiKeyKind {
-    /// `sk-llmobs-` and the ingest, read, and write scopes.
+    /// `sk-cetra-` and the ingest, read, and write scopes.
     Secret,
-    /// `pk-llmobs-` and the feedback scope.
+    /// `pk-cetra-` and the feedback scope.
     Public,
 }
 

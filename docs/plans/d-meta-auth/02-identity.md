@@ -88,11 +88,11 @@ Anything in spec 04's DDL that the functions could not express.
 
 ### `auth/secret.rs`
 
-- The product name appears once: build the prefixes from a single `const` (use the existing name constant in `llmobs_core::names` if there is one that is just `"llmobs"`; otherwise `const NAME: &str = "llmobs";` here with a comment pointing at D46).
+- The product name appears once: build the prefixes from a single `const` (use the existing name constant in `cetra_core::names` if there is one that is just `"cetra"`; otherwise `const NAME: &str = "cetra";` here with a comment pointing at D46).
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum KeyKind { Secret, Public, Personal }   // sk-llmobs- (32), pk-llmobs- (24), pat-llmobs- (32)
+pub(crate) enum KeyKind { Secret, Public, Personal }   // sk-cetra- (32), pk-cetra- (24), pat-cetra- (32)
 
 pub(crate) struct NewKey { pub(crate) plaintext: String, pub(crate) hash: String, pub(crate) prefix: String }
 pub(crate) fn new_key(kind: KeyKind) -> NewKey;
@@ -137,8 +137,8 @@ Download SecLists `Passwords/Common-Credentials/10k-most-common.txt` (MIT) from 
 
 ### Tests
 
-- `new_key` for each kind: prefix, total length, alphabet; 1 000 keys are distinct; `parse_key` accepts them and rejects a wrong prefix, one character short or long, a `-` in the tail, `pat-llmobs-` with a 24-char tail.
-- `display_prefix("sk-llmobs-a1B2c3…")` = `sk-llmobs-a1B2c3`.
+- `new_key` for each kind: prefix, total length, alphabet; 1 000 keys are distinct; `parse_key` accepts them and rejects a wrong prefix, one character short or long, a `-` in the tail, `pat-cetra-` with a 24-char tail.
+- `display_prefix("sk-cetra-a1B2c3…")` = `sk-cetra-a1B2c3`.
 - `new_opaque_token`: 43 chars; `hash_token` is the known SHA-256 hex of a fixed input.
 - Base62 distribution sanity: over 62 000 draws, every symbol appears (not a statistical test, just no symbol missing).
 - Policy: 9 chars fails, 10 passes; 128 ok, 129 fails; a 10-char password made of 10 multi-byte characters passes; equals email (different case) fails; a list entry in uppercase fails.

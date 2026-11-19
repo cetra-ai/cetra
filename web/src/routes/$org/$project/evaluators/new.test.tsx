@@ -80,6 +80,27 @@ function mappingRows(): [string, string][] {
     ]);
 }
 
+it("starts from the template named in the URL", async () => {
+  const hallucination = templatesFixture.data.find((template) => template.id === "hallucination");
+  if (!hallucination) {
+    throw new Error("the hallucination template is missing from the fixtures");
+  }
+  await renderApp("/acme/support-bot/evaluators/new?template=hallucination");
+
+  await waitFor(() => expect(screen.getByLabelText("Name")).toHaveValue("Hallucination"));
+  expect(screen.getByLabelText("Prompt")).toHaveValue(hallucination.prompt);
+  expect(screen.getByRole("combobox", { name: "Start from a template" })).toHaveTextContent(
+    "Hallucination",
+  );
+});
+
+it("ignores a template id that is not in the list", async () => {
+  await renderApp("/acme/support-bot/evaluators/new?template=nope");
+
+  await screen.findByRole("combobox", { name: "Start from a template" });
+  expect(screen.getByLabelText("Name")).toHaveValue("");
+});
+
 it("seeds the test panel's mapping from the picked template", async () => {
   const hallucination = templatesFixture.data.find((template) => template.id === "hallucination");
   if (!hallucination) {
@@ -230,4 +251,38 @@ it("puts server field errors under their controls", async () => {
   expect(
     await screen.findByText("data_type must be numeric for this evaluator"),
   ).toBeInTheDocument();
+});
+
+it("links back to the evaluators list when opened directly", async () => {
+  const { router } = await renderApp("/acme/support-bot/evaluators/new");
+  expect(await screen.findByRole("link", { name: "Back to evaluators" })).toHaveAttribute(
+    "href",
+    "/acme/support-bot/evaluators",
+  );
+  await waitFor(() => expect(router.state.status).toBe("idle"));
+});
+
+it("returns to the filtered list it was opened from", async () => {
+  const { router, user } = await renderApp("/acme/support-bot/evaluators?q=rel");
+  await user.click(await screen.findByRole("link", { name: "New evaluator" }));
+  await user.click(await screen.findByRole("link", { name: "Back to Evaluators" }));
+  await waitFor(() => expect(router.state.location.pathname).toBe("/acme/support-bot/evaluators"));
+  expect(router.state.location.search).toMatchObject({ q: "rel" });
+  await waitFor(() => expect(router.state.status).toBe("idle"));
+});
+
+it("cancels back to the list it was opened from", async () => {
+  const { router, user } = await renderApp("/acme/support-bot/evaluators?q=rel");
+  await user.click(await screen.findByRole("link", { name: "New evaluator" }));
+  await user.click(await screen.findByRole("button", { name: "Cancel" }));
+  await waitFor(() => expect(router.state.location.pathname).toBe("/acme/support-bot/evaluators"));
+  expect(router.state.location.search).toMatchObject({ q: "rel" });
+  await waitFor(() => expect(router.state.status).toBe("idle"));
+});
+
+it("cancels to the evaluators list when opened directly", async () => {
+  const { router, user } = await renderApp("/acme/support-bot/evaluators/new");
+  await user.click(await screen.findByRole("button", { name: "Cancel" }));
+  await waitFor(() => expect(router.state.location.pathname).toBe("/acme/support-bot/evaluators"));
+  await waitFor(() => expect(router.state.status).toBe("idle"));
 });

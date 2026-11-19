@@ -1,9 +1,9 @@
 //! axum router, shared state, and the request log (D150).
 //!
-//! `llmobs serve` binds [`router`] with
+//! `cetra serve` binds [`router`] with
 //! `into_make_service_with_connect_info::<SocketAddr>()` so [`ClientIp`] can
 //! read the socket peer. That binding is P5.
-#![cfg_attr(not(test), allow(dead_code))] // `llmobs serve` binds this in P5
+#![cfg_attr(not(test), allow(dead_code))] // `cetra serve` binds this in P5
 
 pub(crate) mod access;
 pub(crate) mod client_ip;
@@ -21,7 +21,8 @@ use axum::Router;
 use axum::extract::{DefaultBodyLimit, MatchedPath, Request};
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use llmobs_storage::Storage;
+use cetra_core::ids::ProjectId;
+use cetra_storage::Storage;
 use tower::ServiceExt;
 
 use crate::auth::Limits;
@@ -30,6 +31,7 @@ use crate::auth::principal::{ApiKeyCache, PatCache, authenticate};
 use crate::clock::Clock;
 use crate::config::ServerConfig;
 use crate::meta::MetaDb;
+use crate::routes::dashboards::WidgetCache;
 
 /// Bodies on this router. Later tracks raise it on a single route.
 const BODY_LIMIT: usize = 1024 * 1024;
@@ -65,10 +67,12 @@ pub(crate) struct AppInner {
     pub(crate) oauth_key: [u8; 32],
     /// OTLP ingest core: budget, prices, `accept` and `commit` (D-G-1).
     pub(crate) ingest: crate::ingest::Ingest,
+    /// When each project last received OTLP spans (D-C-20), in memory.
+    pub(crate) last_ingest: crate::ingest::last_ingest::LastIngest,
     /// Live bus and stream slots (D-G-12).
     pub(crate) live: crate::live::LiveBus,
-    /// `GET /metrics` answers cached 10 s (spec 05).
-    pub(crate) metrics_cache: crate::routes::metrics::MetricsCache,
+    /// `POST /dashboards/query` answers cached 10 s (spec 05 § Dashboard queries).
+    pub(crate) widget_cache: WidgetCache,
     /// Usage counters, flushed every 10 s (D-G-11).
     pub(crate) usage: crate::usage::Usage,
     /// Alert emails sent per org on the current UTC day (D-K-19).
@@ -78,7 +82,7 @@ pub(crate) struct AppInner {
     /// Seals and opens secret columns (D-I-2).
     pub(crate) secrets: crate::crypto::SecretBox,
     /// One egress client for judges, webhooks and connection tests (D-I-29).
-    pub(crate) eval_runner: Arc<llmobs_eval::EvalRunner>,
+    pub(crate) eval_runner: Arc<cetra_eval::EvalRunner>,
     /// Decrypted connections, keyed by id and `updated_at`.
     pub(crate) connections: crate::eval::connection::ConnectionCache,
     /// Trace-load permits (D-I-23).
@@ -104,6 +108,11 @@ pub(crate) struct AppInner {
 impl AppState {
     pub(crate) fn new(inner: AppInner) -> Self {
         Self(Arc::new(inner))
+    }
+
+    /// Drops the cached answers of `project` (D-M-11).
+    pub(crate) fn clear_answers(&self, project: ProjectId) {
+        self.widget_cache.clear_project(project);
     }
 
     /// The state when this is the last clone. The router holds the other one
@@ -158,7 +167,8 @@ pub(crate) fn serve_router(state: AppState, routes: Vec<access::RouteDef>) -> Ro
     finish(state, routed, None)
 }
 
-/// The OTLP/HTTP listener's router: `/v1/traces` and nothing else (D-G-21).
+/// The OTLP/HTTP listener's router: the OTLP routes `/v1/traces`, `/v1/logs` and `/v1/metrics`
+/// and nothing else (D-G-21, D-G-40).
 pub(crate) fn otlp_router(state: AppState) -> Router {
     serve_router(state, crate::routes::otlp::routes())
 }

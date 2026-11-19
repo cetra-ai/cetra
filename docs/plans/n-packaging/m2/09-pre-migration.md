@@ -101,8 +101,8 @@ applied before the upgrade, and only the copy from the last upgrade (D-N-22)."
 ## Verify
 
 ```bash
-cargo test -p llmobs-server --all-features pre_migration
-cargo test -p llmobs-storage --all-features pre_migration
+cargo test -p cetra-server --all-features pre_migration
+cargo test -p cetra-storage --all-features pre_migration
 just check
 ```
 

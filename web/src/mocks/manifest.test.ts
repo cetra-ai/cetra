@@ -1,10 +1,14 @@
 import mswPackage from "msw/package.json";
 import { expect, it } from "vitest";
+import type { Dashboard } from "@/lib/dashboards/types";
 import openapiDocument from "../../../crates/server/openapi.json";
 import manifest from "../../../fixtures/api/manifest.json";
+import overviewDocument from "../../../fixtures/api/static/dashboard-overview.json";
 import workerSource from "../../msw/mockServiceWorker.js?raw";
+import { dashboardHandlers, seedDashboards } from "./dashboards";
 import { sortBySpecificity } from "./handlers";
 import { type MockEntry, type MockOperation, operations } from "./manifest";
+import { server } from "./node";
 
 it("maps every GET manifest entry to a handler", () => {
   const ids = new Set(operations.map((operation) => operation.operationId));
@@ -44,6 +48,8 @@ function methodOf(operationId: string): string | undefined {
 }
 
 it("serves every manifest entry", async () => {
+  // The manifest's Overview is the stored copy: the dashboard mock answers it with that copy.
+  server.use(...dashboardHandlers(seedDashboards(), overviewDocument as unknown as Dashboard));
   for (const operation of operations) {
     for (const entry of operation.entries) {
       const url = fixtureUrl(operation, entry);

@@ -1,5 +1,5 @@
 /target
-/llmobs-data/
+/cetra-data/
 node_modules/
 dist/
 .venv/
@@ -10,10 +10,11 @@ __pycache__/
 coverage/
 *.tsbuildinfo
 web/src/routeTree.gen.ts
+web/.tanstack/
 .env
 .env.*
 !.env.example
-deploy/compose/llmobs.env
+deploy/compose/cetra.env
 .DS_Store
 *.swp
 

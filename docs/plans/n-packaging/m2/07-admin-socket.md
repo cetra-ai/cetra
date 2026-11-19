@@ -2,7 +2,7 @@
 
 Read [00-design.md](00-design.md) first, especially § Design › Trigger (D-N-17).
 
-**Goal:** `llmobs serve` listens on `<data_dir>/admin.sock` and answers `backup` requests (B6), one
+**Goal:** `cetra serve` listens on `<data_dir>/admin.sock` and answers `backup` requests (B6), one
 JSON line in and one JSON line out per connection.
 
 **Edit only:** `crates/server/src/admin_socket.rs` (new), `crates/server/src/lib.rs`,
@@ -126,11 +126,11 @@ Use `serve::bind` with a temp data dir under `std::env::temp_dir()`; keep paths 
 ## Verify
 
 ```bash
-cargo test -p llmobs-server --all-features admin_socket
+cargo test -p cetra-server --all-features admin_socket
 just check
 ```
 
 ## Done when
 
-- [ ] `llmobs serve` serves `<data_dir>/admin.sock` with mode 0600 and removes it at shutdown.
+- [ ] `cetra serve` serves `<data_dir>/admin.sock` with mode 0600 and removes it at shutdown.
 - [ ] The seven tests pass, and `just check` passes. One commit: `Serve the admin control socket`.

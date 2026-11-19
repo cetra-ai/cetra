@@ -95,10 +95,10 @@ describe("generators", () => {
     expect([...traced({ prompt: "hi" })]).toEqual(["Hel", "lo"]);
     const [span] = await finished(exporter);
     expect(span?.name).toBe("stream");
-    expect(span?.attributes["llmobs.input"]).toBe('{"prompt":"hi"}');
-    expect(span?.attributes["llmobs.input.format"]).toBe("json");
-    expect(span?.attributes["llmobs.output"]).toBe("Hello");
-    expect(span?.attributes["llmobs.output.format"]).toBe("text");
+    expect(span?.attributes["cetra.input"]).toBe('{"prompt":"hi"}');
+    expect(span?.attributes["cetra.input.format"]).toBe("json");
+    expect(span?.attributes["cetra.output"]).toBe("Hello");
+    expect(span?.attributes["cetra.output.format"]).toBe("text");
     expect(span?.status.code).toBe(SpanStatusCode.UNSET);
   });
 
@@ -113,9 +113,9 @@ describe("generators", () => {
     );
     expect([...traced()]).toEqual([{ n: 1 }, { n: 2 }]);
     const [span] = await finished(exporter);
-    expect(span?.attributes["llmobs.input"]).toBeUndefined();
-    expect(span?.attributes["llmobs.output"]).toBe('[{"n":1},{"n":2}]');
-    expect(span?.attributes["llmobs.output.format"]).toBe("json");
+    expect(span?.attributes["cetra.input"]).toBeUndefined();
+    expect(span?.attributes["cetra.output"]).toBe('[{"n":1},{"n":2}]');
+    expect(span?.attributes["cetra.output.format"]).toBe("json");
     expect(span?.status.code).toBe(SpanStatusCode.UNSET);
   });
 
@@ -139,7 +139,7 @@ describe("generators", () => {
     expect(seen).toEqual(["a", "b"]);
     const [span] = await finished(exporter);
     expect(span?.status.code).toBe(SpanStatusCode.OK);
-    expect(span?.attributes["llmobs.output"]).toBe("ab");
+    expect(span?.attributes["cetra.output"]).toBe("ab");
   });
 
   it("records an exception from the body and re-throws it", async () => {
@@ -164,7 +164,7 @@ describe("generators", () => {
     expect(span?.status.code).toBe(SpanStatusCode.ERROR);
     expect(span?.status.message).toBe("ScenarioError: boom");
     expect(span?.events[0]?.attributes?.["exception.type"]).toBe("ScenarioError");
-    expect(span?.attributes["llmobs.output"]).toBeUndefined();
+    expect(span?.attributes["cetra.output"]).toBeUndefined();
   });
 
   it("forwards a consumer throw() and records the error", async () => {
@@ -188,7 +188,7 @@ describe("generators", () => {
     const [span] = await finished(exporter);
     expect(span?.status.code).toBe(SpanStatusCode.ERROR);
     expect(span?.status.message).toBe("ScenarioError: injected");
-    expect(span?.attributes["llmobs.output"]).toBeUndefined();
+    expect(span?.attributes["cetra.output"]).toBeUndefined();
   });
 
   it("keeps going when the body catches a consumer throw()", async () => {
@@ -209,7 +209,7 @@ describe("generators", () => {
     expect(wrapped.next()).toEqual({ value: "end", done: true });
     const [span] = await finished(exporter);
     expect(span?.status.code).toBe(SpanStatusCode.UNSET);
-    expect(span?.attributes["llmobs.output"]).toBe("acaught");
+    expect(span?.attributes["cetra.output"]).toBe("acaught");
   });
 
   it("passes sent values through and returns the generator's return value", async () => {
@@ -269,9 +269,9 @@ describe("generators", () => {
     expect([...traced(4)]).toEqual(["8"]);
     const [span] = await finished(exporter);
     expect(span?.name).toBe("double");
-    expect(span?.attributes["llmobs.input"]).toBe("4");
-    expect(span?.attributes["llmobs.output"]).toBe("8");
-    expect(span?.attributes["llmobs.output.format"]).toBe("text");
+    expect(span?.attributes["cetra.input"]).toBe("4");
+    expect(span?.attributes["cetra.output"]).toBe("8");
+    expect(span?.attributes["cetra.output.format"]).toBe("text");
   });
 
   it("records reduceOutput(items) instead of the default rule", async () => {
@@ -286,8 +286,8 @@ describe("generators", () => {
     );
     expect([...traced()]).toEqual(["a", "b", "c"]);
     const [span] = await finished(exporter);
-    expect(span?.attributes["llmobs.output"]).toBe("a-b-c");
-    expect(span?.attributes["llmobs.output.format"]).toBe("text");
+    expect(span?.attributes["cetra.output"]).toBe("a-b-c");
+    expect(span?.attributes["cetra.output.format"]).toBe("text");
   });
 
   it("falls back to the default rule when reduceOutput throws", async () => {
@@ -306,7 +306,7 @@ describe("generators", () => {
     );
     expect([...traced()]).toEqual(["a", "b"]);
     const [span] = await finished(exporter);
-    expect(span?.attributes["llmobs.output"]).toBe("ab");
+    expect(span?.attributes["cetra.output"]).toBe("ab");
     expect(span?.status.code).toBe(SpanStatusCode.UNSET);
   });
 
@@ -329,7 +329,7 @@ describe("generators", () => {
     );
     expect([...traced()]).toEqual([]);
     const [span] = await finished(exporter);
-    expect(span?.attributes["llmobs.output"]).toBeUndefined();
+    expect(span?.attributes["cetra.output"]).toBeUndefined();
     expect(calls).toEqual([]);
   });
 
@@ -351,7 +351,7 @@ describe("generators", () => {
     // A sync generator's body throws synchronously out of next().
     expect(() => generator.next()).toThrow(TypeError);
     const [span] = await finished(exporter);
-    expect(span?.attributes["llmobs.span.kind"]).toBe("chain");
+    expect(span?.attributes["cetra.span.kind"]).toBe("chain");
     expect(span?.status.code).toBe(SpanStatusCode.ERROR);
     expect(span?.status.message).toMatch(/^TypeError: /);
     expect(span?.events[0]?.name).toBe("exception");
@@ -361,7 +361,7 @@ describe("generators", () => {
     const { exporter } = startMemory();
     observe(() => "plain", { name: "plain", reduceOutput: () => "reduced" })();
     const [span] = await finished(exporter);
-    expect(span?.attributes["llmobs.output"]).toBe("plain");
+    expect(span?.attributes["cetra.output"]).toBe("plain");
   });
 
   it("keeps no items while captureContent is false", async () => {
@@ -376,8 +376,8 @@ describe("generators", () => {
     );
     expect([...traced()]).toHaveLength(10_000);
     const [span] = await finished(exporter);
-    expect(span?.attributes["llmobs.output"]).toBeUndefined();
-    expect(span?.attributes["llmobs.span.kind"]).toBe("chain");
+    expect(span?.attributes["cetra.output"]).toBeUndefined();
+    expect(span?.attributes["cetra.span.kind"]).toBe("chain");
   });
 
   it("keeps no items while captureOutput is false", async () => {
@@ -392,7 +392,7 @@ describe("generators", () => {
     );
     expect([...traced()]).toHaveLength(10_000);
     const [span] = await finished(exporter);
-    expect(span?.attributes["llmobs.output"]).toBeUndefined();
+    expect(span?.attributes["cetra.output"]).toBeUndefined();
   });
 
   it("skips the input per captureInput", async () => {
@@ -405,8 +405,8 @@ describe("generators", () => {
     );
     expect([...traced("hi")]).toEqual(["hi"]);
     const [span] = await finished(exporter);
-    expect(span?.attributes["llmobs.input"]).toBeUndefined();
-    expect(span?.attributes["llmobs.output"]).toBe("hi");
+    expect(span?.attributes["cetra.input"]).toBeUndefined();
+    expect(span?.attributes["cetra.output"]).toBe("hi");
   });
 });
 
@@ -427,9 +427,9 @@ describe("async generators", () => {
     expect(seen).toEqual(["Hel", "lo"]);
     const [span] = await finished(exporter);
     expect(span?.name).toBe("stream");
-    expect(span?.attributes["llmobs.input"]).toBe('{"prompt":"hi"}');
-    expect(span?.attributes["llmobs.output"]).toBe("Hello");
-    expect(span?.attributes["llmobs.output.format"]).toBe("text");
+    expect(span?.attributes["cetra.input"]).toBe('{"prompt":"hi"}');
+    expect(span?.attributes["cetra.output"]).toBe("Hello");
+    expect(span?.attributes["cetra.output.format"]).toBe("text");
     expect(span?.status.code).toBe(SpanStatusCode.UNSET);
   });
 
@@ -484,7 +484,7 @@ describe("async generators", () => {
     expect(seen).toEqual(["a", "b"]);
     const [span] = await finished(exporter);
     expect(span?.status.code).toBe(SpanStatusCode.OK);
-    expect(span?.attributes["llmobs.output"]).toBe("ab");
+    expect(span?.attributes["cetra.output"]).toBe("ab");
   });
 
   it("records an exception from the body and rejects with it", async () => {
@@ -503,7 +503,7 @@ describe("async generators", () => {
     expect(span?.status.code).toBe(SpanStatusCode.ERROR);
     expect(span?.status.message).toBe("ScenarioError: late");
     expect(span?.events).toHaveLength(1);
-    expect(span?.attributes["llmobs.output"]).toBeUndefined();
+    expect(span?.attributes["cetra.output"]).toBeUndefined();
   });
 
   it("forwards a consumer throw() and records the error", async () => {
@@ -538,8 +538,8 @@ describe("async generators", () => {
     }
     expect(items).toEqual([{ n: 1 }, { n: 2 }]);
     const [span] = await finished(exporter);
-    expect(span?.attributes["llmobs.output"]).toBe('[{"n":1},{"n":2}]');
-    expect(span?.attributes["llmobs.output.format"]).toBe("json");
+    expect(span?.attributes["cetra.output"]).toBe('[{"n":1},{"n":2}]');
+    expect(span?.attributes["cetra.output.format"]).toBe("json");
   });
 
   it("never exports an abandoned async generator", async () => {
@@ -568,7 +568,7 @@ describe("call mode around generator-like values", () => {
     expect([...gen]).toEqual([1, 2]);
     const [span] = await finished(exporter);
     expect(span?.name).toBe("make");
-    expect(span?.attributes["llmobs.output"]).toBeUndefined();
+    expect(span?.attributes["cetra.output"]).toBeUndefined();
   });
 
   it("traces an async function resolving to an async generator as a call without output", async () => {
@@ -584,7 +584,7 @@ describe("call mode around generator-like values", () => {
     }
     expect(seen).toEqual([1]);
     const [span] = await finished(exporter);
-    expect(span?.attributes["llmobs.output"]).toBeUndefined();
+    expect(span?.attributes["cetra.output"]).toBeUndefined();
   });
 
   it("returns an AsyncIterable unchanged, unconsumed, recorded as a value", async () => {
@@ -598,8 +598,8 @@ describe("call mode around generator-like values", () => {
     };
     expect(observe(() => source, { name: "give" })()).toBe(source);
     const [span] = await finished(exporter);
-    expect(span?.attributes["llmobs.output"]).toBe('{"brand":"custom"}');
-    expect(span?.attributes["llmobs.output.format"]).toBe("json");
+    expect(span?.attributes["cetra.output"]).toBe('{"brand":"custom"}');
+    expect(span?.attributes["cetra.output.format"]).toBe("json");
     const seen: number[] = [];
     for await (const item of source) {
       seen.push(item);
@@ -618,8 +618,8 @@ describe("call mode around generator-like values", () => {
     });
     expect(observe(() => stream, { name: "give" })()).toBe(stream);
     const [span] = await finished(exporter);
-    expect(span?.attributes["llmobs.output"]).toBe("{}");
-    expect(span?.attributes["llmobs.output.format"]).toBe("json");
+    expect(span?.attributes["cetra.output"]).toBe("{}");
+    expect(span?.attributes["cetra.output.format"]).toBe("json");
     const reader = stream.getReader();
     expect(await reader.read()).toEqual({ value: "chunk-1", done: false });
     expect(await reader.read()).toEqual({ value: "chunk-2", done: false });

@@ -6,8 +6,8 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use llmobs_server::config::ServerConfig;
-use llmobs_server::serve::{self, Running};
+use cetra_server::config::ServerConfig;
+use cetra_server::serve::{self, Running};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -17,7 +17,7 @@ use crate::credentials;
 const ORIGIN: &str = "http://127.0.0.1:8080";
 const EMAIL: &str = "ada@example.com";
 const PASSWORD: &str = "h9-cli-query-secret";
-const KEY: &str = "sk-llmobs-H9CLIQUERY0123456789ABCDEFGHIJKL";
+const KEY: &str = "sk-cetra-H9CLIQUERY0123456789ABCDEFGHIJKL";
 
 /// A running server with one ingested trace and two personal access tokens.
 pub(crate) struct TestServer {
@@ -39,7 +39,7 @@ impl TestServer {
     pub(crate) async fn start() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().join("data");
-        let config_path = dir.path().join("llmobs.toml");
+        let config_path = dir.path().join("cetra.toml");
         std::fs::write(
             &config_path,
             format!(
@@ -94,9 +94,9 @@ impl TestServer {
         self.dir.path().join("data")
     }
 
-    /// The config file that starts this server (`llmobs.toml` in the temp dir).
+    /// The config file that starts this server (`cetra.toml` in the temp dir).
     pub(crate) fn config_path(&self) -> PathBuf {
-        self.dir.path().join("llmobs.toml")
+        self.dir.path().join("cetra.toml")
     }
 
     /// Stops the server and returns its temp dir, which holds the data directory and the
@@ -109,7 +109,7 @@ impl TestServer {
 
     /// A credentials file in the temp dir holding `url → token`.
     pub(crate) fn credentials(&self) -> PathBuf {
-        let path = self.dir.path().join("llmobs").join("credentials.toml");
+        let path = self.dir.path().join("cetra").join("credentials.toml");
         let mut file = credentials::CredentialsFile::default();
         file.servers.insert(
             self.url.clone(),
@@ -121,11 +121,11 @@ impl TestServer {
         path
     }
 
-    /// Posts `fixtures/otlp/llmobs/<fixture>/input.json` to `/v1/traces` as OTLP/JSON with
+    /// Posts `fixtures/otlp/cetra/<fixture>/input.json` to `/v1/traces` as OTLP/JSON with
     /// `key`, after setting every span's `traceId` to `trace_id` (32 lowercase hex digits).
     pub(crate) async fn ingest(&self, fixture: &str, trace_id: &str) {
         let path = format!(
-            "{}/../../fixtures/otlp/llmobs/{fixture}/input.json",
+            "{}/../../fixtures/otlp/cetra/{fixture}/input.json",
             env!("CARGO_MANIFEST_DIR")
         );
         let mut body: Value =

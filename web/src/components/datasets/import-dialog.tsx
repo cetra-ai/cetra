@@ -286,9 +286,9 @@ function ImportWizard({
   if (step === "result" && result) {
     return (
       <div className="flex flex-col gap-4">
-        <p className="text-sm">{`Imported ${result.imported} items as version ${result.version}.`}</p>
+        <p className="text-body">{`Imported ${result.imported} items as version ${result.version}.`}</p>
         {result.error_count > 0 ? (
-          <p className="text-sm">{`${result.error_count} rows were skipped.`}</p>
+          <p className="text-body">{`${result.error_count} rows were skipped.`}</p>
         ) : null}
         {result.errors.length > 0 ? (
           <Table aria-label="Row errors">
@@ -309,7 +309,7 @@ function ImportWizard({
           </Table>
         ) : null}
         {result.error_count > result.errors.length ? (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-caption text-muted-foreground">
             {`Showing the first ${result.errors.length} errors.`}
           </p>
         ) : null}
@@ -327,14 +327,14 @@ function ImportWizard({
     const hiddenErrors = preview.errors.length - shownErrors.length;
     return (
       <div className="flex flex-col gap-4">
-        <p className="text-xs text-muted-foreground">
+        <p className="text-caption text-muted-foreground">
           {`${file.name} · ${formatBytes(file.size)} · ${format.toUpperCase()}`}
         </p>
         {preview.truncated ? (
-          <p className="text-xs text-muted-foreground">Showing the first rows of the file.</p>
+          <p className="text-caption text-muted-foreground">Showing the first rows of the file.</p>
         ) : null}
         {shownErrors.length > 0 ? (
-          <div className="flex flex-col gap-1 text-xs text-destructive">
+          <div className="flex flex-col gap-1 text-caption text-destructive">
             {shownErrors.map((item) => (
               <p key={item.row}>{`Row ${item.row}: ${item.message}`}</p>
             ))}
@@ -364,7 +364,7 @@ function ImportWizard({
               ) : (
                 // biome-ignore lint/suspicious/noArrayIndexKey: the preview is fixed for the step and never reorders
                 <TableRow key={`row-${index}`}>
-                  <TableCell className="font-mono text-xs">{previewJson(row, 200)}</TableCell>
+                  <TableCell className="font-mono text-caption">{previewJson(row, 200)}</TableCell>
                 </TableRow>
               ),
             )}
@@ -418,12 +418,12 @@ function ImportWizard({
             </TableBody>
           </Table>
         ) : (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-caption text-muted-foreground">
             Each line must be an object with input and, optionally, expected_output and metadata.
           </p>
         )}
         {problems.length > 0 ? (
-          <div role="alert" className="flex flex-col gap-1 text-xs text-destructive">
+          <div role="alert" className="flex flex-col gap-1 text-caption text-destructive">
             {problems.map((problem) => (
               <p key={problem}>{problem}</p>
             ))}
@@ -501,7 +501,7 @@ function ImportWizard({
           />
           Choose a CSV or JSONL file
         </label>
-        {reading ? <p className="text-xs text-muted-foreground">Reading the file…</p> : null}
+        {reading ? <p className="text-caption text-muted-foreground">Reading the file…</p> : null}
       </div>
       <FormError message={fileError} />
     </div>

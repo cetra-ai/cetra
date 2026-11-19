@@ -19,6 +19,7 @@ use crate::auth::reset::{ResetError, reset_link, verification_link};
 use crate::auth::secret::{constant_time_eq, hash_token, is_opaque_token};
 use crate::auth::session::{SessionOrigin, clear_cookie, resolve_cookie_header, start_session};
 use crate::bootstrap::{self, BootstrapError};
+use crate::demo::{is_demo_org, orgs_for};
 use crate::email::Email;
 use crate::entitlements::{over_limit, plan_limit};
 use crate::http::AppState;
@@ -28,7 +29,6 @@ use crate::http::error::{self, ApiError};
 use crate::meta::email_verifications;
 use crate::meta::invites;
 use crate::meta::members;
-use crate::meta::orgs::orgs_of_user;
 use crate::meta::password_resets::{delete_user_resets, use_reset, valid_reset};
 use crate::meta::personal_tokens::revoke_user_tokens;
 use crate::meta::users::EmailVerifiedVia;
@@ -197,6 +197,7 @@ async fn setup(
             slug: created.created.org.slug,
             name: created.created.org.name,
             role: OrgRole::Owner,
+            demo: is_demo_org(&state.config, created.created.org.id),
         },
         project: Project {
             id: created.created.project.id,
@@ -205,6 +206,8 @@ async fn setup(
             name: created.created.project.name,
             retention_days: created.created.project.retention_days,
             trace_completion_timeout_s,
+            genai_log_events: None,
+            last_ingest_at: None,
             role: Some(OrgRole::Owner),
             created_at: created.created.project.created_at,
         },
@@ -745,16 +748,17 @@ async fn me(
 }
 
 async fn me_from(state: &AppState, user: &UserRow) -> Result<Me, ApiError> {
-    let orgs = orgs_of_user(state.meta.reader(), user.id).await?;
+    let orgs = orgs_for(state, user.id, user.is_instance_admin).await?;
     Ok(Me {
         user: user_view(user),
         orgs: orgs
             .into_iter()
-            .map(|(org, role)| OrgMembership {
+            .map(|(org, role, demo)| OrgMembership {
                 id: org.id,
                 slug: org.slug,
                 name: org.name,
                 role,
+                demo,
             })
             .collect(),
     })
@@ -879,7 +883,7 @@ mod tests {
         make_instance_admin, org_sso_app, org_sso_app_with, second_org, set_limits,
     };
 
-    const PASSWORD: &str = "llmobs-ok1";
+    const PASSWORD: &str = "cetra-ok-1";
 
     #[tokio::test]
     async fn restore_mode_lists_no_identity_providers() {
@@ -967,7 +971,7 @@ mod tests {
         let cookie = created.headers.get(axum::http::header::SET_COOKIE).unwrap();
         let cookie = cookie.to_str().unwrap();
         assert!(
-            cookie.contains(&format!("{}=", llmobs_core::llmobs_name!("_session"))),
+            cookie.contains(&format!("{}=", cetra_core::cetra_name!("_session"))),
             "{cookie}"
         );
         let response: SetupResponse = created.json();
@@ -1105,7 +1109,7 @@ mod tests {
     use crate::meta::members::add_org_member;
     use crate::meta::orgs::insert_org_with_derived_slug;
     use crate::meta::users::{NewUser, insert_user, set_disabled};
-    use llmobs_core::ids::OrgId;
+    use cetra_core::ids::OrgId;
 
     fn login_body(email: &str, password: &str) -> LoginRequest {
         LoginRequest {
@@ -1713,10 +1717,10 @@ mod tests {
             .unwrap();
         let token = reset_token(&url).to_owned();
         let reset = assert_logs_clean(
-            &[&token, PASSWORD, "llmobs-ok2", "ada@example.com"],
+            &[&token, PASSWORD, "cetra-ok-2", "ada@example.com"],
             async {
                 app.request(Method::POST, "/api/auth/password/reset")
-                    .json(&serde_json::json!({ "token": &token, "password": "llmobs-ok2" }))
+                    .json(&serde_json::json!({ "token": &token, "password": "cetra-ok-2" }))
                     .send()
                     .await
             },
@@ -1742,13 +1746,13 @@ mod tests {
         assert_eq!(old.status, 401);
         let fresh = app
             .request(Method::POST, "/api/auth/login")
-            .json(&login_body("ada@example.com", "llmobs-ok2"))
+            .json(&login_body("ada@example.com", "cetra-ok-2"))
             .send()
             .await;
         assert_eq!(fresh.status, 200);
         let again = app
             .request(Method::POST, "/api/auth/password/reset")
-            .json(&serde_json::json!({ "token": token, "password": "llmobs-ok2" }))
+            .json(&serde_json::json!({ "token": token, "password": "cetra-ok-2" }))
             .send()
             .await;
         assert_eq!(again.status, 400);
@@ -1795,7 +1799,7 @@ mod tests {
         let token = reset_token(&url).to_owned();
         let reset = app
             .request(Method::POST, "/api/auth/password/reset")
-            .json(&serde_json::json!({ "token": &token, "password": "llmobs-ok2" }))
+            .json(&serde_json::json!({ "token": &token, "password": "cetra-ok-2" }))
             .send()
             .await;
         assert_eq!(reset.status, 204);
@@ -1820,7 +1824,7 @@ mod tests {
             .request(Method::POST, "/api/auth/password/reset")
             .json(&serde_json::json!({
                 "token": reset_token(&url),
-                "password": "llmobs-ok2",
+                "password": "cetra-ok-2",
             }))
             .send()
             .await;
@@ -1841,7 +1845,7 @@ mod tests {
         insert_account(&fresh, "ada@example.com", Some(PASSWORD), true).await;
         let shaped = fresh
             .request(Method::POST, "/api/auth/password/reset")
-            .json(&serde_json::json!({ "token": "nope", "password": "llmobs-ok2" }))
+            .json(&serde_json::json!({ "token": "nope", "password": "cetra-ok-2" }))
             .send()
             .await;
         assert_eq!(shaped.status, 400);
@@ -1858,7 +1862,7 @@ mod tests {
         assert_eq!(weak.problem().errors[0].field, "password");
         let accepted = fresh
             .request(Method::POST, "/api/auth/password/reset")
-            .json(&serde_json::json!({ "token": token, "password": "llmobs-ok2" }))
+            .json(&serde_json::json!({ "token": token, "password": "cetra-ok-2" }))
             .send()
             .await;
         assert_eq!(
@@ -1869,7 +1873,7 @@ mod tests {
         );
         let logged_in = fresh
             .request(Method::POST, "/api/auth/login")
-            .json(&login_body("ada@example.com", "llmobs-ok2"))
+            .json(&login_body("ada@example.com", "cetra-ok-2"))
             .send()
             .await;
         assert_eq!(logged_in.status, 200);
@@ -1895,7 +1899,7 @@ mod tests {
             .request(Method::POST, "/api/auth/password/reset")
             .json(&serde_json::json!({
                 "token": reset_token(&url),
-                "password": "llmobs-ok2",
+                "password": "cetra-ok-2",
             }))
             .send()
             .await;
@@ -1903,7 +1907,7 @@ mod tests {
         assert!(!app.state.limits.lockout.is_locked("ada@example.com", now));
         let logged_in = app
             .request(Method::POST, "/api/auth/login")
-            .json(&login_body("ada@example.com", "llmobs-ok2"))
+            .json(&login_body("ada@example.com", "cetra-ok-2"))
             .send()
             .await;
         assert_eq!(logged_in.status, 200);
@@ -1976,7 +1980,7 @@ mod tests {
         let app = TestApp::with_config(|config| config.auth.disable_password = true).await;
         let bad = app
             .request(Method::POST, "/api/auth/password/reset")
-            .json(&serde_json::json!({ "token": "nope", "password": "new-llmobs-1" }))
+            .json(&serde_json::json!({ "token": "nope", "password": "new-cetra-1" }))
             .send()
             .await;
         assert_eq!(bad.status, 400);
@@ -2013,7 +2017,7 @@ mod tests {
             .request(Method::POST, "/api/auth/password/reset")
             .json(&serde_json::json!({
                 "token": ada_token.plaintext,
-                "password": "new-llmobs-1",
+                "password": "new-cetra-1",
             }))
             .send()
             .await;
@@ -2049,14 +2053,14 @@ mod tests {
             .request(Method::POST, "/api/auth/password/reset")
             .json(&serde_json::json!({
                 "token": admin_token.plaintext,
-                "password": "new-llmobs-1",
+                "password": "new-cetra-1",
             }))
             .send()
             .await;
         assert_eq!(admin_reset.status, 204);
         let new_login = app
             .request(Method::POST, "/api/auth/login")
-            .json(&login_body("root@example.com", "new-llmobs-1"))
+            .json(&login_body("root@example.com", "new-cetra-1"))
             .send()
             .await;
         assert_eq!(new_login.status, 200);
@@ -2361,10 +2365,10 @@ mod tests {
         assert!(!logs.contains(&token), "{logs}");
 
         let reset = assert_logs_clean(
-            &[&token, PASSWORD, "llmobs-ok2", "ada@example.com"],
+            &[&token, PASSWORD, "cetra-ok-2", "ada@example.com"],
             async {
                 app.request(Method::POST, "/api/auth/password/reset")
-                    .json(&serde_json::json!({ "token": token, "password": "llmobs-ok2" }))
+                    .json(&serde_json::json!({ "token": token, "password": "cetra-ok-2" }))
                     .send()
                     .await
             },
@@ -2379,7 +2383,7 @@ mod tests {
         assert_eq!(old.status, 401);
         let fresh = app
             .request(Method::POST, "/api/auth/login")
-            .json(&login_body("ada@example.com", "llmobs-ok2"))
+            .json(&login_body("ada@example.com", "cetra-ok-2"))
             .send()
             .await;
         assert_eq!(fresh.status, 200);
@@ -2824,7 +2828,7 @@ mod tests {
             .unwrap();
         let reset = app
             .request(Method::POST, "/api/auth/password/reset")
-            .json(&serde_json::json!({ "token": token.plaintext, "password": "new-llmobs-1" }))
+            .json(&serde_json::json!({ "token": token.plaintext, "password": "new-cetra-1" }))
             .send()
             .await;
         assert_eq!(reset.status, StatusCode::FORBIDDEN);

@@ -199,17 +199,17 @@ function recordOutput(span: Span, plan: GeneratorPlan, items: unknown[]): void {
   }
   if (plan.reduceOutput !== undefined) {
     try {
-      setPayload(span, "llmobs.output", plan.reduceOutput(items), plan.runtime);
+      setPayload(span, "cetra.output", plan.reduceOutput(items), plan.runtime);
       return;
     } catch (error) {
-      debug(`llmobs: reduceOutput failed (${errorName(error)}); recording the items instead`);
+      debug(`cetra: reduceOutput failed (${errorName(error)}); recording the items instead`);
     }
   }
   if (items.every((item) => typeof item === "string")) {
-    setPayload(span, "llmobs.output", items.join(""), plan.runtime);
+    setPayload(span, "cetra.output", items.join(""), plan.runtime);
     return;
   }
-  setPayload(span, "llmobs.output", items, plan.runtime);
+  setPayload(span, "cetra.output", items, plan.runtime);
 }
 
 function errorName(error: unknown): string {

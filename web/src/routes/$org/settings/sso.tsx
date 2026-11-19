@@ -18,7 +18,7 @@ function OrgSsoPage() {
     >
       {role === "owner" ? <OrgSsoSettings org={org} /> : null}
       {role !== undefined && role !== "owner" ? (
-        <p role="note" className="text-sm text-muted-foreground">
+        <p role="note" className="text-body text-muted-foreground">
           Only owners can manage single sign-on.
         </p>
       ) : null}

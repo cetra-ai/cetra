@@ -81,14 +81,14 @@ it("opens the shortcut help for every shortcut", async () => {
   }
 });
 
-it("goes to spans with g then s and sessions with g then e", async () => {
+it("goes to spans with g then p and sessions with g then s", async () => {
   const { router, user } = await renderApp("/acme/support-bot/traces");
   await screen.findByRole("grid", { name: "Traces" });
-  await user.keyboard("gs");
+  await user.keyboard("gp");
   await waitFor(() => {
     expect(router.state.location.pathname).toBe("/acme/support-bot/spans");
   });
-  await user.keyboard("ge");
+  await user.keyboard("gs");
   await waitFor(() => {
     expect(router.state.location.pathname).toBe("/acme/support-bot/sessions");
   });
@@ -102,4 +102,30 @@ it("ignores shortcuts while typing in the search box", async () => {
   expect(search).toHaveValue("gs?");
   expect(router.state.location.pathname).toBe("/acme/support-bot/traces");
   expect(screen.queryByRole("dialog", { name: "Keyboard shortcuts" })).not.toBeInTheDocument();
+});
+
+it("finds a project settings page by a keyword", async () => {
+  const { router, user } = await renderApp("/acme/support-bot/traces");
+  await screen.findByRole("grid", { name: "Traces" });
+  const dialog = await openPalette(user);
+  await user.type(within(dialog).getByRole("combobox"), "retention");
+  await user.click(
+    await within(dialog).findByRole("option", { name: "Project settings: General" }),
+  );
+  await waitFor(() => {
+    expect(router.state.location.pathname).toBe("/acme/support-bot/settings/general");
+  });
+});
+
+it("opens an organization settings page from inside a project", async () => {
+  const { router, user } = await renderApp("/acme/support-bot/traces");
+  await screen.findByRole("grid", { name: "Traces" });
+  const dialog = await openPalette(user);
+  await user.type(within(dialog).getByRole("combobox"), "usage");
+  await user.click(
+    await within(dialog).findByRole("option", { name: "Organization settings: Plan" }),
+  );
+  await waitFor(() => {
+    expect(router.state.location.pathname).toBe("/acme/settings/plan");
+  });
 });

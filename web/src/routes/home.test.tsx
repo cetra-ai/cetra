@@ -245,6 +245,37 @@ it("switches orgs", async () => {
   expect(await screen.findByText("Beta notes")).toBeInTheDocument();
 });
 
+const DEMO = {
+  id: "01900000-0000-7000-8000-000000000020",
+  slug: "cetra-demo",
+  name: "cetra Demo",
+  role: "viewer",
+  demo: true,
+};
+
+it("opens the first org that is not the demo org", async () => {
+  server.use(
+    http.get("/api/auth/me", () =>
+      HttpResponse.json({ user: USER, orgs: [DEMO, { ...ACME, demo: false }] }),
+    ),
+  );
+
+  const { router } = await renderApp("/");
+  expect(router.state.location.pathname).toBe("/acme");
+});
+
+it("opens the demo org when it is the user's only org", async () => {
+  server.use(
+    http.get("/api/auth/me", () => HttpResponse.json({ user: USER, orgs: [DEMO] })),
+    http.get("/api/v1/orgs/:org/projects", () =>
+      HttpResponse.json({ data: [], next_cursor: null }),
+    ),
+  );
+
+  const { router } = await renderApp("/");
+  expect(router.state.location.pathname).toBe("/cetra-demo");
+});
+
 function project(name: string, slug: string, retention?: number) {
   return {
     id: `01900000-0000-7000-8000-${slug.padEnd(12, "0").slice(0, 12)}`,

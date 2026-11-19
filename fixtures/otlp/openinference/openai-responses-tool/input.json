@@ -41,15 +41,15 @@
           },
           "spans": [
             {
-              "traceId": "509df40376da9df51325fbd1de1cffe2",
-              "spanId": "5481f3a30693d27e",
+              "traceId": "e720c61235fc1b29219422d3f7cc2ea0",
+              "spanId": "df7c4f82de483d32",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
               "name": "Response",
               "kind": 1,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590079000000",
+              "endTimeUnixNano": "1767225590082000000",
               "attributes": [
                 {
                   "key": "llm.system",
@@ -189,15 +189,15 @@
               }
             },
             {
-              "traceId": "e858d2ce0654852a35f16b4579a10007",
-              "spanId": "6345dd52d831a0ec",
+              "traceId": "ad0a7150440b538f814dff4945a0da98",
+              "spanId": "ac751fb17c6d87df",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
               "name": "Response",
               "kind": 1,
-              "startTimeUnixNano": "1767225590085000000",
-              "endTimeUnixNano": "1767225590117000000",
+              "startTimeUnixNano": "1767225590089000000",
+              "endTimeUnixNano": "1767225590122000000",
               "attributes": [
                 {
                   "key": "llm.system",

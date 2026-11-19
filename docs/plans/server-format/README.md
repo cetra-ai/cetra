@@ -6,9 +6,9 @@ Track R's M8 (`docs/plans/r-hardening/08-m8-format.md`) makes the storage format
 
 | Surface | Writer | Reader today |
 |---|---|---|
-| `<data_dir>/meta.db` (SQLite, migrations `crates/server/migrations/meta/0001`–`0015` on `main` 2f5181a9, more from track J) | `meta::MetaDb::open` (`llmobs serve`, `llmobs admin migrate`) | the server and every `llmobs admin` command |
+| `<data_dir>/meta.db` (SQLite, migrations `crates/server/migrations/meta/0001`–`0015` on `main` 2f5181a9, more from track J) | `meta::MetaDb::open` (`cetra serve`, `cetra admin migrate`) | the server and every `cetra admin` command |
 | `<data_dir>/secret.key`, `secret.key.new` (D-I-1, D-I-3), and the sealed column values (D-I-2) | `crypto::write_key_file`, `admin::rotate_encryption_key`, `SecretBox::seal` | `crypto::load_key`, `finish_rotation`, `SecretBox::open` |
-| `<data_dir>/admin.sock` protocol (D-N-17) | `admin_socket` (server) | `llmobs admin backup` (`crates/cli/src/main.rs`) |
+| `<data_dir>/admin.sock` protocol (D-N-17) | `admin_socket` (server) | `cetra admin backup` (`crates/cli/src/main.rs`) |
 | a backup directory: `manifest.json`, `meta.db`, `catalog.db`, `secret.key`, `objects/` (D-N-19) | `backup::run` | nothing reads `manifest.json`; a restore copies the files back by hand (`docs/self-hosting/backup.md` § Restore) |
 
 The plan has 8 sub-phases, **SF1–SF8**, one commit each, done in order by one agent working alone. The implementer is Haiku: nothing here may need a guess. If this plan and the code disagree (a name moved, a function changed), follow the code when the change is a rename, and **STOP and report** otherwise. Each sub-phase ends with `just check` green. The decisions are **D-R-33 to D-R-38** (`docs/mvp-decisions.md` § Track R). The spec text is already in `docs/spec/04-metadata-db.md` § Format versions and `docs/spec/12-operations.md`, with "(SF<n>)" markers on what a sub-phase still has to make true; each sub-phase deletes its markers.
@@ -19,19 +19,19 @@ The plan has 8 sub-phases, **SF1–SF8**, one commit each, done in order by one 
 
 **`meta.db`.**
 - `MetaDb::open` (`crates/server/src/meta/mod.rs` around lines 62-85): `connect(path, create = true)`, `applied_version` (the highest `_sqlx_migrations.version`), `pre_migration_copy` (D-N-22: `meta.db.pre-m<applied>` when `0 < applied < expected`), then `migrator().run`. A `meta.db` that has applied a migration this binary lacks fails inside `sqlx` with `MigrateError::VersionMissing`, surfaced as `MetaError::Migrate` ("meta.db migration: migration N was previously applied but is missing…"). Nothing is written before that error (no copy: `applied >= expected`), but the message does not say "newer release".
-- **`llmobs serve` opens storage first** (`serve.rs::bind` around line 258: `Storage::open`, then `MetaDb::open`). A `meta.db` from a newer release whose storage format did not change is therefore detected only **after** `Storage::open` has taken `LOCK`, replayed the WAL, started a new WAL segment and collected obsolete files. `llmobs admin migrate` has the same order (`Maintenance::open`, then `MetaDb::open`, `admin.rs` around line 531), and `gc-orphans` never opens `meta.db` at all.
+- **`cetra serve` opens storage first** (`serve.rs::bind` around line 258: `Storage::open`, then `MetaDb::open`). A `meta.db` from a newer release whose storage format did not change is therefore detected only **after** `Storage::open` has taken `LOCK`, replayed the WAL, started a new WAL segment and collected obsolete files. `cetra admin migrate` has the same order (`Maintenance::open`, then `MetaDb::open`, `admin.rs` around line 531), and `gc-orphans` never opens `meta.db` at all.
 - `MetaDb::open_existing` (admin commands) refuses any other applied version with `SchemaMismatch { found, expected }`; `open_existing_or_newer` (`reapply-deletions --from`, D-M-9) accepts a newer one and reads it by column name, relying on migrations only adding.
 - No `PRAGMA user_version`. Nothing marks a change that adds no migration: a new value in a TEXT enum column (`members.role`, `deletions.kind`, `eval_jobs.status`, …), a changed JSON shape in a JSON column (`saved_views`, `alert_rules.config`, `evaluators.config`, …) or a new sealed-value envelope. An older binary would open such a database and fail later, row by row, with `MetaError::Corrupt`, or read a JSON value wrongly.
 - Migrations: all `CREATE TABLE` / `CREATE INDEX` / `ALTER TABLE … ADD COLUMN`, except **`0008_entitlements.sql`: `ALTER TABLE orgs DROP COLUMN limits`**. `0013` and `0015` add columns to existing tables. `meta::tests::schema_matches_the_snapshot` already pins the schema (`crates/server/tests/snapshots/meta_schema.snap`, insta).
 
 **`secret.key` and sealed values** (spec 04 § Encryption of secrets, D-I-1 to D-I-3).
-- The file is the standard base64 of 32 bytes plus `\n` (a trailing `\r\n` or none is accepted), mode 0600, written through `secret.key.tmp` and a rename. `LLMOBS_ENCRYPTION_KEY` holds the same text. Anything else is `CryptoError::BadKey`, and `load_key` writes nothing when a file exists.
-- A sealed value is `0x01` ‖ key id (4) ‖ nonce (12) ‖ ciphertext and tag; key id and check value are HMAC-SHA256 with the labels `llmobs.key-id.v1` and `llmobs.encryption-check.v1`; the AAD is `table:column:row_id`. `open` answers `Corrupt` for any first byte but `0x01`.
-- **Key rotation exists**: `llmobs admin rotate-encryption-key` (offline, server stopped, D-I-3), re-encrypting every column of `crypto::ENCRYPTED_COLUMNS` in one transaction, with `secret.key.new` finished or removed at the next start (`finish_rotation`). No test pins any of these bytes against a fixed key.
+- The file is the standard base64 of 32 bytes plus `\n` (a trailing `\r\n` or none is accepted), mode 0600, written through `secret.key.tmp` and a rename. `CETRA_ENCRYPTION_KEY` holds the same text. Anything else is `CryptoError::BadKey`, and `load_key` writes nothing when a file exists.
+- A sealed value is `0x01` ‖ key id (4) ‖ nonce (12) ‖ ciphertext and tag; key id and check value are HMAC-SHA256 with the labels `cetra.key-id.v1` and `cetra.encryption-check.v1`; the AAD is `table:column:row_id`. `open` answers `Corrupt` for any first byte but `0x01`.
+- **Key rotation exists**: `cetra admin rotate-encryption-key` (offline, server stopped, D-I-3), re-encrypting every column of `crypto::ENCRYPTED_COLUMNS` in one transaction, with `secret.key.new` finished or removed at the next start (`finish_rotation`). No test pins any of these bytes against a fixed key.
 
-**`admin.sock`** (`admin_socket.rs`). One JSON line each way. Request `{"command": "backup", "to": …, "meta_only": …}` (`AdminRequest`, internally tagged); response untagged `{"ok": true, "report": BackupReport}` or `{"ok": false, "code", "message"}`. `parse` answers `unknown_command` for another command and `bad_request` for a bad shape. **No version.** The client and the server are the same binary in a container (`exec`) but not after an in-place binary upgrade while the old server runs (`install.sh` replaces `/usr/local/bin/llmobs`): a new client then talks to an old server.
+**`admin.sock`** (`admin_socket.rs`). One JSON line each way. Request `{"command": "backup", "to": …, "meta_only": …}` (`AdminRequest`, internally tagged); response untagged `{"ok": true, "report": BackupReport}` or `{"ok": false, "code", "message"}`. `parse` answers `unknown_command` for another command and `bad_request` for a bad shape. **No version.** The client and the server are the same binary in a container (`exec`) but not after an in-place binary upgrade while the old server runs (`install.sh` replaces `/usr/local/bin/cetra`): a new client then talks to an old server.
 
-**Backup manifest** (`backup.rs::manifest`, around lines 430-485): `format: 1`, `llmobs_version`, `created_at`, `mode`, `object_store`, `encryption_key`, `flushed_seq`, `gc_grace_secs`, `restorable_until`, `files` (path, bytes, sha256), `objects`. Write-only: no code reads it. A restore of a backup from a newer release onto an older binary is caught only when `meta.db` or `catalog.db` is opened, i.e. after `gc-orphans` has already run (step 5 of `backup.md` § Restore, which in S3 mode **deletes objects from the live bucket**).
+**Backup manifest** (`backup.rs::manifest`, around lines 430-485): `format: 1`, `cetra_version`, `created_at`, `mode`, `object_store`, `encryption_key`, `flushed_seq`, `gc_grace_secs`, `restorable_until`, `files` (path, bytes, sha256), `objects`. Write-only: no code reads it. A restore of a backup from a newer release onto an older binary is caught only when `meta.db` or `catalog.db` is opened, i.e. after `gc-orphans` has already run (step 5 of `backup.md` § Restore, which in S3 mode **deletes objects from the live bucket**).
 
 **Golden fixtures.** None for the server. M8's golden directories (`fixtures/storage/golden/`, D-R-29) cover the storage data directory only, and explicitly not `meta.db`, `manifest.json` or `admin.sock`.
 
@@ -39,7 +39,7 @@ The plan has 8 sub-phases, **SF1–SF8**, one commit each, done in order by one 
 
 ## Design summary
 
-- **D-R-33 `meta.db` format version.** `META_FORMAT_VERSION: u16 = 1` in `PRAGMA user_version`: the version of everything `meta.db` and its satellites mean (content meaning, `secret.key`, the sealed envelope). One check function, `meta::check_marker`, refuses a newer format (`FormatTooNew`), an unknown applied migration (`SchemaTooNew`) and a pre-release database with rows (`PreFormat`), before any write; a new or empty database is stamped. **`llmobs serve`, `admin migrate` and `admin gc-orphans` run it as a preflight before storage opens**, so a newer `meta.db` stops the binary before `LOCK`, the WAL or the bucket is touched.
+- **D-R-33 `meta.db` format version.** `META_FORMAT_VERSION: u16 = 1` in `PRAGMA user_version`: the version of everything `meta.db` and its satellites mean (content meaning, `secret.key`, the sealed envelope). One check function, `meta::check_marker`, refuses a newer format (`FormatTooNew`), an unknown applied migration (`SchemaTooNew`) and a pre-release database with rows (`PreFormat`), before any write; a new or empty database is stamped. **`cetra serve`, `admin migrate` and `admin gc-orphans` run it as a preflight before storage opens**, so a newer `meta.db` stops the binary before `LOCK`, the WAL or the bucket is touched.
 - **D-R-34 what changes the `meta.db` format; the migration lint.** As D-R-31 for `catalog.db`: a migration must only add, unless listed; every altering migration has a data case; the insta schema snapshot stays. Plus the content rules (enum values, JSON shapes, sealed envelope, key file) that bump `META_FORMAT_VERSION` without a migration.
 - **D-R-35 `secret.key` and sealed values.** Frozen as they are: no version byte in the key file (its strict decoding is the refusal; a format change bumps `META_FORMAT_VERSION`, which refuses first). Key rotation stays D-I-3's offline command; no keyring. Known-answer tests pin the bytes.
 - **D-R-36 `admin.sock` protocol.** Every request and response carries `"v": 1`. A server answers a request of another or no `v` with `unsupported_protocol`; the client refuses a response of another `v`. Within `v` 1 changes are additive; error codes are never renamed.
@@ -52,7 +52,7 @@ The plan has 8 sub-phases, **SF1–SF8**, one commit each, done in order by one 
 - **`just check` passes before each commit.** Node is not on the non-interactive PATH: see `~/ENV.md` (or `ls ~/.nvm/versions/node/`). Build with `CARGO_BUILD_JOBS=6` on the shared VM.
 - **Commit subjects** are given per sub-phase. One commit each. No attribution lines.
 - **Errors** are `thiserror` variants. Messages name versions and file names, never row values, emails, keys or secrets (privacy rule). Use the wording given.
-- **No new dependency.** `sqlx`, `serde_json`, `sha2`, `hex`, `tempfile`, `insta` are already dependencies or dev-dependencies of `llmobs-server`; check `crates/server/Cargo.toml`.
+- **No new dependency.** `sqlx`, `serde_json`, `sha2`, `hex`, `tempfile`, `insta` are already dependencies or dev-dependencies of `cetra-server`; check `crates/server/Cargo.toml`.
 - **No compatibility layers.** Checks are equalities until a second version exists, as in M8: the first bump turns them into a range and adds the reader.
 - **CHANGELOG:** no line. Everything here is pre-release behaviour (D185).
 - **Report at the end of each sub-phase:** what was done; deviations and why; the run time of each new test; sizes where asked; anything left undone or unverified.
@@ -163,7 +163,7 @@ Commit: `server: refuse a newer meta.db before anything opens, stamp new ones (S
    ```rust
    /// The checks of [`check_marker`] on `<data_dir>/meta.db`, before anything else of the
    /// data directory is opened (spec 04 § Format versions, D-R-33). A missing file passes:
-   /// `open` creates it. Writes nothing. `llmobs serve`, `admin migrate` and `admin gc-orphans`
+   /// `open` creates it. Writes nothing. `cetra serve`, `admin migrate` and `admin gc-orphans`
    /// call it before storage opens.
    pub(crate) async fn preflight(data_dir: &Path) -> Result<(), MetaError>
    ```
@@ -259,8 +259,8 @@ No production code change: the formats stay as D-I-1 and D-I-2 define them (D-R-
 
 `const GOLDEN_KEY: [u8; 32]` = `0..=31` (build it with `core::array::from_fn(|i| i as u8)` or a literal).
 
-1. `the_key_file_format_is_pinned`: `write_key_file(dir/secret.key, &GOLDEN_KEY)`; the file's bytes are exactly `b"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\n"`; mode `0o600`. `read_key(None, dir).unwrap().unwrap().key` (it returns `Result<Option<LoadedKey>, _>`) is `GOLDEN_KEY` for that file, for the same text with `\r\n`, and with no newline; `decode_key` of the text without newline equals `GOLDEN_KEY` (the `LLMOBS_ENCRYPTION_KEY` form).
-2. `a_key_file_this_build_does_not_read_is_never_rewritten`: for each of `"llmobs-key:2:AAEC…\n"` (any non-base64 prefix), the base64 of 31 bytes, `"<golden text>\n\n"` and `" <golden text>"`: write the file, take its bytes; `load_key(None, dir, false)` returns `BadKey`; the file bytes are unchanged; no `secret.key.tmp` exists. This is the refusal that makes a version byte unnecessary (D-R-35).
+1. `the_key_file_format_is_pinned`: `write_key_file(dir/secret.key, &GOLDEN_KEY)`; the file's bytes are exactly `b"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\n"`; mode `0o600`. `read_key(None, dir).unwrap().unwrap().key` (it returns `Result<Option<LoadedKey>, _>`) is `GOLDEN_KEY` for that file, for the same text with `\r\n`, and with no newline; `decode_key` of the text without newline equals `GOLDEN_KEY` (the `CETRA_ENCRYPTION_KEY` form).
+2. `a_key_file_this_build_does_not_read_is_never_rewritten`: for each of `"cetra-key:2:AAEC…\n"` (any non-base64 prefix), the base64 of 31 bytes, `"<golden text>\n\n"` and `" <golden text>"`: write the file, take its bytes; `load_key(None, dir, false)` returns `BadKey`; the file bytes are unchanged; no `secret.key.tmp` exists. This is the refusal that makes a version byte unnecessary (D-R-35).
 3. `the_key_id_and_check_value_are_pinned`: `hex::encode(key_id_of(&GOLDEN_KEY)) == "c2f47f2a"`; `SecretBox::new(&GOLDEN_KEY).check_value() == "212e59571b77a8a332ea48a6e4c994fe54e3113cd5665185f707710faf865eb0"`. If either differs, STOP and report: either the code or this plan's independent computation is wrong, and the plan must not be "fixed" by pasting the code's value.
 4. `a_sealed_value_of_format_1_opens`: `SecretBox::new(&GOLDEN_KEY).open(&hex::decode(SEALED_V1), Aad { table: "llm_connections", column: "secret_enc", row_id: &Uuid::parse_str("018f6b4e-7c1a-7c1a-8c1a-0000000000c1") })` returns `b"golden-secret"`, where
 
@@ -314,7 +314,7 @@ Commit: `server: version the admin socket protocol (SF4)`
    }
    ```
 
-   `parse` becomes four steps: JSON (`bad_request`, as today); then `v`: `value.get("v").and_then(Value::as_u64)` must be `Some(ADMIN_PROTOCOL)`, else `AdminResponse::failed("unsupported_protocol", format!("this server (llmobs {}) speaks admin protocol {ADMIN_PROTOCOL}; the request has {}; run the llmobs binary of the server's release", env!("CARGO_PKG_VERSION"), found))` where `found` is `version N` or `no version`; then the command (`unknown_command`, as today); then `serde_json::from_value::<AdminEnvelope>` (`bad_request`). It returns the inner `AdminRequest`.
+   `parse` becomes four steps: JSON (`bad_request`, as today); then `v`: `value.get("v").and_then(Value::as_u64)` must be `Some(ADMIN_PROTOCOL)`, else `AdminResponse::failed("unsupported_protocol", format!("this server (cetra {}) speaks admin protocol {ADMIN_PROTOCOL}; the request has {}; run the cetra binary of the server's release", env!("CARGO_PKG_VERSION"), found))` where `found` is `version N` or `no version`; then the command (`unknown_command`, as today); then `serde_json::from_value::<AdminEnvelope>` (`bad_request`). It returns the inner `AdminRequest`.
 3. **Response.** Both `AdminResponse` variants get a first field `v: u32`. The two constructors set it to `ADMIN_PROTOCOL`: `AdminResponse::failed` (used by `forbidden` too) and `run_backup`'s `AdminResponse::Done { ok: true, report }`. The CLI's patterns use `..` and need no change.
 4. **Client side**, in `admin_socket.rs` so it is testable without the CLI:
 
@@ -324,7 +324,7 @@ Commit: `server: version the admin socket protocol (SF4)`
    pub enum AdminProtocolError {
        #[error("the server's answer is not JSON")]
        NotJson,
-       #[error("the server speaks admin protocol {found}, this command speaks {ADMIN_PROTOCOL}; run the llmobs binary of the server's release")]
+       #[error("the server speaks admin protocol {found}, this command speaks {ADMIN_PROTOCOL}; run the cetra binary of the server's release")]
        OtherProtocol { found: String },
        #[error("the server's answer has an unknown shape")]
        Shape,
@@ -379,14 +379,14 @@ Commit: `server: record the database formats in the backup manifest (SF5)`
    ```
 
 2. `read_formats(dir: &Path) -> Result<Formats, BackupError>`: for `dir/meta.db` and `dir/catalog.db`, a `sqlx` connection with `SqliteConnectOptions::new().filename(..).read_only(true)` (the copies are `VACUUM INTO` outputs, not WAL databases; if a read-only open fails, use `create_if_missing(false)` without `read_only`, and say so in the report), the two queries, `close().await`. Errors map to `BackupError::Io` (`io::Error::other(error.to_string())`; the text names no values). Call it after both copies are written and synced and before `manifest`, in `run` (read `run` for the step order; it is § "What the server does" steps 2 and 5 of `backup.md`).
-3. `manifest` writes the four values as top-level keys `meta_format`, `meta_schema`, `storage_format`, `catalog_schema`, after `llmobs_version`. `FORMAT` stays 1, with a doc comment: "`manifest.json` format (D-R-37). Within 1, keys are only added; a removed, renamed or retyped key, or a changed meaning, is 2. Nothing reads the manifest in the MVP: a newer backup is refused by the database checks at restore."
-4. `docs/self-hosting/backup.md` § The manifest: four rows: `meta_format` "the format of `meta.db`"; `meta_schema` "the last `meta.db` migration"; `storage_format` "the format of the data directory (`catalog.db`)"; `catalog_schema` "the last `catalog.db` migration". § Restore, a paragraph before step 1: "**A backup from a newer release cannot be restored with an older one.** The first command of step 5 (`gc-orphans`) or step 6 (`migrate`) refuses it before it changes anything: `meta.db has format version …` or `meta.db has applied migration …, which this build does not have`. Restore it with the release in the manifest's `llmobs_version`, or a newer one." And in step 5, one sentence: "It checks `meta.db` first and stops on a backup from a newer release."
+3. `manifest` writes the four values as top-level keys `meta_format`, `meta_schema`, `storage_format`, `catalog_schema`, after `cetra_version`. `FORMAT` stays 1, with a doc comment: "`manifest.json` format (D-R-37). Within 1, keys are only added; a removed, renamed or retyped key, or a changed meaning, is 2. Nothing reads the manifest in the MVP: a newer backup is refused by the database checks at restore."
+4. `docs/self-hosting/backup.md` § The manifest: four rows: `meta_format` "the format of `meta.db`"; `meta_schema` "the last `meta.db` migration"; `storage_format` "the format of the data directory (`catalog.db`)"; `catalog_schema` "the last `catalog.db` migration". § Restore, a paragraph before step 1: "**A backup from a newer release cannot be restored with an older one.** The first command of step 5 (`gc-orphans`) or step 6 (`migrate`) refuses it before it changes anything: `meta.db has format version …` or `meta.db has applied migration …, which this build does not have`. Restore it with the release in the manifest's `cetra_version`, or a newer one." And in step 5, one sentence: "It checks `meta.db` first and stops on a backup from a newer release."
 5. `docs/spec/12-operations.md` § Backups: delete "(SF5)".
 
 ### Tests (`backup.rs` `tests`)
 
 1. `the_manifest_records_the_database_versions`: after a backup (the existing test setup), `meta_format == META_FORMAT_VERSION`, `meta_schema == meta::expected_version()`, and `storage_format` and `catalog_schema` equal `PRAGMA user_version` and `MAX(version)` of the live `<data_dir>/catalog.db` (read with a plain connection after the backup).
-2. `the_manifest_keys_are_pinned`: the sorted top-level keys equal `["catalog_schema", "created_at", "encryption_key", "files", "flushed_seq", "format", "gc_grace_secs", "llmobs_version", "meta_format", "meta_schema", "mode", "object_store", "objects", "restorable_until", "storage_format"]`, and each value has the JSON type of § The manifest (string, number, object, array, or null for `restorable_until` in full mode). Message: `manifest.json format 1 only gains keys (D-R-37): a removed, renamed or retyped key bumps FORMAT`.
+2. `the_manifest_keys_are_pinned`: the sorted top-level keys equal `["catalog_schema", "created_at", "encryption_key", "files", "flushed_seq", "format", "gc_grace_secs", "cetra_version", "meta_format", "meta_schema", "mode", "object_store", "objects", "restorable_until", "storage_format"]`, and each value has the JSON type of § The manifest (string, number, object, array, or null for `restorable_until` in full mode). Message: `manifest.json format 1 only gains keys (D-R-37): a removed, renamed or retyped key bumps FORMAT`.
 3. `a_newer_backup_is_refused_by_the_first_restore_command`: take a backup, stamp the backup's `meta.db` with `user_version = 2` through a connection that sets no journal mode (SF1's `check_file` options: the copy is in rollback mode and must stay so); restore it as `backup.md` § Restore step 3 says into a fresh data directory (copy `meta.db`, `catalog.db`, `secret.key`, `objects/`); `admin::gc_orphans(dry_run = false)` (local mode) fails with text containing `format version 2`, and `dir_digest` of the restored directory is unchanged (nothing deleted, catalog not opened).
 
 ### Done when
@@ -435,7 +435,7 @@ Steps:
 3. **The scenario**, through the store functions in `crates/server/src/meta/*.rs` and the services the routes call (read the route of each table to find them; the tests of each store show the call shapes). Fixed names, emails, plaintexts; ids are whatever the functions generate. At least:
    - users `golden-owner@example.com` (password `golden-password-1`, through the same hashing as signup: `auth::password`), `golden-member@example.com`; one org `golden-org`; memberships owner and member; one pending invite;
    - projects `golden-p1` and `golden-p2`; one project role override (D139) if the table exists;
-   - an `sk-llmobs-` and a `pk-llmobs-` key on `golden-p1` (record the plaintexts), a personal access token for the owner, a web session for the owner (record the token plaintexts: the check signs in with them);
+   - an `sk-cetra-` and a `pk-cetra-` key on `golden-p1` (record the plaintexts), a personal access token for the owner, a web session for the owner (record the token plaintexts: the check signs in with them);
    - an LLM connection with a sealed key `golden-secret` and one extra header; an evaluator of each kind (judge, check, webhook with a sealed secret); an online rule with a filter; a score definition of each type; a saved view; an alert rule and a notification channel of each kind (sealed config); an org SSO provider with a sealed client secret, if `ee` is compiled in tests (it is: the crate has no feature for it; check);
    - a deletion of each kind (`DeletionKind`), one applied, one pending, one failed;
    - an org entitlement token (`test_support::org_token`, the dev key) and a window end; `usage_daily` rows; one row in each queue table (`eval_jobs`, `pending_traces`, `backfills`, `rule_spend`, `usage_notices`, `email_verifications`, `password_resets`) through its store function;
@@ -527,7 +527,7 @@ encryption_check   the stored check value (equals GOLDEN_KEY's)
 
 - **Speed.** One fresh build per process: `static FRESH: OnceLock<tempfile::TempDir>`, built on first use with its `expected.json` (the M8 pattern). Argon2 makes a password hash cost tens of milliseconds; the scenario has two.
 - `every_table_has_a_golden_row`: in the fresh directory's `meta.db`, every table except `_sqlx_migrations` has at least one row, unless listed in `const EMPTY_TABLES: &[(&str, &str)]` (name, reason), which starts empty. Message: `table {t} has no row in the golden scenario: add one in golden_tests/build.rs`. This keeps the scenario complete while tracks add tables before the release.
-- `write_server_golden_dir`, `#[ignore = "writes a fixtures directory; run by just golden-dir <version>"]`: reads `LLMOBS_SERVER_GOLDEN_OUT` (absolute, must not exist), runs `build`, then restores a **copy** (SF7's `restore_copy`) to compute the dump, writes `expected.json` (`to_string_pretty`, trailing newline), prints the total size. Refuses when `CARGO_PKG_VERSION` differs from the directory name unless the name starts with `scratch` (as R8.8).
+- `write_server_golden_dir`, `#[ignore = "writes a fixtures directory; run by just golden-dir <version>"]`: reads `CETRA_SERVER_GOLDEN_OUT` (absolute, must not exist), runs `build`, then restores a **copy** (SF7's `restore_copy`) to compute the dump, writes `expected.json` (`to_string_pretty`, trailing newline), prints the total size. Refuses when `CARGO_PKG_VERSION` differs from the directory name unless the name starts with `scratch` (as R8.8).
 - **Size**: measure the fresh directory; report total bytes and the largest files. The limit is 1 MiB (`GOLDEN_MAX_BYTES`, SF7). A `meta.db` of about 40 tables and their indexes is a few hundred KB.
 
 ### `justfile`
@@ -535,14 +535,14 @@ encryption_check   the stored check value (equals GOLDEN_KEY's)
 The `golden-dir` recipe of R8.8 runs, after the storage line:
 
 ```bash
-LLMOBS_SERVER_GOLDEN_OUT="$root/fixtures/server/golden/{{name}}" cargo test -p llmobs-server --all-features -- --ignored --exact golden_tests::write_server_golden_dir
+CETRA_SERVER_GOLDEN_OUT="$root/fixtures/server/golden/{{name}}" cargo test -p cetra-server --all-features -- --ignored --exact golden_tests::write_server_golden_dir
 ```
 
 and refuses to start when `fixtures/server/golden/{{name}}` exists, like the storage one. The `RELEASES` append stays once.
 
 ### `AGENTS.md`
 
-Commands: `just golden-dir` "also writes `fixtures/server/golden/<name>/` (D-R-38)". Tests: `LLMOBS_SERVER_GOLDEN_OUT`; "a `meta.db` format change (spec 04 § Format versions) bumps `META_FORMAT_VERSION`; from the first public release the golden backups under `fixtures/server/golden/` must keep restoring". Layout: `fixtures/server/golden/`.
+Commands: `just golden-dir` "also writes `fixtures/server/golden/<name>/` (D-R-38)". Tests: `CETRA_SERVER_GOLDEN_OUT`; "a `meta.db` format change (spec 04 § Format versions) bumps `META_FORMAT_VERSION`; from the first public release the golden backups under `fixtures/server/golden/` must keep restoring". Layout: `fixtures/server/golden/`.
 
 ### Done when
 
@@ -633,11 +633,11 @@ Commit: `docs: server format stability closeout (SF8)`
 - **Track J** (migrations `0016`+): every new migration must pass SF2's lint, and one that alters a table needs a case in `migrations_that_alter_a_table_keep_its_rows`. A new TEXT enum value or JSON shape in an existing column after the first release bumps `META_FORMAT_VERSION` (D-R-34). Every new table gets a golden row (SF6's `every_table_has_a_golden_row`).
 - **Track N** (`release-prep.sh`, `release-verify.sh`): M8's request covers `just golden-dir <version>`; `release-verify` also checks `fixtures/server/golden/<version>/expected.json`. `serve.rs::bind` gains one preflight line (SF1): keep it before `Storage::open` when rebasing.
 - **`.github/workflows/ci.yml`:** M8's request stands and now covers both paths: a `just check-golden` step in one pull-request job, preceded by `git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main` (the checkout is shallow), or `check-golden` never runs in CI.
-- **CLI `credentials.toml`** (`crates/cli/src/credentials.rs`, on the user's machine) and **`llmobs.toml`** are durable too and outside this plan: see Open questions.
+- **CLI `credentials.toml`** (`crates/cli/src/credentials.rs`, on the user's machine) and **`cetra.toml`** are durable too and outside this plan: see Open questions.
 
 ## What not to build
 
-- A manifest reader, an `llmobs admin restore` or `verify-backup` command (user: no reader in the MVP).
+- A manifest reader, a`cetra admin restore` or `verify-backup` command (user: no reader in the MVP).
 - Online key rotation, a keyring, or a version byte in `secret.key` (D-R-35).
 - A range of readable `meta.db` formats, or a reader for pre-release databases (D185; no compatibility layers).
 - Golden directories for storage (M8's) or for the OTLP fixtures.
@@ -646,5 +646,5 @@ Commit: `docs: server format stability closeout (SF8)`
 ## Open questions
 
 1. **Sub-phase naming.** `SF1`–`SF8` here; the coordinator may rename them R M9.
-2. **`credentials.toml` and `llmobs.toml`.** The CLI's credentials file and the server's config file outlive releases too. Proposal (not in this plan): config keys follow D-R-12's "a new key is not a format change"; renaming or removing a key after the first release needs an upgrade note; `credentials.toml` gains no version until its first change. Say if either needs a plan.
-3. **Pre-release `meta.db` with data is refused (`PreFormat`)**, following the user's choice for storage directories (D-R-27). Existing dev and demo data directories (`~/llmobs-demo` on the VM) stop opening after SF1 if they have users, as they already will after R8.2.
+2. **`credentials.toml` and `cetra.toml`.** The CLI's credentials file and the server's config file outlive releases too. Proposal (not in this plan): config keys follow D-R-12's "a new key is not a format change"; renaming or removing a key after the first release needs an upgrade note; `credentials.toml` gains no version until its first change. Say if either needs a plan.
+3. **Pre-release `meta.db` with data is refused (`PreFormat`)**, following the user's choice for storage directories (D-R-27). Existing dev and demo data directories (`~/cetra-demo` on the VM) stop opening after SF1 if they have users, as they already will after R8.2.

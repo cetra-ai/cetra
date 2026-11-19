@@ -39,7 +39,10 @@
       "environment": "staging",
       "release": "v1.4.0",
       "tags": [],
-      "metadata": {},
+      "metadata": {
+        "user.name": "\"Ada Example\"",
+        "user.plan": "\"pro\""
+      },
       "input_preview": "What does this shipping label say?",
       "output_preview": "It is addressed to warehouse 7.",
       "span_count": 3,
@@ -142,7 +145,7 @@
       "status": "ok",
       "session_id": "sess-001",
       "user_id": "user-42",
-      "environment": "llmobs-eval",
+      "environment": "cetra-eval",
       "release": "v1.4.0",
       "tags": [
         "eval"

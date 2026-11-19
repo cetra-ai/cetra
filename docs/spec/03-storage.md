@@ -4,7 +4,7 @@ The columnar store holds three tables: `spans`, `traces` (derived partial summar
 
 Configuration keys named in this spec (`wal.sync`, `flush.max_bytes`, …) live under the `[storage]` section of the server config (12, D90).
 
-`llmobs-storage` is policy-free: it never reads `meta.db`. Retention days, project lifecycle and deletion scopes reach it through its API (D83). The design behind this spec, with its public API and milestones, is `docs/plans/a1-storage/00-design.md`; the research behind it is `docs/research/storage/`.
+`cetra-storage` is policy-free: it never reads `meta.db`. Retention days, project lifecycle and deletion scopes reach it through its API (D83). The design behind this spec, with its public API and milestones, is `docs/plans/a1-storage/00-design.md`; the research behind it is `docs/research/storage/`.
 
 ## Layout on disk / object store
 
@@ -145,7 +145,7 @@ A failure in steps 2–5 keeps `frozen` and retries that same view under new fil
 | Bloom filters | `trace_id`, `session_id`, `user_id` (fpp 0.01) on `spans`; `trace_id`, `session_id`, `user_id` on `traces`; `trace_id`, `score_id` on `scores` |
 | Sort order (within a file) | `spans`: `trace_id, start_time` · `traces`: `start_time, trace_id` (the `trace_id` tie-break makes files byte-identical across runs) · `scores`: `created_at` (declared in file metadata so DataFusion can exploit it; declared only because the writer sorted) |
 | Time slicing (across files) | every file covers a contiguous `[min_time, max_time]` slice; see below |
-| KV metadata | `llmobs.table`, `llmobs.schema_version`, `llmobs.format_version`, `llmobs.level`, `llmobs.min_time`, `llmobs.max_time`, `llmobs.min_ingest_time`, `llmobs.max_ingest_time`. `llmobs.schema_version` is the row normalization version; `llmobs.format_version` is the file format (§ 12). |
+| KV metadata | `cetra.table`, `cetra.schema_version`, `cetra.format_version`, `cetra.level`, `cetra.min_time`, `cetra.max_time`, `cetra.min_ingest_time`, `cetra.max_ingest_time`. `cetra.schema_version` is the row normalization version; `cetra.format_version` is the file format (§ 12). |
 
 **Time-sliced files, trace-sorted rows** (same pattern as Opik, LangWatch and Laminar, which partition by time and sort by trace ID inside the partition):
 
@@ -159,7 +159,7 @@ A failure in steps 2–5 keeps `frozen` and retries that same view under new fil
 
 ## 4. Catalog
 
-`catalog.db` belongs to `llmobs-storage` (D83): its own migrations (`sqlx::migrate!`, forward-only), its own writer connection, `journal_mode=WAL`, `synchronous=FULL` (a commit that advances `flushed_seq` must survive a power loss, since the WAL segments it covers are deleted afterwards). `PRAGMA user_version` holds the data directory's format version (§ 12); `open` refuses a newer one before it migrates.
+`catalog.db` belongs to `cetra-storage` (D83): its own migrations (`sqlx::migrate!`, forward-only), its own writer connection, `journal_mode=WAL`, `synchronous=FULL` (a commit that advances `flushed_seq` must survive a power loss, since the WAL segments it covers are deleted afterwards). `PRAGMA user_version` holds the data directory's format version (§ 12); `open` refuses a newer one before it migrates.
 
 ```sql
 CREATE TABLE data_files (
@@ -365,7 +365,7 @@ A request is created by the server in `meta.db` (04); the server's deletion work
 
 | Kind | Scope stored | Rows deleted |
 |---|---|---|
-| `traces` | `deletion_traces(trace_id…)`. A filter-based request is resolved to trace IDs by the server's worker, before registration. The set is extended with the **evaluation traces** whose `metadata['llmobs.eval.target_trace_id']` is in it (they contain copies of the evaluated data). | `spans` and `scores` rows of those traces with `ingest_time ≤ cut-off` |
+| `traces` | `deletion_traces(trace_id…)`. A filter-based request is resolved to trace IDs by the server's worker, before registration. The set is extended with the **evaluation traces** whose `metadata['cetra.eval.target_trace_id']` is in it (they contain copies of the evaluated data). | `spans` and `scores` rows of those traces with `ingest_time ≤ cut-off` |
 | `user` | `user_id`, plus the trace IDs and session IDs the server's worker resolved before registration, plus their evaluation traces | with `ingest_time ≤ cut-off`: `spans` rows of those traces or with that `user_id`; `scores` rows of those traces, with that `user_id`, or with one of those `session_id`s (D-A1-4) |
 | `project` | `project_id` | everything in the project (`drop_project`) |
 | `org` | `org_id` | every project of the org (`drop_project` for each), plus org-level metadata in `meta.db` |
@@ -517,7 +517,7 @@ Every write path, what it syncs and in what order. "fsync dir" is an fsync of th
 | Local object delete (GC of obsolete, staged and media objects; orphans) | `objects.rs` `delete_local` | unlink → fsync dir → the caller's row delete | the store stops | `a_deleted_object_stays_deleted_after_a_lossy_crash`, `gc_leaves_no_orphan_after_a_lossy_crash`, `a_failed_delete_sync_stops_the_store` |
 | Object tree at open | `objects.rs` `remove_temp_files` | unlink temp files → fsync the directories, then the root | open fails | `an_object_in_a_directory_left_unsynced_survives_a_lossy_crash` |
 | `catalog.db` | `catalog/committer.rs`, `catalog/db.rs` | SQLite in WAL mode, `synchronous=FULL`. Every commit point goes through `commit_point` | the committer stops until restart (D-R-6) | `every_commit_point_stops_the_committer_on_an_fsync_error`, `fatal_io_codes_stop_the_committer_and_the_rest_stay_retryable`, `an_fsync_error_stops_the_committer_until_reopen`; LazyFS (pending) |
-| S3 objects | `objects.rs` remote writes | the PUT or `complete` returned → catalog commit | n/a: no local fsync | `tests/s3.rs` (a real S3-compatible server, `LLMOBS_TEST_S3_ENDPOINT`) |
+| S3 objects | `objects.rs` remote writes | the PUT or `complete` returned → catalog commit | n/a: no local fsync | `tests/s3.rs` (a real S3-compatible server, `CETRA_TEST_S3_ENDPOINT`) |
 | Read cache | `read_cache.rs` | no fsync. Blocks and `size` carry a CRC-32C; a bad one is dropped and fetched again | n/a | `a_torn_size_file_never_serves_short_ranges`, `a_corrupt_block_is_fetched_again` |
 | Scratch: query spill, compaction temp | DataFusion spill; `create_output` | no fsync; spill directories are removed at open | n/a | `open_removes_leftover_spill_directories` |
 | Catalog snapshot (N B3) | `snapshot_catalog` (`snapshot.rs`) | `VACUUM INTO` (SQLite) | the backup fails | N's tests |
@@ -559,9 +559,9 @@ From the first public release (D185), a data directory written by any release mu
 |---|---|---|
 | Data directory | `catalog.db` `PRAGMA user_version`: the highest format any file of the directory may use. Written before a binary first writes anything in a newer format, never lowered. | `open` fails with `FormatTooNew` before it migrates, copies or writes anything. |
 | WAL | an 8-byte header at the start of every segment (§1) | `open` fails (`WalError::Header`); the segment is not truncated, and `--wal-skip-corrupt` does not apply. |
-| Parquet | KV key `llmobs.format_version` in every file (§3) | not read at query time: the directory marker comes first. Checked by the golden tests. |
+| Parquet | KV key `cetra.format_version` in every file (§3) | not read at query time: the directory marker comes first. Checked by the golden tests. |
 
-`llmobs.schema_version` in the Parquet metadata is the row normalization version (spec 01), not a format version. The S3 read cache (§6) and `tmp/` hold no durable data and carry no version.
+`cetra.schema_version` in the Parquet metadata is the row normalization version (spec 01), not a format version. The S3 read cache (§6) and `tmp/` hold no durable data and carry no version.
 
 **What is a format change.** Not one: a new nullable Parquet column (§3), a `catalog.db` migration that only adds (`CREATE TABLE`, `CREATE INDEX`, `ALTER TABLE … ADD COLUMN` that is nullable or has a default), a new config key. Every other change is one: a new or changed WAL `kind`, segment header, compression or payload schema; a changed Parquet column type, sort order or file layout; a renamed or re-typed catalog column, a dropped table, an `UPDATE` of existing rows, a new value in a TEXT enum column (`data_files.state`, `table_name`, `deletions.kind`, `projects.state`); a changed object path layout; a changed checksum; a changed read-cache block size.
 

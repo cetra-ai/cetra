@@ -11,7 +11,7 @@ When M5 is done:
 - the login page asks for the email first and sends emails of an SSO domain to their org's provider (D-P-60);
 - when the org enforces SSO, users of its domains lose their password sessions and personal access tokens at once, and password login, password reset and the instance-wide providers are refused for them; project API keys keep working (D-P-57, D-P-58);
 - a lapse of `org_sso` (licence expired, feature gone) never widens access: everything set up keeps applying; only setting up or changing it is locked (D-P-8, D-P-61);
-- `llmobs admin org-sso disable <org>` turns an org's SSO off when its provider is broken (D-P-63);
+- `cetra admin org-sso disable <org>` turns an org's SSO off when its provider is broken (D-P-63);
 - all of it is `ee` (D-P-4): `crates/server/src/ee/org_sso/` and `web/src/ee/org-sso/`.
 
 **Read first, in this order:**
@@ -30,7 +30,7 @@ These are the decisions the plan implements, also in [`00-design.md`](00-design.
 | D-P-51 | **Owners manage org SSO.** New `OrgPerm::ManageSso`, minimum role owner, session-only. Enforcement can lock every member out and JIT decides who joins, so it sits with deleting the org and changing owners (spec 08's owner-only row), not with members and invites (admins). |
 | D-P-52 | **One generic OIDC provider per org.** Authorization code with PKCE (S256), scopes `openid email profile`, the same `openidconnect` code as `[[auth.oidc]]`. Identities are stored with provider `org:<org_id>`. Changing the issuer deletes the org's identities (a new issuer's subjects are a different namespace), and a new client secret is then required. Callback URL for every org: `<public_url>/api/auth/callback/sso` (D-P-65). |
 | D-P-53 | **Org issuers pass the SSRF guard on every request.** Unlike `[[auth.oidc]]` (operator configuration), an org's issuer is typed by an org owner. Every request to it (discovery, the JWKS fetch that `discover_async` makes before returning, the token request) goes through one guarded HTTP function: it refuses a URL that fails `EgressPolicy::allows_url` (scheme `http(s)`, and no denied literal IP unless `security.allow_private_network_egress`) **before** sending, because reqwest skips the custom resolver for IP-literal hosts; host names then go through D166's resolver guard; no redirects, no proxy, a 10 s timeout, and response bodies capped at 1 MiB. The issuer follows `[[auth.oidc]]`'s rule (`https`, or `http` on a loopback host; no multi-tenant Entra). Saving the provider loads its discovery document, so a wrong issuer fails at once (400). |
-| D-P-54 | **Domains.** Exact match on the email's domain (no subdomains, as `allowed_domains`). At most 20 per org. A domain is verified by at most one org at a time (unique partial index). A domain listed in `auth.enforce_sso_domains`, `auth.google.allowed_domains` or any `[[auth.oidc]].allowed_domains` cannot be added, and is ignored by org SSO if the config lists it later (an `error`-level startup log with a count). Proof: a TXT record `_llmobs-verify.<domain>` whose value is `llmobs-verify=<32 lowercase hex>` (a random token per org and domain, shown on the settings page; both names built from `llmobs_name!`, D46), queried as an absolute name with the resolver cache off. Verification is checked when the owner clicks Verify, at most 10 times a minute per org, and is not re-checked later. **A stale domain can be taken over:** when org B verifies a domain verified by org A, B's TXT value is present and A's is no longer, the domain moves to B (A's row returns to pending) and A's enforcement for it ends. |
+| D-P-54 | **Domains.** Exact match on the email's domain (no subdomains, as `allowed_domains`). At most 20 per org. A domain is verified by at most one org at a time (unique partial index). A domain listed in `auth.enforce_sso_domains`, `auth.google.allowed_domains` or any `[[auth.oidc]].allowed_domains` cannot be added, and is ignored by org SSO if the config lists it later (an `error`-level startup log with a count). Proof: a TXT record `_cetra-verify.<domain>` whose value is `cetra-verify=<32 lowercase hex>` (a random token per org and domain, shown on the settings page; both names built from `cetra_name!`, D46), queried as an absolute name with the resolver cache off. Verification is checked when the owner clicks Verify, at most 10 times a minute per org, and is not re-checked later. **A stale domain can be taken over:** when org B verifies a domain verified by org A, B's TXT value is present and A's is no longer, the domain moves to B (A's row returns to pending) and A's enforcement for it ends. |
 | D-P-55 | **What the org's provider may sign in.** Only emails whose domain is one of the org's verified domains (`domain_not_allowed` otherwise), for new and known identities alike. `email_verified` is read as an option: an explicit `false` is refused (`email_not_verified`); an absent claim is trusted (Entra omits it), since the org proved the domain and runs the IdP. An unknown identity whose email belongs to an existing account is linked to it (an org provider always links); when that account's email was never verified, linking also deletes its web sessions, revokes its personal access tokens and clears its password (D148's defence against a pre-registered account); a verified account is linked without revocation. Instance admins are never linked (`link_refused`, as D148). A disabled account is `account_disabled`. A new account is created verified and without a password; under `auth.signup = disabled` it is `signup_closed`, under `invite_only` the org's verified domain counts as the invitation, `signup_domains` do not apply. |
 | D-P-56 | **JIT provisioning (user).** A user who signs in through the org's provider and is not a member joins the org, including someone an owner removed earlier (removal does not block the next sign-in; the settings page says so, and blocking a person is done at the IdP). The role is the org's pending invitation's role when one exists for that email (the invitation is then accepted), else the org's `jit_role`, `viewer` (default) or `member`. Seats (D-P-20): a non-viewer role needs a free seat (`seat_members + seat_invites`, or `seat_members` alone when an invitation is accepted, as D-P-20's accept rule); over `max_seats`, a seat limit never locks anyone out of the orgs they already belong to (user): a user who already has another org membership, or a pending invitation to another org, signs in without joining and lands on `/sso/no-seat?org=<slug>` ("No seat available in <org>; ask an owner."); only a user who would end up with no membership at all is refused, before anything is written, with `/login?error=seat_limit`. While the org lacks `org_sso` (a lapse), sign-in keeps working but nobody joins (a new membership would widen access, D-P-8). |
 | D-P-57 | **Enabled, then enforced.** A new provider is disabled, and a disabled provider signs in only its own org's owners testing it: `GET /api/auth/sso/authorize` for a domain whose provider is disabled needs the session of an owner of that org and marks the login `test` in the state cookie; without it the answer is `sso_unavailable`, the same as for an unknown domain. A `test` login signs in only an existing owner of the org (their identity is recorded); it creates no user, adds no member and links no one else. An owner who is an instance admin (never linked, D-P-55) is signed in by a test login without an identity being written, so an operator who is the sole owner can still set `last_login_at` and reach enforcement. Discovery (D-P-60) sends users only to an enabled provider. Enforcing needs the provider enabled, at least one successful sign-in through it (`last_login_at`), at least one verified domain, and, when the caller's own email is in one of those domains, a session started through this org's provider. While enforced, the provider cannot be disabled or deleted (409). |
@@ -39,7 +39,7 @@ These are the decisions the plan implements, also in [`00-design.md`](00-design.
 | D-P-60 | **Email-first login (user).** `GET /api/auth/config` gains `sso_discovery` (true when at least one verified domain routes to an enabled org provider). When true, the login page asks for the email, posts it to `POST /api/auth/sso/discover`, and either navigates to `/api/auth/sso/authorize?domain=<domain>&redirect=…` or shows the password form and the instance providers as today. The answer is `{"sso": bool}`, a function of the domain only (never of an account), and an invalid email answers `{"sso": false}`. Discovery and authorize share one per-IP bucket of 300 per minute with a burst of 300 (D143; companies sit behind NAT). URLs carry the domain, never the org; nothing logs an email or a domain (ids and counts only). |
 | D-P-61 | **Lapses (D-P-8).** Without `org_sso`: reading the settings, removing a domain, turning enforcement off, and disabling or deleting a provider that is not enforced still work; saving the provider, adding or verifying a domain, enabling and enforcing answer `403 plan_required`. Sign-in through the org's provider and enforcement keep applying; JIT stops (D-P-56). |
 | D-P-62 | **Routing in memory.** `AppInner.org_sso` holds the verified domains of active orgs that have a provider (domain → org), each org's flags (enabled, enforced) and each org's built provider (metadata cached one hour, kept across reloads while its configuration `(issuer, client_id, client_secret_enc, display_name, jit_role)` is unchanged). It is reloaded after every org SSO write and every 60 s (which also picks up org drops and the CLI), so every check is synchronous. |
-| D-P-63 | **Break-glass.** `llmobs admin org-sso disable <org>` sets the org's provider disabled and not enforced in `meta.db`; a running server applies it within 60 s (D-P-62). |
+| D-P-63 | **Break-glass.** `cetra admin org-sso disable <org>` sets the org's provider disabled and not enforced in `meta.db`; a running server applies it within 60 s (D-P-62). |
 | D-P-64 | **DNS.** `hickory-resolver` with the system configuration (`/etc/resolv.conf`), cache size 0, absolute query names; no fallback to a public resolver. A lookup has a 10 s timeout; a failure answers `503`. Without a usable system configuration the server starts, logs a warning, and verification answers `503`. |
 | D-P-65 | **One callback.** The org flow reuses the OAuth state cookie (`Path=/api/auth/callback`) with provider `sso`, the org id and the `test` flag inside it; `GET /api/auth/callback/{provider}` hands `sso` to the org flow. `sso` is a reserved org slug. New login error codes: `seat_limit`, `sso_required`, `sso_unavailable` (no usable org provider for that domain). |
 
@@ -92,14 +92,14 @@ just fmt
 just check
 ```
 
-`just check` before every commit (over 20 minutes). Quick loops: `cargo test -p llmobs-server <filter>`, `cargo test -p llmobs-eval egress`, `just lint`, `just check-ee`, `just deny`, `just check-web`, `cd web && pnpm vitest run <file>`.
+`just check` before every commit (over 20 minutes). Quick loops: `cargo test -p cetra-server <filter>`, `cargo test -p cetra-eval egress`, `just lint`, `just check-ee`, `just deny`, `just check-web`, `cd web && pnpm vitest run <file>`.
 
 ## Sub-phases
 
 | # | Subject | What | After |
 |---|---|---|---|
 | P1 | `Add the org_sso feature and owner permission` | `Feature::OrgSso`, `OrgPerm::ManageSso`, web feature labels | M2, M3 |
-| P2 | `Guard org identity-provider requests` | `llmobs_eval::identity_http_client`, `EgressPolicy::allows_url`, `IdpHttp` on every provider request, `OidcProvider::for_org`, `config::issuer_problem` | P1 |
+| P2 | `Guard org identity-provider requests` | `cetra_eval::identity_http_client`, `EgressPolicy::allows_url`, `IdpHttp` on every provider request, `OidcProvider::for_org`, `config::issuer_problem` | P1 |
 | P3 | `Store org SSO settings` | migration, `ee/org_sso/store.rs`, sealed secret column | P2 |
 | P4 | `Record the org provider of a session` | `web_sessions.sso_org_id` in `start_session`, `SessionRow`, `Principal::Session` | P3 |
 | P5 | `Look up DNS TXT records` | `hickory-resolver`, `ee/org_sso/dns.rs` | P4 |
@@ -110,7 +110,7 @@ just check
 | P10 | `Sign in through an org's identity provider` | `/api/auth/sso/authorize`, the `sso` callback, linking, JIT, seats | P9 |
 | P11 | `Discover SSO from the email domain` | `POST /api/auth/sso/discover`, `AuthConfig.sso_discovery` | P10 |
 | P12 | `Refuse other sign-ins under org enforcement` | login, signup, password forgot and reset, instance providers | P11 |
-| P13 | `Add the org SSO break-glass command` | `llmobs admin org-sso disable` | P12 |
+| P13 | `Add the org SSO break-glass command` | `cetra admin org-sso disable` | P12 |
 | P14 | `Ask for the email first on the login page` | `web/src/routes/login.tsx`, `/sso/no-seat` | P13 |
 | P15 | `Add the org SSO settings page` | `web/src/ee/org-sso/`, `/$org/settings/sso` | P13 |
 | P16 | `Close out M5` | dead-code attributes, specs check, changelog, roadmap | all |
@@ -203,7 +203,7 @@ Every HTTP request of an OIDC provider goes through one function that checks the
 #[derive(Debug, Clone)]
 pub(crate) struct IdpHttp {
     client: reqwest::Client,
-    policy: Option<llmobs_eval::EgressPolicy>,
+    policy: Option<cetra_eval::EgressPolicy>,
 }
 
 /// Why an identity-provider request failed. No variant holds the URL or a body.
@@ -219,7 +219,7 @@ pub(crate) enum IdpHttpError {
 
 impl IdpHttp {
     pub(crate) fn operator(client: reqwest::Client) -> Self;
-    pub(crate) fn guarded(client: reqwest::Client, policy: llmobs_eval::EgressPolicy) -> Self;
+    pub(crate) fn guarded(client: reqwest::Client, policy: cetra_eval::EgressPolicy) -> Self;
     /// One request: the policy check, then the client, then the capped body.
     pub(crate) async fn send(&self, request: oauth2::HttpRequest) -> Result<oauth2::HttpResponse, IdpHttpError>;
 }
@@ -235,7 +235,7 @@ const MAX_IDP_BODY: usize = 1024 * 1024;
 ```rust
 /// An org's provider (D-P-52, D-P-53): id `org:<org_id>`, default scopes, no domain list,
 /// no auto-provision, no linking flag (the org flow decides). `http` must be
-/// `IdpHttp::guarded(llmobs_eval::identity_http_client(policy)?, policy)`.
+/// `IdpHttp::guarded(cetra_eval::identity_http_client(policy)?, policy)`.
 pub(crate) fn for_org(
     org_id: OrgId,
     display_name: &str,
@@ -306,7 +306,7 @@ CREATE UNIQUE INDEX org_sso_domains_verified ON org_sso_domains(domain) WHERE ve
 ALTER TABLE web_sessions ADD COLUMN sso_org_id TEXT REFERENCES orgs(id) ON DELETE SET NULL;
 ```
 
-Regenerate `crates/server/tests/snapshots/meta_schema.snap` (`INSTA_UPDATE=always cargo test -p llmobs-server schema_matches_the_snapshot`; review: two tables, one index, one column) and commit it.
+Regenerate `crates/server/tests/snapshots/meta_schema.snap` (`INSTA_UPDATE=always cargo test -p cetra-server schema_matches_the_snapshot`; review: two tables, one index, one column) and commit it.
 
 ### `crates/server/src/crypto.rs`
 
@@ -479,7 +479,7 @@ ORDER BY d.domain
 
 ```rust
 /// A session for `user_id`, started through `sso_org`'s provider when given, as a `cookie`
-/// header value (`llmobs_session=<token>`): the `Set-Cookie` value up to its first `;`.
+/// header value (`cetra_session=<token>`): the `Set-Cookie` value up to its first `;`.
 pub(crate) async fn session_cookie_via(app: &TestApp, user_id: Uuid, sso_org: Option<OrgId>) -> String
 ```
 
@@ -559,22 +559,22 @@ impl TxtResolver {
     pub(crate) async fn txt(&self, name: &str) -> Result<Vec<String>, DnsError>;
 }
 
-/// `_llmobs-verify.<domain>`.
+/// `_cetra-verify.<domain>`.
 pub(crate) fn record_name(domain: &str) -> String;
-/// `llmobs-verify=<token>`.
+/// `cetra-verify=<token>`.
 pub(crate) fn record_value(token: &str) -> String;
 /// A new token: 16 random bytes as 32 lowercase hex characters.
 pub(crate) fn new_token() -> Result<String, crate::auth::AuthError>;
 ```
 
-- `record_name`: `format!("{}.{domain}", concat!("_", llmobs_core::llmobs_name!("-verify")))`; `record_value`: `format!("{}={token}", llmobs_core::llmobs_name!("-verify"))`.
-- `new_token`: `crate::auth::secret::random_bytes(16)` then `hex::encode` (the workspace `hex` crate, already a dependency of `llmobs-server`; `secret::hex_encode` is private).
+- `record_name`: `format!("{}.{domain}", concat!("_", cetra_core::cetra_name!("-verify")))`; `record_value`: `format!("{}={token}", cetra_core::cetra_name!("-verify"))`.
+- `new_token`: `crate::auth::secret::random_bytes(16)` then `hex::encode` (the workspace `hex` crate, already a dependency of `cetra-server`; `secret::hex_encode` is private).
 - `system`: `hickory_resolver::TokioResolver::builder_tokio()`, set the resolver options' `cache_size` to `0` (so a just-added record is seen at once; in 0.26 through the builder's options, e.g. `builder.options_mut().cache_size = 0`, confirm with `cargo doc -p hickory-resolver`), then `.build()` (both return `Result` in 0.26). `Debug` for `TxtResolver` is manual (`"TxtResolver::System"` etc.).
 - `txt`: query the **absolute** name (`name` with a trailing `.` appended when it has none, so no search domain from `resolv.conf` is tried): `tokio::time::timeout(Duration::from_secs(10), resolver.txt_lookup(absolute))`; a timeout or an error is `Lookup`, except the "no records" error (`NetError::Dns(DnsError::NoRecordsFound(_))` in 0.26, check the exact path) which is `Ok(vec![])`. Each TXT rdata's `txt_data()` segments are concatenated, decoded with `String::from_utf8_lossy`. `Unconfigured` → `Err(DnsError::Unconfigured)`. `Fixed` → `Err(Lookup)` while `fail` is set, else the stored list for `name` (without a trailing dot) or empty.
 
 ### Tests (`ee::org_sso::dns::tests`)
 
-`record_name("acme.test") == "_llmobs-verify.acme.test"`; `record_value("ab") == "llmobs-verify=ab"`; `new_token` is 32 chars of `[0-9a-f]` and two calls differ; `Fixed` returns what `set` stored and `[]` for another name, and `Err(Lookup)` after `set_fail(true)`; `Unconfigured.txt(..)` is `Err(Unconfigured)`. No test touches the network.
+`record_name("acme.test") == "_cetra-verify.acme.test"`; `record_value("ab") == "cetra-verify=ab"`; `new_token` is 32 chars of `[0-9a-f]` and two calls differ; `Fixed` returns what `set` stored and `[]` for another name, and `Err(Lookup)` after `set_fail(true)`; `Unconfigured.txt(..)` is `Err(Unconfigured)`. No test touches the network.
 
 ### Done
 
@@ -690,7 +690,7 @@ pub(crate) fn enforces(state: &AppState, email: &str) -> bool {
 pub(crate) async fn refresh(state: &AppState);
 ```
 
-- `new`: `http = IdpHttp::guarded(llmobs_eval::identity_http_client(policy).map_err(|_| OrgSsoError::Client)?, policy)`. `build_provider` calls `OidcProvider::for_org(org, display_name, issuer, client_id, secret, self.http.clone())`.
+- `new`: `http = IdpHttp::guarded(cetra_eval::identity_http_client(policy).map_err(|_| OrgSsoError::Client)?, policy)`. `build_provider` calls `OidcProvider::for_org(org, display_name, issuer, client_id, secret, self.http.clone())`.
 - `reload`: `store::routes` → skip `instance_claims` (count `claimed`) → domains map. `store::active_providers` → for each row: record its `ProviderFlags` in `flags`; reuse the current `Arc` when its `config` equals the row's `(issuer, client_id, client_secret_enc, display_name, jit_role)`; else open the secret (`secrets.open(&row.client_secret_enc, store::secret_aad(&row.id))`, UTF-8) and `build_provider`; an open or build failure is `tracing::warn!(org_id = %row.org_id, "org identity provider skipped")`, counted in `unreadable`. Swap the `Arc<Index>` in one write-lock.
 - `route`: `email.rsplit_once('@')` → `route_domain(domain)`. Emails are already lowercase (`normalize_email`).
 - Lock poisoning: use `.read().unwrap_or_else(std::sync::PoisonError::into_inner)` (no panic), same for write.
@@ -753,9 +753,9 @@ pub struct OrgSsoProvider {
     #[serde(default, skip_serializing_if = "Option::is_none", with = "crate::api::keys::optional_time")]
     #[schema(value_type = Option<String>, format = DateTime)]
     pub last_login_at: Option<i64>,
-    #[serde(with = "llmobs_core::time_serde")] #[schema(value_type = String, format = DateTime)]
+    #[serde(with = "cetra_core::time_serde")] #[schema(value_type = String, format = DateTime)]
     pub created_at: i64,
-    #[serde(with = "llmobs_core::time_serde")] #[schema(value_type = String, format = DateTime)]
+    #[serde(with = "cetra_core::time_serde")] #[schema(value_type = String, format = DateTime)]
     pub updated_at: i64,
 }
 
@@ -769,9 +769,9 @@ pub struct OrgSsoDomain {
     pub id: Uuid,
     pub domain: String,
     pub status: DomainStatus,
-    /// TXT record name, `_llmobs-verify.<domain>`.
+    /// TXT record name, `_cetra-verify.<domain>`.
     pub txt_name: String,
-    /// TXT record value, `llmobs-verify=<token>`.
+    /// TXT record value, `cetra-verify=<token>`.
     pub txt_value: String,
     /// When the TXT record was found. Omitted while pending.
     #[serde(default, skip_serializing_if = "Option::is_none", with = "crate::api::keys::optional_time")]
@@ -781,7 +781,7 @@ pub struct OrgSsoDomain {
     #[serde(default, skip_serializing_if = "Option::is_none", with = "crate::api::keys::optional_time")]
     #[schema(value_type = Option<String>, format = DateTime)]
     pub last_checked_at: Option<i64>,
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub created_at: i64,
 }
@@ -860,8 +860,8 @@ async fn view(state: &AppState, org: OrgId) -> Result<OrgSso, ApiError>
       "id": "01900000-0000-7000-8000-000000000701",
       "domain": "acme.com",
       "status": "verified",
-      "txt_name": "_llmobs-verify.acme.com",
-      "txt_value": "llmobs-verify=0123456789abcdef0123456789abcdef",
+      "txt_name": "_cetra-verify.acme.com",
+      "txt_value": "cetra-verify=0123456789abcdef0123456789abcdef",
       "verified_at": "2026-01-01T00:00:00.000000000Z",
       "last_checked_at": "2026-01-01T00:00:00.000000000Z",
       "created_at": "2026-01-01T00:00:00.000000000Z"
@@ -870,8 +870,8 @@ async fn view(state: &AppState, org: OrgId) -> Result<OrgSso, ApiError>
       "id": "01900000-0000-7000-8000-000000000702",
       "domain": "acme.io",
       "status": "pending",
-      "txt_name": "_llmobs-verify.acme.io",
-      "txt_value": "llmobs-verify=fedcba9876543210fedcba9876543210",
+      "txt_name": "_cetra-verify.acme.io",
+      "txt_value": "cetra-verify=fedcba9876543210fedcba9876543210",
       "created_at": "2026-01-01T00:00:00.000000000Z"
     }
   ]
@@ -978,18 +978,18 @@ OpenAPI: `post_org_sso_domain` (`400, 401, 403, 404, 409, 429`, `QUERY_OR_BODY`,
 
 ### Tests (`settings::tests`)
 
-1. `add_verify_and_route`: add `Acme.test` → 201, `domains[0]` is `acme.test`, pending, `txt_name` `_llmobs-verify.acme.test`, `txt_value` `llmobs-verify=<32 hex>`; verify without a record → 409 "not found", `last_checked_at` set; `app.dns_txt(name, &["\"llmobs-verify=<token>\""])` (quoted) → 200 verified; with a provider configured, `app.state.org_sso.route("ada@acme.test")` routes to the org; verify again → 200 without a lookup (set the record to something else first).
+1. `add_verify_and_route`: add `Acme.test` → 201, `domains[0]` is `acme.test`, pending, `txt_name` `_cetra-verify.acme.test`, `txt_value` `cetra-verify=<32 hex>`; verify without a record → 409 "not found", `last_checked_at` set; `app.dns_txt(name, &["\"cetra-verify=<token>\""])` (quoted) → 200 verified; with a provider configured, `app.state.org_sso.route("ada@acme.test")` routes to the org; verify again → 200 without a lookup (set the record to something else first).
 2. `one_org_per_domain`: `acme` verifies `acme.test`; org B (`second_org(&app, "beta", "b@beta.test")`, with a licence the whole app has) adds `acme.test`; the TXT answer holds **both** tokens → B's verify is 409 "another organization".
 2b. `a_stale_domain_moves`: then the TXT answer holds only B's token → B's verify is 200 verified; `acme`'s row is pending again; `route("x@acme.test")` points to B; with `acme` enforced before, a password login of `x@acme.test` (a user with a password) is no longer refused by `acme` (it is by B only if B enforces).
 3. `instance_config_owns_some_domains`: `auth.enforce_sso_domains = ["corp.test"]` → 400.
 4. `limits`: 20 domains then the 21st → 400; the 11th verify within a minute → 429.
 5. `dns_failure_is_503`: `app.dns_fail(true)` → verify answers 503 and `last_checked_at` is set; `app.dns_fail(false)` and the record present → 200.
 6. `remove_works_without_the_feature`: drop the licence (an app without it, rows inserted through `store`) → DELETE 204; POST → 403 `plan_required`.
-7. `logs_carry_no_domain`: `assert_logs_clean(&["acme.test", "llmobs-verify="], …)` around add, verify and remove.
+7. `logs_carry_no_domain`: `assert_logs_clean(&["acme.test", "cetra-verify="], …)` around add, verify and remove.
 
 ### Spec
 
-`docs/spec/09-api.md`: the P7 row gains "`POST /api/v1/orgs/{org}/sso/domains` · `POST …/sso/domains/{id}/verify` (DNS TXT `_llmobs-verify.<domain>` = `llmobs-verify=<token>`) · `DELETE …/sso/domains/{id}`".
+`docs/spec/09-api.md`: the P7 row gains "`POST /api/v1/orgs/{org}/sso/domains` · `POST …/sso/domains/{id}/verify` (DNS TXT `_cetra-verify.<domain>` = `cetra-verify=<token>`) · `DELETE …/sso/domains/{id}`".
 
 ### Done
 
@@ -1038,7 +1038,7 @@ OpenAPI: `patch_org_sso` (`400, 401, 403, 404, 409, 429`, `QUERY_OR_BODY`); regi
 
 Accounts (all from P7's helpers; `seeded.cookie` is not used, it belongs to the instance admin `ada@example.com`):
 - `let (app, seeded, owner) = org_sso_app().await;` — `owner@acme.test`, a non-admin owner; its password-session cookie is `owner.cookie`;
-- the owner's provider session: `let owner_sso = session_cookie_via(&app, owner.id, Some(seeded.org_id)).await;` (the `Set-Cookie` value of `start_session(.., Some(org))` cut at its first `;`, i.e. `llmobs_session=<token>`, used as the `cookie` header);
+- the owner's provider session: `let owner_sso = session_cookie_via(&app, owner.id, Some(seeded.org_id)).await;` (the `Set-Cookie` value of `start_session(.., Some(org))` cut at its first `;`, i.e. `cetra_session=<token>`, used as the `cookie` header);
 - `let ada = app.add_member(&seeded, "ada@acme.test", OrgRole::Member).await;` with `let ada_pat = app.personal_token(ada.id, true).await;` and a password reset row (`meta::password_resets::insert_reset(conn, &hash_token(&token), ada.id, now, now + 3_600_000_000_000)` in a `meta.write`);
 - `let (_, bob) = second_org(&app, "beta", "bob@other.test").await;`;
 - `let root = app.add_member(&seeded, "root@acme.test", OrgRole::Member).await; make_instance_admin(&app, root.id).await;`.
@@ -1054,7 +1054,7 @@ Once a test has enforced `acme.test`, `owner.cookie` (a password session of `own
 
 ### Spec
 
-`docs/spec/09-api.md` row gains "`PATCH /api/v1/orgs/{org}/sso` (`{enabled?, enforced?}`; enforcing revokes the domains' password sessions and personal access tokens, D-P-58)". `docs/spec/08-auth.md`: a new section **Per-org SSO (track P M5, `ee`)** after § OAuth / OIDC, holding D-P-52, D-P-54 to D-P-58, D-P-60 and D-P-61 in prose (write it now with what exists; P10–P12 complete it). In § Sign-up policy, the `LLMOBS_AUTH_ENFORCE_SSO_DOMAINS` row keeps its text and gains "An org can enforce SSO for its own verified domains (§ Per-org SSO)."
+`docs/spec/09-api.md` row gains "`PATCH /api/v1/orgs/{org}/sso` (`{enabled?, enforced?}`; enforcing revokes the domains' password sessions and personal access tokens, D-P-58)". `docs/spec/08-auth.md`: a new section **Per-org SSO (track P M5, `ee`)** after § OAuth / OIDC, holding D-P-52, D-P-54 to D-P-58, D-P-60 and D-P-61 in prose (write it now with what exists; P10–P12 complete it). In § Sign-up policy, the `CETRA_AUTH_ENFORCE_SSO_DOMAINS` row keeps its text and gains "An org can enforce SSO for its own verified domains (§ Per-org SSO)."
 
 ### Done
 
@@ -1246,7 +1246,7 @@ pub struct SsoDiscovery { pub sso: bool }
 `api/account.rs` `AuthConfig` gains `pub sso_discovery: bool` (doc: "The login page asks for the email first: some domain signs in through an org's provider (D-P-60)"); `routes/auth.rs::config` sets `state.org_sso.discovery_enabled()`. Every literal of `AuthConfig` gains the field:
 - `fixtures/api/static/auth-config.json` gains `"sso_discovery": false`;
 - the `AuthConfig { .. }` literal in `crates/server/src/api/account.rs` tests (about line 399) gains `sso_discovery: false`;
-- `crates/server/tests/snapshots/auth_config.snap` is regenerated (`INSTA_UPDATE=always cargo test -p llmobs-server auth_config`; review: one new field) and committed;
+- `crates/server/tests/snapshots/auth_config.snap` is regenerated (`INSTA_UPDATE=always cargo test -p cetra-server auth_config`; review: one new field) and committed;
 - web tests that build an `AuthConfig` by hand (`grep -rn "org_create_allowed" web/src --include=*.test.ts*`) gain `sso_discovery: false`; those spreading the fixture need nothing.
 
 ### Route (`login.rs`)
@@ -1342,11 +1342,11 @@ Open `meta.db` and resolve the org the way `entitlements` does; `meta.write` →
 
 ### `crates/cli/src/main.rs`
 
-`AdminCommand::OrgSso { #[command(subcommand)] command: OrgSsoCommand }` with `OrgSsoCommand::Disable { org: String, #[arg(long)] config: Option<PathBuf> }` (follow `Entitlements`/`Show`). Output: `org SSO disabled for <org>; a running server applies it within a minute` or `<org> has no identity provider` (exit 0). Tests: clap parsing (`llmobs admin org-sso disable acme`; missing org is an error) and `admin::org_sso_disable` on a temp data dir (a provider enabled and enforced → both off; unknown org → error).
+`AdminCommand::OrgSso { #[command(subcommand)] command: OrgSsoCommand }` with `OrgSsoCommand::Disable { org: String, #[arg(long)] config: Option<PathBuf> }` (follow `Entitlements`/`Show`). Output: `org SSO disabled for <org>; a running server applies it within a minute` or `<org> has no identity provider` (exit 0). Tests: clap parsing (`cetra admin org-sso disable acme`; missing org is an error) and `admin::org_sso_disable` on a temp data dir (a provider enabled and enforced → both off; unknown org → error).
 
 ### Spec
 
-`docs/spec/09-api.md` § CLI: `llmobs admin org-sso disable <org>` ("turns an org's provider and enforcement off; applied by a running server within a minute; for a broken identity provider"). `docs/spec/08-auth.md` § Per-org SSO: one sentence on it.
+`docs/spec/09-api.md` § CLI: `cetra admin org-sso disable <org>` ("turns an org's provider and enforcement off; applied by a running server within a minute; for a broken identity provider"). `docs/spec/08-auth.md` § Per-org SSO: one sentence on it.
 
 ### Done
 
@@ -1439,7 +1439,7 @@ Rendering `/acme/settings/sso` with the fixture (`org-sso.json`) and `server.use
 
 - Remove every `allow(dead_code)` attribute M5 added (P3 `store.rs`, P5 `dns.rs`, P6 `org_sso/mod.rs`, any item-level one); `just lint` clean.
 - Check that specs 04 (P3), 08 (P9–P13), 09 (P7–P13), 11 (P14, P15) and 12 (P2) say what the code does.
-- `CHANGELOG.md` § `[Unreleased]` `### Added`: "Per-org single sign-on (enterprise): an org's own OIDC provider, DNS-verified email domains, email-first login, just-in-time membership and SSO enforcement; `llmobs admin org-sso disable`."
+- `CHANGELOG.md` § `[Unreleased]` `### Added`: "Per-org single sign-on (enterprise): an org's own OIDC provider, DNS-verified email domains, email-first login, just-in-time membership and SSO enforcement; `cetra admin org-sso disable`."
 - `docs/roadmap.md` row **P** Status: add "M5 implemented: per-org OIDC providers, DNS-verified domains, email-first login discovery, JIT membership within seats, per-org SSO enforcement, the org SSO settings page and the break-glass command." (keep the M4 text as the coordinator left it).
 - `just check`, `just e2e`.
 

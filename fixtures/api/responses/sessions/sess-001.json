@@ -23,7 +23,10 @@
         },
         "source": "human"
       }
-    ]
+    ],
+    "error_trace_count": 0,
+    "first_input_preview": "My order 1234 hasn't arrived.",
+    "last_output_preview": "Yes. Send the new address and I will update the delivery."
   },
   "turns": [
     {

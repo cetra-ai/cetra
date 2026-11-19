@@ -25,7 +25,7 @@ When M4 is done:
 - projects have a `trace_completion_timeout_s` setting (10–3600 s, default 60) in the API and on the project's general settings page.
 - `POST …/online-rules/preview` counts what a filter matches over a window (the last 24 h by default, at most 10 000, strict exclusions), and the rule editor shows that count as you type.
 
-**Out of scope:** the annotation panel (M5); backfill (M6); the full `llmobs serve` end-to-end test (M6; M4 has an in-process one); plan enforcement (track P).
+**Out of scope:** the annotation panel (M5); backfill (M6); the full `cetra serve` end-to-end test (M6; M4 has an in-process one); plan enforcement (track P).
 
 ## Decisions this plan relies on
 
@@ -34,7 +34,7 @@ When M4 is done:
 | D-I-7 | Trace and span rules fire when the trace completes: its root span has ended and 5 s passed without a new span, or `trace_completion_timeout_s` (default 60, 10–3600) passed without one. Traces that complete while no rule tracks the project are not evaluated. |
 | D-I-8 | `PendingTraces` lives in memory, updated by `commit`, with no database access on the ingest path. It holds at most 200 000 traces; past that new traces are dropped, counted, and a `warn` is logged at most once a minute. A flusher persists the changes every 5 s (at most 1 000 rows per transaction, deletes first) and at shutdown; startup loads them. |
 | D-I-9 | Every 2 s the sweeper takes completed traces per project, in batches of at most 500, at most 2 000 per project per tick. A batch spans at most 12 h of `min_start`, and its reads use `around` = the middle of that range. One read per rule per batch, with strict exclusions. A failed read keeps the batch for the next tick; after 5 failed ticks a trace is dropped with a `warn`. A trace leaves the map only when its `last_seen` did not change during the reads. Ticks never overlap. |
-| D-I-10 | Sampling: SHA-256(`llmobs.sample.v1` ‖ rule id ‖ trace id ‖ span id for span rules), first 8 bytes big-endian, below `(rate · 2^64) as u64`; `rate >= 1` always samples. A span rule samples first, then keeps the 50 earliest sampled spans of each trace. |
+| D-I-10 | Sampling: SHA-256(`cetra.sample.v1` ‖ rule id ‖ trace id ‖ span id for span rules), first 8 bytes big-endian, below `(rate · 2^64) as u64`; `rate >= 1` always samples. A span rule samples first, then keeps the 50 earliest sampled spans of each trace. |
 | D-I-11 | Rule jobs: `dedup_key` `rule:<rule>:<trace>:<span or ->`, `ON CONFLICT DO NOTHING`. Live enqueues are capped at 10 000 per rule per UTC hour; extra matches are dropped and counted (`dropped_last_hour`). |
 | D-I-17 | `commit` never tracks evaluation or experiment spans; every matching read uses strict exclusions. |
 | D-I-28 | Projects or orgs that are not `active` are not tracked; their pending traces are dropped. |
@@ -51,7 +51,7 @@ The project setting is stored in `projects.settings` (JSON, key `trace_completio
 
 ## Versions
 
-No new dependency. `sha2`, `chrono`, `serde_json` and `tokio` are already dependencies of `llmobs-server`.
+No new dependency. `sha2`, `chrono`, `serde_json` and `tokio` are already dependencies of `cetra-server`.
 
 ## Conventions for every sub-phase
 
@@ -246,7 +246,7 @@ The cost described in that last sentence is accepted by this plan. Do not bound 
 
 - `match_count_counts_in_the_window`: four traces, two inside the window, one before, one after → 2.
 - `match_count_applies_the_filter`: filter `status = 'error'` over two ok traces and one error trace → 1.
-- `match_count_strict_drops_eval_and_experiment_traces`: a normal, an `llmobs-eval` and an experiment trace; filter `environment = 'llmobs-eval'` → 0 with strict, 1 without.
+- `match_count_strict_drops_eval_and_experiment_traces`: a normal, a`cetra-eval` and an experiment trace; filter `environment = 'cetra-eval'` → 0 with strict, 1 without.
 - `match_count_counts_spans`: a trace of 3 spans, 2 with `span_kind = 'llm'`; view spans, filter `span_kind = 'llm'` → 2.
 - `match_count_stops_at_cap_plus_one`: 5 traces, `cap: 2` → 3.
 - `strict_trace_refresh_returns_two_columns`: a `trace_refresh` with `strict_exclusions: true` → the batches' schema has exactly `TRACE_REFRESH_STRICT_COLUMNS`; with `false` → the full row, as before.
@@ -284,7 +284,7 @@ CREATE TABLE pending_traces (
 
 The failed-read count is not stored: a restart gives every trace five fresh tries, which is fine.
 
-**Existing tests:** only the `meta_schema` snapshot changes (§ The migration number). Regenerate the snapshot with `INSTA_UPDATE=always cargo test -p llmobs-server schema_matches_the_snapshot`. Its diff must add only the table and SQLite's automatic index of its primary key. Say so in the report.
+**Existing tests:** only the `meta_schema` snapshot changes (§ The migration number). Regenerate the snapshot with `INSTA_UPDATE=always cargo test -p cetra-server schema_matches_the_snapshot`. Its diff must add only the table and SQLite's automatic index of its primary key. Say so in the report.
 
 ### `meta/pending_traces.rs`
 
@@ -458,7 +458,7 @@ pub(crate) const COMPLETION_TIMEOUT_MAX_S: u32 = 3600;
 
 - `Project` gains, after `retention_days`: `/// Seconds without a new span after which a trace counts as complete for online rules (D-I-7). 10 to 3600; 60 unless set. pub trace_completion_timeout_s: u32,` (always present).
 - `UpdateProjectRequest` gains: `/// Seconds without a new span after which a trace counts as complete for online rules, 10 to 3600. Absent leaves it unchanged. #[serde(default, skip_serializing_if = "Option::is_none")] pub trace_completion_timeout_s: Option<u32>,`. There is no way to unset it; sending 60 restores the default behaviour.
-- The test that builds a `Project` in this file (`rg -n "let project = Project" crates/server/src/api/account.rs`) adds `trace_completion_timeout_s: 60`. Its snapshot `crates/server/tests/snapshots/project.snap` changes: run `INSTA_UPDATE=always cargo test -p llmobs-server project`; the diff must be only `"trace_completion_timeout_s": 60,` after `"retention_days": 30,`.
+- The test that builds a `Project` in this file (`rg -n "let project = Project" crates/server/src/api/account.rs`) adds `trace_completion_timeout_s: 60`. Its snapshot `crates/server/tests/snapshots/project.snap` changes: run `INSTA_UPDATE=always cargo test -p cetra-server project`; the diff must be only `"trace_completion_timeout_s": 60,` after `"retention_days": 30,`.
 - `routes/auth.rs` builds a `Project` for the setup response (`project: Project {` near line 193): add `trace_completion_timeout_s: created.created.project.completion_timeout_s(),`. No other server file builds an `api::account::Project` (`rg -n "Project \{" crates/server/src` also lists `Access::Project` and `WebhookProject`, which are other types).
 
 ### Route (`routes/projects.rs`)
@@ -520,7 +520,7 @@ The trigger reads the value itself each tick (I4.2's query), so nothing else cha
 //! Deterministic sampling of rule targets (D-I-10).
 
 /// A hash input, not an attribute name: the D46 rename must not change which targets are sampled.
-const SAMPLE_TAG: &[u8] = b"llmobs.sample.v1";
+const SAMPLE_TAG: &[u8] = b"cetra.sample.v1";
 
 /// Whether `rule` samples this target. `rate >= 1.0` always does; `rate` that is not above 0
 /// (or NaN) never does. Otherwise the first 8 bytes, big-endian, of SHA-256(tag ‖ rule id (16 bytes)
@@ -532,7 +532,7 @@ pub(crate) fn sampled(rate: f64, rule: Uuid, trace: TraceId, span: Option<SpanId
 
 Tests:
 - `rate_one_always_samples` and `rate_zero_never_samples` (0.0, -1.0, `f64::NAN`).
-- `sampling_is_pinned`: rule `01900000-0000-7000-8000-000000000700`, trace `a1000000000000000000000000000001`, no span. Compute the first 8 bytes of SHA-256 of the tag ‖ the 16 rule bytes ‖ the 16 trace bytes outside this code, in a file under your scratchpad: `{ printf 'llmobs.sample.v1'; printf '%s%s' 01900000000070008000000000000700 a1000000000000000000000000000001 | xxd -r -p; } | sha256sum`, then take the first 16 hex digits. Call that big-endian `u64` value `h`. Write `h` as a literal in the test (`const H: u64 = 0x…;`) with a comment giving the command. Derive the two rates in the test, never as hand-written float literals: f64 granularity near `h / 2^64` would make them fragile.
+- `sampling_is_pinned`: rule `01900000-0000-7000-8000-000000000700`, trace `a1000000000000000000000000000001`, no span. Compute the first 8 bytes of SHA-256 of the tag ‖ the 16 rule bytes ‖ the 16 trace bytes outside this code, in a file under your scratchpad: `{ printf 'cetra.sample.v1'; printf '%s%s' 01900000000070008000000000000700 a1000000000000000000000000000001 | xxd -r -p; } | sha256sum`, then take the first 16 hex digits. Call that big-endian `u64` value `h`. Write `h` as a literal in the test (`const H: u64 = 0x…;`) with a comment giving the command. Derive the two rates in the test, never as hand-written float literals: f64 granularity near `h / 2^64` would make them fragile.
 - Use `let above = (H as f64 + 1e6) / 2f64.powi(64);` and `let below = (H as f64 - 1e6) / 2f64.powi(64);`.
 - Assert `sampled(above, …)` is true and `sampled(below, …)` is false.
 - Also assert that `draw(rule, trace, None) == H`, which pins the hash itself.
@@ -622,7 +622,7 @@ Methods (each takes the lock once, briefly):
 
 There is no `is_tracked` and no `dropped_full()` getter. The `dropped_full` field is read only by the full-map warning.
 
-`ProjectId` and `TraceId` must be `Hash + Eq` (check `crates/core/src/ids.rs`; both derive it). `TraceId`'s order for sorting: compare `as_bytes()`. `Span` is `llmobs_core::span::Span` (check the import in `test_support/mod.rs`); `environment::EVAL` and `metadata_key::EXPERIMENT_ID` are in `llmobs_core::names` (as `ingest/mod.rs` imports `environment::EVAL`).
+`ProjectId` and `TraceId` must be `Hash + Eq` (check `crates/core/src/ids.rs`; both derive it). `TraceId`'s order for sorting: compare `as_bytes()`. `Span` is `cetra_core::span::Span` (check the import in `test_support/mod.rs`); `environment::EVAL` and `metadata_key::EXPERIMENT_ID` are in `cetra_core::names` (as `ingest/mod.rs` imports `environment::EVAL`).
 
 Nothing here has a production caller before I4.5 and I4.7. Add the allows that § Conventions › Dead-code allows in M4 lists for I4.4, item by item, with their comments. A module-level allow is not enough.
 
@@ -631,7 +631,7 @@ Nothing here has a production caller before I4.5 and I4.7. Add the allows that �
 Helpers: `span(trace: u8, parent: bool, start: i64) -> Span` built from `test_support::dataset_span(0)` with its ids and fields replaced; `track(&pending, project)`.
 
 - `untracked_projects_are_ignored`.
-- `eval_and_experiment_spans_are_ignored`: environment `llmobs-eval`; metadata `llmobs.experiment_id` → no entry.
+- `eval_and_experiment_spans_are_ignored`: environment `cetra-eval`; metadata `cetra.experiment_id` → no entry.
 - `observe_tracks_first_last_min_and_root`: two calls at `now` 10 and 20 with starts 500 and 300, the second with a root → `first_seen 10`, `last_seen 20`, `min_start 300`, `root_ended`.
 - `the_map_is_capped`: `new(2)`, three traces → `len() == 2`. A span of an existing trace still updates it. With `capture_logs`, the warning is logged once (`dropped=1`) for two overflowing calls within a minute, and again after a minute.
 - `completed_uses_root_idle_and_timeout`: a rooted trace at `last_seen` 0 is complete at 5 s, not at 4.9 s; an unrooted one only at the timeout; sorted by `min_start`; `limit` cuts.
@@ -670,7 +670,7 @@ Helpers: `span(trace: u8, parent: bool, start: i64) -> Span` built from `test_su
 
 Signature: `commit(&self, storage: &Storage, usage: &Usage, live: &LiveBus, pending: &PendingTraces, target: CommitTarget, normalized: Normalized)`. Right after `live.publish(target.project_id, &spans);`, add `pending.observe(target.project_id, &spans, target.now_ns);`. Doc: add "then records the trace in the trigger's pending map when its project has an online rule (D-I-8; memory only)". `commit_in_task` passes `&state.pending`; `TestApp::commit_spans` passes `&self.state.pending`; every test call in `ingest/mod.rs` passes `&app.state.pending` (`rg -n "\.commit\(" crates/server/src`).
 
-New test in `ingest/mod.rs`: `commit_records_tracked_projects_only`: `app.state.pending.set_tracked([project A])`; commit a dataset span to A and one to B → `pending.len() == 1`; a judge-trace span (`environment = llmobs-eval`) to A adds nothing.
+New test in `ingest/mod.rs`: `commit_records_tracked_projects_only`: `app.state.pending.set_tracked([project A])`; commit a dataset span to A and one to B → `pending.len() == 1`; a judge-trace span (`environment = cetra-eval`) to A adds nothing.
 
 ### `eval/trigger.rs`
 
@@ -792,9 +792,9 @@ pub struct OnlineRulePreview {
     /// More than 10 000 matched.
     pub capped: bool,
     /// The window that was counted. RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")] #[schema(value_type = String, format = DateTime)]
+    #[serde(with = "cetra_core::time_serde")] #[schema(value_type = String, format = DateTime)]
     pub from: i64,
-    #[serde(with = "llmobs_core::time_serde")] #[schema(value_type = String, format = DateTime)]
+    #[serde(with = "cetra_core::time_serde")] #[schema(value_type = String, format = DateTime)]
     pub to: i64,
 }
 ```
@@ -812,7 +812,7 @@ Add it to the module's route list (`Access::Project`, `session_only: false`, `do
 The handler:
 1. `now = state.clock.now_ns()`; `to = body.to.map_or(now, TimeParam::ns)`; `from = body.from.map_or(to − 24 h, TimeParam::ns)`. Collect field errors: `from >= to` → `from`: `from must be before to`; `to − from > 30 days` → `from`: `the window is at most 30 days`; a filter over 4 096 bytes → `filter`: `filter must be at most 4096 bytes` (D-I-30's limit). Non-empty → `400`.
 2. `ctx = open_query(&state, project, None).await?` (`routes/read.rs`).
-3. `count = llmobs_storage::match_count(&ctx, MatchCountRequest { view, filter: body.filter.as_deref(), window: TimeWindow::new(from, to)?, cap: MAX_MATCH_COUNT, strict_exclusions: true, timeout: PREVIEW_TIMEOUT }).await?` with `view` from the target (`Traces` / `Spans`) and `const PREVIEW_TIMEOUT: Duration = Duration::from_secs(10);`. `?` maps `RunError::Invalid` to the `invalid_filter` problem on field `filter`, a timeout to `422 query_timeout`, and `QueryError::Busy` to `503`, as the read routes do.
+3. `count = cetra_storage::match_count(&ctx, MatchCountRequest { view, filter: body.filter.as_deref(), window: TimeWindow::new(from, to)?, cap: MAX_MATCH_COUNT, strict_exclusions: true, timeout: PREVIEW_TIMEOUT }).await?` with `view` from the target (`Traces` / `Spans`) and `const PREVIEW_TIMEOUT: Duration = Duration::from_secs(10);`. `?` maps `RunError::Invalid` to the `invalid_filter` problem on field `filter`, a timeout to `422 query_timeout`, and `QueryError::Busy` to `503`, as the read routes do.
 4. `200` with `matched = min(count, MAX_MATCH_COUNT)`, `capped = count > MAX_MATCH_COUNT`, `from`, `to`.
 
 There is no per-user limit: a preview is a bounded read (10 s, the query memory pool), like a trace list. Log nothing but a `debug` with the project id, the target and the count.
@@ -843,7 +843,7 @@ Register both schemas. `tests/openapi.rs` (M3 § Conventions): add the tuple to 
 
 - `preview_counts_the_last_24_hours`: two ok traces in the last day, one older (two days ago), one error trace → `{target: "trace", filter: "status = 'ok'"}` gives `matched 2`, `capped false`, `to` = now, `from` = now − 24 h. Set the manual clock so that "now" is after the dataset's span times (read their `start_time` in `fixtures/api/dataset/spans.json` and pick `now` one hour after the latest).
 - `preview_counts_spans_for_a_span_target`.
-- `preview_leaves_out_evaluation_traces`: an `llmobs-eval` trace with filter `environment = 'llmobs-eval'` → 0.
+- `preview_leaves_out_evaluation_traces`: a`cetra-eval` trace with filter `environment = 'cetra-eval'` → 0.
 - `preview_validates_the_window`: `from` after `to`; a 31-day window; a 4 097-byte filter → 400 on their fields.
 - `an_invalid_filter_is_400_with_position`.
 - `viewer_and_api_key_cannot_preview` (403).
@@ -885,7 +885,7 @@ Use the module's private helpers (`strings` for the hex ids, `times` for `start_
 /// Most completed traces taken per project per tick (D-I-9).
 const PER_PROJECT_TICK: usize = 2_000;
 /// Most traces in one batch: one `trace_refresh` or `span_refresh` call.
-const BATCH: usize = llmobs_storage::MAX_REFRESH_IDS;
+const BATCH: usize = cetra_storage::MAX_REFRESH_IDS;
 /// Widest `min_start` spread in one batch, so `around ± 1 day` covers it (D-I-9).
 const BATCH_SPREAD_NS: i64 = 12 * 3_600_000_000_000;
 /// Span rules keep this many sampled spans per trace (D-I-10).
@@ -959,8 +959,8 @@ fn admit_targets(hourly: &HourlyCaps, targets: Vec<(&TriggerRule, MatchRow)>, no
 1. `source = state.storage.query(project, QueryOptions { around: Some(around) }).await` (the one field `QueryOptions` has; § Completion and sweeping in one place); `ctx = QueryContext::new(source, None)`, as `routes/read.rs` `open_query_on` does. On any error, log `warn!(project_id, "a trigger read could not start")` and return `Err(())`.
 2. `ids: Vec<String>` is the batch's trace ids as lowercase hex (`TraceId::to_string`), then `refs: Vec<&str>`.
 3. For each rule:
-   - `"trace"` → `llmobs_storage::trace_refresh(&ctx, TraceRefreshRequest { filter: rule.filter.as_deref(), search: None, trace_ids: &refs, include_eval: false, include_experiments: false, strict_exclusions: true, timeout: READ_TIMEOUT })`, then `match_rows(&batches, false)` (strict, so the batches have exactly `TRACE_REFRESH_STRICT_COLUMNS`, I4.1).
-   - `"span"` → `llmobs_storage::span_refresh(&ctx, SpanRefreshRequest { filter: rule.filter.as_deref(), trace_ids: &refs, per_trace: MAX_REFRESH_SPANS_PER_TRACE, strict_exclusions: true, timeout: READ_TIMEOUT })`, then `match_rows(&batches, true)`.
+   - `"trace"` → `cetra_storage::trace_refresh(&ctx, TraceRefreshRequest { filter: rule.filter.as_deref(), search: None, trace_ids: &refs, include_eval: false, include_experiments: false, strict_exclusions: true, timeout: READ_TIMEOUT })`, then `match_rows(&batches, false)` (strict, so the batches have exactly `TRACE_REFRESH_STRICT_COLUMNS`, I4.1).
+   - `"span"` → `cetra_storage::span_refresh(&ctx, SpanRefreshRequest { filter: rule.filter.as_deref(), trace_ids: &refs, per_trace: MAX_REFRESH_SPANS_PER_TRACE, strict_exclusions: true, timeout: READ_TIMEOUT })`, then `match_rows(&batches, true)`.
    - Errors follow § Error outcomes of a batch read. A skipped rule goes on to the next rule. A batch failure logs `warn!(project_id, rule_id, kind = error.kind(), "a trigger read failed")` and returns `Err(())`.
    - Add `rows.len()` to `matched`, then push the rule's sampled rows:
      - **trace rule:** each row with `sampling::sampled(rule.sample_rate, rule.id, row.trace_id, None)`.
@@ -1002,7 +1002,7 @@ Remove the I4.7 rows of § Conventions › Dead-code allows in M4, `HourlyCaps::
 - `a_span_rule_enqueues_matching_spans`: three `llm` spans and one `chain` span, filter `span_kind = 'llm'` → three jobs with their `span_id`s and `start_time`s.
 - `a_span_rule_keeps_the_50_earliest_sampled_spans`: 60 matching spans at rate 1 → 50 jobs, the earliest.
 - `sampling_selects_the_same_targets_as_sampled`: 20 traces at rate 0.5 → the job set equals the traces for which `sampling::sampled` is true.
-- `evaluation_traces_are_never_enqueued`: an `llmobs-eval` trace with a rule filtered on `environment = 'llmobs-eval'` → no entry in the map, no job (and if one is forced into the map with `pending.load`, the strict read still returns nothing).
+- `evaluation_traces_are_never_enqueued`: a`cetra-eval` trace with a rule filtered on `environment = 'cetra-eval'` → no entry in the map, no job (and if one is forced into the map with `pending.load`, the strict read still returns nothing).
 - `the_hourly_cap_drops_and_counts`: advance the clock 6 s, then call `state.eval.hourly.admit(rule, state.clock.now_ns())` 10 000 times. Sweep one trace at the same clock value → no job, `report.capped == 1`, and `GET /online-rules/{id}` answers `dropped_last_hour: 1`.
 - `admit_targets_caps_in_order` (pure, on a fresh `HourlyCaps`): call `admit` 9 999 times for rule A, then `admit_targets` with three candidates of A and one of B → two jobs (A's first and B's), `report.capped == 2`.
 
@@ -1013,7 +1013,7 @@ That a failed read spends no cap unit is guaranteed by the types: `read_candidat
 - `a_failed_batch_keeps_its_traces`: a storage read cannot be made to fail reliably in a test, so test `settle` (step 2) directly: `Err` four times keeps the trace and counts `failed_batches == 4`, the fifth drops it, returns 1 and counts `dropped == 1`; `Ok` finishes it.
 - `a_deleted_rule_during_the_sweep_enqueues_nothing`: call the enqueue helper with a `NewJob` of a deleted rule → `Ok`, 0 inserted.
 - `untracked_projects_are_not_read`: a project without rules → its trace never enters the map.
-- **End to end:** `a_trace_rule_runs_from_commit_to_score` (`#[tokio::test(flavor = "multi_thread")]`, M3 § Conventions' test clock: set the manual clock to the real time first): a judge evaluator on `MockLlm` (as M3's `execute.rs` tests), a trace rule created over HTTP (`POST …/online-rules`, rate 1), then `trigger::refresh_rules(&app.state).await.unwrap()` so the project is tracked before the commit (the sweeper's first pass would otherwise race it), `crate::eval::spawn(&app.state, EvalTiming::TEST)`, `commit_spans` of a rooted trace, then `app.state.clock.advance(Duration::from_secs(6))`; poll `GET …/eval-jobs?rule_id=` every 50 ms for at most 10 s until one job is `done`; `GET /scores?rule_id=` has one `llm_judge` score on the trace; finally `EvalTasks::shutdown`. Run it five times in a row (`for i in 1 2 3 4 5; do cargo test -p llmobs-server a_trace_rule_runs_from_commit_to_score || break; done`); a flaky run must be fixed, not retried.
+- **End to end:** `a_trace_rule_runs_from_commit_to_score` (`#[tokio::test(flavor = "multi_thread")]`, M3 § Conventions' test clock: set the manual clock to the real time first): a judge evaluator on `MockLlm` (as M3's `execute.rs` tests), a trace rule created over HTTP (`POST …/online-rules`, rate 1), then `trigger::refresh_rules(&app.state).await.unwrap()` so the project is tracked before the commit (the sweeper's first pass would otherwise race it), `crate::eval::spawn(&app.state, EvalTiming::TEST)`, `commit_spans` of a rooted trace, then `app.state.clock.advance(Duration::from_secs(6))`; poll `GET …/eval-jobs?rule_id=` every 50 ms for at most 10 s until one job is `done`; `GET /scores?rule_id=` has one `llm_judge` score on the trace; finally `EvalTasks::shutdown`. Run it five times in a row (`for i in 1 2 3 4 5; do cargo test -p cetra-server a_trace_rule_runs_from_commit_to_score || break; done`); a flaky run must be fixed, not retried.
 
 ### Done when
 

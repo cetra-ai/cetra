@@ -14,7 +14,7 @@ fixtures/otlp/
     expected.json
 ```
 
-Group directories are `genai`, `openinference`, `openllmetry`, `vercel`, `langfuse`, `laminar`, `google_adk`, `llmobs` (spans from our own SDKs), and `edge` (cross-cutting edge cases). In `llmobs`, cases named `sdk-<scenario>` are the canonical output of both SDKs for one scenario (spec 10 § Testing). Their `input.json` is in the canonical form described there; the SDK test suites compare against it, so change one only together with both SDKs. Create a group directory only when it contains a case. Case directory names are kebab-case and name the scenario.
+Group directories are `genai`, `openinference`, `openllmetry`, `vercel`, `langfuse`, `laminar`, `google_adk`, `cetra` (spans from our own SDKs), and `edge` (cross-cutting edge cases). In `cetra`, cases named `sdk-<scenario>` are the canonical output of both SDKs for one scenario (spec 10 § Testing). Their `input.json` is in the canonical form described there; the SDK test suites compare against it, so change one only together with both SDKs. Create a group directory only when it contains a case. Case directory names are kebab-case and name the scenario.
 
 A hand-written case directory contains exactly three files: `case.json`, `input.json`, and `expected.json`. A captured case may omit `expected.json` until bless mode writes it (D118). No other file is allowed in a case directory. The validation test allows only `README.md` and `prices.json` beside the group directories, and it rejects a group name outside the list above.
 
@@ -66,7 +66,7 @@ A captured case may be committed before this file exists. The golden test skips 
 }
 ```
 
-- `spans` lists every span the normalizer must accept, in `llmobs_core::Span` JSON (D60, D64). Timestamps are RFC 3339 with 9 fractional digits and a `Z` suffix. Optional and empty fields are omitted. Spans are sorted by `(trace_id, start_time, span_id)`. When a span has normalization warnings, `attributes` includes `llmobs.normalize_warning`: a JSON array of warning codes, sorted, without duplicates (spec 02 rule 18).
+- `spans` lists every span the normalizer must accept, in `cetra_core::Span` JSON (D60, D64). Timestamps are RFC 3339 with 9 fractional digits and a `Z` suffix. Optional and empty fields are omitted. Spans are sorted by `(trace_id, start_time, span_id)`. When a span has normalization warnings, `attributes` includes `cetra.normalize_warning`: a JSON array of warning codes, sorted, without duplicates (spec 02 rule 18).
 - `media` lists every blob the normalizer must extract. The bytes are not stored, only their identity: `{"sha256": "<64 lowercase hex>", "mime_type": "image/png", "size_bytes": 70}`. Sorted by `sha256`. Every entry is referenced by some span's `media_refs`, and every `media_refs` entry appears here.
 - `rejected_spans` is the number of input spans the normalizer must reject (spec 02 § Normalization rules). It equals the number of input spans minus `spans.len()`.
 - Each span's `project_id` and `ingest_time` equal the case context (defaults or overrides).
@@ -108,7 +108,7 @@ The validation test compiles every pattern. It requires a row for each model on 
 
 `case.json`, `input.json`, `expected.json`, and `prices.json` are pretty-printed with 2-space indentation and end with exactly one newline. Object keys stay in the order produced by `serde_json` with the workspace `preserve_order` setting.
 
-The validation test rejects a file that is not in that form. `just fixtures-fmt` rewrites the JSON files into it (`LLMOBS_FIXTURES_FMT=1` on the formatting test). It pretty-prints the parsed JSON. It does not reorder keys, so write them in serde field order the first time.
+The validation test rejects a file that is not in that form. `just fixtures-fmt` rewrites the JSON files into it (`CETRA_FIXTURES_FMT=1` on the formatting test). It pretty-prints the parsed JSON. It does not reorder keys, so write them in serde field order the first time.
 
 ## Content rules
 
@@ -122,6 +122,6 @@ Keep each `input.json` under 256 KiB. For a media case, use a tiny blob and lowe
 
 **Hand-written case.** Write `case.json` and `input.json`, then write `expected.json` by hand from spec 02. Run `just fixtures-fmt`, then `just fixtures-check`.
 
-**Captured case.** The capture tool writes `case.json` and `input.json`. The case may be committed before `expected.json` exists. The golden test skips it and prints `awaiting bless: <group>/<case>`. Bless mode (`LLMOBS_BLESS=1`, `just fixtures-bless`) writes `expected.json`. Review that file line by line before committing it.
+**Captured case.** The capture tool writes `case.json` and `input.json`. The case may be committed before `expected.json` exists. The golden test skips it and prints `awaiting bless: <group>/<case>`. Bless mode (`CETRA_BLESS=1`, `just fixtures-bless`) writes `expected.json`. Review that file line by line before committing it.
 
 **Changing an expected output.** Change it only together with the spec change or bug fix that justifies it, in the same commit.

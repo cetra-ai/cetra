@@ -50,11 +50,11 @@ pub(super) const GOLDEN_KEY: [u8; 32] = {
 /// The owner's password (signs in with it; the hash is an argon2 PHC string, not pinned).
 pub(super) const OWNER_PASSWORD: &str = "golden-password-1";
 /// The owner's ingest key, on `golden-p1` (`sk`, 32 tail characters, base62).
-pub(super) const INGEST_KEY: &str = "sk-llmobs-GoldenP1IngestKey0123456789abcde";
+pub(super) const INGEST_KEY: &str = "sk-cetra-GoldenP1IngestKey0123456789abcde";
 /// The public key of `golden-p1` (`pk`, 24 tail characters).
-pub(super) const PUBLIC_KEY: &str = "pk-llmobs-GoldenPublicP1Key0123456";
+pub(super) const PUBLIC_KEY: &str = "pk-cetra-GoldenPublicP1Key0123456";
 /// The owner's personal access token (`pat`, 32 tail characters).
-pub(super) const PERSONAL_TOKEN: &str = "pat-llmobs-GoldenOwnerToken0123456789012345";
+pub(super) const PERSONAL_TOKEN: &str = "pat-cetra-GoldenOwnerToken0123456789012345";
 /// The owner's web session cookie value (43 characters of the base64url alphabet).
 pub(super) const SESSION_TOKEN: &str = "GoldenSessionTokenABCDEFGHIJKLMNOPQRSTUVWXY";
 /// A pending invite's token, for the invite hash.
@@ -209,31 +209,31 @@ pub(super) async fn row_counts(path: &Path) -> Vec<(String, i64)> {
     }
 }
 
-/// Writes one golden server directory, named by `LLMOBS_SERVER_GOLDEN_OUT` (absolute, not yet
+/// Writes one golden server directory, named by `CETRA_SERVER_GOLDEN_OUT` (absolute, not yet
 /// existing). Its name is the workspace version, or `scratch*` for a look (R8.8).
 #[test]
 #[ignore = "writes a fixtures directory; run by just golden-dir <version>"]
 fn write_server_golden_dir() {
     let out = PathBuf::from(
-        std::env::var_os("LLMOBS_SERVER_GOLDEN_OUT")
-            .expect("LLMOBS_SERVER_GOLDEN_OUT names the directory to write"),
+        std::env::var_os("CETRA_SERVER_GOLDEN_OUT")
+            .expect("CETRA_SERVER_GOLDEN_OUT names the directory to write"),
     );
     assert!(
         out.is_absolute(),
-        "LLMOBS_SERVER_GOLDEN_OUT is an absolute path"
+        "CETRA_SERVER_GOLDEN_OUT is an absolute path"
     );
-    assert!(!out.exists(), "LLMOBS_SERVER_GOLDEN_OUT must not exist yet");
+    assert!(!out.exists(), "CETRA_SERVER_GOLDEN_OUT must not exist yet");
     let name = out
         .file_name()
         .and_then(|name| name.to_str())
-        .expect("LLMOBS_SERVER_GOLDEN_OUT ends in a UTF-8 directory name");
+        .expect("CETRA_SERVER_GOLDEN_OUT ends in a UTF-8 directory name");
     assert!(
         name.starts_with("scratch") || name == env!("CARGO_PKG_VERSION"),
         "{name}: the workspace is {}; a golden directory is named after the version it is written by (or scratch*)",
         env!("CARGO_PKG_VERSION")
     );
-    fs::create_dir_all(out.parent().expect("LLMOBS_SERVER_GOLDEN_OUT has a parent"))
-        .expect("create the parent of LLMOBS_SERVER_GOLDEN_OUT");
+    fs::create_dir_all(out.parent().expect("CETRA_SERVER_GOLDEN_OUT has a parent"))
+        .expect("create the parent of CETRA_SERVER_GOLDEN_OUT");
     generate(&out);
     let (files, bytes) = dir_size(&out);
     println!(
@@ -288,7 +288,7 @@ const PROBE_SECRET: &[u8] = b"golden-probe-secret";
 /// JSON types each may have.
 const MANIFEST_KEYS: &[(&str, &[&str])] = &[
     ("format", &["number"]),
-    ("llmobs_version", &["string"]),
+    ("cetra_version", &["string"]),
     ("created_at", &["string"]),
     ("mode", &["string"]),
     ("object_store", &["string"]),

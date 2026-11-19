@@ -2,7 +2,7 @@ import { problemMessage, problemOf } from "@/api/problem";
 import type { OAuthErrorCode } from "@/lib/search/auth";
 
 export const NO_SIGN_IN_METHOD =
-  "No sign-in method is configured on this server. An instance admin can create an account with `llmobs admin create-user`.";
+  "No sign-in method is configured on this server. An instance admin can create an account with `cetra admin create-user`.";
 
 export const RATE_LIMITED = "Too many attempts. Wait a minute and try again.";
 

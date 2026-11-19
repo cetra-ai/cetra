@@ -58,8 +58,8 @@ function OrgHome() {
     <main className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-6 overflow-auto px-4 py-6">
       <div className="flex items-start justify-between gap-4">
         <div className="flex flex-col gap-1">
-          <h1 className="text-2xl font-medium">{membership?.name ?? org}</h1>
-          <h2 className="text-sm text-muted-foreground">Projects</h2>
+          <h1 className="text-heading font-medium">{membership?.name ?? org}</h1>
+          <h2 className="text-body text-muted-foreground">Projects</h2>
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <DisabledReason

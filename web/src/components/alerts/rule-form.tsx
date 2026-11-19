@@ -253,7 +253,7 @@ export function RuleForm(props: {
         />
 
         <fieldset className="flex flex-col gap-4">
-          <legend className="text-sm font-medium">What to measure</legend>
+          <legend className="text-body font-medium">What to measure</legend>
           <SelectField
             id="rule-metric"
             label="Metric"
@@ -329,18 +329,18 @@ export function RuleForm(props: {
               patchForm({ filter: event.target.value });
             }}
           />
-          <p id="rule-filter-description" className="text-xs text-muted-foreground">
+          <p id="rule-filter-description" className="text-caption text-muted-foreground">
             A traces filter, e.g. environment = 'production'. Empty: every trace.
           </p>
           {filterError ? (
-            <p id="rule-filter-error" className="text-xs text-destructive">
+            <p id="rule-filter-error" className="text-caption text-destructive">
               {filterError}
             </p>
           ) : null}
         </div>
 
         <fieldset className="flex flex-col gap-4">
-          <legend className="text-sm font-medium">Condition</legend>
+          <legend className="text-body font-medium">Condition</legend>
           <SelectField
             id="rule-comparator"
             label="Comparator"
@@ -381,11 +381,11 @@ export function RuleForm(props: {
           className="flex flex-col gap-4"
           aria-describedby={errors.channel_ids ? "rule-channels-error" : undefined}
         >
-          <legend className="text-sm font-medium">Notifications</legend>
+          <legend className="text-body font-medium">Notifications</legend>
           {channels.isPending ? (
             <Skeleton className="h-8 w-full" />
           ) : channelList.length === 0 ? (
-            <p className="text-sm text-muted-foreground">
+            <p className="text-body text-muted-foreground">
               No channels yet.{" "}
               <Link
                 to="/$org/$project/settings/channels"
@@ -416,7 +416,7 @@ export function RuleForm(props: {
                 );
               })}
               {errors.channel_ids ? (
-                <p id="rule-channels-error" className="text-xs text-destructive">
+                <p id="rule-channels-error" className="text-caption text-destructive">
                   {errors.channel_ids}
                 </p>
               ) : null}
@@ -466,11 +466,11 @@ export function RuleForm(props: {
 
       <div className="flex flex-col gap-3 lg:col-span-2">
         {resetsState ? (
-          <p className="text-sm">Saving a new condition resets the rule to OK.</p>
+          <p className="text-body">Saving a new condition resets the rule to OK.</p>
         ) : null}
         <FormError message={formError} />
         {planLimited ? (
-          <p className="text-xs">
+          <p className="text-caption">
             Upgrade your plan, disable another rule, or save this one disabled.
           </p>
         ) : null}
@@ -534,7 +534,7 @@ function SelectField<T extends string>({
         </SelectContent>
       </Select>
       {description ? (
-        <p id={descriptionId} className="text-xs text-muted-foreground">
+        <p id={descriptionId} className="text-caption text-muted-foreground">
           {description}
         </p>
       ) : null}

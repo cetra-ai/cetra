@@ -67,12 +67,12 @@ expression: protobuf
       },
       "input_preview": "{\"x\":1}",
       "attributes": {
-        "llmobs.span.kind": "chain"
+        "cetra.span.kind": "chain"
       },
       "resource_attributes": {
-        "telemetry.distro.name": "llmobs"
+        "telemetry.distro.name": "cetra"
       },
-      "scope_name": "llmobs",
+      "scope_name": "cetra",
       "scope_version": "0.0.0",
       "events": [
         {
@@ -88,7 +88,7 @@ expression: protobuf
       "media_refs": [],
       "truncated": [],
       "conventions": [
-        "llmobs"
+        "cetra"
       ],
       "ingest_time": "[redacted]",
       "schema_version": 1

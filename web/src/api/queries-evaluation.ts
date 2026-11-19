@@ -5,6 +5,23 @@ export function evaluatorsInit(org: string, project: string) {
   return { params: { path: { project: projectRef(org, project) }, query: { limit: 100 } } };
 }
 
+/**
+ * The project's evaluators, page by page. Every reader of the list uses this one shape: a plain
+ * query on the same URL and parameters would share the cache entry and break the paged readers.
+ */
+export function useEvaluatorPages(org: string, project: string) {
+  return $api.useInfiniteQuery(
+    "get",
+    "/api/v1/projects/{project}/evaluators",
+    evaluatorsInit(org, project),
+    {
+      pageParamName: "cursor",
+      initialPageParam: null,
+      getNextPageParam: (page) => page.next_cursor ?? undefined,
+    },
+  );
+}
+
 /** Prefix of every evaluator list query of the project, for invalidation. */
 export function evaluatorsKey(org: string, project: string) {
   return $api.queryOptions("get", "/api/v1/projects/{project}/evaluators", {
@@ -27,6 +44,21 @@ export function evaluatorQuery(org: string, project: string, evaluatorId: string
 /** The key of one evaluator's detail query, for invalidation. */
 export function evaluatorKey(org: string, project: string, evaluatorId: string) {
   return evaluatorQuery(org, project, evaluatorId).queryKey;
+}
+
+export function evaluatorVersionsInit(org: string, project: string, evaluatorId: string) {
+  return { params: { path: { project: projectRef(org, project), id: evaluatorId } } };
+}
+
+/** Per-evaluator 7-day stats of the project, or of the evaluators named by `evaluatorIds`. */
+export function evaluatorStatsQuery(org: string, project: string, evaluatorIds?: string[]) {
+  return $api.queryOptions("get", "/api/v1/projects/{project}/evaluators/stats", {
+    params: {
+      path: { project: projectRef(org, project) },
+      query:
+        evaluatorIds && evaluatorIds.length > 0 ? { evaluator_ids: evaluatorIds.join(",") } : {},
+    },
+  });
 }
 
 export function evaluatorTemplatesInit(org: string, project: string) {

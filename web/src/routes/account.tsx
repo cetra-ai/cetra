@@ -3,11 +3,14 @@ import { createFileRoute } from "@tanstack/react-router";
 import { authConfigQuery } from "@/api/auth";
 import { meQuery } from "@/api/queries";
 import { PasswordForm } from "@/components/account/password-form";
-import { PersonalTokens } from "@/components/account/personal-tokens";
+import { PERSONAL_TOKEN_SORTS, PersonalTokens } from "@/components/account/personal-tokens";
 import { ProfileForm } from "@/components/account/profile-form";
+import { SettingsPage } from "@/components/settings/settings-page";
 import { TopBarLayout } from "@/components/shell/top-bar-layout";
+import { parseSettingsListSearch } from "@/lib/search/settings-list";
 
 export const Route = createFileRoute("/account")({
+  validateSearch: (search) => parseSettingsListSearch(search, PERSONAL_TOKEN_SORTS),
   loader: ({ context }) => context.queryClient.ensureQueryData(authConfigQuery),
   component: AccountPage,
 });
@@ -15,32 +18,23 @@ export const Route = createFileRoute("/account")({
 function AccountPage() {
   const { data: config } = useSuspenseQuery(authConfigQuery);
   const { data: me } = useSuspenseQuery(meQuery);
+  const search = Route.useSearch();
+  const navigate = Route.useNavigate();
   // With password sign-in off, only instance admins keep a password (D-S-3).
   const showPassword = config.password_enabled || me.user.is_instance_admin;
   return (
     <TopBarLayout>
-      <main className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-10 overflow-auto px-4 py-6">
-        <h1 className="text-2xl font-medium">Account</h1>
-        <section className="flex flex-col gap-3" aria-labelledby="profile-heading">
-          <h2 id="profile-heading" className="text-lg font-medium">
-            Profile
-          </h2>
+      <main className="flex min-h-0 flex-1 flex-col">
+        <SettingsPage title="Account" description="Your profile, password and access tokens.">
           <ProfileForm />
-        </section>
-        {showPassword ? (
-          <section className="flex flex-col gap-3" aria-labelledby="password-heading">
-            <h2 id="password-heading" className="text-lg font-medium">
-              Password
-            </h2>
-            <PasswordForm />
-          </section>
-        ) : null}
-        <section className="flex flex-col gap-3" aria-labelledby="tokens-heading">
-          <h2 id="tokens-heading" className="text-lg font-medium">
-            Personal access tokens
-          </h2>
-          <PersonalTokens />
-        </section>
+          {showPassword ? <PasswordForm /> : null}
+          <PersonalTokens
+            search={search}
+            onSearchChange={(patch) => {
+              void navigate({ search: (prev) => ({ ...prev, ...patch }), replace: true });
+            }}
+          />
+        </SettingsPage>
       </main>
     </TopBarLayout>
   );

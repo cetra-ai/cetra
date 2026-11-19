@@ -45,7 +45,7 @@ const PAGES: { url: string; name: string; ready: () => Promise<HTMLElement> }[] 
     ready: () => screen.findByRole("region", { name: "Conversation" }),
   },
   {
-    url: "/acme/support-bot/users/user-42",
+    url: "/acme/support-bot/users/user-42?tab=sessions",
     name: "user",
     ready: () => screen.findByRole("grid", { name: "Sessions" }),
   },
@@ -88,6 +88,11 @@ it("opens a trace, switches mode, and reaches the palette, filter, and time pick
   const tree = await screen.findByRole("grid", { name: "Trace" });
   tree.focus();
   await user.keyboard("j");
+  await user.keyboard("t");
+  expect(await screen.findByRole("radio", { name: "Timeline" })).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
   await user.keyboard("t");
   expect(await screen.findByRole("region", { name: "Transcript" })).toBeInTheDocument();
   const attributes = screen.getByRole("tab", { name: "Attributes" });

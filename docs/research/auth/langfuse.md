@@ -74,7 +74,7 @@ Default is **open** sign-up: anyone who reaches the instance can register.
 - No setup page: the first person to sign up creates an org. With open sign-up an exposed fresh instance can be claimed by anyone.
 - Headless: `LANGFUSE_INIT_ORG_ID`, `_ORG_NAME`, `_PROJECT_ID`, `_PROJECT_NAME`, `_PROJECT_RETENTION`, `_PROJECT_PUBLIC_KEY`, `_PROJECT_SECRET_KEY`, `_USER_EMAIL`, `_USER_NAME`, `_USER_PASSWORD`. Created on startup "if they don't already exist"; behaviour when values change later is undocumented.
 
-## Takeaways for llmobs
+## Takeaways for cetra
 
 - Copy: immutable scope set per key; ingestion-only key; role ≤ own when assigning; org role `none` + project grants; headless init with pre-chosen keys.
 - Do better: DB-backed sessions (revocable), state+nonce+PKCE always on, linking gated on `email_verified` and per-provider trust, password reset without SMTP (CLI), AAD on encrypted columns, secure default sign-up.

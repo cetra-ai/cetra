@@ -1,4 +1,4 @@
-//! `llmobs serve`: open storage, open `meta.db`, bind, and shut down (D137).
+//! `cetra serve`: open storage, open `meta.db`, bind, and shut down (D137).
 //!
 //! Startup creates `data_dir`, checks `meta.db` is not newer (`meta::preflight`), then
 //! `Storage::open` (which takes `LOCK`), then `meta.db`. A second process fails on the lock
@@ -19,9 +19,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use llmobs_otel::{PriceError, PriceTable, builtin_price_rows};
-use llmobs_storage::Storage;
-use llmobs_storage::error::OpenError;
+use cetra_otel::{PriceError, PriceTable, builtin_price_rows};
+use cetra_storage::Storage;
+use cetra_storage::error::OpenError;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -67,7 +67,9 @@ fn grpc_router(state: AppState, timeout: Duration) -> tonic::transport::server::
         .timeout(timeout)
         .max_concurrent_streams(Some(GRPC_MAX_STREAMS))
         .concurrency_limit_per_connection(GRPC_CONCURRENCY_PER_CONNECTION)
-        .add_service(grpc::service(state))
+        .add_service(grpc::service(state.clone()))
+        .add_service(grpc::logs_service(state.clone()))
+        .add_service(grpc::metrics_service(state))
 }
 
 /// The Prometheus listener's router: `GET /metrics` and nothing else (N M3, D-N-28). Any other
@@ -120,10 +122,10 @@ const NOTICES_EVERY: Duration = Duration::from_secs(60);
 /// How often expired web sessions are deleted.
 const PURGE_EVERY: Duration = Duration::from_secs(60 * 60);
 
-/// Why `llmobs serve` stopped before it was listening, or the accept loop failed.
+/// Why `cetra serve` stopped before it was listening, or the accept loop failed.
 #[derive(Debug, thiserror::Error)]
 pub enum ServeError {
-    /// The config file or a `LLMOBS_*` value was rejected.
+    /// The config file or a `CETRA_*` value was rejected.
     #[error(transparent)]
     Config(#[from] ConfigError),
     /// `Storage::open` failed. A held `LOCK` says the data directory is in use.
@@ -302,6 +304,29 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
             return Err(error.into());
         }
     };
+    if let Some(demo_org) = config.demo.org {
+        let row = match crate::meta::orgs::org_by_id(meta.reader(), demo_org).await {
+            Ok(row) => row,
+            Err(error) => {
+                release_storage(storage).await;
+                meta.close().await;
+                return Err(ServeError::Meta(error));
+            }
+        };
+        let reason = match row {
+            None => Some("no org has this id"),
+            Some(row) if row.state != "active" => Some("the org is not active"),
+            Some(_) => None,
+        };
+        if let Some(reason) = reason {
+            release_storage(storage).await;
+            meta.close().await;
+            return Err(ServeError::Config(ConfigError::Invalid {
+                key: "demo.org",
+                reason,
+            }));
+        }
+    }
     let secrets = match open_secrets(&config, &meta).await {
         Ok(secrets) => secrets,
         Err(error) => {
@@ -310,7 +335,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
             return Err(error.into());
         }
     };
-    let eval_runner = match llmobs_eval::EvalRunner::new(llmobs_eval::EgressPolicy {
+    let eval_runner = match cetra_eval::EvalRunner::new(cetra_eval::EgressPolicy {
         allow_private_network: config.security.allow_private_network_egress,
         restore_mode: config.restore_mode,
     }) {
@@ -408,7 +433,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         }
     };
     let org_sso = match crate::ee::org_sso::OrgSso::new(
-        llmobs_eval::EgressPolicy {
+        cetra_eval::EgressPolicy {
             allow_private_network: config.security.allow_private_network_egress,
             restore_mode: config.restore_mode,
         },
@@ -439,13 +464,14 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
     }
     let storage = Arc::new(storage);
     let eval = crate::eval::EvalQueue::new(config.eval.workers);
+    let limits = Limits::new(&config.demo);
     let state = AppState::new(AppInner {
         config,
         meta,
         storage,
         ready: crate::http::health::ReadyCache::default(),
         clock: Clock::System,
-        limits: Limits::new(),
+        limits,
         key_cache: crate::auth::principal::ApiKeyCache::new(),
         pat_cache: crate::auth::principal::PatCache::new(),
         last_used: crate::auth::last_used::LastUsed::new(),
@@ -456,8 +482,9 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         providers,
         oauth_key,
         ingest,
+        last_ingest: crate::ingest::last_ingest::LastIngest::default(),
         live: crate::live::LiveBus::new(crate::live::StreamTiming::DEFAULT),
-        metrics_cache: crate::routes::metrics::MetricsCache::default(),
+        widget_cache: crate::routes::dashboards::WidgetCache::default(),
         usage: crate::usage::Usage::default(),
         alert_email_count: crate::alerts::quota::DailyEmailCount::default(),
         deletions: crate::deletion::Deletions::new(),
@@ -1041,7 +1068,7 @@ mod tests {
     use tokio::net::TcpStream;
 
     use bytesize::ByteSize;
-    use llmobs_otel::decode_json;
+    use cetra_otel::decode_json;
     use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
     use opentelemetry_proto::tonic::collector::trace::v1::trace_service_client::TraceServiceClient;
     use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue, any_value};
@@ -1051,8 +1078,74 @@ mod tests {
     use crate::config::Secret;
     use crate::crypto::{decode_key, encode_key, random_key, write_key_file};
     use crate::meta::instance_settings::put_setting;
+    use crate::meta::orgs::{insert_org, mark_org_deleting};
     use crate::test_support::{OTLP_KEY, config, with_init};
-    use llmobs_core::ids::OrgId;
+    use cetra_core::ids::OrgId;
+
+    /// Writes one org into `meta.db` under `dir` before `bind` opens it. `deleting` takes it out of `active`.
+    async fn org_in_meta(dir: &Path, deleting: bool) -> OrgId {
+        let meta = MetaDb::open(dir).await.unwrap();
+        let id = OrgId::new_v7();
+        meta.write(move |conn| {
+            Box::pin(async move {
+                insert_org(conn, id, "Cetra demo", "cetra-demo", 1).await?;
+                if deleting {
+                    mark_org_deleting(conn, id, 2).await?;
+                }
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+        meta.close().await;
+        id
+    }
+
+    #[tokio::test]
+    async fn a_demo_org_that_names_no_org_fails_startup() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = config(dir.path());
+        config.demo.org = Some(OrgId::new_v7());
+        let error = bind(config, None).await.unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ServeError::Config(ConfigError::Invalid {
+                    key: "demo.org",
+                    reason: "no org has this id",
+                })
+            ),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_demo_org_that_is_not_active_fails_startup() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = org_in_meta(dir.path(), true).await;
+        let mut config = config(dir.path());
+        config.demo.org = Some(id);
+        let error = bind(config, None).await.unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ServeError::Config(ConfigError::Invalid {
+                    key: "demo.org",
+                    reason: "the org is not active",
+                })
+            ),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_active_demo_org_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = org_in_meta(dir.path(), false).await;
+        let mut config = config(dir.path());
+        config.demo.org = Some(id);
+        bind(config, None).await.unwrap().shutdown().await.unwrap();
+    }
 
     #[test]
     fn restore_mode_uses_no_dns() {
@@ -1169,7 +1262,7 @@ mod tests {
         let mut config = config(dir.path());
         config.init = serde_json::from_value(serde_json::json!({
             "admin_email": "ada@example.com",
-            "admin_password": "llmobs-ok1",
+            "admin_password": "cetra-ok-1",
             "org": "Acme",
             "project": "Support bot",
             "secret_key": "not-a-secret-key",
@@ -1178,7 +1271,7 @@ mod tests {
         let error = bind(config, None).await.unwrap_err();
         let text = error.to_string();
         assert!(matches!(error, ServeError::Init { .. }), "{text}");
-        assert!(text.contains("LLMOBS_INIT_SECRET_KEY"), "{text}");
+        assert!(text.contains("CETRA_INIT_SECRET_KEY"), "{text}");
         assert!(!text.contains("not-a-secret-key"), "{text}");
     }
 
@@ -1373,7 +1466,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_flushes_usage() {
         use crate::meta::MetaDb;
-        use llmobs_core::ids::{OrgId, ProjectId};
+        use cetra_core::ids::{OrgId, ProjectId};
 
         let dir = tempfile::tempdir().unwrap();
         let running = bind(config(dir.path()), None).await.unwrap();
@@ -1414,7 +1507,7 @@ mod tests {
         use crate::meta::MetaDb;
         use crate::meta::evaluators::{EvaluatorFields, insert_evaluator};
         use crate::meta::online_rules::{NewRule, RuleFields, insert_rule};
-        use llmobs_core::ids::{ProjectId, SpanId};
+        use cetra_core::ids::{ProjectId, SpanId};
 
         let dir = tempfile::tempdir().unwrap();
         let running = bind(with_init(config(dir.path())), None).await.unwrap();
@@ -1560,7 +1653,7 @@ mod tests {
                             kind: "secret",
                             scopes: vec![KeyScope::Read],
                             name: None,
-                            prefix: "sk-llmobs-abcdef".to_owned(),
+                            prefix: "sk-cetra-abcdef".to_owned(),
                             hash: "ab".repeat(32),
                             created_by: user.id,
                             expires_at: None,
@@ -1950,7 +2043,7 @@ mod tests {
             ),
             "{text}"
         );
-        assert!(text.contains("llmobs_build_info"), "{text}");
+        assert!(text.contains("cetra_build_info"), "{text}");
 
         let other = http_get(addr, "/", "close").await;
         assert!(
@@ -1960,7 +2053,7 @@ mod tests {
 
         let main = http_get(running.local_addr, "/metrics", "close").await;
         let main_text = String::from_utf8_lossy(&main);
-        assert!(!main_text.contains("llmobs_build_info"), "{main_text}");
+        assert!(!main_text.contains("cetra_build_info"), "{main_text}");
 
         running.shutdown().await.unwrap();
         assert!(TcpStream::connect(addr).await.is_err());
@@ -1969,7 +2062,7 @@ mod tests {
     #[tokio::test]
     async fn empty_otlp_address_in_toml_binds_one_listener() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("llmobs.toml");
+        let path = dir.path().join("cetra.toml");
         std::fs::write(
             &path,
             format!(

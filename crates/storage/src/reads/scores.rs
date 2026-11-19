@@ -7,12 +7,12 @@
 use std::time::Duration;
 
 use arrow::record_batch::RecordBatch;
+use cetra_core::enums::{ScoreSource, ScoreTargetKind};
+use cetra_core::schema::scores;
 use datafusion::common::ScalarValue;
 use datafusion::functions_window::expr_fn::row_number;
 use datafusion::logical_expr::{Expr, ExprFunctionExt, col, lit};
 use datafusion::prelude::DataFrame;
-use llmobs_core::enums::{ScoreSource, ScoreTargetKind};
-use llmobs_core::schema::scores;
 
 use super::cursor::{after, assemble, decode, order_by};
 use super::{MAX_PAGE, Page, SortOrder};
@@ -358,11 +358,11 @@ mod tests {
 
     use arrow::json::{ArrayWriter, WriterBuilder};
     use arrow::record_batch::RecordBatch;
+    use cetra_core::enums::{ScoreSource, ScoreTargetKind};
+    use cetra_core::ids::TraceId;
+    use cetra_core::score::{ScoreTarget, ScoreValue};
+    use cetra_core::time_serde::parse_rfc3339;
     use datafusion::execution::runtime_env::RuntimeEnv;
-    use llmobs_core::enums::{ScoreSource, ScoreTargetKind};
-    use llmobs_core::ids::TraceId;
-    use llmobs_core::score::{ScoreTarget, ScoreValue};
-    use llmobs_core::time_serde::parse_rfc3339;
     use serde_json::{Value, json};
 
     use super::{

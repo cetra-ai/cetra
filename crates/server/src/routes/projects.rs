@@ -5,7 +5,7 @@ use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
-use llmobs_core::ids::OrgId;
+use cetra_core::ids::OrgId;
 
 use crate::api::account::{CreateProjectRequest, OrgRole, Project, UpdateProjectRequest};
 use crate::api::common::{FieldError, Page, PageParams};
@@ -20,6 +20,7 @@ use crate::meta::orgs::{self, SlugError};
 use crate::meta::projects::{
     self, COMPLETION_TIMEOUT_MAX_S, COMPLETION_TIMEOUT_MIN_S, ProjectPatch, ProjectRow,
 };
+use crate::meta::usage::genai_log_events;
 
 use super::orgs::page_named;
 
@@ -163,8 +164,15 @@ async fn create_project(
         .into_response())
 }
 
-async fn get_project(Extension(access): Extension<ProjectAccess>) -> error::Json<Project> {
-    error::Json(project_json(&access.project, access.role))
+async fn get_project(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+) -> Result<error::Json<Project>, ApiError> {
+    let mut project = project_json(&access.project, access.role);
+    project.genai_log_events =
+        Some(genai_log_events(state.meta.reader(), access.project.id).await?);
+    project.last_ingest_at = state.last_ingest.get(access.project.id);
+    Ok(error::Json(project))
 }
 
 async fn update_project(
@@ -229,7 +237,9 @@ async fn update_project(
     let Some(project) = projects::project_by_id(state.meta.reader(), id).await? else {
         return Err(ApiError::NotFound);
     };
-    Ok(error::Json(project_json(&project, role)))
+    let mut json = project_json(&project, role);
+    json.genai_log_events = Some(genai_log_events(state.meta.reader(), id).await?);
+    Ok(error::Json(json))
 }
 
 fn project_json(project: &ProjectRow, role: Option<Role>) -> Project {
@@ -240,6 +250,8 @@ fn project_json(project: &ProjectRow, role: Option<Role>) -> Project {
         name: project.name.clone(),
         retention_days: project.retention_days,
         trace_completion_timeout_s: project.completion_timeout_s(),
+        genai_log_events: None,
+        last_ingest_at: None,
         role: role.map(api_role),
         created_at: project.created_at,
     }
@@ -774,6 +786,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_project_reports_the_genai_log_events_it_dropped() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let created = support_bot(&app, &ada).await;
+        assert_eq!(created.genai_log_events, None, "not in a create answer");
+        let path = format!("/api/v1/projects/{}", created.id);
+        let read = |method| {
+            app.request(method, &path)
+                .header(header::COOKIE.as_str(), &ada)
+        };
+        let fetched: Project = read(Method::GET).send().await.json();
+        assert_eq!(fetched.genai_log_events, Some(0));
+
+        let org = created.org_id;
+        app.state
+            .usage
+            .add_log_events(org, created.id, app.state.clock.now_ns(), 5);
+        app.state.usage.flush(&app.state.meta).await.unwrap();
+        let fetched: Project = read(Method::GET).send().await.json();
+        assert_eq!(fetched.genai_log_events, Some(5));
+        let patched: Project = read(Method::PATCH)
+            .json(&serde_json::json!({ "name": "Renamed" }))
+            .send()
+            .await
+            .json();
+        assert_eq!(patched.genai_log_events, Some(5));
+    }
+
+    #[tokio::test]
     async fn patch_sets_the_timeout() {
         let app = TestApp::new().await;
         let (_, ada) = signed_in(&app, "ada@example.com").await;
@@ -905,9 +946,9 @@ mod tests {
     /// Commits one span of `trace` to `project`, starting at `start_time`.
     async fn commit_at(app: &TestApp, project: &ProjectRow, trace: &str, start_time: i64) {
         let mut row = dataset_span(0);
-        row.trace_id = trace.parse::<llmobs_core::ids::TraceId>().unwrap();
+        row.trace_id = trace.parse::<cetra_core::ids::TraceId>().unwrap();
         row.span_id = "b4000000000000aa"
-            .parse::<llmobs_core::ids::SpanId>()
+            .parse::<cetra_core::ids::SpanId>()
             .unwrap();
         row.parent_span_id = None;
         row.start_time = start_time;
@@ -1106,5 +1147,57 @@ mod tests {
         let changed = patch_with(Some(&[]), Some(7), body).await;
         assert_eq!(changed.status, 403);
         assert_eq!(changed.problem().code, ProblemCode::PlanRequired);
+    }
+
+    #[tokio::test]
+    async fn get_project_has_no_last_ingest_at_before_spans_arrive() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let created = support_bot(&app, &ada).await;
+        let path = format!("/api/v1/projects/{}", created.id);
+        let response = app
+            .request(Method::GET, &path)
+            .header(header::COOKIE.as_str(), &ada)
+            .send()
+            .await;
+        let body: serde_json::Value = response.json();
+        assert!(body.get("last_ingest_at").is_none());
+    }
+
+    #[tokio::test]
+    async fn get_project_shows_last_ingest_at_after_a_batch() {
+        const T: i64 = 1_767_225_600_123_456_789; // 2026-01-01T00:00:00.123456789Z
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let created = support_bot(&app, &ada).await;
+        app.state.last_ingest.record(created.id, T);
+        let path = format!("/api/v1/projects/{}", created.id);
+        let response = app
+            .request(Method::GET, &path)
+            .header(header::COOKIE.as_str(), &ada)
+            .send()
+            .await;
+        let body: serde_json::Value = response.json();
+        assert_eq!(body["last_ingest_at"], "2026-01-01T00:00:00.123456789Z");
+        let fetched: Project = response.json();
+        assert_eq!(fetched.last_ingest_at, Some(T));
+    }
+
+    #[tokio::test]
+    async fn lists_never_show_last_ingest_at() {
+        const T: i64 = 1_767_225_600_123_456_789;
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let created = support_bot(&app, &ada).await;
+        app.state.last_ingest.record(created.id, T);
+        let response = app
+            .request(Method::GET, "/api/v1/orgs/acme/projects")
+            .header(header::COOKIE.as_str(), &ada)
+            .send()
+            .await;
+        assert_eq!(response.status, 200);
+        let body: serde_json::Value = response.json();
+        assert_eq!(body["data"].as_array().map(Vec::len), Some(1));
+        assert!(body["data"][0].get("last_ingest_at").is_none());
     }
 }

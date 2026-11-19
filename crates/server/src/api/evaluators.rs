@@ -6,16 +6,17 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use llmobs_core::enums::ScoreDataType;
-use llmobs_core::ids::TraceId;
-use llmobs_core::score::ScoreValue;
+use cetra_core::enums::ScoreDataType;
+use cetra_core::ids::TraceId;
+use cetra_core::score::ScoreValue;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use super::common::TimeParam;
 use super::connections::TestErrorClass;
+use super::metrics::MetricPoint;
 
 /// What an evaluator does. Stored as `evaluators.kind`; `kind` cannot change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -50,7 +51,7 @@ impl EvaluatorKind {
     }
 }
 
-/// The score an evaluator writes. The JSON of `llmobs_eval::OutputScore`.
+/// The score an evaluator writes. The JSON of `cetra_eval::OutputScore`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OutputScoreBody {
@@ -85,13 +86,158 @@ pub struct Evaluator {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_by: Option<Uuid>,
     /// Creation time. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub created_at: i64,
     /// Last change time. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub updated_at: i64,
+}
+
+/// One stored version of an evaluator. Holds what `Evaluator` shows, never a sealed value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct EvaluatorVersion {
+    /// Version number, starting at 1.
+    pub version: i64,
+    /// Display name when this version was made.
+    pub name: String,
+    /// What the evaluator does.
+    pub kind: EvaluatorKind,
+    /// The kind-specific configuration of this version, as `Evaluator.config` shows it.
+    #[schema(value_type = Object)]
+    pub config: Value,
+    /// The score this version writes.
+    pub output_score: OutputScoreBody,
+    /// User who made this version. Omitted when that user is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<Uuid>,
+    /// When this version was made. JSON is RFC 3339.
+    #[serde(with = "cetra_core::time_serde")]
+    #[schema(value_type = String, format = DateTime)]
+    pub created_at: i64,
+}
+
+/// Query of `GET /api/v1/projects/{project}/evaluators/stats`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+pub struct EvaluatorStatsParams {
+    /// Comma-separated evaluator ids, 1 to 50. Default: every evaluator of the project.
+    #[serde(default)]
+    pub evaluator_ids: Option<String>,
+}
+
+/// `GET /api/v1/projects/{project}/evaluators/stats` response (D-I-48).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct EvaluatorStatsResponse {
+    /// The seven UTC days the figures cover.
+    pub window: StatsWindow,
+    /// One entry per evaluator, ordered by name then id. Evaluators without jobs or scores are
+    /// included with zeros.
+    pub data: Vec<EvaluatorStats>,
+}
+
+/// The window of the stats: the start of the UTC day six days ago, up to the request time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct StatsWindow {
+    /// Window start. JSON is RFC 3339.
+    #[serde(with = "cetra_core::time_serde")]
+    #[schema(value_type = String, format = DateTime)]
+    pub from: i64,
+    /// Window end, exclusive. JSON is RFC 3339.
+    #[serde(with = "cetra_core::time_serde")]
+    #[schema(value_type = String, format = DateTime)]
+    pub to: i64,
+}
+
+/// The stats of one evaluator (D-I-48).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct EvaluatorStats {
+    /// The evaluator.
+    pub evaluator_id: Uuid,
+    /// Its finished jobs in the window.
+    pub jobs: EvaluatorJobStats,
+    /// Its scores in the window.
+    pub scores: EvaluatorScoreStats,
+    /// Experiments with a score named like the evaluator's output score in the last 30 days.
+    pub experiments_with_score: ExperimentsWithScore,
+}
+
+/// Finished jobs of one evaluator in the window. A job counts when it finished in the window.
+/// Its errors are `failed / (done + failed)`, which clients compute.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct EvaluatorJobStats {
+    /// Done jobs.
+    pub done: u64,
+    /// Failed jobs.
+    pub failed: u64,
+    /// Skipped jobs, including ones whose target trace was deleted.
+    pub skipped: u64,
+    /// Judge cost of the jobs in the window, USD. 0 when no job has a cost.
+    pub cost_usd_total: f64,
+    /// Average cost per job that has a cost, USD. Omitted when no job has a cost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd_avg: Option<f64>,
+    /// Median latency of the done jobs, milliseconds (nearest rank). Omitted when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_p50_ms: Option<u64>,
+    /// 95th percentile latency of the done jobs, milliseconds (nearest rank). Omitted when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_p95_ms: Option<u64>,
+    /// Finished jobs per day, seven points, oldest first.
+    pub runs_daily: Vec<MetricPoint>,
+}
+
+/// The scores of one evaluator in the window. Read with the evaluator's current output type.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct EvaluatorScoreStats {
+    /// The output type of the evaluator.
+    pub data_type: ScoreDataType,
+    /// Live scores in the window, of any type.
+    pub count: u64,
+    /// Mean of the numeric values. Numeric outputs only. Omitted when there is no numeric value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub average: Option<f64>,
+    /// Share of `true` values, 0 to 1. Boolean outputs only. Omitted when there is no value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pass_rate: Option<f64>,
+    /// The most frequent label. Categorical outputs only. Omitted when there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_category: Option<CategoryCount>,
+    /// Daily average (numeric) or pass rate (boolean), seven points, oldest first. A day without a
+    /// value has no `value`.
+    pub daily: Vec<MetricPoint>,
+}
+
+/// A categorical label and how many scores carry it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct CategoryCount {
+    /// The label.
+    pub label: String,
+    /// Scores with the label in the window.
+    pub count: u64,
+}
+
+/// Experiments that have a score named like the evaluator's output score (D-I-48).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ExperimentsWithScore {
+    /// Experiments with such a score in the last 30 days, that still exist and are visible.
+    pub total: u64,
+    /// The five with the latest score, newest first.
+    pub recent: Vec<ExperimentWithScore>,
+}
+
+/// An experiment listed in `experiments_with_score`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ExperimentWithScore {
+    /// The experiment.
+    pub id: Uuid,
+    /// The experiment's name.
+    pub name: String,
+    /// When the experiment last got such a score. JSON is RFC 3339.
+    #[serde(with = "cetra_core::time_serde")]
+    #[schema(value_type = String, format = DateTime)]
+    pub last_scored_at: i64,
 }
 
 /// `POST /api/v1/projects/{project}/evaluators` body.
@@ -197,8 +343,8 @@ pub struct EvaluatorTemplateList {
     pub data: Vec<EvaluatorTemplate>,
 }
 
-impl From<&llmobs_eval::JudgeTemplate> for EvaluatorTemplate {
-    fn from(template: &llmobs_eval::JudgeTemplate) -> Self {
+impl From<&cetra_eval::JudgeTemplate> for EvaluatorTemplate {
+    fn from(template: &cetra_eval::JudgeTemplate) -> Self {
         Self {
             id: template.id.to_owned(),
             name: template.name.to_owned(),
@@ -219,10 +365,10 @@ impl From<&llmobs_eval::JudgeTemplate> for EvaluatorTemplate {
     }
 }
 
-/// The built-in templates, in `llmobs_eval::builtin_templates` order.
+/// The built-in templates, in `cetra_eval::builtin_templates` order.
 pub fn builtin_template_list() -> EvaluatorTemplateList {
     EvaluatorTemplateList {
-        data: llmobs_eval::builtin_templates()
+        data: cetra_eval::builtin_templates()
             .iter()
             .map(EvaluatorTemplate::from)
             .collect(),
@@ -367,7 +513,7 @@ pub struct EvaluatorTestResult {
     pub latency_ms: u64,
     /// Whether the target trace was cut to fit the loading limits. Always false for literal variables.
     pub trace_truncated: bool,
-    /// The judge trace the run wrote (environment `llmobs-eval`). Omitted when no judge trace was written.
+    /// The judge trace the run wrote (environment `cetra-eval`). Omitted when no judge trace was written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub judge_trace_id: Option<TraceId>,
 }
@@ -378,7 +524,7 @@ mod tests {
         CreateEvaluatorRequest, EvaluatorKind, EvaluatorTestRequest, OutputScoreBody,
         builtin_template_list,
     };
-    use llmobs_core::enums::ScoreDataType;
+    use cetra_core::enums::ScoreDataType;
     use serde_json::json;
 
     #[test]

@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath, URL } from "node:url";
 import tailwindcss from "@tailwindcss/vite";
 import tanstackRouter from "@tanstack/router-plugin/vite";
@@ -9,9 +10,21 @@ import { defineConfig } from "vitest/config";
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const workerPath = fileURLToPath(new URL("./msw/mockServiceWorker.js", import.meta.url));
 
+/** The `version` of the `[workspace.package]` table in the root Cargo.toml. */
+function workspaceVersion(manifest: string): string {
+  const section = /^\[workspace\.package\][ \t]*\r?\n([\s\S]*?)(?=^\[|(?![\s\S]))/m.exec(manifest);
+  const version = section ? /^version\s*=\s*"([^"]+)"/m.exec(section[1] ?? "") : null;
+  if (!version?.[1]) {
+    throw new Error("no version in [workspace.package] of the root Cargo.toml");
+  }
+  return version[1];
+}
+
+const cetraVersion = workspaceVersion(readFileSync(join(repoRoot, "Cargo.toml"), "utf8"));
+
 function mockServiceWorker(): Plugin {
   return {
-    name: "llmobs-mock-service-worker",
+    name: "cetra-mock-service-worker",
     apply: "serve",
     configureServer(server) {
       server.middlewares.use((request, response, next) => {
@@ -34,6 +47,9 @@ export default defineConfig(({ mode }) => ({
     react(),
     tailwindcss(),
   ],
+  define: {
+    __CETRA_VERSION__: JSON.stringify(cetraVersion),
+  },
   build: {
     // The UI's CSP (spec 12) has no `data:` source for fonts or scripts: every asset is a file.
     assetsInlineLimit: 0,

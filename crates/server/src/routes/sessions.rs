@@ -3,7 +3,7 @@
 use axum::extract::{Extension, State};
 use axum::http::Method;
 use axum::routing::get;
-use llmobs_storage as storage;
+use cetra_storage as storage;
 use serde::Deserialize;
 
 use crate::api::common::{ExclusionParams, Page};
@@ -78,6 +78,7 @@ async fn list_sessions(
     )
     .await?;
     let mut data = convert::session_summaries(&page.batches)?;
+    attach_session_extras(&ctx, &mut data, scope, deadline).await?;
     attach_session_scores(&ctx, &mut data, deadline).await?;
     Ok(error::Json(Page {
         data,
@@ -105,6 +106,13 @@ async fn get_session(
     let mut session = convert::session_summaries(std::slice::from_ref(&data.session))?
         .pop()
         .ok_or(ApiError::NotFound)?;
+    // No window: the detail covers the whole session, with the same exclusions as `session_detail`.
+    let scope = storage::ListScope {
+        window: None,
+        include_eval: params.include_eval,
+        include_experiments: params.include_experiments,
+    };
+    attach_session_extras(&ctx, std::slice::from_mut(&mut session), scope, deadline).await?;
     attach_session_scores(&ctx, std::slice::from_mut(&mut session), deadline).await?;
     let mut traces = convert::trace_summaries(&data.turns)?;
     attach_trace_scores(&ctx, &mut traces, deadline).await?;
@@ -127,6 +135,44 @@ async fn get_session(
     }))
 }
 
+/// Fills the extras of each session (spec 09 § Observability data): its error trace count and
+/// previews, from the traces inside `scope`. A session without traces there keeps 0 and no previews.
+///
+/// Callers pass at most one page of sessions.
+async fn attach_session_extras(
+    ctx: &storage::QueryContext,
+    sessions: &mut [SessionSummary],
+    scope: storage::ListScope,
+    deadline: Deadline,
+) -> Result<(), ApiError> {
+    if sessions.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<String> = sessions
+        .iter()
+        .map(|session| session.session_id.clone())
+        .collect();
+    let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let batches = storage::session_extras(
+        ctx,
+        storage::SessionExtrasRequest {
+            scope,
+            session_ids: &refs,
+            timeout: deadline.remaining()?,
+        },
+    )
+    .await?;
+    let mut extras = convert::session_extras(&batches)?;
+    for session in sessions.iter_mut() {
+        if let Some(extra) = extras.remove(&session.session_id) {
+            session.error_trace_count = extra.error_trace_count;
+            session.first_input_preview = extra.first_input_preview;
+            session.last_output_preview = extra.last_output_preview;
+        }
+    }
+    Ok(())
+}
+
 fn session_sort(sort: SessionSort) -> storage::SessionSort {
     match sort {
         SessionSort::StartTime => storage::SessionSort::StartTime,
@@ -139,7 +185,7 @@ fn session_sort(sort: SessionSort) -> storage::SessionSort {
 #[cfg(test)]
 mod tests {
     use axum::http::{Method, StatusCode};
-    use llmobs_core::score::ScoreValue;
+    use cetra_core::score::ScoreValue;
     use serde_json::Value as Json;
 
     use super::*;
@@ -256,5 +302,49 @@ mod tests {
         let (status, body) = get_json(&app, &seeded, "/sessions/nope").await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
         assert_eq!(body["code"], "not_found");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_and_detail_carry_the_session_extras() {
+        let (app, seeded) = loaded().await;
+        // Expected values come from the committed detail fixture of sess-001, not from this server.
+        let fixture: Json = serde_json::from_str(include_str!(
+            "../../../../fixtures/api/responses/sessions/sess-001.json"
+        ))
+        .unwrap();
+        let turns = fixture["turns"].as_array().unwrap();
+        let errors = turns
+            .iter()
+            .filter(|turn| turn["trace"]["status"] == "error")
+            .count();
+        let first = turns[0]["trace"]["input_preview"].as_str().unwrap();
+        let last = turns[turns.len() - 1]["trace"]["output_preview"]
+            .as_str()
+            .unwrap();
+
+        let (status, body) = get_json(&app, &seeded, "/sessions").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let page: Page<SessionSummary> = serde_json::from_value(body).unwrap();
+        let listed = page
+            .data
+            .iter()
+            .find(|s| s.session_id == "sess-001")
+            .unwrap();
+        assert_eq!(listed.error_trace_count, i64::try_from(errors).unwrap());
+        assert_eq!(listed.first_input_preview.as_deref(), Some(first));
+        assert_eq!(listed.last_output_preview.as_deref(), Some(last));
+
+        let (status, body) = get_json(&app, &seeded, "/sessions/sess-001").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let detail: SessionDetail = serde_json::from_value(body).unwrap();
+        assert_eq!(detail.session.error_trace_count, listed.error_trace_count);
+        assert_eq!(
+            detail.session.first_input_preview,
+            listed.first_input_preview
+        );
+        assert_eq!(
+            detail.session.last_output_preview,
+            listed.last_output_preview
+        );
     }
 }
