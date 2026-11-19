@@ -10,5 +10,5 @@ minimumReleaseAge: 10080
 allowBuilds:
   esbuild: true
 # wrangler's runtime binary: its install script only fetches a binary that
-# `wrangler pages deploy` does not use; declined so the install passes (D-W-3).
+# `wrangler deploy` of a static-assets Worker does not use; declined so the install passes (D-W-3).
   workerd: false

@@ -28,19 +28,23 @@ jobs:
     timeout-minutes: 15
     environment:
       name: ${{ github.event_name == 'push' && 'docs-production' || 'docs-preview' }}
-      url: ${{ github.event_name == 'push' && 'https://cetra.sh/docs/' || format('https://pr-{0}.cetra-site.pages.dev/docs/', github.event.pull_request.number) }}
+      url: ${{ steps.deploy.outputs.url }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/js # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
       - name: Deploy
+        id: deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           BRANCH: ${{ github.event_name == 'push' && 'main' || format('pr-{0}', github.event.pull_request.number) }}
-        run: just docs-deploy "$BRANCH"
+        # The recipe's last line is `url=<deployed URL>`; the docs live under docs/.
+        run: |
+          just docs-deploy "$BRANCH" | tee deploy.log
+          echo "url=$(tail -n1 deploy.log | sed 's/^url=//')docs/" >> "$GITHUB_OUTPUT"
       - name: Summary
         env:
-          URL: ${{ github.event_name == 'push' && 'https://cetra.sh/docs/' || format('https://pr-{0}.cetra-site.pages.dev/docs/', github.event.pull_request.number) }}
+          URL: ${{ steps.deploy.outputs.url }}
         run: echo "Deployed to $URL" >> "$GITHUB_STEP_SUMMARY"

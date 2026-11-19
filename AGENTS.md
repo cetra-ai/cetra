@@ -181,7 +181,7 @@ Run everything through `just`:
 | `just web-dev` | web dev server with the API mocked from `fixtures/api` |
 | `just web-dev-server` | web dev server proxied at the real API |
 | `just docs-dev` | docs site dev server on http://localhost:4321 |
-| `just docs-deploy <branch>` | build the site and upload it to Cloudflare Pages (D-W-3); CI does it |
+| `just docs-deploy <branch>` | build the site and deploy it to Cloudflare Workers (D-W-3): production for `main`, a Preview for `pr-<number>`; CI does it |
 | `just docs-screenshots [names]` | rewrite the docs' UI screenshots from the web UI on its mocks (D-W-12); needs Chromium |
 | `just docs-links` | check the docs site's external links with lychee (D-W-13); the weekly `links` job runs it |
 | `just run <args>` | run the `cetra` binary |

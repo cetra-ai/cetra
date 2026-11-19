@@ -386,12 +386,26 @@ web-dev-server: js-install
 docs-dev: js-install
     pnpm --dir website run dev
 
-# Build the site and upload it to Cloudflare Pages (D-W-3). `branch` is `main`
-# (production) or `pr-<number>` (a preview). Needs CLOUDFLARE_API_TOKEN and
-# CLOUDFLARE_ACCOUNT_ID in the environment.
+# Needs CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID (or a `wrangler login`); the
+# last line printed is `url=<deployed URL>`.
+# Build the site and deploy it to the `cetra-site` Worker: `main` is production, `pr-<number>` a Preview (D-W-3)
 docs-deploy branch: js-install
+    #!/usr/bin/env bash
+    set -euo pipefail
     pnpm --dir website run build
-    pnpm --dir website exec wrangler pages deploy dist --project-name cetra-site --branch {{branch}} --commit-dirty=true
+    case "{{branch}}" in
+      main) out="$(pnpm --dir website exec wrangler deploy)" ;;
+      pr-[0-9]*) out="$(pnpm --dir website exec wrangler preview --name "{{branch}}")" ;;
+      *) echo "branch must be main or pr-<number>, not {{branch}}" >&2; exit 1 ;;
+    esac
+    echo "$out"
+    if [ "{{branch}}" = main ]; then
+      url="$(grep -oE 'https://cetra-site\.[a-z0-9-]+\.workers\.dev' <<<"$out" | head -n1)"
+    else
+      url="$(grep -oE 'https://{{branch}}-cetra-site\.[a-z0-9-]+\.workers\.dev' <<<"$out" | head -n1)"
+    fi
+    test -n "$url" || { echo "no workers.dev URL in the wrangler output" >&2; exit 1; }
+    echo "url=$url/"
 
 # Check the docs site's external links (D-W-13); needs lychee 0.24.2 and builds the site first
 docs-links: js-install
