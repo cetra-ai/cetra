@@ -27,7 +27,7 @@ The bench had one real dataset: `swe`, from 2 shards of `nebius/SWE-agent-trajec
 |---|---|---|---|---|---|---|
 | openswe | **29** | 47 | 149 | 48 | 702 | 158 |
 | toucan | **196** | 246 | 295 | 247 | 770 | 233 |
-| wildchat | 594 | 592 | 655 | 596 | 1,429 | **584** |
+| wildchat | 592 | 592 | 655 | 596 | 1,429 | **584** |
 | swe (existing) | **25** | 36 | 65 | 36 | 560 | 31 |
 
 - **Agent data:**
@@ -53,10 +53,10 @@ The bench had one real dataset: `swe`, from 2 shards of `nebius/SWE-agent-trajec
 | metadata_filter | **0.70** | 3.72 | n/a | **2.16** | 10.23 | n/a | **3.10** | 16.71 | n/a |
 | trace_lookup_full | **5.66** | 11.19 | 35.61 | **5.39** | 12.19 | 22.70 | **4.66** | 12.24 | 28.01 |
 | trace_lookup_light | **0.89** | 3.73 | 3.74 | **0.96** | 4.81 | 5.30 | **0.99** | 5.53 | 6.16 |
-| substring_input | **11.65** | 266.86 | 172.29 | **39.89** | 168.63 | 98.73 | **67.21** | 312.04 | 204.27 |
-| scan_all_payload | **237.99** | 286.10 | 313.07 | 297.69 | 281.04 | **205.34** | 611.49 | 538.04 | **404.95** |
+| substring_input | **12.13** | 266.86 | 172.29 | **48.17** | 168.63 | 98.73 | **66.42** | 312.04 | 204.27 |
+| scan_all_payload | **234.07** | 286.10 | 313.07 | 274.41 | 281.04 | **205.34** | 544.11 | 538.04 | **404.95** |
 
-- The Strata columns are measured after the UTF-8 change below. `list_llm_1h` on wildchat comes from a 60-run rerun after the ASCII fast path. Parquet and Vortex come from the first run.
+- The Strata columns are measured after the UTF-8 changes below; `substring_input` and `scan_all_payload` after the one-pass check. Parquet and Vortex come from the first run.
 - "pq best" is the fastest of pq_default, pq_tuned and pq_cetra for each query.
 - Vortex cannot run `metadata_filter` (it can't push down `map['key']`).
 
@@ -84,7 +84,7 @@ Cold trace lookup (mean per trace over 20 ids):
   - the fastest search: 10–32× faster than Parquet and 2.4–12× faster than Vortex compact.
 - **Chat traffic was Strata's weak case.** The first run had `scan_all_payload` at 1.4× Parquet's time on wildchat, and `list_llm_1h` at 1.45×. The cause was UTF-8 checking, fixed below. What remains:
   - files are only as small as the others';
-  - the full scan takes 1.14× Parquet's time and 1.5× Vortex compact's;
+  - the full scan takes about Parquet's time, and 1.34× Vortex compact's;
   - Vortex compact still wins `list_llm_1h` and `model_rollup_day` on toucan and wildchat. This matches `light`, where its narrow-column decode is also cheaper.
 
 ## UTF-8 checking
@@ -119,6 +119,33 @@ Other results:
 - `list_llm_1h` on wildchat went from 32.2 ms to 22.0 ms (60 runs each, old and new binaries alternating). On `light` (18.0 → 17.7 ms) and `payload` (18.7 → 19.1 ms) it did not change.
 - Every other Strata query on the six datasets stayed within run-to-run noise.
 - Wildchat's peak memory rose 15%, because its non-ASCII values are now copied instead of shared.
+
+### One pass
+
+The change above still read most bytes twice: an ASCII value was checked by `is_ascii`, then by arrow when its view was added, and a non-ASCII value was checked and then copied. Checking each byte once, and sharing every value, needs a constructor that skips arrow's check, and those are `unsafe`. Strata now allows `unsafe` on exactly two calls (`#![deny(unsafe_code)]` instead of `forbid`), each with a SAFETY note:
+- **Payload columns** ([build_string_views](strata/src/payload/read.rs)):
+  - the array is built as `BinaryView`, whose builder checks each view's block and bounds but not UTF-8;
+  - the chunk data of each frame is checked once per read with `simdutf8`, as a whole (`FrameBody::span_is_utf8`);
+  - a value in valid chunk data is valid if it starts and ends on a character boundary, a two-byte test;
+  - a value in a frame that fails, and a value rebuilt from chunks in several places, is checked on its own;
+  - then `to_string_view_unchecked` relabels the array as `Utf8View`. Every value that lies in one frame is now shared, ASCII or not.
+- **Narrow `Varbin` chunks** ([decode_varbin](strata/src/narrow/decode.rs)): one `simdutf8` pass over the chunk, a boundary test at each offset, `BinaryArray::try_new` for the offsets and nulls, then `StringArray::new_unchecked`.
+
+**The chunker had to change.** A first count on wildchat found a third of the frame bytes failing the whole-frame check: the gear chunker cut inside characters, so a chunk could start with a continuation byte after a chunk of another value. A gear cut now moves back to the first byte of its character (at most 3 bytes). It stays content-defined, and the chunks of UTF-8 text are UTF-8 (a property test checks it). The files keep their size (wildchat 595 → 592 MiB, the others unchanged). A first version also checked a frame once per batch instead of once per read: toucan's scan checked 5.8 GB of frame data for 0.86 GB of values, and got 13% slower.
+
+**Results** (Strata, min of 30 runs, a2148c6 on the old files → this change on files rewritten with the new chunker):
+
+| Dataset | scan_all_payload | Peak RSS (5-run A/B) |
+|---|---|---|
+| wildchat | 624 → 544 ms (−13%; Parquet 538) | 3.1–3.3 → 2.8 GB |
+| toucan | 299 → 274 ms (−8%) | unchanged |
+| payload | 350 → 333 ms (−5%) | unchanged |
+| openswe | 240 → 234 ms (−3%) | unchanged |
+| swe, light | unchanged | unchanged |
+
+- A wildchat profile no longer shows `simdutf8` among its top functions (under 2% of samples): zstd decoding and the allocator lead.
+- The other queries stayed within noise on the six datasets, `list_llm_1h` included (60-run A/B).
+- One exception is layout luck: the absent needle of toucan's `substring_input` passes more frame filters in the new layout (849 requests against 668), +18%. Over the 20 needles taken from the data, the new files cost +2.4% time and +3.7% bytes.
 
 ## Reproduce
 

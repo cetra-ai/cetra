@@ -562,13 +562,14 @@ Two gaps remain:
 |---|---|---|---|---|
 | openswe | Coding agents (Claude Code and OpenHands harnesses), 2.4 GB of payloads | **29** | 47 | 158 |
 | toucan | Tool-calling agents on 495 MCP servers | **196** | 246 | 233 |
-| wildchat | Real users chatting with ChatGPT | 594 | 592 | **584** |
+| wildchat | Real users chatting with ChatGPT | 592 | 592 | **584** |
 
 - **On agent data** Strata has the smallest files, lookups about 2× faster than Parquet's, and search 10–32× faster.
 - **On chat data**, with many short conversations, Strata lost at first. A full payload scan took 1.4× Parquet's time, and `list_llm_1h` 1.45×.
   - Most of that was arrow's per-value UTF-8 check, which is slow on non-ASCII text.
   - Checking with `simdutf8` brought the scan to 1.14× Parquet's time and `list_llm_1h` to 0.92×.
-  - Agent-data scans also got 6–22% faster.
+  - Checking each byte once, with two `unsafe` constructors and a chunker that cuts between characters, brought the scan to Parquet's time (544 against 538 ms).
+  - Agent-data scans also got 6–22% faster, then 3–8% more.
   - Files stay the same size as the others'.
 
 ## What each format gets right and wrong

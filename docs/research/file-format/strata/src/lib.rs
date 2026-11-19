@@ -23,7 +23,10 @@
 //! - `merge` of sorted files (M6.1): every column is decoded, interleaved and re-encoded, and
 //!   the row-source map costs 16 bytes per row; there is no input-count limit.
 
-#![forbid(unsafe_code)]
+// Denied, not forbidden: two string decoders build arrow arrays without arrow's UTF-8 check
+// after checking it once with `simdutf8` (`narrow::decode::decode_varbin` and
+// `payload::read::build_string_views`). Each allows it on that one call, with its SAFETY note.
+#![deny(unsafe_code)]
 #![warn(missing_docs)]
 #![deny(
     clippy::unwrap_used,

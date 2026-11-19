@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
-use arrow::array::{ArrayRef, BinaryArray, StringArray, StringViewBuilder};
+use arrow::array::{ArrayRef, BinaryArray, BinaryViewBuilder, StringArray};
 use arrow::buffer::{Buffer, NullBuffer, OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{DataType, Field};
 
@@ -20,14 +20,46 @@ use crate::hot::DirectoryRecord;
 use crate::io::ScanKind;
 use crate::segment::{Kind, SegmentRef, Segments, decode_segment_with};
 
-/// The raw body of a frame, and the ranges of its chunks in it. The body is an Arrow buffer so
-/// that a `Utf8View` array can point into it instead of copying its values.
-pub(crate) type FrameBody = (Buffer, Vec<Range<usize>>);
+/// A decoded frame.
+pub(crate) struct FrameBody {
+    /// The raw body: an Arrow buffer, so that a `Utf8View` array can point into it instead of
+    /// copying its values.
+    raw: Buffer,
+    /// The ranges of the frame's chunks in `raw`, back to back.
+    ranges: Vec<Range<usize>>,
+    /// Whether the chunk data is valid UTF-8 as a whole, checked on first use.
+    utf8: OnceLock<bool>,
+}
+
+impl FrameBody {
+    /// Where the chunk data starts in `raw`: after the chunk table.
+    fn data_start(&self) -> usize {
+        self.ranges.first().map_or(self.raw.len(), |r| r.start)
+    }
+
+    /// Whether the value at `range` of `raw` is valid UTF-8. The chunk data is checked with
+    /// `simdutf8` as a whole, once per read however many batches use the frame; a value in
+    /// valid data then only has to start and end on a character boundary. Otherwise the value
+    /// is checked on its own.
+    fn span_is_utf8(&self, range: &Range<usize>) -> bool {
+        let data_start = self.data_start();
+        let whole = *self.utf8.get_or_init(|| {
+            self.raw
+                .get(data_start..)
+                .is_some_and(|data| simdutf8::basic::from_utf8(data).is_ok())
+        });
+        span_is_utf8(&self.raw, data_start, range, whole)
+    }
+}
 
 /// Checks and decodes a fetched frame body into a [`FrameBody`].
 fn frame_body(entry: &FrameEntry, raw: Vec<u8>) -> Result<FrameBody> {
     let (raw, ranges) = decode_fetched_frame(entry, raw)?;
-    Ok((Buffer::from_vec(raw), ranges))
+    Ok(FrameBody {
+        raw: Buffer::from_vec(raw),
+        ranges,
+        utf8: OnceLock::new(),
+    })
 }
 
 /// Largest total of value bytes in one column: Arrow's string and binary offsets are `i32`.
@@ -396,15 +428,14 @@ impl<'a> ChunkReader<'a> {
                 (entry.first_chunk, body)
             }
         };
-        let (raw, ranges) = body;
-        let range = ranges.get((id - first) as usize).ok_or_else(corrupt)?;
-        raw.as_slice().get(range.clone()).ok_or_else(corrupt)
+        let range = body.ranges.get((id - first) as usize).ok_or_else(corrupt)?;
+        body.raw.as_slice().get(range.clone()).ok_or_else(corrupt)
     }
 
     /// The frame body and byte range of a value made of `ids`, when they are consecutive chunks
     /// of one frame: a frame's chunks are stored back to back, so their bytes are contiguous.
     /// `None` for an empty value or one whose chunks are elsewhere.
-    fn span(&mut self, ids: &[u32]) -> Result<Option<(&'a Buffer, Range<usize>)>> {
+    fn span(&mut self, ids: &[u32]) -> Result<Option<(&'a FrameBody, Range<usize>)>> {
         let (Some(&first_id), Some(&last_id)) = (ids.first(), ids.last()) else {
             return Ok(None);
         };
@@ -416,7 +447,7 @@ impl<'a> ChunkReader<'a> {
         }
         // Resolves the frame of the first id into `last`.
         self.chunk(first_id)?;
-        let Some((first, n, (raw, ranges))) = self.last else {
+        let Some((first, n, body)) = self.last else {
             return Ok(None);
         };
         if last_id - first >= n {
@@ -426,18 +457,20 @@ impl<'a> ChunkReader<'a> {
             what: "payload chunk id",
             offset: self.at,
         };
-        let start = ranges
+        let start = body
+            .ranges
             .get((first_id - first) as usize)
             .ok_or_else(corrupt)?
             .start;
-        let end = ranges
+        let end = body
+            .ranges
             .get((last_id - first) as usize)
             .ok_or_else(corrupt)?
             .end;
-        if start > end || end > raw.len() {
+        if start > end || end > body.raw.len() {
             return Err(corrupt());
         }
-        Ok(Some((raw, start..end)))
+        Ok(Some((body, start..end)))
     }
 }
 
@@ -506,19 +539,42 @@ enum ViewRow<'a> {
     Null,
     /// A view into the shared frame body with this block id: (block, start, length).
     Shared(u32, u32, u32),
-    /// Bytes consecutive in one frame body, copied.
-    Span(&'a [u8]),
     /// A value rebuilt from these chunk ids, copied.
     Chunks(&'a [u32]),
 }
 
+/// Whether `i` is a character boundary of UTF-8 text `bytes`: its end, or a byte that does not
+/// continue a character.
+fn starts_char(bytes: &[u8], i: usize) -> bool {
+    match bytes.get(i) {
+        Some(&b) => (b as i8) >= -0x40,
+        None => i == bytes.len(),
+    }
+}
+
+/// Whether `body[range]` is valid UTF-8. `whole_valid` says whether `body[data_start..]` was
+/// found valid: then the value only has to start and end on a character boundary inside it.
+fn span_is_utf8(body: &[u8], data_start: usize, range: &Range<usize>, whole_valid: bool) -> bool {
+    if whole_valid && data_start <= range.start && range.start <= range.end {
+        return starts_char(body, range.start) && starts_char(body, range.end);
+    }
+    body.get(range.clone())
+        .is_some_and(|bytes| simdutf8::basic::from_utf8(bytes).is_ok())
+}
+
 /// The values of `ids` (one entry per row, `None` for a null row) of a Utf8 column, as a
-/// `Utf8View` array. An ASCII value whose chunks are consecutive in one frame is a view into
-/// that frame's body, which the array then shares; arrow checks its UTF-8 when the view is
-/// added. Other values are rebuilt from their chunks, checked with `simdutf8`, and copied
-/// into blocks of at most `VIEW_BLOCK_BYTES`: arrow's own check of a view is
-/// `std::str::from_utf8`, fast on ASCII but several times slower than `simdutf8` on other
-/// text.
+/// `Utf8View` array, with each byte checked once with `simdutf8`.
+///
+/// A value whose chunks are consecutive in one frame is a view into that frame's body, which
+/// the array then shares; [`FrameBody::span_is_utf8`] checks it, by itself or as part of its
+/// frame's chunk data. The chunker cuts between characters, so the chunk data of a frame of
+/// UTF-8 values is UTF-8 as a whole. Other values are rebuilt from their chunks, checked, and
+/// copied into blocks of at most `VIEW_BLOCK_BYTES`.
+///
+/// The array is built as `BinaryView`, which checks the views' bounds but not UTF-8, and then
+/// relabelled as `Utf8View` without arrow's own check: arrow checks each view with
+/// `std::str::from_utf8`, a second pass that is several times slower than `simdutf8` on
+/// non-ASCII text.
 ///
 /// The shared bodies are all added before any value: adding a block closes the block being
 /// filled, so adding them as they come would leave most of each copy block empty.
@@ -536,7 +592,7 @@ fn build_string_views(
         last: None,
         at,
     };
-    let mut builder = StringViewBuilder::with_capacity(ids.len());
+    let mut builder = BinaryViewBuilder::with_capacity(ids.len());
     // The block id of each frame body the array shares, by the body's address.
     let mut shared: HashMap<*const u8, u32> = HashMap::new();
     let mut plan: Vec<ViewRow<'_>> = Vec::with_capacity(ids.len());
@@ -547,21 +603,14 @@ fn build_string_views(
             plan.push(ViewRow::Null);
             continue;
         };
-        let Some((body, range)) = reader.span(row)? else {
+        let Some((frame, range)) = reader.span(row)? else {
             for &id in row {
                 copied += reader.chunk(id)?.len();
             }
             plan.push(ViewRow::Chunks(row));
             continue;
         };
-        let bytes = body
-            .get(range.clone())
-            .ok_or_else(|| corrupt("payload span"))?;
-        if !bytes.is_ascii() {
-            copied += bytes.len();
-            plan.push(ViewRow::Span(bytes));
-            continue;
-        }
+        let body = &frame.raw;
         let id = match shared.get(&body.as_ptr()) {
             Some(&id) => id,
             None => {
@@ -573,6 +622,9 @@ fn build_string_views(
                 id
             }
         };
+        if !frame.span_is_utf8(&range) {
+            return Err(corrupt("payload utf8"));
+        }
         plan.push(ViewRow::Shared(
             id,
             to_u32(range.start)?,
@@ -585,32 +637,31 @@ fn build_string_views(
     // The bytes of a value made of chunks that are not consecutive in one frame.
     let mut scratch: Vec<u8> = Vec::new();
     for row in plan {
-        let bytes = match row {
-            ViewRow::Null => {
-                builder.append_null();
-                continue;
-            }
-            ViewRow::Shared(id, start, len) => {
-                builder
-                    .try_append_view(id, start, len)
-                    .map_err(|_| corrupt("payload utf8"))?;
-                continue;
-            }
-            ViewRow::Span(bytes) => bytes,
+        match row {
+            ViewRow::Null => builder.append_null(),
+            ViewRow::Shared(id, start, len) => builder
+                .try_append_view(id, start, len)
+                .map_err(|_| corrupt("payload span"))?,
             ViewRow::Chunks(row) => {
                 scratch.clear();
                 for &id in row {
                     scratch.extend_from_slice(reader.chunk(id)?);
                 }
-                scratch.as_slice()
+                simdutf8::basic::from_utf8(&scratch).map_err(|_| corrupt("payload utf8"))?;
+                builder
+                    .try_append_value(&scratch)
+                    .map_err(|_| corrupt("payload size"))?;
             }
-        };
-        let value = simdutf8::basic::from_utf8(bytes).map_err(|_| corrupt("payload utf8"))?;
-        builder
-            .try_append_value(value)
-            .map_err(|_| corrupt("payload size"))?;
+        }
     }
-    Ok(Arc::new(builder.finish()))
+    let binary = builder.finish();
+    // SAFETY: `binary` is a valid `BinaryView` array (the builder checked each view's block
+    // and bounds), and every non-null view's bytes are valid UTF-8: a shared value was checked
+    // with `simdutf8`, on its own or as a slice of checked chunk data that starts and ends on
+    // character boundaries, and a copied value was checked before it was appended.
+    #[allow(unsafe_code)]
+    let strings = unsafe { binary.to_string_view_unchecked() };
+    Ok(Arc::new(strings))
 }
 
 /// The values of `ids` (one entry per row, `None` for a null row). With `views`, a Utf8 column
@@ -762,13 +813,35 @@ mod tests {
     }
 
     #[test]
-    fn string_views_copy_the_values_of_non_ascii_frames() {
+    fn a_span_is_utf8_by_its_boundaries_in_checked_data() {
+        // 4 bytes of chunk table, then "aé日" (a, é = 2 bytes, 日 = 3 bytes).
+        let mut body = vec![0xFF, 0, 0, 0];
+        body.extend_from_slice("aé日".as_bytes());
+        let d = 4;
+        assert!(span_is_utf8(&body, d, &(d..d + 6), true));
+        assert!(span_is_utf8(&body, d, &(d + 1..d + 3), true));
+        assert!(span_is_utf8(&body, d, &(d + 3..d + 3), true));
+        // A value that starts or ends inside a character.
+        assert!(!span_is_utf8(&body, d, &(d + 2..d + 6), true));
+        assert!(!span_is_utf8(&body, d, &(d..d + 2), true));
+        // Out of the body.
+        assert!(!span_is_utf8(&body, d, &(d..d + 7), true));
+        // Unchecked data: each value is checked on its own.
+        assert!(span_is_utf8(&body, d, &(d + 1..d + 3), false));
+        assert!(!span_is_utf8(&body, d, &(d + 2..d + 6), false));
+        // A range outside the checked data is checked on its own.
+        assert!(!span_is_utf8(&body, d, &(0..2), true));
+    }
+
+    #[test]
+    fn string_views_share_non_ascii_frames_too() {
         mixed_string_views(false);
     }
 
     /// New values, repeats and extensions of earlier values (whose chunk ids are not
     /// consecutive), empty values and nulls, in a mixed order. With `ascii`, the text is all
-    /// ASCII, and the array shares frame bodies; otherwise it shares none.
+    /// ASCII. The array shares frame bodies either way, and a byte that is not UTF-8 in a
+    /// frame is an error.
     fn mixed_string_views(ascii: bool) {
         let (unique, accent, short) = if ascii {
             ("unique", "e", "short")
@@ -823,6 +896,16 @@ mod tests {
             let ids = ids_of(&header, &pages, &bodies, &rows, 0).unwrap();
             let (segments, frames) = frame_segments(&header, &ids).unwrap();
             let bodies = file.fetch(&segments, ScanKind::Scan).await.unwrap();
+            // Every frame's last byte belongs to a value, and 0xFF is never UTF-8.
+            for i in 0..bodies.len() {
+                let mut broken = bodies.clone();
+                *broken[i].last_mut().unwrap() = 0xFF;
+                let broken = FrameBodies::decoded(&header, &frames, broken).unwrap();
+                assert!(
+                    build_string_views(&header, &broken, &ids, 0).is_err(),
+                    "frame {i}"
+                );
+            }
             let decoded = FrameBodies::decoded(&header, &frames, bodies).unwrap();
 
             let mut reader = ChunkReader {
@@ -844,11 +927,11 @@ mod tests {
                 "{shared} shared, {copied} copied"
             );
 
-            // The whole column: the array's data blocks include frame bodies only for ASCII.
+            // The whole column: the array shares frame bodies, ASCII or not.
             let bodies: Vec<*const u8> = decoded
                 .slots
                 .keys()
-                .map(|&offset| decoded.get(offset).unwrap().0.as_ptr())
+                .map(|&offset| decoded.get(offset).unwrap().raw.as_ptr())
                 .collect();
             let views = build_string_views(&header, &decoded, &ids, 0).unwrap();
             let views = arrow::array::AsArray::as_string_view(views.as_ref());
@@ -857,7 +940,7 @@ mod tests {
                 .iter()
                 .filter(|b| bodies.contains(&b.as_ptr()))
                 .count();
-            assert_eq!(shares > 0, ascii, "{shares} frame bodies shared");
+            assert!(shares > 0, "no frame body shared");
 
             // Pieces that start anywhere: with a null, a shared or a copied value first.
             for piece in [n, 7, 64, 333] {

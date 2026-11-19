@@ -116,8 +116,8 @@ fn decode_ipc(
 }
 
 /// A `VARBIN` chunk of Utf8 or Binary: the validity bitmap if flagged, a lengths block of the
-/// `n` value lengths (null slots have length 0), then the bytes. Utf8 values are checked to be
-/// UTF-8 by the array constructor.
+/// `n` value lengths (null slots have length 0), then the bytes. Utf8 bytes are checked once
+/// with `simdutf8`.
 fn decode_varbin(
     entry: &BlockEntry,
     c: &mut Cursor<'_>,
@@ -140,34 +140,28 @@ fn decode_varbin(
     // `OffsetBuffer::new` cannot panic.
     let offsets = OffsetBuffer::new(ScalarBuffer::from(offsets_of(&lens, "varbin offsets", at)?));
     match dt {
-        DataType::Utf8 if bytes.is_ascii() => {
-            // `try_new` checks the UTF-8 and the character boundaries again, fast on ASCII.
-            let values = Buffer::from_vec(bytes.to_vec());
-            let array =
-                StringArray::try_new(offsets, values, nulls).map_err(|_| corrupt("varbin utf8"))?;
-            Ok(Arc::new(array))
-        }
         DataType::Utf8 => {
-            // `StringArray::try_new` would check the bytes with `std::str::from_utf8`, several
-            // times slower than `simdutf8` on non-ASCII text. The bytes are checked once here,
-            // and `str::get` checks that each value starts and ends on a character boundary.
+            // `StringArray::try_new` would check the bytes again with `std::str::from_utf8`,
+            // several times slower than `simdutf8` on non-ASCII text. The bytes are checked
+            // once here, with the character boundary at each offset.
             let text = simdutf8::basic::from_utf8(bytes).map_err(|_| corrupt("varbin utf8"))?;
-            let mut builder = StringBuilder::with_capacity(n, total);
-            for (i, w) in offsets.windows(2).enumerate() {
-                if nulls.as_ref().is_some_and(|v| v.is_null(i)) {
-                    builder.append_null();
-                    continue;
-                }
-                let (Some(&a), Some(&b)) = (w.first(), w.get(1)) else {
-                    return Err(corrupt("varbin offsets"));
-                };
-                let (Ok(a), Ok(b)) = (usize::try_from(a), usize::try_from(b)) else {
-                    return Err(corrupt("varbin offsets"));
-                };
-                let value = text.get(a..b).ok_or_else(|| corrupt("varbin utf8"))?;
-                builder.append_value(value);
+            let on_boundaries = offsets
+                .iter()
+                .all(|&o| usize::try_from(o).is_ok_and(|o| text.is_char_boundary(o)));
+            if !on_boundaries {
+                return Err(corrupt("varbin utf8"));
             }
-            Ok(Arc::new(builder.finish()))
+            // The binary constructor checks the offsets and the nulls, but not UTF-8.
+            let values = Buffer::from_vec(bytes.to_vec());
+            let (offsets, values, nulls) = BinaryArray::try_new(offsets, values, nulls)
+                .map_err(|_| corrupt("varbin values"))?
+                .into_parts();
+            // SAFETY: the offsets and nulls are those of a valid `BinaryArray`, the values are
+            // valid UTF-8 (checked above), and every offset is a character boundary of them,
+            // so each value is valid UTF-8.
+            #[allow(unsafe_code)]
+            let array = unsafe { StringArray::new_unchecked(offsets, values, nulls) };
+            Ok(Arc::new(array))
         }
         DataType::Binary => {
             let values = Buffer::from_vec(bytes.to_vec());

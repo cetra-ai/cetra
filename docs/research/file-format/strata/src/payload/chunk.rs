@@ -55,6 +55,14 @@ fn gear_pieces(data: &[u8], out: &mut Vec<Range<usize>>, base: usize) {
                 break;
             }
         }
+        // A cut moves back to the start of a UTF-8 character, so that the chunks of a UTF-8
+        // value are UTF-8 too (a character is at most 4 bytes). It stays content-defined, and
+        // the piece stays at least `GEAR_MIN - 2` bytes long.
+        let mut back = 0;
+        while back < 3 && rest.get(cut).is_some_and(|&b| b & 0xC0 == 0x80) {
+            cut -= 1;
+            back += 1;
+        }
         out.push(base + start..base + start + cut);
         start += cut;
     }
@@ -214,7 +222,8 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    /// The reference chunker: `bench/src/payload.rs::Gear` with the format's gear parameters.
+    /// The reference chunker: `bench/src/payload.rs::Gear` with the format's gear parameters,
+    /// and cuts moved back to the start of a UTF-8 character.
     struct RefGear([u64; 256]);
 
     impl RefGear {
@@ -248,6 +257,11 @@ mod tests {
                     if (h >> 52) & MASK == 0 {
                         cut = i + 1;
                         break;
+                    }
+                }
+                for _ in 0..3 {
+                    if cut < rest.len() && rest[cut] & 0xC0 == 0x80 {
+                        cut -= 1;
                     }
                 }
                 out.push(&rest[..cut]);
@@ -368,6 +382,31 @@ mod tests {
             assert_eq!(lens, want);
             assert_eq!(out, ref_pieces(&data));
         }
+    }
+
+    #[test]
+    fn gear_pieces_cut_between_characters() {
+        // Two-, three- and four-byte characters, long enough for many gear cuts.
+        // Pseudo-random, so the gear hash cuts by content and not only at `GEAR_MAX`.
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        let text: String = (0..12_000)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                ['é', '日', '😀', 'a'][(x >> 32) as usize % 4]
+            })
+            .collect();
+        let mut out = Vec::new();
+        gear_pieces(text.as_bytes(), &mut out, 0);
+        assert!(out.len() > 15, "{} pieces", out.len());
+        for r in &out {
+            assert!(
+                std::str::from_utf8(&text.as_bytes()[r.clone()]).is_ok(),
+                "{r:?}"
+            );
+        }
+        assert_eq!(out, ref_pieces(text.as_bytes()));
     }
 
     #[test]
@@ -541,6 +580,12 @@ mod tests {
             prop_assert!(c.len() >= MIN_CHUNK);
         }
         prop_assert_eq!(chunk_value(value), chunks.clone());
+        // The chunks of UTF-8 text are UTF-8: no cut falls inside a character.
+        if std::str::from_utf8(value).is_ok() {
+            for c in &chunks {
+                prop_assert!(std::str::from_utf8(&value[c.clone()]).is_ok(), "{:?}", c);
+            }
+        }
         if let Some(cuts) = json_units(value) {
             let mut starts = vec![0usize];
             starts.extend(cuts.iter().copied());
