@@ -334,13 +334,12 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         let page: Page<EndUserSummary> = serde_json::from_value(body).unwrap();
         assert!(!page.data.is_empty());
-        for user in &page.data {
-            assert_eq!(user.activity.len(), 24, "{}", user.user_id);
+        for (row, user) in page.data.iter().enumerate() {
+            assert_eq!(user.activity.len(), 24, "row {row}");
             assert_eq!(
                 user.activity.iter().sum::<i64>(),
                 user.trace_count,
-                "{}",
-                user.user_id
+                "row {row}"
             );
         }
     }
