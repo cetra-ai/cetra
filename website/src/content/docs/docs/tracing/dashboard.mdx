@@ -8,42 +8,46 @@ import dashboard from "../../../../assets/screenshots/dashboard.png";
 
 Use the dashboard to see how your application behaves over time: volume, errors, latency, cost and quality.
 
-Select **Dashboard** in the sidebar. The layout is fixed. A time range, a filter and a grouping at the top apply to every chart.
+Select **Dashboard** under **Observe** in the sidebar. A time range, a filter and a grouping at the top apply to every chart.
+
+This page is the Overview, the dashboard every project starts with. Members can drag and resize its charts, or select **Edit** to add and change widgets. The Overview can be reset to its default. To build other dashboards, see [Custom dashboards](/docs/tracing/custom-dashboards/).
 
 <Image src={dashboard} alt="The dashboard: summary tiles for traces, error rate, latency, cost and tokens, above charts over time." />
 
 ## Controls
 
-- **Time range**: a preset or a custom range. cetra splits it into buckets, between one minute and one day wide, so a chart has at most about 120 points. A bucket with no data is a gap, not a zero.
+- **Time range**: a preset or a custom range. cetra splits it into buckets, between one minute and one day wide, so a chart has at most 60 points. A bucket with no data is a gap, not a zero.
 - **Filter**: a condition in the [filter language](/docs/reference/filter-language/), on traces. Charts of spans and scores keep those whose trace matches.
-- **Group by**: model, environment or release. It splits the charts that are not already split.
+- **Group by**: model, environment or release. It splits the charts that are not already split. A widget with its own breakdown ignores it.
 
 The dashboard hides evaluation and experiment traces, like the lists.
 
 ## Summary tiles
 
-The tiles show traces, error rate, 95th percentile latency, cost and tokens for the range. Each compares with the previous range of the same length. A tile is empty when its range has no traces.
+The first row shows five tiles: traces, error rate, p95 latency, cost and tokens for the range. Each has a sparkline and compares with the previous range of the same length. A tile is empty when its range has no traces.
 
 ## Charts
 
 | Chart | What it measures |
 |---|---|
-| Traces and errors | The number of traces per bucket, and how many had at least one error. The error rate is errors divided by traces. |
+| Traces & errors | The number of traces per bucket, stacked as OK and errors. |
+| Tokens by type | Input, output, cache read and cache write tokens of model and embedding calls. |
+| Error rate | Errors divided by traces, per bucket. Buckets with fewer than 5 traces are faded. |
+| Scores | The average value of each numeric score name per bucket, one small chart per score name, for up to 6 names. |
 | Latency | The 50th, 95th and 99th percentile of trace duration. |
-| Model latency | The 50th and 95th percentile of the duration of model calls, per model. |
-| Cost | The summed cost of traces per bucket, and of model calls per model. |
-| Tokens | Input, output and cache tokens of model and embedding calls. |
-| Time to first token | The 50th and 95th percentile of the time to the first token of streamed model calls. |
-| Scores | The average value of each numeric score name per bucket. |
+| LLM latency by model | The 95th percentile of the duration of model calls, for up to 5 models. |
+| TTFT | The 50th and 95th percentile of the time to the first token of streamed model calls. |
+| Cost by model | The summed cost of model calls per bucket, stacked for 3 models, with the rest as Other. |
 | Evaluation cost | What cetra's own evaluators and judges cost per bucket. |
-
-A table lists the top models by cost, at most ten.
+| Top models by cost | A table of up to 10 models: cost and its share, LLM calls and tokens. |
+| Top users by cost | The 10 users with the highest cost. |
+| Top trace names by cost | The 10 trace names with the highest cost. |
 
 Percentiles are approximate. Costs are summed exactly, so totals do not depend on how the data is stored.
 
 ## Drill into a period
 
-Select a chart point to open the trace list filtered to that bucket. With the keyboard, each chart is one stop: use the left and right arrows to move between buckets, `Home` and `End` to jump to the ends, and `Enter` to open the traces.
+Drag across a chart to zoom the time range to the part you selected. Select a chart point to open the trace list filtered to that bucket. With the keyboard, each chart is one stop: use the left and right arrows to move between buckets, `Home` and `End` to jump to the ends, and `Enter` to open the traces.
 
 ## Limits
 

@@ -10,6 +10,12 @@ Alert rules watch a metric of a project over a sliding window and notify you whe
 
 <Image src={alerts} alt="The alerts page: the project's alert rules." />
 
+## Where to find them
+
+In the sidebar, **Alerts** (under **Monitor**) lists the project's rules. **New rule** opens the rule form. The strip above the list counts the rules by state (**Firing**, **No data**, **OK**, **Disabled**), and selecting a count filters the list. Each row shows the name, state, condition, last value, a trend, when the rule was last evaluated, its channels and an **Enabled** switch. Selecting a row opens the rule beside the list, with **Edit**, **Delete rule** and the rule's **History**. **Recent events** under the list shows the latest events of every rule, with how many of their deliveries were sent.
+
+The rule form names things differently from the fields below: **Metric** (Error rate, Cost, p95 latency, Score), **Latency of** (Whole traces, LLM spans), **Aggregation** (Average, Pass rate), **Window**, **Filter**, **Comparator** (Above, At or above, Below, At or below), **Threshold**, **Minimum samples**, **Notifications** (the channels), **Remind while firing** with **Remind every (minutes)**, and **Enabled**. A preview next to the form plots the metric. In the form, the threshold of an error rate or a pass rate is in percent, where the API uses a fraction from 0 to 1.
+
 ## What a rule watches
 
 | Metric | What it measures over the window | Extra fields |
@@ -46,7 +52,7 @@ Changing a rule's condition, or disabling and re-enabling it, resets it to `ok` 
 
 ## Channels
 
-A channel is a destination defined once per project. A rule lists up to 10 channels of its project. A project has at most 100 rules and 20 channels. Channel secrets are stored encrypted, and the API never returns a URL path, a secret or a header value.
+A channel is a destination defined once per project. Manage them in the project's **Settings**, under **Channels**, with **New channel**. A rule form also links to that page when the project has no channel yet. A rule lists up to 10 channels of its project. A project has at most 100 rules and 20 channels. Channel secrets are stored encrypted, and the API never returns a URL path, a secret or a header value.
 
 ### Slack
 
@@ -111,9 +117,9 @@ When sign-up is `open`, each recipient must be a verified member of the org. Eac
 
 cetra sends deliveries in the background, at least once. A timeout, a connection error, a `408`, `429` or `5xx` answer, or an SMTP connection, TLS or authentication error is retried with a growing wait (30 seconds, doubling, up to one hour) for up to 8 attempts. Any other failure fails the delivery at once.
 
-cetra never disables a channel on its own. The UI shows the last finished delivery of each channel, and "Send test" sends a sample message right away. A test send is limited to 5 a minute per member and per channel.
+cetra never disables a channel on its own. On the **Channels** page, each channel shows a status: **Delivered**, **Last delivery failed**, **No deliveries**, or **SMTP not configured** for an email channel. Open a channel and select **Send test** to send a sample message right away. A test send is limited to 5 a minute per member and per channel.
 
-cetra keeps alert events for 90 days and finished deliveries for 30 days.
+A rule's history labels each event **Fired**, **Resolved**, **No data** or **Reminder**, and each delivery **Sent**, **Pending** or **Failed**. cetra keeps alert events for 90 days and finished deliveries for 30 days.
 
 In [restore mode](/docs/self-hosting/configuration-reference/) (`restore_mode = true`), cetra evaluates no rule and sends no delivery.
 

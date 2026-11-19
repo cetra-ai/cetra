@@ -72,7 +72,19 @@ Use the same ID for every trace of the session. A new ID starts a new session.
 
 ## In the UI
 
-Select **Sessions** in the sidebar. The list shows each session's start, last activity, number of traces, user, cost, errors and scores.
+Select **Sessions** in the sidebar, or press `g` then `s`. A chart above the list counts the sessions that started in each part of the time range. A summary strip shows the totals for the loaded sessions: **Sessions**, **Avg turns**, **Avg duration**, **Error rate**, **Cost** and **Tokens**. If more sessions exist than are loaded, it says "of N loaded".
+
+The columns are:
+
+- **Session**, the session ID.
+- **First message** and **Last answer**, a preview of the first input and the last output.
+- **Start** and **Last activity**.
+- **Traces**, **Duration**, **Tokens** and **Cost**.
+- **User** and **Tags**.
+- **Errors** and **Error rate**.
+- One column per score name found in the sessions.
+
+Select **Columns** to show, hide or reorder them. The list has the same facets, preset chips (**Errors**, **Slow**, **Expensive**) and saved views as the traces list ([Filters and search](/docs/tracing/filters-and-search/)).
 
 <Image src={sessions} alt="The sessions page: one row per session." />
 

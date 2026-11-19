@@ -79,23 +79,41 @@ Select **Traces** in the sidebar. The list shows the traces of the last 24 hours
 - the models used, the session, the user, the tags and the environment;
 - one column per score name found in the traces.
 
-The columns menu hides or shows columns. Select a column header to sort by it. The time range picker offers presets from 15 minutes to 30 days and a custom range. The list does not show evaluation traces or experiment traces until you turn on **Show evaluation traces** or **Show experiment traces**.
+Select a column header to sort by it. The time range picker offers presets from 15 minutes to 30 days and a custom range ([Filters and search](/docs/tracing/filters-and-search/)).
 
-Select a row to open the trace in a panel beside the list, with the list still in place. Use `j` and `k`, or the arrow keys, to move between rows, and `Esc` to close the panel. The same view opens as a full page from the trace's own link.
+The list hides evaluation traces and experiment traces until you tick them in the **Include** menu. The button reads **Include · 1** or **Include · 2** when something is ticked.
 
-Turn on **Live** to see new traces arrive as they finish. Live mode works with a preset time range and the default sort.
+### The toolbar
+
+- **Refresh** reloads the list. Next to it, "Updated N ago" shows how old the data on screen is.
+- **Search** finds text in the traces. Press `/` to focus it.
+- **Columns** opens a chooser where you show or hide columns, move them up or down, or select **Reset**.
+- The view menu next to the page title in the top bar saves the list's state ([Saved views](/docs/tracing/filters-and-search/#saved-views)).
+- "N loaded" counts the rows loaded so far.
+- **Filters**, the preset chips and the filter bar are in the row below ([Filters and search](/docs/tracing/filters-and-search/)).
+
+Tick the box of one or more rows to see **Add N to dataset**, which adds those traces to a dataset ([Datasets](/docs/evaluation/datasets/)). **Delete matching…** deletes every trace that matches the current filter, search and time range. It shows how many that is before you confirm, and needs the admin role ([Deletion and retention](/docs/platform/deletion-and-retention/)).
+
+Select a row to open the trace in a panel with the list still in place. Use `j` and `k`, or the arrow keys, to move between rows, and `Esc` to close the panel. The layout switcher in the trace header moves the panel: **Drawer** (the default) opens it beside the list, **Bottom** below the list, and **Page** replaces the list with the trace. **Maximize trace** makes the panel fill the page, and **Restore trace** undoes it. **Open full page** opens the trace on its own page.
+
+Turn on the **Live** switch to see new traces arrive as they finish. A button reading "N new traces ↑" shows how many are waiting. Select it to add them to the top of the list. Live mode works on the traces list only. It needs a relative time range (a preset) and the default sort, start time with the newest first. Otherwise the switch is off and its tooltip says why.
 
 A project with no traces shows setup snippets until the first trace arrives.
 
 ## The trace view
 
-The left side shows the spans as a tree and a timeline in one grid. Each row has the span's name, kind and status, its duration, tokens and cost, and a bar on a shared time axis. Spans with an error are red. You can collapse a branch and search within the tree.
+The left side shows the spans of the trace. A switch above it picks how: **Tree**, **Timeline** or **Transcript**. Press `t` to cycle through them.
+
+- **Tree**: the spans as a tree. Each row has the span's name, kind and status, its duration, tokens and cost. Spans with an error are red. There is no time axis.
+- **Timeline**: the same rows with a bar on a shared time axis. The toolbar shows the zoom level. Select **Fit** or press `0` to fit the whole trace.
+
+In Tree and Timeline, the toolbar has a search box with **Previous match** and **Next match**, **Errors only**, **Expand all** and **Collapse**, which folds the tree back to its first level. You can also collapse a single branch.
 
 <Image src={traceView} alt="A trace opened from the trace list: its span tree in the middle, and the root span's input and output on the right." />
 
-**Transcript** shows the model and tool spans in order as one conversation. Each model turn shows only the messages that are new since the previous call.
+**Transcript** shows the model and tool spans in order as one conversation, and has no tree controls. Each model turn shows only the messages that are new since the previous call.
 
-When a trace has just ended, or the list is live, the view updates as spans arrive and shows a **Live** badge.
+When a trace has just ended, or the list is live, the view updates as spans arrive and shows a **Live** badge with a **Stop** button that stops following.
 
 The right side shows the selected span. The header gives its kind, name, model, provider, duration, time to first token, token counts with cache and reasoning, cost and status. The tabs are:
 
@@ -105,9 +123,22 @@ The right side shows the selected span. The header gives its kind, name, model, 
 - **Scores**: the scores on the span and on the trace ([Scores](/docs/evaluation/scores/)).
 - **Annotate**: add your own scores to the trace or the span ([Human annotation](/docs/evaluation/annotation/)).
 
-The trace header shows the trace's name, total duration, cost and tokens, and links to its session and user. Use **Copy link** to share the trace with someone who has access to the project.
+The trace header shows the trace's name, its status, the start time, duration, tokens, cost and span count, and links to its session and user. It also shows the environment, release, tags and scores. Its buttons are:
+
+- **Run evaluator**: queue an evaluator on the trace, or on the selected span. Members and above can use it ([Evaluators](/docs/evaluation/evaluators/)).
+- **Add to dataset**: save the trace, or the selected span, as a dataset item ([Datasets](/docs/evaluation/datasets/)).
+- **Delete trace**: the trash icon. It needs the admin role ([Deletion and retention](/docs/platform/deletion-and-retention/)).
+- **Copy link**: share the trace with someone who has access to the project.
+- **Previous trace** and **Next trace**: step through the traces of the list.
+- **Open full page** and **Close**, when the trace is in a panel.
 
 If a span's parent is missing, for example because it was never sent, cetra shows the span as a root of its own, so no span is hidden.
+
+## The spans list
+
+Select **Spans** in the sidebar, or press `g` then `p`, to see every span as a row instead of every trace. It has the same toolbar, search, facets, preset chips and saved views as the traces list. Its columns include the kind, name, model, provider, duration, time to first token, tokens and cost. The **LLM** preset keeps only the spans of kind `llm`.
+
+Select a row to open its whole trace in the panel, with that span selected.
 
 ## Filter traces
 

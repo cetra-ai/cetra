@@ -11,9 +11,9 @@ Any signed-in member can create an org and becomes its owner. An org has project
 
 ## Members and invites
 
-Admins and owners invite people by email. The invitation link is valid for 7 days, and it admits only the email it was sent to. Without [SMTP](/docs/self-hosting/email/), the UI shows the link so you can send it yourself.
+Admins and owners invite people by email. Open the org's settings, then **Members**, and select **Invite member**. The **Invites** tab lists the pending invitations, and you can revoke one there. The invitation link is valid for 7 days, and it admits only the email it was sent to. The UI shows the link after you create the invitation. Without [SMTP](/docs/self-hosting/email/), cetra sends no email, so you send the link yourself.
 
-Each member has an org role. For a project, an admin can give a member or viewer a different role on that project, from `none` (the project is hidden from them) to `admin`. Setting such an override needs the Teams add-on; removing one never does. Owners and admins are never overridden.
+Each member has an org role. For a project, an admin can give a member or viewer a different role on that project, in the project's **Settings** under **Members**, from `none` (the project is hidden from them) to `admin`. Setting such an override needs the Teams add-on; removing one never does. Owners and admins are never overridden.
 
 Nobody can grant a role above their own, only owners grant or change `owner`, and an org always keeps at least one owner.
 
@@ -23,6 +23,7 @@ Nobody can grant a role above their own, only owners grant or change `owner`, an
 |---|:-:|:-:|:-:|:-:|
 | View traces, sessions, dashboards, datasets, experiments and the SQL console | yes | yes | yes | yes |
 | Annotate, add to and edit datasets, run SQL exports, share saved views | | yes | yes | yes |
+| Create, edit, rename, duplicate and delete custom dashboards, and edit the Overview | | yes | yes | yes |
 | Manage evaluators, online rules, alert rules, channels and score definitions | | yes | yes | yes |
 | Manage API keys, LLM connections, project settings (retention) and GDPR deletions | | | yes | yes |
 | Create and delete projects, manage members and invites | | | yes | yes |
@@ -34,4 +35,15 @@ If something is outside your reach, cetra answers as if it does not exist. If yo
 
 ## Instance admins
 
-On a self-hosted instance, the first member to sign up is an instance admin. Instance admins manage the instance, such as users and settings, but they do not see an org's data unless they are a member of it. They can always sign in with a password at `/login?password=1`, even when [password login is off](/docs/self-hosting/authentication/).
+On a self-hosted instance, the first member to sign up is an instance admin. Instance admins manage the instance, such as users and settings, but they do not see an org's data unless they are a member of it.
+
+Instance admins get an **Admin** entry in the account menu at the bottom of the sidebar. It opens the instance admin area, with two tabs:
+
+- **Users** lists every account on the instance. **Add user** creates an account and shows a link, valid for one hour, that lets the person set a password. The actions menu of a row can make or remove an instance admin, disable or enable the account, and create a password reset link, also valid for one hour. You cannot change your own account.
+- **Settings** shows the instance settings, which are read-only: change them in `cetra.toml` or `CETRA_*` variables and restart. It also has **Send test email**, which sends a message to you. See [Email](/docs/self-hosting/email/).
+
+Instance admins can always sign in with a password at `/login?password=1`, even when [password login is off](/docs/self-hosting/authentication/). Nobody else sees the admin area.
+
+## Demo org
+
+An operator can name one org as the demo org with the `[demo]` keys. See the [configuration reference](/docs/self-hosting/configuration-reference/). Every signed-in user who is not an instance admin reads that org as a viewer, without being a member. The org shows a **Demo** badge in the org switcher, and a banner says "You're exploring the cetra demo, read-only." Real members of the demo org keep their own roles. Visitors never appear in the member list, and the demo org's requests and SQL queries have limits.

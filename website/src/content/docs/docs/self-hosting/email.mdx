@@ -54,13 +54,13 @@ Use a sender address on a domain you have verified with the provider.
 | Password reset | A member asks to reset their password. The link is valid for 1 hour and works once. |
 | Verification | A member signs up, when `auth.require_email_verification` is on. |
 | Alert | An alert rule fires or resolves, on a project with an email channel. See [Alerts](/docs/platform/alerts/). |
-| Test | An instance admin sends a test email from the instance settings. |
+| Test | An instance admin selects **Send test email** on the **Settings** tab of the admin area. |
 
-cetra sends these in the background, and retries a failed message up to three times. Use the test email to check your settings.
+cetra sends these in the background, and retries a failed message up to three times. To check your settings, open **Admin** in the account menu at the bottom of the sidebar, go to the **Settings** tab and select **Send test email**. It sends a message to your own address. The button is disabled while SMTP is not configured.
 
 ## Without SMTP
 
 - The UI shows each invitation link, so you can send it yourself.
-- Run `cetra admin reset-password --email <EMAIL>` to print a password reset link. Instance admins can also generate a link in the UI.
+- Run `cetra admin reset-password --email <EMAIL>` to print a password reset link. Instance admins can also create a link in the UI: in the admin area, open the **Users** tab, open the actions menu of the account and select **Create reset link**.
 - Email channels for alerts are unavailable.
 - You cannot turn on `auth.require_email_verification`. The server refuses to start with it.

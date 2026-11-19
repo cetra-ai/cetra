@@ -53,6 +53,7 @@ export default defineConfig({
                     { label: "Quick start", link: "/docs/get-started/quickstart/" },
                     { label: "Run cetra", link: "/docs/get-started/run-cetra/" },
                     { label: "Send OpenTelemetry", link: "/docs/get-started/opentelemetry/" },
+                    { label: "Tour of the UI", link: "/docs/get-started/ui-tour/" },
                   ],
                 },
                 {
@@ -74,6 +75,7 @@ export default defineConfig({
                     { label: "Filters and search", link: "/docs/tracing/filters-and-search/" },
                     { label: "SQL console", link: "/docs/tracing/sql-console/" },
                     { label: "Dashboard", link: "/docs/tracing/dashboard/" },
+                    { label: "Custom dashboards", link: "/docs/tracing/custom-dashboards/" },
                     { label: "Cost and tokens", link: "/docs/tracing/cost-and-tokens/" },
                     { label: "Media", link: "/docs/tracing/media/" },
                     {

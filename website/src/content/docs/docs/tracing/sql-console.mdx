@@ -8,7 +8,9 @@ import sqlConsole from "../../../../assets/screenshots/sql-console.png";
 
 Use the SQL console when a filter is not enough: to aggregate, join or export your data.
 
-Select **SQL** in the sidebar. The console has an editor with autocomplete from the schema, a results grid with a chart tab, and a schema browser at the side. Press `⌘↵` (or `Ctrl+Enter`) to run the query.
+Select **SQL** in the sidebar. The console has an editor with autocomplete from the schema, a results grid with a **Chart** tab, and a sidebar with **Schema** and **Saved** tabs. Press `⌘↵` (or `Ctrl+Enter`) to run the query.
+
+Select **Format** (`Shift+Alt+F`) to format the query.
 
 <Image src={sqlConsole} alt="The SQL console: the schema on the left, the query editor on top and the result table below it." />
 
@@ -17,6 +19,10 @@ Select **SQL** in the sidebar. The console has an editor with autocomplete from 
 You query views of your project's data: `spans`, `traces`, `sessions`, `scores`, `experiment_items` and `dataset_items`. Write their names without a prefix. See the [SQL schema](/docs/reference/sql-schema/) for every column.
 
 The console shows raw data. Unlike the lists, it does not hide evaluation traces or experiment traces. Filter them out yourself with `environment`.
+
+## Query tabs
+
+Open a query in each tab, up to 20 per project. Use the plus button for a new tab and the close button on a tab to close it. Your tabs stay in your browser.
 
 ## Examples
 
@@ -84,13 +90,21 @@ The console runs read-only queries in a sandbox:
 
 Errors show in the console with the position of the problem.
 
+## Results
+
+The **Table** tab shows the rows. Select a row to open a detail view with every column, its type and value, a copy button for each value, and **Copy row as JSON**.
+
+The **Chart** tab draws the result as a **Line** or **Bar** chart. Choose the **X** column, one or more **Y** columns, and optionally a **Split by** column. A chart shows at most 5 series and the first 1,000 rows, and says so when it clips. **Split by** works with one **Y** column.
+
 ## Saved queries and history
 
-Save a query with its parameters and range. A saved query is private to you or shared with the project. The console also keeps your last 50 runs in your browser.
+Save a query with its parameters and range from the **Saved queries** menu: **Save as…**, then **Save** to update it. The **Saved** tab of the sidebar lists your queries under **Mine** and the project's shared queries under **Shared**, with a filter box. A saved query is private to you until you select **Share with project**. Sharing needs the member role, and so does changing a shared query.
+
+The **History** menu lists your last 50 runs, kept in your browser. Pick one to load it.
 
 ## Export
 
-Export a result as CSV, NDJSON or Parquet. In CSV, a cell that starts with `=`, `+`, `-` or `@` gets a leading `'`, so a spreadsheet does not run it as a formula.
+Export a result with **Export** as CSV, NDJSON or Parquet. Exporting needs the member role. In CSV, a cell that starts with `=`, `+`, `-` or `@` gets a leading `'`, so a spreadsheet does not run it as a formula.
 
 ## From the command line
 

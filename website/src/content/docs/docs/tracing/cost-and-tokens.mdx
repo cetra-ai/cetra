@@ -106,14 +106,15 @@ cetra computes the cost once, when it receives the span. A change in prices does
 
 Add prices for a model that cetra does not know, such as a fine-tuned or self-hosted model, or to override a built-in price.
 
-1. Open **Settings**, then **Models**, in the organization or in the project. An organization's prices apply to all its projects. A project's prices apply to that project only and win over the organization's.
+1. Open **Settings**, then **Model prices**, in the organization or in the project. An organization's prices apply to all its projects. A project's prices apply to that project only and win over the organization's.
 2. Select **Add price**.
-3. Enter the model name, a pattern that matches the model names your spans carry (a regular expression, matched against the whole name, ignoring case), and optionally a provider.
-4. Enter the prices per million tokens: input, output, and optionally cache read, cache write and reasoning.
-5. Set **Valid from**. The price applies only to spans that start at or after that time.
-6. Save.
+3. Enter the **Model name**. Under **Match**, choose **Exact name**, or **Regular expression** to enter a **Pattern** that matches the model names your spans carry (matched against the whole name, ignoring case).
+4. Optionally enter a **Provider**. Leave it empty to match any provider.
+5. Optionally set **Valid from**. The price applies only to spans that start at or after that date. Leave it empty to apply to every span.
+6. Enter the prices per million tokens: **Input**, **Output**, and optionally **Cache read**, **Cache write** and **Reasoning**. Under **Long-context tiers** you can add prices that apply to long inputs.
+7. Save.
 
-The Models page has a **Which price applies?** check: enter a model and a provider and it shows the price cetra would use. An organization or project can hold up to 500 prices. New prices apply to spans received after you save them.
+The **Model prices** page has a **Which price applies?** check: enter a model and a provider and it shows the price cetra would use. An organization or project can hold up to 500 prices. New prices apply to spans received after you save them.
 
 ## Filter and query
 

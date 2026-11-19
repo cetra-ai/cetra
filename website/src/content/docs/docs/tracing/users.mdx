@@ -72,7 +72,26 @@ Use an ID that is stable for a person and that is not their email address or nam
 
 ## In the UI
 
-Select **Users** in the sidebar. The list shows each user's traces, sessions, cost, last activity and errors. Open a user to see their sessions and totals.
+Select **Users** in the sidebar, or press `g` then `u`. A summary strip shows **Traces**, **Error rate**, **p95 latency**, **Cost** and **Tokens** for the users in the time range. Below it, **Top by cost** lists the users who cost the most. Select one to open that user.
+
+The columns are:
+
+- **User**: the user ID. If the user has a `user.name` metadata value, the name comes first and the ID after it. A `user.plan` value shows as a pill.
+- **Activity**: a small chart of traces over the time range.
+- **Traces**, **Sessions**, **Traces / session**, **Tokens** and **Cost**.
+- **Errors** and **Error rate**.
+- One column per score name found in the users' traces.
+- **Metadata**, **First seen** and **Last seen**.
+
+Select **Columns** to show, hide or reorder them. The list has facets, preset chips and saved views, as the traces list has. They work on the traces of the users ([Filters and search](/docs/tracing/filters-and-search/)). The name and plan come from trace metadata keys `user.name` and `user.plan`.
+
+Select a row to open the user in a panel, with their metrics, activity, scores, metadata and recent sessions. **Open page** opens the user's own page. It has a time range picker and three tabs:
+
+- **Overview**: the user's scores, metadata and usage charts.
+- **Sessions**: the user's sessions.
+- **Traces**: the user's traces.
+
+An admin sees **Delete user data…** on the page.
 
 <Image src={users} alt="The users page: one row per user ID." />
 

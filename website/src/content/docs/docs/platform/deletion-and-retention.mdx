@@ -15,9 +15,17 @@ You can delete data on request, and you can let cetra delete old data on a sched
 | A project | Delete project, then type its slug | Org admins and owners |
 | An org | Delete org | Owners |
 
+In the UI:
+
+- **One end user:** open **Settings**, then **Data**, enter the user ID and select **Delete user data…**. The user's page has the same button.
+- **One trace:** select the trash icon in the trace header.
+- **Traces matching a filter:** set the filter, the search and the time range on the traces list, then select **Delete matching…**. The dialog counts the matching traces before you confirm.
+- **A project:** open the project's **Settings**, then **General**. **Delete project…** is in the danger zone at the bottom. You type the project's slug to confirm.
+- **An org:** open the org's settings, then **General**. **Delete organization…** is in the danger zone. You type the org's slug to confirm.
+
 Deleting by user and by filter needs a signed-in session or a personal access token with `read` and `write`. Deleting a project or an org needs a session. An API key can delete by trace ID only.
 
-Before you delete by filter, use the preview. It tells you how many traces match and whether the count was capped. A filter that matches more than 100,000 traces is refused: narrow the time range.
+Before you delete by filter, use the preview. In the UI, the **Delete matching…** dialog shows it. It tells you how many traces match and whether the count was capped. A filter that matches more than 100,000 traces is refused: narrow the time range.
 
 ## What goes with a trace
 
@@ -50,7 +58,7 @@ Data ingested after you make the request is new data, and the request does not c
 
 ## Retention
 
-Each project has a retention in days, or "keep forever". Set it in the project's settings, under General. cetra deletes whole days older than the retention, once an hour and when you save the setting. Lowering retention deletes older data right away.
+Each project has a retention in days, or "keep forever". Set it in the project's **Settings**, under **General**, in the **Data retention** card. cetra deletes whole days older than the retention, once an hour and when you save the setting. Lowering retention deletes older data right away.
 
 Retention is by day. Scores and evaluation traces are deleted by their own date, so they can outlive an old trace they refer to.
 
@@ -63,8 +71,8 @@ Deleted data stays in a backup until the backup expires. Keep backups for 30 day
 ## Erase one person's data (GDPR)
 
 1. Find the user ID your application records for that person.
-2. Open the project's settings and go to the Data tab. You need to be a project admin.
-3. Enter the user ID and confirm by typing it again.
+2. Open the project's **Settings**, then **Data**. You need to be a project admin.
+3. Enter the user ID, select **Delete user data…** and confirm by typing the ID again.
 4. Watch the deletion history until the request shows `applied`.
 5. Record the request in your own log, with its date and the time it reached `applied`.
 6. If you hold backups, delete them when they expire, or restore with the re-apply step above.

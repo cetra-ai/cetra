@@ -34,7 +34,14 @@ Reads use the latest version unless you ask for another one. Past versions are r
 2. Enter a name, a description and, optionally, JSON Schemas for the input and the expected output.
 3. Add items with **Add item**, or import a file.
 
-The **Items** tab edits one item at a time in a side sheet. The **Versions** tab shows the history with a generated description for each version, and **Experiments** lists the experiments run on the dataset.
+A dataset page has four tabs:
+
+- **Items** is a grid with a search box. Select an item to open it in a side panel, which has previous and next buttons, **Edit item** and **Delete item**. **Edit cells** turns the grid into an editor: change cells, then save or discard. Tick rows to delete several items at once.
+- **Versions** lists the history with a generated description and the counts of added, edited and deleted items for each version. **Changes** shows what changed. **View** opens the items of that version, and **Restore this version** creates a new version with its items.
+- **Experiments** lists the experiments run on the dataset. Tick 2 to 4 to compare them, or select **Open in Experiments**.
+- **Settings** shows the name, description and schemas, with **Edit** and **Delete dataset**. Deleting needs the dataset name typed to confirm. Experiments keep their results.
+
+The version picker in the header switches between **Latest** and a past version. A past version is read-only, and a banner with **Go to latest** says so. **Run experiment** shows the `evaluate()` code to run on the dataset.
 
 ## Import a file
 
@@ -59,7 +66,7 @@ The **Export** menu downloads a version as JSONL or CSV. Spreadsheet programs ma
 
 ## Add a trace or a span
 
-On a trace page, **Add to dataset** copies the root of the trace, or the selected span, into a dataset. The span's input becomes the item's input and its output becomes the expected output. You can edit both before you save, and choose an existing dataset or a new one. The item remembers its source trace. If you delete the trace's data, the item is deleted with it.
+On a trace page, **Add to dataset** copies the root of the trace, or the selected span, into a dataset. The span's input becomes the item's input and its output becomes the expected output. You can edit both before you save, and choose an existing dataset or a new one. In the traces list, tick rows and select **Add N to dataset** to copy each trace's root input and output into one new version. The item remembers its source trace. If you delete the trace's data, the item is deleted with it.
 
 ## Check items against a schema
 

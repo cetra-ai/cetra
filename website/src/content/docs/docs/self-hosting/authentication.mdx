@@ -128,6 +128,6 @@ A Teams add-on org can also set up its own provider and verified domains without
 ## Check the setup
 
 1. Restart cetra.
-2. Open the login page and look for the provider's button.
+2. Open the login page and look for the provider's button. With password login off, one provider and no org-level provider, the page sends you straight to the provider instead, except right after a sign-out or a failed sign-in.
 3. Sign in with a test account.
 4. If you are sent back to `/login?error=<code>`, the code says why. Common ones are `domain_not_allowed`, `email_not_verified` and `signup_closed`.

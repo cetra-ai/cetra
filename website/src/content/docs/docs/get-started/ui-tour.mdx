@@ -1,0 +1,130 @@
+---
+title: Tour of the UI
+description: Find your way around the cetra web UI, from the sidebar and command palette to keyboard shortcuts, appearance and settings.
+---
+
+This page shows where things are in the cetra web UI, so you can move around quickly.
+
+## The layout
+
+The UI has a sidebar on the left and a top bar. Both stay in place while you move between pages.
+
+The sidebar lists the pages of the current project in four groups:
+
+| Group | Pages |
+|---|---|
+| Observe | [Dashboard](/docs/tracing/dashboard/), [Traces](/docs/tracing/traces/), Spans, [Sessions](/docs/tracing/sessions/), [Users](/docs/tracing/users/) |
+| Monitor | [Alerts](/docs/platform/alerts/) |
+| Evaluate | [Evaluators](/docs/evaluation/evaluators/), [Online rules](/docs/evaluation/online-rules/), [Datasets](/docs/evaluation/datasets/), [Experiments](/docs/evaluation/experiments/) |
+| Explore | [SQL](/docs/tracing/sql-console/) |
+
+Spans is a list of single spans, with the same toolbar as Traces. You can also make your own views of the Dashboard page, see [Custom dashboards](/docs/tracing/custom-dashboards/).
+
+Below the groups, a Recent group lists the last traces, sessions, evaluators, datasets and experiments you opened in this project. Hover a page to see its keyboard shortcut.
+
+Some pages show a live badge:
+
+- Alerts shows the number of alert rules that are firing.
+- Online rules shows a dot when a rule is paused on errors.
+- Experiments shows the number of experiments that are running.
+
+The footer holds Theme, Settings, your account menu, a link to these docs and the cetra version. Use the toggle at the left of the top bar to collapse the sidebar to icons. Below 1024 px wide, the sidebar starts collapsed.
+
+The top bar shows, from left to right:
+
+- The breadcrumb: the organization switcher, the project switcher, the page name and, on a list, the view switcher. On the Dashboard page, a dashboard switcher takes its place. On a detail page, the open item (a session, an evaluator or a dataset) follows the page name. In the demo organization, a Demo badge sits next to the organization name. The organization switcher also has New organization.
+- A dot that shows whether the project is receiving spans. It is green when the last batch is under five minutes old, and grey otherwise. Hover it for the time of the last batch. Before the server has received any, it says "No spans received since the server started". Click it to open Traces.
+- The alert bell, with the number of firing alert rules. It appears only while a rule is firing. Click it to list the rules.
+- The search box, which opens the command palette (`⌘K`).
+
+## Lists and panels
+
+The Traces, Spans and Sessions lists share one toolbar. It has a filter bar, a search box, a refresh button with the age of the data, a count of loaded rows, a Filters button, a column chooser, and a menu of saved views. Click a row to open it in a side panel, and open the full page from the panel. The Traces list also has a Live switch. See [Filters and search](/docs/tracing/filters-and-search/) for the filter bar, facets and saved views.
+
+## Command palette
+
+Press `⌘K` (`Ctrl+K` on Linux and Windows), or click the search box in the top bar. Type to filter, then press `Enter` on a result. The palette has these groups:
+
+- Go to: every sidebar page, and Home.
+- Projects: the projects of the organization.
+- Recent traces: the traces you opened lately.
+- Settings: every organization and project settings page you can open.
+- Theme, Palette, Density and Time zone: change your appearance settings.
+
+Paste a trace id (32 hex digits) or a span id (16 hex digits) to get "Open trace" or "Find span". The span id opens the Spans list filtered on that span.
+
+## Keyboard shortcuts
+
+Shortcuts are ignored while you type in a field. Press `?` to see the list in the UI.
+
+| Key | Action |
+|---|---|
+| `⌘K` / `Ctrl+K` | Open the command palette |
+| `?` | Show the shortcuts help |
+| `Esc` | Close the panel, clear focus |
+| `/` | Focus search (lists) |
+| `f` | Edit the filter as text (lists) |
+| `j` / `k`, `↓` / `↑` | Next or previous row (lists and the trace tree) |
+| `Enter` | Open the row (lists) |
+| `t` | Cycle Tree, Timeline and Transcript (trace view) |
+| `0` | Fit the timeline (trace view) |
+| `⌘↵` / `Ctrl+Enter` | Run the query (SQL console) |
+| `g` then `d` | Go to Dashboard |
+| `g` then `t` | Go to Traces |
+| `g` then `p` | Go to Spans |
+| `g` then `s` | Go to Sessions |
+| `g` then `u` | Go to Users |
+| `g` then `a` | Go to Alerts |
+| `g` then `q` | Go to SQL |
+| `g` then `e` | Go to Evaluators |
+| `g` then `o` | Go to Online rules |
+| `g` then `i` | Go to Datasets |
+| `g` then `x` | Go to Experiments |
+
+## Account and appearance
+
+Click your name at the bottom of the sidebar to open the account menu:
+
+- Account opens the Account page: your profile, your password and your personal access tokens (`pat-cetra-…`). A token is shown once, when you create it. See [API keys and tokens](/docs/platform/api-keys/).
+- Admin appears for instance admins, with a badge next to your email. It opens the instance-wide user list. See [Organizations, projects and roles](/docs/platform/organizations/#instance-admins).
+- Show times in UTC switches every time in the UI between your local time and UTC.
+- Sign out.
+
+The Theme entry in the sidebar footer sets three things:
+
+- Theme: Light, Dark or System.
+- Density: Compact or Comfortable.
+- Palette: GitHub, Colour-blind, High contrast, Tokyo Night or Nord. Moving over a palette previews it, and picking one saves it.
+
+The same choices are in the command palette. cetra stores them in your browser, so they apply on that browser only.
+
+## Settings
+
+Click Settings in the sidebar footer to open the settings of the current project. A switch at the top of the settings sidebar changes between the project and the organization, and a filter box finds a page by name. Which pages you see depends on your role. See [Organizations, projects and roles](/docs/platform/organizations/).
+
+The Overview page of each scope shows one card per page, with a live status line such as the retention period or a failing channel.
+
+Project settings:
+
+- General: name, URL, [data retention](/docs/platform/deletion-and-retention/#retention) and online evaluation.
+- API keys: keys for SDKs and OTLP exporters. See [API keys and tokens](/docs/platform/api-keys/).
+- Data: delete an end user's data. See [Deletion and retention](/docs/platform/deletion-and-retention/#erase-one-persons-data-gdpr).
+- Members: project roles and overrides.
+- Score definitions: the scores that annotations use. See [Human annotation](/docs/evaluation/annotation/).
+- Model prices: token prices used to compute cost. See [Cost and tokens](/docs/tracing/cost-and-tokens/#custom-model-prices).
+- Channels: where [alerts](/docs/platform/alerts/#channels) are delivered.
+
+Organization settings:
+
+- General: organization name and URL.
+- Plan: plan, limits and usage. See [Plans and licence](/docs/platform/plans-and-licence/).
+- Members: members and invites.
+- LLM connections: provider keys for LLM judges. See [LLM connections](/docs/evaluation/llm-connections/).
+- Model prices: organization token prices.
+- Single sign-on: identity provider and domains, for organization owners. See [Single sign-on](/docs/platform/sso/).
+
+Settings pages behave the same way:
+
+- Each card has its own Save button. The card shows "Unsaved changes" until you save, then "Saved".
+- If you leave a page with unsaved edits, cetra asks whether to discard them.
+- Actions that delete data sit in a Danger zone, or in a card marked as dangerous, and ask you to confirm.

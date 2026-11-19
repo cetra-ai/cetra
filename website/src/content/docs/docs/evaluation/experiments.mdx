@@ -102,7 +102,7 @@ The options:
 
 ## What gets recorded
 
-- **One trace per run.** Its root span is named after the experiment and holds the item's input and your task's output. Every span the task starts, from your code or from an instrumentation library, carries the experiment ID and the dataset item ID, with the environment `experiment`. The default trace lists leave experiment traces out. Turn on **Show experiment traces** to see them.
+- **One trace per run.** Its root span is named after the experiment and holds the item's input and your task's output. Every span the task starts, from your code or from an instrumentation library, carries the experiment ID and the dataset item ID, with the environment `experiment`. The default trace lists leave experiment traces out. Open the **Include** menu and tick **Experiment traces** to see them.
 - **The scores.** They are attached to the run's trace. If tracing is sampled below 100%, a run can have no trace, and its scores stay in the local result only.
 - **The experiment row.** For every item and repetition: the input, the expected output, the output, the error, the trace and the latency. A very large output is cut and marked as truncated.
 
@@ -116,9 +116,26 @@ If uploading results fails, `evaluate` stops, marks the experiment as failed and
 
 ## Read the results
 
-Open **Experiments** in the UI. An experiment page shows summary cards (results, errors, latency, cost and one per score), a table with each item's input, expected output, output, scores, latency, cost and a link to its trace, and an **Errors only** switch.
+Open **Experiments** in the UI.
 
-To compare, tick 2 to 4 experiments in the list. The first one you tick is the baseline. The compare view shows each score with its change from the baseline, per-item outputs with a word-level difference, and highlights regressions: a score mean lower than the baseline's by more than a threshold you set (0.1 by default), or a new error. It warns when the experiments ran on different dataset versions.
+The list has a status strip (**Total**, **Running**, **Completed**, **Failed**, each with a count) and a **Dataset** filter. When you filter on one dataset with at least two runs, a **Trend** chart shows its runs over time. Each row shows the name and metadata tags, the dataset and version, the status, a badge for each score with its change since the previous run of the same dataset, the error count, latency, cost, the number of results out of the expected total, and the creation time. Select a row to open the experiment in a panel beside the list. The layout switcher in the panel header sets the panel to the drawer, the bottom or the full page.
+
+The experiment panel shows:
+
+- the dataset and version, the status, the creation and finish times, and **Compare with previous run** when the dataset has an earlier run;
+- summary cards: results, errors, latency, cost, and one per score with its distribution;
+- a table with each item's input, expected output, output, error, scores, latency, cost and a link to its trace, and an **Errors only** switch.
+
+Select a row of the table to open that item in a side sheet. It shows the repetition, latency, cost, the input, expected output and output, and the scores. **Pretty** and **JSON** switch how a value is shown, and **Open trace** goes to its trace. The up and down arrows step to the other items.
+
+### Compare experiments
+
+Tick 2 to 4 experiments in the list. The first one you tick is the baseline. A bar shows its name and a **Compare** button. The compare view shows each score with its change from the baseline, and per-item outputs with a word-level difference. Select an item to see all the runs of it in a side sheet. It warns when the experiments ran on different dataset versions.
+
+Two controls in the header set what counts as a change:
+
+- **Threshold** is a number from 0 to 1000, 0.1 by default. A score that drops by more than the threshold, or a new error, is a regression. A score that rises by more than it, or a fixed error, is an improvement.
+- **Show** filters the items: **All**, **Regressed**, **Improved** or **Changed**.
 
 ## Run it in CI
 
