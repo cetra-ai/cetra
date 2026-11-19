@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { Schema } from "@/api/types";
 import { JsonView } from "@/components/payload/json-view";
+import { Markdown } from "@/components/payload/markdown";
 import { MediaView } from "@/components/payload/media-view";
 import { ToolCallCard } from "@/components/payload/tool-call-card";
 
@@ -19,7 +20,7 @@ export function PartView({
   links: ToolLinks;
 }) {
   if (part.type === "text" && typeof part.content === "string") {
-    return <p className="text-xs break-words whitespace-pre-wrap">{part.content}</p>;
+    return <Markdown text={part.content} />;
   }
   if (part.type === "reasoning" && typeof part.content === "string") {
     return <Reasoning content={part.content} />;
@@ -55,7 +56,7 @@ export function PartView({
   }
   return (
     <div className="flex flex-col gap-1">
-      <p className="text-xs text-muted-foreground">Unknown part</p>
+      <p className="text-body text-muted-foreground">Unknown part</p>
       <JsonView value={part} />
     </div>
   );
@@ -75,14 +76,14 @@ function Reasoning({ content }: { content: string }) {
     <div className="flex flex-col gap-1">
       <button
         type="button"
-        className="self-start text-xs text-muted-foreground"
+        className="self-start text-body text-muted-foreground"
         aria-expanded={open}
         onClick={() => setOpen((current) => !current)}
       >
         Reasoning · {content.length}
       </button>
       {open ? (
-        <p className="text-xs break-words whitespace-pre-wrap text-muted-foreground italic">
+        <p className="text-body break-words whitespace-pre-wrap text-muted-foreground italic">
           {content}
         </p>
       ) : null}

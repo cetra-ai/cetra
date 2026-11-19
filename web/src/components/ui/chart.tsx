@@ -2,6 +2,7 @@ import { cn } from "cn";
 import * as React from "react";
 import type { TooltipValueType } from "recharts";
 import * as RechartsPrimitive from "recharts";
+import { LayoutKey } from "@/components/charts/layout-key";
 
 // Format: { THEME_NAME: CSS_SELECTOR }
 const THEMES = { light: "", dark: ".dark" } as const;
@@ -53,6 +54,7 @@ function ChartContainer({
 }) {
   const uniqueId = React.useId();
   const chartId = `chart-${id ?? uniqueId.replace(/:/g, "")}`;
+  const size = useOwnedSize();
 
   return (
     <ChartContext.Provider value={{ config }}>
@@ -60,18 +62,56 @@ function ChartContainer({
         data-slot="chart"
         data-chart={chartId}
         className={cn(
-          "flex aspect-video justify-center text-xs [&_.recharts-cartesian-axis-tick_text]:fill-muted-foreground [&_.recharts-cartesian-grid_line[stroke='#ccc']]:stroke-border/50 [&_.recharts-curve.recharts-tooltip-cursor]:stroke-border [&_.recharts-dot[stroke='#fff']]:stroke-transparent [&_.recharts-layer]:outline-hidden [&_.recharts-polar-grid_[stroke='#ccc']]:stroke-border [&_.recharts-radial-bar-background-sector]:fill-muted [&_.recharts-rectangle.recharts-tooltip-cursor]:fill-muted [&_.recharts-reference-line_[stroke='#ccc']]:stroke-border [&_.recharts-sector]:outline-hidden [&_.recharts-sector[stroke='#fff']]:stroke-transparent [&_.recharts-surface]:outline-hidden",
+          "flex aspect-video justify-center text-caption [&_.recharts-cartesian-axis-tick_text]:fill-muted-foreground [&_.recharts-cartesian-grid_line[stroke='#ccc']]:stroke-border/50 [&_.recharts-curve.recharts-tooltip-cursor]:stroke-border [&_.recharts-dot[stroke='#fff']]:stroke-transparent [&_.recharts-layer]:outline-hidden [&_.recharts-polar-grid_[stroke='#ccc']]:stroke-border [&_.recharts-radial-bar-background-sector]:fill-muted [&_.recharts-rectangle.recharts-tooltip-cursor]:fill-muted [&_.recharts-reference-line_[stroke='#ccc']]:stroke-border [&_.recharts-sector]:outline-hidden [&_.recharts-sector[stroke='#fff']]:stroke-transparent [&_.recharts-surface]:outline-hidden",
           className,
         )}
         {...props}
+        ref={size.ref}
       >
         <ChartStyle id={chartId} config={config} />
-        <RechartsPrimitive.ResponsiveContainer initialDimension={initialDimension}>
+        <RechartsPrimitive.ResponsiveContainer
+          initialDimension={initialDimension}
+          {...(size.measured ?? {})}
+        >
           {children}
         </RechartsPrimitive.ResponsiveContainer>
       </div>
     </ChartContext.Provider>
   );
+}
+
+type Size = { width: number; height: number };
+
+/**
+ * The chart box's size, measured by the chart itself under a `LayoutKey`: in the render that
+ * changes the key (before the browser paints) and on every later resize. Undefined outside a key,
+ * and while the box measures empty (jsdom): Recharts measures it then.
+ */
+function useOwnedSize(): { ref: React.RefObject<HTMLDivElement | null>; measured?: Size } {
+  const layoutKey = React.useContext(LayoutKey);
+  const owned = layoutKey !== "";
+  const ref = React.useRef<HTMLDivElement>(null);
+  const [measured, setMeasured] = React.useState<Size | undefined>(undefined);
+  const measure = React.useCallback(() => {
+    const element = ref.current;
+    if (!element || element.clientWidth <= 0 || element.clientHeight <= 0) return;
+    const next = { width: element.clientWidth, height: element.clientHeight };
+    setMeasured((prev) =>
+      prev?.width === next.width && prev.height === next.height ? prev : next,
+    );
+  }, []);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new key is what asks for a measure
+  React.useLayoutEffect(() => {
+    if (owned) measure();
+  }, [owned, layoutKey, measure]);
+  React.useEffect(() => {
+    const element = ref.current;
+    if (!owned || !element || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [owned, measure]);
+  return owned ? { ref, measured } : { ref };
 }
 
 const ChartStyle = ({ id, config }: { id: string; config: ChartConfig }) => {
@@ -160,7 +200,7 @@ function ChartTooltipContent({
   return (
     <div
       className={cn(
-        "grid min-w-32 items-start gap-1.5 rounded-lg border border-border/50 bg-background px-2.5 py-1.5 text-xs shadow-xl",
+        "grid min-w-32 items-start gap-1.5 rounded-lg border border-border/50 bg-background px-2.5 py-1.5 text-caption shadow-xl",
         className,
       )}
     >

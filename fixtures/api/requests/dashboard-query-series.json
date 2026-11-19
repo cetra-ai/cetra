@@ -1,0 +1,14 @@
+{
+  "from": "2026-01-01T10:00:00Z",
+  "to": "2026-01-01T11:00:00Z",
+  "bucket": "10m",
+  "shape": "series",
+  "query": {
+    "source": "traces",
+    "measures": [
+      { "agg": "count", "label": "Traces" },
+      { "agg": "rate", "where": "error_count > 0", "label": "Error rate" }
+    ],
+    "breakdown": { "field": "name", "limit": 3 }
+  }
+}

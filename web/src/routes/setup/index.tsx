@@ -48,9 +48,9 @@ function SetupPage() {
   if (token === undefined) {
     return (
       <AuthLayout title={`Set up ${PRODUCT_NAME}`}>
-        <p className="text-sm">
+        <p className="text-body">
           Open the setup link printed in the server log when it started. It looks like{" "}
-          <code className="font-mono text-xs">{window.location.origin}/setup?token=…</code>.
+          <code className="font-mono text-caption">{window.location.origin}/setup?token=…</code>.
         </p>
       </AuthLayout>
     );
@@ -156,7 +156,7 @@ function SetupForm({
     >
       {config.providers.length > 0 ? (
         <>
-          <p className="text-sm font-medium">Set up with single sign-on</p>
+          <p className="text-body font-medium">Set up with single sign-on</p>
           <ProviderButtons
             providers={config.providers}
             redirect="/setup/workspace"
@@ -168,7 +168,7 @@ function SetupForm({
       {config.password_enabled ? (
         <form noValidate onSubmit={onSubmit} className="flex flex-col gap-6">
           <fieldset className="flex flex-col gap-4">
-            <legend className="mb-2 text-sm font-medium">You</legend>
+            <legend className="mb-2 text-body font-medium">You</legend>
             <TextField
               id="name"
               label="Name (optional)"
@@ -201,7 +201,7 @@ function SetupForm({
             />
           </fieldset>
           <fieldset className="flex flex-col gap-4">
-            <legend className="mb-2 text-sm font-medium">Organization</legend>
+            <legend className="mb-2 text-body font-medium">Organization</legend>
             <TextField
               id="org_name"
               label="Organization name"
@@ -215,7 +215,7 @@ function SetupForm({
             />
           </fieldset>
           <fieldset className="flex flex-col gap-4">
-            <legend className="mb-2 text-sm font-medium">Project</legend>
+            <legend className="mb-2 text-body font-medium">Project</legend>
             <TextField
               id="project_name"
               label="Project name"
@@ -229,7 +229,7 @@ function SetupForm({
           </fieldset>
           <FormError message={formError} />
           {problemOf(setup.error)?.status === 409 ? (
-            <Link to="/login" className="text-sm underline-offset-4 hover:underline">
+            <Link to="/login" className="text-body underline-offset-4 hover:underline">
               Sign in
             </Link>
           ) : null}
@@ -237,7 +237,7 @@ function SetupForm({
         </form>
       ) : null}
       {!config.password_enabled && config.providers.length === 0 ? (
-        <p className="text-sm">{NO_SIGN_IN_METHOD}</p>
+        <p className="text-body">{NO_SIGN_IN_METHOD}</p>
       ) : null}
     </AuthLayout>
   );

@@ -1,4 +1,6 @@
 import { type HttpHandler, HttpResponse, http } from "msw";
+import dashboardQuerySeries from "../../../fixtures/api/responses/dashboard-query-series.json";
+import dashboardQueryTotal from "../../../fixtures/api/responses/dashboard-query-total.json";
 import { type MockEntry, type MockOperation, operations } from "./manifest";
 
 const NOT_FOUND = {
@@ -8,29 +10,44 @@ const NOT_FOUND = {
   code: "not_found",
 } as const;
 
-export const handlers: HttpHandler[] = sortBySpecificity(operations).map((operation) =>
-  http.get(operation.mswPath, ({ request, params }) => {
-    const entry = selectEntry(operation, pathParamsOf(params), queryOf(request.url));
-    if (!entry) {
-      return HttpResponse.json(NOT_FOUND, {
-        status: 404,
-        headers: { "Content-Type": "application/problem+json" },
-      });
-    }
-    if (entry.body instanceof Uint8Array) {
-      const buffer = new ArrayBuffer(entry.body.byteLength);
-      new Uint8Array(buffer).set(entry.body);
-      return HttpResponse.arrayBuffer(buffer, {
+/**
+ * The widget query answers the fixture examples of spec 05: a series for `series`, a total for
+ * `total`. The manifest serves GET only, so this POST is answered here.
+ */
+const widgetQueryFixture = http.post(
+  "/api/v1/projects/:project/dashboards/query",
+  async ({ request }) => {
+    const body = (await request.json()) as { shape?: string };
+    return HttpResponse.json(body.shape === "total" ? dashboardQueryTotal : dashboardQuerySeries);
+  },
+);
+
+export const handlers: HttpHandler[] = [
+  widgetQueryFixture,
+  ...sortBySpecificity(operations).map((operation) =>
+    http.get(operation.mswPath, ({ request, params }) => {
+      const entry = selectEntry(operation, pathParamsOf(params), queryOf(request.url));
+      if (!entry) {
+        return HttpResponse.json(NOT_FOUND, {
+          status: 404,
+          headers: { "Content-Type": "application/problem+json" },
+        });
+      }
+      if (entry.body instanceof Uint8Array) {
+        const buffer = new ArrayBuffer(entry.body.byteLength);
+        new Uint8Array(buffer).set(entry.body);
+        return HttpResponse.arrayBuffer(buffer, {
+          status: entry.status,
+          headers: { "Content-Type": entry.contentType },
+        });
+      }
+      return HttpResponse.json(jsonBody(entry.body), {
         status: entry.status,
         headers: { "Content-Type": entry.contentType },
       });
-    }
-    return HttpResponse.json(jsonBody(entry.body), {
-      status: entry.status,
-      headers: { "Content-Type": entry.contentType },
-    });
-  }),
-);
+    }),
+  ),
+];
 
 export function sortBySpecificity<T extends { mswPath: string }>(items: readonly T[]): T[] {
   return [...items].sort((left, right) => {

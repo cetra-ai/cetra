@@ -2,6 +2,7 @@ import { createFileRoute, notFound } from "@tanstack/react-router";
 import { problemOf } from "@/api/problem";
 import { sessionQuery } from "@/api/queries";
 import { SessionView } from "@/components/session/session-view";
+import { TopBarCrumb } from "@/components/shell/top-bar-slot";
 import { parseSessionPageSearch } from "@/lib/search/sessions";
 
 export const Route = createFileRoute("/$org/$project/sessions/$sessionId")({
@@ -33,6 +34,9 @@ function SessionPage() {
   const search = Route.useSearch();
   return (
     <div className="relative h-full min-h-0 flex-1">
+      <TopBarCrumb>
+        <span className="max-w-48 truncate font-mono text-body">{sessionId}</span>
+      </TopBarCrumb>
       <div className="absolute inset-0 flex min-h-0 flex-col">
         <SessionView sessionId={sessionId} search={search} />
       </div>

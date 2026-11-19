@@ -87,6 +87,35 @@ it("persists sidebar collapse in localStorage across a re-render", async () => {
   );
 });
 
+it("shows the demo notice on the pages of a project in the demo org", async () => {
+  server.use(
+    http.get("/api/auth/me", () =>
+      HttpResponse.json({
+        user: {
+          id: "01900000-0000-7000-8000-000000000100",
+          email: "ada@example.com",
+          name: "Ada Example",
+          is_instance_admin: false,
+        },
+        orgs: [
+          {
+            id: "01900000-0000-7000-8000-000000000020",
+            slug: "cetra-demo",
+            name: "cetra Demo",
+            role: "viewer",
+            demo: true,
+          },
+        ],
+      }),
+    ),
+  );
+
+  await renderApp("/cetra-demo/support-bot/traces");
+  expect(screen.getByRole("status", { name: "Demo" })).toHaveTextContent(
+    "You're exploring the cetra demo, read-only.",
+  );
+});
+
 function project(name: string, slug: string) {
   return {
     id: `01900000-0000-7000-8000-${slug.padEnd(12, "0").slice(0, 12)}`,

@@ -2,6 +2,9 @@
 //!
 //! Spec 09 § Observability data and § Response shapes.
 
+use std::collections::BTreeMap;
+
+use cetra_core::enums::ScoreDataType;
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
@@ -10,6 +13,19 @@ use super::sessions::SessionSummary;
 
 /// Most sessions a user detail response includes. Spec 09 § Response shapes.
 pub const MAX_USER_SESSIONS: usize = 100;
+
+/// Average of one score name over a user's traces (spec 09 § Observability data).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct UserScore {
+    /// Score name.
+    pub name: String,
+    /// `numeric` or `boolean`.
+    pub data_type: ScoreDataType,
+    /// Mean `value_num`; for booleans the share of `true`.
+    pub avg: f64,
+    /// Number of scores averaged.
+    pub count: i64,
+}
 
 /// One row of the end-user list.
 ///
@@ -33,12 +49,22 @@ pub struct EndUserSummary {
     pub session_count: i64,
     /// Sum of the traces' `error_count`.
     pub error_count: i64,
+    /// Traces whose status is `error`.
+    pub error_trace_count: i64,
     /// Sum of trace token totals. Omitted when every trace omitted the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_tokens: Option<i64>,
     /// Sum of trace costs, USD. Omitted when every trace omitted the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_total: Option<f64>,
+    /// Trace counts in 24 equal buckets: the request's `[from, to)`, or without one
+    /// `[first_seen, last_seen]` of the returned rows.
+    pub activity: Vec<i64>,
+    /// Average of each numeric and boolean score name over the user's traces.
+    pub scores: Vec<UserScore>,
+    /// `user.*` keys of the latest trace's metadata, without the prefix. Omitted when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
 }
 
 /// User summary plus the most recent sessions.
@@ -65,6 +91,18 @@ pub enum UserSort {
     TraceCount,
     /// `cost_total`.
     CostTotal,
+    /// `session_count`.
+    SessionCount,
+    /// `total_tokens`.
+    TotalTokens,
+    /// `error_count`.
+    ErrorCount,
+    /// `error_rate`: `error_trace_count / trace_count`.
+    ErrorRate,
+    /// `traces_per_session`: `trace_count / session_count`, null without sessions.
+    TracesPerSession,
+    /// `first_seen`.
+    FirstSeen,
 }
 
 /// Query parameters of `GET /api/v1/projects/{project}/users`.
@@ -103,13 +141,35 @@ pub struct UserListParams {
     pub include_experiments: bool,
 }
 
+/// Query parameters of `GET /api/v1/projects/{project}/users/{user_id}`.
+///
+/// Spec 09 § Observability data.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+pub struct UserDetailParams {
+    /// Inclusive range start. RFC 3339 or epoch milliseconds.
+    #[serde(default)]
+    pub from: Option<TimeParam>,
+    /// Exclusive range end. RFC 3339 or epoch milliseconds.
+    #[serde(default)]
+    pub to: Option<TimeParam>,
+    /// Include traces from the evaluation environment. Default false. Spec 05 § Default exclusions.
+    #[serde(default)]
+    pub include_eval: bool,
+    /// Include experiment traces. Default false. Spec 05 § Default exclusions.
+    #[serde(default)]
+    pub include_experiments: bool,
+}
+
 #[cfg(test)]
 mod tests {
-    use cetra_core::enums::ScoreSource;
+    use std::collections::BTreeMap;
+
+    use cetra_core::enums::{ScoreDataType, ScoreSource};
     use cetra_core::score::ScoreValue;
     use uuid::Uuid;
 
-    use super::{EndUserDetail, EndUserSummary};
+    use super::{EndUserDetail, EndUserSummary, UserScore};
     use crate::api::sessions::SessionSummary;
     use crate::api::traces::ScoreBrief;
 
@@ -125,8 +185,22 @@ mod tests {
                 trace_count: 2,
                 session_count: 1,
                 error_count: 0,
+                error_trace_count: 0,
                 total_tokens: Some(2600),
                 cost_total: Some(0.00306),
+                activity: vec![
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+                ],
+                scores: vec![UserScore {
+                    name: "resolved".to_owned(),
+                    data_type: ScoreDataType::Boolean,
+                    avg: 1.0,
+                    count: 1,
+                }],
+                metadata: BTreeMap::from([
+                    ("name".to_owned(), "\"Ada Example\"".to_owned()),
+                    ("plan".to_owned(), "\"pro\"".to_owned()),
+                ]),
             },
             sessions: vec![SessionSummary {
                 session_id: "sess-001".to_owned(),
@@ -145,6 +219,9 @@ mod tests {
                     value: ScoreValue::Boolean(true),
                     source: ScoreSource::Human,
                 }],
+                error_trace_count: 0,
+                first_input_preview: None,
+                last_output_preview: None,
             }],
         };
 

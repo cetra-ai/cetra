@@ -19,13 +19,12 @@ function ProjectDataPage() {
 
   return (
     <SettingsPage
+      width="wide"
       title="Data"
       description="Delete end-user data and follow deletion requests. Retention is under General."
     >
-      <div className="flex max-w-3xl flex-col gap-8">
-        <UserDeletionForm />
-        <DeletionHistory />
-      </div>
+      <UserDeletionForm />
+      <DeletionHistory />
     </SettingsPage>
   );
 }

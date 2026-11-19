@@ -296,11 +296,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn projects_list_pages_orgs_and_projects() {
         let orgs_first = json!({
-            "data": [{"id": "01900000-0000-7000-8000-000000000010", "slug": "acme", "name": "Acme", "role": "owner"}],
+            "data": [{"id": "01900000-0000-7000-8000-000000000010", "slug": "acme", "name": "Acme", "role": "owner", "demo": false}],
             "next_cursor": "o2"
         });
         let orgs_second = json!({
-            "data": [{"id": "01900000-0000-7000-8000-000000000011", "slug": "beta", "name": "Beta", "role": "viewer"}],
+            "data": [{"id": "01900000-0000-7000-8000-000000000011", "slug": "beta", "name": "Beta", "role": "viewer", "demo": false}],
             "next_cursor": null
         });
         let acme_first = json!({
@@ -383,7 +383,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn projects_list_stops_when_a_cursor_repeats() {
         let org_page = json!({
-            "data": [{"id": "01900000-0000-7000-8000-000000000010", "slug": "acme", "name": "Acme", "role": "owner"}],
+            "data": [{"id": "01900000-0000-7000-8000-000000000010", "slug": "acme", "name": "Acme", "role": "owner", "demo": false}],
             "next_cursor": "o2"
         });
         let canned = Canned::json(vec![
@@ -401,7 +401,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn projects_list_cleans_a_control_character_in_a_cell() {
         let orgs = json!({
-            "data": [{"id": "01900000-0000-7000-8000-000000000010", "slug": "acme", "name": "Acme", "role": "owner"}],
+            "data": [{"id": "01900000-0000-7000-8000-000000000010", "slug": "acme", "name": "Acme", "role": "owner", "demo": false}],
             "next_cursor": null
         });
         let projects = json!({
@@ -452,7 +452,7 @@ mod tests {
             (
                 200,
                 json!({
-                    "data": [{"id": "01900000-0000-7000-8000-000000000010", "slug": "acme", "name": "Acme", "role": "owner"}],
+                    "data": [{"id": "01900000-0000-7000-8000-000000000010", "slug": "acme", "name": "Acme", "role": "owner", "demo": false}],
                     "next_cursor": null
                 })
                 .to_string(),

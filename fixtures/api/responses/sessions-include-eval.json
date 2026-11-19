@@ -9,7 +9,9 @@
       "error_count": 2,
       "user_id": "user-7",
       "tags": [],
-      "scores": []
+      "scores": [],
+      "error_trace_count": 1,
+      "first_input_preview": "What is your refund policy?"
     },
     {
       "session_id": "sess-001",
@@ -36,7 +38,10 @@
           },
           "source": "human"
         }
-      ]
+      ],
+      "error_trace_count": 0,
+      "first_input_preview": "My order 1234 hasn't arrived.",
+      "last_output_preview": "Yes. Send the new address and I will update the delivery."
     }
   ],
   "next_cursor": null

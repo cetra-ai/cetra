@@ -309,6 +309,51 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/projects/{project}/saved-views/{id}",
         "delete_saved_view",
     ),
+    (
+        "get",
+        "/api/v1/projects/{project}/dashboards",
+        "list_dashboards",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/dashboards",
+        "create_dashboard",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/dashboards/{id}",
+        "get_dashboard",
+    ),
+    (
+        "patch",
+        "/api/v1/projects/{project}/dashboards/{id}",
+        "update_dashboard",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/dashboards/{id}",
+        "delete_dashboard",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/dashboards/query",
+        "query_widget",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/dashboards/overview",
+        "get_overview",
+    ),
+    (
+        "put",
+        "/api/v1/projects/{project}/dashboards/overview",
+        "save_overview",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/dashboards/overview",
+        "reset_overview",
+    ),
     ("post", "/api/v1/projects/{project}/sql", "run_sql"),
     (
         "get",
@@ -365,7 +410,12 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/projects/{project}/alert-rules/{id}/events",
         "list_alert_events",
     ),
-    ("get", "/api/v1/projects/{project}/metrics", "get_metrics"),
+    (
+        "get",
+        "/api/v1/projects/{project}/alert-events",
+        "list_project_alert_events",
+    ),
+    ("get", "/api/v1/projects/{project}/facets", "get_facets"),
     (
         "get",
         "/api/v1/projects/{project}/media/{sha256}",
@@ -406,8 +456,18 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ),
     (
         "get",
+        "/api/v1/projects/{project}/evaluators/stats",
+        "get_evaluator_stats",
+    ),
+    (
+        "get",
         "/api/v1/projects/{project}/evaluators/{id}",
         "get_evaluator",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/evaluators/{id}/versions",
+        "list_evaluator_versions",
     ),
     (
         "patch",
@@ -433,6 +493,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "get",
         "/api/v1/projects/{project}/online-rules",
         "list_online_rules",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/online-rules/stats",
+        "get_online_rule_stats",
     ),
     (
         "post",
@@ -590,6 +655,36 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "get_dataset_export",
     ),
     (
+        "patch",
+        "/api/v1/projects/{project}/datasets/{dataset}/items",
+        "patch_dataset_items",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/datasets/{dataset}/items/delete",
+        "post_dataset_items_delete",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/datasets/{dataset}/items/from-traces",
+        "post_dataset_items_from_traces",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/datasets/{dataset}/restore",
+        "restore_dataset",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/datasets/{dataset}/versions/{version}/changes",
+        "list_dataset_version_changes",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/dataset-trends",
+        "list_experiment_trends",
+    ),
+    (
         "get",
         "/api/v1/projects/{project}/experiments",
         "list_experiments",
@@ -613,6 +708,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "get",
         "/api/v1/projects/{project}/experiments/compare",
         "compare_experiments",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/experiments/summaries",
+        "get_experiment_summaries",
     ),
     (
         "delete",
@@ -661,6 +761,7 @@ const QUERY_OR_BODY: &[&str] = &[
     "post_internal_membership_lookup",
     "list_internal_org_members",
     "list_alert_events",
+    "list_project_alert_events",
     "list_org_members",
     "list_org_invites",
     "list_llm_connections",
@@ -679,15 +780,21 @@ const QUERY_OR_BODY: &[&str] = &[
     "list_scores",
     "list_saved_views",
     "get_saved_view",
-    "get_metrics",
+    "list_dashboards",
+    "get_dashboard",
+    "get_overview",
+    "get_facets",
     "list_deletions",
     "get_deletion",
     "list_org_deletions",
     "list_evaluators",
+    "list_evaluator_versions",
     "list_score_definitions",
     "list_datasets",
     "list_dataset_versions",
     "list_dataset_items",
+    "list_dataset_version_changes",
+    "list_experiment_trends",
     "get_dataset_item",
     "list_experiments",
     "get_experiment",
@@ -712,9 +819,12 @@ const READ_OPERATIONS: &[&str] = &[
     "list_users",
     "get_user",
     "list_scores",
-    "get_metrics",
+    "get_facets",
     "get_experiment_results",
     "compare_experiments",
+    "get_evaluator_stats",
+    "get_online_rule_stats",
+    "get_experiment_summaries",
 ];
 
 const TAGS: &[&str] = &[
@@ -735,8 +845,8 @@ const TAGS: &[&str] = &[
     "model_prices",
     "schema",
     "saved_views",
+    "dashboards",
     "sql",
-    "metrics",
     "media",
     "internal",
     "deletions",
@@ -959,10 +1069,19 @@ fn document_lint() {
             // The handler always answers 204. CSRF is the shared origin check.
         } else if *id == "create_scores" || *id == "create_key_scores" {
             expected_errors.extend(["400", "401", "402", "403", "404", "413", "429"]);
-        } else if *id == "delete_score" || *id == "delete_saved_view" {
+        } else if *id == "delete_score"
+            || *id == "delete_saved_view"
+            || *id == "delete_dashboard"
+            || *id == "reset_overview"
+        {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
-        } else if *id == "create_saved_view" || *id == "update_saved_view" {
-            // 409: unsharing a view whose owner was deleted.
+        } else if *id == "create_saved_view"
+            || *id == "update_saved_view"
+            || *id == "create_dashboard"
+            || *id == "update_dashboard"
+            || *id == "save_overview"
+        {
+            // 409: unsharing a view whose owner was deleted, a dashboard past its limit, or a stale version.
             expected_errors.extend(["400", "401", "403", "404", "409", "413", "415", "429"]);
         } else if *id == "post_feedback" {
             expected_errors.extend(["400", "401", "402", "403", "404", "413", "429"]);
@@ -986,7 +1105,7 @@ fn document_lint() {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
         } else if *id == "post_org_sso_domain_verify" || *id == "delete_org_sso_provider" {
             expected_errors.extend(["401", "403", "404", "409", "429"]);
-        } else if *id == "run_sql" {
+        } else if *id == "run_sql" || *id == "query_widget" {
             expected_errors.extend(["400", "401", "403", "404", "413", "415", "422", "429"]);
         } else if *id == "create_deletion" {
             expected_errors.extend(["400", "401", "403", "404", "409", "422", "429"]);
@@ -1029,6 +1148,10 @@ fn document_lint() {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "post_dataset_item_from_trace" {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
+        } else if *id == "patch_dataset_items" || *id == "post_dataset_items_delete" {
+            expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
+        } else if *id == "post_dataset_items_from_traces" || *id == "restore_dataset" {
+            expected_errors.extend(["400", "401", "403", "404", "409", "413", "429"]);
         } else if *id == "post_dataset_import_preview" {
             expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
         } else if *id == "post_dataset_import" {
@@ -1126,9 +1249,11 @@ fn document_lint() {
         ("ApiKeyPage", "ApiKey"),
         ("PersonalTokenPage", "PersonalToken"),
         ("SavedViewPage", "SavedView"),
+        ("DashboardPage", "DashboardSummary"),
         ("LlmConnectionPage", "LlmConnection"),
         ("DeletionPage", "Deletion"),
         ("EvaluatorPage", "Evaluator"),
+        ("EvaluatorVersionPage", "EvaluatorVersion"),
         ("ScoreDefinitionPage", "ScoreDefinition"),
         ("DatasetPage", "Dataset"),
         ("DatasetVersionPage", "DatasetVersion"),
@@ -1294,7 +1419,7 @@ fn check_property_names(schema: &Value, owner: &str) {
 
 fn assert_exclusions(document: &Value) {
     const EXPECTED: &[&str] = &[
-        "get_metrics",
+        "get_facets",
         "get_session",
         "get_user",
         "list_sessions",
@@ -1408,13 +1533,16 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "ApiKeyPage",
         "PersonalTokenPage",
         "SavedViewPage",
+        "DashboardPage",
         "LlmConnectionPage",
         "DeletionPage",
         "EvaluatorPage",
+        "EvaluatorVersionPage",
         "ScoreDefinitionPage",
         "DatasetPage",
         "DatasetVersionPage",
         "DatasetItemPage",
+        "ItemChangePage",
         "ExperimentPage",
         "ModelPricePage",
         "ChannelPage",

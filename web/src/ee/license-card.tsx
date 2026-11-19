@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { TriangleAlert } from "lucide-react";
 import { adminLicenseQuery } from "@/api/queries-admin";
 import type { Schema } from "@/api/types";
+import { SettingsCard } from "@/components/settings/settings-card";
 import { Skeleton } from "@/components/ui/skeleton";
 
 const FEATURE_NAMES: Record<Schema<"Feature">, string> = {
@@ -24,9 +25,8 @@ export function LicenseCard() {
   const data = license.data;
 
   return (
-    <section aria-label="Licence" className="flex flex-col gap-2">
-      <h3 className="text-base font-medium">Licence</h3>
-      <dl className="grid grid-cols-[minmax(10rem,max-content)_1fr] gap-x-6 gap-y-2 text-sm">
+    <SettingsCard title="Licence">
+      <dl className="grid grid-cols-[minmax(10rem,max-content)_1fr] gap-x-6 gap-y-2 text-body">
         <dt className="text-muted-foreground">Status</dt>
         <dd>
           {data.status === "grace" ? (
@@ -56,10 +56,10 @@ export function LicenseCard() {
             : "None"}
         </dd>
       </dl>
-      <p className="text-sm text-muted-foreground">
+      <p className="text-body text-muted-foreground">
         Set the key with CETRA_LICENSE_KEY and restart the server.
       </p>
-    </section>
+    </SettingsCard>
   );
 }
 

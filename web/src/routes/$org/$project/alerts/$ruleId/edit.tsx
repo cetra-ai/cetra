@@ -35,14 +35,15 @@ function EditRulePage() {
 
   const toRule = () => {
     void navigate({
-      to: "/$org/$project/alerts/$ruleId",
-      params: { org, project, ruleId: rule.id },
+      to: "/$org/$project/alerts",
+      params: { org, project },
+      search: { rule: rule.id },
     });
   };
 
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-6 overflow-auto px-4 py-6">
-      <h1 className="text-lg font-medium">Edit {rule.name}</h1>
+      <h2 className="text-title font-medium">Edit {rule.name}</h2>
       <RuleForm org={org} project={project} rule={rule} onSaved={toRule} onCancel={toRule} />
     </div>
   );

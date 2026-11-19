@@ -36,6 +36,12 @@ describe("formatDuration", () => {
     expect(formatDuration(3600 * SECOND)).toBe("1h 00m");
   });
 
+  it("reads durations from 48 hours as days and hours", () => {
+    expect(formatDuration((47 * 3600 + 59 * 60) * SECOND)).toBe("47h 59m");
+    expect(formatDuration(48 * 3600 * SECOND)).toBe("2d 0h");
+    expect(formatDuration((13 * 24 + 7) * 3600 * SECOND)).toBe("13d 7h");
+  });
+
   it("shows a positive sub-microsecond duration as 1µs", () => {
     expect(formatDuration(NS)).toBe("1µs");
   });

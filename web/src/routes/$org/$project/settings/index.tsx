@@ -1,7 +1,6 @@
-import { createFileRoute, redirect } from "@tanstack/react-router";
+import { createFileRoute } from "@tanstack/react-router";
+import { ProjectSettingsHome } from "@/components/settings/settings-home";
 
 export const Route = createFileRoute("/$org/$project/settings/")({
-  beforeLoad: ({ params }) => {
-    throw redirect({ to: "/$org/$project/settings/general", params });
-  },
+  component: ProjectSettingsHome,
 });

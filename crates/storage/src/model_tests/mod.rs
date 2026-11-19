@@ -1134,3 +1134,27 @@ fn s3_mode_uses_both_upload_paths() {
         "no multipart upload was completed"
     );
 }
+
+/// Found by CI on main (2026-11-17). Two synced appends to B, then `DropB`, then a lossy crash.
+/// Dropping the storage without shutdown woke the flush task into a last flush before its abort.
+/// B's rows are dropped, so that flush wrote no file and committed only its sequence to the
+/// catalog, which the lossy shim does not freeze: replay then found none of the durable records.
+/// It failed about one run in five with 48 runs at once; `drop_tests` holds the direct test.
+#[test]
+fn regression_lossy_crash_after_drop_project() {
+    run_case(
+        &[
+            Op::Append {
+                project: P::B,
+                trace: 0,
+                count: 2,
+                split: true,
+            },
+            Op::DropB,
+            Op::LossyCrash {
+                seed: 4_929_351_266_769_504_054,
+            },
+        ],
+        (P::A, P::B),
+    );
+}

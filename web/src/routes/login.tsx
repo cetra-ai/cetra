@@ -269,7 +269,7 @@ function LoginPage() {
             </form>
           ) : null}
           {!showPassword && config.providers.length === 0 ? (
-            <p className="text-sm">{NO_SIGN_IN_METHOD}</p>
+            <p className="text-body">{NO_SIGN_IN_METHOD}</p>
           ) : null}
           {!config.password_enabled && !search.password && config.providers.length > 0 ? (
             <Link

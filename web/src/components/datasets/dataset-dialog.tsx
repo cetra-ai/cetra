@@ -274,14 +274,14 @@ function DatasetForm({
           }}
         />
         {errors.description ? (
-          <p className="text-xs text-destructive">{errors.description}</p>
+          <p className="text-caption text-destructive">{errors.description}</p>
         ) : null}
       </div>
       <div className="flex flex-col gap-1.5">
         <Label htmlFor="dataset-input-schema">Input schema</Label>
         <Textarea
           id="dataset-input-schema"
-          className="font-mono text-xs"
+          className="font-mono text-caption"
           spellCheck={false}
           rows={5}
           value={inputText}
@@ -292,18 +292,18 @@ function DatasetForm({
             onDirty();
           }}
         />
-        <p id="dataset-input-schema-hint" className="text-xs text-muted-foreground">
+        <p id="dataset-input-schema-hint" className="text-caption text-muted-foreground">
           A JSON Schema every item's input must match. Leave empty for none.
         </p>
         {errors.input_schema ? (
-          <p className="text-xs text-destructive">{errors.input_schema}</p>
+          <p className="text-caption text-destructive">{errors.input_schema}</p>
         ) : null}
       </div>
       <div className="flex flex-col gap-1.5">
         <Label htmlFor="dataset-expected-schema">Expected output schema</Label>
         <Textarea
           id="dataset-expected-schema"
-          className="font-mono text-xs"
+          className="font-mono text-caption"
           spellCheck={false}
           rows={5}
           value={expectedText}
@@ -314,15 +314,15 @@ function DatasetForm({
             onDirty();
           }}
         />
-        <p id="dataset-expected-schema-hint" className="text-xs text-muted-foreground">
+        <p id="dataset-expected-schema-hint" className="text-caption text-muted-foreground">
           A JSON Schema every item's expected output must match. Leave empty for none.
         </p>
         {errors.expected_schema ? (
-          <p className="text-xs text-destructive">{errors.expected_schema}</p>
+          <p className="text-caption text-destructive">{errors.expected_schema}</p>
         ) : null}
       </div>
       {batchErrors.length > 0 ? (
-        <div role="alert" className="flex flex-col gap-0.5 text-sm text-destructive">
+        <div role="alert" className="flex flex-col gap-0.5 text-body text-destructive">
           <p className="whitespace-pre-line">
             {batchErrors.slice(0, SCHEMA_LINES_SHOWN).join("\n")}
           </p>

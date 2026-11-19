@@ -16,7 +16,7 @@ Read [README.md](README.md) first, especially § Design (all of it) and § Relea
 
 **Edit only:**
 - `.github/workflows/release.yml` (new);
-- `.github/README.md`.
+- `.github/CI.md`.
 
 **Commit:** `Add the release workflow`
 
@@ -361,7 +361,7 @@ jobs:
             deploy/install.sh
 ```
 
-### `.github/README.md`
+### `.github/CI.md`
 
 Append a new section at the end of the file:
 
@@ -403,7 +403,7 @@ Also read the workflow against these facts. They are the points a reviewer will 
 
 ## Done when
 
-- [ ] `release.yml` and the `.github/README.md` section are in.
+- [ ] `release.yml` and the `.github/CI.md` section are in.
 - [ ] `just check-workflows`, `just check` and `just assert-clean` pass. One commit:
       `Add the release workflow`.
 - [ ] Your report says the workflow is untested until the user's dry run (README § Releasing).

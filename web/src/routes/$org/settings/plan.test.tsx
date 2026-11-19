@@ -9,12 +9,13 @@ import usageFixture from "../../../../../fixtures/api/static/org-usage.json";
 it("shows the month's units against the included units and the reset date", async () => {
   await renderApp("/acme/settings/plan");
 
-  const meter = await screen.findByRole("meter", { name: "Units this month" });
+  const page = within(await screen.findByRole("region", { name: "Usage this month" }));
+  const meter = page.getByRole("meter", { name: "Units this month" });
   expect(meter).toHaveAttribute("aria-valuenow", "1240");
   expect(meter).toHaveAttribute("aria-valuemax", "200000");
-  expect(screen.getByText("1,240 of 200,000 units")).toBeInTheDocument();
-  expect(screen.getByText("Resets on 2026-02-01 (UTC).")).toBeInTheDocument();
-  expect(screen.queryByText(/Ingest pauses at/)).toBeNull();
+  expect(page.getByText("1,240 of 200,000 units")).toBeInTheDocument();
+  expect(page.getByText("Resets on 2026-02-01 (UTC).")).toBeInTheDocument();
+  expect(page.queryByText(/Ingest pauses at/)).toBeNull();
   expect(await screen.findByRole("img", { name: "Daily units" })).toBeInTheDocument();
 });
 
@@ -31,10 +32,11 @@ it("measures against the cap and says when ingest pauses without an included val
 
   await renderApp("/acme/settings/plan");
 
-  const meter = await screen.findByRole("meter", { name: "Units this month" });
+  const page = within(await screen.findByRole("region", { name: "Usage this month" }));
+  const meter = page.getByRole("meter", { name: "Units this month" });
   expect(meter).toHaveAttribute("aria-valuemax", "250000");
-  expect(screen.getByText("1,240 of 250,000 units")).toBeInTheDocument();
-  expect(screen.getByText("Ingest pauses at 250,000 units.")).toBeInTheDocument();
+  expect(page.getByText("1,240 of 250,000 units")).toBeInTheDocument();
+  expect(page.getByText("Ingest pauses at 250,000 units.")).toBeInTheDocument();
 });
 
 it("shows only the usage text when neither an included value nor a cap is set", async () => {
@@ -47,8 +49,9 @@ it("shows only the usage text when neither an included value nor a cap is set", 
 
   await renderApp("/acme/settings/plan");
 
-  expect(await screen.findByText("1,240 units")).toBeInTheDocument();
-  expect(screen.queryByRole("meter")).toBeNull();
+  const page = within(await screen.findByRole("region", { name: "Usage this month" }));
+  expect(page.getByText("1,240 units")).toBeInTheDocument();
+  expect(page.queryByRole("meter")).toBeNull();
 });
 
 it("totals the daily usage", async () => {

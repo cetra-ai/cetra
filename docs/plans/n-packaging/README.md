@@ -330,7 +330,7 @@ crates/cli/src/health.rs                  cetra health                          
 ```
 
 N edits only these files plus `justfile`, `AGENTS.md`, `.gitignore`, `biome.json`,
-`crates/cli/src/main.rs`, `.github/README.md` and `docs/roadmap.md`, as each sub-phase says.
+`crates/cli/src/main.rs`, `.github/CI.md` and `docs/roadmap.md`, as each sub-phase says.
 Nothing else in `crates/`, `web/` or `sdks/` changes.
 
 ## Sub-phases
@@ -450,7 +450,7 @@ Each sub-phase lists the tools it needs. If one is missing, stop and report whic
    until the rename.
 5. Delete the draft release, or keep it as a record. Tags of drafts stay.
 
-**First public release (after D46's rename):** `just release-prep 0.1.0`, merge, tag `v0.1.0`.
+**First public release (after D46's rename):** re-enable cargo deny (D188: `deny` back in `check-rust` and CI's `rust-policy` job, the weekly schedule in `advisories.yml`, `just deny` green), then `just release-prep 0.1.0`, merge, tag `v0.1.0`.
 Make the two GHCR packages public, then publish. That release is not a draft.
 
 ## Requests for Q
@@ -533,7 +533,6 @@ Planned in [`m3/`](m3/00-design.md) (D180, D182):
 
 - **SDK publishing** (PyPI, npm): not in N's scope as briefed. The SDK versions and release flow
   need a decision.
-- **Copyright holder** in `LICENSE` (P's open item): confirm before the first public release.
 - **Native TLS** (spec 12's `tls.cert`/`tls.key`): not built. The docs say to use a reverse proxy.
 - **Upgrade testing:** releases are smoke-tested from a fresh install only. An upgrade test from
   the previous release can come once there are releases.

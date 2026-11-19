@@ -158,7 +158,7 @@ function WorkspacePage() {
         title="Create your workspace"
         description="An organization holds your projects and members. You can add more of both later."
       >
-        <p className="text-sm text-muted-foreground">
+        <p className="text-body text-muted-foreground">
           Organizations are created from your account.
         </p>
         {config?.org_create_url ? (

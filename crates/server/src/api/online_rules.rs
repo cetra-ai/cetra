@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
+use cetra_core::enums::ScoreDataType;
 use serde::{Deserialize, Deserializer, Serialize};
 use utoipa::openapi::schema::{ArrayBuilder, ObjectBuilder, Schema, SchemaType, Type};
 use utoipa::openapi::{Ref, RefOr};
@@ -10,6 +11,8 @@ use utoipa::{PartialSchema, ToSchema};
 use uuid::Uuid;
 
 use super::common::TimeParam;
+use super::evaluators::{CategoryCount, StatsWindow};
+use super::metrics::MetricPoint;
 
 /// The period of a rule budget, in UTC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -363,6 +366,64 @@ pub struct OnlineRulePreview {
     #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub to: i64,
+}
+
+/// `GET /api/v1/projects/{project}/online-rules/stats` response (D-I-50).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct OnlineRuleStatsResponse {
+    /// The 24 hours the figures cover.
+    pub window: StatsWindow,
+    /// One entry per online rule, ordered like the rule list (by name, then id). Rules without
+    /// jobs or scores are included with zeros.
+    pub data: Vec<OnlineRuleStats>,
+}
+
+/// The stats of one online rule (D-I-50).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct OnlineRuleStats {
+    /// The rule.
+    pub rule_id: Uuid,
+    /// Its finished jobs in the window, per hour, 24 points, oldest first.
+    pub jobs_hourly: Vec<RuleJobsHour>,
+    /// Its scores in the window.
+    pub scores: RuleScoreStats,
+}
+
+/// The finished jobs of one online rule in one hour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RuleJobsHour {
+    /// Start of the hour. JSON is RFC 3339.
+    #[serde(with = "cetra_core::time_serde")]
+    #[schema(value_type = String, format = DateTime)]
+    pub time: i64,
+    /// Done jobs.
+    pub done: u64,
+    /// Failed jobs.
+    pub failed: u64,
+    /// Skipped jobs.
+    pub skipped: u64,
+}
+
+/// The scores of one online rule in the window. Read with the rule's evaluator's current output
+/// type (D-I-48).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct RuleScoreStats {
+    /// The output type of the rule's evaluator.
+    pub data_type: ScoreDataType,
+    /// Live scores in the window, of any type.
+    pub count: u64,
+    /// Mean of the numeric values. Numeric outputs only. Omitted when there is no numeric value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub average: Option<f64>,
+    /// Share of `true` values, 0 to 1. Boolean outputs only. Omitted when there is no value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pass_rate: Option<f64>,
+    /// The most frequent label. Categorical outputs only. Omitted when there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_category: Option<CategoryCount>,
+    /// Per hour: the average (numeric) or pass rate (boolean), 24 points, oldest first. An hour
+    /// without a value has no `value`.
+    pub hourly: Vec<MetricPoint>,
 }
 
 /// Deserializes a field that is present, and refuses `null` through `T`'s own deserializer.

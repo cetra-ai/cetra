@@ -7,8 +7,53 @@
       "trace_count": 3,
       "session_count": 1,
       "error_count": 0,
+      "error_trace_count": 0,
       "total_tokens": 5150,
-      "cost_total": 0.00685
+      "cost_total": 0.00685,
+      "activity": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1
+      ],
+      "scores": [
+        {
+          "name": "helpfulness",
+          "data_type": "numeric",
+          "avg": 0.7,
+          "count": 2
+        },
+        {
+          "name": "thumbs",
+          "data_type": "boolean",
+          "avg": 1.0,
+          "count": 1
+        }
+      ],
+      "metadata": {
+        "name": "\"Ada Example\"",
+        "plan": "\"pro\""
+      }
     },
     {
       "user_id": "user-7",
@@ -16,7 +61,35 @@
       "last_seen": "2026-01-01T10:10:00.800000000Z",
       "trace_count": 1,
       "session_count": 1,
-      "error_count": 2
+      "error_count": 2,
+      "error_trace_count": 1,
+      "activity": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scores": []
     }
   ],
   "next_cursor": null

@@ -297,10 +297,10 @@ pub struct BuiltInKey {
     pub kinds: &'static [Kind],
 }
 
-/// Keys every build trusts. `prod-1` signs licences only and stays offline (D-P-27).
+/// Keys every build trusts. `license-offline-1` signs licences only and stays offline (D-P-27).
 /// P11 adds `cloud-1` and `cloud-2` for org and control-plane tokens.
 const RELEASE_KEYS: &[BuiltInKey] = &[BuiltInKey {
-    kid: "prod-1",
+    kid: "license-offline-1",
     public: "AvIxTEduiC/amifl8QFxLYjXjPYON8LsreI7sL7UDWE=",
     kinds: &[Kind::License],
 }];
@@ -351,7 +351,7 @@ plus a crate-private `fn find(kid: &str) -> Option<(&'static BuiltInKey, Verifyi
 ### Tests (`cetra_token` tests)
 
 1. All of M1's token tests, moved (keys decode; dev seed matches dev key; round trip; tampering; malformed; unknown key; release key needs prod signature; error texts never quote the token; fixture tokens verify).
-2. `keys_are_bound_to_kinds`: a dev-signed token whose kid is rewritten to `prod-1` and whose payload is `kind: org` is `BadSignature` (signature first); a token signed with the dev seed under kid `dev-1` of each kind verifies; build a test-only key table is not possible for `KeyNotAllowed` with real keys, so test `KeyNotAllowed` through a crate-private `verify_with(token, keys: &[(BuiltInKey, VerifyingKey)])` that `verify` calls with the built-in keys: a dev-seed key bound only to `License` refuses an `Org` payload with `KeyNotAllowed`.
+2. `keys_are_bound_to_kinds`: a dev-signed token whose kid is rewritten to `license-offline-1` and whose payload is `kind: org` is `BadSignature` (signature first); a token signed with the dev seed under kid `dev-1` of each kind verifies; build a test-only key table is not possible for `KeyNotAllowed` with real keys, so test `KeyNotAllowed` through a crate-private `verify_with(token, keys: &[(BuiltInKey, VerifyingKey)])` that `verify` calls with the built-in keys: a dev-seed key bound only to `License` refuses an `Org` payload with `KeyNotAllowed`.
 3. `payload_errors`: signed `b"not json"` → `Payload`; signed `{"kind": "nope"}` → `Payload`; signed `{"kind": "org"}` → `Payload` (missing fields).
 4. `org_claims_round_trip`: build an `OrgClaims` with every limit `Some(None)` except `data_access_days: Some(Some(30))`, sign with `sign`, `verify` → equal claims; the payload JSON (decode the middle part) contains `"units_cap":null` and `"data_access_days":30`; a `LimitsClaim::default()` serializes to `{}` and parses back to all `None`.
 5. `rfc3339_accepts_offsets_and_writes_nanos`: `"2026-01-01T01:00:00+01:00"` parses to 2026-01-01T00:00:00Z; serialization writes `"2026-01-01T00:00:00.000000000Z"`; `"2026-01-01"` is an error whose text does not contain `2026`.
@@ -1153,7 +1153,7 @@ The user generated both keys on 2026-11-14 and keeps the private halves outside 
 
 Never generate or replace keys yourself.
 
-`crates/token/src/keys.rs` `RELEASE_KEYS` gains, after `prod-1`:
+`crates/token/src/keys.rs` `RELEASE_KEYS` gains, after `license-offline-1`:
 
 ```rust
 BuiltInKey { kid: "cloud-1", public: "9Dd2255sYAaeYOUWa2tJOlDMFCDXBT0csdSVVrU4zYY=", kinds: &[Kind::Org, Kind::ControlPlane] },
@@ -1162,7 +1162,7 @@ BuiltInKey { kid: "cloud-1", public: "9Dd2255sYAaeYOUWa2tJOlDMFCDXBT0csdSVVrU4zY
 BuiltInKey { kid: "cloud-2", public: "hhDDxpReDC1t83KURe1Yp09DXXmupihoMUm7YYqKWZY=", kinds: &[Kind::Org, Kind::ControlPlane] },
 ```
 
-The existing `keys_decode` test covers them. Add `cloud_keys_cannot_sign_licences`: for `cloud-1` and `cloud-2`, `kinds` does not contain `Kind::License`, and `prod-1`'s `kinds` is exactly `[Kind::License]`.
+The existing `keys_decode` test covers them. Add `cloud_keys_cannot_sign_licences`: for `cloud-1` and `cloud-2`, `kinds` does not contain `Kind::License`, and `license-offline-1`'s `kinds` is exactly `[Kind::License]`.
 
 `docs/roadmap.md` row **P** Status: add "the cloud-1 and cloud-2 keys" to the list of what M2 implemented.
 

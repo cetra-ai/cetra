@@ -65,9 +65,9 @@ it("saves a new display name and refreshes the user", async () => {
 
   await user.clear(screen.getByLabelText("Display name (optional)"));
   await user.type(screen.getByLabelText("Display name (optional)"), "  Ada Lovelace  ");
-  await user.click(screen.getByRole("button", { name: "Save name" }));
+  await user.click(screen.getByRole("button", { name: "Save" }));
 
-  expect(await screen.findByText("Name saved.")).toBeInTheDocument();
+  expect(await screen.findByRole("status")).toHaveTextContent("Saved");
   expect(body).toEqual({ name: "Ada Lovelace" });
   await waitFor(() => expect(meCalls).toBeGreaterThanOrEqual(1));
   expect(await screen.findByRole("button", { name: "Ada Lovelace" })).toBeInTheDocument();
@@ -90,7 +90,7 @@ it("clears the display name with an empty body", async () => {
   );
 
   await user.clear(screen.getByLabelText("Display name (optional)"));
-  await user.click(screen.getByRole("button", { name: "Save name" }));
+  await user.click(screen.getByRole("button", { name: "Save" }));
 
   await waitFor(() => expect(body).toEqual({}));
 });
@@ -107,7 +107,8 @@ it("shows the server's error under the name field", async () => {
     ),
   );
 
-  await user.click(screen.getByRole("button", { name: "Save name" }));
+  await user.type(screen.getByLabelText("Display name (optional)"), " Lovelace");
+  await user.click(screen.getByRole("button", { name: "Save" }));
 
   expect(await screen.findByText("must be 1 to 100 characters")).toBeInTheDocument();
   expect(screen.getByLabelText("Display name (optional)")).toHaveAttribute("aria-invalid", "true");
@@ -240,7 +241,7 @@ it("asks for the current password when the account has one", async () => {
   );
 });
 
-it("clears a client error when the user types", async () => {
+it("clears a mismatch once the confirmation matches", async () => {
   const { user } = await renderApp("/account");
   await screen.findByLabelText("New password");
 
@@ -250,6 +251,10 @@ it("clears a client error when the user types", async () => {
   expect(screen.getByLabelText("Confirm password")).toHaveAttribute("aria-invalid", "true");
 
   await user.type(screen.getByLabelText("Confirm password"), "9");
+  expect(screen.getByLabelText("Confirm password")).toHaveAttribute("aria-invalid", "true");
+
+  await user.clear(screen.getByLabelText("Confirm password"));
+  await user.type(screen.getByLabelText("Confirm password"), "correct-horse-battery");
   expect(screen.getByLabelText("Confirm password")).not.toHaveAttribute("aria-invalid");
 });
 

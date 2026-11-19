@@ -362,6 +362,9 @@ async fn export_request(
     let receipt = commit_in_task(state, target, normalized, reservation)
         .await
         .map_err(|error| refused(state, error))?;
+    if receipt.accepted > 0 {
+        state.last_ingest.record(project.id, now);
+    }
     state.telemetry.accept_ingest(
         Protocol::otlp_grpc,
         u64::try_from(receipt.accepted).unwrap_or(u64::MAX),
@@ -746,6 +749,10 @@ mod tests {
         send(&app.state, &[bearer(&seeded.ingest_key)], &message)
             .await
             .expect("exported");
+        assert_eq!(
+            app.state.last_ingest.get(seeded.project.id),
+            Some(app.state.clock.now_ns())
+        );
         let text = app
             .state
             .telemetry

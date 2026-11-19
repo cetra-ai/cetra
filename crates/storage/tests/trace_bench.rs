@@ -47,9 +47,9 @@ use cetra_storage::config::{
     WalSync,
 };
 use cetra_storage::{
-    Bucket, BucketWidth, ListScope, MetricsRequest, Page, ProjectQuery, QueryContext, QueryOptions,
-    SortOrder, TimeWindow, TraceListRequest, TraceSort, metrics, trace_detail, trace_list,
-    trace_list_plan,
+    Agg, Bucket, BucketWidth, ListScope, Measure, Page, ProjectQuery, QueryContext, QueryOptions,
+    Shape, SortOrder, TimeWindow, TraceListRequest, TraceSort, WidgetQuery, WidgetRequest,
+    WidgetSource, trace_detail, trace_list, trace_list_plan, widget_query,
 };
 use chrono::{TimeZone, Utc};
 use common::corpus::{CORPUS_SHA256, Corpus};
@@ -1322,24 +1322,59 @@ async fn trace_benchmark() {
         );
     }
 
-    // Informational: A2's metrics over the 7 days, no target.
+    // Informational: the dashboard overview's headline measures over the 7 days, no target.
     let window = TimeWindow::new(range_start(), range_end()).unwrap();
+    let query = WidgetQuery {
+        source: WidgetSource::Traces,
+        filter: None,
+        measures: vec![
+            Measure {
+                agg: Agg::Count,
+                field: None,
+                condition: None,
+            },
+            Measure {
+                agg: Agg::Rate,
+                field: None,
+                condition: Some("error_count > 0".to_owned()),
+            },
+            Measure {
+                agg: Agg::P95,
+                field: Some("duration_ns".to_owned()),
+                condition: None,
+            },
+            Measure {
+                agg: Agg::Sum,
+                field: Some("cost_total".to_owned()),
+                condition: None,
+            },
+            Measure {
+                agg: Agg::Sum,
+                field: Some("total_tokens".to_owned()),
+                condition: None,
+            },
+        ],
+        breakdown: None,
+    };
     let info = bench(|| async {
-        let data = metrics(
+        let data = widget_query(
             &ctx,
-            MetricsRequest {
+            WidgetRequest {
                 window,
                 bucket: Bucket::Fixed(BucketWidth::H1),
-                filter: None,
+                dashboard_filter: None,
                 group_by: None,
                 include_eval: true,
                 include_experiments: true,
+                query: &query,
+                shape: Shape::Series,
+                compare: false,
                 timeout: TIMEOUT,
             },
         )
         .await
         .unwrap();
-        std::hint::black_box(data.series.len());
+        std::hint::black_box(data);
     })
     .await;
     println!(

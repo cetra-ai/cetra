@@ -25,6 +25,12 @@ it("keeps known column ids and score columns, and drops the rest", () => {
   expect(parseSessionsSearch({ cols: "nope" })).toEqual({});
 });
 
+it("keeps the message and error-rate column ids", () => {
+  expect(parseSessionsSearch({ cols: "first_message,error_rate,last_answer,nope" })).toEqual({
+    cols: "first_message,error_rate,last_answer",
+  });
+});
+
 it("keeps a trace and the exclusion flags on the session page", () => {
   expect(
     parseSessionPageSearch({

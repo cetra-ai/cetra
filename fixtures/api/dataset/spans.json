@@ -281,6 +281,10 @@
     "user_id": "user-42",
     "environment": "staging",
     "release": "v1.4.0",
+    "metadata": {
+      "user.name": "\"Ada Example\"",
+      "user.plan": "\"pro\""
+    },
     "input": "What does this shipping label say?",
     "input_format": "text",
     "output": "It is addressed to warehouse 7.",

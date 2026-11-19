@@ -536,7 +536,7 @@ async fn register(
         .await
         .map_err(|error| forever_meta(&error))?;
     state.live.publish_resync(project);
-    state.metrics_cache.clear_project(project);
+    state.clear_answers(project);
     tracing::info!(
         target: "audit",
         deletion_id = %row.id,
@@ -598,7 +598,7 @@ async fn drop_project_step(state: &AppState, row: &DeletionRow, now: i64) -> Res
         .await
         .map_err(|error| forever_meta(&error))?;
     state.live.publish_resync(project);
-    state.metrics_cache.clear_project(project);
+    state.clear_answers(project);
     {
         // A price reload that read the rows before the delete must not reinstall them (D-T-9).
         let _writes = state.ingest.prices().lock_writes().await;
@@ -720,7 +720,7 @@ async fn drop_org_step(state: &AppState, row: &DeletionRow, now: i64) -> Result<
         .map_err(|error| forever_meta(&error))?;
     for project in &projects {
         state.live.publish_resync(*project);
-        state.metrics_cache.clear_project(*project);
+        state.clear_answers(*project);
     }
     {
         // A price reload that read the rows before the delete must not reinstall them (D-T-9).

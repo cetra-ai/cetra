@@ -46,6 +46,14 @@ pub struct SessionSummary {
     pub tags: Vec<String>,
     /// Latest score of each name attached to this session.
     pub scores: Vec<ScoreBrief>,
+    /// Number of the session's traces whose status is `error`.
+    pub error_trace_count: i64,
+    /// `input_preview` of the session's earliest-starting trace. Omitted when there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_input_preview: Option<String>,
+    /// `output_preview` of the session's latest-starting trace. Omitted when there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_output_preview: Option<String>,
 }
 
 /// One trace in a session, oldest first, with the root span's payloads.
@@ -169,6 +177,9 @@ mod tests {
                     value: ScoreValue::Boolean(true),
                     source: ScoreSource::Human,
                 }],
+                error_trace_count: 0,
+                first_input_preview: None,
+                last_output_preview: None,
             },
             turns: vec![SessionTurn {
                 trace: TraceSummary {

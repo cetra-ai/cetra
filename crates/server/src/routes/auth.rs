@@ -19,6 +19,7 @@ use crate::auth::reset::{ResetError, reset_link, verification_link};
 use crate::auth::secret::{constant_time_eq, hash_token, is_opaque_token};
 use crate::auth::session::{SessionOrigin, clear_cookie, resolve_cookie_header, start_session};
 use crate::bootstrap::{self, BootstrapError};
+use crate::demo::{is_demo_org, orgs_for};
 use crate::email::Email;
 use crate::entitlements::{over_limit, plan_limit};
 use crate::http::AppState;
@@ -28,7 +29,6 @@ use crate::http::error::{self, ApiError};
 use crate::meta::email_verifications;
 use crate::meta::invites;
 use crate::meta::members;
-use crate::meta::orgs::orgs_of_user;
 use crate::meta::password_resets::{delete_user_resets, use_reset, valid_reset};
 use crate::meta::personal_tokens::revoke_user_tokens;
 use crate::meta::users::EmailVerifiedVia;
@@ -197,6 +197,7 @@ async fn setup(
             slug: created.created.org.slug,
             name: created.created.org.name,
             role: OrgRole::Owner,
+            demo: is_demo_org(&state.config, created.created.org.id),
         },
         project: Project {
             id: created.created.project.id,
@@ -206,6 +207,7 @@ async fn setup(
             retention_days: created.created.project.retention_days,
             trace_completion_timeout_s,
             genai_log_events: None,
+            last_ingest_at: None,
             role: Some(OrgRole::Owner),
             created_at: created.created.project.created_at,
         },
@@ -746,16 +748,17 @@ async fn me(
 }
 
 async fn me_from(state: &AppState, user: &UserRow) -> Result<Me, ApiError> {
-    let orgs = orgs_of_user(state.meta.reader(), user.id).await?;
+    let orgs = orgs_for(state, user.id, user.is_instance_admin).await?;
     Ok(Me {
         user: user_view(user),
         orgs: orgs
             .into_iter()
-            .map(|(org, role)| OrgMembership {
+            .map(|(org, role, demo)| OrgMembership {
                 id: org.id,
                 slug: org.slug,
                 name: org.name,
                 role,
+                demo,
             })
             .collect(),
     })

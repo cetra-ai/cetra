@@ -14,6 +14,7 @@ import {
 import { useEffect, useRef } from "react";
 import type { Schema } from "@/api/types";
 import { ensureLayoutRects } from "@/components/filter-bar/editor";
+import { formatSql } from "@/lib/sql/format-sql";
 
 const errorMark = Decoration.mark({ class: "cm-sql-error" });
 const setError = StateEffect.define<{ from: number; to: number } | null>();
@@ -37,7 +38,7 @@ const errorField = StateField.define<DecorationSet>({
 });
 
 const editorTheme = EditorView.theme({
-  "&": { height: "100%", fontSize: "12px", backgroundColor: "transparent" },
+  "&": { height: "100%", fontSize: "13px", backgroundColor: "transparent" },
   "&.cm-focused": { outline: "2px solid var(--ring)", outlineOffset: "1px" },
   ".cm-scroller": {
     fontFamily: "var(--font-mono), ui-monospace, monospace",
@@ -46,7 +47,7 @@ const editorTheme = EditorView.theme({
   },
   ".cm-content": { caretColor: "var(--foreground)" },
   ".cm-gutters": { backgroundColor: "transparent", borderRight: "1px solid var(--border)" },
-  ".cm-tooltip.cm-tooltip-autocomplete": { fontSize: "12px" },
+  ".cm-tooltip.cm-tooltip-autocomplete": { fontSize: "13px" },
   ".cm-sql-error": { textDecoration: "underline wavy var(--destructive)" },
 });
 
@@ -112,9 +113,12 @@ export function SqlEditor({
   const touched = useRef(false);
   const onChangeRef = useRef(onChange);
   const onRunRef = useRef(onRun);
+  /** Functions the SQL console allows, which Shift-Alt-F keeps tight to their parenthesis. */
+  const functionNames = useRef<readonly string[]>([]);
   const initial = useRef({ value, schema, invalid, describedBy });
   onChangeRef.current = onChange;
   onRunRef.current = onRun;
+  functionNames.current = schema?.functions.filter((fn) => fn.in_sql).map((fn) => fn.name) ?? [];
 
   useEffect(() => {
     const host = parent.current;
@@ -156,6 +160,21 @@ export function SqlEditor({
                 key: "Mod-Enter",
                 run: (editor) => {
                   onRunRef.current(editor.state.doc.toString());
+                  return true;
+                },
+              },
+              {
+                key: "Shift-Alt-f",
+                run: (editor) => {
+                  const text = editor.state.doc.toString();
+                  const formatted = formatSql(text, functionNames.current);
+                  if (formatted !== text) {
+                    // One transaction, so one undo restores the text as it was.
+                    editor.dispatch({
+                      changes: { from: 0, to: editor.state.doc.length, insert: formatted },
+                      selection: { anchor: formatted.length },
+                    });
+                  }
                   return true;
                 },
               },

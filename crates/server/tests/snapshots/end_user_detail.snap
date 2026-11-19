@@ -10,8 +10,47 @@ expression: "serde_json::to_string_pretty(&detail).unwrap()"
     "trace_count": 2,
     "session_count": 1,
     "error_count": 0,
+    "error_trace_count": 0,
     "total_tokens": 2600,
-    "cost_total": 0.00306
+    "cost_total": 0.00306,
+    "activity": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1
+    ],
+    "scores": [
+      {
+        "name": "resolved",
+        "data_type": "boolean",
+        "avg": 1.0,
+        "count": 1
+      }
+    ],
+    "metadata": {
+      "name": "\"Ada Example\"",
+      "plan": "\"pro\""
+    }
   },
   "sessions": [
     {
@@ -37,7 +76,8 @@ expression: "serde_json::to_string_pretty(&detail).unwrap()"
           },
           "source": "human"
         }
-      ]
+      ],
+      "error_trace_count": 0
     }
   ]
 }

@@ -10,27 +10,52 @@ use std::time::Duration;
 use std::sync::Arc;
 
 use arrow::compute::concat_batches;
+use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
-use cetra_core::schema::traces;
+use cetra_core::schema::{scores, traces};
+use datafusion::common::ScalarValue;
 use datafusion::error::DataFusionError;
 use datafusion::execution::SessionState;
-use datafusion::functions::expr_fn::coalesce;
-use datafusion::functions_aggregate::expr_fn::{count, count_distinct, max, min, sum};
-use datafusion::logical_expr::{LogicalPlan, col, in_subquery, lit};
+use datafusion::functions::expr_fn::{coalesce, nullif};
+use datafusion::functions_aggregate::expr_fn::{avg, count, count_distinct, max, min, sum};
+use datafusion::functions_window::expr_fn::row_number;
+use datafusion::logical_expr::{
+    Expr, ExprFunctionExt, JoinType, LogicalPlan, cast, col, in_subquery, lit, when,
+};
 use datafusion::prelude::DataFrame;
 
 use super::cursor::{after, assemble, decode, order_by};
 use super::{ListScope, Page, SortOrder, present, scoped_traces};
 use crate::filter::FilterView;
 use crate::query_error::{RunError, classify};
-use crate::views::{QueryContext, exact_cost_sum, sessions_from_traces};
+use crate::views::{QueryContext, TimeWindow, exact_cost_sum, sessions_from_traces};
 
 const LIST: &str = "users";
 const FIRST_SEEN: &str = "first_seen";
 const LAST_SEEN: &str = "last_seen";
 const TRACE_COUNT: &str = "trace_count";
 const SESSION_COUNT: &str = "session_count";
+const ERROR_RATE: &str = "error_rate";
+const TRACES_PER_SESSION: &str = "traces_per_session";
 const TIES: &[&str] = &[traces::USER_ID];
+
+/// Name of the `traces` error count of a user: traces whose status is `error`.
+pub const ERROR_TRACE_COUNT: &str = "error_trace_count";
+
+/// Number of activity buckets of a user row (spec 09 `EndUserSummary.activity`).
+pub const ACTIVITY_BUCKETS: usize = 24;
+
+/// [`ACTIVITY_BUCKETS`] as the `i64` the bucket arithmetic uses.
+const BUCKETS_I64: i64 = 24;
+
+/// Most `user.` metadata keys returned per user.
+pub const MAX_USER_METADATA_KEYS: usize = 20;
+
+const BUCKET: &str = "bucket";
+const RANK: &str = "rank";
+const SCORE_AVG: &str = "avg";
+const SCORE_COUNT: &str = "count";
+const SCORE_TRACE_ID: &str = "t_trace_id";
 
 /// Columns of a user list, in order.
 pub const USER_COLUMNS: &[&str] = &[
@@ -40,8 +65,11 @@ pub const USER_COLUMNS: &[&str] = &[
     TRACE_COUNT,
     SESSION_COUNT,
     traces::ERROR_COUNT,
+    ERROR_TRACE_COUNT,
     traces::TOTAL_TOKENS,
     traces::COST_TOTAL,
+    ERROR_RATE,
+    TRACES_PER_SESSION,
 ];
 
 /// Most sessions `user_detail` returns.
@@ -56,6 +84,18 @@ pub enum UserSort {
     TraceCount,
     /// `cost_total`.
     CostTotal,
+    /// `session_count`.
+    SessionCount,
+    /// `total_tokens`.
+    TotalTokens,
+    /// `error_count`.
+    ErrorCount,
+    /// `first_seen`.
+    FirstSeen,
+    /// `error_rate`: `error_trace_count / trace_count`.
+    ErrorRate,
+    /// `traces_per_session`: `trace_count / session_count`, null without sessions.
+    TracesPerSession,
 }
 
 impl UserSort {
@@ -64,6 +104,12 @@ impl UserSort {
             Self::LastSeen => LAST_SEEN,
             Self::TraceCount => TRACE_COUNT,
             Self::CostTotal => traces::COST_TOTAL,
+            Self::SessionCount => SESSION_COUNT,
+            Self::TotalTokens => traces::TOTAL_TOKENS,
+            Self::ErrorCount => traces::ERROR_COUNT,
+            Self::FirstSeen => FIRST_SEEN,
+            Self::ErrorRate => ERROR_RATE,
+            Self::TracesPerSession => TRACES_PER_SESSION,
         }
     }
 }
@@ -119,9 +165,11 @@ pub async fn user_list(ctx: &QueryContext, request: UserListRequest<'_>) -> Resu
     }
 }
 
-/// The user and the sessions of their traces. No window and no filter.
+/// The user and the sessions of their traces.
 ///
-/// An unknown `user_id` is `Ok(None)`.
+/// The scope's window and default exclusions select the traces (spec 09
+/// § Observability data, UP-1). An unknown `user_id`, or one with no trace in
+/// scope, is `Ok(None)`.
 ///
 /// # Errors
 ///
@@ -129,16 +177,10 @@ pub async fn user_list(ctx: &QueryContext, request: UserListRequest<'_>) -> Resu
 pub async fn user_detail(
     ctx: &QueryContext,
     user_id: &str,
-    include_eval: bool,
-    include_experiments: bool,
+    scope: ListScope,
     timeout: Duration,
 ) -> Result<Option<UserDetailData>, RunError> {
-    match tokio::time::timeout(
-        timeout,
-        load(ctx, user_id, include_eval, include_experiments),
-    )
-    .await
-    {
+    match tokio::time::timeout(timeout, load(ctx, user_id, scope)).await {
         Err(_) => Err(RunError::Timeout),
         Ok(result) => result,
     }
@@ -209,8 +251,9 @@ fn aggregate_users(frame: DataFrame) -> Result<DataFrame, RunError> {
                 count(lit(1_i64)).alias(TRACE_COUNT),
                 count_distinct(col(traces::SESSION_ID)).alias(SESSION_COUNT),
                 sum(col(traces::ERROR_COUNT)).alias(traces::ERROR_COUNT),
+                sum(error_trace_flag()?).alias(ERROR_TRACE_COUNT),
                 sum(col(traces::TOTAL_TOKENS)).alias(traces::TOTAL_TOKENS),
-                exact_cost_sum().alias(traces::COST_TOTAL),
+                exact_cost_sum(col(traces::COST_TOTAL)).alias(traces::COST_TOTAL),
             ],
         )
         .map_err(classify)?;
@@ -222,23 +265,233 @@ fn aggregate_users(frame: DataFrame) -> Result<DataFrame, RunError> {
             col(TRACE_COUNT),
             col(SESSION_COUNT),
             coalesce(vec![col(traces::ERROR_COUNT), lit(0_i64)]).alias(traces::ERROR_COUNT),
+            coalesce(vec![col(ERROR_TRACE_COUNT), lit(0_i64)]).alias(ERROR_TRACE_COUNT),
             col(traces::TOTAL_TOKENS),
             col(traces::COST_TOTAL),
+            // trace_count is at least 1 in every group, so the divisor is never 0.
+            (cast(col(ERROR_TRACE_COUNT), DataType::Float64)
+                / cast(col(TRACE_COUNT), DataType::Float64))
+            .alias(ERROR_RATE),
+            (cast(col(TRACE_COUNT), DataType::Float64)
+                / nullif(cast(col(SESSION_COUNT), DataType::Float64), lit(0.0_f64)))
+            .alias(TRACES_PER_SESSION),
         ])
         .map_err(classify)
+}
+
+/// 1 for a trace whose status is `error`, else 0.
+fn error_trace_flag() -> Result<Expr, RunError> {
+    when(col(traces::STATUS).eq(lit("error")), lit(1_i64))
+        .otherwise(lit(0_i64))
+        .map_err(classify)
+}
+
+/// Per-user extras of a page of users (activity, score averages, latest metadata).
+///
+/// Each query runs over the same traces as the list: the request's scope and filter,
+/// restricted to `user_ids`. Users without rows have no batch entries.
+///
+/// # Errors
+///
+/// [`RunError::InvalidRequest`] for more than [`super::MAX_PAGE`] users or a bad
+/// filter. [`RunError::Invalid`] for filter text. [`RunError::Timeout`] when the
+/// queries exceed `timeout`.
+pub async fn user_extras(
+    ctx: &QueryContext,
+    request: UserExtrasRequest<'_>,
+) -> Result<UserExtras, RunError> {
+    if request.user_ids.len() > super::MAX_PAGE {
+        return Err(RunError::InvalidRequest("too many users".to_owned()));
+    }
+    if request.user_ids.is_empty() {
+        return Ok(UserExtras::default());
+    }
+    match tokio::time::timeout(request.timeout, extras(ctx, &request)).await {
+        Err(_) => Err(RunError::Timeout),
+        Ok(result) => result,
+    }
+}
+
+/// The traces of the listed users, scoped and filtered as the user list is.
+async fn scoped_user_traces(
+    ctx: &QueryContext,
+    request: &UserExtrasRequest<'_>,
+) -> Result<DataFrame, RunError> {
+    let filter = match present(request.filter) {
+        Some(text) => Some(ctx.parse_filter(FilterView::Traces, text)?),
+        None => None,
+    };
+    let references_environment = filter
+        .as_ref()
+        .is_some_and(|filter| filter.references_environment);
+    let mut frame = scoped_traces(ctx, request.scope, references_environment).await?;
+    if let Some(filter) = filter {
+        frame = filter.apply(frame, ctx).await.map_err(classify)?;
+    }
+    let ids: Vec<Expr> = request.user_ids.iter().map(|id| lit(*id)).collect();
+    frame
+        .filter(col(traces::USER_ID).in_list(ids, false))
+        .map_err(classify)
+}
+
+async fn extras(
+    ctx: &QueryContext,
+    request: &UserExtrasRequest<'_>,
+) -> Result<UserExtras, RunError> {
+    let base = scoped_user_traces(ctx, request).await?;
+    Ok(UserExtras {
+        activity: activity(ctx, &base, request.activity).await?,
+        scores: scores_of(ctx, &base).await?,
+        metadata: metadata_of(ctx, &base).await?,
+    })
+}
+
+/// Trace counts per user and bucket of `window`. Buckets are not clamped here.
+async fn activity(
+    ctx: &QueryContext,
+    base: &DataFrame,
+    window: TimeWindow,
+) -> Result<Vec<RecordBatch>, RunError> {
+    let width = window
+        .to()
+        .saturating_sub(window.from())
+        .saturating_add(BUCKETS_I64 - 1)
+        / BUCKETS_I64;
+    let bucket = (cast(col(traces::START_TIME), DataType::Int64) - lit(window.from())) / lit(width);
+    let frame = base
+        .clone()
+        .select(vec![col(traces::USER_ID), bucket.alias(BUCKET)])
+        .map_err(classify)?
+        .aggregate(
+            vec![col(traces::USER_ID), col(BUCKET)],
+            vec![count(lit(1_i64)).alias(TRACE_COUNT)],
+        )
+        .map_err(classify)?;
+    let batches = frame.collect().await.map_err(|error| ctx.fail(error))?;
+    Ok(non_empty(batches))
+}
+
+/// Average of each numeric and boolean score name over the user's traces, per user.
+async fn scores_of(ctx: &QueryContext, base: &DataFrame) -> Result<Vec<RecordBatch>, RunError> {
+    let traces_side = base
+        .clone()
+        .select(vec![
+            col(traces::TRACE_ID).alias(SCORE_TRACE_ID),
+            col(traces::USER_ID),
+        ])
+        .map_err(classify)?;
+    let scores_side = ctx
+        .session()
+        .table("scores")
+        .await
+        .map_err(classify)?
+        .filter(
+            col(scores::DATA_TYPE)
+                .in_list(vec![lit("numeric"), lit("boolean")], false)
+                .and(col(scores::VALUE_NUM).is_not_null())
+                .and(col(scores::TRACE_ID).is_not_null()),
+        )
+        .map_err(classify)?
+        .select(vec![
+            col(scores::TRACE_ID),
+            col(scores::NAME),
+            col(scores::DATA_TYPE),
+            col(scores::VALUE_NUM),
+        ])
+        .map_err(classify)?;
+    let frame = scores_side
+        .join(
+            traces_side,
+            JoinType::Inner,
+            &[scores::TRACE_ID],
+            &[SCORE_TRACE_ID],
+            None,
+        )
+        .map_err(classify)?
+        .aggregate(
+            vec![
+                col(traces::USER_ID),
+                col(scores::NAME),
+                col(scores::DATA_TYPE),
+            ],
+            vec![
+                avg(col(scores::VALUE_NUM)).alias(SCORE_AVG),
+                count(lit(1_i64)).alias(SCORE_COUNT),
+            ],
+        )
+        .map_err(classify)?
+        .sort(vec![
+            col(traces::USER_ID).sort(true, false),
+            col(scores::NAME).sort(true, false),
+            col(scores::DATA_TYPE).sort(true, false),
+        ])
+        .map_err(classify)?;
+    let batches = frame.collect().await.map_err(|error| ctx.fail(error))?;
+    Ok(non_empty(batches))
+}
+
+/// The `metadata` map of each user's latest trace (greatest `start_time`, then `trace_id`).
+async fn metadata_of(ctx: &QueryContext, base: &DataFrame) -> Result<Vec<RecordBatch>, RunError> {
+    let rank = row_number()
+        .partition_by(vec![col(traces::USER_ID)])
+        .order_by(vec![
+            col(traces::START_TIME).sort(false, true),
+            col(traces::TRACE_ID).sort(false, true),
+        ])
+        .build()
+        .map_err(classify)?
+        .alias(RANK);
+    let frame = base
+        .clone()
+        .window(vec![rank])
+        .map_err(classify)?
+        .filter(col(RANK).eq(lit(ScalarValue::UInt64(Some(1)))))
+        .map_err(classify)?
+        .select(vec![col(traces::USER_ID), col(traces::METADATA)])
+        .map_err(classify)?;
+    let batches = frame.collect().await.map_err(|error| ctx.fail(error))?;
+    Ok(non_empty(batches))
+}
+
+fn non_empty(batches: Vec<RecordBatch>) -> Vec<RecordBatch> {
+    batches
+        .into_iter()
+        .filter(|batch| batch.num_rows() > 0)
+        .collect()
+}
+
+/// Inputs of [`user_extras`].
+#[derive(Debug, Clone)]
+pub struct UserExtrasRequest<'a> {
+    /// Same filter as the list request.
+    pub filter: Option<&'a str>,
+    /// Same scope as the list request (for `user_detail`: no window).
+    pub scope: ListScope,
+    /// Users to compute, at most [`super::MAX_PAGE`]. Empty runs no query.
+    pub user_ids: &'a [&'a str],
+    /// Window the activity buckets split.
+    pub activity: TimeWindow,
+    /// Time allowed for all three queries together.
+    pub timeout: Duration,
+}
+
+/// Results of [`user_extras`].
+#[derive(Debug, Default)]
+pub struct UserExtras {
+    /// `user_id` Utf8, `bucket` Int64 (0..ACTIVITY_BUCKETS), `trace_count` Int64. Buckets with no traces are absent.
+    pub activity: Vec<RecordBatch>,
+    /// `user_id` Utf8, `name` Utf8, `data_type` Utf8, `avg` Float64, `count` Int64,
+    /// sorted by `user_id`, `name`, `data_type`.
+    pub scores: Vec<RecordBatch>,
+    /// `user_id` Utf8 and `metadata` (the traces' Map column): one row per user, from their latest trace.
+    pub metadata: Vec<RecordBatch>,
 }
 
 async fn load(
     ctx: &QueryContext,
     user_id: &str,
-    include_eval: bool,
-    include_experiments: bool,
+    scope: ListScope,
 ) -> Result<Option<UserDetailData>, RunError> {
-    let scope = ListScope {
-        window: None,
-        include_eval,
-        include_experiments,
-    };
     let excluded = scoped_traces(ctx, scope, false).await?;
     let excluded_plan = excluded.logical_plan().clone();
     let state = ctx.session().state();
@@ -324,8 +577,10 @@ mod tests {
     use arrow::datatypes::Float64Type;
     use arrow::json::{ArrayWriter, WriterBuilder};
     use arrow::record_batch::RecordBatch;
+    use cetra_core::enums::SpanStatus;
     use cetra_core::names::environment;
     use cetra_core::schema::{traces, traces_schema};
+    use cetra_core::score::{Score, ScoreValue};
     use cetra_core::span::Span;
     use datafusion::datasource::MemTable;
     use datafusion::logical_expr::{col, lit};
@@ -333,11 +588,16 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        UserListRequest, UserSort, user_detail, user_frame, user_list, user_sessions_plan,
+        ERROR_RATE, ERROR_TRACE_COUNT, SESSION_COUNT, TRACE_COUNT, TRACES_PER_SESSION,
+        UserExtrasRequest, UserListRequest, UserSort, user_detail, user_extras, user_frame,
+        user_list, user_sessions_plan,
     };
     use crate::reads::{ListScope, Page, SortOrder, scoped_traces};
-    use crate::test_support::{example_query, span_row, spans_table, trace_batch, traces_table};
-    use crate::views::QueryContext;
+    use crate::test_support::{
+        example_query, live_scores_table, score_row, span_row, spans_table, trace_batch,
+        traces_table,
+    };
+    use crate::views::{ProjectQuery, QueryContext, TimeWindow};
 
     const TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -443,11 +703,24 @@ mod tests {
         }
     }
 
-    fn assert_rows(actual: &[Value], expected: &[Value]) {
+    /// Keys of a user row that the server composes (activity, score averages, latest metadata).
+    const USER_SERVER_KEYS: &[&str] = &["activity", "scores", "metadata"];
+
+    /// Keys of a session row that the server adds from the session extras query.
+    const SESSION_SERVER_KEYS: &[&str] = &[
+        "scores",
+        "error_trace_count",
+        "first_input_preview",
+        "last_output_preview",
+    ];
+
+    /// Checks each fixture key except `server_keys`, which the server composes from
+    /// other queries and which the storage rows therefore never have.
+    fn assert_rows(actual: &[Value], expected: &[Value], server_keys: &[&str]) {
         assert_eq!(actual.len(), expected.len());
         for (row, fixture) in actual.iter().zip(expected) {
             for (key, value) in fixture.as_object().expect("object") {
-                if key == "scores" {
+                if server_keys.contains(&key.as_str()) {
                     continue;
                 }
                 assert!(
@@ -472,14 +745,22 @@ mod tests {
             .await
             .expect("list");
         let listed = fixture("users.json");
-        assert_rows(&rows(&page), listed["data"].as_array().expect("data"));
+        assert_rows(
+            &rows(&page),
+            listed["data"].as_array().expect("data"),
+            USER_SERVER_KEYS,
+        );
         assert!(page.next_cursor.is_none());
 
         let page = user_list(&ctx, request(true, UserSort::LastSeen, SortOrder::Desc))
             .await
             .expect("eval");
         let listed = fixture("users-include-eval.json");
-        assert_rows(&rows(&page), listed["data"].as_array().expect("data"));
+        assert_rows(
+            &rows(&page),
+            listed["data"].as_array().expect("data"),
+            USER_SERVER_KEYS,
+        );
     }
 
     #[tokio::test]
@@ -498,14 +779,15 @@ mod tests {
             ),
             ("user-7", false, "fixtures/api/responses/users/user-7.json"),
         ] {
-            let detail = user_detail(&ctx, user_id, include_eval, false, TIMEOUT)
+            let detail = user_detail(&ctx, user_id, scope(include_eval), TIMEOUT)
                 .await
                 .expect("detail")
-                .unwrap_or_else(|| panic!("missing {user_id}"));
+                .unwrap_or_else(|| panic!("no user for {file}"));
             let fixture = fixture_file(file);
             assert_rows(
                 &json_rows(std::slice::from_ref(&detail.user)),
                 std::slice::from_ref(&fixture["user"]),
+                USER_SERVER_KEYS,
             );
             let sessions = json_rows(&detail.sessions);
             let expected = fixture["sessions"].as_array().expect("sessions");
@@ -514,9 +796,9 @@ mod tests {
                 ids(expected, "session_id"),
                 "{file}"
             );
-            assert_rows(&sessions, expected);
+            assert_rows(&sessions, expected, SESSION_SERVER_KEYS);
         }
-        let missing = user_detail(&ctx, "nobody", false, false, TIMEOUT)
+        let missing = user_detail(&ctx, "nobody", scope(false), TIMEOUT)
             .await
             .expect("missing");
         assert!(missing.is_none());
@@ -575,6 +857,12 @@ mod tests {
             UserSort::LastSeen,
             UserSort::TraceCount,
             UserSort::CostTotal,
+            UserSort::SessionCount,
+            UserSort::TotalTokens,
+            UserSort::ErrorCount,
+            UserSort::FirstSeen,
+            UserSort::ErrorRate,
+            UserSort::TracesPerSession,
         ] {
             for order in [SortOrder::Asc, SortOrder::Desc] {
                 let full = user_list(&ctx, request(true, sort, order))
@@ -600,6 +888,39 @@ mod tests {
                 assert_eq!(walked, expected, "{sort:?} {order:?}");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn computed_rates_match_their_counts() {
+        let ctx = context();
+        let page = user_list(&ctx, request(true, UserSort::ErrorRate, SortOrder::Desc))
+            .await
+            .expect("list");
+        let rows = rows(&page);
+        assert!(!rows.is_empty());
+        for row in &rows {
+            let trace_count = row[TRACE_COUNT].as_i64().expect("trace_count");
+            let session_count = row[SESSION_COUNT].as_i64().expect("session_count");
+            let error_traces = row[ERROR_TRACE_COUNT].as_i64().expect("error_trace_count");
+            let error_rate = row[ERROR_RATE].as_f64().expect("error_rate");
+            assert!(
+                (error_rate - error_traces as f64 / trace_count as f64).abs() < 1e-12,
+                "{row}"
+            );
+            if session_count == 0 {
+                assert!(row[TRACES_PER_SESSION].is_null(), "{row}");
+            } else {
+                let per_session = row[TRACES_PER_SESSION]
+                    .as_f64()
+                    .expect("traces_per_session");
+                assert!(
+                    (per_session - trace_count as f64 / session_count as f64).abs() < 1e-12,
+                    "{row}"
+                );
+            }
+        }
+        // The fixtures have no user without sessions, so the null case is not
+        // exercised here; `user_pages_cover_every_sort` covers the order.
     }
 
     #[tokio::test]
@@ -643,11 +964,11 @@ mod tests {
         root.environment = Some(environment::EVAL.to_owned());
         let spans = [root];
         let ctx = context_of(&spans);
-        let hidden = user_detail(&ctx, "eval-user", false, false, TIMEOUT)
+        let hidden = user_detail(&ctx, "eval-user", scope(false), TIMEOUT)
             .await
             .expect("hidden");
         assert!(hidden.is_none());
-        let shown = user_detail(&ctx, "eval-user", true, false, TIMEOUT)
+        let shown = user_detail(&ctx, "eval-user", scope(true), TIMEOUT)
             .await
             .expect("eval");
         assert!(shown.is_some());
@@ -658,11 +979,97 @@ mod tests {
         let mut root = span_row(7, 0, 1_000, 1_000);
         root.user_id = Some("lonely".to_owned());
         let spans = [root];
-        let detail = user_detail(&context_of(&spans), "lonely", false, false, TIMEOUT)
+        let detail = user_detail(&context_of(&spans), "lonely", scope(false), TIMEOUT)
             .await
             .expect("detail")
             .expect("user");
         assert!(detail.sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn user_detail_follows_the_window() {
+        let mut first = user_span(1, 1_000, "u");
+        first.session_id = Some("s1".to_owned());
+        let mut second = user_span(2, 2_000, "u");
+        second.session_id = Some("s1".to_owned());
+        let mut third = user_span(3, 3_000, "u");
+        third.session_id = Some("s2".to_owned());
+        let spans = [first, second, third];
+        let ctx = context_of(&spans);
+
+        // [1000, 3000) holds the first two traces only, and they share session s1.
+        let windowed = ListScope {
+            window: Some(window_of(1_000, 3_000)),
+            include_eval: false,
+            include_experiments: false,
+        };
+        let detail = user_detail(&ctx, "u", windowed, TIMEOUT)
+            .await
+            .expect("detail")
+            .expect("user in window");
+        let user = json_rows(std::slice::from_ref(&detail.user));
+        assert_eq!(user.len(), 1);
+        assert_eq!(user[0]["trace_count"], 2);
+        let first_seen = detail
+            .user
+            .column_by_name("first_seen")
+            .expect("first_seen")
+            .as_primitive::<arrow::datatypes::TimestampNanosecondType>()
+            .value(0);
+        assert_eq!(first_seen, 1_000);
+        let last_seen = detail
+            .user
+            .column_by_name("last_seen")
+            .expect("last_seen")
+            .as_primitive::<arrow::datatypes::TimestampNanosecondType>()
+            .value(0);
+        // last_seen is the latest end_time, and span_row ends a span 100 ns after its start.
+        assert_eq!(last_seen, 2_100);
+        let sessions = json_rows(&detail.sessions);
+        assert_eq!(sessions.len(), 1, "{sessions:?}");
+        assert_eq!(sessions[0]["session_id"], "s1");
+        assert_eq!(sessions[0]["trace_count"], 2);
+
+        // No trace of the user starts in [5000, 6000).
+        let empty = ListScope {
+            window: Some(window_of(5_000, 6_000)),
+            include_eval: false,
+            include_experiments: false,
+        };
+        let missing = user_detail(&ctx, "u", empty, TIMEOUT)
+            .await
+            .expect("empty window");
+        assert!(missing.is_none());
+    }
+
+    #[tokio::test]
+    async fn user_detail_counts_only_in_window_traces_of_a_straddling_session() {
+        // One session with three traces: two inside [1000, 3000), one after it.
+        let mut first = user_span(1, 1_000, "u");
+        first.session_id = Some("s1".to_owned());
+        let mut second = user_span(2, 2_000, "u");
+        second.session_id = Some("s1".to_owned());
+        let mut after = user_span(3, 3_000, "u");
+        after.session_id = Some("s1".to_owned());
+        let spans = [first, second, after];
+        let ctx = context_of(&spans);
+
+        let windowed = ListScope {
+            window: Some(window_of(1_000, 3_000)),
+            include_eval: false,
+            include_experiments: false,
+        };
+        let detail = user_detail(&ctx, "u", windowed, TIMEOUT)
+            .await
+            .expect("detail")
+            .expect("user in window");
+        let user = json_rows(std::slice::from_ref(&detail.user));
+        assert_eq!(user.len(), 1);
+        assert_eq!(user[0]["trace_count"], 2);
+        let sessions = json_rows(&detail.sessions);
+        assert_eq!(sessions.len(), 1, "{sessions:?}");
+        assert_eq!(sessions[0]["session_id"], "s1");
+        assert_eq!(sessions[0]["trace_count"], 2);
     }
 
     #[tokio::test]
@@ -682,5 +1089,184 @@ mod tests {
         let optimized = state.optimize(&plan).expect("optimize");
         let text = format!("{}", optimized.display_indent());
         assert!(text.contains("LeftSemi"), "{text}");
+    }
+
+    fn user_span(trace: u16, start: i64, user: &str) -> Span {
+        let mut span = span_row(trace, 0, start, start);
+        span.user_id = Some(user.to_owned());
+        span
+    }
+
+    fn extras_context(spans: &[Span], scores: &[Score]) -> QueryContext {
+        let query = ProjectQuery {
+            spans: spans_table(spans),
+            traces: traces_table(spans),
+            scores: live_scores_table(scores),
+            ..example_query()
+        };
+        QueryContext::new(query, None).expect("context")
+    }
+
+    fn window_of(from: i64, to: i64) -> TimeWindow {
+        TimeWindow::new(from, to).expect("window")
+    }
+
+    #[tokio::test]
+    async fn error_trace_count_counts_error_traces() {
+        let mut failed = user_span(1, 1_000, "u");
+        failed.status = SpanStatus::Error;
+        let spans = [failed, user_span(2, 2_000, "u")];
+        let ctx = context_of(&spans);
+        let page = user_list(&ctx, request(false, UserSort::LastSeen, SortOrder::Desc))
+            .await
+            .expect("list");
+        let rows = rows(&page);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["trace_count"], 2);
+        assert_eq!(rows[0]["error_trace_count"], 1);
+    }
+
+    #[tokio::test]
+    async fn activity_buckets_traces_by_start_time() {
+        let (from, width) = (10_000_i64, 1_000_i64);
+        let spans = [
+            user_span(1, from, "u"),
+            user_span(2, from + width, "u"),
+            user_span(3, from + 2 * width + 1, "u"),
+        ];
+        let ctx = context_of(&spans);
+        let window = window_of(from, from + 24 * width);
+        let extras = user_extras(
+            &ctx,
+            UserExtrasRequest {
+                filter: None,
+                scope: ListScope {
+                    window: Some(window),
+                    include_eval: false,
+                    include_experiments: false,
+                },
+                user_ids: &["u"],
+                activity: window,
+                timeout: TIMEOUT,
+            },
+        )
+        .await
+        .expect("extras");
+        let activity = json_rows(&extras.activity);
+        let mut buckets: Vec<(i64, i64)> = activity
+            .iter()
+            .map(|row| {
+                assert_eq!(row["user_id"], "u");
+                (
+                    row["bucket"].as_i64().expect("bucket"),
+                    row["trace_count"].as_i64().expect("trace_count"),
+                )
+            })
+            .collect();
+        buckets.sort_unstable();
+        assert_eq!(buckets, [(0, 1), (1, 1), (2, 1)]);
+    }
+
+    #[tokio::test]
+    async fn scores_average_numeric_and_boolean_per_user() {
+        let spans = [user_span(1, 1_000, "u")];
+        let mut quality = score_row(1, 1, 100, 100, 100, false, "quality");
+        quality.value = ScoreValue::Numeric(0.2);
+        let mut quality_two = score_row(2, 1, 100, 100, 100, false, "quality");
+        quality_two.value = ScoreValue::Numeric(0.6);
+        let mut helpful = score_row(3, 1, 100, 100, 100, false, "helpful");
+        helpful.value = ScoreValue::Boolean(true);
+        let mut label = score_row(4, 1, 100, 100, 100, false, "label");
+        label.value = ScoreValue::Categorical {
+            label: "good".to_owned(),
+            value: None,
+        };
+        let ctx = extras_context(&spans, &[quality, quality_two, helpful, label]);
+        let window = window_of(0, 10_000);
+        let extras = user_extras(
+            &ctx,
+            UserExtrasRequest {
+                filter: None,
+                scope: ListScope {
+                    window: None,
+                    include_eval: false,
+                    include_experiments: false,
+                },
+                user_ids: &["u"],
+                activity: window,
+                timeout: TIMEOUT,
+            },
+        )
+        .await
+        .expect("extras");
+        let scores = json_rows(&extras.scores);
+        assert_eq!(scores.len(), 2, "{scores:?}");
+        assert_eq!(scores[0]["name"], "helpful");
+        assert_eq!(scores[0]["data_type"], "boolean");
+        assert!(values_match(&scores[0]["avg"], &serde_json::json!(1.0)));
+        assert_eq!(scores[0]["count"], 1);
+        assert_eq!(scores[1]["name"], "quality");
+        assert_eq!(scores[1]["data_type"], "numeric");
+        assert!(values_match(&scores[1]["avg"], &serde_json::json!(0.4)));
+        assert_eq!(scores[1]["count"], 2);
+    }
+
+    #[tokio::test]
+    async fn metadata_comes_from_the_latest_trace() {
+        let mut early = user_span(1, 1_000, "u");
+        early
+            .metadata
+            .insert("user.plan".to_owned(), "\"free\"".to_owned());
+        let mut late = user_span(2, 2_000, "u");
+        late.metadata
+            .insert("user.plan".to_owned(), "\"team\"".to_owned());
+        let spans = [early, late];
+        let ctx = context_of(&spans);
+        let window = window_of(0, 10_000);
+        let extras = user_extras(
+            &ctx,
+            UserExtrasRequest {
+                filter: None,
+                scope: ListScope {
+                    window: None,
+                    include_eval: false,
+                    include_experiments: false,
+                },
+                user_ids: &["u"],
+                activity: window,
+                timeout: TIMEOUT,
+            },
+        )
+        .await
+        .expect("extras");
+        let metadata = json_rows(&extras.metadata);
+        assert_eq!(metadata.len(), 1);
+        assert_eq!(metadata[0]["user_id"], "u");
+        assert_eq!(metadata[0]["metadata"]["user.plan"], "\"team\"");
+    }
+
+    #[tokio::test]
+    async fn empty_user_ids_run_no_query() {
+        let ctx = context();
+        let window = window_of(0, 10_000);
+        let extras = user_extras(
+            &ctx,
+            UserExtrasRequest {
+                filter: None,
+                scope: ListScope {
+                    window: None,
+                    include_eval: false,
+                    include_experiments: false,
+                },
+                user_ids: &[],
+                activity: window,
+                timeout: TIMEOUT,
+            },
+        )
+        .await
+        .expect("extras");
+        assert!(extras.activity.is_empty());
+        assert!(extras.scores.is_empty());
+        assert!(extras.metadata.is_empty());
     }
 }

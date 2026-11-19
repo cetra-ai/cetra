@@ -49,7 +49,7 @@ function settingValue(term: string): HTMLElement {
 
 it("shows the effective settings", async () => {
   await renderApp("/admin/settings");
-  await screen.findByRole("heading", { name: "Settings", level: 2 });
+  await screen.findByRole("heading", { name: "Instance settings" });
 
   expect(settingValue("Public URL")).toHaveTextContent("http://localhost:8080");
   expect(settingValue("Sign-up")).toHaveTextContent("Invite only");
@@ -68,7 +68,7 @@ it("labels password sign-in that is off", async () => {
   server.use(withSettings({ password_enabled: false }));
 
   await renderApp("/admin/settings");
-  await screen.findByRole("heading", { name: "Settings", level: 2 });
+  await screen.findByRole("heading", { name: "Instance settings" });
 
   expect(settingValue("Password sign-in")).toHaveTextContent("Instance admins only");
 });
@@ -77,7 +77,7 @@ it("labels a disabled sign-up", async () => {
   server.use(withSettings({ signup: "disabled" }));
 
   await renderApp("/admin/settings");
-  await screen.findByRole("heading", { name: "Settings", level: 2 });
+  await screen.findByRole("heading", { name: "Instance settings" });
 
   expect(settingValue("Sign-up")).toHaveTextContent("Disabled");
 });
@@ -166,7 +166,7 @@ it("says when single sign-on is not enforced without a licence", async () => {
   server.use(withSettings({ enforce_sso_domains: ["sso.example"], enforce_sso_applied: false }));
 
   await renderApp("/admin/settings");
-  await screen.findByRole("heading", { name: "Settings", level: 2 });
+  await screen.findByRole("heading", { name: "Instance settings" });
 
   expect(settingValue("Single sign-on required for")).toHaveTextContent(
     "sso.example — not enforced: needs an enterprise licence",
@@ -177,7 +177,7 @@ it("drops the not enforced note when single sign-on is enforced", async () => {
   server.use(withSettings({ enforce_sso_domains: ["sso.example"], enforce_sso_applied: true }));
 
   await renderApp("/admin/settings");
-  await screen.findByRole("heading", { name: "Settings", level: 2 });
+  await screen.findByRole("heading", { name: "Instance settings" });
 
   const value = settingValue("Single sign-on required for");
   expect(value).toHaveTextContent("sso.example");
@@ -198,7 +198,7 @@ it("shows the from address and lists", async () => {
   );
 
   await renderApp("/admin/settings");
-  await screen.findByRole("heading", { name: "Settings", level: 2 });
+  await screen.findByRole("heading", { name: "Instance settings" });
 
   expect(settingValue("Email (SMTP)")).toHaveTextContent("Configured");
   expect(settingValue("From address")).toHaveTextContent("cetra <noreply@example.com>");
@@ -211,7 +211,7 @@ it("shows the from address and lists", async () => {
 
 it("disables the test email without SMTP", async () => {
   await renderApp("/admin/settings");
-  await screen.findByRole("heading", { name: "Settings", level: 2 });
+  await screen.findByRole("heading", { name: "Instance settings" });
 
   const button = screen.getByRole("button", { name: "Send test email" });
   expect(button).toBeDisabled();
@@ -231,7 +231,7 @@ it("sends a test email", async () => {
   );
 
   const { user } = await renderApp("/admin/settings");
-  await screen.findByRole("heading", { name: "Settings", level: 2 });
+  await screen.findByRole("heading", { name: "Instance settings" });
 
   await user.click(screen.getByRole("button", { name: "Send test email" }));
 
@@ -252,7 +252,7 @@ it("shows an SMTP failure", async () => {
   );
 
   const { user } = await renderApp("/admin/settings");
-  await screen.findByRole("heading", { name: "Settings", level: 2 });
+  await screen.findByRole("heading", { name: "Instance settings" });
 
   await user.click(screen.getByRole("button", { name: "Send test email" }));
 
@@ -270,7 +270,7 @@ it("shows that email is not configured", async () => {
   );
 
   const { user } = await renderApp("/admin/settings");
-  await screen.findByRole("heading", { name: "Settings", level: 2 });
+  await screen.findByRole("heading", { name: "Instance settings" });
 
   await user.click(screen.getByRole("button", { name: "Send test email" }));
 
@@ -284,7 +284,7 @@ it("says when sending is rate limited", async () => {
   );
 
   const { user } = await renderApp("/admin/settings");
-  await screen.findByRole("heading", { name: "Settings", level: 2 });
+  await screen.findByRole("heading", { name: "Instance settings" });
 
   await user.click(screen.getByRole("button", { name: "Send test email" }));
 
@@ -300,7 +300,7 @@ it("falls back for other failures", async () => {
   );
 
   const { user } = await renderApp("/admin/settings");
-  await screen.findByRole("heading", { name: "Settings", level: 2 });
+  await screen.findByRole("heading", { name: "Instance settings" });
 
   await user.click(screen.getByRole("button", { name: "Send test email" }));
 
@@ -320,7 +320,7 @@ it("clears the previous message on the next send", async () => {
   );
 
   const { user } = await renderApp("/admin/settings");
-  await screen.findByRole("heading", { name: "Settings", level: 2 });
+  await screen.findByRole("heading", { name: "Instance settings" });
 
   await user.click(screen.getByRole("button", { name: "Send test email" }));
   expect(await screen.findByRole("alert")).toBeInTheDocument();

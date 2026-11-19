@@ -39,7 +39,7 @@ export function SnippetTabs({
               <div className="absolute top-2 right-2">
                 <CopyButton value={snippet} label={tab.label} />
               </div>
-              <pre className="overflow-auto p-3 pr-10 font-mono text-xs whitespace-pre">
+              <pre className="overflow-auto p-3 pr-10 font-mono text-caption whitespace-pre">
                 {snippet}
               </pre>
             </div>

@@ -58,7 +58,7 @@ export function FormatSwitch({
           key={item.mode}
           type="button"
           aria-pressed={value === item.mode}
-          className="h-5 rounded px-1.5 text-[10px] text-muted-foreground aria-pressed:bg-muted aria-pressed:text-foreground"
+          className="h-5 rounded px-1.5 text-body text-muted-foreground aria-pressed:bg-muted aria-pressed:text-foreground"
           onClick={() => onChange(item.mode)}
         >
           {item.label}

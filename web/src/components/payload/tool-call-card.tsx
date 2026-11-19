@@ -18,7 +18,7 @@ export function ToolCallCard({
 }) {
   return (
     <article id={anchorId} className="flex flex-col gap-1 rounded border px-2 py-1">
-      <header className="flex flex-wrap items-center gap-2 text-xs">
+      <header className="flex flex-wrap items-center gap-2 text-caption">
         {titleTargetId ? (
           <button type="button" className="font-medium" onClick={() => scrollTo(titleTargetId)}>
             {title}
@@ -43,7 +43,7 @@ function ArgumentBody({ value }: { value: unknown }) {
   if (typeof value === "string") {
     const parsed = jsonObject(value);
     if (parsed === undefined) {
-      return <p className="text-xs break-words whitespace-pre-wrap">{value}</p>;
+      return <p className="text-caption break-words whitespace-pre-wrap">{value}</p>;
     }
     return <JsonView value={parsed} />;
   }

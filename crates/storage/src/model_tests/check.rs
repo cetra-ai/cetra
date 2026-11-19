@@ -21,7 +21,7 @@ use datafusion::execution::context::{SessionConfig, SessionContext};
 use super::harness::Harness;
 use super::model::{ExpectedScore, ExpectedTrace, Model, ProjectModel};
 use super::observe::{
-    ALL_ROWS, LatestScore, ReadFailure, SessionRow, context, observe_alert,
+    ALL_ROWS, Kpi, KpiName, LatestScore, ReadFailure, SessionRow, context, observe_alert,
     observe_filter_trace_ids, observe_kpis, observe_latest, observe_scores, observe_scores_by_id,
     observe_sessions, observe_span_detail, observe_spans, observe_trace_detail, observe_traces,
     observe_users, window_of,
@@ -31,7 +31,7 @@ use super::shape::{DAY_NS, P, ScoreKey, day, hex, midnight, score_id, span_id, t
 use crate::Storage;
 use crate::catalog::FileTable;
 use crate::deletion::DeletionStatus;
-use crate::reads::{AlertMeasure, AlertValue, Kpi, KpiName, ListScope, MAX_PAGE};
+use crate::reads::{AlertMeasure, AlertValue, ListScope, MAX_PAGE};
 use crate::test_support::{
     Call, collect_orphans_dry_run, obsolete_rows, orphan_objects, parquet_rows, trace_ids_of,
 };

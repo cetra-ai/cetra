@@ -1,6 +1,8 @@
 import type { Schema } from "@/api/types";
 import { parseFlag } from "@/lib/search/common";
 
+export type CompareOnly = Schema<"CompareOnly">;
+
 export const DEFAULT_THRESHOLD = 0.1;
 /** A running experiment younger than this is polled for results (CG-J5). */
 const LIVE_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -19,10 +21,30 @@ function stringParam(search: Record<string, unknown>, key: string): string | und
   return typeof value === "string" ? value.trim() : undefined;
 }
 
-/** `?dataset=` of the list: a UUID string, else undefined. */
-export function parseExperimentsSearch(search: Record<string, unknown>): { dataset?: string } {
+export type ExperimentStatus = Schema<"Experiment">["status"];
+const STATUSES: readonly ExperimentStatus[] = ["running", "completed", "failed"];
+
+/**
+ * `?dataset=`, `?status=` and `?experiment=` of the list: a UUID string for the first and last,
+ * one of the statuses for `status`; anything else is dropped. The open experiment's `?errors=` and
+ * `?item=` (`parseExperimentSearch`) are kept only while `experiment` is present.
+ */
+export function parseExperimentsSearch(search: Record<string, unknown>): {
+  dataset?: string;
+  status?: ExperimentStatus;
+  experiment?: string;
+  errors?: 1;
+  item?: string;
+} {
   const dataset = stringParam(search, "dataset");
-  return dataset && UUID.test(dataset) ? { dataset } : {};
+  const experiment = stringParam(search, "experiment");
+  const status = STATUSES.find((candidate) => candidate === stringParam(search, "status"));
+  const open = experiment !== undefined && UUID.test(experiment);
+  return {
+    ...(dataset && UUID.test(dataset) ? { dataset } : {}),
+    ...(status === undefined ? {} : { status }),
+    ...(open ? { experiment, ...parseExperimentSearch(search) } : {}),
+  };
 }
 
 /** The ids of a compare search (`parseCompareSearch().ids`) as a list, in URL order. */
@@ -30,9 +52,39 @@ export function compareIdList(ids: string): string[] {
   return ids === "" ? [] : ids.split(",");
 }
 
-/** `?errors=1` of the experiment page. */
-export function parseExperimentSearch(search: Record<string, unknown>): { errors?: 1 } {
-  return parseFlag(search.errors) ? { errors: 1 } : {};
+/**
+ * `?errors=1` and `?item=<uuid>:<repetition>` of an open experiment. `item` is kept only when it
+ * is a UUID, a colon and a non-negative integer (`parseItemKey`).
+ */
+export function parseExperimentSearch(search: Record<string, unknown>): {
+  errors?: 1;
+  item?: string;
+} {
+  const item = stringParam(search, "item");
+  return {
+    ...(parseFlag(search.errors) ? { errors: 1 as const } : {}),
+    ...(item !== undefined && parseItemKey(item) !== undefined ? { item } : {}),
+  };
+}
+
+/** The key of one result row in the URL: `<dataset_item_id>:<repetition>`. */
+export function itemKey(row: { dataset_item_id: string; repetition: number }): string {
+  return `${row.dataset_item_id}:${row.repetition}`;
+}
+
+/** Splits an item key back into its item id and repetition; undefined when malformed. */
+export function parseItemKey(
+  key: string,
+): { datasetItemId: string; repetition: number } | undefined {
+  const match = /^([0-9a-f-]+):(0|[1-9][0-9]*)$/i.exec(key);
+  if (match === null || match[1] === undefined || match[2] === undefined) {
+    return undefined;
+  }
+  const datasetItemId = match[1];
+  if (!UUID.test(datasetItemId)) {
+    return undefined;
+  }
+  return { datasetItemId, repetition: Number(match[2]) };
 }
 
 /**
@@ -61,16 +113,20 @@ function thresholdOf(value: unknown): number | undefined {
   return Number.isFinite(number) && number >= 0 && number <= MAX_THRESHOLD ? number : undefined;
 }
 
+const COMPARE_ONLY: readonly CompareOnly[] = ["regressed", "improved", "changed"];
+
 /**
- * `?ids=a,b&threshold=0.2&regressions=1` of the compare view. `ids`: split on commas, trimmed,
- * empty parts dropped, duplicates dropped (first kept), UUID strings only, at most 4 kept, and
- * joined back with commas (the URL keeps the string; `compareIdList` splits it). `threshold`: a
- * finite number in [0, 1000], else undefined (the view uses DEFAULT_THRESHOLD).
+ * `?ids=a,b&threshold=0.2&only=regressed&item=<uuid>` of the compare view. `ids`: split on commas,
+ * trimmed, empty parts dropped, duplicates dropped (first kept), UUID strings only, at most 4 kept,
+ * and joined back with commas (the URL keeps the string; `compareIdList` splits it). `threshold`: a
+ * finite number in [0, 1000], else undefined (the view uses DEFAULT_THRESHOLD). `only`: one of
+ * `regressed`, `improved`, `changed`, else undefined (every item). `item`: a UUID, else undefined.
  */
 export function parseCompareSearch(search: Record<string, unknown>): {
   ids: string;
   threshold?: number;
-  regressions?: 1;
+  only?: CompareOnly;
+  item?: string;
 } {
   const ids: string[] = [];
   for (const part of (stringParam(search, "ids") ?? "").split(",")) {
@@ -80,10 +136,13 @@ export function parseCompareSearch(search: Record<string, unknown>): {
     }
   }
   const threshold = thresholdOf(search.threshold);
+  const only = COMPARE_ONLY.find((candidate) => candidate === stringParam(search, "only"));
+  const item = stringParam(search, "item");
   return {
     ids: ids.join(","),
     ...(threshold !== undefined ? { threshold } : {}),
-    ...(parseFlag(search.regressions) ? { regressions: 1 as const } : {}),
+    ...(only === undefined ? {} : { only }),
+    ...(item !== undefined && UUID.test(item) ? { item } : {}),
   };
 }
 
@@ -182,16 +241,15 @@ export function scoreValueText(value: Schema<"ResultScore">): string {
       return "—";
     case "categorical":
       return value.value_str ?? "—";
-    case "text": {
-      if (value.value_str === undefined) {
-        return "—";
-      }
-      const chars = [...value.value_str];
-      return chars.length > MAX_TEXT_CHARS
-        ? `${chars.slice(0, MAX_TEXT_CHARS).join("")}…`
-        : value.value_str;
-    }
+    case "text":
+      return value.value_str === undefined ? "—" : truncateChars(value.value_str);
   }
+}
+
+/** A text cut to `MAX_TEXT_CHARS` characters, with "…" when it was cut. */
+function truncateChars(text: string): string {
+  const chars = [...text];
+  return chars.length > MAX_TEXT_CHARS ? `${chars.slice(0, MAX_TEXT_CHARS).join("")}…` : text;
 }
 
 /** Runs expected: item_count × repetitions. */
@@ -217,4 +275,112 @@ export function compareBlockReason(
       : experiment.dataset_id === undefined && experiment.dataset_name === first?.dataset_name,
   );
   return sameDataset ? undefined : "Pick experiments of the same dataset";
+}
+
+/** The colour class of a delta's direction (higher is better, CG-J1). */
+export const DIRECTION_CLASS = {
+  better: "text-status-ok",
+  worse: "text-status-error",
+  same: "text-muted-foreground",
+} as const;
+
+/** What groups experiments into one dataset's runs: `dataset_id`, or the deleted dataset's name. */
+export function datasetKey(experiment: Schema<"Experiment">): string {
+  return experiment.dataset_id ?? `deleted:${experiment.dataset_name}`;
+}
+
+/**
+ * Each experiment's previous run: the next older experiment of the same dataset in `rows`, which
+ * come newest first (`ORDER BY e.id DESC`). An experiment with no older run is not in the map.
+ */
+export function previousRuns(rows: readonly Schema<"Experiment">[]): Map<string, string> {
+  const previous = new Map<string, string>();
+  const lastVisited = new Map<string, string>();
+  // From the oldest row to the newest: each row finds the older run of its dataset visited last.
+  for (let index = rows.length - 1; index >= 0; index--) {
+    const row = rows[index];
+    if (row === undefined) {
+      continue;
+    }
+    const key = datasetKey(row);
+    const older = lastVisited.get(key);
+    if (older !== undefined) {
+      previous.set(row.id, older);
+    }
+    lastVisited.set(key, row.id);
+  }
+  return previous;
+}
+
+/** The value a score summary is headlined by: the mean (numeric), the pass rate (boolean). */
+export function headlineValue(summary: Schema<"ScoreSummary">): number | undefined {
+  switch (summary.data_type) {
+    case "numeric":
+      return summary.mean;
+    case "boolean":
+      return summary.pass_rate;
+    case "categorical":
+    case "text":
+      return undefined;
+  }
+}
+
+/**
+ * The headline as text: the mean with 3 decimals, the pass rate in %, a categorical score's most
+ * frequent label with its share of the labelled rows ("friendly 40 %"), a text score's row
+ * count ("n 12"); "—" when there is nothing to show.
+ */
+export function headlineText(summary: Schema<"ScoreSummary">): string {
+  if (summary.data_type === "categorical") {
+    const labels = Object.entries(summary.labels);
+    const total = labels.reduce((sum, [, count]) => sum + count, 0);
+    const [top] = labels.sort(
+      ([nameA, countA], [nameB, countB]) => countB - countA || nameA.localeCompare(nameB),
+    );
+    return top === undefined || total === 0 ? "—" : `${top[0]} ${percentText(top[1] / total)} %`;
+  }
+  if (summary.data_type === "text") {
+    return summary.count > 0 ? `n ${summary.count}` : "—";
+  }
+  const value = headlineValue(summary);
+  if (value === undefined) {
+    return "—";
+  }
+  return summary.data_type === "boolean" ? `${percentText(value)} %` : value.toFixed(3);
+}
+
+/**
+ * A dataset item id shortened for a table: its last 8 characters. Item ids are UUIDv7, and items
+ * of one dataset are often created in the same millisecond, so their first characters match.
+ */
+export function itemShortId(id: string): string {
+  return id.slice(-8);
+}
+
+/**
+ * The metadata chips of an experiment: `[key, text]` for each string, number and boolean value,
+ * in the order the object holds them. A string is cut like a score text (40 characters, "…").
+ */
+export function metadataTags(metadata: Record<string, unknown>): [string, string][] {
+  const tags: [string, string][] = [];
+  for (const [key, value] of Object.entries(metadata)) {
+    if (typeof value === "string") {
+      tags.push([key, truncateChars(value)]);
+    } else if (typeof value === "number" || typeof value === "boolean") {
+      tags.push([key, String(value)]);
+    }
+  }
+  return tags;
+}
+
+/** The most ids one `GET …/experiments/summaries` takes (1 to 25). */
+export const MAX_SUMMARY_IDS = 25;
+
+/** `rows` split into runs of at most `MAX_SUMMARY_IDS`, in order. */
+export function summaryChunks<T>(rows: readonly T[]): T[][] {
+  const chunks: T[][] = [];
+  for (let start = 0; start < rows.length; start += MAX_SUMMARY_IDS) {
+    chunks.push(rows.slice(start, start + MAX_SUMMARY_IDS));
+  }
+  return chunks;
 }

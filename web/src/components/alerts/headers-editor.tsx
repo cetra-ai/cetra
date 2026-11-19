@@ -36,9 +36,9 @@ export function HeadersEditor({
       disabled={disabled}
       aria-describedby={describedBy.length > 0 ? describedBy : undefined}
     >
-      <legend className="text-sm font-medium">Headers</legend>
+      <legend className="text-body font-medium">Headers</legend>
       {description ? (
-        <p id="channel-headers-description" className="text-xs text-muted-foreground">
+        <p id="channel-headers-description" className="text-caption text-muted-foreground">
           {description}
         </p>
       ) : null}
@@ -98,7 +98,7 @@ export function HeadersEditor({
         Add header
       </Button>
       {error ? (
-        <p id="channel-headers-error" className="text-xs text-destructive">
+        <p id="channel-headers-error" className="text-caption text-destructive">
           {error}
         </p>
       ) : null}

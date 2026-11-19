@@ -23,7 +23,7 @@ export function EventsList({
   }
   return (
     <section className="flex flex-col gap-1" aria-label="Events">
-      <h3 className="text-xs font-medium">
+      <h3 className="text-caption font-medium">
         Events <span className="text-muted-foreground">{visible.length}</span>
       </h3>
       {visible.map((event) => (
@@ -45,7 +45,7 @@ function EventRow({ event, startTime }: { event: Schema<"SpanEventView">; startT
       entry.key !== "exception.stacktrace",
   );
   return (
-    <article className="border-b py-1 text-xs">
+    <article className="border-b py-1 text-caption">
       <div className="flex min-w-0 items-center gap-2">
         <span className="num shrink-0 text-muted-foreground">
           {offsetLabel(startTime, event.time)}
@@ -107,13 +107,13 @@ export function LinksList({
   }
   return (
     <section className="flex flex-col gap-1" aria-label="Links">
-      <h3 className="text-xs font-medium">
+      <h3 className="text-caption font-medium">
         Links <span className="text-muted-foreground">{visible.length}</span>
       </h3>
       {visible.map((link) => {
         const attributes = attributeEntries(recordOf(link.attributes));
         return (
-          <article key={`${link.trace_id}-${link.span_id}`} className="border-b py-1 text-xs">
+          <article key={`${link.trace_id}-${link.span_id}`} className="border-b py-1 text-caption">
             <div className="flex flex-wrap items-center gap-2">
               <IdText value={link.trace_id} kind="trace" />
               <IdText value={link.span_id} kind="span" />

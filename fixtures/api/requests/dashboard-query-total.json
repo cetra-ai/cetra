@@ -1,0 +1,13 @@
+{
+  "from": "2026-01-01T10:00:00Z",
+  "to": "2026-01-01T11:00:00Z",
+  "shape": "total",
+  "compare": true,
+  "query": {
+    "source": "traces",
+    "measures": [
+      { "agg": "count", "label": "Traces" },
+      { "agg": "p95", "field": "duration_ns", "label": "Latency p95" }
+    ]
+  }
+}

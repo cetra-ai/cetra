@@ -55,7 +55,7 @@ function captureCreate(answer?: () => Response): { body: () => unknown; calls: (
   return { body: () => body, calls: () => calls };
 }
 
-it("creates a judge rule with a budget and opens its rule page", async () => {
+it("creates a judge rule with a budget and opens its rule in the list's panel", async () => {
   const created = captureCreate();
   server.use(
     http.get("/api/v1/projects/:project/online-rules/:id", () =>
@@ -80,10 +80,20 @@ it("creates a judge rule with a budget and opens its rule page", async () => {
 
   await waitFor(() => expect(created.body()).toEqual(createFixture));
   await waitFor(() =>
-    expect(router.state.location.pathname).toBe(
-      "/acme/support-bot/online-rules/01900000-0000-7000-8000-000000000799",
-    ),
+    expect(router.state.location.pathname).toBe("/acme/support-bot/online-rules"),
   );
+  expect(router.state.location.search).toMatchObject({
+    rule: "01900000-0000-7000-8000-000000000799",
+  });
+  await waitFor(() => expect(router.state.status).toBe("idle"));
+});
+
+it("links back to the list from a new rule opened from the list", async () => {
+  const { user, router } = await renderApp("/acme/support-bot/online-rules");
+
+  await user.click(await screen.findByRole("link", { name: "New rule" }));
+  expect(await screen.findByRole("link", { name: "Back to Online rules" })).toBeInTheDocument();
+  await waitFor(() => expect(router.state.status).toBe("idle"));
 });
 
 it("refills the mapping with span expressions when the target changes", async () => {

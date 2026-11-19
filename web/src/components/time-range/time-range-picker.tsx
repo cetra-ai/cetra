@@ -138,7 +138,10 @@ export function TimeRangePicker({
             applyTyped();
           }}
         >
-          <Label htmlFor="range-duration" className="text-xs font-normal text-muted-foreground">
+          <Label
+            htmlFor="range-duration"
+            className="text-caption font-normal text-muted-foreground"
+          >
             Duration
           </Label>
           <Input
@@ -146,14 +149,14 @@ export function TimeRangePicker({
             value={typed}
             placeholder="2h"
             aria-invalid={typedError}
-            className="h-7 text-xs"
+            className="h-7 text-caption"
             onChange={(event) => {
               setTyped(event.target.value);
               setTypedError(false);
               setTypedWindowError(false);
             }}
           />
-          {typedError ? <p className="text-xs text-destructive">{TYPED_HINT}</p> : null}
+          {typedError ? <p className="text-caption text-destructive">{TYPED_HINT}</p> : null}
           {typedWindowError && windowDays !== undefined ? (
             <WindowNote windowDays={windowDays} upgradeUrl={upgradeUrl} error />
           ) : null}
@@ -166,7 +169,7 @@ export function TimeRangePicker({
           }}
         >
           <div className="flex flex-col gap-1">
-            <Label htmlFor="range-from" className="text-xs font-normal text-muted-foreground">
+            <Label htmlFor="range-from" className="text-caption font-normal text-muted-foreground">
               From
             </Label>
             <Input
@@ -174,7 +177,7 @@ export function TimeRangePicker({
               type="datetime-local"
               value={custom.from}
               aria-invalid={customError}
-              className="h-7 text-xs"
+              className="h-7 text-caption"
               onChange={(event) => {
                 setCustom((current) => ({ ...current, from: event.target.value }));
                 setCustomError(false);
@@ -183,7 +186,7 @@ export function TimeRangePicker({
             />
           </div>
           <div className="flex flex-col gap-1">
-            <Label htmlFor="range-to" className="text-xs font-normal text-muted-foreground">
+            <Label htmlFor="range-to" className="text-caption font-normal text-muted-foreground">
               To
             </Label>
             <Input
@@ -191,7 +194,7 @@ export function TimeRangePicker({
               type="datetime-local"
               value={custom.to}
               aria-invalid={customError}
-              className="h-7 text-xs"
+              className="h-7 text-caption"
               onChange={(event) => {
                 setCustom((current) => ({ ...current, to: event.target.value }));
                 setCustomError(false);
@@ -199,7 +202,9 @@ export function TimeRangePicker({
               }}
             />
           </div>
-          {customError ? <p className="text-xs text-destructive">From must be before to.</p> : null}
+          {customError ? (
+            <p className="text-caption text-destructive">From must be before to.</p>
+          ) : null}
           {customWindowError && windowDays !== undefined ? (
             <WindowNote windowDays={windowDays} upgradeUrl={upgradeUrl} error />
           ) : null}
@@ -229,7 +234,7 @@ function PresetRow({
       pressed={pressed}
       disabled={locked}
       size="sm"
-      className="h-7 w-full justify-start px-2 text-xs font-normal"
+      className="h-7 w-full justify-start px-2 text-caption font-normal"
       aria-label={locked ? `${label}, available on a paid plan` : undefined}
       onPressedChange={onSelect}
     >
@@ -253,7 +258,7 @@ function WindowNote({
   return (
     <p
       role="note"
-      className={`flex flex-wrap items-center gap-1 text-xs ${error ? "text-destructive" : "text-muted-foreground"}`}
+      className={`flex flex-wrap items-center gap-1 text-caption ${error ? "text-destructive" : "text-muted-foreground"}`}
     >
       <Lock className="size-3" aria-hidden="true" />
       Data older than {span}: available on a paid plan.

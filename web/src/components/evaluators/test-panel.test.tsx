@@ -9,7 +9,7 @@ import resultFixture from "../../../../fixtures/api/static/evaluator-test-result
 import projectFixture from "../../../../fixtures/api/static/project.json";
 
 const EVALUATOR_ID = "01900000-0000-7000-8000-000000000500";
-const EVALUATOR_URL = `/acme/support-bot/evaluators/${EVALUATOR_ID}`;
+const EVALUATOR_URL = `/acme/support-bot/evaluators/${EVALUATOR_ID}?tab=config`;
 const TRACE_ID = "0123456789abcdef0123456789abcdef";
 
 const WEBHOOK = {
@@ -139,7 +139,7 @@ it("tests a saved webhook without resending its settings", async () => {
     http.get("/api/v1/projects/:project/evaluators/:id", () => HttpResponse.json(WEBHOOK)),
   );
   const run = captureRun();
-  const { user } = await renderApp(`/acme/support-bot/evaluators/${WEBHOOK.id}`);
+  const { user } = await renderApp(`/acme/support-bot/evaluators/${WEBHOOK.id}?tab=config`);
 
   const score = await screen.findByLabelText("Score name");
   await user.clear(score);
@@ -245,7 +245,7 @@ it("shows the signing secret of a saved webhook only while its settings are repl
     http.get("/api/v1/projects/:project/evaluators/:id", () => HttpResponse.json(WEBHOOK)),
   );
   const run = captureRun();
-  const { user } = await renderApp(`/acme/support-bot/evaluators/${WEBHOOK.id}`);
+  const { user } = await renderApp(`/acme/support-bot/evaluators/${WEBHOOK.id}?tab=config`);
 
   const toggle = await screen.findByRole("checkbox", { name: "Replace webhook settings" });
   expect(screen.queryByLabelText("Signing secret")).toBeNull();

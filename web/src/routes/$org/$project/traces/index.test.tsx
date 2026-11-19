@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
 import { beforeAll, expect, it, vi } from "vitest";
 import type { Schema } from "@/api/types";
@@ -13,13 +13,71 @@ import { defaultCollapsed } from "@/lib/tree";
 import { createDataset, type Dataset } from "@/mocks/generated/dataset";
 import { largeHandlers } from "@/mocks/generated/handlers";
 import { server } from "@/mocks/node";
-import { savedViewHandlers } from "@/mocks/saved-views";
+import { savedViewHandlers, seedWithDefaultView } from "@/mocks/saved-views";
 import { type StreamEmit, spanStreamHandler, traceStreamHandler } from "@/mocks/sse";
 import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
 import projectFixture from "../../../../../../fixtures/api/static/project.json";
 
 const FIRST = "a1000000000000000000000000000006";
+
+function slotRect(left: number, width: number): DOMRect {
+  return {
+    x: left,
+    y: 0,
+    left,
+    right: left + width,
+    top: 0,
+    bottom: 28,
+    width,
+    height: 28,
+    toJSON: () => ({}),
+  };
+}
+
+// Each header is 100 px wide, so the drop index follows the column order.
+function stubHeaderSlots(grid: HTMLElement) {
+  // The selection column has no column id and is not a sortable column: the slots count the columns only.
+  within(grid)
+    .getAllByRole("columnheader")
+    .filter((header) => header.hasAttribute("data-column-id"))
+    .forEach((header, index) => {
+      header.getBoundingClientRect = () => slotRect(index * 100, 100);
+    });
+  const scroller = grid.querySelector<HTMLElement>("[data-scroll-container]");
+  if (scroller) {
+    scroller.getBoundingClientRect = () => slotRect(0, 1000);
+  }
+}
+
+it("saves a column dragged to a new place as cols", async () => {
+  const { router } = await renderApp("/acme/support-bot/traces");
+  expect(
+    screen.getAllByRole("heading", { level: 1 }).map((heading) => heading.textContent),
+  ).toEqual(["Traces"]);
+  const grid = await screen.findByRole("grid", { name: "Traces" });
+  stubHeaderSlots(grid);
+  vi.useFakeTimers();
+  try {
+    // Input is the second unlocked column; drop it on the Start slot.
+    fireEvent.pointerDown(screen.getByRole("columnheader", { name: "Input" }), {
+      button: 0,
+      clientX: 350,
+      clientY: 10,
+    });
+    fireEvent.pointerMove(window, { clientX: 120, clientY: 10 });
+    fireEvent.pointerUp(window, { clientX: 120, clientY: 10 });
+  } finally {
+    vi.useRealTimers();
+  }
+  await waitFor(() => {
+    expect(
+      String(router.state.location.search.cols ?? "")
+        .split(",")
+        .slice(0, 4),
+    ).toEqual(["status", "input", "start", "name"]);
+  });
+});
 
 it("renders the fixture traces in the default columns", async () => {
   const urls: URL[] = [];
@@ -69,6 +127,12 @@ it("renders the fixture traces in the default columns", async () => {
   } finally {
     server.events.removeListener("request:start", onStart);
   }
+});
+
+it("renders the traces-over-time chart above the table", async () => {
+  await renderApp("/acme/support-bot/traces");
+  await screen.findByRole("grid", { name: "Traces" });
+  expect(screen.getByRole("img", { name: "Traces over time" })).toBeInTheDocument();
 });
 
 it("sorts from the URL without reordering the server page", async () => {
@@ -201,6 +265,40 @@ it("moves up from the open trace after a deep link", async () => {
   });
 });
 
+it("opens the neighbouring loaded traces from the header buttons", async () => {
+  const { router } = await renderApp(
+    "/acme/support-bot/traces?range=1h&trace=a1000000000000000000000000000003",
+  );
+  await screen.findByRole("grid", { name: "Trace" });
+  fireEvent.click(screen.getByRole("button", { name: "Next trace" }));
+  await waitFor(() => {
+    expect(router.state.location.search.trace).toBe("a1000000000000000000000000000002");
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Previous trace" }));
+  await waitFor(() => {
+    expect(router.state.location.search.trace).toBe("a1000000000000000000000000000003");
+  });
+});
+
+it("hides Next at the last loaded trace", async () => {
+  const { router } = await renderApp(
+    "/acme/support-bot/traces?range=1h&trace=a1000000000000000000000000000003",
+  );
+  await screen.findByRole("grid", { name: "Trace" });
+  let steps = 0;
+  while (screen.queryByRole("button", { name: "Next trace" }) && steps < 50) {
+    const before = router.state.location.search.trace;
+    fireEvent.click(screen.getByRole("button", { name: "Next trace" }));
+    await waitFor(() => {
+      expect(router.state.location.search.trace).not.toBe(before);
+    });
+    steps += 1;
+  }
+  expect(steps).toBeGreaterThan(0);
+  expect(screen.queryByRole("button", { name: "Next trace" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Previous trace" })).toBeInTheDocument();
+});
+
 it("persists a column width and restores the default on double-click", async () => {
   await renderApp("/acme/support-bot/traces");
   const handle = await screen.findByRole("separator", { name: "Resize Name" });
@@ -209,15 +307,17 @@ it("persists a column width and restores the default on double-click", async () 
   fireEvent.pointerUp(window, { clientX: 180 });
   expect(JSON.parse(localStorage.getItem("cetra.table.traces") ?? "")).toEqual({ name: 280 });
   const header = handle.parentElement?.parentElement;
-  expect(header?.style.gridTemplateColumns.startsWith("28px 132px 280px")).toBe(true);
+  expect(header?.style.gridTemplateColumns.startsWith("32px 28px 132px 280px")).toBe(true);
   fireEvent.doubleClick(handle);
   expect(localStorage.getItem("cetra.table.traces")).toBeNull();
-  expect(header?.style.gridTemplateColumns.startsWith("28px 132px 200px")).toBe(true);
+  expect(header?.style.gridTemplateColumns.startsWith("32px 28px 132px 200px")).toBe(true);
 });
 
 const TRACE_1 = "a1000000000000000000000000000001";
 const TOOL_SPAN = "b100000000000013";
 const NEXT = "a1000000000000000000000000000004";
+const NEXT_OF_3 = "a1000000000000000000000000000002";
+const PREVIOUS_OF_3 = "a1000000000000000000000000000004";
 const LARGE = "a0000000000000000000000000000000";
 
 it("opens a trace beside the list and follows span, escape, and j", async () => {
@@ -257,7 +357,10 @@ it("opens a trace beside the list and follows span, escape, and j", async () => 
     expect(router.state.location.search.trace).toBeUndefined();
   });
   expect(router.state.location.search.span).toBeUndefined();
-  expect(screen.queryByRole("grid", { name: "Trace" })).not.toBeInTheDocument();
+  // The drawer slides out before it unmounts.
+  await waitFor(() => {
+    expect(screen.queryByRole("grid", { name: "Trace" })).not.toBeInTheDocument();
+  });
   expect(screen.getByRole("grid", { name: "Traces" })).toBeInTheDocument();
 
   const firstRow = within(list).getAllByRole("row")[1];
@@ -272,6 +375,38 @@ it("opens a trace beside the list and follows span, escape, and j", async () => 
     expect(router.state.location.search).toMatchObject({ trace: NEXT });
   });
   expect(router.state.location.search.span).toBeUndefined();
+});
+
+it("shows the trace summary in transcript mode until a block is picked, and goes back to it", async () => {
+  const { router, user } = await renderApp(
+    `/acme/support-bot/traces?trace=${TRACE_1}&mode=transcript`,
+  );
+  expect(await screen.findByRole("region", { name: "Trace summary" })).toBeInTheDocument();
+
+  const transcript = await screen.findByRole("region", { name: "Transcript" });
+  await user.click(within(transcript).getByRole("button", { name: /get_order_status/ }));
+  await waitFor(() => {
+    expect(router.state.location.search).toMatchObject({ span: TOOL_SPAN, mode: "transcript" });
+  });
+  expect(screen.queryByRole("region", { name: "Trace summary" })).not.toBeInTheDocument();
+  const panel = await screen.findByRole("region", { name: "Span" });
+  expect(within(panel).getByText("get_order_status")).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "Trace summary" }));
+  await waitFor(() => {
+    expect(router.state.location.search.span).toBeUndefined();
+  });
+  expect(router.state.location.search).toMatchObject({ trace: TRACE_1, mode: "transcript" });
+  expect(await screen.findByRole("region", { name: "Trace summary" })).toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "Span" })).not.toBeInTheDocument();
+});
+
+it("shows the root span's detail in tree mode, not the summary", async () => {
+  await renderApp(`/acme/support-bot/traces?trace=${TRACE_1}`);
+  const tree = await screen.findByRole("grid", { name: "Trace" });
+  expect(within(tree).getByRole("row", { selected: true })).toHaveTextContent("support-agent");
+  expect(await screen.findByRole("region", { name: "Span" })).toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "Trace summary" })).not.toBeInTheDocument();
 });
 
 it("virtualizes a 10 000 span trace and reveals children when a node expands", async () => {
@@ -373,10 +508,13 @@ it("includes evaluation traces when eval is on", async () => {
   };
   server.events.on("request:start", onStart);
   try {
-    const { router } = await renderApp("/acme/support-bot/traces");
+    const { router, user } = await renderApp("/acme/support-bot/traces");
     await screen.findByRole("grid", { name: "Traces" });
     expect(screen.queryByText("judge helpfulness")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("switch", { name: "Eval" }));
+    await user.click(
+      screen.getByRole("button", { name: /^Include evaluation and experiment traces/ }),
+    );
+    await user.click(await screen.findByRole("menuitemcheckbox", { name: "Evaluation traces" }));
     expect(await screen.findByText("judge helpfulness")).toBeInTheDocument();
     expect(urls.some((url) => url.searchParams.get("include_eval") === "true")).toBe(true);
     expect(router.state.location.search).toMatchObject({ eval: 1 });
@@ -405,6 +543,7 @@ it("restores column order from cols and ignores an unknown id", async () => {
   expect(
     within(grid)
       .getAllByRole("columnheader")
+      .filter((header) => header.hasAttribute("data-column-id"))
       .map((header) => header.textContent),
   ).toEqual(["User", "Name", "Status"]);
 });
@@ -450,7 +589,11 @@ it("sorts by cost, then ascending, then back to the default", async () => {
       urls.find((url) => url.searchParams.get("sort") === "cost_total")?.searchParams.get("order"),
     ).toBe("desc");
     expect(router.state.location.search).toMatchObject({ sort: "cost_total", order: "desc" });
-    fireEvent.click(screen.getByRole("button", { name: "Cost" }));
+    fireEvent.click(
+      within(screen.getByRole("columnheader", { name: "Cost" })).getByRole("button", {
+        name: "Cost",
+      }),
+    );
     await waitFor(() => {
       expect(router.state.location.search).toMatchObject({ sort: "cost_total", order: "asc" });
       expect(screen.getByRole("columnheader", { name: "Cost" })).toHaveAttribute(
@@ -458,7 +601,11 @@ it("sorts by cost, then ascending, then back to the default", async () => {
         "ascending",
       );
     });
-    fireEvent.click(screen.getByRole("button", { name: "Cost" }));
+    fireEvent.click(
+      within(screen.getByRole("columnheader", { name: "Cost" })).getByRole("button", {
+        name: "Cost",
+      }),
+    );
     await waitFor(() => {
       expect(router.state.location.search.sort).toBeUndefined();
       expect(router.state.location.search.order).toBeUndefined();
@@ -479,6 +626,7 @@ it("uses the stored columns when the URL has no cols", async () => {
   expect(
     within(grid)
       .getAllByRole("columnheader")
+      .filter((header) => header.hasAttribute("data-column-id"))
       .map((header) => header.textContent),
   ).toEqual(["User", "Name", "Status"]);
 });
@@ -489,6 +637,7 @@ function near(url: URL, windowMs: number): boolean {
 }
 
 it("shows the plain empty state when the default filter matches nothing", async () => {
+  savedViewHandlers(seedWithDefaultView());
   server.use(
     http.get("/api/v1/projects/:project/traces", () =>
       HttpResponse.json({ data: [], next_cursor: null }),
@@ -499,6 +648,13 @@ it("shows the plain empty state when the default filter matches nothing", async 
   expect(screen.getByRole("button", { name: "Clear filters" })).toBeInTheDocument();
   expect(screen.queryByRole("tab", { name: "OTel env vars" })).not.toBeInTheDocument();
   expect(screen.getByText("0 loaded")).toBeInTheDocument();
+});
+
+it("the saved views menu sits in the breadcrumb", async () => {
+  savedViewHandlers([]);
+  await renderApp("/acme/support-bot/traces");
+  const crumb = await screen.findByRole("navigation", { name: "Breadcrumb" });
+  expect(await within(crumb).findByRole("button", { name: "Default view" })).toBeInTheDocument();
 });
 
 it("shows onboarding snippets when the project has no traces", async () => {
@@ -827,7 +983,9 @@ it("replaces a known trace in place", async () => {
   const { emit } = await openLive("/acme/support-bot/traces?live=1");
   emit.trace(liveTrace(FIRST, "renamed in place", "2026-01-01T10:30:00.000000000Z"));
   expect(await screen.findByText("renamed in place")).toBeInTheDocument();
-  expect(screen.queryByText("chat claude-sonnet-4-5")).not.toBeInTheDocument();
+  // The facet panel lists the same name as a value, so the check is scoped to the table.
+  const table = screen.getByRole("grid", { name: "Traces" });
+  expect(within(table).queryByText("chat claude-sonnet-4-5")).not.toBeInTheDocument();
   expect(screen.getByText("renamed in place").closest("[role=row]")).not.toHaveClass("live-row");
   expect(screen.getByText("5 loaded")).toBeInTheDocument();
 });
@@ -1299,4 +1457,223 @@ it("disables delete matching for members, with the reason", async () => {
   const button = await screen.findByRole("button", { name: "Delete matching…" });
   expect(button).toBeDisabled();
   expect(button.parentElement).toHaveAccessibleDescription("Only project admins can delete traces");
+});
+
+it("shows the layout switcher in the open trace's header, not in the list toolbar", async () => {
+  await renderApp("/acme/support-bot/traces");
+  await screen.findByRole("grid", { name: "Traces" });
+  expect(screen.queryByRole("radiogroup", { name: "Layout" })).not.toBeInTheDocument();
+  cleanup();
+  await renderApp("/acme/support-bot/traces?range=1h&trace=a1000000000000000000000000000001");
+  await screen.findByRole("grid", { name: "Trace" });
+  expect(screen.getByRole("radiogroup", { name: "Layout" })).toBeInTheDocument();
+});
+
+it("shows the list and the trace together in bottom mode", async () => {
+  localStorage.setItem("cetra.list_layout", "bottom");
+  await renderApp("/acme/support-bot/traces?range=1h&trace=a1000000000000000000000000000001");
+  expect(await screen.findByRole("grid", { name: "Trace" })).toBeInTheDocument();
+  expect(screen.getByRole("grid", { name: "Traces" })).toBeInTheDocument();
+});
+
+it("shows the trace in a drawer over the list, and Escape closes it", async () => {
+  localStorage.setItem("cetra.list_layout", "drawer");
+  const { router } = await renderApp(
+    "/acme/support-bot/traces?range=1h&trace=a1000000000000000000000000000001",
+  );
+  const trace = await screen.findByRole("grid", { name: "Trace" });
+  expect(screen.getByRole("grid", { name: "Traces" })).toBeInTheDocument();
+  expect(screen.getByRole("complementary", { name: "Trace" })).toContainElement(trace);
+
+  fireEvent.keyDown(window, { key: "Escape" });
+  await waitFor(() => {
+    expect(router.state.location.search.trace).toBeUndefined();
+  });
+  await waitFor(() => {
+    expect(screen.queryByRole("complementary", { name: "Trace" })).not.toBeInTheDocument();
+  });
+  expect(screen.getByRole("grid", { name: "Traces" })).toBeInTheDocument();
+});
+
+it("prefetches the trace detail and its root span when the pointer rests on a row", async () => {
+  const detailRequests: string[] = [];
+  const rootRequests: string[] = [];
+  const onStart = ({ request }: { request: Request }) => {
+    const url = new URL(request.url);
+    if (url.pathname.endsWith(`/traces/${TRACE_1}`)) {
+      detailRequests.push(url.pathname);
+    }
+    if (url.pathname.includes(`/traces/${TRACE_1}/spans/`)) {
+      rootRequests.push(url.pathname);
+    }
+  };
+  server.events.on("request:start", onStart);
+  try {
+    await renderApp("/acme/support-bot/traces");
+    const list = await screen.findByRole("grid", { name: "Traces" });
+    const scroller = list.querySelector("[data-scroll-container]");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("missing scroll container");
+    }
+    scroller.scrollTop = 240;
+    fireEvent.scroll(scroller);
+    const row = within(list).getByRole("row", { name: /4\.20s/ });
+    fireEvent.pointerEnter(row);
+    await waitFor(() => expect(detailRequests).toHaveLength(1));
+    await waitFor(() => expect(rootRequests).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(detailRequests).toHaveLength(1);
+    expect(rootRequests).toHaveLength(1);
+  } finally {
+    server.events.removeListener("request:start", onStart);
+  }
+});
+
+it("prefetches the neighbours of an open trace once", async () => {
+  const requested: string[] = [];
+  const onStart = ({ request }: { request: Request }) => {
+    const url = new URL(request.url);
+    if (url.pathname.includes("/traces/a1000000000000000000000000000")) {
+      requested.push(url.pathname.split("/").at(-1) ?? "");
+    }
+  };
+  server.events.on("request:start", onStart);
+  try {
+    await renderApp("/acme/support-bot/traces?range=1h&trace=a1000000000000000000000000000003");
+    await screen.findByRole("grid", { name: "Trace" });
+    await waitFor(() => {
+      expect(requested).toEqual(expect.arrayContaining([NEXT_OF_3, PREVIOUS_OF_3]));
+    });
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(requested.filter((id) => id === NEXT_OF_3)).toHaveLength(1);
+    expect(requested.filter((id) => id === PREVIOUS_OF_3)).toHaveLength(1);
+  } finally {
+    server.events.removeListener("request:start", onStart);
+  }
+});
+
+it("returns from the full trace page to the same list search", async () => {
+  const { router, user } = await renderApp("/acme/support-bot/traces?sort=duration&order=asc");
+  const grid = await screen.findByRole("grid", { name: "Traces" });
+  const firstRow = grid.querySelector<HTMLElement>('[role="row"][aria-rowindex="2"]');
+  if (!firstRow) {
+    throw new Error("no first trace row");
+  }
+  fireEvent.click(firstRow);
+  await user.click(await screen.findByRole("link", { name: "Open full page" }));
+  await waitFor(() => {
+    expect(router.state.location.pathname).toMatch(/\/traces\/[0-9a-f]{32}$/);
+  });
+  await user.click(await screen.findByRole("link", { name: "Back to traces" }));
+  await waitFor(() => {
+    expect(router.state.location.pathname).toBe("/acme/support-bot/traces");
+  });
+  expect(router.state.location.search).toMatchObject({ sort: "duration", order: "asc" });
+});
+
+it("does not apply the default view on a return from a detail page", async () => {
+  const { router } = await renderApp("/acme/support-bot/sessions");
+  await screen.findByRole("grid", { name: "Sessions" });
+  await router.navigate({
+    to: "/$org/$project/traces",
+    params: { org: "acme", project: "support-bot" },
+    state: { listRestore: {} },
+  });
+  const traces = await screen.findByRole("grid", { name: "Traces" });
+  expect(within(traces).getAllByRole("row").length).toBeGreaterThan(1);
+  expect(router.state.location.search).toEqual({});
+});
+
+/** The row checkbox of the `index`th loaded row. */
+async function rowBox(index: number): Promise<HTMLElement> {
+  const grid = await screen.findByRole("grid", { name: "Traces" });
+  const boxes = within(grid).getAllByRole("checkbox", { name: "Select row" });
+  const box = boxes[index];
+  if (!box) {
+    throw new Error(`no row checkbox ${index}`);
+  }
+  return box;
+}
+
+it("checks trace rows without opening them and offers to add them to a dataset", async () => {
+  const { router, user } = await renderApp("/acme/support-bot/traces");
+  await screen.findByRole("grid", { name: "Traces" });
+  expect(screen.queryByRole("button", { name: /to dataset$/ })).not.toBeInTheDocument();
+
+  await user.click(await rowBox(0));
+  await user.click(await rowBox(1));
+  expect(screen.getByRole("button", { name: "Add 2 to dataset" })).toBeEnabled();
+
+  await user.click(await rowBox(0));
+  expect(screen.getByRole("button", { name: "Add 1 to dataset" })).toBeEnabled();
+  expect(router.state.location.search.trace).toBeUndefined();
+});
+
+it("keeps the bulk actions out of the breadcrumb", async () => {
+  const { user } = await renderApp("/acme/support-bot/traces");
+  await user.click(await rowBox(0));
+
+  const crumb = await screen.findByRole("navigation", { name: "Breadcrumb" });
+  expect(within(crumb).queryByRole("button", { name: "Add 1 to dataset" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Add 1 to dataset" })).toBeInTheDocument();
+});
+
+it("disables the add action for viewers and says why", async () => {
+  server.use(
+    http.get("/api/v1/projects/:project", () =>
+      HttpResponse.json({ ...projectFixture, role: "viewer" }),
+    ),
+  );
+  const { user } = await renderApp("/acme/support-bot/traces");
+  await user.click(await rowBox(0));
+
+  expect(screen.getByRole("button", { name: "Add 1 to dataset" })).toBeDisabled();
+  expect(screen.getByText("Only members can add to datasets")).toBeInTheDocument();
+});
+
+it("clears the checked traces when the search changes", async () => {
+  const { user } = await renderApp("/acme/support-bot/traces");
+  await user.click(await rowBox(0));
+  expect(screen.getByRole("button", { name: "Add 1 to dataset" })).toBeInTheDocument();
+
+  await user.type(screen.getByRole("searchbox", { name: "Search" }), "refund");
+
+  await waitFor(() =>
+    expect(screen.queryByRole("button", { name: "Add 1 to dataset" })).not.toBeInTheDocument(),
+  );
+});
+
+it("keeps the facet panel and its typed value search when the filter changes", async () => {
+  server.use(
+    http.get("/api/v1/projects/:project/facets", ({ request }) => {
+      const url = new URL(request.url);
+      const field = url.searchParams.get("field");
+      const values =
+        field === "status"
+          ? [
+              { value: "ok", count: 100 },
+              { value: "error", count: 17 },
+            ]
+          : [];
+      return HttpResponse.json({
+        view: url.searchParams.get("view"),
+        field,
+        kind: "values",
+        total: values.reduce((sum, item) => sum + item.count, 0),
+        missing: 0,
+        values,
+        more: false,
+      });
+    }),
+  );
+  const { router, user } = await renderApp("/acme/support-bot/traces?range=15m");
+  const panel = await screen.findByRole("complementary", { name: "Filter facets" });
+  await user.type(within(panel).getByRole("searchbox", { name: "Search Status values" }), "er");
+  await user.click(await within(panel).findByRole("checkbox", { name: "error" }));
+  await waitFor(() => {
+    expect(router.state.location.search.filter).toBe("status = 'error'");
+  });
+  // The same panel node, with the typed text still in its value search.
+  expect(screen.getByRole("complementary", { name: "Filter facets" })).toBe(panel);
+  expect(within(panel).getByRole("searchbox", { name: "Search Status values" })).toHaveValue("er");
 });

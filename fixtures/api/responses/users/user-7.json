@@ -5,7 +5,35 @@
     "last_seen": "2026-01-01T10:10:00.800000000Z",
     "trace_count": 1,
     "session_count": 1,
-    "error_count": 2
+    "error_count": 2,
+    "error_trace_count": 1,
+    "activity": [
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "scores": []
   },
   "sessions": [
     {
@@ -17,7 +45,8 @@
       "error_count": 2,
       "user_id": "user-7",
       "tags": [],
-      "scores": []
+      "scores": [],
+      "error_trace_count": 0
     }
   ]
 }

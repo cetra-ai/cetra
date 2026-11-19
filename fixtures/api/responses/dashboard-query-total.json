@@ -1,0 +1,16 @@
+{
+  "shape": "total",
+  "rows": [
+    {
+      "other": false,
+      "values": [
+        5.0,
+        4200000000.0
+      ],
+      "previous": [
+        null,
+        null
+      ]
+    }
+  ]
+}

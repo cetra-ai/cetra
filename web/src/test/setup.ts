@@ -2,6 +2,7 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, configure } from "@testing-library/react";
 import { HttpNetworkFrame } from "msw/experimental";
 import { afterAll, afterEach, beforeAll, beforeEach } from "vitest";
+import { dashboardHandlers, seedDashboards } from "../mocks/dashboards";
 import { server } from "../mocks/node";
 import { savedViewHandlers, seedSavedViews } from "../mocks/saved-views";
 import { installTestEventSource } from "./event-source";
@@ -55,14 +56,38 @@ if (typeof globalThis.ResizeObserver === "undefined") {
   };
 }
 
+// jsdom has no IntersectionObserver. Report every observed element as visible
+// at once, so lazily mounted cards render as they do in a full page.
+if (typeof globalThis.IntersectionObserver === "undefined") {
+  globalThis.IntersectionObserver = class IntersectionObserverStub {
+    constructor(private readonly callback: IntersectionObserverCallback) {}
+    observe(target: Element): void {
+      this.callback(
+        [{ isIntersecting: true, target } as IntersectionObserverEntry],
+        this as unknown as IntersectionObserver,
+      );
+    }
+    unobserve(): void {}
+    disconnect(): void {}
+    takeRecords(): IntersectionObserverEntry[] {
+      return [];
+    }
+  } as unknown as typeof IntersectionObserver;
+}
+
 beforeEach(() => {
-  server.use(...savedViewHandlers(seedSavedViews()), onlineRulePreviewHandler());
+  server.use(
+    ...savedViewHandlers(seedSavedViews()),
+    ...dashboardHandlers(seedDashboards()),
+    onlineRulePreviewHandler(),
+  );
 });
 
 afterEach(() => {
   server.resetHandlers();
   cleanup();
   localStorage.clear();
+  sessionStorage.clear();
   document.documentElement.className = "";
   document.documentElement.style.colorScheme = "";
   resetMatchMedia();

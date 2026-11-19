@@ -32,6 +32,23 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ### Added
 
+- Dashboard templates — Cost, Latency and Quality — in the New dashboard dialog; the Overview adds top users and top trace names by cost and drops its section headings (D-C-21).
+- A demo org that every signed-in user can read (`demo.org`): users see it last in their org switcher as an implicit viewer, without a membership row (D187).
+- A filter sidebar on the Traces, Spans, Sessions and Users lists: per-field values with counts, keys of metadata and attributes, and histograms with range selection for durations, costs and tokens, all written into the filter text. Backed by the new `GET /facets` endpoint (D-C-13).
+- Preset filters (Errors, Slow, Expensive, Has score, LLM), value autocomplete in the filter editor, a "+ Filter" button with a searchable field picker and token input for `IN`, and wrapping chips in a new filter row.
+- Lists opened without URL parameters keep the range, flags and compatible filters of the last list (D-C-14).
+- A right-click menu on filterable list cells: filter, exclude, copy, open the session or user.
+- Dashboard: KPI sparklines, a shared hover cursor across charts, drag to zoom the range, per-score small charts, and top-model rows that open the filtered traces (D-C-15).
+- Custom dashboards (D-C-16): any number of named dashboards per project on a 60-column grid (D-C-19) that members edit by dragging, resizing and a widget editor; widgets are line, bar, area, horizontal bar, number and table charts, and headings. The built-in Overview is a read-only preset of the same widgets that can be duplicated. API: `GET/POST /dashboards`, `GET/PATCH/DELETE /dashboards/{id}` and `POST /dashboards/query`, which computes one widget from traces, spans or scores with up to six measures, a breakdown and filters.
+- The Overview is editable in place, with "Reset to default" (D-C-18): the first save stores the project's own copy, and everyone sees it. Charts on any dashboard a member can edit are dragged and resized without entering Edit; the layout saves itself, with an Undo bar.
+- Online rules: `GET /online-rules/stats` answers the last 24 hours per rule, with the finished jobs by hour and the score summary with an hourly series (D-I-50), and the reworked Online rules page shows them beside a full-width list with a side panel: status, spend, hourly jobs, score summary and trend, and recent failures.
+- Experiments:
+  - The list is full width, with a status strip, metadata tags, score badges with the change since the previous run, errors, latency and cost, and a trend chart per dataset. Experiments open in the list's panel (drawer, bottom or page).
+  - Experiment pages show score distributions and open each item in a side sheet that renders the input and outputs as Markdown or JSON.
+  - The compare view filters items that are regressed, improved or changed, counts improved and regressed items per score, and opens an item with its outputs side by side.
+  - New: `GET /experiments/summaries?ids=` and `ScoreSummary.histogram` (D-J-20, D-J-21).
+- Users: the user page has a time range and Overview, Sessions and Traces tabs; Overview shows the user's scores, metadata, and the dashboard's KPIs and charts for that user, with a link to the dashboard filtered to them. The list shows each user's name and plan from `user.*` metadata, relative first/last seen, KPI changes against the previous period and the top users by cost; the drawer shows metric chips, an activity chart and each recent session's first message. `GET /users/{user_id}` takes `from` and `to`.
+- Licences: release builds also accept licence keys signed by `license-1`, the cloud control plane's online licence key, and `license-2`, its offline spare (D-P-73).
 - OTLP: `POST /v1/logs` and `POST /v1/metrics` (HTTP) and the gRPC `LogsService` and `MetricsService` are accepted and dropped instead of answering 404 (D-G-40). GenAI content sent as log events is counted per project; `GET /api/v1/projects/{project}` returns it as `genai_log_events`, and the UI tells the project's users once that the content was dropped. Migration `0018` adds `usage_daily.genai_log_events`.
 - Alerts: a `no_data` event kind, shown in the history, and a "No data" notification on Slack, email and webhooks (`alert.no_data`) (D-K-20).
 - Datasets: versioned datasets of input / expected output / metadata items with optional JSON Schemas, and their API (`/datasets`, items, versions) (track J).
@@ -41,6 +58,8 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - TypeScript SDK: `new cetra.Client()` for datasets and `cetra.evaluate` to run experiments on your machine (track J).
 - Experiments: the experiments list, experiment page and compare view (2–4 experiments, deltas, regressions and a word-level output diff) in the web UI (track J).
 - Datasets: the dataset pages in the web UI, with items, versions, import, export and an Experiments tab (track J).
+- Datasets: item search (`q`), batch edit and batch delete of items in one version each, a version's added, edited and deleted counts with its item changes, restore of an earlier version, bulk add of up to 100 traces, and `GET /dataset-trends` with the latest experiments and score means per dataset (track J, D-J-22 to D-J-26).
+- Datasets UI: a full-width list with a summary strip, last experiment and score trend columns and a dataset panel; a dataset page with header chips, a "Run experiment" snippet, an items grid with previews, search, an item panel, cell edit mode and bulk delete; a versions timeline with change counts, diffs and restore; how-to empty states; and "Add N to dataset" for checked rows of the traces list.
 - Settings → Model prices, for an organization and for a project: add, edit and delete custom prices, search the built-in prices, and check which price applies to a model.
 - Custom model prices per project: `/api/v1/projects/{project}/models` lists the effective price table, resolves which price applies, and adds, replaces and deletes project prices. New prices apply to spans received afterwards; stored costs are not recomputed (D-T-5). Org-wide prices under `/api/v1/orgs/{org}/models` apply to every project of the org; a project price beats an org price.
 - Auth: an `[[auth.oidc]]` provider's client secret can come from
@@ -71,12 +90,23 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - Helm chart values `extraVolumes` and `extraVolumeMounts` (for example a backup volume).
 - Restore mode (`restore_mode`): the server serves reads and makes no outbound call, for restore drills.
 - Prometheus metrics on a separate listener (`metrics_addr`); the Helm chart's `metrics.enabled`.
+- A layout switcher on the Traces and Spans lists: split, drawer, rail and bottom.
+
+- Evaluator version history: every change to an evaluator's config or output is kept, `GET /api/v1/projects/{project}/evaluators/{id}/versions` lists the versions, and the evaluator page has a History tab that diffs a version against the previous one.
+- Evaluators: `GET /evaluators/stats`; the evaluator list shows 7-day runs, errors, average cost, p50 and result columns (the score column is now "Output"), and the evaluator page a 7-day stats row and the experiments with its score (D-I-48).
 
 ### Changed
 
 - The self-hosting guides moved from `docs/self-hosting/` to cetra.sh/docs/self-hosting/.
 - The SDK guides moved from the package READMEs to cetra.sh/docs/reference/python/ and
   cetra.sh/docs/reference/typescript/; the READMEs keep install and the quick start.
+- The copyright holder in the MIT `LICENSE` files is sebastiencs, which is also named as the licensor of the Elastic License 2.0 directories (D190).
+- The top bar is a breadcrumb to the current page and its open item, shows whether spans are arriving, and lists firing alerts (D-C-20).
+- Dashboard charts use round axis ticks, at most 60 buckets, the error colour for errors and one colour per model; change badges show `new` or `×N` instead of huge percentages. The list toolbars' Eval and Experiments switches are now one "Include" menu (D-C-15).
+- The project sidebar groups its pages into Observe, Monitor, Evaluate and Explore, with live badges on Alerts, Online rules and Experiments, a Recent group, and the account menu, Docs link and version in its footer; `g` then a letter now reaches every project page (Spans moves to `g p`, Sessions to `g s`), and the sidebar starts collapsed below 1024 px (D-C-12).
+- Settings: `/settings` is now an overview with a live status per section; every settings page shares one layout with per-card Save, a danger zone last, inline validation and an unsaved-changes prompt; lists (API keys, members, invites, tokens, LLM connections, channels, model prices, score definitions) get search, sort, status pills and a row panel; destructive actions ask for the item's name; the settings sidebar has a filter and a usage meter, and ⌘K lists every settings page.
+- `GET /experiments/compare` takes `only=regressed|improved|changed` in place of `regressions_only`; compare cells carry `improved`, and score deltas count the improved and regressed items (D-J-21).
+- New logo, the Caetra c (D189): the web UI's favicons, and the brand files in `assets/brand/`.
 - The product is renamed from the working name `llmobs` to cetra (cetra.sh, D46): the binary and crates,
   the `CETRA_*` environment variables, the `cetra.*` span attributes, the `sk-cetra-`, `pk-cetra-` and
   `pat-cetra-` key prefixes, the `ghcr.io/cetra-ai/cetra` image, the `cetra` Helm chart, and the
@@ -202,3 +232,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 - Cloud cells must set `entitlements.control_plane = true`; without it, `/api/internal/v1/*`
   answers 404 and org and control-plane tokens are refused (D-P-50).
+
+### Removed
+
+- `GET /metrics`: every chart now reads `POST /dashboards/query` (D-C-16).

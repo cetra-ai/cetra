@@ -13,8 +13,8 @@ import projectFixture from "../../../../../../fixtures/api/static/project.json";
 
 const PAGE = "/acme/support-bot/alerts/new";
 const RULES = "/api/v1/projects/:project/alert-rules";
-const METRICS = "/api/v1/projects/:project/metrics";
-const RULE_PAGE = `/acme/support-bot/alerts/${FIRING_RULE_ID}`;
+const WIDGET = "/api/v1/projects/:project/dashboards/query";
+const LIST = "/acme/support-bot/alerts";
 
 /** Chooses an option of a select by its label, through the trigger and the listbox. */
 async function choose(user: UserEvent, label: string, option: string) {
@@ -22,14 +22,18 @@ async function choose(user: UserEvent, label: string, option: string) {
   await user.click(await screen.findByRole("option", { name: option }));
 }
 
-function metricsResponse(points: { time: string; value?: number }[]) {
+/** A widget query answer with one series of the given points. */
+function seriesAnswer(points: { time: string; value?: number }[]) {
   return {
+    shape: "series",
     bucket_ns: 300_000_000_000,
-    from: "2026-01-01T00:00:00.000Z",
-    to: "2026-01-02T00:00:00.000Z",
-    kpis: [],
-    series: [{ metric: "error_rate", points }],
-    top_models: [],
+    series: [
+      {
+        measure: 0,
+        other: false,
+        points: points.map((point) => ({ ...point, rows: 1 })),
+      },
+    ],
   };
 }
 
@@ -63,7 +67,9 @@ it("creates an error rate rule", async () => {
       notify_while_firing: false,
     }),
   );
-  await waitFor(() => expect(router.state.location.pathname).toBe(RULE_PAGE));
+  await waitFor(() => expect(router.state.location.pathname).toBe(LIST));
+  expect(router.state.location.search).toMatchObject({ rule: FIRING_RULE_ID });
+  await waitFor(() => expect(router.state.status).toBe("idle"));
 });
 
 it("sends the score fields", async () => {
@@ -183,8 +189,8 @@ it("creates a rule disabled when Enabled is switched off", async () => {
   await waitFor(() => expect(body).toMatchObject({ enabled: false }));
 });
 
-it("shows the preview error when the metrics request fails", async () => {
-  server.use(http.get(METRICS, () => problemResponse(500, "internal")));
+it("shows the preview error when the widget query fails", async () => {
+  server.use(http.post(WIDGET, () => problemResponse(500, "internal")));
 
   await renderApp(PAGE);
 
@@ -298,39 +304,39 @@ it("shows a server filter error under the filter", async () => {
 });
 
 it("previews over buckets as wide as the window", async () => {
-  const requests: string[] = [];
+  const requests: Record<string, unknown>[] = [];
   server.use(
-    http.get(METRICS, ({ request }) => {
-      requests.push(request.url);
-      return HttpResponse.json(metricsResponse([{ time: "2026-01-01T00:00:00Z", value: 0.1 }]));
+    http.post(WIDGET, async ({ request }) => {
+      requests.push((await request.json()) as Record<string, unknown>);
+      return HttpResponse.json(seriesAnswer([{ time: "2026-01-01T00:00:00Z", value: 0.1 }]));
     }),
   );
 
   const { user } = await renderApp(PAGE);
   await screen.findByRole("figure", { name: "Preview of the metric over the last 24 hours" });
-  expect(requests.at(-1)).toContain("bucket=5m");
+  expect(requests.at(-1)).toMatchObject({ bucket: "5m" });
 
   await choose(user, "Window", "24 hours");
-  await waitFor(() => expect(requests.at(-1)).toContain("bucket=1d"));
-  const url = new URL(requests.at(-1) ?? "");
-  const span =
-    Date.parse(url.searchParams.get("to") ?? "") - Date.parse(url.searchParams.get("from") ?? "");
+  await waitFor(() => expect(requests.at(-1)).toMatchObject({ bucket: "1d" }));
+  const body = requests.at(-1) ?? {};
+  const span = Date.parse(String(body.to)) - Date.parse(String(body.from));
   expect(span).toBe(14 * 24 * 60 * 60 * 1000);
 });
 
 it("does not preview LLM span latency", async () => {
   let requests = 0;
   server.use(
-    http.get(METRICS, () => {
+    http.post(WIDGET, () => {
       requests += 1;
-      return HttpResponse.json(metricsResponse([{ time: "2026-01-01T00:00:00Z", value: 1 }]));
+      return HttpResponse.json(seriesAnswer([{ time: "2026-01-01T00:00:00Z", value: 1 }]));
     }),
   );
 
   const { user } = await renderApp(PAGE);
   await screen.findByRole("figure");
-  const before = requests;
   await choose(user, "Metric", "p95 latency");
+  await screen.findByRole("figure");
+  const before = requests;
   await choose(user, "Latency of", "LLM spans");
 
   expect(await screen.findByText(/No preview for LLM span latency/)).toBeInTheDocument();
@@ -340,9 +346,10 @@ it("does not preview LLM span latency", async () => {
 it("debounces the filter in the preview", async () => {
   const filters: (string | null)[] = [];
   server.use(
-    http.get(METRICS, ({ request }) => {
-      filters.push(new URL(request.url).searchParams.get("filter"));
-      return HttpResponse.json(metricsResponse([{ time: "2026-01-01T00:00:00Z", value: 0.1 }]));
+    http.post(WIDGET, async ({ request }) => {
+      const body = (await request.json()) as { filter?: string };
+      filters.push(body.filter ?? null);
+      return HttpResponse.json(seriesAnswer([{ time: "2026-01-01T00:00:00Z", value: 0.1 }]));
     }),
   );
 
@@ -356,7 +363,7 @@ it("debounces the filter in the preview", async () => {
 
 it("shows the preview states", async () => {
   server.use(
-    http.get(METRICS, () =>
+    http.post(WIDGET, () =>
       problemResponse(400, "invalid_filter", { errors: [{ field: "filter", message: "bad" }] }),
     ),
   );
@@ -366,7 +373,7 @@ it("shows the preview states", async () => {
 });
 
 it("shows no data when the preview has no points", async () => {
-  server.use(http.get(METRICS, () => HttpResponse.json(metricsResponse([]))));
+  server.use(http.post(WIDGET, () => HttpResponse.json(seriesAnswer([]))));
 
   await renderApp(PAGE);
 

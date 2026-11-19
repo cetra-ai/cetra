@@ -49,10 +49,10 @@ export function JsonField({
 }) {
   return (
     <div className="flex flex-col gap-1.5">
-      <span className="text-sm font-medium">{label}</span>
+      <span className="text-body font-medium">{label}</span>
       <Textarea
         aria-label={label}
-        className="font-mono text-xs"
+        className="font-mono text-caption"
         spellCheck={false}
         rows={rows}
         disabled={disabled}
@@ -62,7 +62,7 @@ export function JsonField({
           onChange(event.target.value);
         }}
       />
-      {error ? <p className="text-xs text-destructive">{error}</p> : null}
+      {error ? <p className="text-caption text-destructive">{error}</p> : null}
     </div>
   );
 }

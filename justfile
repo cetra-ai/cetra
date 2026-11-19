@@ -154,14 +154,19 @@ fuzz-lock:
     cp Cargo.lock fuzz/Cargo.lock
     cargo metadata --manifest-path fuzz/Cargo.toml --format-version 1 > /dev/null
 
+# The host triple. cargo-fuzz defaults to the target it was itself built for, so a prebuilt
+# (musl) cargo-fuzz would build for musl, which the sanitizer rejects.
+_fuzz-host:
+    @rustc -vV | sed -n 's/^host: //p'
+
 # Fuzz one target for `secs` seconds; new inputs go into its committed corpus
 fuzz target secs="60": fuzz-lock
-    cargo +{{fuzz_toolchain}} fuzz run {{target}} fuzz/corpus/{{target}} -- -max_total_time={{secs}} -rss_limit_mb=4096 -timeout=30 -max_len=$(just _fuzz-max-len {{target}})
+    cargo +{{fuzz_toolchain}} fuzz run --target "$(just _fuzz-host)" {{target}} fuzz/corpus/{{target}} -- -max_total_time={{secs}} -rss_limit_mb=4096 -timeout=30 -max_len=$(just _fuzz-max-len {{target}})
 
 # Fuzz one target for CI: new inputs go to target/fuzz-new/<target>, so the checkout stays clean
 fuzz-ci target secs: fuzz-lock
     mkdir -p target/fuzz-new/{{target}}
-    cargo +{{fuzz_toolchain}} fuzz run {{target}} target/fuzz-new/{{target}} fuzz/corpus/{{target}} -- -max_total_time={{secs}} -rss_limit_mb=4096 -timeout=30 -max_len=$(just _fuzz-max-len {{target}})
+    cargo +{{fuzz_toolchain}} fuzz run --target "$(just _fuzz-host)" {{target}} target/fuzz-new/{{target}} fuzz/corpus/{{target}} -- -max_total_time={{secs}} -rss_limit_mb=4096 -timeout=30 -max_len=$(just _fuzz-max-len {{target}})
 
 # Fuzz every target in turn; fails if any target crashed
 fuzz-all secs="60":
@@ -177,7 +182,7 @@ fuzz-cmin: fuzz-lock
     set -euo pipefail
     for target in {{fuzz_targets}}; do
         dir="fuzz/corpus/$target"
-        cargo +{{fuzz_toolchain}} fuzz cmin "$target" "$dir" -- -max_len="$(just _fuzz-max-len "$target")"
+        cargo +{{fuzz_toolchain}} fuzz cmin --target "$(just _fuzz-host)" "$target" "$dir" -- -max_len="$(just _fuzz-max-len "$target")"
         dropped=0
         while [ "$(du -sb "$dir" | cut -f1)" -gt 2097152 ]; do
             rm -- "$dir/$(ls -S "$dir" | head -n 1)"
@@ -228,7 +233,7 @@ nightly-issue:
 eval-live:
     cargo test -p cetra-eval --test live -- --ignored --test-threads 1
 
-# Supply-chain checks: advisories, bans, licences, sources (D-P-3), for the root graph and the fuzz graph (track R M3)
+# Supply-chain checks: advisories, bans, licences, sources (D-P-3), for the root graph and the fuzz graph (track R M3). Run by hand until the first release (D188)
 deny: fuzz-lock
     cargo deny check advisories bans licenses sources
     cargo deny --manifest-path fuzz/Cargo.toml check advisories bans licenses sources
@@ -250,8 +255,21 @@ check-release: build-release
 run *args:
     cargo run -p cetra-cli -- {{args}}
 
-# Rust checks: format, lint, tests, supply chain
-check-rust: fmt-check lint test deny check-ee check-golden
+# Run the demo data generator (tools/demo), e.g. `just demo -- --help`
+demo *args:
+    cargo run -q -p cetra-demo -- {{args}}
+
+# Build the cetra-demo image (D187): a static musl binary and the fixtures, staged in target/demo-image, then the image from that directory (tools/demo/Dockerfile)
+demo-image tag="cetra-demo:dev":
+    CC_x86_64_unknown_linux_musl=musl-gcc cargo build --release --locked -p cetra-demo --target x86_64-unknown-linux-musl
+    rm -rf target/demo-image
+    mkdir -p target/demo-image/fixtures
+    cp "${CARGO_TARGET_DIR:-target}/x86_64-unknown-linux-musl/release/cetra-demo" target/demo-image/
+    cp -r fixtures/otlp target/demo-image/fixtures/otlp
+    docker build -f tools/demo/Dockerfile -t {{tag}} target/demo-image
+
+# Rust checks: format, lint, tests, licence headers, golden directories. `just deny` is off until the first release (D188)
+check-rust: fmt-check lint test check-ee check-golden
 
 # Install JS dependencies from the lockfile
 js-install:

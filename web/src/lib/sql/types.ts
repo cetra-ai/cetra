@@ -19,3 +19,15 @@ export function isDateType(type: string): boolean {
 export function isTextType(type: string): boolean {
   return type === "Utf8" || type === "LargeUtf8" || type === "Utf8View";
 }
+
+/** `Boolean` columns. */
+export function isBooleanType(type: string): boolean {
+  return type === "Boolean";
+}
+
+const NESTED_PREFIXES = ["List(", "LargeList(", "FixedSizeList(", "Struct(", "Map("];
+
+/** `List`, `LargeList`, `FixedSizeList`, `Struct` and `Map` columns. */
+export function isNestedType(type: string): boolean {
+  return NESTED_PREFIXES.some((prefix) => type.startsWith(prefix));
+}

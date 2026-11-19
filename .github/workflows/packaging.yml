@@ -25,7 +25,7 @@ env:
   # Kache permits PR uploads only to a separate prefix; protected main ignores it.
   KACHE_PULL_REQUEST_PREFIX: kache-pr-v2
   # Main pushes and the weekly run on main may read and save the S3 compiler cache;
-  # manual runs do not (.github/README.md).
+  # manual runs do not (.github/CI.md).
   CI_CACHE_ALLOWED: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule') }}
 
 jobs:

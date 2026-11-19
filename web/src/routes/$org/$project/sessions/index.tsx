@@ -1,5 +1,5 @@
 import { useInfiniteQuery } from "@tanstack/react-query";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useLocation, useRouter } from "@tanstack/react-router";
 import { MessagesSquare } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { problemOf } from "@/api/problem";
@@ -7,6 +7,7 @@ import { sessionListOptions } from "@/api/queries";
 import type { Schema } from "@/api/types";
 import { ColumnChooser } from "@/components/data-table/column-chooser";
 import {
+  lockedColumnIds,
   readColumnChoice,
   sameColumnIds,
   visibleColumnIds,
@@ -14,11 +15,21 @@ import {
 } from "@/components/data-table/column-layout";
 import { DataTable } from "@/components/data-table/data-table";
 import { EmptyState } from "@/components/empty-state";
+import { CarriedNotice } from "@/components/facets/carried-notice";
+import {
+  FacetPanel,
+  type FacetScope,
+  FiltersToggle,
+  useFacetsOpen,
+} from "@/components/facets/facet-panel";
+import { PresetChips } from "@/components/facets/preset-chips";
 import { FilterBar } from "@/components/filter-bar/filter-bar";
 import { filterMessage } from "@/components/filter-bar/logic";
 import { ListToolbar } from "@/components/list-toolbar";
 import { useDefaultSavedView } from "@/components/saved-views/default-view";
 import { SavedViewsMenu } from "@/components/saved-views/saved-views-menu";
+import { SessionsStartedChart } from "@/components/session/sessions-started-chart";
+import { SessionsSummary } from "@/components/session/sessions-summary";
 import {
   orderedSessionColumns,
   sessionColumnSpecs,
@@ -26,6 +37,16 @@ import {
 } from "@/components/session-columns";
 import { useProject } from "@/components/shell/project-context";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { appendFilter } from "@/lib/dsl/dsl";
+import { rangeOnly, writeListContext } from "@/lib/list-context";
+import {
+  anchorOf,
+  listReturnFor,
+  markReturnPoint,
+  type RowAnchor,
+  rememberListReturn,
+  useRestoredHighlight,
+} from "@/lib/list-return";
 import { parseSessionsSearch, type SessionsSearch } from "@/lib/search/sessions";
 import { type RangeState, rangeFromSearch, resolveRange } from "@/lib/time-range";
 
@@ -54,6 +75,7 @@ function SessionsPage() {
   const { org, project } = useProject();
   const search = Route.useSearch();
   const navigate = Route.useNavigate();
+  const router = useRouter();
   const applyView = useCallback(
     (next: Record<string, unknown>) => {
       void navigate({
@@ -75,7 +97,27 @@ function SessionsPage() {
     },
     [navigate, org, project],
   );
-  const { hold } = useDefaultSavedView("sessions", search, applyDefault);
+  const { hold, carried } = useDefaultSavedView("sessions", search, applyDefault, "sessions");
+  useEffect(() => {
+    if (!hold) {
+      writeListContext(org, project, "sessions", search);
+    }
+  }, [hold, org, project, search]);
+  function clearCarried() {
+    void navigate({
+      to: "/$org/$project/sessions",
+      params: { org, project },
+      search: (prev) => rangeOnly(prev),
+    });
+  }
+  const [facetsOpen, setFacetsOpen] = useFacetsOpen();
+  const listRestore = useLocation().state.listRestore;
+  const restoreAnchor = useMemo(() => anchorOf(listRestore), [listRestore]);
+  const restoredHighlight = useRestoredHighlight(listRestore?.openedId);
+  const lastAnchor = useRef<RowAnchor | undefined>(undefined);
+  const onScrollAnchor = useCallback((anchor: RowAnchor) => {
+    lastAnchor.current = anchor;
+  }, []);
   const range = rangeFromSearch(search);
   const rangeKey = range.kind === "preset" ? range.preset : `${range.from}\n${range.to}`;
   const [anchor, setAnchor] = useState(() => Date.now());
@@ -88,6 +130,13 @@ function SessionsPage() {
     setAnchor(Date.now());
   }, [rangeKey]);
   const resolved = resolveRange(range, anchor);
+  /** The list's window and flags: the facet panel, its presets and the filter bar fetch with it. */
+  const facetScope: FacetScope = {
+    from: resolved.from,
+    to: resolved.to,
+    includeEval: search.eval === 1,
+    includeExperiments: search.exp === 1,
+  };
   const list = useInfiniteQuery({
     ...sessionListOptions(org, project, {
       from: resolved.from,
@@ -105,12 +154,26 @@ function SessionsPage() {
   }, [list.fetchNextPage]);
   const rows = useMemo(() => list.data?.pages.flatMap((page) => page.data) ?? [], [list.data]);
   const specs = useMemo(() => sessionColumnSpecs(sessionScoreNames(rows)), [rows]);
+  const lockedIds = useMemo(() => lockedColumnIds(specs), [specs]);
   const defaults = useMemo(() => visibleColumnIds(specs, undefined), [specs]);
   const visible = useMemo(() => {
     const fromUrl = search.cols?.split(",");
     return visibleColumnIds(specs, fromUrl ?? readColumnChoice(TABLE_ID));
   }, [search.cols, specs]);
-  const tableColumns = useMemo(() => orderedSessionColumns(rows, visible), [rows, visible]);
+  const onFilter = useCallback(
+    (conjunct: string) => {
+      void navigate({
+        to: "/$org/$project/sessions",
+        params: { org, project },
+        search: (prev) => withFilter(prev, appendFilter(prev.filter ?? "", conjunct)),
+      });
+    },
+    [navigate, org, project],
+  );
+  const tableColumns = useMemo(
+    () => orderedSessionColumns(rows, visible, onFilter),
+    [rows, visible, onFilter],
+  );
 
   function onColumns(ids: string[]) {
     const choice = sameColumnIds(ids, defaults) ? undefined : ids;
@@ -132,7 +195,6 @@ function SessionsPage() {
     <div className="flex h-full min-h-0 flex-1 flex-col">
       <TooltipProvider>
         <ListToolbar
-          title="Sessions"
           idPrefix="sessions"
           range={range}
           onRange={(next) => {
@@ -161,11 +223,22 @@ function SessionsPage() {
               search: (prev) => withFlag(prev, "exp", on),
             });
           }}
+          notice={
+            carried ? (
+              <CarriedNotice
+                from={carried.from}
+                dropped={carried.dropped}
+                kept={carried.kept}
+                onClear={clearCarried}
+              />
+            ) : null
+          }
           filter={
             <FilterBar
               view="sessions"
               value={search.filter ?? ""}
               error={filterError}
+              scope={facetScope}
               onApply={(text) => {
                 void navigate({
                   to: "/$org/$project/sessions",
@@ -175,47 +248,105 @@ function SessionsPage() {
               }}
             />
           }
+          filtersToggle={
+            <FiltersToggle
+              open={facetsOpen}
+              onOpenChange={setFacetsOpen}
+              filter={search.filter ?? ""}
+            />
+          }
+          presets={
+            <PresetChips
+              view="sessions"
+              filter={search.filter ?? ""}
+              onFilter={(text) => {
+                void navigate({
+                  to: "/$org/$project/sessions",
+                  params: { org, project },
+                  search: (prev) => withFilter(prev, text),
+                });
+              }}
+              scope={facetScope}
+            />
+          }
           columns={<ColumnChooser columns={specs} visible={visible} onVisible={onColumns} />}
           views={<SavedViewsMenu kind="sessions" search={search} onApply={applyView} />}
           loaded={list.data ? rows.length : undefined}
         />
-        {filterError ? (
-          <div className="mx-auto flex max-w-md flex-col gap-2 px-4 py-16">
-            <h2 className="text-sm font-medium">{filterError.title}</h2>
-            <p className="text-sm text-destructive">{filterMessage(filterError)}</p>
+        <div className="flex min-h-0 flex-1">
+          {facetsOpen && !hold ? (
+            <FacetPanel
+              view="sessions"
+              filter={search.filter ?? ""}
+              onFilter={(text) => {
+                void navigate({
+                  to: "/$org/$project/sessions",
+                  params: { org, project },
+                  search: (prev) => withFilter(prev, text),
+                });
+              }}
+              scope={facetScope}
+            />
+          ) : null}
+          <div className="flex min-w-0 flex-1 flex-col">
+            {filterError ? (
+              <div className="mx-auto flex max-w-md flex-col gap-2 px-4 py-16">
+                <h2 className="text-body font-medium">{filterError.title}</h2>
+                <p className="text-body text-destructive">{filterMessage(filterError)}</p>
+              </div>
+            ) : !hold && list.data ? (
+              <>
+                <SessionsSummary sessions={rows} more={list.hasNextPage} />
+                <div className="border-b px-3 py-2">
+                  <SessionsStartedChart sessions={rows} from={resolved.from} to={resolved.to} />
+                </div>
+                <DataTable
+                  tableId="sessions"
+                  ariaLabel="Sessions"
+                  onReorder={onColumns}
+                  lockedColumnIds={lockedIds}
+                  columns={tableColumns}
+                  rows={rows}
+                  getRowId={(row) => row.session_id}
+                  onScrollAnchor={onScrollAnchor}
+                  restoreAnchor={restoreAnchor}
+                  highlightedRowIds={restoredHighlight}
+                  onActivate={(row) => {
+                    const listReturn = listReturnFor(
+                      "sessions",
+                      search,
+                      lastAnchor.current,
+                      row.session_id,
+                    );
+                    rememberListReturn(listReturn);
+                    markReturnPoint(router.history, listReturn);
+                    void navigate({
+                      to: "/$org/$project/sessions/$sessionId",
+                      params: { org, project, sessionId: row.session_id },
+                      search: pageFlags(search),
+                      state: (current) => ({ ...current, listReturn }),
+                    });
+                  }}
+                  hasNextPage={list.hasNextPage}
+                  isFetchingNextPage={list.isFetchingNextPage}
+                  fetchNextPage={fetchNextPage}
+                  sorting={{
+                    id: SORT_COLUMN[search.sort ?? "start_time"],
+                    desc: (search.order ?? "desc") === "desc",
+                  }}
+                  onSortingChange={(next) => {
+                    void navigate({
+                      to: "/$org/$project/sessions",
+                      params: { org, project },
+                      search: (prev) => withSort(prev, next),
+                    });
+                  }}
+                  emptyState={<EmptyState icon={MessagesSquare} title="No sessions" />}
+                />
+              </>
+            ) : null}
           </div>
-        ) : !hold && list.data ? (
-          <DataTable
-            tableId="sessions"
-            ariaLabel="Sessions"
-            columns={tableColumns}
-            rows={rows}
-            getRowId={(row) => row.session_id}
-            onActivate={(row) => {
-              void navigate({
-                to: "/$org/$project/sessions/$sessionId",
-                params: { org, project, sessionId: row.session_id },
-                search: pageFlags(search),
-                state: (current) => ({ ...current, sessionsSearch: search }),
-              });
-            }}
-            hasNextPage={list.hasNextPage}
-            isFetchingNextPage={list.isFetchingNextPage}
-            fetchNextPage={fetchNextPage}
-            sorting={{
-              id: SORT_COLUMN[search.sort ?? "start_time"],
-              desc: (search.order ?? "desc") === "desc",
-            }}
-            onSortingChange={(next) => {
-              void navigate({
-                to: "/$org/$project/sessions",
-                params: { org, project },
-                search: (prev) => withSort(prev, next),
-              });
-            }}
-            emptyState={<EmptyState icon={MessagesSquare} title="No sessions" />}
-          />
-        ) : null}
+        </div>
       </TooltipProvider>
     </div>
   );

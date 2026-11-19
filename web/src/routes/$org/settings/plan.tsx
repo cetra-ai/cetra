@@ -6,7 +6,9 @@ import { orgUsageQuery } from "@/api/queries-settings";
 import type { Schema } from "@/api/types";
 import { type Feature, featureOffer } from "@/components/plan/feature-label";
 import { UpgradeButton } from "@/components/plan/upgrade-button";
+import { day, numbers, UsageMeter } from "@/components/plan/usage-meter";
 import { useOrgEntitlements } from "@/components/plan/use-org-entitlements";
+import { SettingsCard } from "@/components/settings/settings-card";
 import { SettingsPage } from "@/components/settings/settings-page";
 import {
   type ChartConfig,
@@ -43,19 +45,12 @@ const USAGE_CHART: ChartConfig = {
   scores: { label: "Scores", color: "var(--chart-2)" },
 };
 
-const numbers = new Intl.NumberFormat("en-US");
-
 function formatLimit(value: number | undefined): string {
   return value === undefined ? "unlimited" : numbers.format(value);
 }
 
 function capitalise(word: string): string {
   return word.charAt(0).toUpperCase() + word.slice(1);
-}
-
-/** The date part of an RFC 3339 timestamp. */
-function day(iso: string): string {
-  return iso.slice(0, 10);
 }
 
 function OrgPlanPage() {
@@ -116,33 +111,28 @@ function PlanDetails({
 
   return (
     <>
-      <section aria-labelledby="plan-name" className="flex flex-col gap-2">
-        <h2 id="plan-name" className="text-base font-medium">
-          {name}
-        </h2>
-        {plan.source === "defaults" ? (
-          <p className="text-sm text-muted-foreground">Instance defaults apply.</p>
-        ) : null}
+      <SettingsCard
+        title={name}
+        description={plan.source === "defaults" ? "Instance defaults apply." : undefined}
+        actions={<UpgradeButton url={upgradeUrl} />}
+      >
         {status === "grace" && expires_at !== undefined && grace_ends_at !== undefined ? (
-          <p
-            role="alert"
-            className="flex items-center gap-2 text-sm text-amber-700 dark:text-amber-400"
-          >
+          <p role="alert" className="flex items-center gap-2 text-body text-status-warn">
             <TriangleAlert className="size-4 shrink-0" aria-hidden="true" />
             This plan expired on {day(expires_at)}. It stays in effect until {day(grace_ends_at)}.
           </p>
         ) : null}
-      </section>
+      </SettingsCard>
 
       <UsageSection org={org} entitlements={entitlements} />
 
-      <section aria-labelledby="plan-features" className="flex flex-col gap-2">
-        <h2 id="plan-features" className="text-base font-medium">
-          Features
-        </h2>
+      <SettingsCard title="Features">
         <ul className="flex flex-col divide-y rounded-md border">
           {FEATURES.map((feature) => (
-            <li key={feature} className="flex items-center justify-between gap-4 px-3 py-2 text-sm">
+            <li
+              key={feature}
+              className="flex items-center justify-between gap-4 px-3 py-2 text-body"
+            >
               <span>{FEATURE_NAMES[feature]}</span>
               {allows(feature) ? (
                 <span className="flex items-center gap-1 text-muted-foreground">
@@ -158,13 +148,10 @@ function PlanDetails({
             </li>
           ))}
         </ul>
-      </section>
+      </SettingsCard>
 
-      <section aria-labelledby="plan-limits" className="flex flex-col gap-2">
-        <h2 id="plan-limits" className="text-base font-medium">
-          Limits
-        </h2>
-        <Table>
+      <SettingsCard title="Limits">
+        <Table aria-label="Limits">
           <TableHeader>
             <TableRow>
               <TableHead>Limit</TableHead>
@@ -180,11 +167,7 @@ function PlanDetails({
             ))}
           </TableBody>
         </Table>
-      </section>
-
-      <div>
-        <UpgradeButton url={upgradeUrl} />
-      </div>
+      </SettingsCard>
     </>
   );
 }
@@ -198,10 +181,7 @@ function UsageSection({ org, entitlements }: { org: string; entitlements: Entitl
   }
 
   return (
-    <section aria-labelledby="plan-usage" className="flex flex-col gap-2">
-      <h2 id="plan-usage" className="text-base font-medium">
-        Usage this month
-      </h2>
+    <SettingsCard title="Usage this month">
       <UsageMeter
         units={usage.units}
         resetsAt={usage.resets_at}
@@ -211,7 +191,7 @@ function UsageSection({ org, entitlements }: { org: string; entitlements: Entitl
       {query.data === undefined ? (
         <Skeleton className="h-48 w-full" />
       ) : query.data.days.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No usage this month.</p>
+        <p className="text-body text-muted-foreground">No usage this month.</p>
       ) : (
         <>
           <ChartContainer
@@ -233,63 +213,7 @@ function UsageSection({ org, entitlements }: { org: string; entitlements: Entitl
           <UsageTotals days={query.data.days} />
         </>
       )}
-    </section>
-  );
-}
-
-/**
- * The month's units against `units_included`, or `units_cap` when no included value is set.
- * With neither, only the text shows.
- */
-function UsageMeter({
-  units,
-  resetsAt,
-  included,
-  cap,
-}: {
-  units: number;
-  resetsAt: string;
-  included: number | undefined;
-  cap: number | undefined;
-}) {
-  const base = included ?? cap;
-  const percent = base === undefined || base === 0 ? 0 : Math.min(100, (units / base) * 100);
-  const text =
-    base === undefined
-      ? `${numbers.format(units)} units`
-      : `${numbers.format(units)} of ${numbers.format(base)} units`;
-
-  return (
-    <div className="flex flex-col gap-2">
-      {base === undefined ? null : (
-        // biome-ignore lint/a11y/useSemanticElements: a native meter cannot show the 80 % and 100 % marks, so the styled bar stays a div with role meter
-        <div
-          role="meter"
-          aria-label="Units this month"
-          aria-valuemin={0}
-          aria-valuemax={base}
-          aria-valuenow={Math.min(units, base)}
-          className="relative h-3 w-full overflow-hidden rounded-full bg-muted"
-        >
-          <div className="h-full bg-primary" style={{ width: `${percent}%` }} />
-          {[80, 100].map((mark) => (
-            <span
-              key={mark}
-              aria-hidden="true"
-              className="absolute top-0 h-full w-px bg-foreground/50"
-              style={{ left: `${mark}%` }}
-            />
-          ))}
-        </div>
-      )}
-      <p className="text-sm tabular-nums">{text}</p>
-      <p className="text-sm text-muted-foreground">Resets on {day(resetsAt)} (UTC).</p>
-      {cap === undefined ? null : (
-        <p className="text-sm text-muted-foreground">
-          Ingest pauses at {numbers.format(cap)} units.
-        </p>
-      )}
-    </div>
+    </SettingsCard>
   );
 }
 

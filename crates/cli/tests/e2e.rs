@@ -649,7 +649,19 @@ async fn live_streams_and_every_read_route_work_end_to_end() {
             .any(|score| score["name"] == "e2e"),
         "{scores}"
     );
-    server.api.get(&format!("{project}/metrics?{window}")).await;
+    let total = server
+        .api
+        .post(
+            &format!("{project}/dashboards/query"),
+            &json!({
+                "from": "2025-12-31T00:00:00Z",
+                "to": "2026-01-02T00:00:00Z",
+                "shape": "total",
+                "query": {"source": "traces", "measures": [{"agg": "count"}]},
+            }),
+        )
+        .await;
+    assert!(total["rows"][0]["values"][0].as_f64().is_some(), "{total}");
     server.api.get(&format!("{project}/schema")).await;
 
     let media = server

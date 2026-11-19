@@ -44,7 +44,7 @@ it("warns at 80 % of the included units", async () => {
 
   await renderApp("/acme/support-bot/dashboard");
 
-  expect(await screen.findByRole("status")).toHaveTextContent(
+  expect(await screen.findByRole("status", { name: "Usage" })).toHaveTextContent(
     "This organization has used 80% of its monthly units.",
   );
   expect(screen.getByRole("link", { name: "Upgrade" })).toHaveAttribute(
@@ -67,7 +67,7 @@ it("says ingest is paused until the reset when a cap is reached", async () => {
 
   await renderApp("/acme/support-bot/dashboard");
 
-  expect(await screen.findByRole("status")).toHaveTextContent(
+  expect(await screen.findByRole("status", { name: "Usage" })).toHaveTextContent(
     "This organization reached its monthly units; ingest is paused until 2026-02-01 (UTC).",
   );
 });
@@ -86,7 +86,7 @@ it("says extra units are billed when the cap is above the included units", async
 
   await renderApp("/acme/support-bot/dashboard");
 
-  expect(await screen.findByRole("status")).toHaveTextContent(
+  expect(await screen.findByRole("status", { name: "Usage" })).toHaveTextContent(
     "This organization used all units included in its plan; additional units are billed as overage.",
   );
 });
@@ -100,7 +100,7 @@ it("says extra units are billed when no cap is set", async () => {
 
   await renderApp("/acme/support-bot/dashboard");
 
-  expect(await screen.findByRole("status")).toHaveTextContent(
+  expect(await screen.findByRole("status", { name: "Usage" })).toHaveTextContent(
     "This organization used all units included in its plan; additional units are billed as overage.",
   );
 });
@@ -118,7 +118,7 @@ it("is hidden for members", async () => {
   await renderApp("/acme/support-bot/dashboard");
 
   expect(await screen.findByRole("heading", { name: "Dashboard" })).toBeInTheDocument();
-  expect(screen.queryByRole("status")).toBeNull();
+  expect(screen.queryByRole("status", { name: "Usage" })).toBeNull();
 });
 
 it("is hidden when no notice applies", async () => {
@@ -130,5 +130,5 @@ it("is hidden when no notice applies", async () => {
       "success",
     ),
   );
-  expect(screen.queryByRole("status")).toBeNull();
+  expect(screen.queryByRole("status", { name: "Usage" })).toBeNull();
 });

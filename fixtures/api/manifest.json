@@ -10,6 +10,14 @@
     "file": "static/experiment-comparison.json"
   },
   {
+    "operation_id": "create_dashboard",
+    "path_params": {},
+    "query": {},
+    "status": 201,
+    "content_type": "application/json",
+    "file": "static/dashboard.json"
+  },
+  {
     "operation_id": "create_deletion",
     "path_params": {},
     "query": {},
@@ -54,6 +62,26 @@
   {
     "operation_id": "get_alert_rule",
     "path_params": {
+      "id": "01900000-0000-7000-8000-000000000511"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/alert-rule-0511.json"
+  },
+  {
+    "operation_id": "get_alert_rule",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000512"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/alert-rule-0512.json"
+  },
+  {
+    "operation_id": "get_alert_rule",
+    "path_params": {
       "id": "01900000-0000-7000-8000-000000000510"
     },
     "query": {},
@@ -68,6 +96,16 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/auth-config.json"
+  },
+  {
+    "operation_id": "get_dashboard",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000f01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/dashboard.json"
   },
   {
     "operation_id": "get_dataset",
@@ -121,6 +159,14 @@
     "file": "static/evaluator.json"
   },
   {
+    "operation_id": "get_evaluator_stats",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/evaluator-stats.json"
+  },
+  {
     "operation_id": "get_experiment",
     "path_params": {
       "id": "01900000-0000-7000-8000-000000000e01"
@@ -139,6 +185,214 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/experiment-results.json"
+  },
+  {
+    "operation_id": "get_experiment_summaries",
+    "path_params": {},
+    "query": {
+      "ids": "01900000-0000-7000-8000-000000000e02,01900000-0000-7000-8000-000000000e01"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/experiment-summaries.json"
+  },
+  {
+    "operation_id": "get_facets",
+    "path_params": {},
+    "query": {
+      "field": "cost_total",
+      "view": "sessions"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/facets-sessions-cost_total.json"
+  },
+  {
+    "operation_id": "get_facets",
+    "path_params": {},
+    "query": {
+      "field": "duration_ms",
+      "view": "sessions"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/facets-sessions-duration_ms.json"
+  },
+  {
+    "operation_id": "get_facets",
+    "path_params": {},
+    "query": {
+      "field": "tags",
+      "view": "sessions"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/facets-sessions-tags.json"
+  },
+  {
+    "operation_id": "get_facets",
+    "path_params": {},
+    "query": {
+      "field": "user_id",
+      "view": "sessions"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/facets-sessions-user_id.json"
+  },
+  {
+    "operation_id": "get_facets",
+    "path_params": {},
+    "query": {
+      "field": "cost_total",
+      "view": "spans"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/facets-spans-cost_total.json"
+  },
+  {
+    "operation_id": "get_facets",
+    "path_params": {},
+    "query": {
+      "field": "duration_ms",
+      "view": "spans"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/facets-spans-duration_ms.json"
+  },
+  {
+    "operation_id": "get_facets",
+    "path_params": {},
+    "query": {
+      "field": "model",
+      "view": "spans"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/facets-spans-model.json"
+  },
+  {
+    "operation_id": "get_facets",
+    "path_params": {},
+    "query": {
+      "field": "name",
+      "view": "spans"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/facets-spans-name.json"
+  },
+  {
+    "operation_id": "get_facets",
+    "path_params": {},
+    "query": {
+      "field": "span_kind",
+      "view": "spans"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/facets-spans-span_kind.json"
+  },
+  {
+    "operation_id": "get_facets",
+    "path_params": {},
+    "query": {
+      "field": "status",
+      "view": "spans"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/facets-spans-status.json"
+  },
+  {
+    "operation_id": "get_facets",
+    "path_params": {},
+    "query": {
+      "field": "cost_total",
+      "view": "traces"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/facets-traces-cost_total.json"
+  },
+  {
+    "operation_id": "get_facets",
+    "path_params": {},
+    "query": {
+      "field": "duration_ms",
+      "view": "traces"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/facets-traces-duration_ms.json"
+  },
+  {
+    "operation_id": "get_facets",
+    "path_params": {},
+    "query": {
+      "field": "environment",
+      "view": "traces"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/facets-traces-environment.json"
+  },
+  {
+    "operation_id": "get_facets",
+    "path_params": {},
+    "query": {
+      "field": "metadata",
+      "view": "traces"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/facets-traces-metadata.json"
+  },
+  {
+    "operation_id": "get_facets",
+    "path_params": {},
+    "query": {
+      "field": "models",
+      "view": "traces"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/facets-traces-models.json"
+  },
+  {
+    "operation_id": "get_facets",
+    "path_params": {},
+    "query": {
+      "field": "name",
+      "view": "traces"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/facets-traces-name.json"
+  },
+  {
+    "operation_id": "get_facets",
+    "path_params": {},
+    "query": {
+      "field": "status",
+      "view": "traces"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/facets-traces-status.json"
+  },
+  {
+    "operation_id": "get_facets",
+    "path_params": {},
+    "query": {
+      "field": "tags",
+      "view": "traces"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/facets-traces-tags.json"
   },
   {
     "operation_id": "get_invite_preview",
@@ -180,12 +434,14 @@
     "file": "media/497790947d4666760ce38f3c00e852c71fdb66cae849bae8e9ede352719e1581.png"
   },
   {
-    "operation_id": "get_metrics",
-    "path_params": {},
+    "operation_id": "get_online_rule",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000701"
+    },
     "query": {},
     "status": 200,
     "content_type": "application/json",
-    "file": "responses/metrics.json"
+    "file": "static/online-rule-0701.json"
   },
   {
     "operation_id": "get_online_rule",
@@ -196,6 +452,14 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/online-rule.json"
+  },
+  {
+    "operation_id": "get_online_rule_stats",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/online-rule-stats.json"
   },
   {
     "operation_id": "get_org",
@@ -236,6 +500,14 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/org-usage.json"
+  },
+  {
+    "operation_id": "get_overview",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/dashboard-overview.json"
   },
   {
     "operation_id": "get_project",
@@ -552,6 +824,26 @@
   {
     "operation_id": "list_alert_events",
     "path_params": {
+      "id": "01900000-0000-7000-8000-000000000511"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/alert-events-empty.json"
+  },
+  {
+    "operation_id": "list_alert_events",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000512"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/alert-events-empty.json"
+  },
+  {
+    "operation_id": "list_alert_events",
+    "path_params": {
       "id": "01900000-0000-7000-8000-000000000510"
     },
     "query": {},
@@ -604,6 +896,14 @@
     "file": "static/channels.json"
   },
   {
+    "operation_id": "list_dashboards",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/dashboards.json"
+  },
+  {
     "operation_id": "list_dataset_items",
     "path_params": {
       "dataset": "01900000-0000-7000-8000-000000000c01"
@@ -624,6 +924,17 @@
     "status": 200,
     "content_type": "application/json",
     "file": "responses/datasets/01900000-0000-7000-8000-000000000c01/items.json"
+  },
+  {
+    "operation_id": "list_dataset_version_changes",
+    "path_params": {
+      "dataset": "01900000-0000-7000-8000-000000000c01",
+      "version": "2"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/datasets/01900000-0000-7000-8000-000000000c01/versions/2/changes.json"
   },
   {
     "operation_id": "list_dataset_versions",
@@ -668,12 +979,32 @@
     "file": "static/evaluator-templates.json"
   },
   {
+    "operation_id": "list_evaluator_versions",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000500"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/evaluator-versions.json"
+  },
+  {
     "operation_id": "list_evaluators",
     "path_params": {},
     "query": {},
     "status": 200,
     "content_type": "application/json",
     "file": "static/evaluators.json"
+  },
+  {
+    "operation_id": "list_experiment_trends",
+    "path_params": {},
+    "query": {
+      "ids": "01900000-0000-7000-8000-000000000c01"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/dataset-trends.json"
   },
   {
     "operation_id": "list_experiments",
@@ -764,6 +1095,14 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/personal-tokens.json"
+  },
+  {
+    "operation_id": "list_project_alert_events",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/project-alert-events.json"
   },
   {
     "operation_id": "list_project_members",
@@ -870,6 +1209,16 @@
     "file": "responses/users.json"
   },
   {
+    "operation_id": "patch_dataset_items",
+    "path_params": {
+      "dataset": "01900000-0000-7000-8000-000000000c01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/dataset-items-edited.json"
+  },
+  {
     "operation_id": "post_admin_user",
     "path_params": {},
     "query": {},
@@ -944,6 +1293,26 @@
     "status": 201,
     "content_type": "application/json",
     "file": "static/dataset-item-from-trace.json"
+  },
+  {
+    "operation_id": "post_dataset_items_delete",
+    "path_params": {
+      "dataset": "01900000-0000-7000-8000-000000000c01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/dataset-items-deleted.json"
+  },
+  {
+    "operation_id": "post_dataset_items_from_traces",
+    "path_params": {
+      "dataset": "01900000-0000-7000-8000-000000000c01"
+    },
+    "query": {},
+    "status": 201,
+    "content_type": "application/json",
+    "file": "static/dataset-items-from-traces.json"
   },
   {
     "operation_id": "post_evaluator",
@@ -1093,6 +1462,22 @@
     "file": "static/deletion-preview.json"
   },
   {
+    "operation_id": "query_widget",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/dashboard-query-series.json"
+  },
+  {
+    "operation_id": "query_widget",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/dashboard-query-total.json"
+  },
+  {
     "operation_id": "resolve_model_price",
     "path_params": {},
     "query": {
@@ -1104,11 +1489,49 @@
     "file": "static/model-price-resolution.json"
   },
   {
+    "operation_id": "restore_dataset",
+    "path_params": {
+      "dataset": "01900000-0000-7000-8000-000000000c01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/dataset-restored.json"
+  },
+  {
     "operation_id": "run_sql",
     "path_params": {},
     "query": {},
     "status": 200,
     "content_type": "application/json",
     "file": "static/sql-result.json"
+  },
+  {
+    "operation_id": "save_overview",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/dashboard-overview.json"
+  },
+  {
+    "operation_id": "update_dashboard",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000f01"
+    },
+    "query": {},
+    "status": 409,
+    "content_type": "application/problem+json",
+    "file": "static/dashboard-stale.json"
+  },
+  {
+    "operation_id": "update_dashboard",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000f01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/dashboard.json"
   }
 ]

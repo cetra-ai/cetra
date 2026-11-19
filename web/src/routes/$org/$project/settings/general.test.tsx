@@ -12,6 +12,24 @@ import entitlementsFixture from "../../../../../../fixtures/api/static/org-entit
 import projectFixture from "../../../../../../fixtures/api/static/project.json";
 
 const projectNav = () => within(screen.getByRole("list", { name: "Project settings" }));
+const form = (name: string) => within(screen.getByRole("form", { name }));
+
+/**
+ * A project that keeps what it is saved with, as the server does: a save changes what the next
+ * read returns, so the page's dirty state settles after the save.
+ */
+function savingProject(onPatch: (body: Record<string, unknown>) => void = () => {}) {
+  let current: Record<string, unknown> = { ...projectFixture };
+  return [
+    http.get("/api/v1/projects/:project", () => HttpResponse.json(current)),
+    http.patch("/api/v1/projects/:project", async ({ request }) => {
+      const body = (await request.json()) as Record<string, unknown>;
+      onPatch(body);
+      current = { ...current, ...body };
+      return HttpResponse.json(current);
+    }),
+  ];
+}
 
 function projectAs(role: string) {
   return http.get("/api/v1/projects/:project", () =>
@@ -20,16 +38,16 @@ function projectAs(role: string) {
 }
 
 it("replaces the project sidebar with the settings sidebar", async () => {
-  const { router } = await renderApp("/acme/support-bot/settings");
+  await renderApp("/acme/support-bot/settings/general");
 
   await screen.findByRole("heading", { name: "General", level: 1 });
-  expect(router.state.location.pathname).toBe("/acme/support-bot/settings/general");
-  expect(screen.getByRole("link", { name: "Back to project" })).toHaveAttribute(
+  expect(screen.getByRole("link", { name: "Back to Support bot" })).toHaveAttribute(
     "href",
     "/acme/support-bot/traces",
   );
   expect(screen.getByRole("list", { name: "Project settings" })).toBeInTheDocument();
-  expect(screen.getByRole("list", { name: "Organization settings" })).toBeInTheDocument();
+  expect(screen.queryByRole("list", { name: "Organization settings" })).toBeNull();
+  expect(screen.getByRole("tab", { name: "Support bot", selected: true })).toBeInTheDocument();
   expect(projectNav().getByRole("link", { name: "General" })).toHaveAttribute(
     "aria-current",
     "page",
@@ -52,12 +70,11 @@ it("shows Settings in the project sidebar for a viewer", async () => {
   expect(await screen.findByRole("link", { name: "Settings" })).toBeInTheDocument();
 });
 
-it("saves the name and retention", async () => {
+it("saves only the name from the Project card", async () => {
   let body: unknown;
   server.use(
-    http.patch("/api/v1/projects/:project", async ({ request }) => {
-      body = await request.json();
-      return HttpResponse.json({ ...projectFixture, name: "Support", retention_days: 7 });
+    ...savingProject((sent) => {
+      body = sent;
     }),
   );
 
@@ -65,52 +82,86 @@ it("saves the name and retention", async () => {
   const name = await screen.findByLabelText("Name");
   await user.clear(name);
   await user.type(name, "Support");
-  await user.clear(screen.getByLabelText("Retention (days)"));
-  await user.type(screen.getByLabelText("Retention (days)"), "7");
-  await user.click(screen.getByRole("button", { name: "Save" }));
+  await user.click(form("Project").getByRole("button", { name: "Save" }));
 
-  expect(body).toEqual({ name: "Support", retention_days: 7 });
-  expect(await screen.findByRole("status")).toHaveTextContent("Saved");
+  await waitFor(() => expect(body).toEqual({ name: "Support" }));
+  expect(await form("Project").findByRole("status")).toHaveTextContent("Saved");
+});
+
+it("saves only the retention from the Data retention card", async () => {
+  let body: unknown;
+  server.use(
+    ...savingProject((sent) => {
+      body = sent;
+    }),
+  );
+
+  const { user } = await renderApp("/acme/support-bot/settings/general");
+  const days = await screen.findByLabelText("Retention");
+  await user.clear(days);
+  await user.type(days, "7");
+  await user.click(form("Data retention").getByRole("button", { name: "Save" }));
+
+  await waitFor(() => expect(body).toEqual({ retention_days: 7 }));
+  expect(await form("Data retention").findByRole("status")).toHaveTextContent("Saved");
 });
 
 it("sends null to keep data forever", async () => {
   let body: unknown;
   server.use(
-    http.patch("/api/v1/projects/:project", async ({ request }) => {
-      body = await request.json();
-      return HttpResponse.json({ ...projectFixture, name: "Support bot" });
+    ...savingProject((sent) => {
+      body = sent;
     }),
   );
 
   const { user } = await renderApp("/acme/support-bot/settings/general");
   await screen.findByLabelText("Name");
   await user.click(screen.getByRole("checkbox", { name: "Keep data forever" }));
-  expect(screen.getByLabelText("Retention (days)")).toBeDisabled();
-  await user.click(screen.getByRole("button", { name: "Save" }));
+  expect(screen.getByLabelText("Retention")).toBeDisabled();
+  await user.click(form("Data retention").getByRole("button", { name: "Save" }));
 
-  expect(body).toEqual({ name: "Support bot", retention_days: null });
+  await waitFor(() => expect(body).toEqual({ retention_days: null }));
 });
 
-it("rejects an invalid retention without calling the server", async () => {
+it("shows an invalid retention as you type and keeps Save disabled", async () => {
+  let calls = 0;
+  server.use(
+    http.patch("/api/v1/projects/:project", () => {
+      calls += 1;
+      return HttpResponse.json(projectFixture);
+    }),
+  );
+
   const { user } = await renderApp("/acme/support-bot/settings/general");
-  const days = await screen.findByLabelText("Retention (days)");
+  const days = await screen.findByLabelText("Retention");
   await user.clear(days);
   await user.type(days, "0");
-  await user.click(screen.getByRole("button", { name: "Save" }));
 
   expect(
     await screen.findByText("Enter a whole number of days from 1 to 36500."),
   ).toBeInTheDocument();
+  expect(days).toHaveAttribute("aria-invalid", "true");
+  expect(form("Data retention").getByRole("button", { name: "Save" })).toBeDisabled();
+  expect(calls).toBe(0);
+});
+
+it("does not show an error for a field the user has not touched", async () => {
+  await renderApp("/acme/support-bot/settings/general");
+
+  await screen.findByLabelText("Retention");
+  expect(screen.queryByText("Enter a name.")).toBeNull();
+  expect(screen.queryByText(/Enter a whole number of days/)).toBeNull();
 });
 
 it("shows a refusal from the server", async () => {
   server.use(http.patch("/api/v1/projects/:project", () => problemResponse(403, "forbidden")));
 
   const { user } = await renderApp("/acme/support-bot/settings/general");
-  await screen.findByLabelText("Name");
-  await user.click(screen.getByRole("button", { name: "Save" }));
+  const name = await screen.findByLabelText("Name");
+  await user.type(name, " bot");
+  await user.click(form("Project").getByRole("button", { name: "Save" }));
 
-  expect(await screen.findByRole("alert")).toHaveTextContent(
+  expect(await form("Project").findByRole("alert")).toHaveTextContent(
     "Only project admins can change these settings.",
   );
 });
@@ -128,13 +179,20 @@ it("shows the server's field errors under their fields", async () => {
   );
 
   const { user } = await renderApp("/acme/support-bot/settings/general");
-  await screen.findByLabelText("Name");
-  await user.click(screen.getByRole("button", { name: "Save" }));
+  const name = await screen.findByLabelText("Name");
+  await user.type(name, " bot");
+  await user.click(form("Project").getByRole("button", { name: "Save" }));
 
   expect(await screen.findByText("must be 1 to 100 characters")).toBeInTheDocument();
   expect(screen.getByLabelText("Name")).toHaveAttribute("aria-invalid", "true");
+
+  const days = screen.getByLabelText("Retention");
+  await user.clear(days);
+  await user.type(days, "7");
+  await user.click(form("Data retention").getByRole("button", { name: "Save" }));
+
   expect(await screen.findByText("must be 1 to 36500")).toBeInTheDocument();
-  expect(screen.getByLabelText("Retention (days)")).toHaveAttribute("aria-invalid", "true");
+  expect(screen.getByLabelText("Retention")).toHaveAttribute("aria-invalid", "true");
 });
 
 it("is read-only for a member", async () => {
@@ -143,10 +201,37 @@ it("is read-only for a member", async () => {
   await renderApp("/acme/support-bot/settings/general");
 
   expect(await screen.findByLabelText("Name")).toBeDisabled();
-  expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
-  expect(screen.getByRole("button", { name: "Save" }).parentElement).toHaveAccessibleDescription(
+  const saves = screen.getAllByRole("button", { name: "Save" });
+  expect(saves).toHaveLength(3);
+  for (const save of saves) {
+    expect(save).toBeDisabled();
+  }
+  expect(saves[0]?.parentElement).toHaveAccessibleDescription(
     "Only project admins can change these settings",
   );
+});
+
+it("asks before leaving with unsaved edits, and stays when asked", async () => {
+  const { router, user } = await renderApp("/acme/support-bot/settings/general");
+  const name = await screen.findByLabelText("Name");
+  await user.type(name, " bot");
+
+  await user.click(screen.getByRole("link", { name: "Back to Support bot" }));
+  const dialog = await screen.findByRole("alertdialog", { name: "Discard unsaved changes?" });
+  await user.click(within(dialog).getByRole("button", { name: "Keep editing" }));
+
+  expect(router.state.location.pathname).toBe("/acme/support-bot/settings/general");
+  expect(screen.getByLabelText("Name")).toHaveValue("Support bot bot");
+
+  await user.click(screen.getByRole("link", { name: "Back to Support bot" }));
+  await user.click(
+    within(await screen.findByRole("alertdialog", { name: "Discard unsaved changes?" })).getByRole(
+      "button",
+      { name: "Discard" },
+    ),
+  );
+
+  await waitFor(() => expect(router.state.location.pathname).toBe("/acme/support-bot/traces"));
 });
 
 it("deletes the project once its slug is typed, then returns to the org home", async () => {
@@ -227,20 +312,19 @@ it("shows the org-admin message when the server refuses the deletion", async () 
 it("saves the trace completion timeout", async () => {
   let body: unknown;
   server.use(
-    http.patch("/api/v1/projects/:project", async ({ request }) => {
-      body = await request.json();
-      return HttpResponse.json({ ...projectFixture, trace_completion_timeout_s: 120 });
+    ...savingProject((sent) => {
+      body = sent;
     }),
   );
 
   const { user } = await renderApp("/acme/support-bot/settings/general");
-  const timeout = await screen.findByLabelText("Trace completion timeout (seconds)");
+  const timeout = await screen.findByLabelText("Trace completion timeout");
   await user.clear(timeout);
   await user.type(timeout, "120");
-  await user.click(screen.getByRole("button", { name: "Save timeout" }));
+  await user.click(form("Online evaluation").getByRole("button", { name: "Save" }));
 
   await waitFor(() => expect(body).toEqual({ trace_completion_timeout_s: 120 }));
-  expect(await screen.findByText("Saved")).toBeInTheDocument();
+  expect(await form("Online evaluation").findByRole("status")).toHaveTextContent("Saved");
 });
 
 it("re-syncs the timeout field when the saved value changes", async () => {
@@ -252,7 +336,7 @@ it("re-syncs the timeout field when the saved value changes", async () => {
   );
 
   const { queryClient } = await renderApp("/acme/support-bot/settings/general");
-  const timeout = await screen.findByLabelText("Trace completion timeout (seconds)");
+  const timeout = await screen.findByLabelText("Trace completion timeout");
   expect(timeout).toHaveValue(60);
 
   savedTimeout = 90;
@@ -272,7 +356,7 @@ it("keeps a timeout the user has typed when the saved value changes", async () =
   );
 
   const { user, queryClient } = await renderApp("/acme/support-bot/settings/general");
-  const timeout = await screen.findByLabelText("Trace completion timeout (seconds)");
+  const timeout = await screen.findByLabelText("Trace completion timeout");
   await user.clear(timeout);
   await user.type(timeout, "120");
 
@@ -288,7 +372,7 @@ it("keeps a timeout the user has typed when the saved value changes", async () =
   expect(timeout).toHaveValue(120);
 });
 
-it("refuses an out-of-range timeout without calling the server", async () => {
+it("shows an out-of-range timeout as you type and does not call the server", async () => {
   let calls = 0;
   server.use(
     http.patch("/api/v1/projects/:project", () => {
@@ -298,12 +382,12 @@ it("refuses an out-of-range timeout without calling the server", async () => {
   );
 
   const { user } = await renderApp("/acme/support-bot/settings/general");
-  const timeout = await screen.findByLabelText("Trace completion timeout (seconds)");
+  const timeout = await screen.findByLabelText("Trace completion timeout");
   await user.clear(timeout);
   await user.type(timeout, "5");
-  await user.click(screen.getByRole("button", { name: "Save timeout" }));
 
   expect(await screen.findByText("Enter a whole number from 10 to 3600.")).toBeInTheDocument();
+  expect(form("Online evaluation").getByRole("button", { name: "Save" })).toBeDisabled();
   expect(calls).toBe(0);
 });
 
@@ -317,14 +401,13 @@ it("shows a server field error under the timeout", async () => {
   );
 
   const { user } = await renderApp("/acme/support-bot/settings/general");
-  await screen.findByLabelText("Trace completion timeout (seconds)");
-  await user.click(screen.getByRole("button", { name: "Save timeout" }));
+  const timeout = await screen.findByLabelText("Trace completion timeout");
+  await user.clear(timeout);
+  await user.type(timeout, "15");
+  await user.click(form("Online evaluation").getByRole("button", { name: "Save" }));
 
   expect(await screen.findByText("must be 10 to 3600")).toBeInTheDocument();
-  expect(screen.getByLabelText("Trace completion timeout (seconds)")).toHaveAttribute(
-    "aria-invalid",
-    "true",
-  );
+  expect(screen.getByLabelText("Trace completion timeout")).toHaveAttribute("aria-invalid", "true");
 });
 
 it("does not let a member change the timeout", async () => {
@@ -332,8 +415,8 @@ it("does not let a member change the timeout", async () => {
 
   await renderApp("/acme/support-bot/settings/general");
 
-  expect(await screen.findByLabelText("Trace completion timeout (seconds)")).toBeDisabled();
-  expect(screen.getByRole("button", { name: "Save timeout" })).toBeDisabled();
+  expect(await screen.findByLabelText("Trace completion timeout")).toBeDisabled();
+  expect(form("Online evaluation").getByRole("button", { name: "Save" })).toBeDisabled();
 });
 
 it("shows the Pro plan message and an Upgrade link when retention is refused by the plan", async () => {
@@ -346,10 +429,12 @@ it("shows the Pro plan message and an Upgrade link when retention is refused by 
   );
 
   const { user } = await renderApp("/acme/support-bot/settings/general");
-  await screen.findByLabelText("Name");
-  await user.click(screen.getByRole("button", { name: "Save" }));
+  const days = await screen.findByLabelText("Retention");
+  await user.clear(days);
+  await user.type(days, "7");
+  await user.click(form("Data retention").getByRole("button", { name: "Save" }));
 
-  expect(await screen.findByRole("alert")).toHaveTextContent(
+  expect(await form("Data retention").findByRole("alert")).toHaveTextContent(
     "Data retention management is part of the Pro plan.",
   );
   expect(await screen.findByRole("link", { name: "Upgrade" })).toHaveAttribute(
@@ -361,7 +446,7 @@ it("shows the Pro plan message and an Upgrade link when retention is refused by 
 it("states the plan's data window under the retention field", async () => {
   await renderApp("/acme/support-bot/settings/general");
 
-  const days = await screen.findByLabelText("Retention (days)");
+  const days = await screen.findByLabelText("Retention");
   await waitFor(() =>
     expect(days).toHaveAccessibleDescription(/Your plan shows the last 1825 days/),
   );
@@ -383,7 +468,7 @@ it("locks the retention days without retention_management and keeps Keep data fo
     "href",
     entitlementsFixture.upgrade_url,
   );
-  expect(screen.getByLabelText("Retention (days)")).toBeDisabled();
+  expect(screen.getByLabelText("Retention")).toBeDisabled();
   expect(screen.getByRole("checkbox", { name: "Keep data forever" })).toBeEnabled();
 });
 
@@ -393,9 +478,8 @@ it("renames a project without sending retention when it is locked and already se
     http.get("/api/v1/orgs/:org/entitlements", () =>
       HttpResponse.json({ ...entitlementsFixture, features: ["project_roles"] }),
     ),
-    http.patch("/api/v1/projects/:project", async ({ request }) => {
-      body = await request.json();
-      return HttpResponse.json({ ...projectFixture, name: "Support" });
+    ...savingProject((sent) => {
+      body = sent;
     }),
   );
 
@@ -404,8 +488,8 @@ it("renames a project without sending retention when it is locked and already se
   const name = screen.getByLabelText("Name");
   await user.clear(name);
   await user.type(name, "Support");
-  await user.click(screen.getByRole("button", { name: "Save" }));
+  await user.click(form("Project").getByRole("button", { name: "Save" }));
 
-  expect(await screen.findByRole("status")).toHaveTextContent("Saved");
+  expect(await form("Project").findByRole("status")).toHaveTextContent("Saved");
   expect(body).toEqual({ name: "Support" });
 });

@@ -308,7 +308,7 @@ From their source in `/home/sebastien/github` (2026-11-15):
 - **CG-J1.** Scores have no direction: a regression is a lower mean. A "lower is better" flag on score definitions is a later change.
 - **CG-J2.** An experiment of more than 20,000 rows (items × repetitions) is refused; the SDK can run a subset by passing a smaller dataset. Results are aggregated in memory from one storage read per page view.
 - **CG-J3.** No server-side experiment runs and no server evaluators on experiments (D18, D-J-11).
-- **CG-J4.** No bulk "add to dataset" from the trace list or the SQL console; no named version tags.
+- **CG-J4.** No bulk "add to dataset" from the SQL console; no named version tags. (Amended by D-J-25: bulk add from the trace list is in the MVP.)
 - **CG-J5.** `running` experiments abandoned by a crashed SDK stay `running`; the UI shows their age.
 
 ## Conventions

@@ -105,6 +105,8 @@ pub struct OrgMembership {
     pub name: String,
     /// Org role. A project override of `none` hides that project and is never returned.
     pub role: OrgRole,
+    /// The demo org (`demo.org`, D187). Its role is `viewer` for a caller without a row.
+    pub demo: bool,
 }
 
 /// Role on an org, and the caller's effective role on a project.
@@ -148,6 +150,16 @@ pub struct Project {
     /// when the project is created.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub genai_log_events: Option<u64>,
+    /// When the server last committed spans sent over OTLP to this project (D-C-20). Kept in
+    /// memory: absent until the first batch after the server starts. Present only when one
+    /// project is read.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::api::keys::optional_time"
+    )]
+    #[schema(value_type = Option<String>, format = DateTime)]
+    pub last_ingest_at: Option<i64>,
     /// The caller's effective role. Omitted when the caller is an API key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<OrgRole>,
@@ -430,6 +442,7 @@ mod tests {
                 slug: "acme".to_owned(),
                 name: "Acme".to_owned(),
                 role: OrgRole::Owner,
+                demo: false,
             }],
         };
         let project = Project {
@@ -440,6 +453,7 @@ mod tests {
             retention_days: Some(30),
             trace_completion_timeout_s: 60,
             genai_log_events: None,
+            last_ingest_at: None,
             role: Some(OrgRole::Owner),
             created_at: CREATED_AT,
         };

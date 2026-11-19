@@ -92,7 +92,7 @@ function SignupPage() {
       {open && hasProviders && config.password_enabled ? <OrDivider /> : null}
       {open && config.password_enabled ? <SignupForm onCheckEmail={setCheckEmail} /> : null}
       {open && !hasProviders && !config.password_enabled ? (
-        <p className="text-sm">No sign-up method is configured on this server.</p>
+        <p className="text-body">No sign-up method is configured on this server.</p>
       ) : null}
     </AuthLayout>
   );

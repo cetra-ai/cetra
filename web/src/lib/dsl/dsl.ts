@@ -205,9 +205,9 @@ export function serializeChip(chip: Chip): string {
       return `${serializeField(chip.field)} @> [${values}]`;
     }
     case "score":
-      return `${chip.fn}(${quote(chip.name)}) ${chip.op} ${serializeValue(chip.value)}`;
+      return `${chip.fn}(${quoteString(chip.name)}) ${chip.op} ${serializeValue(chip.value)}`;
     case "has_score":
-      return `${chip.negated ? "NOT " : ""}has_score(${quote(chip.name)})`;
+      return `${chip.negated ? "NOT " : ""}has_score(${quoteString(chip.name)})`;
     case "raw":
       return chip.text;
   }
@@ -477,9 +477,9 @@ function wrapped(
   return undefined;
 }
 
-function serializeField(field: Field): string {
+export function serializeField(field: Field): string {
   if ("key" in field) {
-    return `${field.column.toLowerCase()}[${quote(field.key)}]`;
+    return `${field.column.toLowerCase()}[${quoteString(field.key)}]`;
   }
   return field.column.toLowerCase();
 }
@@ -487,7 +487,7 @@ function serializeField(field: Field): string {
 function serializeValue(value: ChipValue): string {
   switch (value.kind) {
     case "string":
-      return quote(value.value);
+      return quoteString(value.value);
     case "number":
       return value.text;
     case "boolean":
@@ -495,8 +495,17 @@ function serializeValue(value: ChipValue): string {
   }
 }
 
-function quote(value: string): string {
+export function quoteString(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
+}
+
+/** The filter text with `conjunct` appended by AND; a top-level OR in `current` is parenthesized. */
+export function appendFilter(current: string, conjunct: string): string {
+  const base = current.trim();
+  if (base.length === 0) {
+    return conjunct;
+  }
+  return hasTopLevelOr(base) ? `(${base}) AND ${conjunct}` : `${base} AND ${conjunct}`;
 }
 
 export function hasTopLevelOr(text: string): boolean {

@@ -1,0 +1,18 @@
+{
+  "view": "traces",
+  "field": "metadata",
+  "kind": "keys",
+  "total": 5,
+  "missing": 4,
+  "values": [
+    {
+      "value": "user.name",
+      "count": 1
+    },
+    {
+      "value": "user.plan",
+      "count": 1
+    }
+  ],
+  "more": false
+}
