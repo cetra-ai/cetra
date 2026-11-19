@@ -3,7 +3,7 @@
 All notable changes to cetra are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/) (D-N-5). A release that needs action on upgrade starts
-with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
+with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/).
 
 ## [Unreleased]
 
@@ -97,6 +97,9 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Changed
 
+- The self-hosting guides moved from `docs/self-hosting/` to cetra.sh/docs/self-hosting/.
+- The SDK guides moved from the package READMEs to cetra.sh/docs/reference/python/ and
+  cetra.sh/docs/reference/typescript/; the READMEs keep install and the quick start.
 - The copyright holder in the MIT `LICENSE` files is sebastiencs, which is also named as the licensor of the Elastic License 2.0 directories (D190).
 - The top bar is a breadcrumb to the current page and its open item, shows whether spans are arriving, and lists firing alerts (D-C-20).
 - Dashboard charts use round axis ticks, at most 60 buckets, the error colour for errors and one colour per model; change badges show `new` or `×N` instead of huge percentages. The list toolbars' Eval and Experiments switches are now one "Include" menu (D-C-15).

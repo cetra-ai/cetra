@@ -15,9 +15,9 @@ GitHub and Google also accept the split form (`CETRA_AUTH__GITHUB__CLIENT_ID`, `
 | `grpc_addr` | `CETRA_GRPC_ADDR` | `0.0.0.0:4317` (empty = disabled; a config key from track G M3) |
 | `otlp_http_addr` | `CETRA_OTLP_HTTP_ADDR` | `0.0.0.0:4318` (empty = disabled) |
 | `metrics_addr` | `CETRA_METRICS_ADDR` | unset (off). Prometheus `/metrics`; no authentication, bind it to a private address (D-N-28) |
-| `restore_mode` | `CETRA_RESTORE_MODE` | `false`. No outbound work: alert deliveries, webhooks, judges, email and identity providers are off; for restore drills (D-N-25) |
+| `restore_mode` | | `false`. No outbound work: alert deliveries, webhooks, judges, email and identity providers are off; for restore drills (D-N-25) |
 | `storage.object_store` | `CETRA_OBJECT_STORE` | `file://<data_dir>/objects`. A set value is `file://<absolute path>` or `s3://<bucket>[/<prefix>]` |
-| `storage.s3.region` | `AWS_REGION` | unset |
+| `storage.s3.region` | | unset: the `AWS_REGION` environment variable (not an alias; the loader has none) |
 | `storage.s3.endpoint` | | unset (MinIO, R2, …) |
 | `storage.s3.force_path_style` | | `false` |
 | `storage.s3.allow_http` | | `false` |
@@ -47,8 +47,10 @@ GitHub and Google also accept the split form (`CETRA_AUTH__GITHUB__CLIENT_ID`, `
 | `ingest.max_grpc_message_bytes` | | `"32MiB"` (with the gRPC listener, track G M3) |
 | `ingest.max_attribute_bytes` | | `"8MiB"` |
 | `media.min_bytes` / `media.max_bytes` | | `"4KiB"` / `"32MiB"` |
+| `storage.min_free_bytes` | | `"2GiB"`: ingestion is refused below this much free disk |
 | `storage.wal.sync` | | `"always"` (or a duration such as `"5ms"`: fsync at most that often) |
 | `storage.flush.max_bytes` / `storage.flush.max_age` / `storage.flush.upload_concurrency` | | `"256MiB"` / `"120s"` / `8` |
+| `storage.wal.segment_bytes` / `storage.wal.group_max_bytes` / `storage.wal.group_max_wait` / `storage.wal.skip_corrupt` | | `"64MiB"` / `"8MiB"` / `"2ms"` / `false` |
 | `storage.memtable.hard_limit` | | `"1GiB"` |
 | `storage.compaction.target_file_size` / `storage.compaction.threads` | | `"512MiB"` / `max(1, cores/4)` |
 | `storage.compaction.interval` / `storage.compaction.close_delay` | | `"30s"` / `"2h"` |
@@ -57,19 +59,21 @@ GitHub and Google also accept the split form (`CETRA_AUTH__GITHUB__CLIENT_ID`, `
 | `storage.gc.grace` | | `"5m"` (at most `"30d"`; the window a meta-only S3 backup stays restorable, D-N-20) |
 | `storage.query.max_memory` | | `"2GiB"` |
 | `storage.query.metadata_cache_bytes` | | `"512MiB"` |
+| `storage.query.target_partitions` / `storage.query.trace_lookback` / `storage.query.admission_wait` | | the CPU count / `"1h"` / `"5s"` |
+| `storage.query.max_memory_total` / `storage.query.initial_memory` / `storage.query.read_cache_bytes` | | unset (half the machine's memory, at most `"8GiB"`) / `"64MiB"` / unset (10% of the file system, at most `"100GiB"`; `"0B"` turns it off) |
+| `storage.anchor.window` | | unset (`storage.query.trace_lookback`) |
 | `storage.deletion.max_delay` | | `"24h"` |
-
-The storage engine's settings form the `[storage]` section, with one sub-table per area (`wal`, `s3`, `flush`, `memtable`, `compaction`, `query`, `gc`, `deletion`, `anchor`); spec 03 names them without the `storage.` prefix. Sizes are strings with a binary unit (`"256MiB"`, `"1GiB"`) and durations are strings with a unit (`"2ms"`, `"120s"`, `"24h"`) (D90). The `[ingest]` and `[media]` sections use the same formats. S3 credentials are the standard `AWS_*` environment variables and are not config keys. The full list, with defaults, is the `StorageConfig` doc in `cetra-storage`. Memory, disk and file-descriptor needs of the storage engine, and a profile for small machines, are in spec 03 § 10 Resource needs.
 | `eval.workers` | | `16` (1–256, D-I-6) |
 | `security.allow_private_network_egress` | | `false` (D166) |
 | `log.format` / `log.level` | `CETRA_LOG` | `pretty` on TTY else `json` / `info` |
-| `telemetry.enabled` | `CETRA_TELEMETRY` | decided with the license (anonymous usage ping, opt-out) |
 
-TLS: terminated by a reverse proxy in the reference setups; native TLS optional via `tls.cert` / `tls.key` (rustls) for simple installs.
+The storage engine's settings form the `[storage]` section, with one sub-table per area (`wal`, `s3`, `flush`, `memtable`, `compaction`, `query`, `gc`, `deletion`, `anchor`); spec 03 names them without the `storage.` prefix. Sizes are strings with a binary unit (`"256MiB"`, `"1GiB"`) and durations are strings with a unit (`"2ms"`, `"120s"`, `"24h"`) (D90). The `[ingest]` and `[media]` sections use the same formats. S3 credentials are the standard `AWS_*` environment variables and are not config keys. The full list, with defaults, is the `StorageConfig` doc in `cetra-storage`, and the site's configuration reference, which `config::tests::the_configuration_reference_matches_the_loader` checks against the loader. Memory, disk and file-descriptor needs of the storage engine, and a profile for small machines, are in spec 03 § 10 Resource needs.
+
+TLS: terminated by a reverse proxy in the reference setups. cetra has no `tls.*` keys and no telemetry key: the loader refuses them as unknown keys.
 
 ## Packaging
 
-Track N builds, publishes and tests these (`docs/plans/n-packaging/`, D-N-1–D-N-16). User documentation: `docs/self-hosting/`.
+Track N builds, publishes and tests these (`docs/plans/n-packaging/`, D-N-1–D-N-16). User documentation: `website/src/content/docs/docs/self-hosting/`, served at cetra.sh/docs/self-hosting/.
 
 | Artifact | Details |
 |---|---|
@@ -114,7 +118,7 @@ The design is `docs/plans/p-entitlements/00-design.md` (D169–D179, D-P-1–D-P
 ## Self-monitoring
 
 > **Built in N M3 (D-N-28 to D-N-30, D-N-33):**
-> - Prometheus `/metrics` on `metrics_addr`, a separate listener, off by default, with no authentication. The metrics are listed in `docs/self-hosting/monitoring.md`. Labels come from fixed sets only, never a tenant, user, key, model or URL (D-N-29).
+> - Prometheus `/metrics` on `metrics_addr`, a separate listener, off by default, with no authentication. The metrics are listed in `website/src/content/docs/docs/self-hosting/monitoring.md`. Labels come from fixed sets only, never a tenant, user, key, model or URL (D-N-29).
 > - `/readyz` as § Process lifecycle describes it.
 > - Restore mode (`restore_mode`, D-N-25) for restore drills: no outbound work.
 >
@@ -124,7 +128,7 @@ The design is `docs/plans/p-entitlements/00-design.md` (D169–D179, D-P-1–D-P
 
 What to back up: `meta.db` and `catalog.db` (taken together, in the same pause), the object store (`objects/` or the bucket), and `<data_dir>/secret.key` (or keep `CETRA_ENCRYPTION_KEY`) with the data. Without it, LLM connection keys and webhook secrets cannot be read, and the server refuses to start (D-I-1). `cetra admin rotate-encryption-key` replaces the key while the server is stopped (D-I-3). A backup taken before a rotation can only be read with the key that was current then; keep that key with it.
 
-**Cold snapshot (the MVP procedure, D-N-11; `docs/self-hosting/backup.md`):** stop the server (it drains and flushes, at most 60 s); copy the whole data directory (`meta.db`, `catalog.db`, `wal/`, `secret.key`, and `objects/` in local mode; `tmp/` and `LOCK` may be skipped); in S3 mode, copy the bucket prefix during the same stop; start the server.
+**Cold snapshot (the MVP procedure, D-N-11; `website/src/content/docs/docs/self-hosting/backup.md`):** stop the server (it drains and flushes, at most 60 s); copy the whole data directory (`meta.db`, `catalog.db`, `wal/`, `secret.key`, and `objects/` in local mode; `tmp/` and `LOCK` may be skipped); in S3 mode, copy the bucket prefix during the same stop; start the server.
 
 **Restore:** stop the server, keep the current data directory (or a copy of its `meta.db`), put the backed-up data directory in place, in S3 mode make the bucket prefix identical to the backup copy (sync with delete). Then, with the server still stopped, run `cetra admin migrate` if the backup is from an older version, and re-apply deletions (below) before starting the server.
 
@@ -134,7 +138,7 @@ What to back up: `meta.db` and `catalog.db` (taken together, in the same pause),
 
 ## Upgrades
 
-- Semantic versioning (0.x for now). Upgrade: take a backup, replace the binary, image or chart version, restart; SQLite migrations run automatically (forward-only). Release notes (`CHANGELOG.md`) start with `### Upgrade notes` when an upgrade needs action (D-N-5, D-N-12; `docs/self-hosting/upgrade.md`). Before migrating an existing `meta.db` or `catalog.db`, the server keeps a copy named `meta.db.pre-m<N>` / `catalog.db.pre-m<N>` (by `VACUUM INTO`), where N is the highest migration applied before the upgrade, and only the copy from the last upgrade (D-N-22). The copies hold the data: delete them once the upgrade is verified.
+- Semantic versioning (0.x for now). Upgrade: take a backup, replace the binary, image or chart version, restart; SQLite migrations run automatically (forward-only). Release notes (`CHANGELOG.md`) start with `### Upgrade notes` when an upgrade needs action (D-N-5, D-N-12; `website/src/content/docs/docs/self-hosting/upgrade.md`). Before migrating an existing `meta.db` or `catalog.db`, the server keeps a copy named `meta.db.pre-m<N>` / `catalog.db.pre-m<N>` (by `VACUUM INTO`), where N is the highest migration applied before the upgrade, and only the copy from the last upgrade (D-N-22). The copies hold the data: delete them once the upgrade is verified.
 - Parquet schema changes are additive only (03 §3); normalization changes bump `schema_version` without rewriting data.
 - From the first public release tag (D185): a storage format change bumps a format version and migrates at open (D-R-12); the WAL carries a format header in each segment (03 § 12), and a new binary reads the previous format's segments (replays them before writing the new format). Before that tag there is no format constraint.
 - `meta.db`, `secret.key`, the backup manifest and the admin socket follow 04 § Format versions (D-R-33 to D-R-38): a `meta.db` format version beside the migrations, additive migrations, golden backups restored by CI (SF7).
@@ -162,4 +166,5 @@ The team's accounts are the demo org's only members, and every visitor sees thei
 
 ## Documentation deliverables (part of the MVP)
 
-Self-hosting (`docs/self-hosting/`: install by binary, Docker, compose or Helm, configuration, S3, backup/restore, upgrades; track N), quickstart (Docker, binary), OTel recipe per language, SDK guides (Python/TS), Vercel AI SDK guide, attribute reference, filter DSL + SQL schema reference, evaluators & online rules, alerts, auth/SSO setup (GitHub, Google, Okta, Entra ID, Keycloak), SMTP setup, S3 setup, backup/restore, GDPR guide, Helm values reference, API reference (rendered OpenAPI).
+Self-hosting (`website/src/content/docs/docs/self-hosting/`, served at cetra.sh/docs/self-hosting/: install by binary, Docker, compose or Helm, configuration and its reference, S3, backup/restore, upgrades; tracks N and W), quickstart (Docker, binary), OTel recipe per language, SDK guides (Python/TS), Vercel AI SDK guide, attribute reference, filter DSL + SQL schema reference, evaluators & online rules, alerts, auth/SSO setup (GitHub, Google, Okta, Entra ID, Keycloak), SMTP setup, S3 setup, backup/restore, GDPR guide, Helm values reference, API reference (rendered OpenAPI).
+The site and its drift checks are track W (`docs/plans/docs-site/`). The configuration reference page is checked against the loader by `config::tests::the_configuration_reference_matches_the_loader`.

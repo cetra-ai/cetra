@@ -1,0 +1,128 @@
+---
+title: Alerts
+description: Watch error rate, cost, latency and scores per project, and get notified through Slack, a signed webhook or email.
+---
+
+import { Image } from "astro:assets";
+import alerts from "../../../../assets/screenshots/alerts.png";
+
+Alert rules watch a metric of a project over a sliding window and notify you when it crosses a threshold. Rules belong to a project. Members and above manage them.
+
+<Image src={alerts} alt="The alerts page: the project's alert rules." />
+
+## Where to find them
+
+In the sidebar, **Alerts** (under **Monitor**) lists the project's rules. **New rule** opens the rule form. The strip above the list counts the rules by state (**Firing**, **No data**, **OK**, **Disabled**), and selecting a count filters the list. Each row shows the name, state, condition, last value, a trend, when the rule was last evaluated, its channels and an **Enabled** switch. Selecting a row opens the rule beside the list, with **Edit**, **Delete rule** and the rule's **History**. **Recent events** under the list shows the latest events of every rule, with how many of their deliveries were sent.
+
+The rule form names things differently from the fields below: **Metric** (Error rate, Cost, p95 latency, Score), **Latency of** (Whole traces, LLM spans), **Aggregation** (Average, Pass rate), **Window**, **Filter**, **Comparator** (Above, At or above, Below, At or below), **Threshold**, **Minimum samples**, **Notifications** (the channels), **Remind while firing** with **Remind every (minutes)**, and **Enabled**. A preview next to the form plots the metric. In the form, the threshold of an error rate or a pass rate is in percent, where the API uses a fraction from 0 to 1.
+
+## What a rule watches
+
+| Metric | What it measures over the window | Extra fields |
+|---|---|---|
+| `error_rate` | The fraction of traces with at least one error span, from 0 to 1. | `min_count` (default 20) |
+| `cost` | The total cost in USD of the traces. It is 0 when there are none. | |
+| `latency_p95` | The 95th percentile duration in milliseconds, of traces or of LLM spans (`target`: `trace`, the default, or `llm_span`). | `min_count` (default 20) |
+| `score` | The average of the scores with a given name (`score_name`), or the pass rate of boolean scores (`aggregation`: `avg` or `pass_rate`). | `min_count` (default 10) |
+
+Every rule has:
+
+- a `window`: `1m`, `5m`, `15m`, `1h`, `6h` or `24h`;
+- a `comparator`: `gt`, `gte`, `lt` or `lte`;
+- a `threshold`, in the unit of the metric;
+- an optional `filter`, a [filter](/docs/reference/) expression over traces. There is no `group_by`: to watch the cost of one model, add a filter for that model.
+
+Evaluation traces and experiment traces are not counted, unless the filter names the `environment` for evaluation traces.
+
+A window with fewer samples than `min_count` has too little data to judge. cetra does not treat it as a breach.
+
+## When a rule fires
+
+cetra evaluates each enabled rule once a minute for windows up to 15 minutes, and every five minutes for longer windows. A rule is in one of three states:
+
+- `ok`: the latest reading is not breaching.
+- `firing`: the reading breached the threshold. cetra records a `fired` event and notifies each channel.
+- `no_data`: a rule that was firing has had too few samples twice in a row. cetra records a `no_data` event and the notification says "No data". It does not resolve the rule, because a silent application is not a healthy one.
+
+A firing rule returns to `ok` after two clear readings in a row, and cetra records a `resolved` event. With `notify_while_firing` on, cetra sends a reminder every `cooldown_s` seconds (300 to 604,800, default 3,600) while the rule keeps firing.
+
+If a query fails, the rule keeps its state and shows the error. A failure is never read as "no data".
+
+Changing a rule's condition, or disabling and re-enabling it, resets it to `ok` without a notification.
+
+## Channels
+
+A channel is a destination defined once per project. Manage them in the project's **Settings**, under **Channels**, with **New channel**. A rule form also links to that page when the project has no channel yet. A rule lists up to 10 channels of its project. A project has at most 100 rules and 20 channels. Channel secrets are stored encrypted, and the API never returns a URL path, a secret or a header value.
+
+### Slack
+
+Create an incoming webhook in your Slack workspace and paste its `https` URL as the channel's URL. cetra posts a message with the rule, project, metric, value, threshold, window, sample count and buttons to the rule and to the matching traces.
+
+### Webhook
+
+cetra sends a `POST` with a JSON body to your URL. A webhook channel has a URL, a secret of 16 to 256 characters, and up to 10 extra headers.
+
+```json
+{
+  "type": "alert.fired",
+  "event_id": "…",
+  "rule": { "id": "…", "name": "High error rate", "metric": "error_rate" },
+  "project": { "id": "…", "name": "support-bot" },
+  "value": 0.083,
+  "count": 120,
+  "threshold": 0.05,
+  "comparator": "gt",
+  "window": "5m",
+  "window_from": "…",
+  "window_to": "…",
+  "occurred_at": "…",
+  "url": "https://cetra.example.com/<org>/<project>/traces?from=…&to=…&filter=…",
+  "rule_url": "https://cetra.example.com/<org>/<project>/alerts/<rule id>"
+}
+```
+
+`type` is `alert.fired`, `alert.resolved`, `alert.reminder` or `alert.test`. `value` and `count` are `null` when the window had no data.
+
+Each request carries two headers:
+
+- `X-Cetra-Delivery`: the delivery ID. It is the same on every retry of one delivery, so use it to ignore duplicates.
+- `X-Cetra-Signature`: `t=<unix seconds>,v1=<hex>`, where the hex is the HMAC-SHA256 of `<t>.<raw body>` with your secret.
+
+Verify the signature on the raw body, before you parse it:
+
+{/* untested: verifies a webhook request */}
+```python
+import hashlib
+import hmac
+import time
+
+
+def verify(secret: str, header: str, body: bytes, tolerance: int = 300) -> bool:
+    parts = dict(item.split("=", 1) for item in header.split(","))
+    timestamp = parts["t"]
+    if abs(time.time() - int(timestamp)) > tolerance:
+        return False
+    signed = timestamp.encode() + b"." + body
+    expected = hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, parts["v1"])
+```
+
+### Email
+
+An email channel has 1 to 20 recipients, and cetra sends one message per recipient. It needs [SMTP](/docs/self-hosting/email/). Without SMTP the channel shows "SMTP not configured".
+
+When sign-up is `open`, each recipient must be a verified member of the org. Each org can send 1,000 alert emails per UTC day, test sends included.
+
+## Delivery and history
+
+cetra sends deliveries in the background, at least once. A timeout, a connection error, a `408`, `429` or `5xx` answer, or an SMTP connection, TLS or authentication error is retried with a growing wait (30 seconds, doubling, up to one hour) for up to 8 attempts. Any other failure fails the delivery at once.
+
+cetra never disables a channel on its own. On the **Channels** page, each channel shows a status: **Delivered**, **Last delivery failed**, **No deliveries**, or **SMTP not configured** for an email channel. Open a channel and select **Send test** to send a sample message right away. A test send is limited to 5 a minute per member and per channel.
+
+A rule's history labels each event **Fired**, **Resolved**, **No data** or **Reminder**, and each delivery **Sent**, **Pending** or **Failed**. cetra keeps alert events for 90 days and finished deliveries for 30 days.
+
+In [restore mode](/docs/self-hosting/configuration-reference/) (`restore_mode = true`), cetra evaluates no rule and sends no delivery.
+
+## Limits by plan
+
+A self-hosted instance has no limit on rules unless you set `entitlements.defaults.max_alert_rules`. On a plan with a limit, creating or re-enabling a rule beyond it fails with `403 plan_limit`. See [Plans and licence](/docs/platform/plans-and-licence/).

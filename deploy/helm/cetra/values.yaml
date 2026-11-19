@@ -60,7 +60,7 @@ persistence:
 resources: {}
 
 # More volumes for the pod and mounts for the cetra container, e.g. a backup volume for
-# `cetra admin backup` (docs/self-hosting/backup.md):
+# `cetra admin backup` (https://cetra.sh/docs/self-hosting/backup/):
 #   extraVolumes: [{name: backups, persistentVolumeClaim: {claimName: cetra-backups}}]
 #   extraVolumeMounts: [{name: backups, mountPath: /backups}]
 extraVolumes: []

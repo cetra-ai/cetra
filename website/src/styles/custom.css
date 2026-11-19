@@ -1,0 +1,18 @@
+/* The holding page's teal (cetra.sh), as Starlight's accent. */
+:root {
+  --sl-color-accent-low: #134e4a;
+  --sl-color-accent: #0f766e;
+  --sl-color-accent-high: #ccfbf1;
+}
+/* Starlight's 45rem text column clips the reference tables; 60rem fits a four-column table.
+   "On this page" keeps the sidebar width (src/components/TwoColumnContent.astro). */
+@media (min-width: 72rem) {
+  :root {
+    --sl-content-width: 60rem;
+  }
+}
+:root[data-theme="light"] {
+  --sl-color-accent-low: #ccfbf1;
+  --sl-color-accent: #0f766e;
+  --sl-color-accent-high: #134e4a;
+}

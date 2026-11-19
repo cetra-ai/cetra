@@ -1,0 +1,39 @@
+---
+title: Human annotation
+description: Score traces, spans and sessions by hand with a form built from your score definitions.
+---
+
+Annotation lets a member of a project review traces and write scores by hand in the UI.
+
+## Set up the form
+
+The annotation form shows one control for each [score definition](/docs/evaluation/scores/#score-definitions) of the project. Create the definitions first, under **Settings**, then **Score definitions**. With none, the form says "No score definitions yet." and links to that page.
+
+The control follows the definition:
+
+| Definition | Control |
+|---|---|
+| Numeric | A number within the allowed range |
+| Boolean | Yes or No |
+| Categorical | One of the categories |
+| Text | A text box |
+
+Every control also takes an optional reason.
+
+## Annotate a trace, a span or a session
+
+1. Open a trace, select a span, and select the **Annotate** tab in the span panel. To score a session, open it and select **Annotate** in the header, which opens a side sheet.
+2. On a trace, choose the target with the **Trace** and **Span** switch. **Trace** is the default.
+3. Fill in the controls you want and select **Save**.
+
+cetra saves only the controls you changed. The scores have the source `human` and carry the trace's session and user, so they show up in the session and user views. **Clear** deletes your own score for that control.
+
+## Who can annotate
+
+Project members and above can annotate. Viewers see "Only members can annotate." and can read the scores.
+
+## Edit your scores, and other people's
+
+A human score belongs to the person who wrote it. The form shows and edits only your own scores, and each person keeps one score per name and target. If two reviewers score the same trace, the trace has two scores with that name, and averages in dashboards and filters count both.
+
+Only a project admin can change or delete another member's human score, and only through the API, by sending the score's ID. The admin becomes its author.

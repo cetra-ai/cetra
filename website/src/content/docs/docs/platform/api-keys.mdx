@@ -1,0 +1,50 @@
+---
+title: API keys and tokens
+description: The three credential kinds, what each may call, and how to create, revoke and rotate them without downtime.
+---
+
+cetra uses three kinds of credential. Each has a prefix that tells you what it is.
+
+| Kind | Prefix | Scopes | Created in | Used for | Safe in a browser |
+|---|---|---|---|---|---|
+| API key (secret) | `sk-cetra-` | `ingest`, `read`, `write`. The default is all three; a key can be limited to `ingest`. | A project | OpenTelemetry exporters, the SDKs, CI | No |
+| Public key | `pk-cetra-` | `feedback` | A project | Sending end-user feedback from a browser | Yes |
+| Personal access token | `pat-cetra-` | `read`, or `read` and `write` | Your account | The CLI and the [MCP server](/docs/platform/mcp/) | No |
+
+You send every credential in the header `Authorization: Bearer <key>`. cetra never reads a key from a query string.
+
+## What each scope allows
+
+- `ingest`: send spans over OTLP and write scores.
+- `read`: call the read endpoints of the project, and run SQL.
+- `write`: manage datasets, experiments and scores, and delete data by trace ID.
+- `feedback`: send public feedback only.
+
+A personal access token acts as you. With `read` it can make safe requests (`GET`) plus SQL and MCP calls. With `read` and `write` it can call everything except the actions below.
+
+These actions need a signed-in session, so a stolen key or token cannot do them: creating, listing and revoking keys and tokens; changing members, roles and invites; changing your password; and deleting a project or an org. A token can revoke itself.
+
+An API key never reads the member list.
+
+## Create, list and revoke
+
+Project admins create and revoke API keys in the project's **Settings**, under **API keys**. You create personal access tokens on the account page: open the account menu at the bottom of the sidebar, select **Account**, and use **New token** in the **Personal access tokens** card. For the CLI, `cetra login` creates a token for you in the browser. It expires after 90 days.
+
+When you create a credential:
+
+- cetra shows the full value once. Store it in a secret manager.
+- You can set an expiry date.
+- The list shows the prefix (for example `sk-cetra-a1B2c3`) and when the credential was last used, so you can find the one you no longer need.
+
+Revoking a credential stops it working at once.
+
+## Rotate a key without downtime
+
+1. Create a new key with the same scopes.
+2. Deploy the new key to every service that sends data.
+3. Check in the list that the old key's last use is no longer moving.
+4. Revoke the old key.
+
+## Keep `sk-cetra-` keys out of browsers
+
+An `sk-cetra-` key can read and write your project's data. Never ship one in a web page or a mobile app. To collect feedback from a browser, use a `pk-cetra-` key, which can only send feedback.

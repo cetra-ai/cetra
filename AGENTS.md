@@ -26,6 +26,7 @@ Read these before writing code, and follow them:
 | `docs/roadmap.md` | Phases, waves and tracks: each track's plan, status, PRs and decision IDs |
 | `docs/plans/` | Step-by-step implementation plans; do the sub-phase you were given, nothing more |
 | `docs/research/competitors.md` | Why the decisions were made (competitor features and code-level findings) |
+| `website/` | The user documentation site (cetra.sh/docs), including the self-hosting guides: what users read. `website/STYLE.md` is its style guide |
 
 If the code has to deviate from the spec, update the spec **in the same change**, and add a decision to `docs/mvp-decisions.md` if the change is not a detail. A track's decisions are named `D-<track>-<n>` (e.g. `D-G-1`) and go in that track's section; only the coordinating session adds plain-numbered decisions (`docs/roadmap.md` § Decision IDs). If the spec is ambiguous or contradicts itself, stop and ask instead of guessing.
 
@@ -69,6 +70,7 @@ If the code has to deviate from the spec, update the spec **in the same change**
 - Normalization uses golden fixtures in `fixtures/otlp/`.
 - Storage needs crash-recovery and concurrency tests.
 - `CETRA_BLESS_SCHEMA=1` makes `catalog::db::tests::the_schema_matches_the_committed_dump` rewrite `crates/storage/src/catalog/schema.txt` instead of comparing it; then update spec 03 § 4 by hand (R M8).
+- `CETRA_DOCS_WRITE=1` makes `cli_reference_is_up_to_date` rewrite the site's CLI reference, and `sql_schema_reference_is_up_to_date` its SQL schema reference (`just docs-gen` runs both); a CLI or schema change commits the regenerated page.
 - `golden_tests` checks the golden data directories against the current build (R M8): the fresh directory is built once per test process by `golden_tests::fresh_golden_dir()`, and every golden test and `read_cache::tests::the_golden_cache_entry_is_served` uses it; `golden_tests::write_golden_dir` (ignored; `just golden-dir <name>`) writes one into `CETRA_GOLDEN_OUT`.
 - A format change (spec 03 § 12) bumps `FORMAT_VERSION`; from the first public release the golden directories under `fixtures/storage/golden/` must keep opening; `just golden-dir <name>` writes one.
 - `CETRA_CRASH_ITERATIONS=N just test` runs the storage crash harness longer (default 25).
@@ -84,6 +86,9 @@ If the code has to deviate from the spec, update the spec **in the same change**
 - `crates/storage/tests/s3_probe.rs` probes what our S3 code relies on against a real provider. Its tests are `#[ignore]`d and skip without `CETRA_TEST_S3_ENDPOINT`: `cargo test --release -p cetra-storage --all-features --test s3_probe -- --ignored --nocapture` (R M4).
 - `CETRA_TEST_TOXIPROXY` (with `CETRA_TEST_S3_*` and optionally `CETRA_TEST_TOXIPROXY_TOKEN`) runs `just s3-chaos`; `crates/storage/tests/s3_chaos.rs` shows how to start toxiproxy and Versity Gateway.
 - `CETRA_BENCH_CORPUS` overrides the benchmark corpus path. `CETRA_TEST_S3_REGION` and `CETRA_TEST_S3_PATH_STYLE` also configure the benches and the soak. `CETRA_SOAK_*` configure the soak (`crates/storage/tests/soak.rs`).
+- `config::tests::the_configuration_reference_matches_the_loader` checks the site's configuration reference against the loader: a new config key is documented in `website/src/content/docs/docs/self-hosting/configuration-reference.md` in the same PR.
+- The docs checks run in `just check-docs` (`website/scripts/`, plain Node, unit tests by `node --test`): `check-terms.mjs` (banned terms, description length), `check-samples.mjs` (every code block tested or marked untested), `check-env-vars.mjs` (every `CETRA_*` name exists), `check-backing.mjs` (every fixture an integration page cites exists), `check-screenshots.mjs` (shots and PNGs match), and `starlight-links-validator` (internal links and anchors, during the build). The generated pages are the API reference (from `openapi.json`), the changelog (from `CHANGELOG.md`, git-ignored) and, from Rust tests, the CLI and SQL schema references.
+- Python samples of the site run in `sdks/python/tests/test_examples.py` and TypeScript samples in `sdks/typescript/src/examples.test.ts`; the SDK reference pages are checked against the exports by `just check-py` and `just check-ts`.
 - Tests cover the current behaviour only.
 - UI tests use the MSW mocks from `fixtures/api/`; a page test overrides an endpoint with `server.use` instead of mocking modules.
 - Captured OTLP fixtures are recorded with `just capture` (tools/capture) and never edited by hand; `just check-capture` before committing one.
@@ -108,6 +113,7 @@ crates/
   cli/       cetra-cli      the `cetra` binary                                       (spec 09 § CLI)
   ui/        cetra-ui       the web UI embedded at build time (D-G-18, D-G-35)
 web/                         React UI (Vite, TanStack, shadcn/ui, pnpm)               (spec 11)
+website/                     docs site and landing page (Astro, Starlight)            (docs/plans/docs-site)
 sdks/python/                 Python SDK (uv)                                           (spec 10)
 sdks/typescript/             TypeScript SDK (pnpm)                                     (spec 10)
 fixtures/otlp/               OTLP fixtures shared by Rust golden tests and SDK tests  (spec 02 § Testing)
@@ -146,9 +152,10 @@ Run everything through `just`:
 
 | Command | What it does |
 |---|---|
-| `just check` | Rust, web, Python SDK, and TypeScript SDK (D79); **must pass before every commit** |
+| `just check` | Rust, web, Python SDK, TypeScript SDK and the docs site (D79); **must pass before every commit** |
 | `just check-rust` | format check, clippy (`-D warnings`), tests, `ee` licence headers, golden directories (cargo-deny is off until the first release, D188) |
 | `just check-web` | web lint, types, tests, production build |
+| `just check-docs` | docs site: lint, script tests, types, content checks, build with link validation |
 | `just check-release` | build-release, then check the UI is embedded |
 | `just check-py` | Python SDK format, lint, types, tests |
 | `just check-ts` | TypeScript SDK lint, types, tests, package exports |
@@ -170,8 +177,13 @@ Run everything through `just`:
 | `just ts-smoke <tarball>` | load a packed TS SDK from ESM and CommonJS |
 | `just check-workflows` | lint and audit GitHub Actions workflows (actionlint, zizmor) |
 | `just openapi` | regenerate `crates/server/openapi.json` and `web/src/api/schema.gen.ts` |
+| `just docs-gen` | regenerate the site's generated pages (the CLI reference, D-W-7) |
 | `just web-dev` | web dev server with the API mocked from `fixtures/api` |
 | `just web-dev-server` | web dev server proxied at the real API |
+| `just docs-dev` | docs site dev server on http://localhost:4321 |
+| `just docs-deploy <branch>` | build the site and deploy it to Cloudflare Workers (D-W-3): production for `main`, a Preview for `pr-<number>`; CI does it |
+| `just docs-screenshots [names]` | rewrite the docs' UI screenshots from the web UI on its mocks (D-W-12); needs Chromium |
+| `just docs-links` | check the docs site's external links with lychee (D-W-13); the weekly `links` job runs it |
 | `just run <args>` | run the `cetra` binary |
 | `just fuzz <target> [secs]` · `just fuzz-all [secs]` | fuzz one target, or every target in turn, growing its committed corpus (track R M3) |
 | `just fuzz-seed` | write the fuzz seed files from the test fixtures (track R M3) |
@@ -229,6 +241,7 @@ The product was renamed from the working name `llmobs` to `cetra` mechanically (
 - Small commits with a short imperative subject (e.g. `Add WAL group commit`). One sub-phase gives one commit unless the plan says otherwise.
 - Don't commit generated artifacts (`target/`, `node_modules/`, `dist/`, `.venv/`).
 - A user-visible change adds a line to `CHANGELOG.md` § `[Unreleased]` (`Added`, `Changed`, `Fixed`, `Removed`); one that needs action on upgrade goes under `### Upgrade notes` (D-N-5).
+- A user-visible change updates its page under `website/src/content/docs/docs/` in the same PR.
 - When you finish, report:
   - what was done;
   - any deviation from the plan or spec, and why;

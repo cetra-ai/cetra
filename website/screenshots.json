@@ -1,0 +1,46 @@
+[
+  { "name": "trace-list", "path": "/acme/support-bot/traces", "waitFor": "100 loaded" },
+  {
+    "name": "trace-view",
+    "path": "/acme/support-bot/traces",
+    "waitFor": "100 loaded",
+    "actions": [{ "click": "text=How can I export my traces to a CSV file?" }],
+    "waitAfter": "Input / Output"
+  },
+  { "name": "sessions", "path": "/acme/support-bot/sessions?range=30d", "waitFor": "100 loaded" },
+  { "name": "users", "path": "/acme/support-bot/users", "waitFor": "Top by cost" },
+  { "name": "dashboard", "path": "/acme/support-bot/dashboard", "waitFor": "Tokens by type" },
+  {
+    "name": "sql-console",
+    "path": "/acme/support-bot/sql",
+    "waitFor": "Run",
+    "actions": [
+      {
+        "click": ".cm-content",
+        "type": "SELECT span_kind, count(*) AS spans, min(start_time) AS first_start\nFROM spans\nGROUP BY span_kind\nORDER BY span_kind"
+      },
+      { "click": "button:has-text('Run')" }
+    ],
+    "waitAfter": " rows · "
+  },
+  {
+    "name": "evaluators",
+    "path": "/acme/support-bot/evaluators",
+    "waitFor": "Answer is JSON",
+    "now": "2026-01-01T11:00:00Z"
+  },
+  {
+    "name": "online-rules",
+    "path": "/acme/support-bot/online-rules",
+    "waitFor": "Relevance on answers",
+    "now": "2026-01-01T11:00:00Z"
+  },
+  { "name": "datasets", "path": "/acme/support-bot/datasets", "waitFor": "api-rate-limits" },
+  { "name": "experiments", "path": "/acme/support-bot/experiments", "waitFor": "nightly-12" },
+  {
+    "name": "alerts",
+    "path": "/acme/support-bot/alerts",
+    "waitFor": "High error rate",
+    "now": "2026-01-01T11:00:00Z"
+  }
+]

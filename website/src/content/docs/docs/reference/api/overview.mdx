@@ -1,0 +1,101 @@
+---
+title: REST API
+description: The cetra REST API under /api/v1 - authentication, errors, pagination, rate limits and conventions.
+---
+
+The REST API lets you read and manage everything the UI shows: traces, spans, sessions, users, scores, evaluators, datasets, experiments, alerts and administration. The pages under Endpoints in the sidebar document each operation.
+
+## Base URL
+
+Every operation is under `<PUBLIC_URL>/api/v1`, for example `http://localhost:8080/api/v1/traces`. The UI also uses `/api/auth/*` routes for sign-in; they are listed in the endpoints but are meant for the UI, not for your code.
+
+## Authentication
+
+Send a credential in the `Authorization` header. cetra never accepts credentials in a query string.
+
+| Credential | Use it for |
+|---|---|
+| API key `sk-cetra-…` | The data of one project: ingest spans, read and write traces, scores, datasets. The key picks the project; `current` in a `{project}` path segment means that project. |
+| Personal access token `pat-cetra-…` | The CLI, the MCP server and calls that act as a user across projects and orgs. |
+| Session cookie | The UI, after sign-in. |
+
+List the traces of the key's project:
+
+```bash
+curl -H "Authorization: Bearer <API_KEY>" \
+  "http://localhost:8080/api/v1/projects/current/traces?limit=5"
+```
+
+## Errors
+
+Errors use the problem-details format (RFC 7807) with the content type `application/problem+json`:
+
+```json
+{
+  "type": "about:blank",
+  "title": "Bad Request",
+  "status": 400,
+  "code": "invalid_filter",
+  "detail": "unknown field",
+  "errors": [{ "field": "filter", "message": "unknown field", "position": { "line": 1, "column": 5 } }]
+}
+```
+
+`detail` and `errors` are present when they help. `position` is 1-based, in characters, and points into the field's value for filter and SQL errors. Branch on `code`, not on the text.
+
+| `code` | Status | Meaning |
+|---|---|---|
+| `bad_request` | 400 | The request is malformed or a value is out of range. |
+| `invalid_filter` | 400 | The filter or SQL text does not parse. |
+| `query_failed` | 400 | The query failed while it ran. |
+| `unauthorized` | 401 | No credential, or an invalid one. |
+| `quota_exceeded` | 402 | The org's monthly units cap is reached. |
+| `forbidden` | 403 | The credential may not do this. |
+| `sso_required` | 403 | The org requires single sign-on. |
+| `email_not_verified` | 403 | The account's email address is not verified. |
+| `plan_required` | 403 | The org's plan does not include this feature. |
+| `plan_limit` | 403 | The org's plan limit is reached; `detail` names the limit. |
+| `not_found` | 404 | The resource does not exist, or you cannot see it. |
+| `method_not_allowed` | 405 | The route does not accept this method. |
+| `conflict` | 409 | The request conflicts with the current state. |
+| `payload_too_large` | 413 | The body is over the limit. |
+| `unsupported_media_type` | 415 | The `Content-Type` or `Content-Encoding` is not accepted. |
+| `range_not_satisfiable` | 416 | The `Range` header cannot be served. |
+| `query_timeout` | 422 | The query ran past its time limit. |
+| `query_too_large` | 422 | The query result is over the size limit. |
+| `too_many_traces` | 422 | A deletion by filter matches more than 100,000 traces. |
+| `owner_not_allowed` | 422 | The owner of an organization creation is disabled or an instance administrator. |
+| `rate_limited` | 429 | Too many requests. |
+| `internal` | 500 | A server error. |
+| `busy` | 503 | The server is overloaded; retry. |
+| `restore_mode` | 503 | The server runs in restore mode, which turns off calls that leave the machine. |
+
+## Pagination
+
+List operations take `limit` (default 50, from 1 to 1000; a value outside that range is a `400`) and `cursor` (an opaque string). The response is:
+
+```json
+{ "data": [], "next_cursor": null }
+```
+
+`next_cursor` is always present. Pass it as `cursor` to get the next page; it is `null` on the last page.
+
+## Time, IDs and money
+
+- Instants are RFC 3339 UTC strings with 9 fractional digits. Durations whose name ends in `_ns` are integers in nanoseconds.
+- Time range parameters `from` and `to` take an RFC 3339 instant with any offset, or an integer in epoch milliseconds. The range is `[from, to)`; one bound alone leaves the other side open; `from` at or after `to` is a `400`.
+- Entity IDs are UUIDv7 strings. Trace IDs (16 bytes) and span IDs (8 bytes) are lowercase hex in responses; requests accept either case.
+- Money is USD as a number.
+- JSON fields are `snake_case`. An optional field that has no value is absent from the response.
+
+## Rate limits
+
+Ingest and the API are limited per org. A request over the limit gets `429` with a `Retry-After` header; the `RateLimit-*` headers (IETF draft) describe the limit. When an org reaches its monthly units cap, the answer is `402` with the code `quota_exceeded` and a `Retry-After` of the seconds until the cap resets. Retrying earlier does not help.
+
+## Stability
+
+Before 1.0 the API may change between minor releases; every change is in the changelog with an upgrade note.
+
+## The OpenAPI document
+
+The generated pages come from the OpenAPI 3.1 document that every cetra serves at `/api/openapi.json`. The same file is committed as [`crates/server/openapi.json`](https://github.com/cetra-ai/cetra/blob/main/crates/server/openapi.json) in the repository. Routes meant for the cloud control plane are not part of this reference.

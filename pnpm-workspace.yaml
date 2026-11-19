@@ -1,6 +1,7 @@
 packages:
   - web
   - sdks/typescript
+  - website
 
 # Minutes. D74: packages younger than 7 days are not installed.
 minimumReleaseAge: 10080
@@ -8,3 +9,6 @@ minimumReleaseAge: 10080
 # pnpm 11 replaced onlyBuiltDependencies with allowBuilds.
 allowBuilds:
   esbuild: true
+# wrangler's runtime binary: its install script only fetches a binary that
+# `wrangler deploy` of a static-assets Worker does not use; declined so the install passes (D-W-3).
+  workerd: false

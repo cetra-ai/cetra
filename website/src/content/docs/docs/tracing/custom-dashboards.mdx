@@ -1,0 +1,85 @@
+---
+title: Custom dashboards
+description: Build your own project dashboards from blank or from a template, add charts, numbers and tables, and rename, copy or delete them.
+---
+
+Use custom dashboards to chart the numbers you care about, next to the built-in [Overview](/docs/tracing/dashboard/).
+
+Every dashboard has the same controls at the top: a time range, a filter and a **Group by**. They apply to all its widgets. A widget that has its own breakdown ignores **Group by**.
+
+## Switch dashboards
+
+The name of the open dashboard is in the top bar. Select it (**Switch dashboard**) to open the menu. It lists **Overview**, then the project's dashboards by name. Members also see **New dashboard** at the end.
+
+## Create a dashboard
+
+1. Open the **Switch dashboard** menu and select **New dashboard**.
+2. Enter a **Name** of 1 to 100 characters. Names do not have to be unique. Add a **Description** if you want one, up to 500 characters.
+3. Under **Start from**, choose one of:
+   - **Blank**: an empty dashboard.
+   - **Cost**: cost by model, environment, user, trace name and span name, and p95 cost.
+   - **Latency**: trace and LLM latency percentiles, slowest traces and time to first token.
+   - **Quality**: error rates by trace and span name, and scores over time.
+4. Select **Create dashboard**. cetra opens it.
+
+A template is a copy. Changing your dashboard later does not change the template. A project holds at most 100 dashboards.
+
+## Edit a dashboard
+
+Select **Edit**. The page has these buttons:
+
+- **Add widget** opens the widget editor.
+- **Add heading** adds a title that spans the full width.
+- **Cancel** drops your changes.
+- **Save** stores them.
+
+In edit mode, drag a widget to move it and drag its corner to resize it. Each widget also has an actions menu with **Edit**, **Duplicate**, **Move up**, **Move down**, **Move left**, **Move right**, **Wider**, **Narrower**, **Taller**, **Shorter** and **Remove**. A dashboard holds at most 50 widgets, headings included. At the limit, **Add widget**, **Add heading** and **Duplicate** are disabled.
+
+You do not have to select **Edit** to rearrange. Outside edit mode, moving or resizing a widget saves the layout by itself and shows **Layout saved.** with an **Undo** link.
+
+If someone else changed the dashboard while you were editing, cetra tells you and reloads it.
+
+Editing is not available on a narrow screen. There the widgets are stacked and read only.
+
+## The widget editor
+
+The editor asks for the following. The preview at the bottom uses the dashboard's range and filter, and **Apply** stays disabled until every field is valid.
+
+| Field | What it does |
+|---|---|
+| **Title** | Up to 100 characters. Optional. |
+| **Source** | **Traces**, **Spans** or **Scores**. |
+| **Measures** | What to compute. A widget has from 1 to 6. |
+| **Breakdown** | Tick **Break down by a field**, choose the **Breakdown field**, and set **Groups** from 1 to 20. **Group the rest as Other** collects the remaining rows in one group. |
+| **Widget filter** | A condition in the [filter language](/docs/reference/filter-language/), on the source. |
+| **Chart type** | **Line**, **Bar**, **Area**, **Horizontal bar**, **Number** or **Table**. |
+
+Each measure has an **Aggregate**: **Count**, **Distinct count**, **Sum**, **Average**, **Minimum**, **Maximum**, **p50**, **p75**, **p90**, **p95**, **p99** or **Rate**. Most take a **Field**. A measure can also have a **Condition** that limits the rows it counts, and a **Label** of up to 60 characters. The condition is required for **Rate**, which is the share of rows that match it.
+
+Some chart types have an option:
+
+- **Bar** and **Area**: **Stack the series**.
+- **Line**: **One small chart per group**. It needs a breakdown of at most 6 groups.
+- **Bar**: **Fade buckets with fewer rows than**, from 1 to 1000.
+- **Table**: **Show each row's share of the first measure**.
+
+Two types have rules. A **Number** has exactly one measure and no breakdown. A **Horizontal bar** needs a breakdown.
+
+To add a heading, select **Add heading** and enter 1 to 100 characters.
+
+## Manage a dashboard
+
+The **Dashboard actions** menu (the three dots) is next to **Edit**:
+
+- **Rename** changes the name and the description.
+- **Duplicate** creates a copy named **Copy of** and the original name. You can change the name before you create it.
+- **Delete** asks for confirmation. A deleted dashboard cannot be restored.
+- **Reset to default**, on the Overview only, puts back the built-in Overview and drops your changes.
+
+The Overview can be edited and duplicated, but not renamed or deleted. **Reset to default** shows only once you have changed it.
+
+## Who can edit
+
+Members and above can create, edit, rename, duplicate and delete dashboards, and edit the Overview. Viewers can open dashboards and read them. See [Organizations](/docs/platform/organizations/) for the roles.
+
+In the public demo, a visitor can create and edit custom dashboards, but they are kept only in that browser, and the Overview is read only.

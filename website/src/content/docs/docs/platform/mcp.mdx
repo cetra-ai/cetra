@@ -1,0 +1,88 @@
+---
+title: MCP server
+description: Connect a coding agent to your traces over MCP with a personal access token, using seven read-only tools.
+---
+
+The cetra server speaks the Model Context Protocol, so a coding agent such as Claude Code or Cursor can list your projects, run SQL, search traces and read spans while it works on your code. Every tool is read-only.
+
+## Create a personal access token
+
+The MCP endpoint accepts personal access tokens (`pat-cetra-…`) only. A session cookie or an API key (`sk-cetra-…`) is refused with `403`.
+
+1. Sign in to the UI.
+2. Open the account menu at the bottom of the sidebar and select **Account**. In the **Personal access tokens** card, select **New token** and choose **Read only**. A read-only token is enough.
+3. Copy it. cetra shows it once.
+
+The token acts as you: the agent sees the projects you can read, and no others. See [API keys and tokens](/docs/platform/api-keys/).
+
+## Endpoint
+
+The endpoint is `POST <public_url>/mcp`, for example `https://cetra.example.com/mcp`. It uses streamable HTTP, is stateless and answers with JSON. There is no stdio mode. Authenticate with `Authorization: Bearer pat-cetra-…`.
+
+## Configure your client
+
+Client syntax changes between releases. The Claude Code command matches `claude mcp add --help`; check your client's documentation for the current syntax.
+
+### Claude Code
+
+```bash
+claude mcp add --transport http cetra https://cetra.example.com/mcp \
+  --header "Authorization: Bearer pat-cetra-…"
+```
+
+### Cursor
+
+Add this to `.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "cetra": {
+      "url": "https://cetra.example.com/mcp",
+      "headers": { "Authorization": "Bearer pat-cetra-…" }
+    }
+  }
+}
+```
+
+### Other clients
+
+Any client that supports streamable HTTP and custom headers works with the same two values:
+
+```json
+{
+  "url": "https://cetra.example.com/mcp",
+  "headers": { "Authorization": "Bearer pat-cetra-…" }
+}
+```
+
+Keep the token out of files you commit.
+
+## Tools
+
+In every tool, `project` is a project ID or `<org-slug>/<project-slug>`. Times (`from`, `to`) are RFC 3339 timestamps, or epoch milliseconds as a string.
+
+| Tool | Arguments | Returns |
+|---|---|---|
+| `list_projects` | none | The projects you can read: ID, org slug, slug, name and your role. |
+| `get_schema` | `project` | The views, columns, types and descriptions you can query. |
+| `query_sql` | `project`, `query`, `params`, `from`, `to`, `limit` (1 to 1,000, default 100), `max_chars` | Columns, rows, row count, a truncated flag and notes. `from` and `to` are required, at most 30 days apart. The call times out after 30 seconds. |
+| `list_saved_views` | `project`, `kind` | The saved views and SQL queries you can see. |
+| `search_traces` | `project`, `from`, `to`, `view`, `filter`, `search`, `limit` (1 to 100, default 20), `include_eval`, `include_experiments`, `max_chars` | Compact trace summaries. `view` is a saved view ID or name, and explicit arguments override it. The time window is required. |
+| `get_trace` | `project`, `trace_id`, `around`, `include_payloads` (default false), `max_chars` | The span tree, with short input and output previews when `include_payloads` is true. |
+| `get_span` | `project`, `trace_id`, `span_id`, `around`, `max_chars` | One span with its full payloads, cut to fit `max_chars`. |
+
+## Limits
+
+- Each token can make 60 requests a minute and 4 at a time. Beyond that the server answers `429 rate_limited`.
+- Every result is capped at `max_chars` characters (default 20,000, from 1,000 to 100,000).
+- String values in attributes and metadata are cut to 200 characters. `query_sql` cuts string cells at 2,000 characters. A `notes` list in the result names every cut.
+- Errors in arguments or queries come back as a tool result with `isError: true` and an error code and message.
+
+## What it cannot do
+
+The MCP server cannot write. It cannot send spans, add scores, change settings or delete data. Use the [REST API](/docs/reference/api/overview/) or the UI for that.
+
+## For coding agents that read the docs
+
+The documentation is also published as plain text for coding agents: `https://cetra.sh/llms.txt` is an index, and `https://cetra.sh/llms-full.txt` holds the whole site.

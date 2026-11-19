@@ -1,0 +1,42 @@
+---
+title: Plans and licence
+description: What is open source and what needs a licence key, how to add a key, and what a self-hosted instance gets without one.
+---
+
+cetra is open core. The core is under the MIT licence. A small set of features lives in the `ee` directories under the Elastic License 2.0, and is compiled into the same binary. Those features stay locked until you add a licence key.
+
+## What needs a licence key
+
+| Feature | What it does |
+|---|---|
+| `project_roles` | Project-level role overrides. See [Organizations and roles](/docs/platform/organizations/). |
+| `sso_enforcement` | Require single sign-on for listed email domains (`auth.enforce_sso_domains`). |
+| `org_sso` | Per-org single sign-on with verified domains. See [Single sign-on](/docs/platform/sso/). |
+
+Everything else is core, including tracing, evaluation, datasets, experiments, alerts, the MCP server, deletion and retention.
+
+A locked feature answers with `403 plan_required`.
+
+## Add a licence key
+
+Set the key in the environment of `cetra serve`:
+
+```bash
+export CETRA_LICENSE_KEY='<YOUR_LICENCE_KEY>'
+```
+
+Keep it in the same secret file as your other secrets. See [Configuration](/docs/self-hosting/configuration/).
+
+A key is active before its expiry date, then in a grace period where features keep working and the server warns, then expired. If cetra refuses a key, it logs the reason and runs without a licence. When a licence lapses, restrictions you already set, such as role overrides and enforcement, keep applying. You can no longer set up new ones.
+
+## Without a key
+
+A self-hosted instance without a key has every core feature and no limits. To limit what orgs get, set `entitlements.defaults.*` in the configuration, for example `max_projects`, `max_seats`, `max_alert_rules` or `data_access_days`. The [configuration reference](/docs/self-hosting/configuration-reference/) lists them. A limit that is not set means unlimited.
+
+When an org reaches a count limit, such as seats or alert rules, the request fails with `403 plan_limit`.
+
+## Usage
+
+The org's Plan page shows its monthly usage: spans and scores, bytes, and judge tokens and cost, by project and day. The same figures are available at `GET /api/v1/orgs/{org}/usage`.
+
+For prices and cloud plans, see the cetra website.

@@ -20,3 +20,7 @@ deploy/compose/cetra.env
 
 # Core dumps from the storage crash-harness tests
 core.[0-9]*
+
+website/.astro/
+website/src/generated/
+website/src/content/docs/docs/help/changelog.md
