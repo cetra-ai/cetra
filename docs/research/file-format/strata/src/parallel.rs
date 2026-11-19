@@ -4,18 +4,23 @@ use std::ops::Range;
 
 use crate::error::{Result, StrataError};
 
+/// The number of cores, at least one.
+pub(crate) fn cores() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+}
+
 /// Applies `f` to every item and returns the results in input order, or the first error in
-/// input order. The items are cut into contiguous groups of about equal total `weight`, one
-/// group per available core, and each group runs on a scoped thread. With a single group, or a
-/// single core, everything runs on the calling thread.
+/// input order. The items are cut into contiguous groups of about equal total `weight`, at
+/// most `threads` groups, and each group runs on a scoped thread. With a single group,
+/// everything runs on the calling thread.
 pub(crate) fn map_in_order<I: Sync, T: Send>(
     items: &[I],
     weight: impl Fn(&I) -> usize,
+    threads: usize,
     f: impl Fn(&I) -> Result<T> + Sync,
 ) -> Result<Vec<T>> {
     let run = |group: &[I]| -> Result<Vec<T>> { group.iter().map(&f).collect() };
-    let threads = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
-    let groups = groups(items, weight, threads);
+    let groups = groups(items, weight, threads.max(1));
     if groups.len() < 2 {
         return run(items);
     }
@@ -72,14 +77,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn at_most_threads_threads_run() {
+        let items: Vec<u64> = (0..1_000).collect();
+        for threads in [1, 2, 3] {
+            let ids = std::sync::Mutex::new(std::collections::HashSet::new());
+            map_in_order(
+                &items,
+                |_| 1,
+                threads,
+                |_| {
+                    ids.lock().unwrap().insert(std::thread::current().id());
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(ids.lock().unwrap().len(), threads);
+        }
+        // One thread: the calling thread.
+        let ids = std::sync::Mutex::new(Vec::new());
+        map_in_order(
+            &items,
+            |_| 1,
+            1,
+            |_| {
+                ids.lock().unwrap().push(std::thread::current().id());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(
+            ids.lock()
+                .unwrap()
+                .iter()
+                .all(|&id| id == std::thread::current().id())
+        );
+    }
+
+    #[test]
     fn results_keep_the_input_order_and_the_first_error() {
         let items: Vec<u64> = (0..1_000).collect();
-        let got = map_in_order(&items, |_| 1, |&k| Ok(k * 2)).unwrap();
+        let got = map_in_order(&items, |_| 1, 8, |&k| Ok(k * 2)).unwrap();
         assert_eq!(got, items.iter().map(|k| k * 2).collect::<Vec<_>>());
 
         let failed = map_in_order(
             &items,
             |_| 1,
+            8,
             |&k| {
                 if k >= 600 {
                     Err(StrataError::Corrupt {

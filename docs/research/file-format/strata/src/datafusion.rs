@@ -908,17 +908,19 @@ impl ExecutionPlan for StrataExec {
                         .map(Ok),
                 ),
                 None => Box::new(
-                    file.scan_batches(&ScanRequest {
-                        projection,
-                        predicate,
-                        row_ranges,
-                        limit,
-                        kind: ScanKind::Scan,
-                        views: true,
-                    })
+                    file.scan_batches(
+                        &ScanRequest {
+                            projection,
+                            predicate,
+                            row_ranges,
+                            limit,
+                            kind: ScanKind::Scan,
+                            views: true,
+                        },
+                        threads,
+                    )
                     .await
-                    .map_err(df)?
-                    .with_threads(threads),
+                    .map_err(df)?,
                 ),
             };
             let after = file.io_stats();

@@ -19,7 +19,7 @@ use arrow::compute::{cast, concat, take};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 
 use crate::error::{Result, StrataError};
-use crate::file::StrataFile;
+use crate::file::{SCAN_PARALLEL_BYTES, StrataFile};
 use crate::hot::Layer;
 use crate::io::ScanKind;
 use crate::narrow::{BlockEntry, Dictionary, decode_chunk_view};
@@ -95,11 +95,14 @@ struct Masks {
     full: Vec<Option<BooleanArray>>,
 }
 
-/// What the filter wave evaluates: the bound predicate, its masks, and the columns it reads.
+/// What the filter wave evaluates: the bound predicate, its masks, and the columns it reads;
+/// and on how many threads.
 struct FilterPlan<'a> {
     bound: &'a Bound,
     masks: &'a Masks,
     columns: &'a [usize],
+    /// The scan's threads, for the filter wave.
+    threads: usize,
 }
 
 /// One payload column of a read: its header, and what its refs pages and frames hold.
@@ -391,12 +394,14 @@ fn plan_chunks(
     Ok((segments, pending))
 }
 
-/// Decodes the fetched bodies of the chunks planned by [`plan_chunks`] into `decoded`.
+/// Decodes the fetched bodies of the chunks planned by [`plan_chunks`] into `decoded`, on
+/// `threads` threads once the bodies reach `SCAN_PARALLEL_BYTES`.
 fn decode_chunks(
     infos: &HashMap<usize, ColumnInfo>,
     pending: Vec<(usize, usize, BlockEntry)>,
     bodies: Vec<Vec<u8>>,
     decoded: &mut Decoded,
+    threads: usize,
 ) -> Result<()> {
     if bodies.len() != pending.len() {
         return Err(StrataError::Corrupt {
@@ -404,14 +409,36 @@ fn decode_chunks(
             offset: 0,
         });
     }
-    for ((column, index, entry), body) in pending.into_iter().zip(&bodies) {
-        let info = info_of(infos, column)?;
-        let array = decode_chunk_view(
-            &entry,
+    let decode = |i: &usize| -> Result<ArrayRef> {
+        let ((column, _, entry), body) =
+            pending
+                .get(*i)
+                .zip(bodies.get(*i))
+                .ok_or(StrataError::Corrupt {
+                    what: "segment range",
+                    offset: 0,
+                })?;
+        let info = info_of(infos, *column)?;
+        decode_chunk_view(
+            entry,
             Some(body.as_slice()),
             &info.field,
             info.dict.as_deref(),
-        )?;
+        )
+    };
+    let indexes: Vec<usize> = (0..pending.len()).collect();
+    let total: usize = bodies.iter().map(Vec::len).sum();
+    let arrays = if threads < 2 || total < SCAN_PARALLEL_BYTES {
+        indexes.iter().map(decode).collect::<Result<Vec<_>>>()?
+    } else {
+        crate::parallel::map_in_order(
+            &indexes,
+            |&i| bodies.get(i).map_or(0, Vec::len),
+            threads,
+            decode,
+        )?
+    };
+    for ((column, index, _), array) in pending.into_iter().zip(arrays) {
         decoded.insert((column, index), array);
     }
     Ok(())
@@ -566,14 +593,6 @@ impl ScanBatches {
         }
     }
 
-    /// Builds at most `threads` batches at a time (at least one). The default is one per core;
-    /// a caller that runs several scans at once gives each a share of the cores.
-    #[must_use]
-    pub fn with_threads(mut self, threads: usize) -> Self {
-        self.threads = threads.max(1);
-        self
-    }
-
     /// The schema of the batches.
     pub fn schema(&self) -> SchemaRef {
         Arc::clone(&self.output)
@@ -676,7 +695,7 @@ impl ScanBatches {
                 .map(|&i| self.build(i))
                 .collect::<Result<Vec<_>>>()?
         } else {
-            crate::parallel::map_in_order(&indexes, |_| 1, |&i| self.build(i))?
+            crate::parallel::map_in_order(&indexes, |_| 1, indexes.len(), |&i| self.build(i))?
         };
         if let Some(values) = &mut self.payloads {
             for index in range {
@@ -733,12 +752,20 @@ impl StrataFile {
     /// bounds the evaluation and the output, but not the bytes fetched: the filter wave still
     /// fetches every surviving predicate chunk.
     pub async fn scan(&self, req: &ScanRequest) -> Result<Vec<RecordBatch>> {
-        self.scan_batches(req).await?.collect()
+        self.scan_batches(req, crate::parallel::cores())
+            .await?
+            .collect()
     }
 
     /// The reads of [`Self::scan`], with the batches left to build as they are asked for. All
     /// the I/O is done when it returns; see [`ScanBatches`].
-    pub async fn scan_batches(&self, req: &ScanRequest) -> Result<ScanBatches> {
+    ///
+    /// The scan uses at most `threads` threads (at least one): to decompress and decode the
+    /// chunks of a wave of at least `SCAN_PARALLEL_BYTES`, and to build that many batches at a
+    /// time. [`Self::scan`] gives it every core; a caller that runs several scans at once gives
+    /// each its share of the cores.
+    pub async fn scan_batches(&self, req: &ScanRequest, threads: usize) -> Result<ScanBatches> {
+        let threads = threads.max(1);
         // 1. Validate. Every error is found before any read.
         self.check_projection(&req.projection)?;
         let (bound, sources) = match &req.predicate {
@@ -879,6 +906,7 @@ impl StrataFile {
                     bound: b,
                     masks: &masks,
                     columns: &filter_columns,
+                    threads,
                 };
                 self.filter(
                     &plan,
@@ -909,13 +937,16 @@ impl StrataFile {
                 wanted.insert((column, index));
             }
         }
-        self.decode_wave(&infos, &wanted, req.kind, &mut decoded)
+        self.decode_wave(&infos, &wanted, req.kind, &mut decoded, threads)
             .await?;
         let payload = payload_projection(self, &req.projection);
         let payloads = self
             .payload_values(&payload, &selection, req.kind, req.views)
             .await?;
-        self.batches(&req.projection, selection, infos, decoded, payloads, output)
+        let mut batches =
+            self.batches(&req.projection, selection, infos, decoded, payloads, output)?;
+        batches.threads = threads;
+        Ok(batches)
     }
 
     /// Whether some row of the file may satisfy `predicate`, from the zones, dictionaries and
@@ -1059,7 +1090,8 @@ impl StrataFile {
             segments.extend(refs);
             let mut bodies = self.fetch(&segments, kind).await?;
             let refs_bodies = bodies.split_off(n_narrow);
-            decode_chunks(&infos, pending, bodies, &mut decoded)?;
+            // A lookup's chunks are few: one thread.
+            decode_chunks(&infos, pending, bodies, &mut decoded, 1)?;
             Self::take_ids(&mut reads, refs_bodies, &exact)?;
         } else {
             // The metadata is cached. W1: the candidate chunks, the narrow chunks that overlap
@@ -1097,7 +1129,7 @@ impl StrataFile {
             let cand_bodies = with_gaps(&candidates, bodies)?;
             let exact_ranges = self.rows_of_key(&candidates, &cand_bodies, key)?;
             exact = rows_in(&exact_ranges, None);
-            decode_chunks(&infos, pending, rest, &mut decoded)?;
+            decode_chunks(&infos, pending, rest, &mut decoded, 1)?;
             Self::take_ids(&mut reads, refs_bodies, &exact)?;
         }
 
@@ -1171,7 +1203,8 @@ impl StrataFile {
                 wanted.insert((column, index));
             }
         }
-        self.decode_wave(infos, &wanted, kind, decoded).await?;
+        self.decode_wave(infos, &wanted, kind, decoded, plan.threads)
+            .await?;
 
         let n_dirs = self.directory().len();
         let mut selection = Vec::new();
@@ -1272,17 +1305,19 @@ impl StrataFile {
     }
 
     /// Fetches, in one wave, the bodies of the chunks in `wanted` that are not decoded yet, and
-    /// decodes them into `decoded`. A wave with nothing to fetch makes no request.
+    /// decodes them into `decoded`, on `threads` threads when the wave is large enough. A wave
+    /// with nothing to fetch makes no request.
     async fn decode_wave(
         &self,
         infos: &HashMap<usize, ColumnInfo>,
         wanted: &BTreeSet<(usize, usize)>,
         kind: ScanKind,
         decoded: &mut Decoded,
+        threads: usize,
     ) -> Result<()> {
         let (segments, pending) = plan_chunks(infos, wanted, decoded)?;
-        let bodies = self.fetch(&segments, kind).await?;
-        decode_chunks(infos, pending, bodies, decoded)
+        let bodies = self.fetch_on(&segments, kind, threads).await?;
+        decode_chunks(infos, pending, bodies, decoded, threads)
     }
 
     /// Plans the refs pages of the payload columns `columns` for `rows` (sorted, unique): one
@@ -1424,7 +1459,7 @@ impl StrataFile {
     }
 
     /// The batches of `selection` (ascending rows) for `projection`, from the decoded narrow
-    /// chunks and the payload values.
+    /// chunks and the payload values, built on every core.
     fn batches(
         &self,
         projection: &[usize],
@@ -1435,7 +1470,6 @@ impl StrataFile {
         output: SchemaRef,
     ) -> Result<ScanBatches> {
         let columns = output_columns(self, projection, &payloads.reads)?;
-        let threads = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
         Ok(ScanBatches {
             columns,
             selection,
@@ -1445,7 +1479,7 @@ impl StrataFile {
             output,
             next: 0,
             ready: std::collections::VecDeque::new(),
-            threads,
+            threads: crate::parallel::cores(),
         })
     }
 }
@@ -1714,7 +1748,7 @@ mod tests {
                         kind: ScanKind::Scan,
                         views,
                     };
-                    let mut batches = file.scan_batches(&req).await.unwrap().with_threads(threads);
+                    let mut batches = file.scan_batches(&req, threads).await.unwrap();
                     let all = batches.frames_held();
                     let mut got: Vec<Option<String>> = Vec::with_capacity(n);
                     let mut held = Vec::new();

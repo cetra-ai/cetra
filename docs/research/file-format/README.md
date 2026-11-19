@@ -571,6 +571,7 @@ Two gaps remain:
   - Checking each byte once, with two `unsafe` constructors and a chunker that cuts between characters, brought the scan to Parquet's time (544 against 538 ms).
   - Agent-data scans also got 6–22% faster, then 3–8% more.
   - Files stay the same size as the others'.
+- **Narrow queries** on toucan and wildchat ran on one thread: each file is one partition, and a wave under 4 MiB was decoded serially. Scans now decode a wave of 1 MiB or more on the partition's share of the cores, and `list_llm_1h` dropped by 37% on toucan and 12% on wildchat. Vortex compact is still faster there (10.4 and 14.6 ms against 16.8 and 18.8 ms).
 
 ## What each format gets right and wrong
 

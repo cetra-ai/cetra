@@ -48,7 +48,7 @@ The bench had one real dataset: `swe`, from 2 shards of `nebius/SWE-agent-trajec
 |---|---|---|---|---|---|---|---|---|---|
 | count_errors_6h | **0.80** | 2.31 | 1.84 | **0.86** | 2.27 | 2.09 | **0.88** | 2.28 | 2.12 |
 | model_rollup_day | **3.05** | 5.19 | 4.84 | 11.18 | 10.95 | **8.09** | 15.22 | 15.78 | **12.45** |
-| list_llm_1h | **4.27** | 6.63 | 6.36 | 26.99 | 24.27 | **10.55** | 22.02 | 23.95 | **14.60** |
+| list_llm_1h | **4.27** | 6.63 | 6.36 | 16.75 | 24.27 | **10.55** | 18.75 | 23.95 | **14.60** |
 | user_filter | **0.75** | 2.70 | 2.94 | **0.82** | 2.83 | 3.99 | **2.45** | 5.05 | 6.40 |
 | metadata_filter | **0.70** | 3.72 | n/a | **2.16** | 10.23 | n/a | **3.10** | 16.71 | n/a |
 | trace_lookup_full | **5.66** | 11.19 | 35.61 | **5.39** | 12.19 | 22.70 | **4.66** | 12.24 | 28.01 |
@@ -56,7 +56,7 @@ The bench had one real dataset: `swe`, from 2 shards of `nebius/SWE-agent-trajec
 | substring_input | **12.13** | 266.86 | 172.29 | **48.17** | 168.63 | 98.73 | **66.42** | 312.04 | 204.27 |
 | scan_all_payload | **234.07** | 286.10 | 313.07 | 274.41 | 281.04 | **205.34** | 544.11 | 538.04 | **404.95** |
 
-- The Strata columns are measured after the UTF-8 changes below; `substring_input` and `scan_all_payload` after the one-pass check. Parquet and Vortex come from the first run.
+- The Strata columns are measured after the UTF-8 changes below; `substring_input` and `scan_all_payload` after the one-pass check, `list_llm_1h` after the scan threads change (§ Narrow queries on one thread). Parquet and Vortex come from the first run.
 - "pq best" is the fastest of pq_default, pq_tuned and pq_cetra for each query.
 - Vortex cannot run `metadata_filter` (it can't push down `map['key']`).
 
@@ -85,7 +85,7 @@ Cold trace lookup (mean per trace over 20 ids):
 - **Chat traffic was Strata's weak case.** The first run had `scan_all_payload` at 1.4× Parquet's time on wildchat, and `list_llm_1h` at 1.45×. The cause was UTF-8 checking, fixed below. What remains:
   - files are only as small as the others';
   - the full scan takes about Parquet's time, and 1.34× Vortex compact's;
-  - Vortex compact still wins `list_llm_1h` and `model_rollup_day` on toucan and wildchat. This matches `light`, where its narrow-column decode is also cheaper.
+  - Vortex compact still wins `list_llm_1h` and `model_rollup_day` on toucan and wildchat, though by less on `list_llm_1h` since the scan threads change below. This matches `light`, where its narrow-column decode is also cheaper.
 
 ## UTF-8 checking
 
@@ -146,6 +146,28 @@ The change above still read most bytes twice: an ASCII value was checked by `is_
 - A wildchat profile no longer shows `simdutf8` among its top functions (under 2% of samples): zstd decoding and the allocator lead.
 - The other queries stayed within noise on the six datasets, `list_llm_1h` included (60-run A/B).
 - One exception is layout luck: the absent needle of toucan's `substring_input` passes more frame filters in the new layout (849 requests against 668), +18%. Over the 20 needles taken from the data, the new files cost +2.4% time and +3.7% bytes.
+
+## Narrow queries on one thread
+
+`list_llm_1h` on toucan took 27 ms against Vortex compact's 10.4 ms, with 29 ms of CPU against Vortex's 39 ms: Strata ran it on one thread.
+- A file of toucan has 93k rows, under the 2 × 65,536 a file needs before the DataFusion scan splits it, so each file is one partition. The hour window leaves few files with rows to read.
+- In that partition, the chunk segments were decompressed one after another (43% of the profile), then decoded one after another (21%). Only a wave of 4 MiB or more was decoded on several threads, and each wave here was smaller.
+- A lower threshold for every read helped toucan but slowed `light` by up to 2.5×: `light` runs about 12 partitions at once, and each one also took every core.
+
+**The change.** `scan_batches` takes the scan's threads: DataFusion gives each partition its share of the cores (one when there are as many partitions as cores), and `scan` gives all of them. A scan wave of at least 1 MiB (`SCAN_PARALLEL_BYTES`) is decompressed and decoded on those threads; the batches were already built on them. Lookups and the other reads keep the 4 MiB rule.
+
+**Results** (min of 3 × 30 runs, 3533a02 → this change, on the rewritten files):
+
+| Dataset | list_llm_1h | Vortex compact |
+|---|---|---|
+| toucan | 26.5 → 16.8 ms (−37%) | 10.4 |
+| wildchat | 21.3 → 18.8 ms (−12%) | 14.6 |
+| swe, light | unchanged | |
+| payload | 18.6 → 19.9 ms (+7%) | |
+
+- A 512 KiB threshold gave the same gains but made swe's `list_llm_1h` 27% slower: starting threads for about a millisecond of work cost more than it saved.
+- The other queries stayed within noise (one 20-run round of the whole suite at 512 KiB, then three rounds of the filter queries at 1 MiB). `payload`'s `list_llm_1h` uses the threads without gaining from them; not investigated.
+- What is left against Vortex: Strata reads 5.7 MB for toucan's `list_llm_1h` against Vortex's 3.6 MB, and zstd is still the largest cost.
 
 ## Reproduce
 
