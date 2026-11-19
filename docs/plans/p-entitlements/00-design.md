@@ -329,7 +329,7 @@ M1–M5 are implemented and merged.
 
 ## Open items
 
-- **Copyright holder** in the `LICENSE` files: M1 writes "Copyright (c) 2026 the cetra authors". The user confirms the legal name before the first release.
+- ~~**Copyright holder** in the `LICENSE` files~~: settled by D190, the copyright holder and licensor is sebastiencs.
 - **Audit logs and SCIM** (D178, Enterprise): no track owns them yet. They go in `ee` and add their features to D-P-12 when built.
 - **SDK messages** for `402`: M3 changes both SDKs' exporters to log the cap once; track F's owners review.
 - **Q's token lifetime** and the plan values (units, rates, windows) are Q's to choose; a cloud cell's `[entitlements.defaults]` is its Free plan without `data_access_days` (Q's decision, cetra-control PR #3): an org without a token keeps unlimited visibility, so a lapse longer than D-P-30's 30-day history never hides data.

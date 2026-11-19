@@ -533,7 +533,6 @@ Planned in [`m3/`](m3/00-design.md) (D180, D182):
 
 - **SDK publishing** (PyPI, npm): not in N's scope as briefed. The SDK versions and release flow
   need a decision.
-- **Copyright holder** in `LICENSE` (P's open item): confirm before the first public release.
 - **Native TLS** (spec 12's `tls.cert`/`tls.key`): not built. The docs say to use a reverse proxy.
 - **Upgrade testing:** releases are smoke-tested from a fresh install only. An upgrade test from
   the previous release can come once there are releases.
