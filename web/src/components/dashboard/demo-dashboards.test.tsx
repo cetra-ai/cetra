@@ -148,7 +148,7 @@ it("shows the browser-only banner in edit mode for a demo viewer", async () => {
 it("a demo viewer's Overview is the preset, with no Edit and no request for a stored one", async () => {
   signedInAs("viewer", true);
   const { user } = await renderApp("/acme/support-bot/dashboard");
-  await screen.findByRole("heading", { level: 2, name: "Volume" });
+  await screen.findByRole("region", { name: "Traces & errors" });
   await user.click(await screen.findByRole("button", { name: "Switch dashboard" }));
   await user.keyboard("{Escape}");
   const requests = recordRequests();

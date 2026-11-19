@@ -872,7 +872,7 @@ it("Reset to default shows only with a stored copy, asks first, and brings the p
     expect(requests.calls.some((call) => call.method === "DELETE")).toBe(false);
     await user.click(within(dialog).getByRole("button", { name: "Reset" }));
 
-    expect(await screen.findByRole("heading", { level: 2, name: "Volume" })).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: "Traces & errors" })).toBeInTheDocument();
     expect(requests.calls.some((call) => call.method === "DELETE")).toBe(true);
   } finally {
     requests.stop();
@@ -894,7 +894,7 @@ it("Reset after an autosaved move hides the Undo bar", async () => {
     const dialog = await screen.findByRole("dialog");
     await user.click(within(dialog).getByRole("button", { name: "Reset" }));
 
-    expect(await screen.findByRole("heading", { level: 2, name: "Volume" })).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: "Traces & errors" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
   } finally {
     requests.stop();
@@ -918,7 +918,7 @@ it("viewing the preset Overview saves nothing", async () => {
   const requests = recordRequests();
   try {
     await renderApp(OVERVIEW_URL);
-    await screen.findByRole("heading", { level: 2, name: "Volume" });
+    await screen.findByRole("region", { name: "Traces & errors" });
     await new Promise((resolve) => setTimeout(resolve, AUTOSAVE_DELAY_MS + 300));
     expect(requests.calls.some((call) => call.method === "PUT")).toBe(false);
   } finally {

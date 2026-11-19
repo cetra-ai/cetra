@@ -25,15 +25,10 @@ describe("the Overview", () => {
     expect(validateDefinition(OVERVIEW)).toEqual([]);
   });
 
-  it("lists the headings and widgets in the order of spec 11", () => {
+  it("lists the widgets in the order of spec 11, with no headings", () => {
     const titles = OVERVIEW.widgets.map((widget) => widget.title);
     expect(titles.slice(0, 5)).toEqual(["Traces", "Error rate", "p95 latency", "Cost", "Tokens"]);
-    expect(titles.filter((_, index) => OVERVIEW.widgets[index]?.kind === "heading")).toEqual([
-      "Volume",
-      "Quality",
-      "Latency",
-      "Cost",
-    ]);
+    expect(OVERVIEW.widgets.some((widget) => widget.kind === "heading")).toBe(false);
     expect(titles.at(-1)).toBe("Top models by cost");
   });
 
