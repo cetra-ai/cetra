@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { STORAGE_PREFIX } from "@/product";
 import { localStore } from "./store";
+import { TEMPLATES } from "./templates";
 import type { Definition } from "./types";
 
 const EMPTY: Definition = { widgets: [] };
@@ -36,6 +37,17 @@ describe("localStore", () => {
     expect(await store.list()).toEqual([]);
     await expect(store.get(created.id)).rejects.toMatchObject({ status: 404, code: "not_found" });
     await expect(store.remove(created.id)).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("creates a dashboard from a template", async () => {
+    const store = localStore("acme", "store-tests");
+    const cost = TEMPLATES.find((template) => template.id === "cost");
+    expect(cost).toBeDefined();
+    const created = await store.create({
+      name: "Spend",
+      definition: structuredClone(cost?.definition ?? EMPTY),
+    });
+    expect((await store.get(created.id)).definition).toEqual(cost?.definition);
   });
 
   it("increments the version on every update", async () => {

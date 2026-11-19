@@ -1,5 +1,5 @@
 /** Templates of "New dashboard" (D-C-21): their widgets are copied into the new dashboard. */
-import { CHART_HEIGHT, chartAt, ERROR, HALF, LLM, numberAt, query } from "./preset";
+import { CHART_HEIGHT, chartAt, ERROR, HALF, LLM, LLM_TTFT, numberAt, query } from "./preset";
 import type { Definition } from "./types";
 
 export type TemplateId = "cost" | "latency" | "quality";
@@ -14,7 +14,6 @@ export type DashboardTemplate = {
 
 const QUARTER = 15; // four tiles in the first row
 const THIRD = 20; // three tiles in the first row
-const LLM_TTFT = "span_kind = 'llm' AND ttft_ns IS NOT NULL";
 
 export const TEMPLATES: readonly DashboardTemplate[] = [
   {

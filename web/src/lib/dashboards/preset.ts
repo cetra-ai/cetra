@@ -11,6 +11,8 @@ export const NUMBER_HEIGHT = 4;
 export const HALF = COLUMNS / 2;
 /** LLM spans with a model. */
 export const LLM = "span_kind = 'llm' AND model IS NOT NULL";
+/** LLM spans with a time to first token. */
+export const LLM_TTFT = "span_kind = 'llm' AND ttft_ns IS NOT NULL";
 export const ERROR = "status = 'error'";
 
 /** A number tile `w` columns wide at column `x` of the first row. */

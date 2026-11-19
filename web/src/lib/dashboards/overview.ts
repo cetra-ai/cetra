@@ -1,5 +1,5 @@
 import { COLUMNS } from "./draft";
-import { chartAt, ERROR, HALF, LLM, numberAt, query } from "./preset";
+import { chartAt, ERROR, HALF, LLM, LLM_TTFT, numberAt, query } from "./preset";
 import type { Definition } from "./types";
 
 /**
@@ -127,7 +127,7 @@ export const OVERVIEW: Definition = {
           { agg: "p50", field: "ttft_ns", label: "p50" },
           { agg: "p95", field: "ttft_ns", label: "p95" },
         ],
-        { filter: "span_kind = 'llm' AND ttft_ns IS NOT NULL" },
+        { filter: LLM_TTFT },
       ),
     ),
 

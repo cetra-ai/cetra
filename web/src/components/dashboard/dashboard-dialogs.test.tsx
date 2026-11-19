@@ -59,7 +59,7 @@ it("creates an empty dashboard and reports it", async () => {
   expect(onCreated.mock.calls[0]?.[0].definition).toEqual({ widgets: [] });
 });
 
-it("creates a dashboard from a template", async () => {
+it.each(TEMPLATES)("creates a dashboard from the $name template", async (template) => {
   server.use(...dashboardHandlers(seedDashboards()));
   const onCreated = vi.fn<(dashboard: Dashboard) => void>();
   const user = renderWith(
@@ -72,12 +72,12 @@ it("creates a dashboard from a template", async () => {
     />,
   );
   await user.type(screen.getByLabelText("Name"), "Spend");
-  await user.click(screen.getByRole("radio", { name: "Cost" }));
+  await user.click(screen.getByRole("radio", { name: template.name }));
   await user.click(screen.getByRole("button", { name: "Create dashboard" }));
   await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
-  const cost = TEMPLATES.find((template) => template.id === "cost");
-  expect(cost).toBeDefined();
-  expect(onCreated.mock.calls[0]?.[0].definition).toEqual(cost?.definition);
+  const created = onCreated.mock.calls[0]?.[0].definition;
+  expect(created).toEqual(template.definition);
+  expect(created).not.toBe(template.definition);
 });
 
 it("lists Blank and the three templates under Start from", () => {

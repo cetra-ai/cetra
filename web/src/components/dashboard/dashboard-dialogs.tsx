@@ -20,7 +20,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Textarea } from "@/components/ui/textarea";
-import { TEMPLATES, type TemplateId } from "@/lib/dashboards/templates";
+import { type DashboardTemplate, TEMPLATES, type TemplateId } from "@/lib/dashboards/templates";
 import type { Dashboard, Definition } from "@/lib/dashboards/types";
 import { validateDashboard } from "@/lib/dashboards/validate";
 
@@ -35,6 +35,15 @@ const STARTS: readonly { id: "blank" | TemplateId; name: string; description: st
     description: template.description,
   })),
 ];
+
+/** The template with this id; every `TemplateId` has one. */
+function templateOf(id: TemplateId): DashboardTemplate {
+  const template = TEMPLATES.find((item) => item.id === id);
+  if (!template) {
+    throw new Error(`no dashboard template ${id}`);
+  }
+  return template;
+}
 
 /** The field and form messages of a failed save. Server paths map to `name` and `description`. */
 type Failure = { name?: string; description?: string; form?: string };
@@ -162,10 +171,8 @@ function NewForm({
     if (!issues.valid) {
       return;
     }
-    const definition =
-      start === "blank"
-        ? { widgets: [] }
-        : (TEMPLATES.find((template) => template.id === start)?.definition ?? { widgets: [] });
+    const definition: Definition =
+      start === "blank" ? { widgets: [] } : structuredClone(templateOf(start).definition);
     const dashboard = await create
       .mutateAsync({ name, description, definition })
       .catch(() => undefined);

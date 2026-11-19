@@ -1,5 +1,5 @@
-import { COLUMNS } from "./draft";
 import { OVERVIEW } from "./overview";
+import { CHART_HEIGHT, HALF } from "./preset";
 import type { Definition, Widget } from "./types";
 
 /**
@@ -7,9 +7,6 @@ import type { Definition, Widget } from "./types";
  * evaluation cost and the top users (they rank users). Numbers keep their places; the charts follow
  * them in reading order, two per row (6 columns by 7 rows each), as the Overview lays out its charts.
  */
-
-const CHART_WIDTH = COLUMNS / 2;
-const CHART_HEIGHT = 7;
 
 const EXCLUDED = new Set(["ov-18", "ov-20"]);
 
@@ -32,9 +29,9 @@ function charts(): Widget[] {
   return kept.map((widget, index) => ({
     ...widget,
     layout: {
-      x: (index % 2) * CHART_WIDTH,
+      x: (index % 2) * HALF,
       y: NUMBERS_END + Math.floor(index / 2) * CHART_HEIGHT,
-      w: CHART_WIDTH,
+      w: HALF,
       h: CHART_HEIGHT,
     },
   }));
