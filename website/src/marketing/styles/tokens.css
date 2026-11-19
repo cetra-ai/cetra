@@ -1,0 +1,102 @@
+/* cetra marketing tokens (design §4). Dark only. Brand colours: assets/brand/README.md (D189). */
+:root {
+  /* Raw palette */
+  --c-ink: #141414;
+  --c-ink-2: #1b1b1b;
+  --c-ink-3: #232323;
+  --c-line: #2e2e2e;
+  --c-line-strong: #3d3d3d;
+  --c-paper: #f5f5f4;
+  --c-stone-300: #d6d3d1;
+  --c-stone-400: #a8a29e;
+  --c-stone-600: #57534e;
+  --c-teal: #0f766e;
+  --c-teal-light: #2dd4bf;
+  --c-teal-deep: #0a2e2b;
+  --c-teal-ink: #042f2e;
+
+  /* Semantic tokens (re-mapped by .tone-* bands) */
+  --bg: var(--c-ink);
+  --surface: var(--c-ink-2);
+  --surface-2: var(--c-ink-3);
+  --line: var(--c-line);
+  --line-strong: var(--c-line-strong);
+  --fg: var(--c-paper);
+  --fg-muted: var(--c-stone-400);
+  --accent: var(--c-teal-light);
+  --accent-fg: var(--c-teal-ink);
+  --link: var(--c-teal-light);
+  --focus: var(--c-teal-light);
+  --band-bg: var(--c-ink);
+
+  /* Type */
+  --font-display: "Space Grotesk Variable", "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-body: "Inter Variable", "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono:
+    "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --text-xs: 0.8125rem;
+  --text-sm: 0.9375rem;
+  --text-base: 1.0625rem;
+  --text-lg: 1.25rem;
+  --text-xl: 1.5rem;
+  --text-2xl: clamp(1.75rem, 1.2rem + 2vw, 2.5rem);
+  --text-3xl: clamp(2.25rem, 1.4rem + 3.4vw, 3.5rem);
+  --text-hero: clamp(2.75rem, 1.5rem + 5vw, 5rem);
+  --leading-tight: 1.05;
+  --leading-snug: 1.25;
+  --leading-body: 1.6;
+  --tracking-display: -0.03em;
+  --tracking-label: 0.08em;
+
+  /* Space and shape */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --space-7: 3rem;
+  --space-8: 4rem;
+  --space-9: 6rem;
+  --space-10: 8rem;
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 16px;
+  --container: 1200px;
+  --container-narrow: 760px;
+  --container-wide: 1360px;
+  --gutter: max(16px, env(safe-area-inset-left, 0px));
+  --shadow-panel: 0 1px 0 rgb(255 255 255 / 0.04) inset, 0 24px 48px -24px rgb(0 0 0 / 0.6);
+  color-scheme: dark;
+}
+
+/* Bands: each re-maps the semantic tokens for its content. */
+.tone-ink {
+  --band-bg: var(--c-ink);
+}
+.tone-raised {
+  --band-bg: var(--c-ink-2);
+  --surface: var(--c-ink-3);
+}
+.tone-teal {
+  --band-bg: var(--c-teal-deep);
+  --surface: #0f3b37;
+  --surface-2: #134843;
+  --line: #1d5650;
+  --line-strong: #2a6c64;
+  --fg-muted: #a7d8d1;
+}
+.tone-paper {
+  --band-bg: var(--c-paper);
+  --surface: #ffffff;
+  --surface-2: #ecebe9;
+  --line: #dddbd8;
+  --line-strong: #c9c6c2;
+  --fg: var(--c-ink);
+  --fg-muted: var(--c-stone-600);
+  --accent: var(--c-teal);
+  --accent-fg: #ffffff;
+  --link: var(--c-teal);
+  --focus: var(--c-teal);
+  color-scheme: light;
+}
