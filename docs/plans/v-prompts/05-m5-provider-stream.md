@@ -1121,6 +1121,16 @@ pub(crate) async fn complete_chat(
 
 The coordinating session runs a Sonnet code review of V5.1–V5.5 (`git diff main...HEAD -- crates/eval`): behaviour of the judges unchanged, key orders, privacy of `Debug` and errors, D166 kept. Fixes go in by a Haiku agent with an exact brief before V5.6.
 
+The review (2026-11-20) found no change in judge behaviour. Fixed in one commit, `Fix the review findings of the chat foundation`:
+
+- `EgressRequest` and `EgressStreamRequest` get a hand-written `Debug` (the derive printed the URL, the header values, among them the API key, and the body): `url_host` (`self.url.host_str()`), `headers` (the names only), `body_bytes` (`self.body.len()`), the timeouts and the cap.
+- `ChatParams`' `Debug` prints `reasoning_effort` as `reasoning_effort_set` (`is_some()`).
+- `arguments_text`: `None` and `Some(Value::Null)` are both `{}` (OpenAI refuses `"null"`).
+- Anthropic: in a user turn made by merging, `tool_result` blocks come before the other blocks (Anthropic requires them first); a stable partition, the order inside each group kept.
+- `check_request`: in a request with a response format, a user tool named like `tool_name` is `InvalidRequest` (tool mode would send two tools of that name).
+
+Left as they are, and said in spec 06 by V5.7: `check_request`'s bounds also apply to judges (their config already enforces the same ones); an empty text part is sent as is; a request whose messages are all system messages is sent and the provider answers 400; tool mode replaces the request's `tool_choice` with the forced tool. V5.6 removes the `#[allow(dead_code)]` of `tests/support/stream.rs` that its tests make unneeded.
+
 ---
 
 ## V5.6 — Streamed calls

@@ -197,7 +197,7 @@ impl fmt::Debug for ChatParams {
             .field("presence_penalty", &self.presence_penalty)
             .field("frequency_penalty", &self.frequency_penalty)
             .field("seed", &self.seed)
-            .field("reasoning_effort", &self.reasoning_effort)
+            .field("reasoning_effort_set", &self.reasoning_effort.is_some())
             .finish()
     }
 }
@@ -352,6 +352,15 @@ pub(crate) fn check_request(request: &ChatRequest) -> Result<(), ChatError> {
     {
         return Err(ChatError::InvalidRequest);
     }
+    // Tool mode sends the forced tool next to the request's tools: two tools of one name.
+    if let Some(format) = &request.response_format
+        && request
+            .tools
+            .iter()
+            .any(|tool| tool.name == format.tool_name)
+    {
+        return Err(ChatError::InvalidRequest);
+    }
     if let Some(ToolChoice::Tool(name)) = &request.tool_choice
         && !request.tools.iter().any(|tool| tool.name == *name)
     {
@@ -453,13 +462,13 @@ pub(crate) fn arguments_object(
     }
 }
 
-/// Tool-call arguments as JSON text: a JSON string as is, `None` as `{}`, any other
-/// value as compact JSON.
+/// Tool-call arguments as JSON text: a JSON string as is, `None` and `null` as `{}`, any
+/// other value as compact JSON.
 pub(crate) fn arguments_text(arguments: Option<&Value>) -> Result<String, ChatError> {
     match arguments {
         Some(Value::String(text)) => Ok(text.clone()),
+        Some(Value::Null) | None => Ok("{}".to_owned()),
         Some(value) => serde_json::to_string(value).map_err(|_| ChatError::InvalidRequest),
-        None => Ok("{}".to_owned()),
     }
 }
 
@@ -836,6 +845,19 @@ mod tests {
             ..request()
         };
         assert_eq!(check_request(&bad_format), Err(ChatError::InvalidRequest));
+
+        let clash = ChatRequest {
+            tools: vec![tool_def("submit")],
+            response_format: Some(schema_format("submit")),
+            ..request()
+        };
+        assert_eq!(check_request(&clash), Err(ChatError::InvalidRequest));
+        let distinct = ChatRequest {
+            tools: vec![tool_def("lookup")],
+            response_format: Some(schema_format("submit")),
+            ..request()
+        };
+        assert_eq!(check_request(&distinct), Ok(()));
     }
 
     #[test]
@@ -1034,6 +1056,7 @@ mod tests {
             "{\"a\":1}"
         );
         assert_eq!(arguments_text(None).expect("text"), "{}");
+        assert_eq!(arguments_text(Some(&Value::Null)).expect("text"), "{}");
         assert_eq!(response_text(&json!("ok")).expect("text"), "ok");
         assert_eq!(response_text(&json!({"t": 1})).expect("text"), "{\"t\":1}");
     }
@@ -1079,6 +1102,7 @@ mod tests {
             }),
             params: ChatParams {
                 stop: vec![secret.to_owned()],
+                reasoning_effort: Some(secret.to_owned()),
                 ..ChatParams::default()
             },
             max_tokens: 16,

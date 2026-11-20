@@ -183,8 +183,24 @@ fn encode_messages(messages: &[Message]) -> Result<Vec<Value>, ChatError> {
     }
     Ok(entries
         .into_iter()
-        .map(|(role, blocks)| json!({"role": role, "content": content_of(blocks)}))
+        .map(|(role, blocks)| {
+            let blocks = if role == "user" {
+                tool_results_first(blocks)
+            } else {
+                blocks
+            };
+            json!({"role": role, "content": content_of(blocks)})
+        })
         .collect())
+}
+
+/// The `tool_result` blocks of a user turn come before the other blocks, as Anthropic
+/// requires. A stable partition: each group keeps its order.
+fn tool_results_first(blocks: Vec<Value>) -> Vec<Value> {
+    let (results, others): (Vec<Value>, Vec<Value>) = blocks
+        .into_iter()
+        .partition(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"));
+    results.into_iter().chain(others).collect()
 }
 
 /// The text and `tool_use` blocks of an assistant message, in part order.
@@ -579,6 +595,40 @@ mod tests {
                 {"type": "tool_result", "tool_use_id": "call_1", "content": "sunny"},
                 {"type": "text", "text": "and?"}
             ]})
+        );
+    }
+
+    #[test]
+    fn tool_results_lead_a_merged_user_turn() {
+        let messages = vec![
+            user("q"),
+            message(
+                Role::Assistant,
+                vec![Part::ToolCall {
+                    id: Some("c1".to_owned()),
+                    name: "t".to_owned(),
+                    arguments: Some(json!({})),
+                    extra: Map::new(),
+                }],
+            ),
+            user("x"),
+            message(
+                Role::Tool,
+                vec![Part::ToolCallResponse {
+                    id: Some("c1".to_owned()),
+                    response: json!("ok"),
+                    extra: Map::new(),
+                }],
+            ),
+        ];
+        let body = body_of(StructuredOutput::Native, &request(messages));
+        let entries = body["messages"].as_array().expect("messages");
+        assert_eq!(
+            entries.last(),
+            Some(&json!({"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "c1", "content": "ok"},
+                {"type": "text", "text": "x"}
+            ]}))
         );
     }
 

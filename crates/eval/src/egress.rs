@@ -48,7 +48,10 @@ pub struct EgressClient {
 }
 
 /// One POST. The caller owns the URL, the timeout, and the body cap.
-#[derive(Debug)]
+///
+/// [`Debug`](std::fmt::Debug) is hand-written: it prints the URL's host, the header names,
+/// the body's length, and the limits, never the URL's path or query, the header values
+/// (the API key), or the body.
 pub struct EgressRequest<'a> {
     /// Destination. Only http and https are allowed.
     pub url: &'a Url,
@@ -62,6 +65,20 @@ pub struct EgressRequest<'a> {
     pub max_response_bytes: usize,
 }
 
+impl fmt::Debug for EgressRequest<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let headers: Vec<&str> = self.headers.iter().map(|(name, _)| name.as_str()).collect();
+        formatter
+            .debug_struct("EgressRequest")
+            .field("url_host", &self.url.host_str())
+            .field("headers", &headers)
+            .field("body_bytes", &self.body.len())
+            .field("timeout", &self.timeout)
+            .field("max_response_bytes", &self.max_response_bytes)
+            .finish()
+    }
+}
+
 /// The status and body of one response. The body is at most the request's cap.
 #[derive(Debug)]
 pub struct EgressResponse {
@@ -72,7 +89,8 @@ pub struct EgressResponse {
 }
 
 /// One streamed POST. The caller owns the URL, both timeouts, and the body cap.
-#[derive(Debug)]
+///
+/// [`Debug`](std::fmt::Debug) is hand-written, as for [`EgressRequest`].
 pub struct EgressStreamRequest<'a> {
     /// Destination. Only http and https are allowed.
     pub url: &'a Url,
@@ -86,6 +104,21 @@ pub struct EgressStreamRequest<'a> {
     pub idle_timeout: Duration,
     /// More body bytes than this fail with [`EgressError::TooLarge`].
     pub max_response_bytes: usize,
+}
+
+impl fmt::Debug for EgressStreamRequest<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let headers: Vec<&str> = self.headers.iter().map(|(name, _)| name.as_str()).collect();
+        formatter
+            .debug_struct("EgressStreamRequest")
+            .field("url_host", &self.url.host_str())
+            .field("headers", &headers)
+            .field("body_bytes", &self.body.len())
+            .field("timeout", &self.timeout)
+            .field("idle_timeout", &self.idle_timeout)
+            .field("max_response_bytes", &self.max_response_bytes)
+            .finish()
+    }
 }
 
 /// A response whose body is read chunk by chunk. Dropping it closes the connection.
@@ -482,6 +515,7 @@ mod tests {
     use axum::http::{StatusCode, Uri};
     use axum::response::{IntoResponse, Response};
     use reqwest::Url;
+    use reqwest::header::{HeaderName, HeaderValue};
 
     use super::{
         EgressClient, EgressPolicy, EgressRequest, EgressStream, EgressStreamRequest,
@@ -620,6 +654,35 @@ mod tests {
         assert!(!strict.allows_url(&url("http://169.254.169.254/latest")));
         assert!(!strict.allows_url(&url("ftp://x")));
         assert!(!open.allows_url(&url("ftp://x")));
+    }
+
+    #[test]
+    fn request_debug_hides_payload() {
+        let url = Url::parse(&format!("https://h.example/p?token={PLANTED}")).expect("url");
+        let headers = vec![(
+            HeaderName::from_static("authorization"),
+            HeaderValue::from_str(&format!("Bearer {PLANTED}")).expect("header"),
+        )];
+        let plain = EgressRequest {
+            url: &url,
+            headers: headers.clone(),
+            body: PLANTED.as_bytes().to_vec(),
+            timeout: Duration::from_secs(2),
+            max_response_bytes: 64,
+        };
+        let stream = EgressStreamRequest {
+            url: &url,
+            headers,
+            body: PLANTED.as_bytes().to_vec(),
+            timeout: Duration::from_secs(2),
+            idle_timeout: Duration::from_secs(1),
+            max_response_bytes: 64,
+        };
+        for debug in [format!("{plain:?}"), format!("{stream:?}")] {
+            assert!(debug.contains("h.example"), "{debug}");
+            assert!(debug.contains("authorization"), "{debug}");
+            assert_no_payload(&debug, PLANTED);
+        }
     }
 
     #[tokio::test]
@@ -1140,7 +1203,7 @@ mod tests {
                 let mut response = StatusCode::FOUND.into_response();
                 response.headers_mut().insert(
                     axum::http::header::LOCATION,
-                    axum::http::HeaderValue::from_static("/landed"),
+                    HeaderValue::from_static("/landed"),
                 );
                 response
             }
