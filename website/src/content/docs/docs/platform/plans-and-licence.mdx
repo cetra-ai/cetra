@@ -35,6 +35,8 @@ A self-hosted instance without a key has every core feature and no limits. To li
 
 When an org reaches a count limit, such as seats or alert rules, the request fails with `403 plan_limit`. The limit `max_annotation_queues` caps the [annotation queues](/docs/evaluation/annotation-queues/) of an org. The Free plan allows one.
 
+Issue sources are a count limit too: an org may have a number of enabled issue sources in its active projects. The Free cloud plan allows one; paid plans have no limit.
+
 ## Usage
 
 The org's Plan page shows its monthly usage: spans and scores, bytes, and judge tokens and cost, by project and day. The same figures are available at `GET /api/v1/orgs/{org}/usage`.

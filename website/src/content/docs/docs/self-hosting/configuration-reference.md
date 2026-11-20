@@ -91,6 +91,12 @@ Object storage credentials are not settings: cetra reads the standard `AWS_ACCES
 |---|---|---|---|---|
 | `eval.workers` | | integer | `16` | Evaluation jobs this process runs at once, 1 to 256. |
 
+## `[issues]`
+
+| Key | Environment | Type | Default | Description |
+|---|---|---|---|---|
+| `issues.workers` | | integer | `4` | Workers that summarize and embed issue candidates (1–64). They share each connection's limits with judges. |
+
 ## `[security]`
 
 | Key | Environment | Type | Default | Description |
@@ -117,6 +123,7 @@ These settings decide what an organization gets without a licence key or a plan 
 | `entitlements.defaults.max_projects` | | integer | unset (unlimited) | Active projects per organization. |
 | `entitlements.defaults.max_alert_rules` | | integer | unset (unlimited) | Alert rules per organization. |
 | `entitlements.defaults.max_active_online_rules` | | integer | unset (unlimited) | Active online rules per organization. |
+| `entitlements.defaults.max_active_issue_sources` | | integer | unset (unlimited) | Enabled issue sources of active projects per organization. |
 | `entitlements.defaults.max_annotation_queues` | | integer | unset (unlimited) | Annotation queues per organization (D-AQ-10). |
 
 ## `[orgs]`

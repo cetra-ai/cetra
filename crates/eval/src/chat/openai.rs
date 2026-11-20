@@ -22,7 +22,7 @@ use crate::error::{ChatError, EgressError};
 use crate::judge::{Adapter, JudgeConnection, StructuredOutput};
 use crate::secret::Secret;
 
-const DEFAULT_BASE: &str = "https://api.openai.com/v1";
+pub(super) const DEFAULT_BASE: &str = "https://api.openai.com/v1";
 
 /// POSTs `request` to Chat Completions without streaming.
 pub(crate) async fn complete(
@@ -45,7 +45,16 @@ pub(crate) fn prepare(
     validate_model(&request.model)?;
     check_request(request)?;
     let url = endpoint(conn.base_url.as_ref(), DEFAULT_BASE, "chat/completions")?;
-    let headers = request_headers(
+    let headers = openai_headers(conn)?;
+    let body = request_body(conn.structured_output, request, stream)?;
+    Ok(Prepared { url, headers, body })
+}
+
+/// The request headers of an OpenAI-compatible call, shared with embeddings.
+pub(super) fn openai_headers(
+    conn: &JudgeConnection,
+) -> Result<Vec<(HeaderName, HeaderValue)>, ChatError> {
+    request_headers(
         conn,
         vec![
             (
@@ -57,9 +66,7 @@ pub(crate) fn prepare(
                 HeaderValue::from_static("application/json"),
             ),
         ],
-    )?;
-    let body = request_body(conn.structured_output, request, stream)?;
-    Ok(Prepared { url, headers, body })
+    )
 }
 
 fn bearer(key: &Secret) -> Result<HeaderValue, ChatError> {

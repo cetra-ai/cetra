@@ -152,6 +152,30 @@ it("unchecks a score already in the filter, keeping the other conjuncts", async 
   });
 });
 
+it("lists the open issues under Has issue and writes the one picked", async () => {
+  const issueId = "01900000-0000-7000-8000-0000000000a1";
+  server.use(
+    http.get("/api/v1/projects/:project/issues", ({ request }) => {
+      const url = new URL(request.url);
+      if (url.searchParams.get("state") !== "open" || url.searchParams.get("limit") !== "20") {
+        return HttpResponse.json({ data: [], next_cursor: null });
+      }
+      return HttpResponse.json({
+        data: [{ id: issueId, title: "Tool timeout", state: "open" }],
+        next_cursor: null,
+      });
+    }),
+  );
+  const { router, user } = await renderApp(TRACES);
+  await user.click(await screen.findByRole("button", { name: "Has issue" }));
+  await user.click(await screen.findByRole("menuitemcheckbox", { name: "Tool timeout" }));
+  await waitFor(() => {
+    expect(router.state.location.search.filter).toBe(`has_score('issue:${issueId}')`);
+  });
+  expect(screen.getByRole("button", { name: "Has issue", pressed: true })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Has score", pressed: false })).toBeInTheDocument();
+});
+
 it("has no Has score preset on spans", async () => {
   await renderApp(SPANS);
   await screen.findByRole("button", { name: "LLM" });

@@ -26,6 +26,8 @@ pub(crate) mod internal_orgs;
 pub(crate) mod internal_usage;
 pub(crate) mod internal_users;
 pub(crate) mod invites;
+pub(crate) mod issue_dataset_items;
+pub(crate) mod issues;
 pub(crate) mod me;
 pub(crate) mod media;
 pub(crate) mod members;

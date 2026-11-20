@@ -674,7 +674,7 @@ const SCORES: &[ColumnInfo] = &[
         "source",
         ColumnKind::String,
         false,
-        "api, sdk, human, end_user, llm_judge, check, or webhook.",
+        "api, sdk, human, end_user, llm_judge, check, webhook or issue.",
     ),
     col(
         "evaluator_id",

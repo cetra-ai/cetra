@@ -73,8 +73,8 @@ use super::datasets::{
     ExperimentScoreMean, ExperimentTrend, ExperimentTrendParams, ExperimentTrends, ExportFormat,
     ExportParams, FromTraceRequest, FromTracesRequest, FromTracesResult, ImportColumn,
     ImportFormat, ImportMapping, ImportParams, ImportPreview, ImportResult, ImportRowError,
-    ItemChange, ItemChangeKind, ItemChangeListParams, NewDatasetItem, PreviewParams,
-    RestoreRequest, SkippedTrace, TraceRef, UpdateDatasetRequest, UpdateItemRequest,
+    IssueDatasetItemsRequest, ItemChange, ItemChangeKind, ItemChangeListParams, NewDatasetItem,
+    PreviewParams, RestoreRequest, SkippedTrace, TraceRef, UpdateDatasetRequest, UpdateItemRequest,
 };
 use super::deletions::{
     CreateDeletion, Deletion, DeletionPreview, DeletionPreviewRequest, DropParams,
@@ -107,6 +107,12 @@ use super::internal::{
     MembershipLookupRequest, MembershipOrg,
 };
 use super::invites::{CreateInviteRequest, CreatedInvite, Invite, InvitePreview};
+use super::issues::{
+    CreateIssueSourceRequest, Issue, IssueCandidateCounts, IssueDay, IssueEvent, IssueEventPage,
+    IssueExample, IssueListParams, IssueOccurrenceParams, IssueOccurrences, IssueRefit,
+    IssueRefitPage, IssueSource, IssueSourceKind, IssueSourcePage, IssueState, MergeIssueRequest,
+    UpdateIssueRequest, UpdateIssueSourceRequest,
+};
 use super::keys::{
     ApiKey as ProjectApiKey, CreateApiKeyRequest, CreatePersonalTokenRequest, CreatedApiKey,
     CreatedPersonalToken, PersonalToken,
@@ -447,6 +453,7 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<RestoreRequest>();
     set.insert::<TraceRef>();
     set.insert::<FromTracesRequest>();
+    set.insert::<IssueDatasetItemsRequest>();
     set.insert::<SkippedTrace>();
     set.insert::<FromTracesResult>();
     set.insert::<ExperimentScoreMean>();
@@ -529,6 +536,23 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<OnlineRulePreviewRequest>();
     set.insert::<OnlineRulePreview>();
     set.insert::<OnlineRuleStatsResponse>();
+    set.insert::<IssueSourceKind>();
+    set.insert::<IssueSource>();
+    set.insert::<IssueSourcePage>();
+    set.insert::<IssueCandidateCounts>();
+    set.insert::<IssueRefit>();
+    set.insert::<IssueRefitPage>();
+    set.insert::<CreateIssueSourceRequest>();
+    set.insert::<UpdateIssueSourceRequest>();
+    set.insert::<IssueState>();
+    set.insert::<UpdateIssueRequest>();
+    set.insert::<MergeIssueRequest>();
+    set.insert_page::<Issue>("IssuePage");
+    set.insert::<IssueDay>();
+    set.insert::<IssueExample>();
+    set.insert::<IssueOccurrences>();
+    set.insert::<IssueEvent>();
+    set.insert::<IssueEventPage>();
     set.insert::<EvalJobKind>();
     set.insert::<EvalJobStatus>();
     set.insert::<EvalJob>();
@@ -660,6 +684,7 @@ pub fn openapi() -> OpenApi {
                 "alerts",
                 "Alert rules, alert events and notification channels.",
             ),
+            tag("issues", "Issue sources and the issues they find."),
             tag(
                 "assistant",
                 "The in-app assistant's conversations, private to their author (D-AS-10).",
@@ -725,6 +750,8 @@ const NULL_IS_A_VALUE: &[(&str, &str)] = &[
     ("UpdatePromptRequest", "description"),
     ("UpdateDatasetRequest", "input_schema"),
     ("UpdateDatasetRequest", "expected_schema"),
+    ("UpdateIssueSourceRequest", "filter"),
+    ("UpdateIssueRequest", "description"),
     ("AgentContextBody", "repository"),
     ("AgentContextBody", "branch"),
     ("AgentContextBody", "user"),
@@ -980,6 +1007,8 @@ fn paths() -> Paths {
     let paths = score_paths(paths);
     let paths = evaluator_paths(paths);
     let paths = online_rule_paths(paths);
+    let paths = issue_source_paths(paths);
+    let paths = issue_paths(paths);
     let paths = eval_job_paths(paths);
     let paths = backfill_paths(paths);
     let paths = playground_paths(paths);
@@ -2937,6 +2966,252 @@ fn online_rule_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/online-rules/{{id}}/resume"),
             PathItem::new(HttpMethod::Post, resume),
+        )
+}
+
+fn issue_source_paths(paths: PathsBuilder) -> PathsBuilder {
+    let id = path_uuid("id", "Issue source id.");
+    let list = operation("list_issue_sources", "issues", "List issue sources")
+        .description(Some(
+            "Any project member can read. `org_active_sources` counts the enabled sources of the whole org for the plan's active-source limit (D-IC-13).",
+        ))
+        .parameters(Some(with_query::<PageParams>(vec![project_param()])))
+        .responses(responses(
+            "200",
+            json_named("IssueSourcePage", "One page of issue sources."),
+            QUERY_ERRORS,
+        ))
+        .build();
+    let create = operation("post_issue_source", "issues", "Create an issue source")
+        .description(Some(
+            "Project members and above. API keys cannot call it. 403 `plan_limit` when the org is at its active-source limit.",
+        ))
+        .parameters(Some(vec![project_param()]))
+        .request_body(Some(json_body("CreateIssueSourceRequest")))
+        .responses(responses(
+            "201",
+            json_of::<IssueSource>("The created source."),
+            &[400, 401, 403, 404, 409, 429],
+        ))
+        .build();
+    let get = operation("get_issue_source", "issues", "Get an issue source")
+        .description(Some("Any project member can read."))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .responses(responses(
+            "200",
+            json_of::<IssueSource>("The source."),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    let patch = operation("patch_issue_source", "issues", "Update an issue source")
+        .description(Some(
+            "Project members and above. API keys cannot call it. `kind` cannot change. Enabling a source checks the active-source limit.",
+        ))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .request_body(Some(json_body("UpdateIssueSourceRequest")))
+        .responses(responses(
+            "200",
+            json_of::<IssueSource>("The updated source."),
+            &[400, 401, 403, 404, 409, 429],
+        ))
+        .build();
+    let refit = operation(
+        "post_issue_source_refit",
+        "issues",
+        "Refit an issue source now",
+    )
+        .description(Some(
+            "Project members and above. API keys cannot call it. Sets the source's next refit to now, so the next sweep refits it. 400 for an `error` source, or a disabled or paused one. The refit is recorded as `manual`. 409 when a refit started less than 10 minutes ago or one is already due.",
+        ))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .responses(responses(
+            "202",
+            json_of::<IssueSource>("The source, with `next_refit_at` set to now."),
+            &[400, 401, 403, 404, 409, 429],
+        ))
+        .build();
+    let refits = operation(
+        "list_issue_source_refits",
+        "issues",
+        "List the refits of an issue source",
+    )
+    .description(Some(
+        "Any project member can read. The newest 50 refits of the source, newest first.",
+    ))
+    .parameters(Some(vec![project_param(), id.clone()]))
+    .responses(responses(
+        "200",
+        json_of::<IssueRefitPage>("The refits, newest first."),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    let delete = operation("delete_issue_source", "issues", "Delete an issue source")
+        .description(Some(
+            "Project members and above. API keys cannot call it. The source's issues and their events are deleted with it; the occurrence scores stay (D-IC-3).",
+        ))
+        .parameters(Some(vec![project_param(), id]))
+        .responses(responses(
+            "204",
+            ResponseBuilder::new().description("Deleted.").build(),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    paths
+        .path(
+            format!("{PROJECT}/issue-sources"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/issue-sources"),
+            PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/issue-sources/{{id}}"),
+            PathItem::new(HttpMethod::Get, get),
+        )
+        .path(
+            format!("{PROJECT}/issue-sources/{{id}}"),
+            PathItem::new(HttpMethod::Patch, patch),
+        )
+        .path(
+            format!("{PROJECT}/issue-sources/{{id}}/refit"),
+            PathItem::new(HttpMethod::Post, refit),
+        )
+        .path(
+            format!("{PROJECT}/issue-sources/{{id}}/refits"),
+            PathItem::new(HttpMethod::Get, refits),
+        )
+        .path(
+            format!("{PROJECT}/issue-sources/{{id}}"),
+            PathItem::new(HttpMethod::Delete, delete),
+        )
+}
+
+fn issue_paths(paths: PathsBuilder) -> PathsBuilder {
+    let id = path_uuid("id", "Issue id.");
+    let list = operation("list_issues", "issues", "List issues")
+        .description(Some(
+            "Any project member can read. `count` and `users` cover the period `[from, to)` (default the last 24 hours). Merged issues are listed only when `state` names `merged`. Blank `ids` means no filter.",
+        ))
+        .parameters(Some(with_query::<IssueListParams>(vec![project_param()])))
+        .responses(responses(
+            "200",
+            json_named("IssuePage", "One page of issues."),
+            READ_ERRORS,
+        ))
+        .build();
+    let get = operation("get_issue", "issues", "Get an issue")
+        .description(Some(
+            "Any project member can read. `count` and `users` cover the last 24 hours. `merged_from` lists the issues merged into this one.",
+        ))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .responses(responses("200", json_of::<Issue>("The issue."), READ_ERRORS))
+        .build();
+    let patch = operation("patch_issue", "issues", "Update an issue")
+        .description(Some(
+            "Project members and above. API keys and personal access tokens cannot call it. `title` renames the issue and records a `renamed` event. `description` records no event; `null` clears it. `state` resolves, ignores or reopens the issue and records a `state_changed` event; a resolved issue that recurs is reopened as regressed. `merged` is refused: merge with the merge operation. Setting a value it already has changes nothing. A merged issue cannot change (409).",
+        ))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .request_body(Some(json_body("UpdateIssueRequest")))
+        .responses(responses(
+            "200",
+            json_of::<Issue>("The updated issue, with its counts over the last 24 hours."),
+            &[400, 401, 403, 404, 409, 429],
+        ))
+        .securities(Some(vec![SecurityRequirement::new(
+            "session",
+            [] as [&str; 0],
+        )]))
+        .build();
+    let merge = operation("post_issue_merge", "issues", "Merge an issue into another")
+        .description(Some(
+            "Project members and above. API keys and personal access tokens cannot call it. Folds the issue into `into`, an issue of the same source that is not merged. The issues merged into it move to `into` too, so chains stay one level deep. Its occurrences count on `into`. Answers the target issue. 409 when both are the same issue, the issues are in different sources, this issue is already merged, or the target is merged.",
+        ))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .request_body(Some(json_body("MergeIssueRequest")))
+        .responses(responses(
+            "200",
+            json_of::<Issue>("The target issue, with its counts over the last 24 hours."),
+            &[400, 401, 403, 404, 409, 429],
+        ))
+        .securities(Some(vec![SecurityRequirement::new(
+            "session",
+            [] as [&str; 0],
+        )]))
+        .build();
+    let dataset_items = operation(
+        "post_issue_dataset_items",
+        "issues",
+        "Add an issue's occurrences to a dataset",
+    )
+    .description(Some(
+        "Project members and above, a read-write personal access token, or an API key with `write` (D-IC-22). Copies the most recent occurrence traces of the issue and of the issues merged into it, one item per trace and up to `limit` (default and maximum 100), into the dataset as one new version, as `items/from-traces` does. An occurrence with an error span uses that span, else the trace root. Items get the metadata `cetra.issue_id`. A trace that cannot be copied is listed in `skipped`; no occurrence in the data window or no copyable trace is a 400.",
+    ))
+    .parameters(Some(vec![project_param(), id.clone()]))
+    .request_body(Some(json_body("IssueDatasetItemsRequest")))
+    .responses(responses(
+        "201",
+        json_of::<FromTracesResult>("The new version, the items added and the traces skipped."),
+        &[400, 401, 403, 404, 409, 429, 503],
+    ))
+    .build();
+    let occurrences = operation(
+        "get_issue_occurrences",
+        "issues",
+        "Get the occurrences of an issue",
+    )
+    .description(Some(
+        "Any project member can read. `days` has one entry per UTC day of `[from, to)` (default the last 14 days, at most 90) with an occurrence. `examples` are the newest 20 occurrences of the issue and of the issues merged into it, not limited to the period.",
+    ))
+    .parameters(Some(with_query::<IssueOccurrenceParams>(vec![
+        project_param(),
+        id.clone(),
+    ])))
+    .responses(responses(
+        "200",
+        json_of::<IssueOccurrences>("The occurrences."),
+        READ_ERRORS,
+    ))
+    .build();
+    let events = operation("get_issue_events", "issues", "List the events of an issue")
+        .description(Some(
+            "Any project member can read. The newest 100 events of the issue, newest first.",
+        ))
+        .parameters(Some(vec![project_param(), id]))
+        .responses(responses(
+            "200",
+            json_of::<IssueEventPage>("The events."),
+            QUERY_ERRORS,
+        ))
+        .build();
+    paths
+        .path(
+            format!("{PROJECT}/issues"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/issues/{{id}}"),
+            PathItem::new(HttpMethod::Get, get),
+        )
+        .path(
+            format!("{PROJECT}/issues/{{id}}"),
+            PathItem::new(HttpMethod::Patch, patch),
+        )
+        .path(
+            format!("{PROJECT}/issues/{{id}}/merge"),
+            PathItem::new(HttpMethod::Post, merge),
+        )
+        .path(
+            format!("{PROJECT}/issues/{{id}}/dataset-items"),
+            PathItem::new(HttpMethod::Post, dataset_items),
+        )
+        .path(
+            format!("{PROJECT}/issues/{{id}}/occurrences"),
+            PathItem::new(HttpMethod::Get, occurrences),
+        )
+        .path(
+            format!("{PROJECT}/issues/{{id}}/events"),
+            PathItem::new(HttpMethod::Get, events),
         )
 }
 

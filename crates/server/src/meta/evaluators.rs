@@ -359,7 +359,8 @@ pub(crate) async fn list_evaluator_versions(
     records.into_iter().map(version_row_from).collect()
 }
 
-/// True when any evaluator, in any project, uses connection `id`.
+/// True when any evaluator, in any project, uses connection `id`, or any issue source uses it as
+/// its chat or embedding connection (track IC).
 ///
 /// # Errors
 ///
@@ -368,10 +369,14 @@ pub(crate) async fn connection_in_use(
     conn: &mut SqliteConnection,
     id: Uuid,
 ) -> Result<bool, MetaError> {
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM evaluators WHERE connection_id = ?")
-        .bind(id.to_string())
-        .fetch_one(&mut *conn)
-        .await?;
+    let count: i64 = sqlx::query_scalar(
+        "SELECT (SELECT COUNT(*) FROM evaluators WHERE connection_id = ?1) + \
+         (SELECT COUNT(*) FROM issue_sources WHERE chat_connection_id = ?1 \
+          OR embed_connection_id = ?1)",
+    )
+    .bind(id.to_string())
+    .fetch_one(&mut *conn)
+    .await?;
     Ok(count > 0)
 }
 
@@ -459,6 +464,7 @@ mod tests {
         connection_in_use, delete_evaluator, get_evaluator, insert_evaluator, list_evaluators,
         update_evaluator,
     };
+    use crate::meta::issues::{SourceKind, SourceRow, delete_source, insert_source};
     use crate::meta::orgs::insert_org;
     use crate::meta::projects::insert_project;
     use crate::meta::users::{NewUser, insert_user};
@@ -871,6 +877,99 @@ mod tests {
             .await
             .unwrap();
         assert!(!used);
+    }
+
+    /// An issue source of `project` that uses `chat` and `embed` as its connections.
+    fn source_using(project: ProjectId, chat: Option<Uuid>, embed: Option<Uuid>) -> SourceRow {
+        SourceRow {
+            id: Uuid::now_v7(),
+            project_id: project,
+            name: format!("source {}", Uuid::now_v7()),
+            kind: SourceKind::Score,
+            filter: None,
+            enabled: true,
+            paused_reason: None,
+            paused_at: None,
+            created_by: None,
+            created_at: NOW,
+            updated_at: NOW,
+            sample_rate: None,
+            daily_cap: None,
+            score_names: Vec::new(),
+            feedback_sources: Vec::new(),
+            chat_connection_id: chat,
+            chat_model: None,
+            embed_connection_id: embed,
+            embed_model: None,
+            embed_dimension: None,
+            floor: None,
+            min_issue_size: None,
+            budget_usd: None,
+            budget_period: None,
+            paused_detail: None,
+            next_refit_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn connection_in_use_counts_issue_sources_as_chat_or_embedding() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let acme = org(&db).await;
+        let support = project(&db, acme).await;
+        let (chat_id, embed_id) = (Uuid::now_v7(), Uuid::now_v7());
+        db.write(move |conn| {
+            Box::pin(async move {
+                for id in [chat_id, embed_id] {
+                    insert_connection(
+                        conn,
+                        id,
+                        acme,
+                        ConnectionFields {
+                            name: format!("main {id}"),
+                            adapter: "openai".to_owned(),
+                            base_url: None,
+                            secret_enc: vec![1],
+                            api_key_hint: "WXYZ".to_owned(),
+                            extra_headers_enc: None,
+                            extra_header_names: Vec::new(),
+                            default_model: None,
+                            structured_output: "native".to_owned(),
+                            max_concurrency: 4,
+                            requests_per_minute: 300,
+                        },
+                        None,
+                        NOW,
+                    )
+                    .await?;
+                }
+                Ok::<_, MetaError>(())
+            })
+        })
+        .await
+        .unwrap();
+        let in_use = |id: Uuid| {
+            db.write(move |conn| Box::pin(async move { connection_in_use(conn, id).await }))
+        };
+        assert!(!in_use(chat_id).await.unwrap());
+        assert!(!in_use(embed_id).await.unwrap());
+
+        let chat_source = source_using(support, Some(chat_id), None);
+        let embed_source = source_using(support, None, Some(embed_id));
+        for row in [chat_source.clone(), embed_source] {
+            db.write(move |conn| Box::pin(async move { insert_source(conn, &row).await }))
+                .await
+                .unwrap();
+        }
+        assert!(in_use(chat_id).await.unwrap());
+        assert!(in_use(embed_id).await.unwrap());
+
+        let chat_id_of = chat_source.id;
+        db.write(move |conn| {
+            Box::pin(async move { delete_source(conn, support, chat_id_of).await })
+        })
+        .await
+        .unwrap();
+        assert!(!in_use(chat_id).await.unwrap());
     }
 
     #[tokio::test]

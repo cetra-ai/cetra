@@ -1,0 +1,9 @@
+{{ total }} new or regressed {{ noun }} in {{ source_name }} ({{ project_name }})
+{% for item in items %}
+- {{ item.kind }}: {{ item.title }}
+  {{ item.url }}{% endfor %}{% if more > 0 %}
+
+and {{ more }} more{% endif %}
+
+View the issues:
+{{ issues_url }}

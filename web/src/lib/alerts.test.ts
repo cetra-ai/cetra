@@ -9,6 +9,8 @@ import {
   DEFAULT_RULE_FORM,
   formatAlertValue,
   formFromRule,
+  metricDefaults,
+  metricLabel,
   previewCondition,
   previewParams,
   previewQuery,
@@ -17,6 +19,7 @@ import {
   thresholdInPercent,
   thresholdUnit,
 } from "./alerts";
+import { parseNewRuleSearch } from "./search/alerts";
 
 type Condition = Schema<"AlertCondition">;
 
@@ -403,4 +406,181 @@ it("previews a zero threshold while the form is invalid", () => {
   const condition = previewCondition(formWith({ threshold: "abc" }));
   expect(condition.threshold).toBe(0);
   expect(condition.metric).toBe("error_rate");
+});
+
+const ISSUE_OCCURRENCES: Condition = {
+  metric: "issue_occurrences",
+  window: "1h",
+  comparator: "gt",
+  threshold: 0,
+  issue_id: "0190a6c4-2f1e-7000-8000-000000000001",
+};
+
+it("labels, formats and units an issue occurrences condition", () => {
+  expect(metricLabel(ISSUE_OCCURRENCES)).toBe("Issue occurrences");
+  expect(conditionSummary(ISSUE_OCCURRENCES)).toBe("Issue occurrences > 0 over 1h");
+  expect(formatAlertValue(ISSUE_OCCURRENCES, 12)).toBe("12");
+  expect(formatAlertValue(ISSUE_OCCURRENCES, 12.4)).toBe("12");
+  expect(thresholdUnit("issue_occurrences", "avg")).toBe("occurrences");
+  expect(thresholdInPercent("issue_occurrences", "avg")).toBe(false);
+});
+
+it("defaults an issue occurrences rule to more than 0", () => {
+  expect(metricDefaults("issue_occurrences", "avg")).toEqual({
+    threshold: "0",
+    comparator: "gt",
+    minCount: "20",
+  });
+});
+
+it("builds an issue scope condition without filter and min count", () => {
+  const form = formWith({
+    metric: "issue_occurrences",
+    window: "1h",
+    threshold: "0",
+    filter: "environment = 'production'",
+    minCount: "7",
+    issueScope: "issue",
+    issueId: " 0190a6c4-2f1e-7000-8000-000000000001 ",
+  });
+  expect(conditionOf(form)).toEqual({
+    metric: "issue_occurrences",
+    window: "1h",
+    comparator: "gt",
+    threshold: 0,
+    issue_id: "0190a6c4-2f1e-7000-8000-000000000001",
+  });
+});
+
+it("builds a source scope condition", () => {
+  const form = formWith({
+    metric: "issue_occurrences",
+    window: "1h",
+    threshold: "3",
+    issueScope: "source",
+    sourceId: " src-1 ",
+    issueId: "ignored",
+  });
+  expect(conditionOf(form)).toEqual({
+    metric: "issue_occurrences",
+    window: "1h",
+    comparator: "gt",
+    threshold: 3,
+    source_id: "src-1",
+  });
+});
+
+it("refuses 1m and 5m windows for issue occurrences only", () => {
+  const issue = { metric: "issue_occurrences" as const, issueId: "i" };
+  for (const window of ["1m", "5m"] as const) {
+    expect(errorsOf(formWith({ ...issue, window }))).toEqual({
+      "condition.window": "Issue occurrences need a window of 15 minutes or more.",
+    });
+  }
+  expect(conditionOf(formWith({ ...issue, window: "15m" })).window).toBe("15m");
+  expect(conditionOf(formWith({ ...issue, window: "1h" })).window).toBe("1h");
+  expect(conditionOf(formWith({ metric: "error_rate", window: "1m" })).window).toBe("1m");
+});
+
+it("validates the threshold, the scope ids and the min count of issue occurrences", () => {
+  expect(
+    errorsOf(
+      formWith({ metric: "issue_occurrences", window: "1h", issueId: "i", threshold: "-1" }),
+    ),
+  ).toEqual({ "condition.threshold": "Enter 0 or more." });
+  expect(
+    errorsOf(
+      formWith({ metric: "issue_occurrences", window: "1h", issueScope: "issue", issueId: " " }),
+    ),
+  ).toEqual({ "condition.issue_id": "Choose an issue." });
+  expect(
+    errorsOf(
+      formWith({ metric: "issue_occurrences", window: "1h", issueScope: "source", sourceId: "" }),
+    ),
+  ).toEqual({ "condition.source_id": "Choose a source." });
+  expect(
+    conditionOf(
+      formWith({
+        metric: "issue_occurrences",
+        window: "1h",
+        issueId: "i",
+        threshold: "2.5",
+        minCount: "abc",
+      }),
+    ).threshold,
+  ).toBe(2.5);
+});
+
+it("round-trips an issue rule and a source rule through the form", () => {
+  const base = rules[0];
+  if (!base) {
+    throw new Error("fixture rule missing");
+  }
+  const issueCondition: Condition = { ...ISSUE_OCCURRENCES, threshold: 2 };
+  const sourceCondition: Condition = {
+    metric: "issue_occurrences",
+    window: "1h",
+    comparator: "gte",
+    threshold: 5,
+    source_id: "src-1",
+  };
+  for (const condition of [issueCondition, sourceCondition]) {
+    const form = formFromRule({ ...base, condition });
+    expect(conditionOf(form)).toEqual(condition);
+  }
+  expect(formFromRule({ ...base, condition: sourceCondition }).issueScope).toBe("source");
+  expect(formFromRule({ ...base, condition: issueCondition }).issueScope).toBe("issue");
+  expect(formFromRule({ ...base, condition: issueCondition }).issueId).toBe(
+    issueCondition.issue_id,
+  );
+});
+
+it("changes an issue rule only by its scope, not by its filter or min count", () => {
+  const base = formWith({
+    metric: "issue_occurrences",
+    window: "1h",
+    issueId: "a",
+    threshold: "0",
+  });
+  expect(conditionChanged(base, { ...base, filter: "environment = 'x'" })).toBe(false);
+  expect(conditionChanged(base, { ...base, minCount: "3" })).toBe(false);
+  expect(conditionChanged(base, { ...base, issueId: "b" })).toBe(true);
+  expect(conditionChanged(base, { ...base, issueScope: "source", sourceId: "a" })).toBe(true);
+  const source = { ...base, issueScope: "source" as const, sourceId: "s" };
+  expect(conditionChanged(source, { ...source, issueId: "b" })).toBe(false);
+  expect(conditionChanged(source, { ...source, sourceId: "t" })).toBe(true);
+});
+
+it("counts the scope of an issue rule when switching metric and back is not a change", () => {
+  const original = formWith({
+    metric: "score",
+    window: "1h",
+    comparator: "lt",
+    threshold: "0.7",
+    scoreName: "helpfulness",
+    aggregation: "avg",
+  });
+  const issue = {
+    ...original,
+    metric: "issue_occurrences" as const,
+    threshold: "0",
+    comparator: "gt" as const,
+    issueId: "x",
+  };
+  const back = { ...issue, metric: "score" as const, comparator: "lt" as const, threshold: "0.7" };
+  expect(conditionChanged(original, back)).toBe(false);
+});
+
+it("has no preview for issue occurrences", () => {
+  expect(previewQuery({ metric: "issue_occurrences", target: "trace", scoreName: "" })).toBe(
+    undefined,
+  );
+});
+
+it("parses the prefilled new rule search", () => {
+  expect(
+    parseNewRuleSearch({ metric: "issue_occurrences", issue_id: " abc ", source_id: "s" }),
+  ).toEqual({ metric: "issue_occurrences", issue_id: "abc", source_id: "s" });
+  expect(parseNewRuleSearch({ metric: "cost", issue_id: "", source_id: 3 })).toEqual({});
+  expect(parseNewRuleSearch({})).toEqual({});
 });

@@ -199,7 +199,7 @@ Scores are high-volume (online judges can score every trace) and must be joinabl
 | `value_num` | Float64, nullable | numeric value; boolean as 0/1 |
 | `value_str` | Utf8, nullable | categorical label or text |
 | `reason` | Utf8, nullable | explanation |
-| `source` | Utf8 dict | `api` \| `sdk` \| `human` \| `end_user` \| `llm_judge` \| `check` \| `webhook` |
+| `source` | Utf8 dict | `api` \| `sdk` \| `human` \| `end_user` \| `llm_judge` \| `check` \| `webhook` \| `issue` |
 | `evaluator_id` | Utf8, nullable | |
 | `rule_id` | Utf8, nullable | online rule that produced it |
 | `experiment_id` | Utf8, nullable | |

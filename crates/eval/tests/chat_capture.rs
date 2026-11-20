@@ -14,7 +14,9 @@ use reqwest::Url;
 use serde_json::{Map, Value, json};
 use tokio::net::TcpListener;
 
-use crate::judge::{JudgeCall, call, parse_answer};
+use crate::judge::{
+    CompletionCall, JUDGEMENT_DESCRIPTION, JUDGEMENT_TOOL, answer_schema, call, parse_answer,
+};
 use crate::{
     Adapter, CHAT_IDLE_TIMEOUT, ChatDone, ChatEvent, ChatParams, ChatRequest, ChatStream,
     EgressClient, EgressPolicy, FinishReason, JudgeConnection, JudgeOutput, Secret,
@@ -258,11 +260,14 @@ async fn the_capture_mock_still_serves_buffered_judges() {
     }))])
     .await;
     let output = JudgeOutput::Numeric { min: 0.0, max: 1.0 };
-    let judge = JudgeCall {
+    let schema = answer_schema(&output, true);
+    let judge = CompletionCall {
         model: "gpt-test",
         prompt: "Grade the answer.",
-        output: &output,
-        include_reason: true,
+        schema: &schema,
+        schema_name: "judge_answer",
+        tool_name: JUDGEMENT_TOOL,
+        tool_description: JUDGEMENT_DESCRIPTION,
         temperature: None,
         max_output_tokens: 64,
         timeout: Duration::from_secs(10),

@@ -111,6 +111,23 @@ pub(crate) fn tool_list() -> Vec<Tool> {
             GET_SPAN_DESCRIPTION,
             get_span_schema(),
         ),
+        tool(
+            super::issues::LIST_ISSUES,
+            "List issues",
+            "Issues of a project (recurring errors and, from LLM sources, groups of similar traces), newest `last_seen` first, with their occurrence counts over the last 7 days. `state` is open (default), resolved, ignored or all (never merged issues). `source` is a source id (each issue's `source_id`). `url` opens the issue page.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": PROJECT_ARG},
+                    "state": {"type": "string", "enum": ["open", "resolved", "ignored", "all"], "default": "open", "description": "Only issues in this state."},
+                    "source": {"type": "string", "description": "Only issues of this source id."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20, "description": "Most issues to return."},
+                    "max_chars": {"type": "integer", "minimum": 1000, "maximum": 100000, "default": 20000, "description": "Most characters in the result; later issues are left out beyond it."}
+                },
+                "required": ["project"],
+                "additionalProperties": false
+            }),
+        ),
     ]
 }
 

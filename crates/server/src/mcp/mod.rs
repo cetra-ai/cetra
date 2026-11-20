@@ -3,6 +3,7 @@
 //! Streamable HTTP through `rmcp`, stateless, with JSON responses: every POST is served on its
 //! own by a fresh [`McpServer`] that holds the caller. Only personal access tokens reach it.
 
+mod issues;
 pub(crate) mod output;
 mod prompts;
 pub(crate) mod sql;
@@ -37,7 +38,7 @@ use crate::http::error::ApiError;
 const MCP_BODY_LIMIT: usize = 1024 * 1024;
 
 /// Instructions sent with `initialize`.
-const INSTRUCTIONS: &str = "Read-only access to LLM traces, spans and prompts. Call list_projects first: the other tools take a `project`. Each tool's description says what it needs. Results are compact JSON; when a result is cut, `truncated` is true and `notes` says what was left out.";
+const INSTRUCTIONS: &str = "Read-only access to LLM traces, spans and prompts, and to the issues found in them. Call list_projects first: the other tools take a `project`. Each tool's description says what it needs. Results are compact JSON; when a result is cut, `truncated` is true and `notes` says what was left out.";
 
 /// `POST /mcp`. Not in the OpenAPI document.
 pub(crate) fn routes() -> Vec<RouteDef> {
@@ -206,6 +207,10 @@ impl McpServer {
                 traces::GET_SPAN,
                 traces::get_span(&self.state, &self.user, arguments).await,
             ),
+            issues::LIST_ISSUES => (
+                issues::LIST_ISSUES,
+                issues::list_issues(&self.state, &self.user, arguments).await,
+            ),
             _ => return Err(McpError::invalid_params("unknown tool", None)),
         };
         Ok(pair)
@@ -356,7 +361,7 @@ mod tests {
     use crate::test_support::TestApp;
     use cetra_core::ids::{OrgId, ProjectId};
 
-    const TOOLS: [&str; 9] = [
+    const TOOLS: [&str; 10] = [
         "list_projects",
         "get_schema",
         "query_sql",
@@ -366,6 +371,7 @@ mod tests {
         "search_traces",
         "get_trace",
         "get_span",
+        "list_issues",
     ];
 
     fn init_body(version: &str) -> Value {
@@ -502,6 +508,7 @@ mod tests {
             tools[8]["inputSchema"]["required"],
             json!(["project", "trace_id", "span_id"])
         );
+        assert_eq!(tools[9]["inputSchema"]["required"], json!(["project"]));
         assert!(body["result"].get("resultType").is_none());
     }
 

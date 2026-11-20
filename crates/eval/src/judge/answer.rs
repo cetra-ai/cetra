@@ -98,7 +98,7 @@ pub(crate) fn parse_answer(
     })
 }
 
-fn find_object(raw: RawAnswer) -> Result<Map<String, Value>, JudgeError> {
+pub(crate) fn find_object(raw: RawAnswer) -> Result<Map<String, Value>, JudgeError> {
     match raw {
         RawAnswer::Object(object) => Ok(object),
         RawAnswer::Text(text) => object_from_text(&text),

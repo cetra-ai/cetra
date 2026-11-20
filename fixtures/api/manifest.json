@@ -464,6 +464,46 @@
     "file": "static/invite-preview.json"
   },
   {
+    "operation_id": "get_issue",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000001c01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/issue.json"
+  },
+  {
+    "operation_id": "get_issue_events",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000001c01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/issue-events.json"
+  },
+  {
+    "operation_id": "get_issue_occurrences",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000001c01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/issue-occurrences.json"
+  },
+  {
+    "operation_id": "get_issue_source",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000001c00"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/issue-source.json"
+  },
+  {
     "operation_id": "get_llm_connection",
     "path_params": {
       "id": "01900000-0000-7000-8000-000000000400",
@@ -1191,6 +1231,32 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/experiments.json"
+  },
+  {
+    "operation_id": "list_issue_source_refits",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000001c20"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/issue-refits.json"
+  },
+  {
+    "operation_id": "list_issue_sources",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/issue-sources.json"
+  },
+  {
+    "operation_id": "list_issues",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/issues.json"
   },
   {
     "operation_id": "list_llm_connections",

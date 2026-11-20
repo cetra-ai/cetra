@@ -1,32 +1,24 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
+import { useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
 import { $api } from "@/api/client";
 import { fieldErrors, problemMessage, problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
-import { alertRuleQuery, alertRulesQuery, channelsQuery } from "@/api/queries-alerts";
+import { alertRuleQuery, alertRulesQuery } from "@/api/queries-alerts";
 import type { Schema } from "@/api/types";
+import { ChannelCheckboxes } from "@/components/alerts/channel-checkboxes";
+import { IssueScopeFields } from "@/components/alerts/issue-scope-fields";
 import { RulePreview } from "@/components/alerts/rule-preview";
+import { type Option, SelectField } from "@/components/alerts/select-field";
 import { FormError } from "@/components/form/form-error";
 import { SubmitButton } from "@/components/form/submit-button";
 import { TextField } from "@/components/form/text-field";
 import { UpgradeButton } from "@/components/plan/upgrade-button";
 import { useOrgEntitlements } from "@/components/plan/use-org-entitlements";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import {
-  channelKindLabel,
   conditionChanged,
   conditionFromForm,
   DEFAULT_RULE_FORM,
@@ -37,13 +29,14 @@ import {
 } from "@/lib/alerts";
 
 type Comparator = Schema<"Comparator">;
-type Option<T extends string> = { value: T; label: string };
+type Window = Schema<"AlertWindow">;
 
 const METRIC_OPTIONS: Option<Schema<"AlertMetric">>[] = [
   { value: "error_rate", label: "Error rate" },
   { value: "cost", label: "Cost" },
   { value: "latency_p95", label: "p95 latency" },
   { value: "score", label: "Score" },
+  { value: "issue_occurrences", label: "Issue occurrences" },
 ];
 const TARGET_OPTIONS: Option<Schema<"LatencyTarget">>[] = [
   { value: "trace", label: "Whole traces" },
@@ -53,7 +46,7 @@ const AGGREGATION_OPTIONS: Option<Schema<"ScoreAggregation">>[] = [
   { value: "avg", label: "Average" },
   { value: "pass_rate", label: "Pass rate" },
 ];
-const WINDOW_OPTIONS: Option<Schema<"AlertWindow">>[] = [
+const WINDOW_OPTIONS: Option<Window>[] = [
   { value: "1m", label: "1 minute" },
   { value: "5m", label: "5 minutes" },
   { value: "15m", label: "15 minutes" },
@@ -61,6 +54,10 @@ const WINDOW_OPTIONS: Option<Schema<"AlertWindow">>[] = [
   { value: "6h", label: "6 hours" },
   { value: "24h", label: "24 hours" },
 ];
+/** Issue occurrences need a window of 15 minutes or more (D-IC-20). */
+const ISSUE_WINDOW_OPTIONS = WINDOW_OPTIONS.filter(
+  (option) => option.value !== "1m" && option.value !== "5m",
+);
 const COMPARATOR_OPTIONS: Option<Comparator>[] = [
   { value: "gt", label: "Above" },
   { value: "gte", label: "At or above" },
@@ -76,36 +73,33 @@ const FORM_FIELDS = [
   "condition.threshold",
   "condition.min_count",
   "condition.score_name",
+  "condition.issue_id",
+  "condition.source_id",
   "channel_ids",
   "cooldown_s",
 ] as const;
-
-const CHANNEL_LIMIT = 10;
 
 export function RuleForm(props: {
   org: string;
   project: string;
   /** Absent: create. */
   rule?: Schema<"AlertRule">;
+  /** Create only: the values the new rule starts with, over the defaults. */
+  initial?: Partial<RuleFormValues>;
   /** Called with the saved rule. */
   onSaved: (rule: Schema<"AlertRule">) => void;
   onCancel: () => void;
 }) {
-  const { org, project, rule, onSaved, onCancel } = props;
+  const { org, project, rule, initial, onSaved, onCancel } = props;
   const queryClient = useQueryClient();
-  const channels = useQuery(channelsQuery(org, project));
   const upgradeUrl = useOrgEntitlements(org).upgradeUrl;
   const create = $api.useMutation("post", "/api/v1/projects/{project}/alert-rules");
   const update = $api.useMutation("patch", "/api/v1/projects/{project}/alert-rules/{id}");
   const [form, setForm] = useState<RuleFormValues>(() =>
-    rule ? formFromRule(rule) : DEFAULT_RULE_FORM,
+    rule ? formFromRule(rule) : { ...DEFAULT_RULE_FORM, ...initial },
   );
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | undefined>();
-
-  if (channels.error) {
-    throw channels.error;
-  }
 
   const pending = create.isPending || update.isPending;
   const planLimited = problemOf(create.error ?? update.error)?.code === "plan_limit";
@@ -116,7 +110,12 @@ export function RuleForm(props: {
   }
 
   function changeMetric(metric: Schema<"AlertMetric">) {
-    patchForm({ metric, ...metricDefaults(metric, form.aggregation) });
+    // Issue occurrences have no 1- or 5-minute window: such a window moves to one hour.
+    const nextWindow: Window =
+      metric === "issue_occurrences" && (form.window === "1m" || form.window === "5m")
+        ? "1h"
+        : form.window;
+    patchForm({ metric, window: nextWindow, ...metricDefaults(metric, form.aggregation) });
   }
 
   function changeAggregation(aggregation: Schema<"ScoreAggregation">) {
@@ -233,9 +232,10 @@ export function RuleForm(props: {
         ? "USD."
         : unit === "ms"
           ? "Milliseconds."
-          : "Raw score.";
+          : unit === "occurrences"
+            ? "Occurrences."
+            : "Raw score.";
   const filterError = errors.filter ?? errors["condition.filter"];
-  const channelList = channels.data?.data ?? [];
 
   return (
     <form noValidate onSubmit={onSubmit} className="grid gap-8 lg:grid-cols-2">
@@ -298,11 +298,23 @@ export function RuleForm(props: {
               />
             </>
           ) : null}
+          {form.metric === "issue_occurrences" ? (
+            <IssueScopeFields
+              org={org}
+              project={project}
+              scope={form.issueScope}
+              issueId={form.issueId}
+              sourceId={form.sourceId}
+              errors={errors}
+              disabled={pending}
+              onChange={patchForm}
+            />
+          ) : null}
           <SelectField
             id="rule-window"
             label="Window"
             value={form.window}
-            options={WINDOW_OPTIONS}
+            options={form.metric === "issue_occurrences" ? ISSUE_WINDOW_OPTIONS : WINDOW_OPTIONS}
             description="Checked every minute for windows up to 15 minutes, every 5 minutes otherwise."
             disabled={pending}
             onChange={(window) => {
@@ -311,33 +323,37 @@ export function RuleForm(props: {
           />
         </fieldset>
 
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="rule-filter">Filter</Label>
-          <Textarea
-            id="rule-filter"
-            name="rule-filter"
-            className="font-mono"
-            rows={2}
-            maxLength={4096}
-            value={form.filter}
-            disabled={pending}
-            aria-invalid={filterError ? true : undefined}
-            aria-describedby={
-              filterError ? "rule-filter-description rule-filter-error" : "rule-filter-description"
-            }
-            onChange={(event) => {
-              patchForm({ filter: event.target.value });
-            }}
-          />
-          <p id="rule-filter-description" className="text-caption text-muted-foreground">
-            A traces filter, e.g. environment = 'production'. Empty: every trace.
-          </p>
-          {filterError ? (
-            <p id="rule-filter-error" className="text-caption text-destructive">
-              {filterError}
+        {form.metric !== "issue_occurrences" ? (
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="rule-filter">Filter</Label>
+            <Textarea
+              id="rule-filter"
+              name="rule-filter"
+              className="font-mono"
+              rows={2}
+              maxLength={4096}
+              value={form.filter}
+              disabled={pending}
+              aria-invalid={filterError ? true : undefined}
+              aria-describedby={
+                filterError
+                  ? "rule-filter-description rule-filter-error"
+                  : "rule-filter-description"
+              }
+              onChange={(event) => {
+                patchForm({ filter: event.target.value });
+              }}
+            />
+            <p id="rule-filter-description" className="text-caption text-muted-foreground">
+              A traces filter, e.g. environment = 'production'. Empty: every trace.
             </p>
-          ) : null}
-        </div>
+            {filterError ? (
+              <p id="rule-filter-error" className="text-caption text-destructive">
+                {filterError}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
 
         <fieldset className="flex flex-col gap-4">
           <legend className="text-body font-medium">Condition</legend>
@@ -362,7 +378,7 @@ export function RuleForm(props: {
               patchForm({ threshold });
             }}
           />
-          {form.metric !== "cost" ? (
+          {form.metric !== "cost" && form.metric !== "issue_occurrences" ? (
             <TextField
               id="rule-min-count"
               label="Minimum samples"
@@ -382,46 +398,15 @@ export function RuleForm(props: {
           aria-describedby={errors.channel_ids ? "rule-channels-error" : undefined}
         >
           <legend className="text-body font-medium">Notifications</legend>
-          {channels.isPending ? (
-            <Skeleton className="h-8 w-full" />
-          ) : channelList.length === 0 ? (
-            <p className="text-body text-muted-foreground">
-              No channels yet.{" "}
-              <Link
-                to="/$org/$project/settings/channels"
-                params={{ org, project }}
-                className="underline underline-offset-4"
-              >
-                Add a channel
-              </Link>
-            </p>
-          ) : (
-            <div className="flex flex-col gap-2">
-              {channelList.map((channel) => {
-                const checked = form.channelIds.includes(channel.id);
-                return (
-                  <div key={channel.id} className="flex items-center gap-2">
-                    <Checkbox
-                      id={`rule-channel-${channel.id}`}
-                      checked={checked}
-                      disabled={pending || (!checked && form.channelIds.length >= CHANNEL_LIMIT)}
-                      onCheckedChange={(next) => {
-                        toggleChannel(channel.id, next === true);
-                      }}
-                    />
-                    <Label htmlFor={`rule-channel-${channel.id}`}>
-                      {`${channel.name} (${channelKindLabel(channel.kind)})`}
-                    </Label>
-                  </div>
-                );
-              })}
-              {errors.channel_ids ? (
-                <p id="rule-channels-error" className="text-caption text-destructive">
-                  {errors.channel_ids}
-                </p>
-              ) : null}
-            </div>
-          )}
+          <ChannelCheckboxes
+            org={org}
+            project={project}
+            idPrefix="rule"
+            selected={form.channelIds}
+            onToggle={toggleChannel}
+            disabled={pending}
+            error={errors.channel_ids}
+          />
           <div className="flex items-center gap-2">
             <Switch
               id="rule-notify"
@@ -483,62 +468,6 @@ export function RuleForm(props: {
         </div>
       </div>
     </form>
-  );
-}
-
-/** A select that maps the Radix string back to the option's typed value. */
-function SelectField<T extends string>({
-  id,
-  label,
-  value,
-  options,
-  description,
-  disabled,
-  onChange,
-}: {
-  id: string;
-  label: string;
-  value: T;
-  options: Option<T>[];
-  description?: string;
-  disabled: boolean;
-  onChange: (value: T) => void;
-}) {
-  const descriptionId = `${id}-description`;
-  return (
-    <div className="flex flex-col gap-1.5">
-      <Label htmlFor={id}>{label}</Label>
-      <Select
-        value={value}
-        onValueChange={(next) => {
-          const found = options.find((option) => option.value === next);
-          if (found) {
-            onChange(found.value);
-          }
-        }}
-        disabled={disabled}
-      >
-        <SelectTrigger
-          id={id}
-          className="w-full"
-          aria-describedby={description ? descriptionId : undefined}
-        >
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {options.map((option) => (
-            <SelectItem key={option.value} value={option.value}>
-              {option.label}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-      {description ? (
-        <p id={descriptionId} className="text-caption text-muted-foreground">
-          {description}
-        </p>
-      ) : null}
-    </div>
   );
 }
 

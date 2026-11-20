@@ -130,7 +130,7 @@ pub struct PlanClaim {
     pub add_ons: Vec<String>,
 }
 
-/// The ten limits of D-P-13. Outer `None`: the key is missing (the cell's default applies);
+/// The limits of D-P-13 and D-IC-13. Outer `None`: the key is missing (the cell's default applies);
 /// `Some(None)`: JSON `null` (unlimited); `Some(Some(n))`: the limit.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LimitsClaim {
@@ -197,6 +197,13 @@ pub struct LimitsClaim {
         skip_serializing_if = "Option::is_none"
     )]
     pub max_active_online_rules: Option<Option<u64>>,
+    /// Enabled issue sources of active projects (D-IC-13).
+    #[serde(
+        default,
+        with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_active_issue_sources: Option<Option<u64>>,
     /// Annotation queues per org (D-AQ-10).
     #[serde(
         default,
@@ -678,6 +685,7 @@ mod tests {
                 max_projects: Some(None),
                 max_alert_rules: Some(None),
                 max_active_online_rules: Some(None),
+                max_active_issue_sources: Some(None),
                 max_annotation_queues: Some(None),
             },
         });

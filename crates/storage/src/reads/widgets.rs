@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arrow::record_batch::RecordBatch;
-use cetra_core::enums::ScoreTargetKind;
+use cetra_core::enums::{ScoreSource, ScoreTargetKind};
 use cetra_core::schema::{scores, spans, traces};
 use datafusion::arrow::datatypes::DataType;
 use datafusion::common::{NullHandling, ScalarValue, UnnestOptions};
@@ -671,8 +671,7 @@ async fn base(
                 references_environment,
             )
             .await?;
-            let mut predicate =
-                window
+            let mut predicate = window
                     .predicate(scores::CREATED_AT)
                     .and(col(scores::TARGET).in_list(
                         vec![
@@ -680,7 +679,9 @@ async fn base(
                             lit(ScoreTargetKind::Span.as_str()),
                         ],
                         false,
-                    ));
+                    ))
+                    // Issue occurrences never show as score columns or briefs (D-IC-18).
+                    .and(col(scores::SOURCE).not_eq(lit(ScoreSource::Issue.as_str())));
             if let Some(plan) = ids {
                 predicate = predicate.and(in_subquery(col(scores::TRACE_ID), Arc::new(plan)));
             }
@@ -1746,7 +1747,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use cetra_core::enums::SpanKind;
+    use cetra_core::enums::{ScoreSource, SpanKind};
     use cetra_core::names::environment;
     use cetra_core::score::Score;
     use cetra_core::span::Span;
@@ -2144,6 +2145,20 @@ mod tests {
         request.include_eval = true;
         let data = answer(&ctx, request).await;
         assert_line(line(&data, 0, None, false), &[(0, 0.0008)]);
+    }
+
+    #[tokio::test]
+    async fn score_widgets_leave_out_issue_occurrences() {
+        let value = r#"{"data_type": "numeric", "value": 0.5}"#;
+        let mut occurrence = score_row(1, 0, value, "{}", 30);
+        occurrence.source = ScoreSource::Issue;
+        let api = score_row(2, 0, value, "{}", 30);
+        // The scores' trace has a span in the window, so the scores semi-join keeps it.
+        let spans = [span(0, 0, minute(30), None)];
+        let ctx = context_with(&spans, &[occurrence, api]);
+        let counted = build(WidgetSource::Scores, count_query(), None);
+        let rows = rows_of(&answer(&ctx, ask(&counted, hour(), Shape::Total)).await).to_vec();
+        assert_eq!(rows[0].values[0], Some(1.0));
     }
 
     #[tokio::test]

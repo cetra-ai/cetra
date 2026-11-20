@@ -1,5 +1,6 @@
 import {
   BellRing,
+  Bug,
   ClipboardCheck,
   Database,
   FileText,
@@ -8,6 +9,7 @@ import {
   LayoutDashboard,
   ListChecks,
   MessagesSquare,
+  Radar,
   Rows3,
   SquareTerminal,
   Table2,
@@ -27,6 +29,7 @@ export const projectNav = [
   { section: "Observe", to: "/$org/$project/sessions", label: "Sessions", icon: MessagesSquare },
   { section: "Observe", to: "/$org/$project/users", label: "Users", icon: Users },
   { section: "Monitor", to: "/$org/$project/alerts", label: "Alerts", icon: BellRing },
+  { section: "Monitor", to: "/$org/$project/issues", label: "Issues", icon: Bug },
   { section: "Evaluate", to: "/$org/$project/prompts", label: "Prompts", icon: FileText },
   {
     section: "Evaluate",
@@ -40,6 +43,12 @@ export const projectNav = [
     to: "/$org/$project/online-rules",
     label: "Online rules",
     icon: ListChecks,
+  },
+  {
+    section: "Evaluate",
+    to: "/$org/$project/issue-sources",
+    label: "Issue sources",
+    icon: Radar,
   },
   {
     section: "Evaluate",

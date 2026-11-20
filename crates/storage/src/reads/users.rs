@@ -12,6 +12,7 @@ use std::sync::Arc;
 use arrow::compute::concat_batches;
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
+use cetra_core::enums::ScoreSource;
 use cetra_core::schema::{scores, traces};
 use datafusion::common::ScalarValue;
 use datafusion::error::DataFusionError;
@@ -389,7 +390,9 @@ async fn scores_of(ctx: &QueryContext, base: &DataFrame) -> Result<Vec<RecordBat
             col(scores::DATA_TYPE)
                 .in_list(vec![lit("numeric"), lit("boolean")], false)
                 .and(col(scores::VALUE_NUM).is_not_null())
-                .and(col(scores::TRACE_ID).is_not_null()),
+                .and(col(scores::TRACE_ID).is_not_null())
+                // Issue occurrences never show as score columns or briefs (D-IC-18).
+                .and(col(scores::SOURCE).not_eq(lit(ScoreSource::Issue.as_str()))),
         )
         .map_err(classify)?
         .select(vec![
@@ -1209,6 +1212,38 @@ mod tests {
         assert_eq!(scores[1]["data_type"], "numeric");
         assert!(values_match(&scores[1]["avg"], &serde_json::json!(0.4)));
         assert_eq!(scores[1]["count"], 2);
+    }
+
+    #[tokio::test]
+    async fn scores_leave_out_issue_occurrences() {
+        let spans = [user_span(1, 1_000, "u")];
+        let mut occurrence = score_row(1, 1, 100, 100, 100, false, "quality");
+        occurrence.source = cetra_core::enums::ScoreSource::Issue;
+        occurrence.value = ScoreValue::Numeric(0.9);
+        let mut api = score_row(2, 1, 100, 100, 100, false, "quality");
+        api.value = ScoreValue::Numeric(0.2);
+        let ctx = extras_context(&spans, &[occurrence, api]);
+        let extras = user_extras(
+            &ctx,
+            UserExtrasRequest {
+                filter: None,
+                scope: ListScope {
+                    window: None,
+                    include_eval: false,
+                    include_experiments: false,
+                },
+                user_ids: &["u"],
+                activity: window_of(0, 10_000),
+                timeout: TIMEOUT,
+            },
+        )
+        .await
+        .expect("extras");
+        let scores = json_rows(&extras.scores);
+        assert_eq!(scores.len(), 1, "{scores:?}");
+        assert_eq!(scores[0]["name"], "quality");
+        assert_eq!(scores[0]["count"], 1);
+        assert!(values_match(&scores[0]["avg"], &serde_json::json!(0.2)));
     }
 
     #[tokio::test]

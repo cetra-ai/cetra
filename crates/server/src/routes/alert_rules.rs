@@ -26,6 +26,7 @@ use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
 use crate::meta::alerts::{self, EventRow, NewRule, RulePatch, RuleRow};
+use crate::meta::issues;
 use crate::routes::read::open_query;
 
 const MIN_COOLDOWN_S: i64 = 300;
@@ -397,7 +398,7 @@ fn checked_cooldown(value: i64) -> Result<i64, ApiError> {
 }
 
 /// The channel ids of the project, sorted. A rule has at most 10, none twice, all its own.
-async fn checked_channels(
+pub(crate) async fn checked_channels(
     state: &AppState,
     project: cetra_core::ids::ProjectId,
     ids: &[Uuid],
@@ -420,7 +421,8 @@ async fn checked_channels(
 }
 
 /// The normalized condition. A filter is checked by the query layer, so a bad one is
-/// `400 invalid_filter` on the `filter` field.
+/// `400 invalid_filter` on the `filter` field. The issue or source of an `issue_occurrences`
+/// condition must exist in the project.
 async fn checked_condition(
     state: &AppState,
     org: OrgId,
@@ -434,6 +436,28 @@ async fn checked_condition(
     if let Some(text) = &condition.filter {
         let ctx = open_query(state, org, project, None).await?;
         cetra_storage::validate_filter(&ctx, cetra_storage::ViewName::Traces, text)?;
+    }
+    if let Some(id) = condition.issue_id {
+        let known = issues::get_issue(state.meta.reader(), project, id)
+            .await?
+            .is_some();
+        if !known {
+            return Err(field_error(
+                "condition.issue_id",
+                "no such issue in this project",
+            ));
+        }
+    }
+    if let Some(id) = condition.source_id {
+        let known = issues::get_source(state.meta.reader(), project, id)
+            .await?
+            .is_some();
+        if !known {
+            return Err(field_error(
+                "condition.source_id",
+                "no such issue source in this project",
+            ));
+        }
     }
     Ok(condition)
 }
@@ -512,6 +536,8 @@ mod tests {
     use crate::api::common::ProblemCode;
     use crate::auth::roles::OrgRole;
     use crate::meta::alerts::NewChannel;
+    use crate::meta::issues::{IssueState, SourceKind};
+    use crate::test_support::issues::{issue_row, put_issue, put_source, source_row};
     use crate::test_support::{Seeded, TestApp, TestResponse, assert_logs_clean, set_limits};
 
     fn rules(seeded: &Seeded) -> String {
@@ -1531,5 +1557,187 @@ mod tests {
             .send()
             .await;
         assert_eq!(key_create.status, 403);
+    }
+
+    /// Stores an error source of `project` and one open issue of it; returns both ids.
+    async fn source_and_issue(app: &TestApp, project: cetra_core::ids::ProjectId) -> (Uuid, Uuid) {
+        let now = app.state.clock.now_ns();
+        let source = source_row(project, "Errors", SourceKind::Error, true, now);
+        let source_id = source.id;
+        put_source(app, source).await;
+        let issue = Uuid::now_v7();
+        put_issue(
+            app,
+            issue_row(project, source_id, issue, "Boom", IssueState::Open, now),
+        )
+        .await;
+        (source_id, issue)
+    }
+
+    /// An `issue_occurrences` rule body: 15 minutes, `gte` 2, with `scope` (`issue_id` or
+    /// `source_id`) in the condition.
+    fn issue_body(name: &str, scope: Value) -> Value {
+        let mut condition = json!({
+            "metric": "issue_occurrences",
+            "window": "15m",
+            "comparator": "gte",
+            "threshold": 2,
+        });
+        if let (Some(condition), Value::Object(scope)) = (condition.as_object_mut(), scope) {
+            for (key, value) in scope {
+                condition.insert(key, value);
+            }
+        }
+        json!({"name": name, "condition": condition})
+    }
+
+    #[tokio::test]
+    async fn create_issue_rule_with_a_known_issue() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let (_, issue) = source_and_issue(&app, seeded.project.id).await;
+        let created = create_ok(
+            &app,
+            &seeded,
+            issue_body("Issue spikes", json!({"issue_id": issue})),
+        )
+        .await;
+        assert_eq!(created.condition.issue_id, Some(issue));
+        assert_eq!(created.condition.source_id, None);
+        assert_eq!(created.condition.min_count, None);
+        let raw = serde_json::to_value(&created.condition).expect("serializes");
+        assert!(raw.get("min_count").is_none(), "{raw}");
+    }
+
+    #[tokio::test]
+    async fn create_rule_with_an_unknown_issue_is_400() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let refused = send(
+            &app,
+            Method::POST,
+            &rules(&seeded),
+            &seeded.cookie,
+            Some(issue_body("Ghost", json!({"issue_id": Uuid::now_v7()}))),
+        )
+        .await;
+        assert_eq!(refused.status, 400);
+        assert_eq!(
+            problem_of(&refused),
+            pairs(&[("condition.issue_id", "no such issue in this project")])
+        );
+    }
+
+    #[tokio::test]
+    async fn create_rule_with_an_issue_of_another_project_is_400() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let (other, _) = app.add_project(&seeded, "other", None).await;
+        let (_, foreign) = source_and_issue(&app, other.id).await;
+        let refused = send(
+            &app,
+            Method::POST,
+            &rules(&seeded),
+            &seeded.cookie,
+            Some(issue_body("Foreign", json!({"issue_id": foreign}))),
+        )
+        .await;
+        assert_eq!(refused.status, 400);
+        assert_eq!(
+            problem_of(&refused),
+            pairs(&[("condition.issue_id", "no such issue in this project")])
+        );
+    }
+
+    #[tokio::test]
+    async fn create_rule_with_an_unknown_source_is_400() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let refused = send(
+            &app,
+            Method::POST,
+            &rules(&seeded),
+            &seeded.cookie,
+            Some(issue_body(
+                "Ghost source",
+                json!({"source_id": Uuid::now_v7()}),
+            )),
+        )
+        .await;
+        assert_eq!(refused.status, 400);
+        assert_eq!(
+            problem_of(&refused),
+            pairs(&[(
+                "condition.source_id",
+                "no such issue source in this project"
+            )])
+        );
+    }
+
+    #[tokio::test]
+    async fn create_source_rule_with_a_known_source() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let (source, _) = source_and_issue(&app, seeded.project.id).await;
+        let created = create_ok(
+            &app,
+            &seeded,
+            issue_body("Source spikes", json!({"source_id": source})),
+        )
+        .await;
+        assert_eq!(created.condition.source_id, Some(source));
+        assert_eq!(created.condition.issue_id, None);
+    }
+
+    #[tokio::test]
+    async fn update_to_an_unknown_issue_is_400() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let created = create_ok(&app, &seeded, rule_body("Rule")).await;
+        let path = format!("{}/{}", rules(&seeded), created.id);
+        let refused = send(
+            &app,
+            Method::PATCH,
+            &path,
+            &seeded.cookie,
+            Some(json!({
+                "condition": {"metric": "issue_occurrences", "window": "15m", "comparator": "gte", "threshold": 2, "issue_id": Uuid::now_v7()},
+            })),
+        )
+        .await;
+        assert_eq!(refused.status, 400);
+        assert_eq!(
+            problem_of(&refused),
+            pairs(&[("condition.issue_id", "no such issue in this project")])
+        );
+    }
+
+    #[tokio::test]
+    async fn issue_rule_counts_toward_the_rule_limit() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let (source, _) = source_and_issue(&app, seeded.project.id).await;
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-01T00:00:00Z",
+            &json!({"max_alert_rules": 1}),
+        );
+        create_ok(
+            &app,
+            &seeded,
+            issue_body("Source rule", json!({"source_id": source})),
+        )
+        .await;
+        let second = send(
+            &app,
+            Method::POST,
+            &rules(&seeded),
+            &seeded.cookie,
+            Some(rule_body("Second")),
+        )
+        .await;
+        assert_eq!(second.status, 403);
+        assert_eq!(second.problem().code, ProblemCode::PlanLimit);
     }
 }

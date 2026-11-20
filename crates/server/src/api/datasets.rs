@@ -488,6 +488,17 @@ pub struct FromTracesRequest {
     pub items: Vec<TraceRef>,
 }
 
+/// `POST …/issues/{id}/dataset-items` body (D-IC-22).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct IssueDatasetItemsRequest {
+    /// The dataset: its id or its name.
+    pub dataset: String,
+    /// Most traces to add, 1 to 100. Default 100.
+    #[serde(default, deserialize_with = "super::online_rules::present")]
+    pub limit: Option<u32>,
+}
+
 /// A trace of a bulk add that was not copied (D-J-25).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct SkippedTrace {

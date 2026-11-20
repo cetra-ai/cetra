@@ -115,6 +115,10 @@ fn merge_limits(claim: &LimitsClaim, defaults: &Limits) -> Limits {
             claim.max_active_online_rules,
             defaults.max_active_online_rules,
         ),
+        max_active_issue_sources: merge(
+            claim.max_active_issue_sources,
+            defaults.max_active_issue_sources,
+        ),
         max_annotation_queues: merge(claim.max_annotation_queues, defaults.max_annotation_queues),
     }
 }

@@ -67,6 +67,7 @@ it("recognizes keys, chords, and modifiers", () => {
   expect(reduceShortcut("g", { ...plain, key: "e" }, false).action).toBe("go-evaluators");
   expect(reduceShortcut("g", { ...plain, key: "i" }, false).action).toBe("go-datasets");
   expect(reduceShortcut("g", { ...plain, key: "x" }, false).action).toBe("go-experiments");
+  expect(reduceShortcut("g", { ...plain, key: "y" }, false).action).toBe("go-issues");
   expect(reduceShortcut("g", { ...plain, key: "m" }, false).action).toBe("go-prompts");
   expect(reduceShortcut("g", { ...plain, key: "l" }, false).action).toBe("go-playground");
   expect(reduceShortcut("g", { ...plain, key: "r" }, false).action).toBe("go-annotation-queues");
@@ -94,6 +95,8 @@ it("gives every project page its go letter and back again", () => {
   expect(goKeyOf("/$org/$project/spans")).toBe("p");
   expect(goKeyOf("/$org/$project/sessions")).toBe("s");
   expect(goKeyOf("/$org/$project/experiments")).toBe("x");
+  expect(goKeyOf("/$org/$project/issues")).toBe("y");
+  expect(goKeyOf("/$org/$project/issue-sources")).toBe("n");
   expect(goKeyOf("/$org/$project/prompts")).toBe("m");
   expect(goKeyOf("/$org/$project/annotation-queues")).toBe("r");
   expect(goKeyOf("/$org/$project/playground")).toBe("l");

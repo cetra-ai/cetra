@@ -1,5 +1,6 @@
 ---
 source: crates/server/src/meta/mod.rs
+assertion_line: 498
 expression: text
 ---
 table agent_contexts
@@ -510,6 +511,158 @@ CREATE TABLE invites (
 index invites_pending
 CREATE UNIQUE INDEX invites_pending ON invites(org_id, email) WHERE accepted_at IS NULL
 
+table issue_candidates
+CREATE TABLE issue_candidates (
+    id                     TEXT PRIMARY KEY,
+    project_id             TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    source_id              TEXT NOT NULL REFERENCES issue_sources(id) ON DELETE CASCADE,
+    target                 TEXT NOT NULL CHECK (target IN ('trace', 'span', 'session')),
+    trace_id               BLOB,
+    span_id                BLOB,
+    session_id             TEXT,
+    user_id                TEXT,
+    trace_start            INTEGER,
+    score_id               TEXT,
+    dedup_key              TEXT NOT NULL UNIQUE,
+    status                 TEXT NOT NULL CHECK (status IN ('queued', 'running', 'pending', 'assigned', 'outlier', 'dropped', 'failed', 'skipped')),
+    attempts               INTEGER NOT NULL DEFAULT 0,
+    claims                 INTEGER NOT NULL DEFAULT 0,
+    interruptions          INTEGER NOT NULL DEFAULT 0,
+    load_retries           INTEGER NOT NULL DEFAULT 0,
+    not_before             INTEGER NOT NULL,
+    error_class            TEXT,
+    issue_id               TEXT REFERENCES issues(id) ON DELETE SET NULL,
+    summary                TEXT,
+    summary_prompt_version INTEGER,
+    vector                 BLOB,
+    embed_model            TEXT,
+    dimension              INTEGER,
+    call_trace_id          BLOB,
+    cost_usd               REAL NOT NULL DEFAULT 0,
+    created_at             INTEGER NOT NULL,
+    updated_at             INTEGER NOT NULL
+)
+
+index issue_candidates_ready
+CREATE INDEX issue_candidates_ready ON issue_candidates (not_before) WHERE status = 'queued'
+
+index issue_candidates_source
+CREATE INDEX issue_candidates_source ON issue_candidates (source_id, status, created_at)
+
+index issue_candidates_trace
+CREATE INDEX issue_candidates_trace ON issue_candidates (project_id, trace_id)
+
+table issue_events
+CREATE TABLE issue_events (
+    id            TEXT PRIMARY KEY,
+    issue_id      TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+    kind          TEXT NOT NULL CHECK (kind IN ('created', 'state_changed', 'renamed', 'merged', 'regressed')),
+    actor_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+    from_value    TEXT,
+    to_value      TEXT,
+    at            INTEGER NOT NULL
+)
+
+index issue_events_issue
+CREATE INDEX issue_events_issue ON issue_events (issue_id, at, id)
+
+table issue_notifications
+CREATE TABLE issue_notifications (
+    id         TEXT PRIMARY KEY,
+    source_id  TEXT NOT NULL REFERENCES issue_sources(id) ON DELETE CASCADE,
+    digest     TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+)
+
+index issue_notifications_created
+CREATE INDEX issue_notifications_created ON issue_notifications (created_at)
+
+table issue_refits
+CREATE TABLE issue_refits (
+    id          TEXT PRIMARY KEY,
+    source_id   TEXT NOT NULL REFERENCES issue_sources(id) ON DELETE CASCADE,
+    trigger     TEXT NOT NULL CHECK (trigger IN ('schedule', 'manual')),
+    started_at  INTEGER NOT NULL,
+    finished_at INTEGER,
+    pending     INTEGER NOT NULL DEFAULT 0,
+    clusters    INTEGER NOT NULL DEFAULT 0,
+    created     INTEGER NOT NULL DEFAULT 0,
+    joined      INTEGER NOT NULL DEFAULT 0,
+    outliers    INTEGER NOT NULL DEFAULT 0,
+    cost_usd    REAL NOT NULL DEFAULT 0,
+    error_class TEXT
+)
+
+index issue_refits_source
+CREATE INDEX issue_refits_source ON issue_refits (source_id, started_at DESC)
+
+table issue_source_channels
+CREATE TABLE issue_source_channels (
+    source_id  TEXT NOT NULL REFERENCES issue_sources(id) ON DELETE CASCADE,
+    channel_id TEXT NOT NULL REFERENCES notification_channels(id) ON DELETE CASCADE,
+    PRIMARY KEY (source_id, channel_id)
+)
+
+index issue_source_channels_channel
+CREATE INDEX issue_source_channels_channel ON issue_source_channels (channel_id)
+
+table issue_source_days
+CREATE TABLE issue_source_days (
+    source_id  TEXT NOT NULL REFERENCES issue_sources(id) ON DELETE CASCADE,
+    day        INTEGER NOT NULL,
+    candidates INTEGER NOT NULL DEFAULT 0,
+    spent_usd  REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (source_id, day)
+)
+
+table issue_sources
+CREATE TABLE issue_sources (
+    id            TEXT PRIMARY KEY,
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name          TEXT NOT NULL,
+    kind          TEXT NOT NULL,
+    filter        TEXT,
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    paused_reason TEXT,
+    paused_at     INTEGER,
+    created_by    TEXT REFERENCES users(id) ON DELETE SET NULL,
+    created_at    INTEGER NOT NULL,
+    updated_at    INTEGER NOT NULL, sample_rate REAL, daily_cap INTEGER, score_names TEXT, feedback_sources TEXT, chat_connection_id TEXT REFERENCES llm_connections(id), chat_model TEXT, embed_connection_id TEXT REFERENCES llm_connections(id), embed_model TEXT, embed_dimension INTEGER, floor REAL, min_issue_size INTEGER, budget_usd REAL, budget_period TEXT, paused_detail TEXT, next_refit_at INTEGER, refit_trigger TEXT NOT NULL DEFAULT 'schedule' CHECK (refit_trigger IN ('schedule', 'manual')), last_notified_at INTEGER,
+    UNIQUE (project_id, name)
+)
+
+table issues
+CREATE TABLE issues (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    source_id   TEXT NOT NULL REFERENCES issue_sources(id) ON DELETE CASCADE,
+    fingerprint TEXT,
+    title       TEXT NOT NULL,
+    description TEXT,
+    state       TEXT NOT NULL CHECK (state IN ('open', 'resolved', 'ignored', 'merged')),
+    regressed   INTEGER NOT NULL DEFAULT 0,
+    merged_into TEXT REFERENCES issues(id) ON DELETE SET NULL,
+    first_seen  INTEGER NOT NULL,
+    last_seen   INTEGER NOT NULL,
+    resolved_at INTEGER,
+    resolved_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    created_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL
+, centroid BLOB, member_count INTEGER NOT NULL DEFAULT 0)
+
+index issues_merged_into
+CREATE INDEX issues_merged_into ON issues (merged_into) WHERE merged_into IS NOT NULL
+
+index issues_project_last_seen
+CREATE INDEX issues_project_last_seen ON issues (project_id, last_seen DESC, id)
+
+index issues_source
+CREATE INDEX issues_source ON issues (source_id)
+
+index issues_source_fingerprint
+CREATE UNIQUE INDEX issues_source_fingerprint ON issues (source_id, fingerprint)
+    WHERE fingerprint IS NOT NULL
+
 table llm_connections
 CREATE TABLE llm_connections (
   id TEXT PRIMARY KEY,
@@ -577,16 +730,18 @@ index notification_channels_name
 CREATE UNIQUE INDEX notification_channels_name ON notification_channels(project_id, name)
 
 table notification_deliveries
-CREATE TABLE notification_deliveries (
-  id TEXT PRIMARY KEY,
-  event_id TEXT NOT NULL REFERENCES alert_events(id) ON DELETE CASCADE,
-  channel_id TEXT NOT NULL REFERENCES notification_channels(id) ON DELETE CASCADE,
-  status TEXT NOT NULL,
-  attempts INTEGER NOT NULL DEFAULT 0,
-  next_attempt_at INTEGER,
-  last_error TEXT,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+CREATE TABLE "notification_deliveries" (
+    id                    TEXT PRIMARY KEY,
+    event_id              TEXT REFERENCES alert_events(id) ON DELETE CASCADE,
+    issue_notification_id TEXT REFERENCES issue_notifications(id) ON DELETE CASCADE,
+    channel_id            TEXT NOT NULL REFERENCES notification_channels(id) ON DELETE CASCADE,
+    status                TEXT NOT NULL,
+    attempts              INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at       INTEGER,
+    last_error            TEXT,
+    created_at            INTEGER NOT NULL,
+    updated_at            INTEGER NOT NULL,
+    CHECK ((event_id IS NULL) <> (issue_notification_id IS NULL))
 )
 
 index notification_deliveries_channel
@@ -597,6 +752,9 @@ CREATE INDEX notification_deliveries_due ON notification_deliveries(status, next
 
 index notification_deliveries_event
 CREATE INDEX notification_deliveries_event ON notification_deliveries(event_id)
+
+index notification_deliveries_issue
+CREATE INDEX notification_deliveries_issue ON notification_deliveries(issue_notification_id)
 
 table online_rules
 CREATE TABLE online_rules (
@@ -948,6 +1106,26 @@ index sqlite_autoindex_instance_settings_1
 index sqlite_autoindex_invites_1
 
 index sqlite_autoindex_invites_2
+
+index sqlite_autoindex_issue_candidates_1
+
+index sqlite_autoindex_issue_candidates_2
+
+index sqlite_autoindex_issue_events_1
+
+index sqlite_autoindex_issue_notifications_1
+
+index sqlite_autoindex_issue_refits_1
+
+index sqlite_autoindex_issue_source_channels_1
+
+index sqlite_autoindex_issue_source_days_1
+
+index sqlite_autoindex_issue_sources_1
+
+index sqlite_autoindex_issue_sources_2
+
+index sqlite_autoindex_issues_1
 
 index sqlite_autoindex_llm_connections_1
 

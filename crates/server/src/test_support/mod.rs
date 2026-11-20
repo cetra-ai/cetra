@@ -2,6 +2,7 @@
 #![cfg(test)]
 
 pub(crate) mod hook_receiver;
+pub(crate) mod issues;
 pub(crate) mod mock_idp;
 pub(crate) mod mock_llm;
 pub(crate) mod mock_webhook;
@@ -365,6 +366,9 @@ impl TestApp {
         .await
         .expect("stored org tokens load");
         let eval = crate::eval::EvalQueue::new(config.eval.workers);
+        let issue_workers = Arc::new(tokio::sync::Semaphore::new(
+            usize::try_from(config.issues.workers).unwrap_or(usize::MAX),
+        ));
         let org_sso = crate::ee::org_sso::OrgSso::new(
             cetra_eval::EgressPolicy {
                 allow_private_network: config.security.allow_private_network_egress,
@@ -394,6 +398,9 @@ impl TestApp {
             last_ingest: crate::ingest::last_ingest::LastIngest::default(),
             live: crate::live::LiveBus::new(crate::live::StreamTiming::TEST),
             widget_cache: crate::routes::dashboards::WidgetCache::default(),
+            issue_score_rules: crate::issues::triggers::ScoreRules::default(),
+            issue_workers,
+            issue_wake: tokio::sync::Notify::new(),
             usage: crate::usage::Usage::default(),
             alert_email_count: crate::alerts::quota::DailyEmailCount::default(),
             deletions: crate::deletion::Deletions::new(),
@@ -1273,6 +1280,7 @@ fn default_config(data_dir: &std::path::Path) -> ServerConfig {
         ingest: IngestConfig::default(),
         media: MediaConfig::default(),
         eval: EvalConfig::default(),
+        issues: crate::config::IssuesConfig::default(),
         security: SecurityConfig::default(),
         // Most tests act as a cloud cell (D-P-50); a test of the default turns it off.
         entitlements: EntitlementsConfig {
@@ -1826,6 +1834,7 @@ pub(crate) fn config(data_dir: &std::path::Path) -> ServerConfig {
         ingest: IngestConfig::default(),
         media: MediaConfig::default(),
         eval: EvalConfig::default(),
+        issues: crate::config::IssuesConfig::default(),
         security: SecurityConfig::default(),
         entitlements: EntitlementsConfig::default(),
         orgs: OrgsConfig::default(),

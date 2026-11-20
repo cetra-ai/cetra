@@ -3,6 +3,7 @@
 //! playground streams it.
 
 mod anthropic;
+mod embed;
 mod gemini;
 mod http;
 mod openai;
@@ -19,6 +20,7 @@ use reqwest::Url;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Map, Value, json};
 
+pub(crate) use embed::{EmbedCall, embed};
 pub(crate) use http::{provider_error, stream_error};
 pub use stream::ChatStream;
 use stream::Decoder;

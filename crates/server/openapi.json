@@ -16957,6 +16957,1573 @@
         }
       }
     },
+    "/api/v1/projects/{project}/issue-sources": {
+      "get": {
+        "tags": [
+          "issues"
+        ],
+        "summary": "List issue sources",
+        "description": "Any project member can read. `org_active_sources` counts the enabled sources of the whole org for the plan's active-source limit (D-IC-13).",
+        "operationId": "list_issue_sources",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of items to return (1–1000, default 50).",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Limit",
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque cursor from a previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of issue sources.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssueSourcePage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "issues"
+        ],
+        "summary": "Create an issue source",
+        "description": "Project members and above. API keys cannot call it. 403 `plan_limit` when the org is at its active-source limit.",
+        "operationId": "post_issue_source",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateIssueSourceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The created source.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssueSource"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/issue-sources/{id}": {
+      "get": {
+        "tags": [
+          "issues"
+        ],
+        "summary": "Get an issue source",
+        "description": "Any project member can read.",
+        "operationId": "get_issue_source",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Issue source id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The source.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssueSource"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "issues"
+        ],
+        "summary": "Delete an issue source",
+        "description": "Project members and above. API keys cannot call it. The source's issues and their events are deleted with it; the occurrence scores stay (D-IC-3).",
+        "operationId": "delete_issue_source",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Issue source id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted."
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "issues"
+        ],
+        "summary": "Update an issue source",
+        "description": "Project members and above. API keys cannot call it. `kind` cannot change. Enabling a source checks the active-source limit.",
+        "operationId": "patch_issue_source",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Issue source id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateIssueSourceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated source.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssueSource"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/issue-sources/{id}/refit": {
+      "post": {
+        "tags": [
+          "issues"
+        ],
+        "summary": "Refit an issue source now",
+        "description": "Project members and above. API keys cannot call it. Sets the source's next refit to now, so the next sweep refits it. 400 for an `error` source, or a disabled or paused one. The refit is recorded as `manual`. 409 when a refit started less than 10 minutes ago or one is already due.",
+        "operationId": "post_issue_source_refit",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Issue source id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The source, with `next_refit_at` set to now.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssueSource"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/issue-sources/{id}/refits": {
+      "get": {
+        "tags": [
+          "issues"
+        ],
+        "summary": "List the refits of an issue source",
+        "description": "Any project member can read. The newest 50 refits of the source, newest first.",
+        "operationId": "list_issue_source_refits",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Issue source id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The refits, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssueRefitPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/issues": {
+      "get": {
+        "tags": [
+          "issues"
+        ],
+        "summary": "List issues",
+        "description": "Any project member can read. `count` and `users` cover the period `[from, to)` (default the last 24 hours). Merged issues are listed only when `state` names `merged`. Blank `ids` means no filter.",
+        "operationId": "list_issues",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Comma-separated states: `open`, `resolved`, `ignored`, `merged`, or `all` (every state\nbut `merged`). Default `open`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "source_id",
+            "in": "query",
+            "description": "Issues of this source only.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Keeps issues whose title contains this text, ignoring case.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "description": "`last_seen` (default) or `first_seen`, newest first.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Start of the period for `count` and `users`, inclusive. RFC 3339 or epoch milliseconds.\nDefault 24 hours before `to`.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/TimeParam"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "End of the period for `count` and `users`, exclusive. RFC 3339 or epoch milliseconds.\nDefault now.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/TimeParam"
+            }
+          },
+          {
+            "name": "ids",
+            "in": "query",
+            "description": "Comma-separated issue ids, at most 100. Only these issues are listed. Blank means no\nfilter.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of items to return (1–1000, default 50).",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Limit",
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque cursor from a previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of issues.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssuePage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is busy or a dependency is unavailable. Retry later.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/issues/{id}": {
+      "get": {
+        "tags": [
+          "issues"
+        ],
+        "summary": "Get an issue",
+        "description": "Any project member can read. `count` and `users` cover the last 24 hours. `merged_from` lists the issues merged into this one.",
+        "operationId": "get_issue",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Issue id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The issue.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Issue"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is busy or a dependency is unavailable. Retry later.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "issues"
+        ],
+        "summary": "Update an issue",
+        "description": "Project members and above. API keys and personal access tokens cannot call it. `title` renames the issue and records a `renamed` event. `description` records no event; `null` clears it. `state` resolves, ignores or reopens the issue and records a `state_changed` event; a resolved issue that recurs is reopened as regressed. `merged` is refused: merge with the merge operation. Setting a value it already has changes nothing. A merged issue cannot change (409).",
+        "operationId": "patch_issue",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Issue id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateIssueRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated issue, with its counts over the last 24 hours.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Issue"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/projects/{project}/issues/{id}/dataset-items": {
+      "post": {
+        "tags": [
+          "issues"
+        ],
+        "summary": "Add an issue's occurrences to a dataset",
+        "description": "Project members and above, a read-write personal access token, or an API key with `write` (D-IC-22). Copies the most recent occurrence traces of the issue and of the issues merged into it, one item per trace and up to `limit` (default and maximum 100), into the dataset as one new version, as `items/from-traces` does. An occurrence with an error span uses that span, else the trace root. Items get the metadata `cetra.issue_id`. A trace that cannot be copied is listed in `skipped`; no occurrence in the data window or no copyable trace is a 400.",
+        "operationId": "post_issue_dataset_items",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Issue id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IssueDatasetItemsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The new version, the items added and the traces skipped.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FromTracesResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is busy or a dependency is unavailable. Retry later.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/issues/{id}/events": {
+      "get": {
+        "tags": [
+          "issues"
+        ],
+        "summary": "List the events of an issue",
+        "description": "Any project member can read. The newest 100 events of the issue, newest first.",
+        "operationId": "get_issue_events",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Issue id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The events.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssueEventPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/issues/{id}/merge": {
+      "post": {
+        "tags": [
+          "issues"
+        ],
+        "summary": "Merge an issue into another",
+        "description": "Project members and above. API keys and personal access tokens cannot call it. Folds the issue into `into`, an issue of the same source that is not merged. The issues merged into it move to `into` too, so chains stay one level deep. Its occurrences count on `into`. Answers the target issue. 409 when both are the same issue, the issues are in different sources, this issue is already merged, or the target is merged.",
+        "operationId": "post_issue_merge",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Issue id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MergeIssueRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The target issue, with its counts over the last 24 hours.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Issue"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/projects/{project}/issues/{id}/occurrences": {
+      "get": {
+        "tags": [
+          "issues"
+        ],
+        "summary": "Get the occurrences of an issue",
+        "description": "Any project member can read. `days` has one entry per UTC day of `[from, to)` (default the last 14 days, at most 90) with an occurrence. `examples` are the newest 20 occurrences of the issue and of the issues merged into it, not limited to the period.",
+        "operationId": "get_issue_occurrences",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Issue id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Start of the days, inclusive. RFC 3339 or epoch milliseconds. Default 14 days before\n`to`; the period is at most 90 days.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/TimeParam"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "End of the days, exclusive. RFC 3339 or epoch milliseconds. Default now.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/TimeParam"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The occurrences.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssueOccurrences"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is busy or a dependency is unavailable. Retry later.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{project}/media/{sha256}": {
       "get": {
         "tags": [
@@ -24471,6 +26038,11 @@
             "type": "string",
             "description": "Filter DSL expression over `traces`. Absent means every trace."
           },
+          "issue_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "`issue_occurrences` only: count one issue and the issues merged into it. Exactly one of\n`issue_id` and `source_id` is set for that metric."
+          },
           "metric": {
             "$ref": "#/components/schemas/AlertMetric",
             "description": "What is measured."
@@ -24478,11 +26050,16 @@
           "min_count": {
             "type": "integer",
             "format": "int64",
-            "description": "Fewer samples than this gives `no_data`. Not for `cost`. Defaults: 20, or 10 for `score`."
+            "description": "Fewer samples than this gives `no_data`. Not for `cost` or `issue_occurrences`. Defaults:\n20, or 10 for `score`."
           },
           "score_name": {
             "type": "string",
             "description": "`score` only: the score name."
+          },
+          "source_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "`issue_occurrences` only: count every issue of the source that is not ignored or merged,\nand the issues merged into them."
           },
           "target": {
             "$ref": "#/components/schemas/LatencyTarget",
@@ -24491,7 +26068,7 @@
           "threshold": {
             "type": "number",
             "format": "double",
-            "description": "Fraction for `error_rate` and `pass_rate`, USD for `cost`, milliseconds for `latency_p95`\n(below the window length for a `trace` target)."
+            "description": "Fraction for `error_rate` and `pass_rate`, USD for `cost`, milliseconds for `latency_p95`\n(below the window length for a `trace` target), occurrences for `issue_occurrences`."
           },
           "window": {
             "$ref": "#/components/schemas/AlertWindow",
@@ -24674,7 +26251,8 @@
           "error_rate",
           "cost",
           "latency_p95",
-          "score"
+          "score",
+          "issue_occurrences"
         ]
       },
       "AlertRule": {
@@ -26691,6 +28269,104 @@
           "role": {
             "$ref": "#/components/schemas/OrgRole",
             "description": "Role granted on accept. Not above the caller's role."
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateIssueSourceRequest": {
+        "type": "object",
+        "description": "`POST /api/v1/projects/{project}/issue-sources` body. Absent optional fields take their defaults.\n\nOptional fields refuse `null` (spec 09 § Conventions).",
+        "required": [
+          "name",
+          "kind"
+        ],
+        "properties": {
+          "budget_period": {
+            "$ref": "#/components/schemas/BudgetPeriod",
+            "description": "Period of the budget. Needed with `budget_usd`."
+          },
+          "budget_usd": {
+            "type": "number",
+            "format": "double",
+            "description": "Spend limit per `budget_period`, in USD. Needs `budget_period`, and the models must be\npriced."
+          },
+          "channel_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Channels notified of new and regressed issues, at most 10 channels of this project.\nDefault none."
+          },
+          "chat_connection_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Connection of the chat model. Required for LLM kinds."
+          },
+          "chat_model": {
+            "type": "string",
+            "description": "Chat model of that connection. Required for LLM kinds."
+          },
+          "daily_cap": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Most candidates admitted per UTC day, 1 to 10 000. LLM kinds only. Default 500.",
+            "minimum": 0
+          },
+          "embed_connection_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Connection of the embedding model. Required for LLM kinds. Anthropic cannot embed."
+          },
+          "embed_model": {
+            "type": "string",
+            "description": "Embedding model of that connection. Required for LLM kinds. Fixed after create."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether the source runs. Default true."
+          },
+          "feedback_sources": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Feedback sources of a `feedback` source: `end_user` and/or `human`. Default both."
+          },
+          "filter": {
+            "type": "string",
+            "description": "Spans filter. Absent means no filter."
+          },
+          "floor": {
+            "type": "number",
+            "format": "double",
+            "description": "Cosine similarity at which a candidate joins an issue, 0.5 to 0.99. Default 0.80."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/IssueSourceKind",
+            "description": "What the source reads."
+          },
+          "min_issue_size": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Smallest group a refit makes into a new issue, 2 to 100. Default 5.",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name, 1 to 128 characters after trimming."
+          },
+          "sample_rate": {
+            "type": "number",
+            "format": "double",
+            "description": "Share of the matching traces or scores that become candidates, in `(0, 1]`. LLM kinds\nonly. Default 1."
+          },
+          "score_names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Score names of a `score` or `feedback` source: 1 to 8 names of 1 to 255 bytes. Required\nfor those kinds; a `topic` source refuses it."
           }
         },
         "additionalProperties": false
@@ -30077,6 +31753,665 @@
           }
         }
       },
+      "Issue": {
+        "type": "object",
+        "description": "An issue: one distinct error of an error source (spec 09 § Issues, D-IC-10).",
+        "required": [
+          "id",
+          "project_id",
+          "source_id",
+          "source_name",
+          "kind",
+          "score_name",
+          "title",
+          "state",
+          "regressed",
+          "merged_from",
+          "first_seen",
+          "last_seen",
+          "created_at",
+          "updated_at",
+          "count",
+          "users"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Occurrences in the period: the last 24 hours on `get`, or the `from`/`to` period on\n`list`. Counts the issue's own occurrences and those of the issues merged into it.",
+            "minimum": 0
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Creation time. JSON is RFC 3339."
+          },
+          "description": {
+            "type": "string",
+            "description": "Description written by a member. Omitted when there is none."
+          },
+          "first_seen": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Start of the earliest occurrence. JSON is RFC 3339."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Issue id."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/IssueSourceKind",
+            "description": "Kind of that source."
+          },
+          "last_seen": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Start of the latest occurrence. JSON is RFC 3339."
+          },
+          "merged_from": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Issues merged into this one. Their occurrences count here. Ordered by occurrence count\nover the read's period, most first, then by id."
+          },
+          "merged_into": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The issue this one was merged into. Omitted unless `state` is `merged`."
+          },
+          "project_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The project the issue belongs to."
+          },
+          "regressed": {
+            "type": "boolean",
+            "description": "`true` when a resolved issue recurred and was reopened."
+          },
+          "resolved_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it was resolved. Omitted unless the issue is resolved."
+          },
+          "resolved_by": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Who resolved it. Omitted when nobody did or the user is unknown."
+          },
+          "score_name": {
+            "type": "string",
+            "description": "Name of the occurrence scores of this issue: `issue:<id>`."
+          },
+          "source_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The source the issue belongs to."
+          },
+          "source_name": {
+            "type": "string",
+            "description": "Name of that source."
+          },
+          "state": {
+            "$ref": "#/components/schemas/IssueState",
+            "description": "Lifecycle state."
+          },
+          "title": {
+            "type": "string",
+            "description": "Title, from the error."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Last change time. JSON is RFC 3339."
+          },
+          "users": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Distinct users in the same period: the largest user count of the issue's names, so an\napproximation when merged issues share users.",
+            "minimum": 0
+          }
+        }
+      },
+      "IssueCandidateCounts": {
+        "type": "object",
+        "description": "Candidates of an LLM source created in the last 24 hours, by status (D-IC-12).",
+        "required": [
+          "queued",
+          "pending",
+          "assigned",
+          "dropped",
+          "failed",
+          "skipped"
+        ],
+        "properties": {
+          "assigned": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Joined an issue.",
+            "minimum": 0
+          },
+          "dropped": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Not kept: the trace is gone, or the daily cap was reached.",
+            "minimum": 0
+          },
+          "failed": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Failed after its retries.",
+            "minimum": 0
+          },
+          "pending": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Embedded, waiting for the next refit.",
+            "minimum": 0
+          },
+          "queued": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Waiting for a worker, or for their retry time.",
+            "minimum": 0
+          },
+          "skipped": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Skipped: the source was deleted, paused too long, or the trace was deleted.",
+            "minimum": 0
+          }
+        }
+      },
+      "IssueDatasetItemsRequest": {
+        "type": "object",
+        "description": "`POST …/issues/{id}/dataset-items` body (D-IC-22).",
+        "required": [
+          "dataset"
+        ],
+        "properties": {
+          "dataset": {
+            "type": "string",
+            "description": "The dataset: its id or its name."
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Most traces to add, 1 to 100. Default 100.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "IssueDay": {
+        "type": "object",
+        "description": "One UTC day of an issue's occurrences.",
+        "required": [
+          "day",
+          "count",
+          "users"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Occurrences that day.",
+            "minimum": 0
+          },
+          "day": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Start of the UTC day. JSON is RFC 3339."
+          },
+          "users": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Largest user count of the issue's names that day.",
+            "minimum": 0
+          }
+        }
+      },
+      "IssueEvent": {
+        "type": "object",
+        "description": "One entry of an issue's history (D-IC-10).",
+        "required": [
+          "id",
+          "kind",
+          "at"
+        ],
+        "properties": {
+          "actor_user_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The user who acted. Omitted for the system or an unknown user."
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it happened. JSON is RFC 3339."
+          },
+          "from_value": {
+            "type": "string",
+            "description": "The value before the change, when there is one."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Event id."
+          },
+          "kind": {
+            "type": "string",
+            "description": "`created`, `state_changed`, `renamed`, `merged` or `regressed`."
+          },
+          "to_value": {
+            "type": "string",
+            "description": "The value after the change, when there is one."
+          }
+        }
+      },
+      "IssueEventPage": {
+        "type": "object",
+        "description": "`GET …/issues/{id}/events` answer: the newest 100 events, newest first.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IssueEvent"
+            },
+            "description": "The events, newest first."
+          }
+        }
+      },
+      "IssueExample": {
+        "type": "object",
+        "description": "One occurrence of an issue, with the trace it is on.",
+        "required": [
+          "trace_id",
+          "created_at",
+          "issue_id"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the occurrence happened (the trace's start). JSON is RFC 3339."
+          },
+          "issue_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The issue the occurrence belongs to: the issue itself or one merged into it."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Reason stored with the occurrence. Omitted when there is none."
+          },
+          "span_id": {
+            "type": "string",
+            "description": "The error span the occurrence came from, 16 lowercase hex digits. Omitted when unknown."
+          },
+          "trace_id": {
+            "type": "string",
+            "description": "Trace id, 32 lowercase hex digits."
+          }
+        }
+      },
+      "IssueOccurrences": {
+        "type": "object",
+        "description": "Occurrences of an issue (spec 09 § Issues).",
+        "required": [
+          "days",
+          "examples"
+        ],
+        "properties": {
+          "days": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IssueDay"
+            },
+            "description": "One entry per UTC day of the period with at least one occurrence, oldest first. `users`\nis the largest user count of the issue's names that day, an approximation when merged\nissues share users."
+          },
+          "examples": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IssueExample"
+            },
+            "description": "The newest occurrences of the issue and of its seven merged issues with the most\noccurrences in the period (eight names in all), at most 20. Not limited to the period."
+          }
+        }
+      },
+      "IssuePage": {
+        "type": "object",
+        "description": "One page of results. `next_cursor` is null when there is no next page.",
+        "required": [
+          "data",
+          "next_cursor"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Issue"
+            },
+            "description": "Items in this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor for the next page, or null when this is the last page."
+          }
+        }
+      },
+      "IssueRefit": {
+        "type": "object",
+        "description": "One refit of an LLM source (D-IC-8).",
+        "required": [
+          "id",
+          "trigger",
+          "started_at",
+          "pending",
+          "clusters",
+          "created",
+          "joined",
+          "outliers",
+          "cost_usd"
+        ],
+        "properties": {
+          "clusters": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Clusters found among them.",
+            "minimum": 0
+          },
+          "cost_usd": {
+            "type": "number",
+            "format": "double",
+            "description": "USD spent on the naming calls."
+          },
+          "created": {
+            "type": "integer",
+            "format": "int32",
+            "description": "New issues created.",
+            "minimum": 0
+          },
+          "error_class": {
+            "type": "string",
+            "description": "Why the refit stopped early, such as `busy`, `budget` or `interrupted`. Omitted when it\nfinished."
+          },
+          "finished_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the refit finished. Omitted while it runs. JSON is RFC 3339."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Refit id."
+          },
+          "joined": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Candidates that joined an existing issue.",
+            "minimum": 0
+          },
+          "outliers": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Candidates left as outliers.",
+            "minimum": 0
+          },
+          "pending": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Pending candidates the refit read.",
+            "minimum": 0
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the refit started. JSON is RFC 3339."
+          },
+          "trigger": {
+            "type": "string",
+            "description": "`schedule` (every 6 hours) or `manual` (\"Refit now\")."
+          }
+        }
+      },
+      "IssueRefitPage": {
+        "type": "object",
+        "description": "`GET …/issue-sources/{id}/refits` answer: the newest 50 refits, newest first.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IssueRefit"
+            },
+            "description": "The refits, newest first."
+          }
+        }
+      },
+      "IssueSource": {
+        "type": "object",
+        "description": "An issue source. Spec 09 § Issues.",
+        "required": [
+          "id",
+          "project_id",
+          "name",
+          "kind",
+          "enabled",
+          "channel_ids",
+          "created_at",
+          "updated_at",
+          "open_issues"
+        ],
+        "properties": {
+          "budget_period": {
+            "$ref": "#/components/schemas/BudgetPeriod",
+            "description": "Period of the budget. Present exactly when `budget_usd` is."
+          },
+          "budget_usd": {
+            "type": "number",
+            "format": "double",
+            "description": "Spend limit per `budget_period`, in USD. Omitted when there is no budget."
+          },
+          "candidates_24h": {
+            "$ref": "#/components/schemas/IssueCandidateCounts",
+            "description": "Candidates created in the last 24 hours, by status. LLM kinds only."
+          },
+          "channel_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Channels notified of new and regressed issues. Ordered by id."
+          },
+          "chat_connection_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Connection of the chat model that summarizes and names. LLM kinds only."
+          },
+          "chat_model": {
+            "type": "string",
+            "description": "Chat model of that connection. LLM kinds only."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Creation time. JSON is RFC 3339."
+          },
+          "created_by": {
+            "type": "string",
+            "format": "uuid",
+            "description": "User who created the source. Omitted when that user is unknown."
+          },
+          "daily_cap": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Most candidates admitted per UTC day, 1 to 10 000. LLM kinds only.",
+            "minimum": 0
+          },
+          "embed_connection_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Connection of the embedding model. Fixed after create. LLM kinds only."
+          },
+          "embed_dimension": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Vector dimension of the embedding model, set once the source first embeds. LLM kinds only.",
+            "minimum": 0
+          },
+          "embed_model": {
+            "type": "string",
+            "description": "Embedding model of that connection. Fixed after create. LLM kinds only."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether the source runs. A disabled source counts for no plan limit."
+          },
+          "feedback_sources": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Feedback sources read by a `feedback` source: `end_user` and/or `human`. Omitted for other\nkinds."
+          },
+          "filter": {
+            "type": "string",
+            "description": "Spans filter for `error` sources. Omitted when there is none."
+          },
+          "floor": {
+            "type": "number",
+            "format": "double",
+            "description": "Cosine similarity at which a candidate joins an issue, 0.5 to 0.99. LLM kinds only."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Source id."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/IssueSourceKind",
+            "description": "What the source reads. Immutable."
+          },
+          "min_issue_size": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Smallest group a refit makes into a new issue, 2 to 100. LLM kinds only.",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name, unique in the project. 1 to 128 characters."
+          },
+          "next_refit_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the next refit is due. Omitted for other kinds. JSON is RFC 3339."
+          },
+          "open_issues": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Issues of this source that are open now.",
+            "minimum": 0
+          },
+          "paused_detail": {
+            "type": "string",
+            "description": "The provider's error text for a connection pause. Omitted when the source is not paused\nfor a connection."
+          },
+          "paused_reason": {
+            "type": "string",
+            "description": "Why the sweeper skips the source. Omitted when it runs."
+          },
+          "project_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The project the source belongs to."
+          },
+          "sample_rate": {
+            "type": "number",
+            "format": "double",
+            "description": "Share of the matching traces or scores that become candidates, in `(0, 1]`. LLM kinds only."
+          },
+          "score_names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Score names read by a `score` or `feedback` source. Omitted for other kinds."
+          },
+          "spent_today_usd": {
+            "type": "number",
+            "format": "double",
+            "description": "Spend of the current UTC day, in USD. LLM kinds only."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Last change time. JSON is RFC 3339."
+          }
+        }
+      },
+      "IssueSourceKind": {
+        "type": "string",
+        "description": "What an issue source reads. M3 adds kinds (D-IC-1).",
+        "enum": [
+          "error",
+          "score",
+          "feedback",
+          "topic"
+        ]
+      },
+      "IssueSourcePage": {
+        "type": "object",
+        "description": "One page of issue sources. `next_cursor` is null when there is no next page.",
+        "required": [
+          "data",
+          "next_cursor",
+          "org_active_sources"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IssueSource"
+            },
+            "description": "Sources in this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor for the next page, or null when this is the last page."
+          },
+          "org_active_sources": {
+            "type": "integer",
+            "description": "Enabled sources of the whole org, counted for the plan's active-source limit.",
+            "minimum": 0
+          }
+        }
+      },
+      "IssueState": {
+        "type": "string",
+        "description": "The state of an issue (D-IC-10). `merged` issues point at their target.",
+        "enum": [
+          "open",
+          "resolved",
+          "ignored",
+          "merged"
+        ]
+      },
       "ItemChange": {
         "type": "object",
         "description": "One item that changed in a version (D-J-24). `before` is the revision the version closed,\n`after` the one it started; each is absent when the version did not make it.",
@@ -30575,6 +32910,21 @@
             "description": "The org slug."
           }
         }
+      },
+      "MergeIssueRequest": {
+        "type": "object",
+        "description": "`POST …/issues/{id}/merge` body (spec 09 § Issues).",
+        "required": [
+          "into"
+        ],
+        "properties": {
+          "into": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The issue to merge into. It must be an issue of the same source that is not merged."
+          }
+        },
+        "additionalProperties": false
       },
       "Message": {
         "type": "object",
@@ -31291,6 +33641,12 @@
             "type": "integer",
             "format": "int64",
             "description": "Sustained ingest rate, spans per second.",
+            "minimum": 0
+          },
+          "max_active_issue_sources": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Enabled issue sources of active projects.",
             "minimum": 0
           },
           "max_active_online_rules": {
@@ -33914,7 +36270,8 @@
           "end_user",
           "llm_judge",
           "check",
-          "webhook"
+          "webhook",
+          "issue"
         ]
       },
       "ScoreSummary": {
@@ -35335,6 +37692,10 @@
         "type": "object",
         "description": "`POST /api/v1/orgs/{org}/llm-connections/{id}/test` body.",
         "properties": {
+          "embedding_model": {
+            "type": "string",
+            "description": "Embedding model to test instead: the test embeds `\"ping\"` and does not ask for a\njudgement. Not for an Anthropic connection, which has no embeddings API."
+          },
           "model": {
             "type": "string",
             "description": "Model to call. Default: the connection's `default_model`."
@@ -35993,6 +38354,125 @@
           "webhook_secret": {
             "type": "string",
             "description": "Replaces the signing secret of a webhook, 16 to 256 characters. Required with a webhook\n`config`, so a saved secret never signs requests to a new URL. An empty string is refused."
+          }
+        },
+        "additionalProperties": false
+      },
+      "UpdateIssueRequest": {
+        "type": "object",
+        "description": "`PATCH …/issues/{id}` body. Absent means unchanged (spec 09 § Issues).\n\nOptional fields refuse `null`, except `description`, where `null` clears it.",
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New description, at most 2000 characters. `null` or `\"\"` clears it. Records no event."
+          },
+          "state": {
+            "$ref": "#/components/schemas/IssueState",
+            "description": "`open`, `resolved` or `ignored`. `merged` is refused: merge with the merge operation."
+          },
+          "title": {
+            "type": "string",
+            "description": "New title, 1 to 200 characters after trimming. A change records a `renamed` event."
+          }
+        },
+        "additionalProperties": false
+      },
+      "UpdateIssueSourceRequest": {
+        "type": "object",
+        "description": "`PATCH /api/v1/projects/{project}/issue-sources/{id}` body. Absent means unchanged.\n\nThere is no `kind`: sending it is a 400 (unknown field). Optional fields refuse `null`,\nexcept `filter`, where `null` clears it.",
+        "properties": {
+          "budget_period": {
+            "$ref": "#/components/schemas/BudgetPeriod",
+            "description": "Period of the budget."
+          },
+          "budget_usd": {
+            "type": "number",
+            "format": "double",
+            "description": "Spend limit per `budget_period`, in USD. Give it with `budget_period` when the source has\nno budget yet."
+          },
+          "channel_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "New channels, at most 10 of this project. `[]` removes every channel. Absent keeps them."
+          },
+          "chat_connection_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Connection of the chat model. LLM kinds only."
+          },
+          "chat_model": {
+            "type": "string",
+            "description": "Chat model of that connection. LLM kinds only."
+          },
+          "clear_budget": {
+            "type": "boolean",
+            "description": "Removes the budget. Cannot come with `budget_usd` or `budget_period`."
+          },
+          "daily_cap": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Most candidates admitted per UTC day, 1 to 10 000. LLM kinds only.",
+            "minimum": 0
+          },
+          "embed_connection_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Refused: the embedding connection is fixed after create (400)."
+          },
+          "embed_model": {
+            "type": "string",
+            "description": "Refused: the embedding model is fixed after create (400)."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Turns the source on or off."
+          },
+          "feedback_sources": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Replaces the feedback sources of a `feedback` source."
+          },
+          "filter": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Spans filter. `null` or `\"\"` clears it."
+          },
+          "floor": {
+            "type": "number",
+            "format": "double",
+            "description": "Cosine similarity at which a candidate joins an issue, 0.5 to 0.99. LLM kinds only."
+          },
+          "min_issue_size": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Smallest group a refit makes into a new issue, 2 to 100. LLM kinds only.",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name, 1 to 128 characters after trimming."
+          },
+          "sample_rate": {
+            "type": "number",
+            "format": "double",
+            "description": "Share of the matching traces or scores that become candidates, in `(0, 1]`. LLM kinds only."
+          },
+          "score_names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Replaces the score names of a `score` or `feedback` source."
           }
         },
         "additionalProperties": false
@@ -36923,6 +39403,10 @@
     {
       "name": "alerts",
       "description": "Alert rules, alert events and notification channels."
+    },
+    {
+      "name": "issues",
+      "description": "Issue sources and the issues they find."
     },
     {
       "name": "assistant",

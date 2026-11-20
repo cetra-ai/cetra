@@ -71,6 +71,20 @@ impl Api {
         read_json(response).await
     }
 
+    /// A `PATCH` with the same cookie and origin as `post`.
+    async fn patch(&self, path: &str, body: &Value) -> Value {
+        let response = self
+            .client
+            .patch(format!("{}{path}", self.base))
+            .header("cookie", &self.cookie)
+            .header("origin", ORIGIN)
+            .json(body)
+            .send()
+            .await
+            .unwrap();
+        read_json(response).await
+    }
+
     /// A `PUT` with the same cookie and origin as `post`.
     async fn put(&self, path: &str, body: &Value) -> Value {
         let response = self
@@ -1076,7 +1090,12 @@ fn judge_turn() -> cetra_capture::Turn {
 /// `sdk-generator-text`'s one root span (it has an input and an output), on `trace`,
 /// starting at `start_ns` and lasting 998 ms.
 fn timed_request(trace: &str, start_ns: i64) -> ExportTraceServiceRequest {
-    let mut request = fixture_request("sdk-generator-text", trace);
+    timed_fixture("sdk-generator-text", trace, start_ns)
+}
+
+/// The fixture `name`'s spans, on `trace`, starting at `start_ns` and lasting 998 ms.
+fn timed_fixture(name: &str, trace: &str, start_ns: i64) -> ExportTraceServiceRequest {
+    let mut request = fixture_request(name, trace);
     let start = u64::try_from(start_ns).unwrap();
     let end = u64::try_from(start_ns + 998_000_000).unwrap();
     for resource in &mut request.resource_spans {
@@ -1337,6 +1356,162 @@ async fn online_rules_and_backfill_end_to_end() {
     drop(server.client);
     server.running.shutdown().await.unwrap();
     provider.abort();
+}
+
+/// Track IC M4 end to end (D-IC-25): an error source turns a failing trace into an issue, a
+/// resolved issue regresses on a second failure, its examples are copied into a dataset, and a
+/// channel is attached and detached. No alert or notification is awaited: the binary's
+/// notification tick runs every 60 s.
+#[tokio::test(flavor = "multi_thread")]
+async fn error_issues_end_to_end() {
+    /// A Slack URL the channel is never sent to: nothing is notified in this test.
+    const SLACK_URL: &str = "https://hooks.slack.com/services/T0/B0/XXXXabcd";
+
+    let dir = tempfile::tempdir().unwrap();
+    let server = start(dir.path(), "").await;
+    let project = format!("/api/v1/projects/{}", server.proto_id);
+    let otlp_url = format!("{}/v1/traces", server.http);
+
+    let source = server
+        .api
+        .post(
+            &format!("{project}/issue-sources"),
+            &json!({"name": "Errors", "kind": "error"}),
+        )
+        .await;
+    let source_id = source["id"].as_str().unwrap().to_owned();
+    assert_eq!(source["channel_ids"], json!([]), "{source}");
+
+    // The sweeper tracks the project from its first tick after the source exists, and a trace
+    // is tracked from its first span: wait one tick and a margin before the first failure.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    let first = format!("{:032x}", 41);
+    post_otlp_http(
+        &server.client,
+        otlp_url.clone(),
+        INIT_KEY,
+        "application/x-protobuf",
+        timed_fixture("sdk-observe-error", &first, now_ns() - NANOS_PER_SECOND).encode_to_vec(),
+    )
+    .await;
+
+    // The trace completes after its 5 s idle timer, and its error becomes one open issue.
+    let issues_path = format!("{project}/issues");
+    let listed = poll_json(
+        &server.api,
+        &issues_path,
+        |body| body["data"][0]["state"] == "open",
+        Duration::from_secs(30),
+    )
+    .await;
+    assert_eq!(listed["data"].as_array().unwrap().len(), 1, "{listed}");
+    let issue = &listed["data"][0];
+    assert_eq!(issue["kind"], "error", "{listed}");
+    assert_eq!(issue["count"], 1, "{listed}");
+    let issue_id = issue["id"].as_str().unwrap().to_owned();
+    let issue_path = format!("{issues_path}/{issue_id}");
+
+    let occurrences = server.api.get(&format!("{issue_path}/occurrences")).await;
+    assert_eq!(
+        occurrences["examples"][0]["trace_id"], first,
+        "{occurrences}"
+    );
+
+    // Resolved, then a failure that started after the resolution reopens the issue as regressed.
+    let resolved = server
+        .api
+        .patch(&issue_path, &json!({"state": "resolved"}))
+        .await;
+    assert_eq!(resolved["state"], "resolved", "{resolved}");
+    let second = format!("{:032x}", 42);
+    post_otlp_http(
+        &server.client,
+        otlp_url,
+        INIT_KEY,
+        "application/x-protobuf",
+        timed_fixture("sdk-observe-error", &second, now_ns()).encode_to_vec(),
+    )
+    .await;
+    let regressed = poll_json(
+        &server.api,
+        &issue_path,
+        |body| body["state"] == "open" && body["regressed"] == true && body["count"] == 2,
+        Duration::from_secs(30),
+    )
+    .await;
+    assert_eq!(regressed["id"], issue_id.as_str(), "{regressed}");
+
+    // The issue's examples are copied into a dataset: both traces, each tagged with the issue.
+    server
+        .api
+        .post(
+            &format!("{project}/datasets"),
+            &json!({"name": "issue-examples"}),
+        )
+        .await;
+    let dataset_items = format!("{issue_path}/dataset-items");
+    let added = server
+        .api
+        .post(&dataset_items, &json!({"dataset": "issue-examples"}))
+        .await;
+    let added_items = added["items"].as_array().unwrap();
+    assert_eq!(added_items.len(), 2, "{added}");
+    assert_eq!(added["skipped"], json!([]), "{added}");
+    for item in added_items {
+        assert_eq!(
+            item["metadata"]["cetra.issue_id"],
+            issue_id.as_str(),
+            "{added}"
+        );
+    }
+    let items = server
+        .api
+        .get(&format!("{project}/datasets/issue-examples/items"))
+        .await;
+    assert_eq!(items["data"].as_array().unwrap().len(), 2, "{items}");
+
+    // A limit of one copies only the newest occurrence, as a new version.
+    let newest = server
+        .api
+        .post(
+            &dataset_items,
+            &json!({"dataset": "issue-examples", "limit": 1}),
+        )
+        .await;
+    assert_eq!(newest["items"].as_array().unwrap().len(), 1, "{newest}");
+
+    // A channel is attached to the source, and deleting the channel detaches it.
+    let channel = server
+        .api
+        .post(
+            &format!("{project}/channels"),
+            &json!({"name": "Team Slack", "kind": "slack", "url": SLACK_URL}),
+        )
+        .await;
+    let channel_id = channel["id"].as_str().unwrap().to_owned();
+    let source_path = format!("{project}/issue-sources/{source_id}");
+    let attached = server
+        .api
+        .patch(&source_path, &json!({"channel_ids": [channel_id]}))
+        .await;
+    assert_eq!(attached["channel_ids"], json!([channel_id]), "{attached}");
+
+    // A `DELETE` answers `204` with no body, so it is sent without `Api::delete`'s JSON read.
+    let deleted = server
+        .client
+        .delete(format!("{}{project}/channels/{channel_id}", server.http))
+        .header("cookie", &server.api.cookie)
+        .header("origin", ORIGIN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted.status().as_u16(), 204);
+    let detached = server.api.get(&source_path).await;
+    assert_eq!(detached["channel_ids"], json!([]), "{detached}");
+
+    drop(server.api);
+    drop(server.client);
+    server.running.shutdown().await.unwrap();
 }
 
 /// Track V M6 end to end (D-V-20, D-V-22, D-V-33): a playground run streams from the capture

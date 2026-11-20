@@ -78,6 +78,8 @@ it("lists every account and admin write of the contract", () => {
         path.startsWith("/api/v1/projects/{project}/channels") ||
         path.startsWith("/api/v1/projects/{project}/alert-rules") ||
         path.startsWith("/api/v1/projects/{project}/online-rules") ||
+        path.startsWith("/api/v1/projects/{project}/issue-sources") ||
+        path.startsWith("/api/v1/projects/{project}/issues") ||
         path.startsWith("/api/v1/projects/{project}/datasets") ||
         path.startsWith("/api/v1/projects/{project}/scores") ||
         path.startsWith("/api/v1/projects/{project}/experiments") ||

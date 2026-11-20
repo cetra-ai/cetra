@@ -668,7 +668,7 @@
           "name": "source",
           "column_type": "string",
           "nullable": false,
-          "description": "api, sdk, human, end_user, llm_judge, check, or webhook."
+          "description": "api, sdk, human, end_user, llm_judge, check, webhook or issue."
         },
         {
           "name": "evaluator_id",

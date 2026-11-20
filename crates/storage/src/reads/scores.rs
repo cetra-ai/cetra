@@ -6,12 +6,17 @@
 
 use std::time::Duration;
 
+use arrow::array::{Array, ArrayRef, AsArray, Int64Array};
+use arrow::datatypes::{DataType, Int64Type};
+use arrow::error::ArrowError;
 use arrow::record_batch::RecordBatch;
 use cetra_core::enums::{ScoreSource, ScoreTargetKind};
 use cetra_core::schema::scores;
 use datafusion::common::ScalarValue;
+use datafusion::error::DataFusionError;
+use datafusion::functions_aggregate::expr_fn::{count, count_distinct, max};
 use datafusion::functions_window::expr_fn::row_number;
-use datafusion::logical_expr::{Expr, ExprFunctionExt, col, lit};
+use datafusion::logical_expr::{Expr, ExprFunctionExt, cast, col, lit};
 use datafusion::prelude::DataFrame;
 
 use super::cursor::{after, assemble, decode, order_by};
@@ -23,6 +28,180 @@ const LIST: &str = "scores";
 const TARGET_KEY: &str = "target_key";
 const RANK: &str = "__rn";
 const TIES: &[&str] = &[scores::SCORE_ID];
+const DAY_NS: i64 = 86_400_000_000_000;
+const BUCKET: &str = "bucket";
+const COUNT: &str = "count";
+const USERS: &str = "users";
+const LAST: &str = "last_created_at";
+
+/// Most names one [`score_name_counts`] takes (D-IC-9).
+pub const MAX_COUNT_NAMES: usize = 1_000;
+
+/// Live scores of one name, in one UTC day or in the whole window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScoreNameCount {
+    /// Score name.
+    pub name: String,
+    /// Start of the UTC day (ns), or `window.from` when `by_day` is false.
+    pub bucket_start: i64,
+    /// Live scores.
+    pub count: u64,
+    /// Distinct non-null `user_id`s.
+    pub users: u64,
+    /// Greatest `created_at` among them (ns).
+    pub last_created_at: i64,
+}
+
+/// Names and window of one [`score_name_counts`].
+#[derive(Debug, Clone, Copy)]
+pub struct ScoreNameCountsRequest<'a> {
+    /// Score names; empty returns no rows. At most [`MAX_COUNT_NAMES`].
+    pub names: &'a [String],
+    /// `created_at ∈ [from, to)`.
+    pub window: TimeWindow,
+    /// `true`: one row per (name, UTC day); `false`: one row per name for the whole window.
+    pub by_day: bool,
+    /// Time allowed for planning and running.
+    pub timeout: Duration,
+}
+
+/// Live scores per name, in the day or the window of the request (D-IC-9). Rows are sorted by
+/// name, then by bucket. Names with no live score in the window have no row.
+///
+/// # Errors
+///
+/// [`RunError::InvalidRequest`] for more than [`MAX_COUNT_NAMES`] names; [`RunError::Timeout`];
+/// DataFusion failures through [`classify`] and `ctx.fail`.
+pub async fn score_name_counts(
+    ctx: &QueryContext,
+    request: ScoreNameCountsRequest<'_>,
+) -> Result<Vec<ScoreNameCount>, RunError> {
+    if request.names.len() > MAX_COUNT_NAMES {
+        return Err(RunError::InvalidRequest(format!(
+            "at most {MAX_COUNT_NAMES} names"
+        )));
+    }
+    if request.names.is_empty() {
+        return Ok(Vec::new());
+    }
+    match tokio::time::timeout(request.timeout, counts(ctx, &request)).await {
+        Err(_) => Err(RunError::Timeout),
+        Ok(result) => result,
+    }
+}
+
+async fn counts(
+    ctx: &QueryContext,
+    request: &ScoreNameCountsRequest<'_>,
+) -> Result<Vec<ScoreNameCount>, RunError> {
+    let names: Vec<Expr> = request
+        .names
+        .iter()
+        .map(|name| lit(name.as_str()))
+        .collect();
+    let created = cast(col(scores::CREATED_AT), DataType::Int64);
+    let predicate = col(scores::NAME)
+        .in_list(names, false)
+        .and(request.window.predicate(scores::CREATED_AT));
+    let mut keys = vec![col(scores::NAME)];
+    let mut order = vec![col(scores::NAME).sort(true, false)];
+    if request.by_day {
+        keys.push((created.clone() - created.clone() % lit(DAY_NS)).alias(BUCKET));
+        order.push(col(BUCKET).sort(true, false));
+    }
+    let batches = ctx
+        .session()
+        .table(LIST)
+        .await
+        .map_err(classify)?
+        .filter(predicate)
+        .map_err(classify)?
+        .aggregate(
+            keys,
+            vec![
+                count(lit(1_i64)).alias(COUNT),
+                count_distinct(col(scores::USER_ID)).alias(USERS),
+                max(created).alias(LAST),
+            ],
+        )
+        .map_err(classify)?
+        .sort(order)
+        .map_err(classify)?
+        .collect()
+        .await
+        .map_err(|error| ctx.fail(error))?;
+    counts_of(&batches, request)
+}
+
+/// Converts the aggregate rows: name, then the bucket when `by_day`, then count, users and last.
+fn counts_of(
+    batches: &[RecordBatch],
+    request: &ScoreNameCountsRequest<'_>,
+) -> Result<Vec<ScoreNameCount>, RunError> {
+    let mut found = Vec::new();
+    let offset = usize::from(request.by_day);
+    for batch in batches {
+        let names =
+            arrow::compute::cast(batch.column(0), &DataType::Utf8).map_err(arrow_failure)?;
+        let names = names.as_string::<i32>();
+        let buckets = if request.by_day {
+            Some(int64_column(batch.column(1))?)
+        } else {
+            None
+        };
+        let buckets = buckets
+            .as_ref()
+            .map(|column| column.as_primitive::<Int64Type>());
+        let counts = int64_column(batch.column(1 + offset))?;
+        let counts = counts.as_primitive::<Int64Type>();
+        let users = int64_column(batch.column(2 + offset))?;
+        let users = users.as_primitive::<Int64Type>();
+        let lasts = int64_column(batch.column(3 + offset))?;
+        let lasts = lasts.as_primitive::<Int64Type>();
+        for row in 0..batch.num_rows() {
+            let bucket_start = match buckets {
+                Some(buckets) => required_int(buckets, row)?,
+                None => request.window.from(),
+            };
+            found.push(ScoreNameCount {
+                name: names
+                    .is_valid(row)
+                    .then(|| names.value(row).to_owned())
+                    .ok_or_else(bad_row)?,
+                bucket_start,
+                count: non_negative(required_int(counts, row)?)?,
+                users: non_negative(required_int(users, row)?)?,
+                last_created_at: required_int(lasts, row)?,
+            });
+        }
+    }
+    Ok(found)
+}
+
+fn int64_column(column: &ArrayRef) -> Result<ArrayRef, RunError> {
+    arrow::compute::cast(column, &DataType::Int64).map_err(arrow_failure)
+}
+
+fn required_int(column: &Int64Array, row: usize) -> Result<i64, RunError> {
+    if column.is_null(row) {
+        return Err(bad_row());
+    }
+    Ok(column.value(row))
+}
+
+fn non_negative(value: i64) -> Result<u64, RunError> {
+    u64::try_from(value).map_err(|_| bad_row())
+}
+
+fn arrow_failure(error: ArrowError) -> RunError {
+    RunError::Internal(DataFusionError::ArrowError(Box::new(error), None))
+}
+
+fn bad_row() -> RunError {
+    RunError::Internal(DataFusionError::Internal(
+        "a view returned a null where a value is required".to_owned(),
+    ))
+}
 
 /// Columns of [`latest_scores`], in order.
 pub const LATEST_SCORE_COLUMNS: &[&str] = &[
@@ -295,7 +474,9 @@ async fn latest(
         .filter(
             col(scores::TARGET)
                 .eq(lit(kind.as_str()))
-                .and(col(key_column).in_list(keys, false)),
+                .and(col(key_column).in_list(keys, false))
+                // Issue occurrences never show as score columns or briefs (D-IC-18).
+                .and(col(scores::SOURCE).not_eq(lit(ScoreSource::Issue.as_str()))),
         )
         .map_err(classify)?
         .select(vec![
@@ -371,7 +552,8 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        LATEST_SCORE_COLUMNS, ScoreListRequest, ScoreTargets, latest_scores, score_list,
+        LATEST_SCORE_COLUMNS, MAX_COUNT_NAMES, ScoreListRequest, ScoreNameCount,
+        ScoreNameCountsRequest, ScoreTargets, latest_scores, score_list, score_name_counts,
         scores_by_id,
     };
     use crate::query_error::RunError;
@@ -822,6 +1004,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn latest_scores_leave_out_issue_occurrences() {
+        // Trace 0 is `00010001000100010001000100010001` (see `trace_id_of` in test_support).
+        let trace = "00010001000100010001000100010001";
+        let mut occurrence = score_row(1, 0, 100, 100, 100, false, "issue:a");
+        occurrence.source = ScoreSource::Issue;
+        let mut api = score_row(2, 0, 100, 100, 100, false, "quality");
+        api.source = ScoreSource::Api;
+        let query = ProjectQuery {
+            scores: live_scores_table(&[occurrence, api]),
+            ..example_query()
+        };
+        let ctx = QueryContext::new(query, None).expect("context");
+        let batches = latest_scores(&ctx, ScoreTargets::Traces(&[trace]), TIMEOUT)
+            .await
+            .expect("latest");
+        let rows = json_rows(&batches);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["name"], "quality");
+        assert_eq!(rows[0]["source"], "api");
+    }
+
+    #[tokio::test]
     async fn the_greater_score_id_wins_a_latest_tie() {
         let template = dataset_scores().into_iter().next().expect("score");
         let mut low = template.clone();
@@ -919,6 +1123,172 @@ mod tests {
         rule.rule_id = Some(RULE);
         let page = score_list(&ctx, rule).await.expect("rule");
         assert_eq!(ids(&rows(&page)), ["00000000-0000-0000-0000-000000000001"]);
+    }
+
+    const DAY: i64 = 86_400_000_000_000;
+
+    /// The live scores of `scores`, in a context of the test project.
+    fn counts_context(scores: &[cetra_core::score::Score]) -> QueryContext {
+        let query = ProjectQuery {
+            scores: live_scores_table(scores),
+            ..example_query()
+        };
+        QueryContext::new(query, None).expect("context")
+    }
+
+    /// Three scores of `issue:a` on two days (two users, one without a user) and one of
+    /// `issue:b`. Score 1 is `day1 + 100`, score 2 `day1 + 200`, score 3 `day2 + 50`, and
+    /// score 4 `day1 + 400`.
+    fn counted_scores(day1: i64, day2: i64) -> Vec<cetra_core::score::Score> {
+        let mut first = score_row(1, 0, day1 + 100, 100, 100, false, "issue:a");
+        first.user_id = Some("u1".to_owned());
+        let mut second = score_row(2, 1, day1 + 200, 200, 200, false, "issue:a");
+        second.user_id = Some("u2".to_owned());
+        let third = score_row(3, 2, day2 + 50, 300, 300, false, "issue:a");
+        let mut other = score_row(4, 3, day1 + 400, 400, 400, false, "issue:b");
+        other.user_id = Some("u1".to_owned());
+        vec![first, second, third, other]
+    }
+
+    fn count_row(
+        name: &str,
+        bucket_start: i64,
+        count: u64,
+        users: u64,
+        last: i64,
+    ) -> ScoreNameCount {
+        ScoreNameCount {
+            name: name.to_owned(),
+            bucket_start,
+            count,
+            users,
+            last_created_at: last,
+        }
+    }
+
+    #[tokio::test]
+    async fn score_name_counts_by_day() {
+        let (day1, day2) = (10 * DAY, 11 * DAY);
+        let ctx = counts_context(&counted_scores(day1, day2));
+        let names = ["issue:a".to_owned(), "issue:b".to_owned()];
+        let window = TimeWindow::new(0, 100 * DAY).expect("window");
+        let request = ScoreNameCountsRequest {
+            names: &names,
+            window,
+            by_day: true,
+            timeout: TIMEOUT,
+        };
+        let counts = score_name_counts(&ctx, request).await.expect("by day");
+        assert_eq!(
+            counts,
+            [
+                count_row("issue:a", day1, 2, 2, day1 + 200),
+                count_row("issue:a", day2, 1, 0, day2 + 50),
+                count_row("issue:b", day1, 1, 1, day1 + 400),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn score_name_counts_whole_window() {
+        let (day1, day2) = (10 * DAY, 11 * DAY);
+        let ctx = counts_context(&counted_scores(day1, day2));
+        let names = ["issue:a".to_owned(), "issue:b".to_owned()];
+        let window = TimeWindow::new(0, 100 * DAY).expect("window");
+        let request = ScoreNameCountsRequest {
+            names: &names,
+            window,
+            by_day: false,
+            timeout: TIMEOUT,
+        };
+        let counts = score_name_counts(&ctx, request)
+            .await
+            .expect("whole window");
+        assert_eq!(
+            counts,
+            [
+                count_row("issue:a", 0, 3, 2, day2 + 50),
+                count_row("issue:b", 0, 1, 1, day1 + 400),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn score_name_counts_respects_the_window() {
+        let (day1, day2) = (10 * DAY, 11 * DAY);
+        let ctx = counts_context(&counted_scores(day1, day2));
+        let names = ["issue:a".to_owned(), "issue:b".to_owned()];
+        // `from` is inclusive (score 1 starts there) and `to` is exclusive (score 3 is after it).
+        let window = TimeWindow::new(day1 + 100, day2).expect("window");
+        let request = ScoreNameCountsRequest {
+            names: &names,
+            window,
+            by_day: false,
+            timeout: TIMEOUT,
+        };
+        let counts = score_name_counts(&ctx, request).await.expect("window");
+        assert_eq!(
+            counts,
+            [
+                count_row("issue:a", day1 + 100, 2, 2, day1 + 200),
+                count_row("issue:b", day1 + 100, 1, 1, day1 + 400),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn score_name_counts_ignores_deleted_scores() {
+        let (day1, day2) = (10 * DAY, 11 * DAY);
+        let mut scores = counted_scores(day1, day2);
+        // A later deleted version of score 1 replaces it, so only score 2 is live for `issue:a`.
+        scores.push(score_row(1, 0, day1 + 100, 500, 500, true, "issue:a"));
+        let ctx = counts_context(&scores);
+        let names = ["issue:a".to_owned()];
+        let window = TimeWindow::new(0, 100 * DAY).expect("window");
+        let request = ScoreNameCountsRequest {
+            names: &names,
+            window,
+            by_day: true,
+            timeout: TIMEOUT,
+        };
+        let counts = score_name_counts(&ctx, request).await.expect("live");
+        assert_eq!(
+            counts,
+            [
+                count_row("issue:a", day1, 1, 1, day1 + 200),
+                count_row("issue:a", day2, 1, 0, day2 + 50),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn score_name_counts_rejects_1001_names_and_is_empty_without_names() {
+        let ctx = counts_context(&counted_scores(10 * DAY, 11 * DAY));
+        let window = TimeWindow::new(0, 100 * DAY).expect("window");
+        let many = vec!["issue:a".to_owned(); MAX_COUNT_NAMES + 1];
+        let too_many = ScoreNameCountsRequest {
+            names: &many,
+            window,
+            by_day: true,
+            timeout: TIMEOUT,
+        };
+        assert!(matches!(
+            score_name_counts(&ctx, too_many).await,
+            Err(RunError::InvalidRequest(_))
+        ));
+        let none: Vec<String> = Vec::new();
+        let empty = ScoreNameCountsRequest {
+            names: &none,
+            window,
+            by_day: true,
+            timeout: TIMEOUT,
+        };
+        assert!(
+            score_name_counts(&ctx, empty)
+                .await
+                .expect("no names")
+                .is_empty()
+        );
     }
 
     #[tokio::test]

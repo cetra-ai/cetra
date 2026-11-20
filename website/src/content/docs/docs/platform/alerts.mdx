@@ -14,7 +14,7 @@ Alert rules watch a metric of a project over a sliding window and notify you whe
 
 In the sidebar, **Alerts** (under **Monitor**) lists the project's rules. **New rule** opens the rule form. The strip above the list counts the rules by state (**Firing**, **No data**, **OK**, **Disabled**), and selecting a count filters the list. Each row shows the name, state, condition, last value, a trend, when the rule was last evaluated, its channels and an **Enabled** switch. Selecting a row opens the rule beside the list, with **Edit**, **Delete rule** and the rule's **History**. **Recent events** under the list shows the latest events of every rule, with how many of their deliveries were sent.
 
-The rule form names things differently from the fields below: **Metric** (Error rate, Cost, p95 latency, Score), **Latency of** (Whole traces, LLM spans), **Aggregation** (Average, Pass rate), **Window**, **Filter**, **Comparator** (Above, At or above, Below, At or below), **Threshold**, **Minimum samples**, **Notifications** (the channels), **Remind while firing** with **Remind every (minutes)**, and **Enabled**. A preview next to the form plots the metric. In the form, the threshold of an error rate or a pass rate is in percent, where the API uses a fraction from 0 to 1.
+The rule form names things differently from the fields below: **Metric** (Error rate, Cost, p95 latency, Score, Issue occurrences), **Latency of** (Whole traces, LLM spans), **Aggregation** (Average, Pass rate), **Window**, **Filter**, **Comparator** (Above, At or above, Below, At or below), **Threshold**, **Minimum samples**, **Notifications** (the channels), **Remind while firing** with **Remind every (minutes)**, and **Enabled**. A preview next to the form plots the metric. In the form, the threshold of an error rate or a pass rate is in percent, where the API uses a fraction from 0 to 1.
 
 ## What a rule watches
 
@@ -24,6 +24,7 @@ The rule form names things differently from the fields below: **Metric** (Error 
 | `cost` | The total cost in USD of the traces. It is 0 when there are none. | |
 | `latency_p95` | The 95th percentile duration in milliseconds, of traces or of LLM spans (`target`: `trace`, the default, or `llm_span`). | `min_count` (default 20) |
 | `score` | The average of the scores with a given name (`score_name`), or the pass rate of boolean scores (`aggregation`: `avg` or `pass_rate`). | `min_count` (default 10) |
+| `issue_occurrences` | The number of times an issue happened: the occurrences of one issue, with the issues merged into it, or of every issue of a source except the ignored and merged ones. Zero is a count. | `issue_id` or `source_id`, exactly one |
 
 Every rule has:
 
@@ -35,6 +36,20 @@ Every rule has:
 Evaluation traces and experiment traces are not counted, unless the filter names the `environment` for evaluation traces.
 
 A window with fewer samples than `min_count` has too little data to judge. cetra does not treat it as a breach.
+
+An issue occurrences rule has no filter, no minimum samples and no trace exclusions. Its window must be `15m` or more, because cetra records an occurrence only after its trace completes, and a shorter window can miss it. cetra refuses `1m` and `5m` for this metric.
+
+## Alert on an issue
+
+Use an issue occurrences rule to hear when an issue keeps happening.
+
+1. Open the issue and select **Create alert**. The rule form opens with the metric **Issue occurrences**, the issue, a window of 1 hour, **Above** and a threshold of 0.
+2. Change the threshold to the count that matters. With **Above** and 0, the rule fires on the first occurrence in the window.
+3. Choose the channels and save the rule.
+
+An error source writes its occurrences within a minute or two of the trace, so a 15 minute or 1 hour window works. For an issue from a bad score, feedback or topic source, use a window of 6 or 24 hours. cetra writes those occurrences when the trace joins an issue, which can be minutes after its score, or in a refit, which runs every 6 hours. Each occurrence is dated at the start of its trace, so a refit can add occurrences up to about 6 hours in the past, and a shorter window can miss them.
+
+A rule on an issue counts that issue and the issues merged into it, including an ignored issue. A rule on a source counts its issues that are not ignored or merged, and the issues merged into them.
 
 ## When a rule fires
 
@@ -81,7 +96,7 @@ cetra sends a `POST` with a JSON body to your URL. A webhook channel has a URL, 
 }
 ```
 
-`type` is `alert.fired`, `alert.resolved`, `alert.reminder` or `alert.test`. `value` and `count` are `null` when the window had no data.
+`type` is `alert.fired`, `alert.resolved`, `alert.reminder` or `alert.test`. `value` and `count` are `null` when the window had no data. Issue notifications use a different body, `issues.detected`, described on the [Issues page](/docs/evaluation/issues/#notifications).
 
 Each request carries two headers:
 
@@ -113,13 +128,19 @@ An email channel has 1 to 20 recipients, and cetra sends one message per recipie
 
 When sign-up is `open`, each recipient must be a verified member of the org. Each org can send 1,000 alert emails per UTC day, test sends included.
 
+## Issue notifications
+
+An issue source can send its new and regressed issues to channels of the project. You set the channels on the issue source, not on a rule. See [Issues](/docs/evaluation/issues/#notifications).
+
+A source sends at most one message per channel every 10 minutes. The 10 minutes run from the newest issue event in the message, so two messages from one source are about 9 to 10 minutes apart. A message lists up to 20 issues, newest first, and says how many more there are. When you enable a source, or give it its first channel, cetra starts from then and does not send older issues.
+
 ## Delivery and history
 
 cetra sends deliveries in the background, at least once. A timeout, a connection error, a `408`, `429` or `5xx` answer, or an SMTP connection, TLS or authentication error is retried with a growing wait (30 seconds, doubling, up to one hour) for up to 8 attempts. Any other failure fails the delivery at once.
 
 cetra never disables a channel on its own. On the **Channels** page, each channel shows a status: **Delivered**, **Last delivery failed**, **No deliveries**, or **SMTP not configured** for an email channel. Open a channel and select **Send test** to send a sample message right away. A test send is limited to 5 a minute per member and per channel.
 
-A rule's history labels each event **Fired**, **Resolved**, **No data** or **Reminder**, and each delivery **Sent**, **Pending** or **Failed**. cetra keeps alert events for 90 days and finished deliveries for 30 days.
+A rule's history labels each event **Fired**, **Resolved**, **No data** or **Reminder**, and each delivery **Sent**, **Pending** or **Failed**. cetra keeps alert events for 90 days and finished deliveries for 30 days. Issue messages are kept for 90 days, with their deliveries.
 
 In [restore mode](/docs/self-hosting/configuration-reference/) (`restore_mode = true`), cetra evaluates no rule and sends no delivery.
 

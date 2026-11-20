@@ -1,0 +1,14 @@
+{
+  "name": "Topics",
+  "kind": "topic",
+  "filter": "environment = 'production'",
+  "enabled": true,
+  "channel_ids": [],
+  "sample_rate": 0.5,
+  "chat_connection_id": "01900000-0000-7000-8000-000000000400",
+  "chat_model": "gpt-5-mini",
+  "embed_connection_id": "01900000-0000-7000-8000-000000000400",
+  "embed_model": "text-embedding-3-small",
+  "budget_usd": 5.0,
+  "budget_period": "day"
+}
