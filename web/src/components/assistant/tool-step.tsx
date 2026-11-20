@@ -1,5 +1,12 @@
+import { useNavigate } from "@tanstack/react-router";
 import { CircleCheck, CircleX, Loader } from "lucide-react";
+import { projectRef } from "@/api/project-ref";
+import { fenced, sqlTabsFullReason } from "@/components/assistant/draft-card";
+import { DisabledReason } from "@/components/disabled-reason";
 import { Markdown } from "@/components/payload/markdown";
+import { useProject } from "@/components/shell/project-context";
+import { Button } from "@/components/ui/button";
+import { handDraft } from "@/lib/assistant/handoff";
 import type { Step } from "@/lib/assistant/transcript";
 
 /** The label of each tool (`crates/server/src/assistant/tools/mod.rs` `specs()`). */
@@ -56,25 +63,28 @@ function StatusIcon({ result }: { result: Step["result"] }) {
   return <CircleCheck aria-hidden="true" className="size-4 text-muted-foreground" />;
 }
 
-/** A fenced code block whose fence is longer than any backtick run in `body`. */
-function fenced(language: string, body: string): string {
-  const longest = Math.max(2, ...(body.match(/`+/g) ?? []).map((run) => run.length));
-  const fence = "`".repeat(longest + 1);
-  return `${fence}${language}\n${body}\n${fence}`;
-}
-
-function sqlOf(args: unknown): string | undefined {
+/** A field of the tool's arguments: `query` (text) or `params` (an object), or `undefined`. */
+function argOf(args: unknown, key: string): unknown {
   if (typeof args !== "object" || args === null || Array.isArray(args)) {
     return undefined;
   }
-  const query = (args as Record<string, unknown>).query;
-  return typeof query === "string" ? query : undefined;
+  return (args as Record<string, unknown>)[key];
 }
 
 /** One tool call, collapsed by default: its label, its result summary, and the arguments. */
 export function ToolStep({ step }: { step: Step }) {
+  const { org, project } = useProject();
+  const navigate = useNavigate();
   const label = LABELS[step.name] ?? step.name;
-  const query = step.name === "query_sql" ? sqlOf(step.arguments) : undefined;
+  const rawQuery = step.name === "query_sql" ? argOf(step.arguments, "query") : undefined;
+  const query = typeof rawQuery === "string" ? rawQuery : undefined;
+  const rawParams = argOf(step.arguments, "params");
+  const params: Record<string, unknown> =
+    typeof rawParams === "object" && rawParams !== null && !Array.isArray(rawParams)
+      ? (rawParams as Record<string, unknown>)
+      : {};
+  const ref = projectRef(org, project);
+  const sqlReason = sqlTabsFullReason(ref);
   return (
     <details className="rounded-md border bg-surface text-body">
       <summary className="flex cursor-pointer items-center gap-2 px-2.5 py-1.5">
@@ -85,6 +95,24 @@ export function ToolStep({ step }: { step: Step }) {
       <div className="flex flex-col gap-2 border-t p-2.5">
         <Markdown text={fenced("json", JSON.stringify(step.arguments ?? null, null, 2))} />
         {query !== undefined ? <Markdown text={fenced("sql", query)} /> : null}
+        {query !== undefined ? (
+          <div className="flex justify-end">
+            <DisabledReason reason={sqlReason}>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={sqlReason !== undefined}
+                onClick={() => {
+                  handDraft(ref, { kind: "sql", draft: { query, params, columns: [] } });
+                  void navigate({ to: "/$org/$project/sql", params: { org, project } });
+                }}
+              >
+                Open in SQL console
+              </Button>
+            </DisabledReason>
+          </div>
+        ) : null}
       </div>
     </details>
   );

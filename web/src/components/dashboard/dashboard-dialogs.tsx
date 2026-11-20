@@ -119,19 +119,24 @@ function DashboardFields({
   );
 }
 
-/** Creates an empty dashboard, then calls `onCreated` with it. */
+/**
+ * Creates a dashboard, then calls `onCreated` with it. Blank by default; `initial` (an assistant's
+ * draft) prefills the name, description and definition, and the template choice is not shown.
+ */
 export function NewDashboardDialog({
   org,
   project,
   open,
   onOpenChange,
   onCreated,
+  initial,
 }: {
   org: string;
   project: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onCreated: (dashboard: Dashboard) => void;
+  initial?: { name: string; description?: string; definition: Definition };
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -141,6 +146,7 @@ export function NewDashboardDialog({
           project={project}
           onCancel={() => onOpenChange(false)}
           onCreated={onCreated}
+          initial={initial}
         />
       </DialogContent>
     </Dialog>
@@ -152,15 +158,17 @@ function NewForm({
   project,
   onCancel,
   onCreated,
+  initial,
 }: {
   org: string;
   project: string;
   onCancel: () => void;
   onCreated: (dashboard: Dashboard) => void;
+  initial?: { name: string; description?: string; definition: Definition };
 }) {
   const create = useCreateDashboard(org, project);
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
+  const [name, setName] = useState(initial?.name ?? "");
+  const [description, setDescription] = useState(initial?.description ?? "");
   const [start, setStart] = useState<"blank" | TemplateId>("blank");
   const [submitted, setSubmitted] = useState(false);
   const failure = failureOf(create.error, false);
@@ -172,7 +180,11 @@ function NewForm({
       return;
     }
     const definition: Definition =
-      start === "blank" ? { widgets: [] } : structuredClone(templateOf(start).definition);
+      initial !== undefined
+        ? structuredClone(initial.definition)
+        : start === "blank"
+          ? { widgets: [] }
+          : structuredClone(templateOf(start).definition);
     const dashboard = await create
       .mutateAsync({ name, description, definition })
       .catch(() => undefined);
@@ -201,40 +213,42 @@ function NewForm({
         failure={failure}
         issues={issues}
       />
-      <div className="flex flex-col gap-2">
-        <span id="dashboard-start-label" className="text-caption text-muted-foreground">
-          Start from
-        </span>
-        <RadioGroup
-          aria-labelledby="dashboard-start-label"
-          value={start}
-          onValueChange={(value) => {
-            const choice = STARTS.find((item) => item.id === value);
-            if (choice) {
-              setStart(choice.id);
-            }
-          }}
-          disabled={create.isPending}
-        >
-          {STARTS.map((choice) => (
-            <div key={choice.id} className="flex items-start gap-2">
-              <RadioGroupItem
-                value={choice.id}
-                id={`dashboard-start-${choice.id}`}
-                aria-label={choice.name}
-                className="mt-1"
-              />
-              <Label
-                htmlFor={`dashboard-start-${choice.id}`}
-                className="flex flex-col items-start gap-0.5"
-              >
-                <span className="text-ui font-medium">{choice.name}</span>
-                <span className="text-caption text-muted-foreground">{choice.description}</span>
-              </Label>
-            </div>
-          ))}
-        </RadioGroup>
-      </div>
+      {initial === undefined ? (
+        <div className="flex flex-col gap-2">
+          <span id="dashboard-start-label" className="text-caption text-muted-foreground">
+            Start from
+          </span>
+          <RadioGroup
+            aria-labelledby="dashboard-start-label"
+            value={start}
+            onValueChange={(value) => {
+              const choice = STARTS.find((item) => item.id === value);
+              if (choice) {
+                setStart(choice.id);
+              }
+            }}
+            disabled={create.isPending}
+          >
+            {STARTS.map((choice) => (
+              <div key={choice.id} className="flex items-start gap-2">
+                <RadioGroupItem
+                  value={choice.id}
+                  id={`dashboard-start-${choice.id}`}
+                  aria-label={choice.name}
+                  className="mt-1"
+                />
+                <Label
+                  htmlFor={`dashboard-start-${choice.id}`}
+                  className="flex flex-col items-start gap-0.5"
+                >
+                  <span className="text-ui font-medium">{choice.name}</span>
+                  <span className="text-caption text-muted-foreground">{choice.description}</span>
+                </Label>
+              </div>
+            ))}
+          </RadioGroup>
+        </div>
+      ) : null}
       {failure.form ? <p className="text-caption text-destructive">{failure.form}</p> : null}
       <DialogFooter>
         <Button type="button" variant="outline" onClick={onCancel}>

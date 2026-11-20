@@ -9,6 +9,7 @@ import {
   useUpdateDashboard,
 } from "@/api/dashboards";
 import { problemMessage, problemOf } from "@/api/problem";
+import { projectRef } from "@/api/project-ref";
 import { UnsavedChangesGuard } from "@/components/settings/unsaved-changes";
 import { useProject } from "@/components/shell/project-context";
 import { TopBarCrumb } from "@/components/shell/top-bar-slot";
@@ -42,6 +43,7 @@ import {
   sameDefinition,
   withLayouts,
 } from "@/lib/dashboards/draft";
+import { peekDraft, subscribeDrafts, takeDraft } from "@/lib/assistant/handoff";
 import { OVERVIEW } from "@/lib/dashboards/overview";
 import { overviewKey, useDashboardStore } from "@/lib/dashboards/store";
 import type { Dashboard, Definition, Layout, Widget } from "@/lib/dashboards/types";
@@ -86,6 +88,15 @@ type Session = {
 };
 
 /**
+ * An edit session of `definition`, read at `version`. The grid packs the widgets upwards when it is
+ * shown, so the base is packed the same way: the first drag then changes only what the user moved.
+ */
+function editSession(definition: Definition, version: number | undefined): Session {
+  const packed = { widgets: compactWidgets(definition.widgets) };
+  return { version, base: packed, draft: packed, issues: [], conflict: false };
+}
+
+/**
  * The dialog that is open. `index` is the widget's place in the draft; for a new widget it is
  * where it will be appended.
  */
@@ -120,6 +131,7 @@ function DashboardGrid({
   renderWidget: (widget: Widget, edit?: { actions: ReactNode }) => ReactNode;
 }) {
   const { org, project, data } = useProject();
+  const ref = projectRef(org, project);
   const queryClient = useQueryClient();
   const narrow = useIsMobile();
   const { store, local } = useDashboardStore(org, project);
@@ -160,6 +172,30 @@ function DashboardGrid({
     target.kind === "overview"
       ? !local && canManageDashboards(data.role) && !narrow
       : (local || canManageDashboards(data.role)) && !narrow;
+
+  // An edit draft for this dashboard opens its editor with the draft definition, at the draft's
+  // version, so a dashboard changed since gets the stale-version message on save (D-AS-28). It is
+  // taken when shown and when handed over while shown; a hidden or read-only grid leaves it.
+  const customId = custom?.id;
+  useEffect(() => {
+    if (!active) {
+      return;
+    }
+    function takeEditDraft() {
+      const draft = peekDraft(ref, "dashboard");
+      if (!canEdit || customId === undefined || draft?.dashboard_id !== customId) {
+        return;
+      }
+      takeDraft(ref, "dashboard");
+      setSession({
+        ...editSession(definition, version),
+        draft: draft.definition,
+        version: draft.version,
+      });
+    }
+    takeEditDraft();
+    return subscribeDrafts(ref, takeEditDraft);
+  }, [active, canEdit, customId, definition, version, ref]);
   const editing = canEdit && session !== null;
   const draft = editing ? session.draft : undefined;
   // Outside Edit, a moved or resized chart is saved by itself (D-C-18). Viewing saves nothing.
@@ -204,16 +240,7 @@ function DashboardGrid({
     if (!canEdit) {
       return;
     }
-    // The grid packs the widgets upwards when it is shown, so the base is packed the same way:
-    // the first drag then changes only what the user moved.
-    const packed = { widgets: compactWidgets(definition.widgets) };
-    setSession({
-      version,
-      base: packed,
-      draft: packed,
-      issues: [],
-      conflict: false,
-    });
+    setSession(editSession(definition, version));
   }
 
   /**

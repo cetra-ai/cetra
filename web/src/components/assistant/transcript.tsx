@@ -7,6 +7,7 @@ import { projectRef } from "@/api/project-ref";
 import { conversationKey } from "@/api/queries-assistant";
 import { AnswerMarkdown } from "@/components/assistant/answer-markdown";
 import { chipValue } from "@/components/assistant/composer";
+import { DraftCard } from "@/components/assistant/draft-card";
 import { ToolStep } from "@/components/assistant/tool-step";
 import { Button } from "@/components/ui/button";
 import type { AssistantBubble, Bubble } from "@/lib/assistant/transcript";
@@ -71,8 +72,7 @@ function AssistantBubbleView({
         if (block.type === "step") {
           return <ToolStep key={index} step={block.step} />;
         }
-        // Drafts are replaced by their cards (AS4.5).
-        return <div key={index} data-draft-id={block.id} />;
+        return <DraftCard key={index} kind={block.kind} draft={block.draft} />;
       })}
       {bubble.status === "streaming" && bubble.blocks.length === 0 ? (
         <p className="text-muted-foreground">Thinking…</p>
