@@ -1,0 +1,84 @@
+---
+title: Codex CLI
+description: "Connect OpenAI Codex CLI to cetra: each turn becomes a trace with its tool calls, tagged with the session, repository and branch."
+---
+
+import Backing from "../../../../components/Backing.astro";
+
+This page shows how to send OpenAI Codex CLI's traces to cetra with `cetra agents setup`, and what you see in the UI.
+
+<Backing fixtures={["codex/exec-command"]} />
+
+## Connect Codex
+
+1. Create a project key with the `ingest` scope in the project's [API keys](/docs/platform/api-keys/) page. Copy the `sk-cetra-…` value.
+2. Install the `cetra` binary and run this in a terminal, with `<SK_CETRA_KEY>` set to your key and `<CETRA_URL>` set to your server:
+
+```bash
+export CETRA_INGEST_KEY=<SK_CETRA_KEY>
+cetra agents setup codex --url <CETRA_URL>
+```
+
+3. Trust the cetra hook in Codex once. Codex runs a hook only after you trust it. Until you do, traces have no repository or branch.
+
+`cetra agents setup codex` writes these files, and keeps every other key in them:
+
+- `~/.codex/config.toml`: the `[otel]` table. It sends spans to your server and turns off Codex's log and metric exporters. Comments in the file are kept.
+- `~/.codex/hooks.json`: the cetra hook on `SessionStart` and `UserPromptSubmit`. The hooks send the session's repository, branch and person to cetra. They never send spans.
+- `~/.config/cetra/agents.toml`, with mode 0600: the server, the key and the person that the hooks use.
+
+Before the first change, setup copies each original file to `<file>.cetra-backup`.
+
+To see the files without writing them, add `--print`. It prints the merged files and writes nothing. To attribute sessions to a person other than your `git config --global user.email`, add `--user <EMAIL>`.
+
+To undo setup, run this. It removes only the keys and hooks that setup wrote:
+
+```bash
+cetra agents remove codex
+```
+
+Run `cetra agents setup codex` again after you move or upgrade the `cetra` binary. The hooks hold the binary's path.
+
+## What you get
+
+A turn makes one trace. Codex exports about 700 internal spans for one prompt, and cetra keeps only the turn and the tool calls:
+
+- the turn is the root span, an `llm` span with the model and the turn's token counts;
+- each tool call is a `tool` span named after the tool, such as `exec_command`.
+
+In the captured fixture, one prompt sends 19 spans, and cetra keeps 2 of them (the turn and the tool call) and discards 17. Discarded spans are not stored and are not units.
+
+Each trace has these fields:
+
+- the session, from Codex's conversation id;
+- the person and the repository and branch, when the hook has run and you trusted it. Codex sends no person on its spans;
+- `metadata.coding_agent` set to `codex`.
+
+Use the [Coding agents dashboard template](/docs/tracing/custom-dashboards/) to see cost per person, repository, branch and session, and tool usage.
+
+## Content
+
+Codex does not put prompts, tool arguments or tool output on its spans. Codex keeps that content in its log events, and cetra drops log events.
+
+So a turn shows its model, its tokens and its cost, and each tool's name, but no prompt and no tool input or output. `--no-content` changes nothing for Codex.
+
+## Cost
+
+cetra prices each turn from the turn's token totals, using its price table. Codex's own cost figure is in its log events and metrics, which cetra drops.
+
+Codex is priced per turn, not per model call. The result is the same as pricing each call, except when a long-context price applies to some calls in a turn and not to others.
+
+If you use a subscription plan, the cost shown is what the same tokens would cost at API prices. It is not what you pay.
+
+## Limits
+
+- Tested with Codex 0.167.2, using `codex exec`. The interactive mode was not captured, so this page does not describe how it groups traces.
+- Codex runs the cetra hook only after you trust it. Until then, traces have no repository or branch.
+- `cetra agents setup` does not run on Windows. There, Codex can still export spans if you set its `[otel]` table yourself, but no hooks run.
+- Setup turns off Codex's log and metrics exporters. Codex's default metrics export goes to OpenAI's Statsig collector, and setup stops it.
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Sessions](/docs/tracing/sessions/): the turns of one Codex session.
+- [Custom dashboards](/docs/tracing/custom-dashboards/): build your own cost views, or start from the Coding agents template.
