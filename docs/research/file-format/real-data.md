@@ -269,8 +269,38 @@ Braintrust published a search benchmark of Brainstore against two unnamed vendor
 
 - Every format returns the same counts and rows (0; 49,835; 1,937; 1).
 - Rare and absent phrases: the gram index leaves Strata 16–36 MiB of frames to read, against 7.4 GB for Parquet and Vortex: 70–100× faster.
-- A common phrase is Strata's weak case: nearly every frame is a candidate, so it decompresses 2.4 GB of frames (3.4 s), only 2× faster than a Parquet scan. Brainstore counts it from posting lists without reading text.
+- A common phrase is Strata's weak case: nearly every frame is a candidate, so it decompresses 2.4 GB of frames (3.4 s), only 2× faster than a Parquet scan. Brainstore counts it from posting lists without reading text. § Common phrases makes its newest matches 38× faster.
 - **Bug found and fixed:** the "help me" scan issued 64,561 range reads over 20 files with up to 2,560 in flight (64 per wave, two waves per file at once). It failed with "Too many open files" under the default limit of 1,024 descriptors, so the run above raised the limit to 65,536. Strata now holds at most 256 reads in flight in the whole process (`MAX_GETS_IN_FLIGHT`). Rerun under the default limit, every query passes with the same counts, and the times stay within 2% ("help me" 3,434 ms, phrase none 87 ms, cold lookup 12.0 ms).
+
+## Common phrases
+
+"help me" was the one Braintrust query where Strata trailed: 3.4 s to count it, and 3.6 s for its newest 100 matches (`bt_newest_help_me`, added for this: `SELECT input … LIKE '%help me%' ORDER BY start_time DESC LIMIT 100`), against Parquet's 6.5 s and 3.7 s.
+
+**Profile of the count** (36 s of CPU over 12 cores):
+- zstd decompression of the candidate frames: about 50%;
+- about 17% in the threads of tokio's blocking pool, waking and locking: the local store reads each of the 64,561 ranges on a blocking thread;
+- about 8% in fresh allocator pages: every candidate frame of a file was decoded and held at once.
+
+**The changes:**
+- **Search while decoding.** Each candidate frame is searched on the decoding threads as soon as it is decoded (`StrataFile::fetch_map`), and its body is kept only when one of its chunks ends with a prefix of the needle.
+- **Dense frames read like a scan.** When the candidate frames hold at least a quarter of the bytes between the first and the last, they are fetched with scan coalescing (gaps up to 1 MiB, ranges up to 16 MiB) instead of one request per frame (`frames_kind`).
+- **Staged top.** A sort with a limit over a `LIKE` search, by a timestamp or integer column, ranks the files by their zones (newest first for a descending sort) and searches them in stages of 1, 4, 16, … files. Once 100 rows are kept, the 100th one's `start_time` is added to the filter of later files, and a file whose zones rule it out reads no payload. The rows are the full sort's: ties pass the bound, and a null key is kept when nulls sort first (`prototype-plan.md` § S8).
+
+**Results** (Strata, ms, median of 5; before: two rounds alternating with the previous binary; after: two rounds of the final binary; default open-file limit):
+
+| Query | Before | After | Parquet | Vortex compact |
+|---|---|---|---|---|
+| Count matches of "help me" | 3,486 | 3,222 | 6,498 | 5,888 |
+| Newest 100 matches of "help me" | 3,607 | **94** | 3,668 | 7,123 |
+| Newest 100 matches of the rare phrase | 282 | **108** | 7,883 | 9,695 |
+| Newest matches of the long phrase (1 match) | 83 | 98 | 6,353 | 5,901 |
+| Count matches of a phrase found nowhere | 90 | 83 | 6,573 | 5,896 |
+
+- **Newest matches of a common phrase: 38× faster.** The newest file holds about 2,500 matches, so one file of 20 is searched. Brainstore's posting lists would do the same with no text read; this does it with the text format as it is.
+- **Rare phrase: 2.6× faster.** About 97 matches per file, so the first stage keeps 97 rows and the second stage (4 files) completes the 100.
+- **Single match: 15 ms slower.** Nothing bounds the search, so every file is read in three stages (1, 4, 15 files) instead of all at once. A first version ran a stage's files one after another in one task: 331 ms. Each file is now its own task.
+- **Count of "help me": 8% faster.** The dense read cut the requests from 64,561 to 9,744 but fetches 7.2 GB instead of 2.5 GB, and CPU rose from 35 to 37 s. Locally the extra bytes are copies from the page cache; on S3 the change trades bytes for 6.6× fewer requests. Counting a common phrase still decompresses every frame that holds it: only a word index (posting lists, as Brainstore's) avoids that.
+- The other datasets' `substring_input` stayed within noise (swe 22 → 21 ms with 242 → 167 requests; openswe, toucan, wildchat unchanged).
 
 ## Reproduce
 

@@ -47,9 +47,10 @@ use crate::config::Config;
 use crate::error::{Result, StrataError};
 use crate::file::StrataFile;
 use crate::hot::Layer;
-use crate::io::ScanKind;
+use crate::io::{IoStats, ScanKind};
 use crate::predicate::{self, CmpOp, Lit, Predicate, layout_of};
 use crate::scan::{ScanRequest, TopRows};
+use ::datafusion::common::runtime::SpawnedTask;
 
 /// A DataFusion table over Strata files that share one schema.
 #[derive(Debug)]
@@ -708,6 +709,10 @@ pub struct StrataExec {
     order: Option<Vec<PhysicalSortExpr>>,
     /// The rows each partition keeps of `order`, from the sort's limit (`with_fetch`).
     fetch: Option<usize>,
+    /// The scan is one partition that reads the files in stages, best first ([`staged_top`]):
+    /// set with a sort, a limit and a substring search, when the first key is a signed integer
+    /// or a timestamp.
+    staged: bool,
     schema: SchemaRef,
     props: Arc<PlanProperties>,
     metrics: ExecutionPlanMetricsSet,
@@ -800,6 +805,153 @@ fn sort_rows(
     Ok(Some(take_record_batch(&all, &indices)?))
 }
 
+/// How much each stage of [`staged_top`] grows: 1, 4, 16, … files, so that a needle found in
+/// the first file reads one file, and one found nowhere takes few stages.
+const STAGE_GROWTH: usize = 4;
+
+/// The first `fetch` rows of `files` by `keys`, for a scan whose first sort key is the signed
+/// integer or timestamp column `top.column`, filtered by `predicate`. Also returns the I/O of
+/// every file read.
+///
+/// The files are ranked by the best value their zones allow for the first key (the largest
+/// for a descending sort), and read in stages of 1, 4, 16, … files, the files of a stage at
+/// once, each in its own task. Once `fetch` rows are kept, the k-th one's first key `v` bounds
+/// the rest: later stages read with `key >= v` (`<=` ascending) added to the predicate, so a
+/// file whose zones rule it out reads no payload. Rows tied with `v` pass the bound, and the
+/// kept rows are sorted by every key each time, so the result is the full sort's. With files
+/// that are time slices, a needle found in the newest file reads that file only.
+async fn staged_top(
+    files: &[Arc<StrataFile>],
+    projection: &[usize],
+    predicate: &Predicate,
+    top: TopRows,
+    keys: &[(usize, SortOptions)],
+    fetch: usize,
+) -> DfResult<(Option<RecordBatch>, IoStats)> {
+    let descending = top.options.descending;
+    // Files without a range sort last; they are read, and checked against the bound, as any.
+    // A file may hold nulls unless its zones say otherwise.
+    let mut ranked: Vec<(Option<i64>, bool, &Arc<StrataFile>)> = Vec::with_capacity(files.len());
+    for file in files {
+        let range = file.int_range(top.column).await.map_err(df)?;
+        let best = range.map(|(lo, hi, _)| if descending { hi } else { lo });
+        let nulls = range.is_none_or(|(_, _, nulls)| nulls);
+        ranked.push((best, nulls, file));
+    }
+    ranked.sort_by(|a, b| match (a.0, b.0) {
+        (Some(x), Some(y)) if descending => y.cmp(&x),
+        (Some(x), Some(y)) => x.cmp(&y),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+    let first = keys
+        .first()
+        .map(|&(position, _)| position)
+        .ok_or_else(|| DataFusionError::Internal("a staged scan without sort keys".to_string()))?;
+    let mut io = IoStats::default();
+    let mut best: Option<RecordBatch> = None;
+    let mut schema: Option<SchemaRef> = None;
+    let mut next = 0;
+    let mut stage = 1;
+    while next < ranked.len() {
+        let bound = match &best {
+            Some(batch) if batch.num_rows() >= fetch => {
+                kth_int(batch, first, fetch - 1).map_err(df)?
+            }
+            _ => None,
+        };
+        let end = next.saturating_add(stage).min(ranked.len());
+        let group = ranked.get(next..end).unwrap_or_default();
+        let threads = crate::parallel::cores().div_ceil(group.len().max(1));
+        // Each file of the stage is its own task, so their decoding runs in parallel.
+        let tasks: Vec<_> = group
+            .iter()
+            .map(|&(_, nulls, file)| {
+                // Rows that cannot pass the k-th kept row are left out. A null key ranks first
+                // when nulls sort first, so it stays in, but only in a file that may hold one:
+                // the zones cannot prune an `OR`.
+                let predicate = match bound {
+                    Some(v) => {
+                        let op = if descending { CmpOp::GtEq } else { CmpOp::LtEq };
+                        let cmp = Predicate::Cmp(top.column, op, Lit::Int(v));
+                        let bound = if top.options.nulls_first && nulls {
+                            Predicate::Or(vec![Predicate::IsNull(top.column), cmp])
+                        } else {
+                            cmp
+                        };
+                        Predicate::And(vec![predicate.clone(), bound])
+                    }
+                    None => predicate.clone(),
+                };
+                let file = Arc::clone(file);
+                let projection = projection.to_vec();
+                SpawnedTask::spawn(async move {
+                    let before = file.io_stats();
+                    let scanned = file
+                        .scan_batches(
+                            &ScanRequest {
+                                projection,
+                                predicate: Some(predicate),
+                                row_ranges: None,
+                                limit: None,
+                                kind: ScanKind::Scan,
+                                views: true,
+                                top: Some(top),
+                            },
+                            threads,
+                        )
+                        .await?;
+                    let scan_schema = scanned.schema();
+                    let rows = scanned.collect::<Result<Vec<_>>>()?;
+                    let after = file.io_stats();
+                    Ok::<_, StrataError>((scan_schema, rows, before, after))
+                })
+            })
+            .collect();
+        let mut rows: Vec<RecordBatch> = best.take().into_iter().collect();
+        for task in tasks {
+            let (scan_schema, batches, before, after) = task
+                .join_unwind()
+                .await
+                .map_err(|e| DataFusionError::ExecutionJoin(Box::new(e)))?
+                .map_err(df)?;
+            io.requests += after.requests.saturating_sub(before.requests);
+            io.bytes += after.bytes.saturating_sub(before.bytes);
+            io.waves += after.waves.saturating_sub(before.waves);
+            schema.get_or_insert(scan_schema);
+            rows.extend(batches);
+        }
+        if let Some(schema) = &schema {
+            best = sort_rows(rows, schema, keys, Some(fetch)).map_err(df)?;
+        }
+        next = end;
+        stage = stage.saturating_mul(STAGE_GROWTH);
+    }
+    Ok((best, io))
+}
+
+/// Row `row` of column `position` of `batch` as an `i64`, or `None` when it is null.
+fn kth_int(batch: &RecordBatch, position: usize, row: usize) -> Result<Option<i64>> {
+    let column = batch
+        .columns()
+        .get(position)
+        .ok_or_else(|| StrataError::Schema {
+            reason: format!("internal: no sort column {position}"),
+        })?;
+    if row >= column.len() {
+        return Ok(None);
+    }
+    let value = cast(&column.slice(row, 1), &DataType::Int64)?;
+    let ints = value
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .ok_or_else(|| StrataError::Schema {
+            reason: "internal: sort key is not an integer".to_string(),
+        })?;
+    Ok(arrow::array::Array::is_valid(ints, 0).then(|| ints.value(0)))
+}
+
 impl StrataExec {
     /// An exec over `files`. `schema` is the output schema, the projection of the table schema.
     /// A scan splits each file into row ranges so that there are about `target_partitions`
@@ -831,6 +983,7 @@ impl StrataExec {
             limit,
             order: None,
             fetch: None,
+            staged: false,
             schema,
             props: Arc::new(props),
             metrics: ExecutionPlanMetricsSet::new(),
@@ -839,11 +992,27 @@ impl StrataExec {
 
     /// This scan with each partition's rows sorted by `order`, keeping the first `fetch`.
     fn ordered(&self, order: Vec<PhysicalSortExpr>, fetch: Option<usize>) -> StrataExec {
+        let first_int = sort_keys(&order, self.projection.len())
+            .and_then(|keys| keys.first().copied())
+            .and_then(|(position, _)| self.schema.fields().get(position))
+            .is_some_and(|field| {
+                matches!(
+                    field.data_type(),
+                    DataType::Int8
+                        | DataType::Int16
+                        | DataType::Int32
+                        | DataType::Int64
+                        | DataType::Timestamp(_, _)
+                )
+            });
+        let staged =
+            fetch.is_some() && first_int && self.predicate.as_ref().is_some_and(has_contains);
+        let partitions = if staged { 1 } else { self.parts.len().max(1) };
         let props = plan_properties(
             &self.files,
             &self.projection,
             &self.schema,
-            self.partitions(),
+            partitions,
             Some(&order),
         );
         StrataExec {
@@ -855,6 +1024,7 @@ impl StrataExec {
             limit: self.limit,
             order: Some(order),
             fetch,
+            staged,
             schema: Arc::clone(&self.schema),
             props: Arc::new(props),
             metrics: ExecutionPlanMetricsSet::new(),
@@ -863,7 +1033,11 @@ impl StrataExec {
 
     /// The number of partitions: one per row range, and one when there is no file.
     fn partitions(&self) -> usize {
-        self.parts.len().max(1)
+        if self.staged {
+            1
+        } else {
+            self.parts.len().max(1)
+        }
     }
 }
 
@@ -883,6 +1057,9 @@ impl DisplayAs for StrataExec {
         if let Some(order) = &self.order {
             let keys: Vec<String> = order.iter().map(ToString::to_string).collect();
             write!(f, ", order=[{}], fetch={:?}", keys.join(", "), self.fetch)?;
+            if self.staged {
+                write!(f, ", staged")?;
+            }
         }
         Ok(())
     }
@@ -916,8 +1093,8 @@ impl ExecutionPlan for StrataExec {
             }
         };
         let rows: u64 = match args.partition() {
-            Some(i) => self.parts.get(i).map_or(0, rows_of),
-            None => self.parts.iter().map(rows_of).sum(),
+            Some(i) if !self.staged => self.parts.get(i).map_or(0, rows_of),
+            _ => self.parts.iter().map(rows_of).sum(),
         };
         let mut rows = usize::try_from(rows).unwrap_or(usize::MAX);
         // How a limit splits across partitions is not modelled: it only caps the estimate.
@@ -1058,6 +1235,36 @@ impl ExecutionPlan for StrataExec {
             _ => None,
         };
         let schema = Arc::clone(&self.schema);
+        if self.staged
+            && let (Some(keys), Some(top), Some(fetch), Some(predicate)) =
+                (keys.clone(), top, fetch, predicate.clone())
+        {
+            let files = self.files.clone();
+            let fut = async move {
+                let (best, io) =
+                    staged_top(&files, &projection, &predicate, top, &keys, fetch).await?;
+                bytes.add(usize::try_from(io.bytes).unwrap_or(usize::MAX));
+                requests.add(usize::try_from(io.requests).unwrap_or(usize::MAX));
+                waves.add(usize::try_from(io.waves).unwrap_or(usize::MAX));
+                Ok::<_, DataFusionError>(best)
+            };
+            let stream = futures::stream::once(fut)
+                .map_ok(move |best| {
+                    let (elapsed, output_rows, schema) =
+                        (elapsed.clone(), output_rows.clone(), Arc::clone(&schema));
+                    futures::stream::iter(best.into_iter().map(move |batch| {
+                        let _timer = elapsed.timer();
+                        let batch = to_table_batch(&batch, &schema).map_err(df)?;
+                        output_rows.add(batch.num_rows());
+                        Ok(batch)
+                    }))
+                })
+                .try_flatten();
+            return Ok(Box::pin(RecordBatchStreamAdapter::new(
+                Arc::clone(&self.schema),
+                stream,
+            )));
+        }
         // Partitions run at once: each builds its batches on its share of the cores.
         let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
         let threads = cores.div_ceil(self.partitions()).max(1);
@@ -1609,6 +1816,115 @@ mod tests {
                     pushed_bytes < sorted_bytes,
                     "{pushed_bytes} of {sorted_bytes} bytes\n{plan}\n{plain}"
                 );
+            }
+        }
+    }
+
+    /// File `f` of a table of time slices: 600 rows whose start times fall in slice `f` (ten
+    /// rows share each time, so the sort has ties), a payload `body` in which every third row
+    /// holds "abc", and row 17 of files 2 and 5 holds "zzrare".
+    async fn slice_file(f: usize) -> Arc<StrataFile> {
+        let n = 600usize;
+        let trace: Vec<[u8; 16]> = (0..n)
+            .map(|i| {
+                let mut id = [0u8; 16];
+                id[..8].copy_from_slice(&(f as u64).to_be_bytes());
+                id[8..].copy_from_slice(&(i as u64).to_be_bytes());
+                id
+            })
+            .collect();
+        let trace_ids = FixedSizeBinaryArray::try_from_iter(trace.iter()).unwrap();
+        // Time does not follow the sort key inside a file, as with real traces.
+        // File 3 has a null start time in every 50th row: nulls sort first in a descending
+        // sort, so they are always in its top rows.
+        let times = TimestampNanosecondArray::from_iter((0..n).map(|i| {
+            (f != 3 || i % 50 != 0).then_some((f * 1_000_000 + (i * 7919 % n) / 10) as i64)
+        }))
+        .with_timezone("UTC");
+        let body = StringArray::from_iter_values((0..n).map(|i| {
+            let rare = if i == 17 && (f == 2 || f == 5) {
+                " zzrare"
+            } else {
+                ""
+            };
+            let common = if i % 3 == 0 { " abc" } else { "" };
+            format!("file {f} row {i}{common}{rare} and some words to make it longer")
+        }));
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("trace_id", DataType::FixedSizeBinary(16), false),
+            Field::new("start_time", times.data_type().clone(), true),
+            Field::new("body", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(trace_ids), Arc::new(times), Arc::new(body)],
+        )
+        .unwrap();
+        let config = Config {
+            payload_min_avg: 1,
+            ..Config::default()
+        };
+        // Sorted by trace id alone: a sort-key column holds no null.
+        let mut writer = StrataWriter::new(batch.schema(), &["trace_id"], config).unwrap();
+        writer.write(&batch).unwrap();
+        let (bytes, _) = writer.finish().unwrap();
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("slice.strata");
+        store.put(&path, PutPayload::from(bytes)).await.unwrap();
+        Arc::new(
+            StrataFile::open(store, path, None, &Config::default())
+                .await
+                .unwrap(),
+        )
+    }
+
+    /// A sort with a limit over a substring search reads the files in stages, best first: the
+    /// rows are those of DataFusion's own sort (both directions, ties, fewer matches than the
+    /// limit), and a common needle reads fewer bytes than the full sort.
+    #[tokio::test]
+    async fn a_staged_top_returns_the_rows_of_datafusions_sort() {
+        let mut files = Vec::new();
+        for f in 0..8 {
+            files.push(slice_file(f).await);
+        }
+        let table = || StrataTable::new(files.clone()).unwrap();
+        // Payload frame bytes of the last run: the files are small, so metadata would hide
+        // what the stages save.
+        let frame_bytes = || -> u64 {
+            files
+                .iter()
+                .map(|f| f.io_stats().by_kind[crate::segment::Kind::PayloadFrame as usize])
+                .sum()
+        };
+        for sql in [
+            "SELECT start_time, trace_id, body FROM t WHERE body LIKE '%abc%' \
+             ORDER BY start_time DESC, trace_id LIMIT 25",
+            "SELECT start_time, trace_id FROM t WHERE body LIKE '%abc%' \
+             ORDER BY start_time, trace_id DESC LIMIT 25",
+            "SELECT start_time, trace_id, body FROM t WHERE body LIKE '%zzrare%' \
+             ORDER BY start_time DESC, trace_id LIMIT 25",
+            "SELECT start_time, trace_id FROM t WHERE body LIKE '%nowhere%' \
+             ORDER BY start_time DESC LIMIT 5",
+            "SELECT start_time, trace_id FROM t WHERE body LIKE '%abc%' \
+             ORDER BY start_time DESC NULLS LAST, trace_id LIMIT 25",
+        ] {
+            let (pushed, _, plan) = run_sorted(table(), sql, true).await;
+            let pushed_bytes = frame_bytes();
+            let (sorted, _, plain) = run_sorted(table(), sql, false).await;
+            let sorted_bytes = frame_bytes();
+            assert!(plan.contains("staged"), "{sql}\n{plan}");
+            assert!(!plan.contains("SortExec"), "{sql}\n{plan}");
+            assert!(plain.contains("SortExec"), "{sql}\n{plain}");
+            assert_eq!(pushed, sorted, "{sql}");
+            if sql.contains("abc") {
+                assert_eq!(sorted.num_rows(), 25, "{sql}");
+                assert!(
+                    pushed_bytes * 2 < sorted_bytes,
+                    "{pushed_bytes} of {sorted_bytes} bytes\n{plan}"
+                );
+            }
+            if sql.contains("zzrare") {
+                assert_eq!(sorted.num_rows(), 2, "{sql}");
             }
         }
     }

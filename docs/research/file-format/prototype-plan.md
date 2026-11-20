@@ -429,8 +429,8 @@ Strata v2 replaces the payload layer's frames table, filters, edge groups and ro
 
 **`Contains(needle)`**, exact, after the header and store (metadata):
 1. One wave: the index rows of every gram of the needle, in every run. Their AND gives the candidate frames (every frame for a needle under 5 B).
-2. One wave: every refs page of the column (scan coalescing) and the candidate frames (point coalescing, 4 KiB gaps).
-3. In the candidate frames, a chunk is a hit when it holds the needle, and a partial hit for each `k` where it ends with the needle's first `k` bytes.
+2. One wave: every refs page of the column (scan coalescing) and the candidate frames. The frames use point coalescing (4 KiB gaps), or scan coalescing when they hold at least a quarter of the bytes from the first to the last (`frames_kind`): a common needle then reads a few large ranges instead of one request per frame.
+3. In the candidate frames, a chunk is a hit when it holds the needle, and a partial hit for each `k` where it ends with the needle's first `k` bytes. Each frame is searched on the decoding threads as soon as it is decoded (`fetch_map`), and its body is kept only when it holds a partial hit; a continuation that needs a dropped frame reads it again in step 4's wave.
 4. A row matches when it refers to a hit, or to a partial hit followed by chunks that hold the rest of the needle. A rest that needs a frame not read yet costs one more wave.
 
 **Point reads.** A read of some rows of several payload columns fetches and decompresses each frame once, even when the columns share its store: frames are planned across the columns, by file offset. A refs page is decoded only up to the last row wanted from it, since a row's list builds on earlier rows only. On `payload`, the two cut a warm full-trace lookup's execute time from 4.57 to 3.81 ms (one partition).
@@ -580,6 +580,14 @@ The Parquet baseline is measured with the same counting store (`bench/src/counti
 - `output_ordering`: the first sort-key column only, declared when that column is in the projection. Each partition reads at most one file, so the order holds per partition.
 - Statistics: the row count from the postscripts, per partition or in total. It is exact for a plain scan, so DataFusion answers `count(*)` without a read; with a predicate, a lookup or a limit it is only an estimate. Column statistics are unknown.
 - `limit` reaches `scan` only when DataFusion passes it, which it does only when every pushed filter is `Exact`.
+- A sort with a limit whose first key is a narrow column is pushed in (`try_pushdown_sort`, then `with_fetch`): each partition keeps the rows that can rank in the limit ([`TopRows`]) and outputs them sorted (`real-data.md` § Top rows in the scan).
+- **Staged top.** When the predicate also holds a `Contains` term and the first key is a signed integer or a timestamp, the scan is one partition that reads the files in stages (`staged_top`), since each file's search is the costly part:
+  1. The files are ranked by the best first-key value their zones allow (`StrataFile::int_range`): the largest maximum first for a descending sort, the smallest minimum first for an ascending one; files without a range go last.
+  2. Stages of 1, 4, 16, … files (`STAGE_GROWTH`) run in rank order. The files of a stage run at once, each in its own task on its share of the cores. The rows kept so far and the stage's rows are sorted by every key, and the first `fetch` kept.
+  3. Once `fetch` rows are kept, the k-th row's first key `v` is added to the predicate of later files: `key >= v` (descending) or `key <= v` (ascending). Ties pass, so the result is the full sort's. When nulls sort first, a file whose zones show nulls gets `key IS NULL OR key >= v` instead, which the zones cannot prune.
+  4. A file whose zones rule out the bound prunes every chunk and reads no payload.
+
+  With files that are time slices and a needle found in the newest one, the query reads one file. With files that each span the whole time range, it reads every file, in fewer and larger stages than one file at a time.
 - Metrics, registered with `MetricBuilder`:
 
 | Metric | Kind |

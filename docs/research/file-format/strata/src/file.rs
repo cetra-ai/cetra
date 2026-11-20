@@ -561,6 +561,30 @@ impl StrataFile {
         self.fetch_with(segments, kind, on, decode).await
     }
 
+    /// [`Self::fetch`], with `f` applied to each decoded body on the decoding threads, so that
+    /// a wave of frames can be searched as it is decoded and only what `f` keeps is held.
+    pub(crate) async fn fetch_map<T: Send>(
+        &self,
+        segments: &[(SegmentRef, Kind)],
+        kind: ScanKind,
+        f: impl Fn(Vec<u8>, &SegmentRef) -> Result<T> + Sync,
+    ) -> Result<Vec<T>> {
+        let on = DecodeThreads {
+            threads: crate::parallel::cores(),
+            min_bytes: PARALLEL_DECODE_BYTES,
+        };
+        let decode = |slice: &bytes::Bytes, r: &SegmentRef, k: Kind| {
+            let body = if k == Kind::PayloadFrame {
+                let dict = self.frame_dict(r.offset);
+                decode_segment_with(slice, r.offset, k, dict.as_deref())?
+            } else {
+                decode_segment(slice, r.offset, k)?
+            };
+            f(body, r)
+        };
+        self.fetch_with(segments, kind, on, decode).await
+    }
+
     /// Reads and slices `segments` as one wave, like [`Self::fetch`], but returns each segment
     /// as stored, header included, for the caller to check and decode when it needs it.
     pub(crate) async fn fetch_stored(

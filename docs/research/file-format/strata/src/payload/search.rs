@@ -122,6 +122,39 @@ async fn candidate_frames(
     Ok(frames)
 }
 
+/// What a search finds in one frame: the chunks that hold the needle, the chunks that end with
+/// proper prefixes of it (with the prefix lengths), and the decoded body when there are any of
+/// the latter.
+struct FrameHits {
+    hits: Vec<u32>,
+    partial: Vec<(u32, Vec<usize>)>,
+    body: Option<Decoded>,
+}
+
+/// Fewest bytes wanted per byte spanned for a wave of frames to be read like a scan.
+const DENSE_FRAMES: u64 = 4;
+
+/// How to coalesce a wave of frames: like a scan when the frames hold at least a quarter of the
+/// bytes from the first to the last, so that a common needle reads a few large ranges instead of
+/// one request per frame; else like point reads.
+fn frames_kind(segments: &[(SegmentRef, Kind)]) -> ScanKind {
+    let start = segments.iter().map(|(s, _)| s.offset).min();
+    let end = segments
+        .iter()
+        .map(|(s, _)| s.offset.saturating_add(u64::from(s.len)))
+        .max();
+    let (Some(start), Some(end)) = (start, end) else {
+        return ScanKind::Point;
+    };
+    let span = end.saturating_sub(start);
+    let wanted: u64 = segments.iter().map(|(s, _)| u64::from(s.len)).sum();
+    if wanted.saturating_mul(DENSE_FRAMES) >= span {
+        ScanKind::Scan
+    } else {
+        ScanKind::Point
+    }
+}
+
 /// Fetches and decodes the frames `indexes` of `header`'s store into `decoded`.
 async fn read_frames(
     file: &StrataFile,
@@ -143,7 +176,7 @@ async fn read_frames(
                 .ok_or_else(corrupt)
         })
         .collect::<Result<_>>()?;
-    let bodies = file.fetch(&segments, ScanKind::Point).await?;
+    let bodies = file.fetch(&segments, frames_kind(&segments)).await?;
     for (&f, raw) in indexes.iter().zip(bodies) {
         let entry = header.store.frames.get(f).ok_or_else(corrupt)?;
         decoded.insert(f, decode_fetched_frame(entry, raw)?);
@@ -234,8 +267,9 @@ pub(crate) async fn payload_contains(
     }
 
     let frames = candidate_frames(file, &header, needle).await?;
-    // The refs pages (every row) and the candidate frames, fetched together. The frames are
-    // scattered, so they are coalesced like point reads, without the scan's large gaps.
+    // The refs pages (every row) and the candidate frames, fetched together. Each frame is
+    // searched on the decoding threads as soon as it is decoded, and its body is kept only when
+    // a chunk of it ends with a prefix of the needle: a continuation may need it.
     let (ref_segments, pages) = refs_segments(&header, &rows)?;
     let mut frame_segments = Vec::with_capacity(frames.len());
     for &f in &frames {
@@ -245,44 +279,66 @@ pub(crate) async fn payload_contains(
         })?;
         frame_segments.push((seg, Kind::PayloadFrame));
     }
-    let (bodies, frame_bodies) = futures::try_join!(
-        file.fetch(&ref_segments, ScanKind::Scan),
-        file.fetch(&frame_segments, ScanKind::Point)
-    )?;
-    let ids = ids_of(&header, &pages, &bodies, &rows, at)?;
-    let mut decoded: HashMap<usize, Decoded> = HashMap::with_capacity(frames.len());
-    for (&f, raw) in frames.iter().zip(frame_bodies) {
-        let entry = header.store.frames.get(f).ok_or(StrataError::Corrupt {
-            what: "payload frame",
-            offset: at,
-        })?;
-        decoded.insert(f, decode_fetched_frame(entry, raw)?);
-    }
-
-    // Hits and partial hits among the chunks of the candidate frames.
+    let kind = frames_kind(&frame_segments);
+    let at_offset: HashMap<u64, usize> = frames
+        .iter()
+        .zip(&frame_segments)
+        .map(|(&f, (seg, _))| (seg.offset, f))
+        .collect();
     let finder = Finder::new(needle);
-    let mut hits = ChunkBits::new(header.store.n_chunks);
-    let mut partial: HashMap<u32, Vec<usize>> = HashMap::new();
-    let mut partial_bits = ChunkBits::new(header.store.n_chunks);
-    for &f in &frames {
-        let (Some((raw, ranges)), Some(entry)) = (decoded.get(&f), header.store.frames.get(f))
-        else {
-            continue;
-        };
+    let search = |raw: Vec<u8>, seg: &SegmentRef| -> Result<FrameHits> {
+        let entry = at_offset
+            .get(&seg.offset)
+            .and_then(|&f| header.store.frames.get(f))
+            .ok_or(StrataError::Corrupt {
+                what: "payload frame",
+                offset: seg.offset,
+            })?;
+        let (raw, ranges) = decode_fetched_frame(entry, raw)?;
+        let mut hits = Vec::new();
+        let mut partial = Vec::new();
         for (local, range) in ranges.iter().enumerate() {
             let id = entry.first_chunk + local as u32;
             let chunk = raw.get(range.clone()).unwrap_or_default();
             if finder.find(chunk).is_some() {
-                hits.set(id);
+                hits.push(id);
                 continue;
             }
             let ks: Vec<usize> = (1..needle.len().min(chunk.len() + 1))
                 .filter(|&k| needle.get(..k).is_some_and(|p| chunk.ends_with(p)))
                 .collect();
             if !ks.is_empty() {
-                partial_bits.set(id);
-                partial.insert(id, ks);
+                partial.push((id, ks));
             }
+        }
+        let body = (!partial.is_empty()).then_some((raw, ranges));
+        Ok(FrameHits {
+            hits,
+            partial,
+            body,
+        })
+    };
+    let (bodies, frame_hits) = futures::try_join!(
+        file.fetch(&ref_segments, ScanKind::Scan),
+        file.fetch_map(&frame_segments, kind, search)
+    )?;
+    let ids = ids_of(&header, &pages, &bodies, &rows, at)?;
+
+    // Hits and partial hits among the chunks of the candidate frames.
+    let mut decoded: HashMap<usize, Decoded> = HashMap::new();
+    let mut hits = ChunkBits::new(header.store.n_chunks);
+    let mut partial: HashMap<u32, Vec<usize>> = HashMap::new();
+    let mut partial_bits = ChunkBits::new(header.store.n_chunks);
+    for (&f, found) in frames.iter().zip(frame_hits) {
+        for id in found.hits {
+            hits.set(id);
+        }
+        for (id, ks) in found.partial {
+            partial_bits.set(id);
+            partial.insert(id, ks);
+        }
+        if let Some(body) = found.body {
+            decoded.insert(f, body);
         }
     }
 
@@ -413,6 +469,18 @@ mod tests {
                 .map(|_| alphabet[self.below(alphabet.len())])
                 .collect()
         }
+    }
+
+    #[test]
+    fn frames_are_read_like_a_scan_when_they_fill_a_quarter_of_their_span() {
+        let seg = |offset: u64, len: u32| (SegmentRef { offset, len }, Kind::PayloadFrame);
+        assert_eq!(frames_kind(&[]), ScanKind::Point);
+        assert_eq!(frames_kind(&[seg(100, 10)]), ScanKind::Scan);
+        // 2 × 25 bytes over 200: exactly a quarter.
+        assert_eq!(frames_kind(&[seg(0, 25), seg(175, 25)]), ScanKind::Scan);
+        assert_eq!(frames_kind(&[seg(0, 25), seg(176, 25)]), ScanKind::Point);
+        // The order of the segments does not matter.
+        assert_eq!(frames_kind(&[seg(175, 25), seg(0, 25)]), ScanKind::Scan);
     }
 
     const LOWER: &[u8] = b"abcdefghijklmnopqrstuvwxyz";

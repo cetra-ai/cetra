@@ -1057,6 +1057,7 @@ fn braintrust_queries() -> Vec<Query> {
     vec![
         Query { name: "bt_phrase_none", kind: Kind::Sql, sql: format!("SELECT count(*) FROM t WHERE {}", like(BT_NONE)) },
         Query { name: "bt_help_me", kind: Kind::Sql, sql: format!("SELECT count(*) FROM t WHERE {}", like("help me")) },
+        Query { name: "bt_newest_help_me", kind: Kind::Sql, sql: format!("SELECT input FROM t WHERE {} ORDER BY start_time DESC LIMIT 100", like("help me")) },
         Query { name: "bt_newest_rare", kind: Kind::Sql, sql: format!("SELECT input FROM t WHERE {} ORDER BY start_time DESC LIMIT 100", like(BT_RARE)) },
         Query { name: "bt_single", kind: Kind::Sql, sql: format!("SELECT input FROM t WHERE {} ORDER BY start_time DESC LIMIT 100", like(BT_SINGLE)) },
         Query { name: "bt_spans_per_hour", kind: Kind::Sql, sql: "SELECT date_trunc('hour', start_time) AS h, count(*) FROM t GROUP BY h ORDER BY h".to_owned() },

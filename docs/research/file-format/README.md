@@ -576,6 +576,7 @@ Two gaps remain:
 - **Plain integer chunks:** an integer chunk is stored plain, compressed by zstd, when that saves at least 30% over bit-packing. On `light`, `ingest_time` dropped from 6.2 to 2.1 MB and the file from 177 to 173 MiB. The rest of the narrow-size gap is the float costs and the previews, where Parquet uses dictionaries.
 
 - **Smaller files:** preview stores and narrow text columns now use trained zstd dictionaries, and Float64 columns whose values repeat use a file dictionary. Files are 3–9% smaller (wildchat 591 → 564 MiB, now under Vortex compact; `light` 174 → 159). `Config::cold()` and `strata::rewrite` recompress a file at zstd level 19 for compaction: 13–19% smaller than before, written at 9–21 MiB/s, read 2–9% slower (lookups up to 21%).
+- **Braintrust's search benchmark** (FineWeb, 1.94M spans of 10 KB): Strata is 70–100× faster than Parquet and Vortex on rare and absent phrases, with files 21% larger. For a common phrase, a sort with a limit over a search now searches the files newest first and stops once the limit is met: the newest 100 matches of "help me" take 94 ms instead of 3.6 s (Parquet 3.7 s). Counting a common phrase still decompresses every frame that holds it (3.2 s, Parquet 6.5 s).
 
 Details in [real-data.md](real-data.md).
 

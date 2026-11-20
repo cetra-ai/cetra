@@ -23,14 +23,14 @@ use crate::error::{Result, StrataError};
 use crate::file::{SCAN_PARALLEL_BYTES, StrataFile};
 use crate::hot::Layer;
 use crate::io::ScanKind;
-use crate::narrow::{BlockEntry, Dictionary, decode_chunk_view};
+use crate::narrow::{BlockEntry, Dictionary, decode_chunk_view, flags};
 use crate::payload::{
     FrameBodies, FrameEntry, PayloadHeader, build_payload_values, ids_of, payload_contains,
     read_header, refs_segments,
 };
 use crate::predicate::{
     Bound, MaskSource, Predicate, bind, bound_columns, chunk_may_match, evaluate, layout_of,
-    map_key_mask, matching_codes, never_true, pruned_columns,
+    map_key_mask, matching_codes, never_true, pruned_columns, zone_i64,
 };
 use crate::segment::{Kind, SegmentRef, Segments};
 use crate::shred::unshred;
@@ -1050,6 +1050,46 @@ impl StrataFile {
             }
         }
         Ok(true)
+    }
+
+    /// The smallest and largest value of the signed integer or timestamp column `column`, from
+    /// its chunk zones (one wave when the metadata is not cached), and whether a row is null.
+    /// `None` when the column is of another type or not chunked, when every row is null, or when
+    /// a chunk with a valid value has no zone.
+    pub async fn int_range(&self, column: usize) -> Result<Option<(i64, i64, bool)>> {
+        let field = self.field_of(column)?;
+        let int = matches!(
+            field.data_type(),
+            DataType::Int8
+                | DataType::Int16
+                | DataType::Int32
+                | DataType::Int64
+                | DataType::Timestamp(_, _)
+        );
+        if !int || !is_chunked(self, column) {
+            return Ok(None);
+        }
+        self.load_metadata(&[column], ScanKind::Point).await?;
+        let entries = self.block_entries(column).await?;
+        let mut range: Option<(i64, i64)> = None;
+        let mut nulls = false;
+        for entry in entries.iter() {
+            nulls |= entry.flags & (flags::HAS_NULLS | flags::ALL_NULL) != 0;
+            if entry.flags & flags::ALL_NULL != 0 {
+                continue;
+            }
+            if entry.flags & flags::HAS_ZONE == 0 {
+                return Ok(None);
+            }
+            let (Some(lo), Some(hi)) = (zone_i64(&entry.min), zone_i64(&entry.max)) else {
+                return Ok(None);
+            };
+            range = Some(match range {
+                None => (lo, hi),
+                Some((a, b)) => (a.min(lo), b.max(hi)),
+            });
+        }
+        Ok(range.map(|(lo, hi)| (lo, hi, nulls)))
     }
 
     /// Rows whose first sort-key column equals `key`, with the projected columns. It runs in
