@@ -14,7 +14,7 @@ import Terminal from "../components/Terminal.astro";
         id="agents-title"
         lede="cetra has an MCP server. Point Claude Code, Cursor or another MCP client at your traces and ask what went wrong, from your editor."
       />
-      <ul class="features">
+      <ul class="features bullets">
         <li>Search traces and open a whole trace</li>
         <li>Run read-only SQL over your project</li>
         <li>Works with MCP clients that support streamable HTTP</li>
@@ -51,27 +51,8 @@ import Terminal from "../components/Terminal.astro";
     min-width: 0;
   }
   .features {
-    list-style: none;
-    padding: 0;
-    margin: 0;
-    display: grid;
-    gap: var(--space-2);
     font-size: var(--text-sm);
     color: var(--fg-muted);
-  }
-  .features li {
-    position: relative;
-    padding-left: var(--space-4);
-  }
-  .features li::before {
-    content: "";
-    position: absolute;
-    left: 0;
-    top: 0.55em;
-    width: 6px;
-    height: 6px;
-    background: var(--accent);
-    border-radius: 50%;
   }
   .docs-link {
     margin-left: -0.4rem;

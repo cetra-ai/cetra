@@ -59,12 +59,3 @@ import Section from "../components/Section.astro";
     <Frame src={marketingAlerts} alt="The alerts page with three alert rules, one of them firing, and the recent alert events." label="Alerts" fade />
   </Chapter>
 </Section>
-
-<style>
-  /* Chapter has no column template, so its columns could grow past a phone's width. */
-  :global(.chapter),
-  :global(.text) {
-    min-width: 0;
-    grid-template-columns: minmax(0, 1fr);
-  }
-</style>

@@ -19,16 +19,16 @@ const { src, alt, label, bleed = false, fade = true, eager = false } = Astro.pro
 ---
 
 <figure class:list={["frame", bleed && "frame--bleed", fade && "frame--fade"]}>
-  <div class="scroll">
-    <div class="bar" aria-hidden="true">
-      <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-      {label && <span class="label">{label}</span>}
-    </div>
+  <div class="bar" aria-hidden="true">
+    <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+    {label && <span class="label">{label}</span>}
+  </div>
+  <div class="scroll" tabindex="0" role="group" aria-label="Screenshot">
     <Image
       src={src}
       alt={alt}
       widths={[720, 1080, 1440, 2160]}
-      sizes="(min-width: 1200px) 1200px, 100vw"
+      sizes="(max-width: 720px) 760px, (min-width: 1200px) 1200px, 100vw"
       priority={eager}
     />
   </div>
@@ -47,7 +47,7 @@ const { src, alt, label, bleed = false, fade = true, eager = false } = Astro.pro
     overflow: hidden;
   }
   .frame--bleed {
-    margin-right: calc(-1 * min(12vw, 160px));
+    margin-right: calc(-1 * max(0px, min(160px, (100vw - var(--container)) / 2)));
   }
   .bar {
     display: flex;

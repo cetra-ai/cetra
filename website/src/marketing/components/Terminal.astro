@@ -9,6 +9,14 @@ interface Props {
   lines: Line[];
 }
 const { title, lines } = Astro.props;
+
+/** What a screen reader says before each line, since the visible marks are hidden. */
+const PREFIX: Record<Line["kind"], string> = {
+  user: "You: ",
+  tool: "Tool call: ",
+  out: "Result: ",
+  agent: "Agent: ",
+};
 ---
 
 <figure class="term" aria-label={title}>
@@ -19,6 +27,7 @@ const { title, lines } = Astro.props;
         <p class:list={["line", `line--${line.kind}`]}>
           {line.kind === "user" && <span class="mark" aria-hidden="true">›</span>}
           {line.kind === "tool" && <span class="mark" aria-hidden="true">⏺</span>}
+          <span class="visually-hidden">{PREFIX[line.kind]}</span>
           <span>{line.text}</span>
         </p>
       ))
