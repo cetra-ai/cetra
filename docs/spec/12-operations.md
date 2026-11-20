@@ -26,6 +26,7 @@ GitHub and Google also accept the split form (`CETRA_AUTH__GITHUB__CLIENT_ID`, `
 | `entitlements.defaults.plan_name` | | `"Self-hosted"`: the plan name shown for orgs without a token (D-P-10) |
 | `entitlements.defaults.features` | | unset: every core feature (`retention_management`); a list grants only those; `ee` names are refused (D-P-10) |
 | `entitlements.defaults.<limit>` | | unset = unlimited, for each of `units_included`, `units_cap`, `ingest_spans_per_sec`, `ingest_burst`, `data_access_days`, `max_seats`, `max_projects`, `max_alert_rules`, `max_active_online_rules`, `max_annotation_queues` (D-P-13, D-AQ-10) |
+| `alerts.email_recipients` | | unset: `"members"` under `auth.signup = "open"`, `"any"` otherwise. `"members"`: email alert channels and their "Send test" reach only the org's verified members; `"any"`: any address. A cloud cell sets `"members"` (07 § Channels, D-K-21) |
 | `orgs.user_create` | | `true`; `false` on a cloud cell: users cannot create orgs, the control plane does (D-P-31) |
 | `orgs.create_url` | | unset: where "New organization" links when `orgs.user_create` is false (D-P-31) |
 | `demo.org` | `CETRA_DEMO__ORG` | unset (no demo org). An org id: every signed-in user who is not an instance admin reads that org as an implicit viewer (08 § Demo org, D187). The org must exist and be active at startup, or startup fails |

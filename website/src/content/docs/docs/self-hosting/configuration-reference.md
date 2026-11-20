@@ -119,6 +119,12 @@ These settings decide what an organization gets without a licence key or a plan 
 | `entitlements.defaults.max_active_online_rules` | | integer | unset (unlimited) | Active online rules per organization. |
 | `entitlements.defaults.max_annotation_queues` | | integer | unset (unlimited) | Annotation queues per organization (D-AQ-10). |
 
+## `[alerts]`
+
+| Key | Environment | Type | Default | Description |
+|---|---|---|---|---|
+| `alerts.email_recipients` | | `"members"` or `"any"` | unset: `"members"` when `auth.signup` is `"open"`, otherwise `"any"` | Whom email alert channels may reach. `"members"`: only verified members of the channel's organization, for alerts and test sends alike. `"any"`: any address. |
+
 ## `[orgs]`
 
 | Key | Environment | Type | Default | Description |
