@@ -1,6 +1,7 @@
 import { setupWorker } from "msw/browser";
 import { assistantHandlers } from "./assistant";
 import { dashboardHandlers, seedDashboards } from "./dashboards";
+import { fallbackHandlers } from "./fallbacks";
 import { handlers } from "./handlers";
 import { playgroundHandlers } from "./playground";
 import { savedViewHandlers, seedSavedViews } from "./saved-views";
@@ -16,5 +17,6 @@ export const worker = setupWorker(
   ...sqlHandlers,
   ...assistantHandlers(),
   ...writeHandlers,
+  ...fallbackHandlers,
   ...handlers,
 );
