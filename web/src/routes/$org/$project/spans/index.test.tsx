@@ -4,10 +4,35 @@ import { expect, it, vi } from "vitest";
 import type { Schema } from "@/api/types";
 import { server } from "@/mocks/node";
 import { renderApp } from "@/test/render";
+import { recordUrls } from "@/test/requests";
 import queuesFixture from "../../../../../../fixtures/api/static/annotation-queues.json";
+import spansFixture from "../../../../../../fixtures/api/responses/spans.json";
 
 const TRACE = "a1000000000000000000000000000006";
 const SPAN = "b100000000000061";
+const SPANS_ENDPOINT = "*/api/v1/projects/:project/spans";
+const SPANS_PATH = { org: "acme", project: "support-bot" } as const;
+
+type Router = Awaited<ReturnType<typeof renderApp>>["router"];
+
+/** A list request: the first page of the window (limit 100). */
+function isListRequest(url: URL): boolean {
+  return url.pathname.endsWith("/spans") && url.searchParams.get("limit") === "100";
+}
+
+/** A new-rows check request (limit 50). */
+function isCheckRequest(url: URL): boolean {
+  return url.pathname.endsWith("/spans") && url.searchParams.get("limit") === "50";
+}
+
+async function leaveSpans(router: Router) {
+  await router.navigate({ to: "/$org/$project/sessions", params: SPANS_PATH });
+}
+
+async function returnToSpans(router: Router) {
+  await router.navigate({ to: "/$org/$project/spans", params: SPANS_PATH });
+  await screen.findByRole("grid", { name: "Spans" });
+}
 
 function slotRect(left: number, width: number): DOMRect {
   return {
@@ -235,4 +260,156 @@ it("opens a span from its cell and not from its checkbox", async () => {
   await waitFor(() => {
     expect(router.state.location.search).toMatchObject({ trace: TRACE, span: SPAN });
   });
+});
+
+it("a return within 15 minutes sends no list request", async () => {
+  const { router } = await renderApp("/acme/support-bot/spans");
+  await screen.findByRole("grid", { name: "Spans" });
+  await leaveSpans(router);
+  const recording = recordUrls();
+  try {
+    await returnToSpans(router);
+    expect(screen.getByRole("grid", { name: "Spans" })).toHaveTextContent("get_order_status");
+    expect(recording.urls.some(isListRequest)).toBe(false);
+  } finally {
+    recording.stop();
+  }
+});
+
+it("the pill shows the new spans and loads them", async () => {
+  server.use(
+    http.get(SPANS_ENDPOINT, ({ request }) => {
+      if (new URL(request.url).searchParams.get("limit") === "50") {
+        return HttpResponse.json({
+          ...spansFixture,
+          data: spansFixture.data.slice(0, 2),
+          next_cursor: null,
+        });
+      }
+      return undefined;
+    }),
+  );
+  const { router, user } = await renderApp("/acme/support-bot/spans");
+  await screen.findByRole("grid", { name: "Spans" });
+  await leaveSpans(router);
+  await returnToSpans(router);
+  const pill = await screen.findByRole("button", { name: "2 new spans ↑" });
+
+  const recording = recordUrls();
+  try {
+    await user.click(pill);
+    await waitFor(() => {
+      expect(recording.urls.some(isListRequest)).toBe(true);
+    });
+    expect(screen.queryByRole("button", { name: /new span/ })).not.toBeInTheDocument();
+  } finally {
+    recording.stop();
+  }
+});
+
+it("no pill without new spans", async () => {
+  server.use(
+    http.get(SPANS_ENDPOINT, ({ request }) => {
+      if (new URL(request.url).searchParams.get("limit") === "50") {
+        return HttpResponse.json({ data: [], next_cursor: null });
+      }
+      return undefined;
+    }),
+  );
+  const { router } = await renderApp("/acme/support-bot/spans");
+  await screen.findByRole("grid", { name: "Spans" });
+  await leaveSpans(router);
+  const recording = recordUrls();
+  try {
+    await returnToSpans(router);
+    await waitFor(() => {
+      expect(recording.urls.some(isCheckRequest)).toBe(true);
+    });
+    // Let the empty answer land before asserting that no pill shows.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.queryByRole("button", { name: /new span/ })).not.toBeInTheDocument();
+  } finally {
+    recording.stop();
+  }
+});
+
+it("an expired anchor refetches", async () => {
+  vi.useFakeTimers({ toFake: ["Date"], shouldAdvanceTime: true });
+  try {
+    const { router } = await renderApp("/acme/support-bot/spans");
+    await screen.findByRole("grid", { name: "Spans" });
+    await leaveSpans(router);
+    vi.setSystemTime(Date.now() + 16 * 60_000);
+    const recording = recordUrls();
+    try {
+      await returnToSpans(router);
+      await waitFor(() => {
+        expect(recording.urls.some(isListRequest)).toBe(true);
+      });
+      expect(recording.urls.some(isCheckRequest)).toBe(false);
+    } finally {
+      recording.stop();
+    }
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("a new window keeps the old rows dimmed", async () => {
+  server.use(
+    http.get(SPANS_ENDPOINT, async ({ request }) => {
+      if (new URL(request.url).searchParams.has("filter")) {
+        await new Promise(() => {});
+      }
+      return undefined;
+    }),
+  );
+  const { router } = await renderApp("/acme/support-bot/spans");
+  await screen.findByRole("grid", { name: "Spans" });
+  await router.navigate({
+    to: "/$org/$project/spans",
+    params: SPANS_PATH,
+    search: { filter: "status = 'error'" },
+  });
+  const grid = screen.getByRole("grid", { name: "Spans" });
+  await waitFor(() => {
+    expect(grid).toHaveAttribute("aria-busy", "true");
+  });
+  expect(grid).toHaveTextContent("get_order_status");
+});
+
+it("an absolute range sends no list and no check request", async () => {
+  const from = "2026-01-01T09:00:00.000Z";
+  const to = "2026-01-01T11:00:00.000Z";
+  const { router } = await renderApp(`/acme/support-bot/spans?from=${from}&to=${to}`);
+  await screen.findByRole("grid", { name: "Spans" });
+  await router.navigate({ to: "/$org/$project/sessions", params: SPANS_PATH });
+  const recording = recordUrls();
+  try {
+    await router.navigate({
+      to: "/$org/$project/spans",
+      params: SPANS_PATH,
+      search: { from, to },
+    });
+    await screen.findByRole("grid", { name: "Spans" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(recording.urls.some(isListRequest)).toBe(false);
+    expect(recording.urls.some(isCheckRequest)).toBe(false);
+  } finally {
+    recording.stop();
+  }
+});
+
+it("refresh sets a new window", async () => {
+  const { user } = await renderApp("/acme/support-bot/spans");
+  await screen.findByRole("grid", { name: "Spans" });
+  const recording = recordUrls();
+  try {
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => {
+      expect(recording.urls.filter(isListRequest)).toHaveLength(1);
+    });
+  } finally {
+    recording.stop();
+  }
 });
