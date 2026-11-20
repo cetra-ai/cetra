@@ -540,7 +540,21 @@ fn process(
         &scenario.case,
         ingest_nanos(scenario)?,
         &scenario.timestamp_attributes,
+        &scenario.span_names,
+        &scenario.volatile_attributes,
     )?;
+    let kept = request.resource_spans.iter().any(|resource| {
+        resource
+            .scope_spans
+            .iter()
+            .any(|scope| !scope.spans.is_empty())
+    });
+    if !scenario.span_names.is_empty() && !kept {
+        return Err(CaptureError::CaptureIncomplete {
+            case: scenario.case.to_string(),
+            reasons: vec!["span_names matched no span".to_owned()],
+        });
+    }
     scrub(
         &mut request,
         &ScrubContext {
@@ -1390,5 +1404,31 @@ mod tests {
         );
         let rendered = format!("{error} {error:?}");
         assert!(!rendered.contains("hello"));
+    }
+
+    #[test]
+    fn span_names_that_match_nothing_fail_the_capture() {
+        let mut input = scenario(json!({}), None);
+        input.span_names = vec!["missing".to_owned()];
+        let exports = vec![
+            serde_json::from_value::<ExportTraceServiceRequest>(json!({
+                "resourceSpans": [{
+                    "scopeSpans": [{
+                        "spans": [{
+                            "name": "chat",
+                            "startTimeUnixNano": "100",
+                            "endTimeUnixNano": "200"
+                        }]
+                    }]
+                }]
+            }))
+            .unwrap(),
+        ];
+        let error = process(Path::new("/nonexistent"), &input, exports, 0, 0).unwrap_err();
+        let CaptureError::CaptureIncomplete { case, reasons } = error else {
+            panic!("expected CaptureIncomplete");
+        };
+        assert_eq!(case, "genai/alpha");
+        assert_eq!(reasons, vec!["span_names matched no span".to_owned()]);
     }
 }
