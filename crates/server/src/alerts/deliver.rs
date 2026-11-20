@@ -179,8 +179,8 @@ fn egress_error(error: &EgressError) -> SendError {
 /// are retryable (an admin may fix the credentials within the retry span, D-K-7).
 ///
 /// When `alerts.email_recipients` is `members`, only verified members of the org get mail (D-K-19,
-/// D-K-21): the other recipients are skipped, and the delivery then fails with a count. Every message counts against the
-/// org's daily cap, reserved just before its send.
+/// D-K-21): the other recipients are skipped, and the delivery then fails with a count. Every
+/// message counts against the org's daily cap, reserved just before its send.
 async fn send_email(
     state: &AppState,
     org_id: OrgId,
