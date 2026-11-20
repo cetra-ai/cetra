@@ -63,6 +63,8 @@ Parsed with `sqlparser::Parser::parse_expr` (DataFusion dialect), then validated
 - Anything else (subqueries, casts to other types, window functions, unknown identifiers/functions) → 400 `invalid_filter` with a 1-based character position when one is known.
 - `duration_ms` is available as a derived column (`duration_ns / 1e6`) on the `spans`, `traces` and `sessions` views.
 
+A filter can be checked without running for the traces, spans, sessions and scores views; the SQL console's statement can be planned without running (`sql_check`), which the assistant's drafts use (D-AS-6).
+
 ### UI builder
 
 The filter text is the truth (D129, spec 11 § Filter bar). One editor holds the DSL. A client parser splits top-level `AND` conjuncts and recognises simple shapes as editable chips; anything else is a raw chip. The server stays the validator.
