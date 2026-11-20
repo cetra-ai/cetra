@@ -4,6 +4,7 @@ import { delay, HttpResponse, http } from "msw";
 import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { server } from "@/mocks/node";
+import { projectRef } from "./project-ref";
 import {
   type FacetAsk,
   facetQuery,
@@ -53,16 +54,14 @@ describe("facet answers from an earlier visit", () => {
     to,
     ...more,
   });
-  const answer = (count: number): Schema<"FacetsResponse"> => ({
-    view: "traces",
-    field: "environment",
+  const answer = (count: number): Schema<"Facet"> => ({
     kind: "values",
     total: count,
     missing: 0,
     values: [{ value: "production", count }],
     more: false,
   });
-  const seed = (cache: QueryClient, asked: FacetAsk, data: Schema<"FacetsResponse">) =>
+  const seed = (cache: QueryClient, asked: FacetAsk, data: Schema<"Facet">) =>
     cache.setQueryData(facetQuery("acme", "support-bot", asked).queryKey, data);
   const key = (asked: FacetAsk) => facetQuery("acme", "support-bot", asked).queryKey;
 
@@ -82,6 +81,28 @@ describe("facet answers from an earlier visit", () => {
       key(ask("2026-11-18T10:00:40.000Z", "2026-11-18T11:00:40.000Z")),
     );
     expect(found?.total).toBe(2);
+  });
+
+  it("facetQuery keys leave out empty parts", () => {
+    const ref = projectRef("acme", "support-bot");
+    expect(
+      facetQuery("acme", "support-bot", {
+        view: "traces",
+        field: "status",
+        from: "2026-11-18T10:00:00.000Z",
+        to: "2026-11-18T11:00:00.000Z",
+        filter: "",
+        search: "",
+        includeEval: false,
+        q: "",
+        limit: 10,
+      }).queryKey,
+    ).toEqual([
+      "facets",
+      ref,
+      { view: "traces", from: "2026-11-18T10:00:00.000Z", to: "2026-11-18T11:00:00.000Z" },
+      { field: "status", limit: 10 },
+    ]);
   });
 
   it("ignores a window of another length", () => {
@@ -109,9 +130,13 @@ describe("facet answers from an earlier visit", () => {
     const cache = client();
     seed(cache, ask("2026-11-18T10:00:00.000Z", "2026-11-18T11:00:00.000Z"), answer(1));
     server.use(
-      http.get("*/api/v1/projects/:project/facets", async () => {
+      http.post("*/api/v1/projects/:project/facets", async ({ request }) => {
+        const body = (await request.json()) as Schema<"FacetsRequest">;
         await delay(50);
-        return HttpResponse.json(answer(7));
+        return HttpResponse.json({
+          view: body.view,
+          results: body.fields.map((field) => ({ field: field.field, facet: answer(7) })),
+        });
       }),
     );
     const wrapper = ({ children }: { children: ReactNode }) => (

@@ -105,7 +105,6 @@ function BoundPreset({
     to: scope.to,
     includeEval: scope.includeEval,
     includeExperiments: scope.includeExperiments,
-    limit: 1,
   });
   const p95 = query.data?.histogram?.p95;
   const bound = p95 === undefined ? undefined : roundP95(p95);
