@@ -34,7 +34,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment:
-      name: ${{ github.event_name == 'push' && 'web-demo-production' || 'web-demo-preview' }}
+      # One environment for production and Previews: both would hold the same token (D-C-22).
+      name: web-demo
       url: ${{ steps.deploy.outputs.url }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
