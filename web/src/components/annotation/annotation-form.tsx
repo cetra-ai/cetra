@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { type FormEvent, useId, useState } from "react";
+import { useEffect, useId, useImperativeHandle, useRef, useState } from "react";
 import { $api } from "@/api/client";
 import { problemMessage, problemOf } from "@/api/problem";
 import { meQuery } from "@/api/queries";
@@ -17,6 +17,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import {
   type AnnotationContext,
+  type AnnotationSaveHandle,
   type AnnotationTarget,
   type Draft,
   draftError,
@@ -34,20 +35,40 @@ import { canAnnotate } from "@/lib/roles";
 type Score = Schema<"Score">;
 type ScoreDefinition = Schema<"ScoreDefinition">;
 
-/** The annotation form of one target: one control per live definition, the caller's own scores (D-I-37). */
+/**
+ * The annotation form of one target: one control per live definition, the caller's own scores (D-I-37).
+ * `definitionIds` restricts the rows to those live definitions, in that order. `saveRef` receives
+ * an imperative save handle while the rows are shown. `onReady` fires once, after loading.
+ */
 export function AnnotationForm({
   target,
   context,
+  definitionIds,
+  saveRef,
+  hideSave = false,
+  onReady,
 }: {
   target: AnnotationTarget;
   context: AnnotationContext;
+  definitionIds?: readonly string[];
+  saveRef?: { current: AnnotationSaveHandle | null };
+  hideSave?: boolean;
+  onReady?: () => void;
 }) {
   const { org, project, data } = useProject();
   const me = useQuery(meQuery);
   const definitions = useQuery(liveScoreDefinitionsQuery(org, project));
   const scores = useQuery(scoreListQuery(org, project, target));
+  const loaded = !(me.isPending || definitions.isPending || scores.isPending);
+  const notified = useRef(false);
+  useEffect(() => {
+    if (loaded && !notified.current) {
+      notified.current = true;
+      onReady?.();
+    }
+  }, [loaded, onReady]);
 
-  if (me.isPending || definitions.isPending || scores.isPending) {
+  if (!loaded) {
     return (
       <div className="flex flex-col gap-2">
         <Skeleton className="h-4 w-2/3" />
@@ -64,7 +85,15 @@ export function AnnotationForm({
   if (!canAnnotate(data.role)) {
     return <p className="text-caption text-muted-foreground">Only members can annotate.</p>;
   }
-  if (definitions.data.data.length === 0) {
+  const rows = definitionRows(definitions.data.data, definitionIds);
+  if (rows.length === 0) {
+    if (definitionIds !== undefined) {
+      return (
+        <p className="text-caption text-muted-foreground">
+          This queue's score definitions are all archived.
+        </p>
+      );
+    }
     return (
       <div className="flex flex-col gap-1">
         <p className="text-caption text-muted-foreground">No score definitions yet.</p>
@@ -80,12 +109,32 @@ export function AnnotationForm({
   }
   return (
     <AnnotationRows
-      definitions={definitions.data.data}
+      definitions={rows}
       own={ownScores(scores.data.data, target, me.data.user.id)}
       target={target}
       context={context}
+      saveRef={saveRef}
+      hideSave={hideSave}
     />
   );
+}
+
+/**
+ * The rows to show: the ids' live definitions in the ids' order (unknown and repeated ids dropped),
+ * or every live definition sorted by name without ids.
+ */
+function definitionRows(
+  live: readonly ScoreDefinition[],
+  definitionIds: readonly string[] | undefined,
+): ScoreDefinition[] {
+  if (definitionIds === undefined) {
+    return [...live].sort((left, right) => left.name.localeCompare(right.name));
+  }
+  const byId = new Map(live.map((definition) => [definition.id, definition]));
+  return [...new Set(definitionIds)].flatMap((id) => {
+    const definition = byId.get(id);
+    return definition === undefined ? [] : [definition];
+  });
 }
 
 /** The form's state and markup, once everything has loaded. The caller keys the form by target. */
@@ -94,11 +143,15 @@ function AnnotationRows({
   own,
   target,
   context,
+  saveRef,
+  hideSave,
 }: {
   definitions: ScoreDefinition[];
   own: Map<string, Score>;
   target: AnnotationTarget;
   context: AnnotationContext;
+  saveRef: { current: AnnotationSaveHandle | null } | undefined;
+  hideSave: boolean;
 }) {
   const { ref } = useProject();
   const queryClient = useQueryClient();
@@ -110,19 +163,17 @@ function AnnotationRows({
   const [formError, setFormError] = useState<string | undefined>();
   const [refreshing, setRefreshing] = useState(false);
 
-  const rows = [...definitions].sort((left, right) => left.name.localeCompare(right.name));
   const savedOf = (definition: ScoreDefinition) => draftOf(own.get(definition.name), definition);
   const draftOfRow = (definition: ScoreDefinition) => edits[definition.id] ?? savedOf(definition);
-  const changed = rows.filter((definition) => {
+  const changed = definitions.filter((definition) => {
     const draft = draftOfRow(definition);
     return isSet(draft) && isDirty(draft, savedOf(definition));
   });
   // Still busy while the score reads refresh, so the form keeps its fields locked until it shows the saved values.
   const busy = create.isPending || remove.isPending || refreshing;
-  const canSave =
-    changed.length > 0 &&
-    changed.every((definition) => draftError(draftOfRow(definition), definition) === undefined) &&
-    !busy;
+  const allValid = changed.every(
+    (definition) => draftError(draftOfRow(definition), definition) === undefined,
+  );
 
   function change(definition: ScoreDefinition, draft: Draft) {
     if (busy) {
@@ -143,10 +194,17 @@ function AnnotationRows({
     }
   }
 
-  async function save(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!canSave) {
-      return;
+  // Saves the changed rows. Resolves true when there was nothing to save or the save succeeded,
+  // and false when the save was refused or failed (its errors are shown on the form).
+  async function submit(): Promise<boolean> {
+    if (busy) {
+      return false;
+    }
+    if (changed.length === 0) {
+      return true;
+    }
+    if (!allValid) {
+      return false;
     }
     const sent = changed;
     const sentIds = sent.map((definition) => definition.id);
@@ -168,13 +226,19 @@ function AnnotationRows({
       } else {
         setFormError(problemMessage(error, "Could not save the annotations."));
       }
-      return;
+      return false;
     }
     await refresh();
     setEdits((current) => without(current, sentIds));
     setServerErrors((current) => without(current, sentIds));
     setSuccess(true);
+    return true;
   }
+
+  useImperativeHandle(saveRef, () => ({
+    save: submit,
+    isDirty: () => changed.length > 0,
+  }));
 
   async function clear(definition: ScoreDefinition) {
     const score = own.get(definition.name);
@@ -197,8 +261,16 @@ function AnnotationRows({
   }
 
   return (
-    <form aria-label="Annotations" noValidate className="flex flex-col gap-3" onSubmit={save}>
-      {rows.map((definition) => {
+    <form
+      aria-label="Annotations"
+      noValidate
+      className="flex flex-col gap-3"
+      onSubmit={(event) => {
+        event.preventDefault();
+        void submit();
+      }}
+    >
+      {definitions.map((definition) => {
         const draft = draftOfRow(definition);
         const dirty = isDirty(draft, savedOf(definition));
         const saved = own.get(definition.name);
@@ -225,11 +297,13 @@ function AnnotationRows({
       })}
       <FormError message={formError} />
       <FormSuccess message={success ? "Saved." : undefined} />
-      <div>
-        <Button type="submit" size="sm" disabled={!canSave}>
-          Save
-        </Button>
-      </div>
+      {hideSave ? null : (
+        <div>
+          <Button type="submit" size="sm" disabled={changed.length === 0 || !allValid || busy}>
+            Save
+          </Button>
+        </div>
+      )}
     </form>
   );
 }
