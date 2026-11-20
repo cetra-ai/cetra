@@ -20,6 +20,7 @@ export const SPAN_COLUMN_IDS = [
   "kind",
   "name",
   "model",
+  "prompt",
   "input",
   "output",
   "duration",
