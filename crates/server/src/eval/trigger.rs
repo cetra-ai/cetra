@@ -655,7 +655,7 @@ pub(crate) fn timeout_ns(stored: Option<i64>) -> i64 {
 /// Test-only fault injection for the trigger's reads, writes and sweep order. Each fault is armed
 /// by a test on its own thread and fires once.
 #[cfg(test)]
-mod faults {
+pub(crate) mod faults {
     use std::cell::{Cell, RefCell};
 
     use cetra_storage::RunError;
@@ -687,7 +687,7 @@ mod faults {
         BEFORE_SETTLE.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
     }
 
-    pub(super) fn take_read() -> Option<RunError> {
+    pub(crate) fn take_read() -> Option<RunError> {
         READ.with(|slot| slot.borrow_mut().take())
     }
 
@@ -1097,7 +1097,7 @@ mod tests {
         use axum::http::{Method, header};
         use cetra_core::enums::{PayloadFormat, SpanKind, SpanStatus};
         use cetra_core::ids::{ProjectId, SpanId, TraceId};
-        use cetra_core::span::Span;
+        use cetra_core::span::{Span, SpanEvent};
         use serde_json::{Value, json};
         use uuid::Uuid;
 
@@ -1109,6 +1109,7 @@ mod tests {
         use crate::eval::sampling;
         use crate::meta::eval_jobs::KIND_RULE;
         use crate::meta::evaluators::{EvaluatorFields, insert_evaluator};
+        use crate::meta::issues::{SourceKind, SourceRow, insert_source};
         use crate::meta::online_rules::{NewRule, RuleFields, insert_rule};
         use crate::test_support::mock_llm::{MockLlm, completion};
         use crate::test_support::{Seeded, TestApp, capture_logs, dataset_span};
@@ -2058,6 +2059,495 @@ mod tests {
             let page: Value = scores.json();
             assert_eq!(page["data"].as_array().expect("data").len(), 1, "{page}");
             tasks.shutdown(&app.state).await;
+        }
+
+        /// An enabled error source of `project` with `filter`. Returns its id.
+        async fn error_source(app: &TestApp, project: ProjectId, filter: Option<&str>) -> Uuid {
+            let now = app.state.clock.now_ns();
+            let row = SourceRow {
+                id: Uuid::now_v7(),
+                project_id: project,
+                name: format!("Errors {}", Uuid::now_v7()),
+                kind: SourceKind::Error,
+                filter: filter.map(str::to_owned),
+                enabled: true,
+                paused_reason: None,
+                paused_at: None,
+                created_by: None,
+                created_at: now,
+                updated_at: now,
+            };
+            let id = row.id;
+            app.state
+                .meta
+                .write(move |conn| Box::pin(async move { insert_source(conn, &row).await }))
+                .await
+                .unwrap();
+            id
+        }
+
+        /// A root error span of `trace`, starting at `start`, from `service`, with an `exception`
+        /// event of `kind` and `message`.
+        fn error_span(
+            trace: TraceId,
+            start: i64,
+            service: &str,
+            kind: &str,
+            message: &str,
+        ) -> Span {
+            let mut row = span(trace, 1, true, start);
+            row.status = SpanStatus::Error;
+            row.service_name = Some(service.to_owned());
+            row.events = vec![SpanEvent {
+                time: start,
+                name: "exception".to_owned(),
+                attributes: Some(
+                    json!({"exception.type": kind, "exception.message": message}).to_string(),
+                ),
+            }];
+            row
+        }
+
+        /// The issues of the project: title, state, regressed flag, first and last seen.
+        async fn issues_of(app: &TestApp) -> Vec<(String, String, i64, i64, i64)> {
+            sqlx::query_as(
+                "SELECT title, state, regressed, first_seen, last_seen FROM issues ORDER BY title",
+            )
+            .fetch_all(app.state.meta.reader())
+            .await
+            .unwrap()
+        }
+
+        /// The events of the issue titled `title`, oldest first: kind, from and to values.
+        async fn events_of(
+            app: &TestApp,
+            title: &str,
+        ) -> Vec<(String, Option<String>, Option<String>)> {
+            sqlx::query_as(
+                "SELECT e.kind, e.from_value, e.to_value FROM issue_events e \
+                 JOIN issues i ON i.id = e.issue_id WHERE i.title = ? ORDER BY e.at, e.id",
+            )
+            .bind(title)
+            .fetch_all(app.state.meta.reader())
+            .await
+            .unwrap()
+        }
+
+        /// Runs `statement` with the binds in one write.
+        async fn exec(app: &TestApp, statement: &'static str, binds: Vec<String>) {
+            app.state
+                .meta
+                .write(move |conn| {
+                    Box::pin(async move {
+                        let mut query = sqlx::query(statement);
+                        for bind in binds {
+                            query = query.bind(bind);
+                        }
+                        query.execute(&mut *conn).await?;
+                        Ok(())
+                    })
+                })
+                .await
+                .unwrap();
+        }
+
+        #[tokio::test]
+        async fn error_span_becomes_an_issue() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, None).await;
+            let at = set_clock(&app);
+            let start = at - 30 * SECOND;
+            app.commit_spans(
+                &seeded.project,
+                vec![error_span(
+                    trace_id(1),
+                    start,
+                    "api",
+                    "ValueError",
+                    "bad id 42",
+                )],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            let title = "ValueError: bad id <n>";
+            assert_eq!(
+                issues_of(&app).await,
+                vec![(title.to_owned(), "open".to_owned(), 0, start, start)]
+            );
+            assert_eq!(
+                events_of(&app, title).await,
+                vec![("created".to_owned(), None, Some("open".to_owned()))]
+            );
+        }
+
+        #[tokio::test]
+        async fn same_error_in_two_traces_is_one_issue() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, None).await;
+            let at = set_clock(&app);
+            let start = at - 30 * SECOND;
+            app.commit_spans(
+                &seeded.project,
+                vec![
+                    error_span(trace_id(1), start, "api", "ValueError", "bad id 42"),
+                    error_span(
+                        trace_id(2),
+                        start + SECOND,
+                        "api",
+                        "ValueError",
+                        "bad id 43",
+                    ),
+                ],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            assert_eq!(
+                issues_of(&app).await,
+                vec![(
+                    "ValueError: bad id <n>".to_owned(),
+                    "open".to_owned(),
+                    0,
+                    start,
+                    start + SECOND
+                )]
+            );
+        }
+
+        #[tokio::test]
+        async fn different_exception_types_are_two_issues() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, None).await;
+            let at = set_clock(&app);
+            let start = at - 30 * SECOND;
+            app.commit_spans(
+                &seeded.project,
+                vec![
+                    error_span(trace_id(1), start, "api", "ValueError", "bad id 42"),
+                    error_span(trace_id(2), start, "api", "KeyError", "bad id 42"),
+                ],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            let titles: Vec<String> = issues_of(&app).await.into_iter().map(|row| row.0).collect();
+            assert_eq!(
+                titles,
+                vec![
+                    "KeyError: bad id <n>".to_owned(),
+                    "ValueError: bad id <n>".to_owned()
+                ]
+            );
+        }
+
+        #[tokio::test]
+        async fn resolved_issue_regresses_on_a_newer_trace() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, None).await;
+            let at = set_clock(&app);
+            let title = "ValueError: bad id <n>";
+            app.commit_spans(
+                &seeded.project,
+                vec![error_span(
+                    trace_id(1),
+                    at - 60 * SECOND,
+                    "api",
+                    "ValueError",
+                    "bad id 1",
+                )],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            // Resolved 30 seconds before the clock's start time.
+            exec(
+                &app,
+                "UPDATE issues SET state = 'resolved', resolved_at = ? WHERE title = ?",
+                vec![(at - 30 * SECOND).to_string(), title.to_owned()],
+            )
+            .await;
+
+            // A trace that started before the resolution, but completes after it: no reopen.
+            app.commit_spans(
+                &seeded.project,
+                vec![error_span(
+                    trace_id(2),
+                    at - 50 * SECOND,
+                    "api",
+                    "ValueError",
+                    "bad id 2",
+                )],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            assert_eq!(issues_of(&app).await[0].1, "resolved");
+            assert_eq!(issues_of(&app).await[0].2, 0);
+
+            // A trace that started after the resolution reopens the issue.
+            app.commit_spans(
+                &seeded.project,
+                vec![error_span(
+                    trace_id(3),
+                    at - 10 * SECOND,
+                    "api",
+                    "ValueError",
+                    "bad id 3",
+                )],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            assert_eq!(issues_of(&app).await[0].1, "open");
+            assert_eq!(issues_of(&app).await[0].2, 1);
+            assert_eq!(
+                events_of(&app, title).await,
+                vec![
+                    ("created".to_owned(), None, Some("open".to_owned())),
+                    (
+                        "regressed".to_owned(),
+                        Some("resolved".to_owned()),
+                        Some("open".to_owned())
+                    ),
+                ]
+            );
+        }
+
+        #[tokio::test]
+        async fn merged_issue_routes_to_its_target() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, None).await;
+            let at = set_clock(&app);
+            let start = at - 30 * SECOND;
+            app.commit_spans(
+                &seeded.project,
+                vec![
+                    error_span(trace_id(1), start, "api", "ValueError", "bad id 42"),
+                    error_span(trace_id(2), start, "api", "KeyError", "missing key"),
+                ],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            exec(
+                &app,
+                "UPDATE issues SET state = 'merged', \
+                 merged_into = (SELECT id FROM issues WHERE title = ?) WHERE title = ?",
+                vec![
+                    "ValueError: bad id <n>".to_owned(),
+                    "KeyError: missing key".to_owned(),
+                ],
+            )
+            .await;
+
+            let later = start + 2 * SECOND;
+            app.commit_spans(
+                &seeded.project,
+                vec![error_span(
+                    trace_id(3),
+                    later,
+                    "api",
+                    "KeyError",
+                    "missing key",
+                )],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            assert_eq!(
+                issues_of(&app).await,
+                vec![
+                    (
+                        "KeyError: missing key".to_owned(),
+                        "merged".to_owned(),
+                        0,
+                        start,
+                        start
+                    ),
+                    (
+                        "ValueError: bad id <n>".to_owned(),
+                        "open".to_owned(),
+                        0,
+                        start,
+                        later
+                    ),
+                ]
+            );
+        }
+
+        #[tokio::test]
+        async fn filter_limits_the_spans() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, Some("service_name = 'api'")).await;
+            let at = set_clock(&app);
+            let start = at - 30 * SECOND;
+            app.commit_spans(
+                &seeded.project,
+                vec![
+                    error_span(trace_id(1), start, "api", "ValueError", "bad id 42"),
+                    error_span(trace_id(2), start, "worker", "KeyError", "missing key"),
+                ],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            let titles: Vec<String> = issues_of(&app).await.into_iter().map(|row| row.0).collect();
+            assert_eq!(titles, vec!["ValueError: bad id <n>".to_owned()]);
+        }
+
+        #[tokio::test]
+        async fn a_bad_stored_filter_skips_the_source_only() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            let broken = error_source(&app, project, None).await;
+            error_source(&app, project, None).await;
+            exec(
+                &app,
+                "UPDATE issue_sources SET filter = ? WHERE id = ?",
+                vec!["((".to_owned(), broken.to_string()],
+            )
+            .await;
+            let at = set_clock(&app);
+            app.commit_spans(
+                &seeded.project,
+                vec![error_span(
+                    trace_id(1),
+                    at - 30 * SECOND,
+                    "api",
+                    "ValueError",
+                    "bad id 42",
+                )],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            // Only the source with a working filter created the issue.
+            assert_eq!(issues_of(&app).await.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn rules_and_sources_share_a_batch() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            rule(&app, project, "trace", None, 1.0).await;
+            error_source(&app, project, None).await;
+            let at = set_clock(&app);
+            app.commit_spans(
+                &seeded.project,
+                vec![error_span(
+                    trace_id(1),
+                    at - 30 * SECOND,
+                    "api",
+                    "ValueError",
+                    "bad id 42",
+                )],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            let report = sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            assert_eq!(report.enqueued, 1);
+            assert_eq!(jobs(&app).await.len(), 1);
+            assert_eq!(issues_of(&app).await.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn eval_traces_are_never_issues() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, None).await;
+            let at = set_clock(&app);
+            let start = at - 30 * SECOND;
+            let mut eval_span = error_span(trace_id(9), start, "api", "ValueError", "bad id 42");
+            eval_span.environment = Some(cetra_core::names::environment::EVAL.to_owned());
+            app.commit_spans(&seeded.project, vec![eval_span]).await;
+            // Evaluation spans are not recorded as pending, so the trace is forced into the map.
+            app.state.pending.load(vec![(
+                project,
+                trace_id(9),
+                Entry {
+                    first_seen: at,
+                    last_seen: at,
+                    min_start: start,
+                    root_ended: true,
+                    failed_reads: 0,
+                    spans: 1,
+                },
+            )]);
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            assert!(issues_of(&app).await.is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_failed_error_read_retries_the_batch() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, None).await;
+            let at = set_clock(&app);
+            app.commit_spans(
+                &seeded.project,
+                vec![error_span(
+                    trace_id(1),
+                    at - 30 * SECOND,
+                    "api",
+                    "ValueError",
+                    "bad id 42",
+                )],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            let now = app.state.clock.now_ns();
+            faults::fail_next_read(RunError::Timeout);
+            let report = sweep_once(&app.state, now).await.unwrap();
+            assert_eq!(report.failed_batches, 1);
+            assert!(issues_of(&app).await.is_empty());
+            assert_eq!(app.state.pending.len(), 1, "the trace stays pending");
+
+            let report = sweep_once(&app.state, now).await.unwrap();
+            assert_eq!(report.failed_batches, 0);
+            assert_eq!(issues_of(&app).await.len(), 1);
+            assert_eq!(app.state.pending.len(), 0);
         }
     }
 }
