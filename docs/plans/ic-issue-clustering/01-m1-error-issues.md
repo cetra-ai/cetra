@@ -669,7 +669,7 @@ Copy `OnlineRulePage`'s hand-written `PartialSchema` pattern for `IssueSourcePag
 5. List: `page_named` by name. `open_issues` comes from `open_counts` (M1.3). `org_active_sources` comes from `count_enabled_sources`.
 6. OpenAPI: register the types; add `issue_source_paths`, copied from `online_rule_paths` with the five operations; add the rows to `tests/openapi.rs`.
 7. Fixtures:
-   - fixed ids: source `01900000-0000-7000-8000-000000000900`, issue `…-000000000901`, merged issue `…-000000000902`, events `…-000000000910` and up; add them to the README table;
+   - fixed ids: source `01900000-0000-7000-8000-000000001c00`, issue `…-000000001c01`, merged issue `…-000000001c02`, events `…-000000001c10` and up (the `…0900` range belongs to deletions); add them to the README table;
    - the static JSON for list and get; request examples for create and update;
    - `api_examples.rs` entries for the two GET operations;
    - round-trips in `tests/api_examples.rs`;
