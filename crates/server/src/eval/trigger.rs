@@ -2949,8 +2949,161 @@ mod tests {
                     .len(),
                 1
             );
-            // The issue itself is still created: only the occurrence is dropped.
+            // Trace 2 still makes the issue: the blocked trace only drops its own occurrence.
             assert_eq!(issues_of(&app).await.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn a_trace_blocked_by_a_deletion_creates_no_issue() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, None).await;
+            let at = set_clock(&app);
+            app.commit_spans(
+                &seeded.project,
+                vec![error_span(
+                    trace_id(1),
+                    at - 30 * SECOND,
+                    "api",
+                    "ValueError",
+                    "bad id 42",
+                )],
+            )
+            .await;
+            let now = app.state.clock.now_ns();
+            app.state
+                .deletions
+                .guard
+                .add_traces(project, &[trace_id(1)], Uuid::now_v7(), now);
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            assert!(issues_of(&app).await.is_empty());
+            assert!(
+                occurrences_on(&app, &seeded, project, trace_id(1))
+                    .await
+                    .is_empty()
+            );
+        }
+
+        #[tokio::test]
+        async fn a_too_old_occurrence_does_not_regress_a_resolved_issue() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let (short, _) = app.add_project(&seeded, "short", Some(3)).await;
+            error_source(&app, short.id, None).await;
+            let at = set_clock(&app);
+            let day = 86_400 * SECOND;
+            app.commit_spans(
+                &short,
+                vec![error_span(
+                    trace_id(1),
+                    at - 30 * SECOND,
+                    "api",
+                    "ValueError",
+                    "bad id 42",
+                )],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            assert_eq!(issues_of(&app).await.len(), 1);
+            // Resolved five days ago. A trace that started four days ago came after that, but it is
+            // past the three-day retention, so it must not reopen the issue.
+            let resolved_at = at - 5 * day;
+            app.state
+                .meta
+                .write(move |conn| {
+                    Box::pin(async move {
+                        sqlx::query("UPDATE issues SET state = 'resolved', resolved_at = ?")
+                            .bind(resolved_at)
+                            .execute(&mut *conn)
+                            .await?;
+                        Ok::<(), MetaError>(())
+                    })
+                })
+                .await
+                .unwrap();
+            app.commit_spans(
+                &short,
+                vec![error_span(
+                    trace_id(2),
+                    at - 4 * day,
+                    "api",
+                    "ValueError",
+                    "bad id 42",
+                )],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            let issues = issues_of(&app).await;
+            assert_eq!(issues.len(), 1);
+            assert_eq!(issues[0].1, "resolved");
+            assert_eq!(issues[0].2, 0, "the issue is not regressed");
+            assert!(
+                events_of(&app, &issues[0].0)
+                    .await
+                    .iter()
+                    .all(|event| event.0 != "regressed")
+            );
+            assert!(
+                occurrences_on(&app, &seeded, short.id, trace_id(2))
+                    .await
+                    .is_empty()
+            );
+        }
+
+        #[tokio::test]
+        async fn an_occurrence_within_the_retention_margin_is_dropped() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let (short, _) = app.add_project(&seeded, "short", Some(1)).await;
+            error_source(&app, short.id, None).await;
+            let at = set_clock(&app);
+            let day = 86_400 * SECOND;
+            // Thirty minutes inside the cutoff is within the one-hour margin; two hours is not.
+            app.commit_spans(
+                &short,
+                vec![
+                    error_span(
+                        trace_id(1),
+                        at - day + 30 * 60 * SECOND,
+                        "api",
+                        "ValueError",
+                        "bad id 1",
+                    ),
+                    error_span(
+                        trace_id(2),
+                        at - day + 2 * HOUR,
+                        "api",
+                        "ValueError",
+                        "bad id 2",
+                    ),
+                ],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            assert!(
+                occurrences_on(&app, &seeded, short.id, trace_id(1))
+                    .await
+                    .is_empty()
+            );
+            assert_eq!(
+                occurrences_on(&app, &seeded, short.id, trace_id(2))
+                    .await
+                    .len(),
+                1
+            );
         }
     }
 }

@@ -34,6 +34,11 @@ use crate::scores::{self, Writer, occurrence_id};
 const TITLE_CHARS: usize = 200;
 /// Most occurrence scores one write takes (the API's per-request cap).
 const OCCURRENCE_CHUNK: usize = 1_000;
+/// An occurrence this close to the retention cutoff is dropped too (D-IC-18). `scores::write`
+/// checks the cutoff again at its own, later `now`, and refuses the whole chunk when one
+/// occurrence is older than that. The margin keeps every kept occurrence inside the cutoff for
+/// the next hour, so the write does not fail.
+const RETENTION_MARGIN_NS: i64 = 3_600_000_000_000;
 /// Stands in for a missing message in a title.
 const NO_MESSAGE: &str = "(no message)";
 /// The event name whose attributes carry the exception (OpenTelemetry semantic conventions).
@@ -45,8 +50,8 @@ const EXCEPTION_EVENT: &str = "exception";
 ///
 /// # Errors
 ///
-/// `Err(())` when a read or a write fails; the batch is then retried, and nothing a retry would
-/// repeat has been counted.
+/// `Err(())` when a read or a write fails. The caller skips the batch's error issues and goes on
+/// with its rules (`eval::trigger`): nothing here is retried on its own.
 pub(crate) async fn sweep_batch(
     ctx: &SweepCtx<'_>,
     around: i64,
@@ -125,7 +130,9 @@ pub(crate) async fn sweep_batch(
         let decoded = decode(&batches);
         skipped += decoded.skipped;
         error_span_count += decoded.spans.len();
-        let groups = group_spans(decoded.spans, ctx.now);
+        let mut groups = group_spans(decoded.spans, ctx.now);
+        // Only the occurrences that will be written make issues, regressions and `last_seen`.
+        total.add(&keep_hits(ctx, &project, &mut groups));
         if groups.is_empty() {
             continue;
         }
@@ -181,16 +188,54 @@ impl Outcome {
     }
 }
 
-/// Writes the occurrences of one source as occurrence scores (D-IC-11, D-IC-18). An occurrence
-/// whose trace or user a deletion blocks is dropped (D-M-6), and so is one older than the project's
-/// retention: `scores::write` would refuse its whole chunk. The rest are written in chunks of
-/// [`OCCURRENCE_CHUNK`]. After each chunk, the after-commit check files a follow-up deletion for a
-/// trace that a deletion blocked meanwhile.
+/// Drops the hits that a deletion blocks (D-M-6) and those older than the project's retention
+/// plus [`RETENTION_MARGIN_NS`] (D-IC-18), then the groups left without a hit. It runs before
+/// [`write_groups`], so an issue, a regression and `last_seen` come only from occurrences that
+/// will be written.
+fn keep_hits(
+    ctx: &SweepCtx<'_>,
+    project: &ProjectRow,
+    groups: &mut BTreeMap<String, Group>,
+) -> Outcome {
+    let cutoff = project.retention_days.map(|days| {
+        ctx.now
+            .saturating_sub(i64::from(days).saturating_mul(DAY_NS))
+            .saturating_add(RETENTION_MARGIN_NS)
+    });
+    let mut outcome = Outcome::default();
+    for group in groups.values_mut() {
+        group.traces.retain(|trace_id, hit| {
+            let users = user_times(hit.user_id.as_deref(), hit.at);
+            let blocked = ctx
+                .state
+                .deletions
+                .guard
+                .blocking(ctx.project, *trace_id, &borrowed_users(&users), ctx.now)
+                .is_some();
+            if blocked {
+                outcome.blocked += 1;
+                false
+            } else if cutoff.is_some_and(|cutoff| id_time(hit.at) < cutoff) {
+                outcome.too_old += 1;
+                false
+            } else {
+                true
+            }
+        });
+    }
+    groups.retain(|_, group| !group.traces.is_empty());
+    outcome
+}
+
+/// Writes the occurrences of one source as occurrence scores (D-IC-11, D-IC-18). The occurrences
+/// are already filtered by [`keep_hits`]. They are written in chunks of [`OCCURRENCE_CHUNK`].
+/// After each chunk, the after-commit check files a follow-up deletion for a trace that a
+/// deletion blocked meanwhile.
 ///
 /// # Errors
 ///
-/// `Err(())` when a write fails. The batch is then retried; the occurrence ids are stable, so a
-/// rewrite replaces the same rows.
+/// `Err(())` when a write fails. The occurrence ids are stable, so a later rewrite of the same
+/// trace replaces the same rows.
 async fn write_occurrences(
     ctx: &SweepCtx<'_>,
     project: &ProjectRow,
@@ -198,33 +243,7 @@ async fn write_occurrences(
     occurrences: Vec<Occurrence>,
 ) -> Result<Outcome, ()> {
     let mut outcome = Outcome::default();
-    let cutoff = project.retention_days.map(|days| {
-        ctx.now
-            .saturating_sub(i64::from(days).saturating_mul(DAY_NS))
-    });
-    let mut kept = Vec::with_capacity(occurrences.len());
-    for occurrence in occurrences {
-        let users = occurrence_users(&occurrence);
-        let blocked = ctx
-            .state
-            .deletions
-            .guard
-            .blocking(
-                ctx.project,
-                occurrence.trace_id,
-                &borrowed_users(&users),
-                ctx.now,
-            )
-            .is_some();
-        if blocked {
-            outcome.blocked += 1;
-        } else if cutoff.is_some_and(|cutoff| id_time(occurrence.at) < cutoff) {
-            outcome.too_old += 1;
-        } else {
-            kept.push(occurrence);
-        }
-    }
-    for chunk in kept.chunks(OCCURRENCE_CHUNK) {
+    for chunk in occurrences.chunks(OCCURRENCE_CHUNK) {
         let items: Vec<ScoreCreate> = chunk
             .iter()
             .map(|occurrence| occurrence_score(project.id, occurrence))
@@ -248,7 +267,7 @@ async fn write_occurrences(
         }
         outcome.written += chunk.len();
         for occurrence in chunk {
-            let users = occurrence_users(occurrence);
+            let users = user_times(occurrence.user_id.as_deref(), occurrence.at);
             if after_commit(
                 ctx.state,
                 ctx.project,
@@ -273,11 +292,10 @@ fn id_time(at: i64) -> i64 {
 /// The occurrence's end user, as the deletion guard takes it. Error spans do not carry their
 /// ingest time here, so the occurrence time stands in for it. Ingest comes after a span starts, so
 /// this is the earlier of the two, and the guard blocks at least as often as with the real time.
-fn occurrence_users(occurrence: &Occurrence) -> Vec<(String, i64)> {
-    occurrence
-        .user_id
+fn user_times(user_id: Option<&str>, at: i64) -> Vec<(String, i64)> {
+    user_id
         .iter()
-        .map(|user| (user.clone(), occurrence.at))
+        .map(|user| ((*user).to_owned(), at))
         .collect()
 }
 
