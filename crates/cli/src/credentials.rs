@@ -37,9 +37,17 @@ pub(crate) fn save(path: &Path, file: &CredentialsFile) -> anyhow::Result<()> {
     fs::create_dir_all(directory).context("creating the credentials directory")?;
     set_dir_mode(directory)?;
     let text = toml::to_string(file).map_err(|_| anyhow::anyhow!("encoding credentials"))?;
+    write_private_file(path, text.as_bytes())
+}
+
+/// Writes `bytes` to `path` with mode 0600 (unix), through `<path>.tmp` and a rename.
+/// Creates missing parent directories, but never changes the mode of an existing directory.
+pub(crate) fn write_private_file(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    let directory = path.parent().context("file path has no directory")?;
+    fs::create_dir_all(directory).context("creating the directory")?;
     let temporary = temporary_path(path);
-    write_private(&temporary, text.as_bytes())?;
-    fs::rename(&temporary, path).context("replacing credentials")?;
+    write_private(&temporary, bytes)?;
+    fs::rename(&temporary, path).context("replacing the file")?;
     Ok(())
 }
 
@@ -148,8 +156,24 @@ fn set_dir_mode(_directory: &Path) -> anyhow::Result<()> {
 mod tests {
     use super::{
         CredentialsFile, SavedToken, check_server_url, chosen_server, normalize_server_url,
-        server_url,
+        server_url, write_private_file,
     };
+
+    #[cfg(unix)]
+    #[test]
+    fn write_private_file_keeps_an_existing_directory_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("existing");
+        std::fs::create_dir(&existing).unwrap();
+        std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = existing.join("file.toml");
+        write_private_file(&path, b"x = 1\n").unwrap();
+        let directory_mode = std::fs::metadata(&existing).unwrap().permissions().mode();
+        assert_eq!(directory_mode & 0o777, 0o755);
+        let file_mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(file_mode & 0o777, 0o600);
+    }
 
     #[test]
     fn server_url_loses_trailing_slashes() {

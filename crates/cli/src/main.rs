@@ -1,3 +1,4 @@
+mod agents;
 mod client;
 mod credentials;
 mod health;
@@ -84,6 +85,11 @@ enum Command {
     Projects {
         #[command(subcommand)]
         command: Box<projects::ProjectsCommand>,
+    },
+    /// Connect coding agents (Claude Code, Codex, Gemini CLI, Copilot) to cetra.
+    Agents {
+        #[command(subcommand)]
+        command: Box<agents::AgentsCommand>,
     },
 }
 
@@ -321,6 +327,21 @@ async fn run_cli(
                 stdout_is_terminal,
             };
             projects::run(&command, credentials::credentials_path, &mut streams).await?;
+        }
+        Command::Agents { command } => {
+            let mut out = io::stdout().lock();
+            let mut err = io::stderr().lock();
+            match agents::Paths::detect() {
+                Ok(paths) => {
+                    agents::run(&command, &paths, io::stdin(), &mut out, &mut err).await?;
+                }
+                // The hook never fails: without a home directory it can only note that.
+                Err(_) => match *command {
+                    agents::AgentsCommand::Hook { .. } => {
+                        let _ = writeln!(err, "cetra agents hook: cannot find the home directory");
+                    }
+                },
+            }
         }
     }
     Ok(())
