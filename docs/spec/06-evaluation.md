@@ -211,7 +211,7 @@ Occurrence scores are not billable units and do not count toward the units cap (
 
 **Privacy.** Titles, reasons and descriptions come from span payloads. They are stored only in `meta.db` and in the scores' reason, and logs carry ids and counts only (§ Logs and privacy in the design).
 
-**Links** (D-IC-14, D-IC-20 to D-IC-24). An alert rule can count the occurrences of one issue, or of a source's live issues, over a window (07 § Rule model). A source's channels receive its new and regressed issues in digests (07 § Channels). An issue can copy its newest occurrence traces into a dataset (09 § Issues). The MCP server has a read-only `list_issues` tool (09 § MCP server). These links read issues; none of them changes an issue's state, title or merges.
+**Links** (D-IC-14, D-IC-20 to D-IC-24). An alert rule can count the occurrences of one issue, or of a source's live issues, over a window (07 § Rule model). A source's channels receive its new and regressed issues in digests (07 § Channels). An issue can copy its newest occurrence traces into a dataset (09 § Issues). An issue can send its newest occurrences to an annotation queue of any kind (09 § Issues, D-IC-27 to D-IC-31). The MCP server has a read-only `list_issues` tool (09 § MCP server). These links read issues; the dataset and queue links write datasets and queue items; none of them changes an issue's state, title or merges.
 
 ## Datasets
 
