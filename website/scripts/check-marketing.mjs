@@ -28,12 +28,22 @@ export function decode(text) {
   });
 }
 
-/** Removes script and style contents and comments, so their text is not read as markup. */
+/**
+ * Removes script and style contents and comments, so their text is not read as markup. This only
+ * reads our own build output; it repeats until nothing changes, so a removal cannot leave a new
+ * block behind, and accepts end tags with whitespace before ">".
+ */
 export function stripBlocks(html) {
-  return html
-    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "")
-    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "")
-    .replace(/<!--[\s\S]*?-->/g, "");
+  let out = html;
+  let previous;
+  do {
+    previous = out;
+    out = out
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, "")
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, "")
+      .replace(/<!--[\s\S]*?-->/g, "");
+  } while (out !== previous);
+  return out;
 }
 
 /** Parses an attribute string into a Map. Names are lower-cased; a bare attribute is "". */

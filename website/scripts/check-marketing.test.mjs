@@ -1,7 +1,22 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { ALWAYS_NOINDEX, MARKETING_ROUTES } from "../src/marketing/routes.mjs";
-import { checkPage, checkSitemap, listedRoutes, pageWeight } from "./check-marketing.mjs";
+import {
+  checkPage,
+  checkSitemap,
+  listedRoutes,
+  pageWeight,
+  stripBlocks,
+} from "./check-marketing.mjs";
+
+describe("stripBlocks", () => {
+  it("removes blocks whose end tag has whitespace", () => {
+    assert.equal(stripBlocks("a<script>x</script >b<style>y</style\n>c"), "abc");
+  });
+  it("removes a block revealed by removing another", () => {
+    assert.equal(stripBlocks("a<scr<!-- c -->ipt>x</script>b"), "ab");
+  });
+});
 
 // A valid page built from parts. Each part can be replaced by a test.
 function page({
