@@ -26,7 +26,8 @@ export type ShortcutId =
   | "fit"
   | "palette"
   | "help"
-  | GoTarget["id"];
+  | GoTarget["id"]
+  | "assistant";
 
 type Binding = { id: ShortcutId; key: string; mod?: boolean };
 
@@ -117,6 +118,12 @@ export const SHORTCUTS: readonly Shortcut[] = [
     bindings: [{ id: "palette", key: "k", mod: true }],
   },
   {
+    keys: "⌘I",
+    description: "Open or close the assistant",
+    scope: "project",
+    bindings: [{ id: "assistant", key: "i", mod: true }],
+  },
+  {
     keys: "?",
     description: "Shortcuts help",
     scope: "anywhere",
@@ -133,6 +140,7 @@ export type KeyInfo = {
   metaKey: boolean;
   ctrlKey: boolean;
   altKey: boolean;
+  shiftKey?: boolean;
 };
 
 export function isElementShortcut(id: ShortcutId): boolean {
@@ -185,6 +193,12 @@ export function reduceShortcut(
   const palette = key.key.toLowerCase() === "k" && (key.metaKey || key.ctrlKey) && !key.altKey;
   if (palette) {
     return { chord: null, action: "palette" };
+  }
+  // Before the typing check: the assistant's composer is a textarea, and Ctrl/Cmd+I must still work there.
+  const assistant =
+    key.key.toLowerCase() === "i" && (key.metaKey || key.ctrlKey) && !key.altKey && !key.shiftKey;
+  if (assistant) {
+    return { chord: null, action: "assistant" };
   }
   if (typing || key.metaKey || key.ctrlKey || key.altKey) {
     return { chord: null, action: null };
