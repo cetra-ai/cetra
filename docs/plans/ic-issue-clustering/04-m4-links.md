@@ -35,6 +35,17 @@ The decisions file (D-IC-20 to D-IC-25) leaves these open. Each phase is written
 | Q8 | An issue event written with `at` earlier than a source's `last_notified_at` after that value was set (a write that committed late) | never sent (D-IC-21 says events at or before `last_notified_at` are never sent); accepted | M4.9 |
 | Q9 | Singular wording (`1 new or regressed issues`) | the decision's wording is used as written for every count | M4.7 |
 
+**Coordinator's answers (binding; they override the assumptions and any phase text that follows them):**
+- Q1: as assumed.
+- Q2: the dataset route reads the same 8 names as the occurrences examples after the M1 fixes: the issue plus the 7 merged issues with the most occurrences (`most_occurrences_first` in `routes/issues.rs`, or its M4.10a home). It picks the most recent occurrences across those names, one per trace, up to `limit`.
+- Q3: as assumed, with the message "the issue has no occurrences in the data window".
+- Q4: as assumed.
+- Q5: as assumed.
+- Q6: as assumed.
+- Q7: as assumed.
+- Q8: mostly as assumed, with a settle margin so a late commit is not lost: the tick collects only events with `at <= now - ISSUE_NOTIFY_SETTLE_NS` (a const, 60 s, with a doc comment saying why), and `last_notified_at` advances to the newest collected event's `at`. Test: an event newer than the margin waits for the next tick. D-IC-21's text in M4.1 says so.
+- Q9: singular and plural: "1 new or regressed issue" / "N new or regressed issues", in Slack, email subject and email body. Test both.
+
 ## What it is, and what it is not
 
 When M4 is done:
