@@ -10,6 +10,7 @@ export const GO_TARGETS = {
   o: { id: "go-online-rules", to: "/$org/$project/online-rules" },
   i: { id: "go-datasets", to: "/$org/$project/datasets" },
   x: { id: "go-experiments", to: "/$org/$project/experiments" },
+  r: { id: "go-prompts", to: "/$org/$project/prompts" },
 } as const;
 
 type GoTarget = (typeof GO_TARGETS)[keyof typeof GO_TARGETS];

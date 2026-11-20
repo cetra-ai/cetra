@@ -23,3 +23,13 @@ it("carries detail and errors", async () => {
   expect(body.detail).toBe("nope");
   expect(body.errors).toEqual([{ field: "email", message: "invalid email" }]);
 });
+
+it("carries a field's position in the source", async () => {
+  const response = problemResponse(400, "bad_request", {
+    errors: [{ field: "template", message: "bad", position: { line: 2, column: 5 } }],
+  });
+  const body = await response.json();
+  expect(body.errors).toEqual([
+    { field: "template", message: "bad", position: { line: 2, column: 5 } },
+  ]);
+});

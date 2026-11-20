@@ -1,6 +1,7 @@
 import {
   BellRing,
   Database,
+  FileText,
   FlaskConical,
   Gauge,
   LayoutDashboard,
@@ -24,6 +25,7 @@ export const projectNav = [
   { section: "Observe", to: "/$org/$project/sessions", label: "Sessions", icon: MessagesSquare },
   { section: "Observe", to: "/$org/$project/users", label: "Users", icon: Users },
   { section: "Monitor", to: "/$org/$project/alerts", label: "Alerts", icon: BellRing },
+  { section: "Evaluate", to: "/$org/$project/prompts", label: "Prompts", icon: FileText },
   { section: "Evaluate", to: "/$org/$project/evaluators", label: "Evaluators", icon: Gauge },
   {
     section: "Evaluate",
