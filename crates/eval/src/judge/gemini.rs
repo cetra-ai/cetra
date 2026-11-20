@@ -5,19 +5,20 @@
 //! is the `x-goog-api-key` header and is never added to the query string.
 
 use reqwest::Url;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{HeaderName, HeaderValue};
 use serde_json::{Map, Value};
 
 use super::answer::answer_schema;
-use super::http::provider_error;
 use super::{
     Adapter, JUDGEMENT_DESCRIPTION, JUDGEMENT_TOOL, JudgeCall, JudgeConnection, JudgeReply,
-    JudgeUsage, RESPONSE_MAX_BYTES, RawAnswer, StructuredOutput, endpoint, user_message,
+    RawAnswer, StructuredOutput, user_message,
+};
+use crate::chat::{
+    RESPONSE_MAX_BYTES, TokenUsage, endpoint, provider_error, request_headers, secret_header,
     validate_model,
 };
 use crate::egress::{EgressClient, EgressRequest};
 use crate::error::JudgeError;
-use crate::secret::Secret;
 
 const DEFAULT_BASE: &str = "https://generativelanguage.googleapis.com";
 
@@ -52,7 +53,8 @@ pub(crate) async fn complete(
             conn.structured_output,
             response.status.as_u16(),
             &response.body,
-        ));
+        )
+        .into());
     }
     parse_generate_content(&response.body)
 }
@@ -60,33 +62,21 @@ pub(crate) async fn complete(
 fn generate_content_url(base: Option<&Url>, model: &str) -> Result<Url, JudgeError> {
     validate_model(model)?;
     let path = format!("v1beta/models/{model}:generateContent");
-    endpoint(base, DEFAULT_BASE, &path)
+    Ok(endpoint(base, DEFAULT_BASE, &path)?)
 }
 
 fn headers(conn: &JudgeConnection) -> Result<Vec<(HeaderName, HeaderValue)>, JudgeError> {
-    let mut map = HeaderMap::new();
-    // Extra headers go first: the adapter's own headers are inserted after them and win (D-I-46).
-    for (name, value) in &conn.extra_headers {
-        let name = HeaderName::try_from(name.as_str()).map_err(|_| JudgeError::InvalidHeader)?;
-        let value = header_value(value)?;
-        map.insert(name, value);
-    }
-    map.insert(
-        HeaderName::from_static("x-goog-api-key"),
-        header_value(&conn.api_key)?,
-    );
-    map.insert(
-        HeaderName::from_static("content-type"),
-        HeaderValue::from_static("application/json"),
-    );
-    Ok(map
-        .into_iter()
-        .filter_map(|(name, value)| name.map(|name| (name, value)))
-        .collect())
-}
-
-fn header_value(value: &Secret) -> Result<HeaderValue, JudgeError> {
-    HeaderValue::from_bytes(value.expose().as_bytes()).map_err(|_| JudgeError::InvalidHeader)
+    let own = vec![
+        (
+            HeaderName::from_static("x-goog-api-key"),
+            secret_header(&conn.api_key)?,
+        ),
+        (
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/json"),
+        ),
+    ];
+    Ok(request_headers(conn, own)?)
 }
 
 fn request_body(mode: StructuredOutput, call: &JudgeCall<'_>) -> Result<Vec<u8>, JudgeError> {
@@ -229,12 +219,12 @@ fn function_args(parts: &[Value]) -> Result<Option<&Value>, JudgeError> {
     Ok(None)
 }
 
-fn usage_of(usage: Option<&Value>) -> JudgeUsage {
+fn usage_of(usage: Option<&Value>) -> TokenUsage {
     let Some(usage) = usage.and_then(Value::as_object) else {
-        return JudgeUsage::default();
+        return TokenUsage::default();
     };
     let reasoning = u64_field(usage, "thoughtsTokenCount");
-    JudgeUsage {
+    TokenUsage {
         input: u64_field(usage, "promptTokenCount"),
         output: u64_field(usage, "candidatesTokenCount").saturating_add(reasoning),
         cache_read: u64_field(usage, "cachedContentTokenCount"),

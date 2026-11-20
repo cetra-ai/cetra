@@ -3,18 +3,19 @@
 //! The base URL includes the version (`https://api.openai.com/v1`). Compatible
 //! servers use the same path.
 
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{HeaderName, HeaderValue};
 use serde_json::{Map, Value};
 
 use super::answer::answer_schema;
-use super::http::provider_error;
 use super::{
     Adapter, JUDGEMENT_DESCRIPTION, JUDGEMENT_TOOL, JudgeCall, JudgeConnection, JudgeReply,
-    JudgeUsage, RESPONSE_MAX_BYTES, RawAnswer, StructuredOutput, endpoint, user_message,
-    validate_model,
+    RawAnswer, StructuredOutput, user_message,
+};
+use crate::chat::{
+    RESPONSE_MAX_BYTES, TokenUsage, endpoint, provider_error, request_headers, validate_model,
 };
 use crate::egress::{EgressClient, EgressRequest};
-use crate::error::JudgeError;
+use crate::error::{ChatError, JudgeError};
 use crate::secret::Secret;
 
 const DEFAULT_BASE: &str = "https://api.openai.com/v1";
@@ -43,45 +44,34 @@ pub(crate) async fn complete(
             conn.structured_output,
             response.status.as_u16(),
             &response.body,
-        ));
+        )
+        .into());
     }
     parse_completion(&response.body)
 }
 
 fn headers(conn: &JudgeConnection) -> Result<Vec<(HeaderName, HeaderValue)>, JudgeError> {
-    let mut map = HeaderMap::new();
-    // Extra headers go first: the adapter's own headers are inserted after them and win (D-I-46).
-    for (name, value) in &conn.extra_headers {
-        let name = HeaderName::try_from(name.as_str()).map_err(|_| JudgeError::InvalidHeader)?;
-        let value = header_value(value)?;
-        map.insert(name, value);
-    }
-    map.insert(
-        HeaderName::from_static("authorization"),
-        bearer(&conn.api_key)?,
-    );
-    map.insert(
-        HeaderName::from_static("content-type"),
-        HeaderValue::from_static("application/json"),
-    );
-    Ok(map
-        .into_iter()
-        .filter_map(|(name, value)| name.map(|name| (name, value)))
-        .collect())
+    let own = vec![
+        (
+            HeaderName::from_static("authorization"),
+            bearer(&conn.api_key)?,
+        ),
+        (
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/json"),
+        ),
+    ];
+    Ok(request_headers(conn, own)?)
 }
 
-fn bearer(key: &Secret) -> Result<HeaderValue, JudgeError> {
+fn bearer(key: &Secret) -> Result<HeaderValue, ChatError> {
     let mut bytes = b"Bearer ".to_vec();
     bytes.extend_from_slice(key.expose().as_bytes());
     header_bytes(&bytes)
 }
 
-fn header_value(value: &Secret) -> Result<HeaderValue, JudgeError> {
-    header_bytes(value.expose().as_bytes())
-}
-
-fn header_bytes(bytes: &[u8]) -> Result<HeaderValue, JudgeError> {
-    HeaderValue::from_bytes(bytes).map_err(|_| JudgeError::InvalidHeader)
+fn header_bytes(bytes: &[u8]) -> Result<HeaderValue, ChatError> {
+    HeaderValue::from_bytes(bytes).map_err(|_| ChatError::InvalidHeader)
 }
 
 fn request_body(mode: StructuredOutput, call: &JudgeCall<'_>) -> Result<Vec<u8>, JudgeError> {
@@ -211,9 +201,9 @@ fn tool_arguments(message: &Value) -> Result<Option<Value>, JudgeError> {
     Ok(Some(value))
 }
 
-fn usage_of(usage: Option<&Value>) -> JudgeUsage {
+fn usage_of(usage: Option<&Value>) -> TokenUsage {
     let Some(usage) = usage.and_then(Value::as_object) else {
-        return JudgeUsage::default();
+        return TokenUsage::default();
     };
     let prompt = usage
         .get("prompt_tokens_details")
@@ -221,7 +211,7 @@ fn usage_of(usage: Option<&Value>) -> JudgeUsage {
     let completion = usage
         .get("completion_tokens_details")
         .and_then(Value::as_object);
-    JudgeUsage {
+    TokenUsage {
         input: u64_field(usage, "prompt_tokens"),
         output: u64_field(usage, "completion_tokens"),
         cache_read: prompt.map_or(0, |details| u64_field(details, "cached_tokens")),
@@ -236,14 +226,14 @@ fn u64_field(object: &Map<String, Value>, key: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{endpoint, validate_model};
     use super::{DEFAULT_BASE, parse_completion};
-    use crate::error::JudgeError;
+    use crate::chat::{endpoint, validate_model};
+    use crate::error::{ChatError, JudgeError};
     use crate::hostile_tests::{body, check_reply, config, openai_reply};
     use proptest::prelude::*;
     use reqwest::Url;
 
-    fn chat_completions_url(base: Option<&Url>) -> Result<Url, JudgeError> {
+    fn chat_completions_url(base: Option<&Url>) -> Result<Url, ChatError> {
         endpoint(base, DEFAULT_BASE, "chat/completions")
     }
 
@@ -304,7 +294,7 @@ mod tests {
         ] {
             assert_eq!(
                 validate_model(model),
-                Err(JudgeError::InvalidModel),
+                Err(ChatError::InvalidModel),
                 "{model:?}"
             );
         }

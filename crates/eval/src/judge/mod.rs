@@ -5,7 +5,6 @@
 mod answer;
 mod anthropic;
 mod gemini;
-mod http;
 mod openai;
 
 use std::time::Duration;
@@ -16,6 +15,7 @@ pub(crate) use answer::{RawAnswer, parse_answer};
 pub(crate) use answer::{cut_chars, normalize_label};
 use reqwest::Url;
 
+use crate::chat::TokenUsage;
 use crate::config::JudgeOutput;
 use crate::egress::EgressClient;
 use crate::error::JudgeError;
@@ -225,24 +225,9 @@ pub(crate) struct JudgeReply {
     /// Text the model returned. Tool-call arguments are compact JSON.
     pub(crate) output_text: String,
     /// Token counts in OTel semantics.
-    pub(crate) usage: JudgeUsage,
+    pub(crate) usage: TokenUsage,
     /// Model the provider says it ran.
     pub(crate) response_model: Option<String>,
-}
-
-/// Token counts. Input includes cached prompt tokens. Output includes reasoning tokens.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct JudgeUsage {
-    /// Prompt tokens, including cached tokens.
-    pub input: u64,
-    /// Completion tokens, including reasoning tokens.
-    pub output: u64,
-    /// Cached prompt tokens.
-    pub cache_read: u64,
-    /// Prompt tokens written to the cache.
-    pub cache_write: u64,
-    /// Reasoning tokens. They are also included in `output`.
-    pub reasoning: u64,
 }
 
 /// Sends one judge call and returns the model's answer without parsing it.
@@ -264,57 +249,6 @@ pub(crate) async fn call(
         Adapter::Anthropic => anthropic::complete(client, conn, call).await,
         Adapter::Gemini => gemini::complete(client, conn, call).await,
     }
-}
-
-/// Largest provider response body, in bytes (D159).
-pub(crate) const RESPONSE_MAX_BYTES: usize = 4 * 1024 * 1024;
-
-const MODEL_MAX_BYTES: usize = 256;
-
-/// Rejects a model name that would be placed in a URL or a JSON body.
-pub(crate) fn validate_model(model: &str) -> Result<(), JudgeError> {
-    if model.is_empty() || model.len() > MODEL_MAX_BYTES || model.chars().any(forbidden_in_model) {
-        return Err(JudgeError::InvalidModel);
-    }
-    Ok(())
-}
-
-/// The URL parser reads `\` as `/` in http(s) paths, and `%` starts an escape.
-fn forbidden_in_model(ch: char) -> bool {
-    ch.is_whitespace() || ch.is_control() || matches!(ch, '/' | '\\' | '%' | '?' | '#')
-}
-
-/// Joins `path` onto a provider base, preserving a query string.
-///
-/// A base without a trailing slash is treated as a directory. `set_path` drops
-/// the query, so it is written back for bases such as `?api-version=`.
-pub(crate) fn endpoint(
-    base: Option<&Url>,
-    default_base: &str,
-    path: &str,
-) -> Result<Url, JudgeError> {
-    let parsed;
-    let base = match base {
-        Some(base) => base,
-        None => {
-            parsed = Url::parse(default_base).map_err(|_| JudgeError::InvalidRequest)?;
-            &parsed
-        }
-    };
-    let query = base.query().map(ToOwned::to_owned);
-    let mut directory = base.clone();
-    if !directory.path().ends_with('/') {
-        let mut with_slash = directory.path().to_owned();
-        with_slash.push('/');
-        directory.set_path(&with_slash);
-    }
-    let mut url = directory
-        .join(path)
-        .map_err(|_| JudgeError::InvalidRequest)?;
-    if let Some(query) = query {
-        url.set_query(Some(&query));
-    }
-    Ok(url)
 }
 
 #[cfg(test)]

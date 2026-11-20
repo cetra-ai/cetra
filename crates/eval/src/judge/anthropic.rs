@@ -5,19 +5,20 @@
 //! not use an `anthropic-beta` header. The version header is the one in the
 //! current Messages reference.
 
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{HeaderName, HeaderValue};
 use serde_json::{Map, Value};
 
 use super::answer::answer_schema;
-use super::http::provider_error;
 use super::{
     Adapter, JUDGEMENT_DESCRIPTION, JUDGEMENT_TOOL, JudgeCall, JudgeConnection, JudgeReply,
-    JudgeUsage, RESPONSE_MAX_BYTES, RawAnswer, StructuredOutput, endpoint, user_message,
+    RawAnswer, StructuredOutput, user_message,
+};
+use crate::chat::{
+    RESPONSE_MAX_BYTES, TokenUsage, endpoint, provider_error, request_headers, secret_header,
     validate_model,
 };
 use crate::egress::{EgressClient, EgressRequest};
 use crate::error::JudgeError;
-use crate::secret::Secret;
 
 const DEFAULT_BASE: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2026-10-21";
@@ -46,39 +47,28 @@ pub(crate) async fn complete(
             conn.structured_output,
             response.status.as_u16(),
             &response.body,
-        ));
+        )
+        .into());
     }
     parse_message(&response.body)
 }
 
 fn headers(conn: &JudgeConnection) -> Result<Vec<(HeaderName, HeaderValue)>, JudgeError> {
-    let mut map = HeaderMap::new();
-    // Extra headers go first: the adapter's own headers are inserted after them and win (D-I-46).
-    for (name, value) in &conn.extra_headers {
-        let name = HeaderName::try_from(name.as_str()).map_err(|_| JudgeError::InvalidHeader)?;
-        let value = header_value(value)?;
-        map.insert(name, value);
-    }
-    map.insert(
-        HeaderName::from_static("x-api-key"),
-        header_value(&conn.api_key)?,
-    );
-    map.insert(
-        HeaderName::from_static("anthropic-version"),
-        HeaderValue::from_static(ANTHROPIC_VERSION),
-    );
-    map.insert(
-        HeaderName::from_static("content-type"),
-        HeaderValue::from_static("application/json"),
-    );
-    Ok(map
-        .into_iter()
-        .filter_map(|(name, value)| name.map(|name| (name, value)))
-        .collect())
-}
-
-fn header_value(value: &Secret) -> Result<HeaderValue, JudgeError> {
-    HeaderValue::from_bytes(value.expose().as_bytes()).map_err(|_| JudgeError::InvalidHeader)
+    let own = vec![
+        (
+            HeaderName::from_static("x-api-key"),
+            secret_header(&conn.api_key)?,
+        ),
+        (
+            HeaderName::from_static("anthropic-version"),
+            HeaderValue::from_static(ANTHROPIC_VERSION),
+        ),
+        (
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/json"),
+        ),
+    ];
+    Ok(request_headers(conn, own)?)
 }
 
 fn request_body(mode: StructuredOutput, call: &JudgeCall<'_>) -> Result<Vec<u8>, JudgeError> {
@@ -198,14 +188,14 @@ fn tool_input(blocks: &[Value]) -> Option<&Value> {
     })
 }
 
-fn usage_of(usage: Option<&Value>) -> JudgeUsage {
+fn usage_of(usage: Option<&Value>) -> TokenUsage {
     let Some(usage) = usage.and_then(Value::as_object) else {
-        return JudgeUsage::default();
+        return TokenUsage::default();
     };
     let details = usage
         .get("output_tokens_details")
         .and_then(Value::as_object);
-    JudgeUsage {
+    TokenUsage {
         input: u64_field(usage, "input_tokens")
             .saturating_add(u64_field(usage, "cache_read_input_tokens"))
             .saturating_add(u64_field(usage, "cache_creation_input_tokens")),
@@ -222,9 +212,9 @@ fn u64_field(object: &Map<String, Value>, key: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{endpoint, validate_model};
     use super::{DEFAULT_BASE, parse_message};
-    use crate::error::JudgeError;
+    use crate::chat::{endpoint, validate_model};
+    use crate::error::{ChatError, JudgeError};
     use crate::hostile_tests::{anthropic_reply, body, check_reply, config};
     use proptest::prelude::*;
     use reqwest::Url;
@@ -271,7 +261,7 @@ mod tests {
         assert!(validate_model("claude-sonnet-4-5").is_ok());
         assert_eq!(
             validate_model("claude/sonnet"),
-            Err(JudgeError::InvalidModel)
+            Err(ChatError::InvalidModel)
         );
     }
 }

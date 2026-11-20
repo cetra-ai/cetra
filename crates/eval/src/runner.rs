@@ -12,11 +12,12 @@ use cetra_core::ids::TraceId;
 use cetra_core::score::ScoreValue;
 use cetra_otel::{IngestContext, Normalized, PriceTable};
 
+use crate::chat::TokenUsage;
 use crate::check::{CheckInput, run_check};
 use crate::config::{Check, Evaluator, EvaluatorConfig, JudgeConfig, WebhookConfig};
 use crate::egress::{EgressClient, EgressPolicy};
 use crate::error::{ConfigError, EvalError, JudgeError, WebhookError};
-use crate::judge::{Adapter, JudgeCall, JudgeConnection, JudgeUsage, call, parse_answer};
+use crate::judge::{Adapter, JudgeCall, JudgeConnection, call, parse_answer};
 use crate::mapping::resolve::Variables;
 use crate::secret::Secret;
 use crate::template::PromptTemplate;
@@ -122,7 +123,7 @@ enum OwnedChild {
         response_model: Option<String>,
         prompt: String,
         output_text: Option<String>,
-        usage: Option<JudgeUsage>,
+        usage: Option<TokenUsage>,
         error: Option<JudgeError>,
     },
     Webhook {

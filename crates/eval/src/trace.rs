@@ -19,9 +19,10 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::chat::TokenUsage;
 use crate::config::Evaluator;
 use crate::error::{EvalError, JudgeError, WebhookError};
-use crate::judge::{Adapter, JudgeUsage};
+use crate::judge::Adapter;
 use crate::mapping::resolve::Variables;
 
 /// Where a run was started. `Test` writes neither a rule id nor an experiment id.
@@ -81,7 +82,7 @@ pub(crate) enum ChildSpan<'a> {
         /// Assistant text, when the call returned one.
         output_text: Option<&'a str>,
         /// Token counts, when the provider sent them.
-        usage: Option<&'a JudgeUsage>,
+        usage: Option<&'a TokenUsage>,
         /// Provider or parse error. The message is the error's `Display`.
         error: Option<&'a JudgeError>,
     },
@@ -379,7 +380,7 @@ fn child_span(input: &TraceInput<'_>, parent: &SpanId, child: &ChildSpan<'_>) ->
     }
 }
 
-fn usage_attrs(usage: &JudgeUsage) -> Vec<KeyValue> {
+fn usage_attrs(usage: &TokenUsage) -> Vec<KeyValue> {
     vec![
         int_attr("gen_ai.usage.input_tokens", token_count(usage.input)),
         int_attr("gen_ai.usage.output_tokens", token_count(usage.output)),
@@ -526,9 +527,10 @@ mod tests {
     use uuid::Uuid;
 
     use super::{ChildSpan, EvalOrigin, EvalTarget, TraceInput, build, judge_metadata, span_id};
+    use crate::chat::TokenUsage;
     use crate::config::{Check, Evaluator, EvaluatorConfig, OutputScore};
     use crate::error::{ErrorClass, EvalError, JudgeError, WebhookError};
-    use crate::judge::{Adapter, JudgeUsage};
+    use crate::judge::Adapter;
     use crate::mapping::resolve::Variables;
 
     const INGEST: i64 = 1_767_225_600_000_000_000;
@@ -591,8 +593,8 @@ mod tests {
         EvalOrigin::Rule(Uuid::parse_str(RULE_ID).expect("rule id"))
     }
 
-    fn usage() -> JudgeUsage {
-        JudgeUsage {
+    fn usage() -> TokenUsage {
+        TokenUsage {
             input: 1_000,
             output: 100,
             cache_read: 200,
@@ -808,7 +810,7 @@ mod tests {
         let target = target();
         let origin = rule();
         let score = ScoreValue::Boolean(true);
-        let usage = JudgeUsage {
+        let usage = TokenUsage {
             input: 10,
             output: 2,
             cache_read: 0,

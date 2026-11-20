@@ -16,6 +16,7 @@
 //!
 //! [`EgressClient`] and [`sign_payload`] are public so the server's alert deliveries share the guard and the signature (D-K-11).
 
+mod chat;
 mod check;
 mod config;
 mod egress;
@@ -30,6 +31,7 @@ mod text;
 mod trace;
 mod webhook;
 
+pub use chat::TokenUsage;
 pub use config::{
     Check, ContainsMode, Evaluator, EvaluatorConfig, JudgeConfig, JudgeOutput, OutputScore,
     WebhookConfig,
@@ -39,10 +41,10 @@ pub use egress::{
     identity_http_client,
 };
 pub use error::{
-    CheckError, ConfigError, EgressError, ErrorClass, EvalError, JudgeError, MappingError,
-    TemplateError, WebhookError,
+    ChatError, CheckError, ConfigError, EgressError, ErrorClass, EvalError, JudgeError,
+    MappingError, TemplateError, WebhookError,
 };
-pub use judge::{Adapter, JudgeConnection, JudgeUsage, StructuredOutput, UnknownName};
+pub use judge::{Adapter, JudgeConnection, StructuredOutput, UnknownName};
 pub use mapping::resolve::{ItemData, TraceData, Variables, resolve};
 pub use mapping::{Expr, VariableMapping};
 pub use runner::{EvalOutcome, EvalRun, EvalRunner, RunInput};

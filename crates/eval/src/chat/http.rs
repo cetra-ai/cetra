@@ -5,8 +5,8 @@
 
 use serde_json::Value;
 
-use super::{Adapter, StructuredOutput};
-use crate::error::{ErrorClass, JudgeError};
+use crate::error::{ChatError, ErrorClass};
+use crate::judge::{Adapter, StructuredOutput};
 
 /// Shown when native or tool mode is rejected. Prompt mode does not set it.
 const STRUCTURED_OUTPUT_HINT: &str = "The model may not support this structured_output mode; try \"tool\" or \"prompt\" on the connection.";
@@ -14,7 +14,7 @@ const STRUCTURED_OUTPUT_HINT: &str = "The model may not support this structured_
 const TOKEN_MAX_CHARS: usize = 64;
 const MESSAGE_MAX_CHARS: usize = 500;
 
-/// Builds a [`JudgeError::Provider`] from a non-success response.
+/// Builds a [`ChatError::Provider`] from a non-success response.
 ///
 /// Unparsable bodies leave the type, code, and message empty. The message is
 /// cut to 500 Unicode scalar values and is not included in the error's `Display`.
@@ -23,7 +23,7 @@ pub(crate) fn provider_error(
     mode: StructuredOutput,
     status: u16,
     body: &[u8],
-) -> JudgeError {
+) -> ChatError {
     let (provider_type, provider_code, provider_message) = match adapter {
         Adapter::OpenAi | Adapter::Anthropic => error_object(body),
         Adapter::Gemini => gemini_error(body),
@@ -44,7 +44,7 @@ pub(crate) fn provider_error(
         provider_code.as_deref(),
     );
     let hint = structured_output_hint(adapter, mode, status, provider_code.as_deref());
-    JudgeError::Provider {
+    ChatError::Provider {
         status,
         class,
         provider_type,
@@ -194,7 +194,7 @@ fn mentions_content_filter(value: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{MESSAGE_MAX_CHARS, TOKEN_MAX_CHARS, is_token, provider_error};
-    use crate::error::{ErrorClass, JudgeError};
+    use crate::error::{ChatError, ErrorClass};
     use crate::hostile_tests::{body, config, error_reply};
     use crate::judge::{Adapter, StructuredOutput};
     use proptest::prelude::*;
@@ -218,7 +218,7 @@ mod tests {
         ) {
             let err = provider_error(adapter, mode, status, &bytes);
             assert_eq!(err.to_string(), format!("provider status {status}"));
-            let JudgeError::Provider {
+            let ChatError::Provider {
                 status: kept,
                 provider_type,
                 provider_code,
@@ -238,7 +238,7 @@ mod tests {
         }
     }
 
-    fn error(status: u16, body: &serde_json::Value) -> JudgeError {
+    fn error(status: u16, body: &serde_json::Value) -> ChatError {
         provider_error(
             Adapter::OpenAi,
             StructuredOutput::Prompt,
@@ -325,7 +325,7 @@ mod tests {
             400,
             &json!({"error": {"type": "invalid_request_error", "code": null, "message": "SECRET-PAYLOAD"}}),
         );
-        let JudgeError::Provider {
+        let ChatError::Provider {
             provider_type,
             provider_code,
             provider_message,
@@ -353,7 +353,7 @@ mod tests {
             400,
             &json!({"error": {"type": long_type, "code": "bad/code", "message": message}}),
         );
-        let JudgeError::Provider {
+        let ChatError::Provider {
             provider_type,
             provider_code,
             provider_message,
@@ -375,7 +375,7 @@ mod tests {
             500,
             b"SECRET-PAYLOAD",
         );
-        let JudgeError::Provider {
+        let ChatError::Provider {
             provider_type,
             provider_code,
             provider_message,
@@ -392,7 +392,7 @@ mod tests {
         assert!(!err.to_string().contains("SECRET-PAYLOAD"));
 
         let err = error(400, &json!({"error": {"code": 429, "message": ""}}));
-        let JudgeError::Provider {
+        let ChatError::Provider {
             provider_code,
             provider_message,
             ..
@@ -416,7 +416,7 @@ mod tests {
             529,
             &serde_json::to_vec(&body).expect("body"),
         );
-        let JudgeError::Provider {
+        let ChatError::Provider {
             provider_type,
             provider_code,
             provider_message,
@@ -449,7 +449,7 @@ mod tests {
             429,
             &serde_json::to_vec(&body).expect("body"),
         );
-        let JudgeError::Provider {
+        let ChatError::Provider {
             provider_type,
             provider_code,
             provider_message,
@@ -473,7 +473,7 @@ mod tests {
             500,
             b"SECRET-PAYLOAD",
         );
-        let JudgeError::Provider {
+        let ChatError::Provider {
             provider_type,
             provider_code,
             provider_message,
@@ -496,7 +496,7 @@ mod tests {
             serde_json::to_vec(&json!({"error": {"message": "SECRET-PAYLOAD"}})).expect("body");
         for mode in [StructuredOutput::Native, StructuredOutput::Tool] {
             let err = provider_error(Adapter::OpenAi, mode, 400, &body);
-            let JudgeError::Provider { hint, .. } = &err else {
+            let ChatError::Provider { hint, .. } = &err else {
                 panic!("provider error");
             };
             assert_eq!(hint, &Some(super::STRUCTURED_OUTPUT_HINT));
@@ -505,7 +505,7 @@ mod tests {
             assert!(!err.to_string().contains("structured_output"));
         }
         let err = provider_error(Adapter::Anthropic, StructuredOutput::Prompt, 400, &body);
-        let JudgeError::Provider { hint, .. } = &err else {
+        let ChatError::Provider { hint, .. } = &err else {
             panic!("provider error");
         };
         assert_eq!(hint, &None);
@@ -515,13 +515,13 @@ mod tests {
         }))
         .expect("body");
         let err = provider_error(Adapter::Gemini, StructuredOutput::Tool, 403, &gemini);
-        let JudgeError::Provider { hint, class, .. } = &err else {
+        let ChatError::Provider { hint, class, .. } = &err else {
             panic!("provider error");
         };
         assert_eq!(hint, &Some(super::STRUCTURED_OUTPUT_HINT));
         assert_eq!(class, &ErrorClass::Pause);
         let err = provider_error(Adapter::Gemini, StructuredOutput::Prompt, 400, &gemini);
-        let JudgeError::Provider { hint, .. } = &err else {
+        let ChatError::Provider { hint, .. } = &err else {
             panic!("provider error");
         };
         assert_eq!(hint, &None);
