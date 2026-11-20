@@ -19,6 +19,7 @@ use crate::eval::evaluator;
 use crate::http::AppState;
 use crate::http::access::{ProjectAccess, user_project};
 use crate::http::error::{ApiError, field_error};
+use crate::mcp::sql::required_window;
 use crate::mcp::tools as mcp_tools;
 use crate::meta::evaluators::get_evaluator;
 use crate::routes::dashboards::{
@@ -223,6 +224,7 @@ pub(super) async fn draft_filter(
     arguments: JsonObject,
 ) -> Result<(Value, (AssistantDraftKind, Value)), ToolError> {
     let args: FilterArgs = mcp_tools::arguments(arguments)?;
+    let access = draft_access(state, scope).await?;
     if args
         .filter
         .as_ref()
@@ -237,7 +239,6 @@ pub(super) async fn draft_filter(
         args.from.as_deref(),
         args.to.as_deref(),
     )?;
-    let access = draft_access(state, scope).await?;
     let filter = trimmed(args.filter);
     if let Some(text) = &filter {
         let ctx = open_query(state, access.project.org_id, access.project.id, None).await?;
@@ -283,6 +284,7 @@ pub(super) async fn draft_sql(
     arguments: JsonObject,
 ) -> Result<(Value, (AssistantDraftKind, Value)), ToolError> {
     let args: SqlArgs = mcp_tools::arguments(arguments)?;
+    let access = draft_access(state, scope).await?;
     if args.query.trim().is_empty() || args.query.len() > MAX_QUERY_BYTES {
         return Err(field_error("query", "query must be 1 to 65536 bytes").into());
     }
@@ -292,7 +294,10 @@ pub(super) async fn draft_sql(
         args.from.as_deref(),
         args.to.as_deref(),
     )?;
-    let access = draft_access(state, scope).await?;
+    // A window given as from and to is at most 30 days, as query_sql checks it (presets are at most 30d).
+    if let (Some(from), Some(to)) = (args.from.as_deref(), args.to.as_deref()) {
+        required_window(Some(time_of("from", from)?), Some(time_of("to", to)?))?;
+    }
     let (org, project) = (access.project.org_id, access.project.id);
     let ctx = open_query_windowed(state, org, project, window).await?;
     crate::datasets::sql_views::register(state, &ctx, org, project, &args.query, window).await?;
@@ -334,6 +339,7 @@ pub(super) async fn draft_dashboard(
     arguments: JsonObject,
 ) -> Result<(Value, (AssistantDraftKind, Value)), ToolError> {
     let args: DashboardArgs = mcp_tools::arguments(arguments)?;
+    let access = draft_access(state, scope).await?;
     let edit = match (args.dashboard_id.as_deref(), args.version) {
         (None, None) => None,
         (Some(text), Some(version)) => Some((
@@ -353,7 +359,6 @@ pub(super) async fn draft_dashboard(
         .map_err(|_| field_error("definition", "must be a dashboard definition with widgets"))?;
     check_definition(&definition, "definition", &mut errors);
     refuse_if_any(errors)?;
-    let access = draft_access(state, scope).await?;
     check_expressions(state, &access, &definition, "definition").await?;
 
     let mut draft = Map::new();
@@ -396,10 +401,10 @@ pub(super) async fn draft_evaluator(
     arguments: JsonObject,
 ) -> Result<(Value, (AssistantDraftKind, Value)), ToolError> {
     let args: EvaluatorArgs = mcp_tools::arguments(arguments)?;
+    let access = draft_access(state, scope).await?;
     if args.kind == EvaluatorKind::Webhook {
         return Err(field_error("kind", "webhook evaluators cannot be drafted").into());
     }
-    let access = draft_access(state, scope).await?;
     let output = output_of(&args.output_score);
     let prepared = evaluator::prepare(
         Uuid::now_v7(),
@@ -615,7 +620,7 @@ mod tests {
     use crate::api::assistant::AssistantDraftKind;
     use crate::auth::principal::AuthUser;
     use crate::mcp::test_helpers::{FROM, TO};
-    use crate::test_support::{Seeded, TestApp};
+    use crate::test_support::{Seeded, TestApp, second_org};
 
     fn scope_of(seeded: &Seeded) -> ToolScope {
         ToolScope {
@@ -774,6 +779,80 @@ mod tests {
         assert!(ok.ok, "{:?}", ok.value);
         let (_, draft) = ok.draft.expect("a draft");
         assert_eq!(draft["range"], "1h");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_user_without_access_gets_not_found_before_validation() {
+        let (app, seeded) = seeded_app().await;
+        let (_, member) = second_org(&app, "other", "owner@example.com").await;
+        let scope = ToolScope {
+            user: AuthUser {
+                id: member.id,
+                is_instance_admin: false,
+                email: "owner@example.com".to_owned(),
+            },
+            project: seeded.project.id,
+        };
+        let result = run(
+            &app.state,
+            &scope,
+            "draft_filter",
+            arguments(json!({"view": "traces", "filter": "nope = 1"})),
+        )
+        .await
+        .expect("a known tool");
+        assert!(!result.ok);
+        assert_eq!(result.value["error"]["code"], "not_found");
+        assert!(result.draft.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn draft_sql_refuses_a_window_over_30_days() {
+        let (app, seeded) = seeded_app().await;
+        let too_long = call(
+            &app,
+            &seeded,
+            "draft_sql",
+            json!({"query": "SELECT 1 AS one", "from": "2026-01-01T00:00:00Z", "to": "2026-02-01T00:00:00Z"}),
+        )
+        .await;
+        assert!(!too_long.ok);
+        assert_eq!(too_long.value["error"]["code"], "bad_request");
+        assert_eq!(
+            too_long.value["error"]["message"],
+            "the window is at most 30 days"
+        );
+        assert!(too_long.draft.is_none());
+
+        let at_limit = call(
+            &app,
+            &seeded,
+            "draft_sql",
+            json!({"query": "SELECT 1 AS one", "from": "2026-01-01T00:00:00Z", "to": "2026-01-31T00:00:00Z"}),
+        )
+        .await;
+        assert!(at_limit.ok, "{:?}", at_limit.value);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn draft_evaluator_keeps_the_config_as_sent() {
+        let (app, seeded) = seeded_app().await;
+        let config = json!({"check": "contains", "value": "refund"});
+        let result = call(
+            &app,
+            &seeded,
+            "draft_evaluator",
+            json!({
+                "name": "Refund mention",
+                "kind": "check",
+                "config": config,
+                "output_score": {"name": "mentions_refund", "data_type": "boolean"}
+            }),
+        )
+        .await;
+        assert!(result.ok, "{:?}", result.value);
+        let (_, draft) = result.draft.expect("a draft");
+        assert_eq!(draft["config"], config);
     }
 
     #[tokio::test(flavor = "multi_thread")]

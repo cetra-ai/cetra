@@ -68,8 +68,10 @@ fn push_note(body: &mut Map<String, Value>, note: String) {
 /// Builds `{<list>: items, "next_cursor": cursor, "truncated": false, "notes": []}`. It cuts the strings
 /// of the items only (never `next_cursor` or `notes`) to `cut`, adding the note "string values longer than
 /// {cut} characters were cut to {cut} characters", then fits the body to [`MAX_CHARS`] with
-/// `crate::mcp::output::fit_list` (note: "the list was cut to fit {MAX_CHARS} characters; ask for fewer rows").
-/// `truncated` is true when there is a cursor, or when the list was cut.
+/// `crate::mcp::output::fit_list` (note: "the list was cut to fit {MAX_CHARS} characters; ask for fewer rows",
+/// or, with a cursor, "...; the cursor was dropped, ask again with a smaller limit").
+/// `truncated` is true when there is a cursor, or when the list was cut. A list cut to fit the budget drops its
+/// cursor (`next_cursor` becomes `null`): the page after the cut one would skip the dropped items.
 pub(crate) fn list_body(
     list: &str,
     mut items: Vec<Value>,
@@ -84,7 +86,8 @@ pub(crate) fn list_body(
     if cut_any {
         notes.push(Value::String(cut_note(cut)));
     }
-    let truncated = cursor.is_some();
+    let had_cursor = cursor.is_some();
+    let truncated = had_cursor;
     let mut body = Map::new();
     body.insert(list.to_owned(), Value::Array(items));
     body.insert(
@@ -93,12 +96,17 @@ pub(crate) fn list_body(
     );
     body.insert("truncated".to_owned(), Value::Bool(truncated));
     body.insert("notes".to_owned(), Value::Array(notes));
-    fit_list(
-        &mut body,
-        list,
-        MAX_CHARS,
-        &format!("the list was cut to fit {MAX_CHARS} characters; ask for fewer rows"),
-    );
+    let note = if had_cursor {
+        format!(
+            "the list was cut to fit {MAX_CHARS} characters; the cursor was dropped, ask again with a smaller limit"
+        )
+    } else {
+        format!("the list was cut to fit {MAX_CHARS} characters; ask for fewer rows")
+    };
+    // `fit_list` returns true exactly when it cut the list and added its note.
+    if fit_list(&mut body, list, MAX_CHARS, &note) && had_cursor {
+        body.insert("next_cursor".to_owned(), Value::Null);
+    }
     Value::Object(body)
 }
 
@@ -221,6 +229,24 @@ mod tests {
         let body = list_body("rows", vec![json!(1)], None, 200);
         assert_eq!(body["truncated"], json!(false));
         assert_eq!(body["next_cursor"], Value::Null);
+    }
+
+    #[test]
+    fn list_body_drops_the_cursor_when_it_cuts() {
+        let items: Vec<Value> = (0..1_000).map(|_| json!("a".repeat(100))).collect();
+        let body = list_body("rows", items, Some("c".repeat(300)), 200);
+        assert_eq!(body["next_cursor"], Value::Null);
+        assert_eq!(body["truncated"], json!(true));
+        assert!(char_len(&render(&body)) <= MAX_CHARS);
+        assert!(body["rows"].as_array().unwrap().len() < 1_000);
+        let notes = body["notes"].as_array().unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(
+            notes[0],
+            json!(format!(
+                "the list was cut to fit {MAX_CHARS} characters; the cursor was dropped, ask again with a smaller limit"
+            ))
+        );
     }
 
     #[test]

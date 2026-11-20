@@ -129,9 +129,10 @@ fn items<T: Serialize>(rows: &[T]) -> Result<Vec<Value>, ApiError> {
     rows.iter().map(json_of).collect()
 }
 
-/// The item count of a list answer.
-fn count(len: usize) -> Option<u64> {
-    u64::try_from(len).ok()
+/// The items a shaped list answer holds: the array `list` of `value` after the budget fit, so `rows` counts what
+/// the model receives.
+fn shaped_rows(value: &Value, list: &str) -> Option<u64> {
+    u64::try_from(value.get(list)?.as_array()?.len()).ok()
 }
 
 /// The scope's project, read by the user with `ProjectPerm::View`: the access every read tool needs.
@@ -188,8 +189,8 @@ pub(super) async fn list_sessions(
     };
     let access = project_access(state, scope).await?;
     let page = session_page(state, &access, params).await?;
-    let rows = count(page.data.len());
     let value = shape::list_body("sessions", items(&page.data)?, page.next_cursor, VALUE_CUT);
+    let rows = shaped_rows(&value, "sessions");
     Ok((value, rows))
 }
 
@@ -260,8 +261,8 @@ pub(super) async fn list_scores(
     };
     let access = project_access(state, scope).await?;
     let page = score_page(state, &access, params).await?;
-    let rows = count(page.data.len());
     let value = shape::list_body("scores", items(&page.data)?, page.next_cursor, VALUE_CUT);
+    let rows = shaped_rows(&value, "scores");
     Ok((value, rows))
 }
 
@@ -288,13 +289,13 @@ pub(super) async fn list_score_definitions(
     };
     let access = project_access(state, scope).await?;
     let page = definition_page(state, &access, params).await?;
-    let rows = count(page.data.len());
     let value = shape::list_body(
         "definitions",
         items(&page.data)?,
         page.next_cursor,
         VALUE_CUT,
     );
+    let rows = shaped_rows(&value, "definitions");
     Ok((value, rows))
 }
 
@@ -320,8 +321,8 @@ pub(super) async fn list_alert_rules(
     let _: NoArguments = mcp_tools::arguments(arguments)?;
     let access = project_access(state, scope).await?;
     let page = alert_rule_page(state, &access).await?;
-    let rows = count(page.data.len());
     let value = shape::list_body("rules", items(&page.data)?, page.next_cursor, VALUE_CUT);
+    let rows = shaped_rows(&value, "rules");
     Ok((value, rows))
 }
 
@@ -367,7 +368,6 @@ pub(super) async fn list_evaluators(
             stats.insert(entry.evaluator_id, entry);
         }
     }
-    let rows = count(page.data.len());
     let mut items = Vec::with_capacity(page.data.len());
     for evaluator in &page.data {
         let mut item = json_of(evaluator)?;
@@ -383,6 +383,7 @@ pub(super) async fn list_evaluators(
         items.push(item);
     }
     let value = shape::list_body("evaluators", items, page.next_cursor, VALUE_CUT);
+    let rows = shaped_rows(&value, "evaluators");
     Ok((value, rows))
 }
 
@@ -425,7 +426,6 @@ pub(super) async fn list_online_rules(
     for entry in rule_stats(state, &access).await?.data {
         stats.insert(entry.rule_id, entry);
     }
-    let rows = count(page.data.len());
     let mut items = Vec::with_capacity(page.data.len());
     for rule in &page.data {
         let mut item = json_of(rule)?;
@@ -441,6 +441,7 @@ pub(super) async fn list_online_rules(
         items.push(item);
     }
     let value = shape::list_body("rules", items, page.next_cursor, VALUE_CUT);
+    let rows = shaped_rows(&value, "rules");
     Ok((value, rows))
 }
 
@@ -484,13 +485,13 @@ pub(super) async fn list_dashboards(
     };
     let access = project_access(state, scope).await?;
     let page = dashboard_page(state, &access, params).await?;
-    let rows = count(page.data.len());
     let value = shape::list_body(
         "dashboards",
         items(&page.data)?,
         page.next_cursor,
         VALUE_CUT,
     );
+    let rows = shaped_rows(&value, "dashboards");
     Ok((value, rows))
 }
 
@@ -1038,6 +1039,15 @@ mod tests {
         let text = result.value.to_string();
         assert!(!text.contains(WEBHOOK_URL), "{text}");
         assert!(!text.contains(SECRET), "{text}");
+    }
+
+    #[test]
+    fn rows_count_the_items_the_model_receives() {
+        let items: Vec<Value> = (0..1_000).map(|_| json!("a".repeat(100))).collect();
+        let body = super::super::shape::list_body("rows", items, None, 200);
+        let kept = body["rows"].as_array().unwrap().len();
+        assert!(kept > 0 && kept < 1_000, "{kept}");
+        assert_eq!(super::shaped_rows(&body, "rows"), Some(kept as u64));
     }
 
     #[tokio::test(flavor = "multi_thread")]
