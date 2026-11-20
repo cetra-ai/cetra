@@ -26,7 +26,7 @@ use crate::io::ScanKind;
 use crate::narrow::{BlockEntry, Dictionary, decode_chunk_view, flags};
 use crate::payload::{
     FrameBodies, FrameEntry, PayloadHeader, build_payload_values, ids_of, payload_contains,
-    read_header, refs_segments,
+    payload_contains_rows, read_header, refs_segments,
 };
 use crate::predicate::{
     Bound, MaskSource, Predicate, bind, bound_columns, chunk_may_match, evaluate, layout_of,
@@ -336,6 +336,51 @@ fn top_positions(values: &dyn Array, options: SortOptions, k: usize) -> Result<V
     );
     keep.sort_unstable();
     Ok(keep)
+}
+
+/// When every `Contains` mask of `b` is a conjunct of the whole predicate (nested `AND`s
+/// included) and appears nowhere else: the predicate without them, and their mask indexes in
+/// order. `None` when there is no `Contains` mask, when one sits under an `OR` or a `NOT`, or
+/// when there is no other conjunct.
+/// A `Contains` term is never NULL, so a row passes `b` exactly when it passes the rest and
+/// every one of them.
+fn late_contains(b: &Bound, sources: &[MaskSource]) -> Option<(Bound, Vec<usize>)> {
+    fn conjuncts<'a>(b: &'a Bound, out: &mut Vec<&'a Bound>) {
+        match b {
+            Bound::And(terms) => terms.iter().for_each(|term| conjuncts(term, out)),
+            other => out.push(other),
+        }
+    }
+    fn mentions(b: &Bound, is_contains: &dyn Fn(usize) -> bool) -> bool {
+        match b {
+            Bound::Mask(i) => is_contains(*i),
+            Bound::And(terms) | Bound::Or(terms) => terms.iter().any(|t| mentions(t, is_contains)),
+            Bound::Not(inner) => mentions(inner, is_contains),
+            _ => false,
+        }
+    }
+    let is_contains = |i: usize| matches!(sources.get(i), Some(MaskSource::Contains(..)));
+    let total = (0..sources.len()).filter(|&i| is_contains(i)).count();
+    if total == 0 {
+        return None;
+    }
+    let mut terms = Vec::new();
+    conjuncts(b, &mut terms);
+    let mut late = Vec::new();
+    let mut rest = Vec::new();
+    for term in terms {
+        match term {
+            Bound::Mask(i) if is_contains(*i) => late.push(*i),
+            other if mentions(other, &is_contains) => return None,
+            other => rest.push(other.clone()),
+        }
+    }
+    let mut unique = late.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    // With no other conjunct, every row is searched either way.
+    (!rest.is_empty() && unique.len() == total && unique.len() == late.len())
+        .then_some((Bound::And(rest), late))
 }
 
 /// The rows of the (sorted, disjoint) ranges, in order, or only the first `limit` of them. It
@@ -932,27 +977,72 @@ impl StrataFile {
             }
         }
 
-        // 4. The masks of `Contains` terms, four waves each, computed before the filter wave.
-        let mut masks = Masks {
-            full: vec![None; sources.len()],
-            sources,
-        };
-        if bound.is_some() && !candidates.is_empty() {
-            for (index, source) in masks.sources.iter().enumerate() {
-                if let MaskSource::Contains(column, needle) = source {
-                    let result = payload_contains(self, *column, needle).await?;
-                    if let Some(slot) = masks.full.get_mut(index) {
-                        *slot = Some(BooleanArray::from(result.rows));
+        // 4–5. The selected rows. When every `Contains` term is a conjunct of the whole
+        // predicate, the other conjuncts are evaluated first, and each search then reads only the
+        // frames of the rows they keep: a time range searches the text of its rows only. Else
+        // the masks of the `Contains` terms are computed over the whole file before the filter
+        // wave, which evaluates the predicate with them.
+        let late = bound.as_ref().and_then(|b| late_contains(b, &sources));
+        let mut decoded: Decoded = HashMap::new();
+        let mut selection: Vec<u32> = match (&bound, late) {
+            (None, _) => rows_in(&candidates, req.limit),
+            (Some(_), Some((rest, late))) => {
+                // `rest` reads no `Contains` mask; theirs are null placeholders.
+                let full = sources
+                    .iter()
+                    .map(|source| match source {
+                        MaskSource::Contains(..) => Some(BooleanArray::new_null(
+                            usize::try_from(rows).unwrap_or(usize::MAX),
+                        )),
+                        MaskSource::MapKey(..) => None,
+                    })
+                    .collect();
+                let masks = Masks { full, sources };
+                let plan = FilterPlan {
+                    bound: &rest,
+                    masks: &masks,
+                    columns: &filter_columns,
+                    threads,
+                };
+                let mut selection = self
+                    .filter(&plan, &infos, &candidates, req.kind, None, &mut decoded)
+                    .await?;
+                for index in late {
+                    if selection.is_empty() {
+                        break;
+                    }
+                    if let Some(MaskSource::Contains(column, needle)) = masks.sources.get(index) {
+                        let found =
+                            payload_contains_rows(self, *column, needle, &selection).await?;
+                        if found.rows.len() != selection.len() {
+                            return Err(StrataError::Schema {
+                                reason: "internal: a search of the wrong row count".to_string(),
+                            });
+                        }
+                        selection = selection
+                            .into_iter()
+                            .zip(found.rows)
+                            .filter_map(|(row, hit)| hit.then_some(row))
+                            .collect();
                     }
                 }
+                selection
             }
-        }
-
-        // 5. Filter wave: the surviving chunks of the predicate columns, then the mask.
-        let mut decoded: Decoded = HashMap::new();
-        let mut selection: Vec<u32> = match &bound {
-            None => rows_in(&candidates, req.limit),
-            Some(b) => {
+            (Some(b), None) => {
+                let mut masks = Masks {
+                    full: vec![None; sources.len()],
+                    sources,
+                };
+                if !candidates.is_empty() {
+                    for (index, source) in masks.sources.iter().enumerate() {
+                        if let MaskSource::Contains(column, needle) = source {
+                            let result = payload_contains(self, *column, needle).await?;
+                            if let Some(slot) = masks.full.get_mut(index) {
+                                *slot = Some(BooleanArray::from(result.rows));
+                            }
+                        }
+                    }
+                }
                 let plan = FilterPlan {
                     bound: b,
                     masks: &masks,
@@ -2659,6 +2749,58 @@ mod tests {
             )
             .await;
             check(&payload, Predicate::IsNull(tokens), &[blob]).await;
+        });
+    }
+
+    /// A search that is a conjunct of the predicate runs after the other conjuncts, on the rows
+    /// they keep: the rows are the brute force's for every shape (nested, under OR or NOT, two
+    /// searches), and a selective conjunct reads fewer frame bytes than the search alone.
+    #[test]
+    fn a_search_after_narrow_conjuncts_reads_only_their_rows_frames() {
+        runtime().block_on(async {
+            let file = open_wide(20_000, &payload_config()).await;
+            let (blob, uid, tokens) = (col("blob"), col("uid"), col("input_tokens"));
+            let needle = Predicate::Contains(blob, vec![7u8; 2]);
+            let other = Predicate::Contains(blob, vec![7u8; 1]);
+            // About 0.2% of the rows, spread over the file: a frame holds many small values, so
+            // a wider filter would still touch most frames.
+            let narrow = Predicate::Cmp(tokens, CmpOp::Lt, lit_int(10));
+            let and = |terms: Vec<Predicate>| Predicate::And(terms);
+            for p in [
+                and(vec![narrow.clone(), needle.clone()]),
+                and(vec![needle.clone(), and(vec![narrow.clone()])]),
+                and(vec![narrow.clone(), needle.clone(), other.clone()]),
+                Predicate::Or(vec![narrow.clone(), needle.clone()]),
+                and(vec![
+                    narrow.clone(),
+                    Predicate::Not(Box::new(needle.clone())),
+                ]),
+                and(vec![Predicate::Const(Some(false)), needle.clone()]),
+            ] {
+                check(&file, p, &[uid]).await;
+            }
+
+            let frame_bytes = |req: ScanRequest| {
+                let file = &file;
+                async move {
+                    file.reset_io_stats();
+                    file.scan(&req).await.unwrap();
+                    file.io_stats().by_kind[Kind::PayloadFrame as usize]
+                }
+            };
+            let req = |predicate: Predicate| ScanRequest {
+                projection: vec![uid],
+                predicate: Some(predicate),
+                row_ranges: None,
+                limit: None,
+                kind: ScanKind::Scan,
+                views: false,
+                top: None,
+            };
+            let whole = frame_bytes(req(needle.clone())).await;
+            let part = frame_bytes(req(and(vec![narrow.clone(), needle.clone()]))).await;
+            assert!(whole > 0);
+            assert!(part * 4 < whole, "{part} of {whole} frame bytes");
         });
     }
 

@@ -299,8 +299,91 @@ Braintrust published a search benchmark of Brainstore against two unnamed vendor
 - **Newest matches of a common phrase: 38× faster.** The newest file holds about 2,500 matches, so one file of 20 is searched. Brainstore's posting lists would do the same with no text read; this does it with the text format as it is.
 - **Rare phrase: 2.6× faster.** About 97 matches per file, so the first stage keeps 97 rows and the second stage (4 files) completes the 100.
 - **Single match: 15 ms slower.** Nothing bounds the search, so every file is read in three stages (1, 4, 15 files) instead of all at once. A first version ran a stage's files one after another in one task: 331 ms. Each file is now its own task.
-- **Count of "help me": 8% faster.** The dense read cut the requests from 64,561 to 9,744 but fetches 7.2 GB instead of 2.5 GB, and CPU rose from 35 to 37 s. Locally the extra bytes are copies from the page cache; on S3 the change trades bytes for 6.6× fewer requests. Counting a common phrase still decompresses every frame that holds it: only a word index (posting lists, as Brainstore's) avoids that.
+- **Count of "help me": 8% faster.** The dense read cut the requests from 64,561 to 9,744 but fetches 7.2 GB instead of 2.5 GB, and CPU rose from 35 to 37 s (§ Simulated S3 later cut it to 4.8 GB with a 128 KiB gap). Locally the extra bytes are copies from the page cache; on S3 the change trades bytes for 6.6× fewer requests. Counting a common phrase still decompresses every frame that holds it: only a word index (posting lists, as Brainstore's) avoids that.
 - The other datasets' `substring_input` stayed within noise (swe 22 → 21 ms with 242 → 167 requests; openswe, toucan, wildchat unchanged).
+
+## Time ranges
+
+A UI search usually comes with a time range. Four queries ending at the newest span: `bt_help_me_1d` and `bt_help_me_1h` count "help me" over the last day and hour; `bt_newest_help_me_5m` and `bt_newest_rare_1h` return the newest 100 matches of "help me" over the last 5 minutes and of the rare phrase over the last hour.
+
+Before, the file pruning already dropped the files outside the range, but inside a file the search ran before the time filter, over every row: a 5-minute range cost a whole file's search. Rows inside a file are sorted by trace id, so their times are spread over all its chunks, and the zones cannot narrow them.
+
+**The change.** When every `Contains` term is a conjunct of the filter, the other conjuncts run first, and the search reads the refs pages of the rows they keep, then only the candidate frames those rows use (`prototype-plan.md` § S4, Searching after the other filters). The refs pages come with the index rows, so the waves do not grow. A filter with no other conjunct keeps the old path. The early stop of § Common phrases benefits too: its bound on `start_time` is such a conjunct.
+
+**Results** (ms; local: mean of four alternating rounds of 5 runs; simulated S3: median of 3):
+
+| Query | Strata before | Strata after | Parquet | Vortex compact | S3 sim. before | S3 sim. after | Parquet S3 sim. | Vortex S3 sim. |
+|---|---|---|---|---|---|---|---|---|
+| Count "help me", last day | 1,212 | **1,044** | 2,536 | 2,263 | 4,100 | **2,991** | 7,256 | 3,008 |
+| Count "help me", last hour | 77 | **73** | 530 | 189 | 781 | **419** | 662 | 613 |
+| Newest 100 "help me", last 5 min | 90 | **54** | 785 | 322 | 951 | **344** | 1,008 | 782 |
+| Newest 100 rare phrase, last hour | 23 | 23–27 | 947 | 366 | 273 | **250** | 985 | 726 |
+
+- The 5-minute search reads half the frames (47 → 24 MB). The hour reads as many as before: an hour is 28% of its file's rows, and with about six spans per frame that still touches most frames. The gain grows as the range shrinks against the file.
+- The S3 gains also come from § Simulated S3's changes (4 MiB ranges, 256 requests per wave).
+- A check of the queries that do not use the new path (absent phrase, newest matches without a range, `substring_input` and `list_llm_1h` of openswe and wildchat; three alternating rounds against the committed code) found them within the run-to-run spread: 88 against 93 ms, 98 against 106, 9.7 against 9.7, and the substring searches within 1 ms (7%).
+
+## Writer threads and file size
+
+**Parallel writer.** A store's frames are compressed, and their index bitmaps built, on `Config::write_threads` threads (default: the cores), in batches of 1,024 frames, each thread with one compressor. The frames are written in order, so the file is byte for byte the same for any thread count (a test writes with 1 and 7 threads; the golden hash did not move). Rewriting FineWeb's 20 files (`fmtbench restrata`, two rounds): **94–95 → 282–308 MiB/s**, against Parquet's 143 MiB/s on one thread. Chunking, deduplication and the narrow columns still run on one thread.
+
+**Where FineWeb's extra 21% goes** (MiB, 20 files; Strata 9,444, Parquet 7,892):
+
+| Part | Strata | Parquet | Difference |
+|---|---|---|---|
+| `input` text: frames / column chunks | 7,667 | 7,380 | +287 |
+| `input` gram index | 1,166 | — | +1,166 |
+| `input` refs pages and store segment | 17 | — | +17 |
+| `input_preview` (own store, with its own index) | 501 | 407 | +94 |
+| narrow and other columns | 93 | 105 | −12 |
+
+- **The gram index is three quarters of the gap**: 15% of the frames' size. On unique text it costs about 0.5 bit per byte of raw text; it is what makes rare and absent phrases 70–100× faster (§ Braintrust's search benchmark). It could be made smaller only by setting fewer rows per frame, at more false-positive frames for short needles (about 55% of a frame's rows are set, so a frame without a 9-byte needle, five grams, passes with probability 0.55⁵ ≈ 5%; with half the rows, 80% are set and it passes with 0.8⁵ ≈ 33%).
+- **Frames: +4%** against Parquet's text column. Frames are 64 KiB so that a point read decompresses little; Parquet's pages are about 1 MB.
+- **Previews: +23%**, of which about 64 MiB is the preview store's own index and refs. Previews are rarely searched; dropping their index would save 0.7% of the file, and make a `LIKE` on a preview column read every frame.
+
+## Simulated S3
+
+Every number above is local disk with the OS page cache warm, where a request costs microseconds. On S3 a request costs a first-byte latency, and one request runs at one connection's throughput, so the same reader can rank differently. `FMT_SIM_S3=1` estimates S3 times without S3 (2026-11-20, `bench/src/sim.rs`):
+- Each GET reads the local file, then waits until the time it would end on S3: 30 ms of first-byte latency, plus its bytes at 90 MB/s, and no earlier than a shared 10 Gbit/s link allows for all the bytes in flight (`FMT_SIM_LATENCY_MS`, `FMT_SIM_CONN_MBPS`, `FMT_SIM_LINK_GBPS`).
+- Dependent waves, concurrency and the CPU work between requests come from each reader, so every format pays for its own access pattern.
+- Not modelled: throttling (S3 allows about 5,500 GETs per second per prefix), tail latency, retries, and connection set-up. The constants are AWS's typical figures; one run against real S3 would calibrate them.
+- Request cost on S3 Standard is $0.0004 per 1,000 GETs: the full "help me" count's 21,742 requests cost $0.009, Parquet's 20 requests nothing measurable.
+
+**Before the changes below** (ms, median of 3; Strata / best Parquet / Vortex compact; bold where Strata is fastest):
+
+| Dataset | count_errors_6h | model_rollup_day | list_llm_1h | trace_lookup_full | trace_lookup_cold | substring_input | scan_all_payload |
+|---|---|---|---|---|---|---|---|
+| light | **52** / 120 / 160 | **95** / 129 / 303 | **120** / 271 / 335 | **47** / 125 / 410 | 168 / 165 / 432 | 7 / 3 / 67 | 7 / 6 / 82 |
+| payload | **57** / 74 / 146 | 125 / 107 / 118 | 234 / 196 / 195 | **86** / 118 / 414 | 173 / 164 / 451 | **207** / 410 / 215 | 725 / 622 / 521 |
+| swe | 5 / 2 / 4 | 90 / 82 / 81 | 147 / 155 / 122 | **83** / 105 / 214 | 157 / 155 / 297 | **127** / 431 / 251 | 487 / 416 / 320 |
+| openswe | **1** / 2 / 7 | **79** / 85 / 82 | 143 / 155 / 129 | **91** / 105 / 444 | 157 / 153 / 528 | **105** / 459 / 380 | **505** / 521 / 555 |
+| toucan | 6 / 2 / 9 | 123 / 115 / 112 | **132** / 205 / 187 | **84** / 114 / 332 | **164** / 168 / 434 | 293 / 536 / 169 | 723 / 731 / 333 |
+| wildchat | 6 / 3 / 4 | 146 / 110 / 141 | **153** / 197 / 188 | **84** / 117 / 466 | 199 / 170 / 550 | **273** / 656 / 277 | 949 / 889 / 523 |
+
+FineWeb (Braintrust's queries): Strata 307 ms for the absent phrase against Parquet's 15,038 and Vortex's 6,504; 8.0 s for the "help me" count against 15.1 and 6.4 s; Parquet 175 ms and Strata 206 ms for a cold trace lookup.
+
+**What the simulation showed:**
+- **Large merged ranges.** A scan merged ranges up to 16 MiB, and one request of 16 MiB takes 190 ms at one connection's 90 MB/s: payload's `list_llm_1h` made 4 requests for 7.3 MB, `scan_all_payload` 16 requests of 10 MB. Merged ranges now stop at 4 MiB, which takes about as long to transfer as a request's latency.
+- **64 requests per wave.** A wave allowed 64 requests in flight, so the 1,063 requests of a one-hour search took 17 latencies. The process-wide limit of 256 (§ Braintrust's search benchmark) now applies alone.
+- **The dense gap.** With 256 requests of 30 ms in flight, a request costs about as much as 150 KB on a 10 Gbit/s link. Candidate frames that fill a quarter of their span (§ Common phrases) were merged with the scan's 1 MiB gap, which read 7.2 GB for the "help me" count; they now merge gaps under 128 KiB (`ScanKind::Dense`): 4.8 GB in 21,742 requests.
+- **Still behind:** a cold trace lookup takes 5 dependent waves (open, metadata, sort-key chunks, row chunks and refs, frames) and ties with Parquet; Vortex compact's full scans stay faster (333–523 ms against Strata's 530–842 on toucan, payload and wildchat).
+
+**After** (Strata, ms, median of 3, committed code → this change):
+
+| Query | Before | After |
+|---|---|---|
+| FineWeb: count "help me" | 8,101 | 6,478 |
+| FineWeb: absent phrase | 312 | 271 |
+| FineWeb: newest 100 "help me" | 962 | 477 |
+| FineWeb: single match | 571 | 420 |
+| payload: `scan_all_payload` | 740 | 661 |
+| toucan: `scan_all_payload` | 682 | 530 |
+| wildchat: `scan_all_payload` | 946 | 842 |
+| payload: `substring_input` | 209 | 177 |
+| toucan: `substring_input` | 287 | 220 |
+| wildchat: `substring_input` | 285 | 236 |
+
+The other queries of the six datasets moved within the run-to-run noise (a few ms; the 5 ms queries by up to a few ms either way).
 
 ## Reproduce
 

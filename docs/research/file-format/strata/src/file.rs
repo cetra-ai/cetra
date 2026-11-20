@@ -19,7 +19,7 @@ use crate::format::{
 };
 use crate::hot::{DirectoryRecord, HotTail, Layer, PageRef, Postscript};
 use crate::index::{KeyFilter, merge_rows, zone_may_hold};
-use crate::io::{IoStats, MAX_CONCURRENT_GETS, ScanKind, coalesce};
+use crate::io::{IoStats, MAX_GETS_IN_FLIGHT, ScanKind, coalesce};
 use crate::narrow::{BlockEntry, DictKind, Dictionary, decode_chunk, is_utf8_map};
 use crate::payload::{Dict, PayloadHeader, PayloadStore, decode_header};
 use crate::postings::ChunkPostings;
@@ -620,10 +620,12 @@ impl StrataFile {
             ranges.push(r.offset..end);
         }
         let (merged, owner) = coalesce(&ranges, kind);
-        // At most `MAX_CONCURRENT_GETS` requests in flight; `buffered` keeps the order.
+        // Up to the process's limit in flight, which `get_range` enforces across waves; one
+        // wave of a common search on S3 makes about a thousand requests, and 64 at a time cost
+        // 16 latencies (`real-data.md` § Simulated S3). `buffered` keeps the order.
         let parts: Vec<bytes::Bytes> = futures::stream::iter(merged.iter().cloned())
             .map(|range| crate::io::get_range(self.store.as_ref(), &self.path, range))
-            .buffered(MAX_CONCURRENT_GETS)
+            .buffered(MAX_GETS_IN_FLIGHT)
             .try_collect()
             .await?;
 
@@ -2153,8 +2155,8 @@ mod tests {
                     (segment, Kind::NarrowChunk)
                 })
                 .collect();
-            // 1,000 waves of one request each, all started together: each wave alone stays
-            // under `MAX_CONCURRENT_GETS`, together they would hold 1,000 requests.
+            // 1,000 waves of one request each, all started together: each wave alone holds one
+            // request, together they would hold 1,000.
             let waves = (0..1_000).map(|i| {
                 let one = [segments[i % segments.len()]];
                 let file = &file;
@@ -2163,11 +2165,8 @@ mod tests {
             let bodies = futures::future::try_join_all(waves).await.unwrap();
             assert_eq!(bodies.len(), 1_000);
             let max = counting.max_in_flight();
-            assert!(
-                max <= crate::io::MAX_GETS_IN_FLIGHT as u64,
-                "{max} in flight"
-            );
-            assert!(max > MAX_CONCURRENT_GETS as u64, "only {max} in flight");
+            assert!(max <= MAX_GETS_IN_FLIGHT as u64, "{max} in flight");
+            assert!(max > 64, "only {max} in flight");
         });
     }
 

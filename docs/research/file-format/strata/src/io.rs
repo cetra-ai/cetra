@@ -16,8 +16,13 @@ use crate::error::Result;
 pub enum ScanKind {
     /// Point lookups: merge ranges whose gap is below 4 KiB.
     Point,
-    /// Scans: merge ranges whose gap is below 1 MiB, without growing a merged range past 16 MiB.
+    /// Scans: merge ranges whose gap is below 1 MiB, without growing a merged range past 4 MiB.
     Scan,
+    /// Many scattered segments, such as the candidate frames of a common needle: merge ranges
+    /// whose gap is below 128 KiB, without growing a merged range past 4 MiB. On S3 a request
+    /// costs about as much as 150 KB on the link when 256 are in flight (30 ms each, 10 Gbit/s),
+    /// so a larger gap reads more than it saves and a smaller one makes more requests.
+    Dense,
 }
 
 /// I/O counters of one `StrataFile` since it was opened (or since `reset_io_stats`).
@@ -36,13 +41,15 @@ pub struct IoStats {
 
 /// Largest gap merged for [`ScanKind::Point`].
 pub(crate) const POINT_GAP: u64 = 4 * 1024;
+/// Largest gap merged for [`ScanKind::Dense`].
+pub(crate) const DENSE_GAP: u64 = 128 * 1024;
 /// Largest gap merged for [`ScanKind::Scan`].
 pub(crate) const SCAN_GAP: u64 = 1024 * 1024;
-/// Largest merged range for [`ScanKind::Scan`], unless a single input is larger.
-pub(crate) const SCAN_MAX_RANGE: u64 = 16 * 1024 * 1024;
-
-/// Most ranged GET requests of one wave that are in flight at once.
-pub(crate) const MAX_CONCURRENT_GETS: usize = 64;
+/// Largest merged range for [`ScanKind::Scan`] and [`ScanKind::Dense`], unless a single input is
+/// larger. One S3 request runs at one connection's throughput (about 90 MB/s), so a larger range
+/// is slower than several fetched at once: 4 MiB takes about as long to transfer as a request's
+/// first-byte latency (`real-data.md` § Simulated S3).
+pub(crate) const SCAN_MAX_RANGE: u64 = 4 * 1024 * 1024;
 
 /// Most ranged GET requests in flight in the process, across every file, wave and query. A
 /// local store opens a file descriptor for each request, so this also bounds the descriptors
@@ -91,6 +98,7 @@ pub(crate) fn coalesce(ranges: &[Range<u64>], kind: ScanKind) -> (Vec<Range<u64>
     let gap = match kind {
         ScanKind::Point => POINT_GAP,
         ScanKind::Scan => SCAN_GAP,
+        ScanKind::Dense => DENSE_GAP,
     };
     let mut order: Vec<(u64, u64, usize)> = ranges
         .iter()
@@ -151,6 +159,19 @@ mod tests {
     }
 
     #[test]
+    fn dense_merges_gaps_up_to_128_kib_and_the_cap() {
+        let (merged, _) = coalesce(&[0..10, 131_082..131_090], ScanKind::Dense);
+        assert_eq!(merged, vec![0..131_090]);
+        let (merged, _) = coalesce(&[0..10, 131_083..131_090], ScanKind::Dense);
+        assert_eq!(merged, vec![0..10, 131_083..131_090]);
+        let (merged, _) = coalesce(
+            &[0..10 * MIB, (10 * MIB + 1)..(20 * MIB + 1)],
+            ScanKind::Dense,
+        );
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
     fn scan_merges_up_to_the_gap_and_the_cap() {
         let (merged, _) = coalesce(&[0..10, 500_000..500_010], ScanKind::Scan);
         assert_eq!(merged, vec![0..500_010]);
@@ -206,7 +227,7 @@ mod tests {
                 for pair in merged.windows(2) {
                     prop_assert!(pair[0].end <= pair[1].start);
                 }
-                if kind == ScanKind::Scan && disjoint {
+                if kind != ScanKind::Point && disjoint {
                     for m in &merged {
                         if m.end - m.start > SCAN_MAX_RANGE {
                             prop_assert!(ranges.iter().any(|r| r == m));

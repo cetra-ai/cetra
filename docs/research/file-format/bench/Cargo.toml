@@ -13,7 +13,7 @@ arrow = { version = "59.2", default-features = false, features = ["ipc", "pretty
 parquet = { version = "59.2", default-features = false, features = ["arrow", "async", "object_store", "zstd"] }
 datafusion = { version = "55.2", default-features = false, features = ["nested_expressions", "parquet", "sql", "string_expressions", "unicode_expressions", "datetime_expressions", "regex_expressions"] }
 object_store = { version = "0.13", features = ["aws"] }
-tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "fs"] }
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "fs", "time"] }
 futures = "0.3.34"
 async-trait = "0.1.92"
 bytes = "1.12"

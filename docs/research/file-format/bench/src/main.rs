@@ -9,6 +9,7 @@ mod payload;
 mod pqfast;
 mod profile;
 mod series;
+mod sim;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -353,7 +354,8 @@ fn write_strata(b: &RecordBatch, path: &Path) -> R<(u64, strata::FileSummary)> {
 fn payload_table(dir: &Path, summaries: &[strata::FileSummary]) -> R<()> {
     let names = ["input", "output", "system_instructions", "tool_definitions"];
     let mut pq = Vec::new();
-    for v in PQ_VARIANTS {
+    // A dataset may hold only some of the variants (fineweb: pq_default).
+    for v in PQ_VARIANTS.iter().filter(|v| dir.join(v).is_dir()) {
         pq.push((*v, column_sizes_parquet(&dir.join(v), v)?));
     }
     println!("payload columns (KiB; a store's frames, index and store segment count in its first column):");
@@ -602,7 +604,13 @@ fn location(dir: &str) -> R<Location> {
         });
     }
     let abs = std::fs::canonicalize(dir)?;
-    let inner: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new());
+    let mut inner: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new());
+    // FMT_SIM_S3=1: local reads take as long as the S3 model says (sim.rs).
+    if std::env::var_os("FMT_SIM_S3").is_some() {
+        let model = sim::Model::from_env();
+        println!("simulated S3: {model}");
+        inner = Arc::new(sim::SimS3::new(inner, model));
+    }
     Ok(Location {
         store: Arc::new(counting::Counting::new(inner)),
         url: url::Url::parse("file:///")?,
@@ -1054,12 +1062,19 @@ const BT_VARIANTS: [&str; 3] = ["pq_default", "vx_compact", "st"];
 /// `help meet` and not `Help me`.
 fn braintrust_queries() -> Vec<Query> {
     let like = |phrase: &str| format!("input LIKE '%{phrase}%'");
+    let end = datagen::DAY_START + BT_DAYS * 86_400 * datagen::NS;
+    let last = |secs: i64| format!("start_time >= to_timestamp_nanos({})", end - secs * datagen::NS);
     vec![
         Query { name: "bt_phrase_none", kind: Kind::Sql, sql: format!("SELECT count(*) FROM t WHERE {}", like(BT_NONE)) },
         Query { name: "bt_help_me", kind: Kind::Sql, sql: format!("SELECT count(*) FROM t WHERE {}", like("help me")) },
         Query { name: "bt_newest_help_me", kind: Kind::Sql, sql: format!("SELECT input FROM t WHERE {} ORDER BY start_time DESC LIMIT 100", like("help me")) },
         Query { name: "bt_newest_rare", kind: Kind::Sql, sql: format!("SELECT input FROM t WHERE {} ORDER BY start_time DESC LIMIT 100", like(BT_RARE)) },
         Query { name: "bt_single", kind: Kind::Sql, sql: format!("SELECT input FROM t WHERE {} ORDER BY start_time DESC LIMIT 100", like(BT_SINGLE)) },
+        // A time range ending at the newest span, as a UI's time picker would select.
+        Query { name: "bt_help_me_1d", kind: Kind::Sql, sql: format!("SELECT count(*) FROM t WHERE {} AND {}", like("help me"), last(86_400)) },
+        Query { name: "bt_help_me_1h", kind: Kind::Sql, sql: format!("SELECT count(*) FROM t WHERE {} AND {}", like("help me"), last(3_600)) },
+        Query { name: "bt_newest_help_me_5m", kind: Kind::Sql, sql: format!("SELECT input FROM t WHERE {} AND {} ORDER BY start_time DESC LIMIT 100", like("help me"), last(300)) },
+        Query { name: "bt_newest_rare_1h", kind: Kind::Sql, sql: format!("SELECT input FROM t WHERE {} AND {} ORDER BY start_time DESC LIMIT 100", like(BT_RARE), last(3_600)) },
         Query { name: "bt_spans_per_hour", kind: Kind::Sql, sql: "SELECT date_trunc('hour', start_time) AS h, count(*) FROM t GROUP BY h ORDER BY h".to_owned() },
     ]
 }

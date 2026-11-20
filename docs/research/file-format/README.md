@@ -578,6 +578,8 @@ Two gaps remain:
 - **Smaller files:** preview stores and narrow text columns now use trained zstd dictionaries, and Float64 columns whose values repeat use a file dictionary. Files are 3–9% smaller (wildchat 591 → 564 MiB, now under Vortex compact; `light` 174 → 159). `Config::cold()` and `strata::rewrite` recompress a file at zstd level 19 for compaction: 13–19% smaller than before, written at 9–21 MiB/s, read 2–9% slower (lookups up to 21%).
 - **Braintrust's search benchmark** (FineWeb, 1.94M spans of 10 KB): Strata is 70–100× faster than Parquet and Vortex on rare and absent phrases, with files 21% larger. For a common phrase, a sort with a limit over a search now searches the files newest first and stops once the limit is met: the newest 100 matches of "help me" take 94 ms instead of 3.6 s (Parquet 3.7 s). Counting a common phrase still decompresses every frame that holds it (3.2 s, Parquet 6.5 s).
 
+- **Time ranges, S3 and writes:** a search with a time range now searches only the rows in the range: the newest matches of "help me" in the last 5 minutes take 54 ms instead of 90. `FMT_SIM_S3=1` estimates S3 times from each reader's own requests (30 ms first byte, 90 MB/s per connection); it found merged ranges too large (now 4 MiB) and too few requests in flight (now 256), and cut Strata's simulated S3 times by 10–60% on searches and full scans. Writes run on every core: FineWeb from 95 to about 300 MiB/s, with byte-identical files. On FineWeb the gram index is three quarters of Strata's 21% extra size.
+
 Details in [real-data.md](real-data.md).
 
 ## What each format gets right and wrong

@@ -167,6 +167,27 @@ impl IndexBuilder {
         }
     }
 
+    /// The bitmap of frame `frame`, with its open bytes packed, leaving it empty: a builder of
+    /// one frame computes one frame's bitmap at a time, on any thread.
+    pub(crate) fn take_bitmap(&mut self, frame: usize) -> Vec<u64> {
+        self.flush();
+        self.bitmaps
+            .get_mut(frame)
+            .map(|bitmap| std::mem::replace(bitmap, vec![0u64; self.words]))
+            .unwrap_or_default()
+    }
+
+    /// ORs `bits`, a bitmap of this index's row count, into frame `frame`'s. A frame out of
+    /// range adds nothing.
+    pub(crate) fn or_bitmap(&mut self, frame: usize, bits: &[u64]) {
+        self.flush();
+        if let Some(bitmap) = self.bitmaps.get_mut(frame) {
+            for (word, b) in bitmap.iter_mut().zip(bits) {
+                *word |= b;
+            }
+        }
+    }
+
     /// Packs the open frame's bytes into its bitmap.
     fn flush(&mut self) {
         let Some(frame) = self.open.take() else {

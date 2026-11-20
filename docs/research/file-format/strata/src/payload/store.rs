@@ -389,6 +389,13 @@ pub(crate) fn decode_fetched_frame(
     Ok((raw, ranges))
 }
 
+/// Frames compressed or indexed per parallel batch: about 64 MiB of raw bytes, so that memory
+/// holds one batch of results, not the whole store's.
+const PARALLEL_FRAMES: usize = 1024;
+
+/// A packed frame: its raw length, its body as written, and the codec of the body.
+type Packed = (usize, Vec<u8>, Codec);
+
 /// A hasher for keys that are already uniform hashes: it keeps their low 64 bits.
 #[derive(Default)]
 pub(crate) struct KeyHasher(u64);
@@ -493,12 +500,14 @@ impl StoreBuilder {
     }
 
     /// Writes the frames, the index pages and the store segment, in that order. Returns the
-    /// store segment and what was written. The frames use zstd `level`. A store of at least
+    /// store segment and what was written. The frames use zstd `level`, and are compressed and
+    /// indexed on `threads` threads; the bytes do not depend on it. A store of at least
     /// `DICT_MIN_RAW` bytes trains a dictionary of its own: one trained on another store's text
     /// fits it badly, and is slower.
     pub(crate) fn write(
         self,
         level: i32,
+        threads: usize,
         codec: &mut SegmentCodec,
         out: &mut Out,
     ) -> Result<(SegmentRef, StoreStats)> {
@@ -554,23 +563,47 @@ impl StoreBuilder {
         let encoder = dict
             .as_ref()
             .map(|d| EncoderDictionary::copy(&d.raw, level));
-        let mut compressor = match &encoder {
-            Some(e) => {
-                let mut c =
-                    zstd::bulk::Compressor::with_prepared_dictionary(e).map_err(zstd_error)?;
-                // Attach the dictionary's tables instead of copying them into every frame.
-                c.set_parameter(zstd::zstd_safe::CParameter::ForceAttachDict(
-                    zstd::zstd_safe::DictAttachPref::ForceAttach,
-                ))
-                .map_err(zstd_error)?;
-                c
+        // One compressor per thread; the frames are written in order, so the file does not
+        // depend on the thread count.
+        let compressor = || -> Result<zstd::bulk::Compressor<'_>> {
+            match &encoder {
+                Some(e) => {
+                    let mut c =
+                        zstd::bulk::Compressor::with_prepared_dictionary(e).map_err(zstd_error)?;
+                    // Attach the dictionary's tables instead of copying them into every frame.
+                    c.set_parameter(zstd::zstd_safe::CParameter::ForceAttachDict(
+                        zstd::zstd_safe::DictAttachPref::ForceAttach,
+                    ))
+                    .map_err(zstd_error)?;
+                    Ok(c)
+                }
+                None => zstd::bulk::Compressor::new(level).map_err(zstd_error),
             }
-            None => zstd::bulk::Compressor::new(level).map_err(zstd_error)?,
         };
         let packed_codec = if dict.is_some() {
             Codec::ZstdDict
         } else {
             Codec::Zstd
+        };
+        // A frame's raw body: the chunk count, each chunk's end, then the chunk bytes.
+        let pack = |c: &mut zstd::bulk::Compressor<'_>, r: &Range<usize>| -> Result<Packed> {
+            let bytes = byte_range(r);
+            let mut raw = Vec::with_capacity(4 + 4 * r.len() + bytes.len());
+            raw.extend_from_slice(&(r.len() as u32).to_le_bytes());
+            for id in r.clone() {
+                let end = self.ends.get(id).copied().unwrap_or(0) - bytes.start;
+                raw.extend_from_slice(&(end as u32).to_le_bytes());
+            }
+            raw.extend_from_slice(self.data.get(bytes).unwrap_or_default());
+            let packed = c.compress(&raw).map_err(|source| StrataError::Io {
+                action: "zstd compress",
+                source,
+            })?;
+            Ok(if packed.len() < raw.len() {
+                (raw.len(), packed, packed_codec)
+            } else {
+                (raw.len(), raw, Codec::Raw)
+            })
         };
 
         let mut stats = StoreStats {
@@ -580,37 +613,28 @@ impl StoreBuilder {
             ..StoreStats::default()
         };
         let mut frames = Vec::with_capacity(frame_chunks.len());
-        let mut raw = Vec::new();
-        for r in &frame_chunks {
-            let bytes = byte_range(r);
-            raw.clear();
-            raw.extend_from_slice(&(r.len() as u32).to_le_bytes());
-            for id in r.clone() {
-                let end = self.ends.get(id).copied().unwrap_or(0) - bytes.start;
-                raw.extend_from_slice(&(end as u32).to_le_bytes());
+        // In batches, so that memory holds a batch of packed frames, not the whole store's.
+        for batch in frame_chunks.chunks(PARALLEL_FRAMES) {
+            let packed = crate::parallel::map_in_order_with(
+                batch,
+                |r| byte_range(r).len(),
+                threads,
+                compressor,
+                pack,
+            )?;
+            for (r, (raw_len, body, codec)) in batch.iter().zip(packed) {
+                let seg = write_segment(Kind::PayloadFrame, codec, raw_len, &body, out)?;
+                stats.frame_bytes += u64::from(seg.len);
+                frames.push(FrameEntry {
+                    offset: seg.offset,
+                    len: seg.len,
+                    raw_len: u32::try_from(raw_len).map_err(|_| StrataError::Unsupported {
+                        what: "a payload frame of more than 4 GiB".to_string(),
+                    })?,
+                    first_chunk: r.start as u32,
+                    n_chunks: r.len() as u32,
+                });
             }
-            raw.extend_from_slice(self.data.get(bytes).unwrap_or_default());
-            let packed = compressor
-                .compress(&raw)
-                .map_err(|source| StrataError::Io {
-                    action: "zstd compress",
-                    source,
-                })?;
-            let seg = if packed.len() < raw.len() {
-                write_segment(Kind::PayloadFrame, packed_codec, raw.len(), &packed, out)?
-            } else {
-                write_segment(Kind::PayloadFrame, Codec::Raw, raw.len(), &raw, out)?
-            };
-            stats.frame_bytes += u64::from(seg.len);
-            frames.push(FrameEntry {
-                offset: seg.offset,
-                len: seg.len,
-                raw_len: u32::try_from(raw.len()).map_err(|_| StrataError::Unsupported {
-                    what: "a payload frame of more than 4 GiB".to_string(),
-                })?,
-                first_chunk: r.start as u32,
-                n_chunks: r.len() as u32,
-            });
         }
 
         // The gram index: the row count from the distinct grams of up to three frames.
@@ -634,11 +658,13 @@ impl StoreBuilder {
                 .map(|&f| estimate_distinct(frame_bytes(f).into_iter()))
                 .sum::<f64>()
                 / probes.len() as f64;
-            let mut builder = IndexBuilder::new(rows_for(distinct), n_frames);
-            let mut w = Vec::new();
-            for (f, r) in frame_chunks.iter().enumerate() {
+            let rows = rows_for(distinct);
+            let mut builder = IndexBuilder::new(rows, n_frames);
+            // Each frame's bitmap is built on its own, by a one-frame builder per thread, then
+            // ORed into the index: the bits do not depend on the thread count.
+            let frame_bits = |(one, w): &mut (IndexBuilder, Vec<u8>), r: &Range<usize>| {
                 for id in r.clone() {
-                    builder.add(f, self.chunk(id));
+                    one.add(0, self.chunk(id));
                     if id + 1 < n {
                         // When the next chunk is in the same frame, its head grams are there
                         // already: only the grams that cross the boundary are added.
@@ -647,11 +673,25 @@ impl StoreBuilder {
                         } else {
                             WINDOW_HEAD
                         };
-                        window(self.chunk(id), self.chunk(id + 1), head, &mut w);
-                        builder.add(f, &w);
+                        window(self.chunk(id), self.chunk(id + 1), head, w);
+                        one.add(0, w);
                     }
                 }
+                Ok(one.take_bitmap(0))
+            };
+            for (b, batch) in frame_chunks.chunks(PARALLEL_FRAMES).enumerate() {
+                let bits = crate::parallel::map_in_order_with(
+                    batch,
+                    |r| byte_range(r).len(),
+                    threads,
+                    || Ok((IndexBuilder::new(rows, 1), Vec::new())),
+                    frame_bits,
+                )?;
+                for (i, bitmap) in bits.iter().enumerate() {
+                    builder.or_bitmap(b * PARALLEL_FRAMES + i, bitmap);
+                }
             }
+            let mut w = Vec::new();
             let frame_of_chunk =
                 |id: usize| -> usize { frame_chunks.partition_point(|r| r.end <= id) };
             for &pair in &self.pairs {
@@ -725,7 +765,7 @@ mod tests {
         }
         let mut out = Out(Vec::new());
         let mut codec = SegmentCodec::new(3).unwrap();
-        let (seg, stats) = b.write(3, &mut codec, &mut out).unwrap();
+        let (seg, stats) = b.write(3, 4, &mut codec, &mut out).unwrap();
         let bytes = &out.0[seg.offset as usize..(seg.offset + u64::from(seg.len)) as usize];
         let body = crate::segment::decode_segment(bytes, seg.offset, Kind::PayloadStore).unwrap();
         let store = PayloadStore::decode(&body, seg.offset).unwrap();

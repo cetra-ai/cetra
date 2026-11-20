@@ -23,7 +23,7 @@ pub(crate) use read::{
     FrameBodies, build_payload_values, decode_header, ids_of, read_header, read_payload_column,
     refs_segments,
 };
-pub(crate) use search::payload_contains;
+pub(crate) use search::{payload_contains, payload_contains_rows};
 pub(crate) use store::{Dict, FrameEntry, PayloadStore};
 pub use write::PayloadStats;
 pub(crate) use write::{is_payload, write_payload_columns};

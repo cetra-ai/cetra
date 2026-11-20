@@ -175,6 +175,7 @@ fn chunk_with_reuse(value: &[u8], previous: Option<&Previous<'_>>) -> (Vec<Chunk
 pub(crate) fn write_payload_columns(
     columns: &[&[ArrayRef]],
     level: i32,
+    threads: usize,
     codec: &mut SegmentCodec,
     out: &mut Out,
 ) -> Result<(SegmentRef, Vec<(SegmentRef, PayloadStats)>)> {
@@ -258,7 +259,7 @@ pub(crate) fn write_payload_columns(
     for refs in &chunk_refs {
         check_chunk_refs(*refs)?;
     }
-    let (store_seg, store_stats) = store.write(level, codec, out)?;
+    let (store_seg, store_stats) = store.write(level, threads, codec, out)?;
 
     let n_rows_u32 = u32::try_from(n_rows).map_err(|_| StrataError::TooManyRows {
         rows: n_rows as u64,

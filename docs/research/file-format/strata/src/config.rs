@@ -34,6 +34,9 @@ pub struct Config {
     /// Suffix read length when no hot-tail length hint is given. Default 64 KiB; a longer hot
     /// tail costs one more read.
     pub open_default_suffix: u64,
+    /// Threads the writer compresses and indexes payload frames on. Default: the number of
+    /// cores. The file is the same for any value; 1 writes on the calling thread only.
+    pub write_threads: usize,
 }
 
 impl Config {
@@ -54,6 +57,7 @@ impl Default for Config {
         Self {
             zstd_level: 3,
             payload_zstd_level: 3,
+            write_threads: crate::parallel::cores(),
             chunk_max_rows: 2_048,
             chunk_max_bytes: 32 * 1024,
             page_max_entries: 64,

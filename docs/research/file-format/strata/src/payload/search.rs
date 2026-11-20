@@ -134,9 +134,9 @@ struct FrameHits {
 /// Fewest bytes wanted per byte spanned for a wave of frames to be read like a scan.
 const DENSE_FRAMES: u64 = 4;
 
-/// How to coalesce a wave of frames: like a scan when the frames hold at least a quarter of the
-/// bytes from the first to the last, so that a common needle reads a few large ranges instead of
-/// one request per frame; else like point reads.
+/// How to coalesce a wave of frames: [`ScanKind::Dense`] when the frames hold at least a quarter
+/// of the bytes from the first to the last, so that a common needle makes fewer requests without
+/// reading much more; else like point reads.
 fn frames_kind(segments: &[(SegmentRef, Kind)]) -> ScanKind {
     let start = segments.iter().map(|(s, _)| s.offset).min();
     let end = segments
@@ -149,7 +149,7 @@ fn frames_kind(segments: &[(SegmentRef, Kind)]) -> ScanKind {
     let span = end.saturating_sub(start);
     let wanted: u64 = segments.iter().map(|(s, _)| u64::from(s.len)).sum();
     if wanted.saturating_mul(DENSE_FRAMES) >= span {
-        ScanKind::Scan
+        ScanKind::Dense
     } else {
         ScanKind::Point
     }
@@ -229,14 +229,9 @@ fn continues(
     Ok(Ok(false))
 }
 
-/// Finds the rows of payload column `column` whose value contains `needle`. It is three waves
-/// at most after the header: the index rows, then the refs pages with the candidate frames, then
-/// the frames that continuations need.
-pub(crate) async fn payload_contains(
-    file: &StrataFile,
-    column: usize,
-    needle: &[u8],
-) -> Result<ContainsResult> {
+/// Checks that `column` is a payload column and `needle` is at most `MAX_NEEDLE` bytes long, and
+/// returns the column's payload offset.
+fn check_search(file: &StrataFile, column: usize, needle: &[u8]) -> Result<u64> {
     let record = file
         .directory()
         .get(column)
@@ -253,24 +248,76 @@ pub(crate) async fn payload_contains(
             what: "needle longer than 64 bytes".to_string(),
         });
     }
-    let at = record.payload_offset;
+    Ok(record.payload_offset)
+}
+
+/// Finds the rows of payload column `column` whose value contains `needle`, over every row of
+/// the file. See [`payload_contains_rows`].
+pub(crate) async fn payload_contains(
+    file: &StrataFile,
+    column: usize,
+    needle: &[u8],
+) -> Result<ContainsResult> {
+    check_search(file, column, needle)?;
     let header = read_header(file, column).await?;
     let rows: Vec<u32> = (0..header.n_rows).collect();
+    payload_contains_rows(file, column, needle, &rows).await
+}
+
+/// Whether each of `rows` (ascending, unique) of payload column `column` contains `needle`. It
+/// is three waves at most after the header: the index rows with the refs pages of `rows`, then
+/// the candidate frames that those rows refer to, then the frames that continuations need. So a
+/// search over a few rows (a time range, say) decompresses only the frames they use.
+pub(crate) async fn payload_contains_rows(
+    file: &StrataFile,
+    column: usize,
+    needle: &[u8],
+    rows: &[u32],
+) -> Result<ContainsResult> {
+    let at = check_search(file, column, needle)?;
+    let header = read_header(file, column).await?;
+    if rows.is_empty() {
+        return Ok(ContainsResult {
+            rows: Vec::new(),
+            frames_read: 0,
+        });
+    }
+    let (ref_segments, pages) = refs_segments(&header, rows)?;
     if needle.is_empty() {
-        let (segments, pages) = refs_segments(&header, &rows)?;
-        let bodies = file.fetch(&segments, ScanKind::Scan).await?;
-        let ids = ids_of(&header, &pages, &bodies, &rows, at)?;
+        let bodies = file.fetch(&ref_segments, ScanKind::Scan).await?;
+        let ids = ids_of(&header, &pages, &bodies, rows, at)?;
         return Ok(ContainsResult {
             rows: ids.iter().map(Option::is_some).collect(),
             frames_read: 0,
         });
     }
 
-    let frames = candidate_frames(file, &header, needle).await?;
-    // The refs pages (every row) and the candidate frames, fetched together. Each frame is
-    // searched on the decoding threads as soon as it is decoded, and its body is kept only when
-    // a chunk of it ends with a prefix of the needle: a continuation may need it.
-    let (ref_segments, pages) = refs_segments(&header, &rows)?;
+    // The index rows and the refs pages of `rows`, in one wave.
+    let (mut frames, bodies) = futures::try_join!(
+        candidate_frames(file, &header, needle),
+        file.fetch(&ref_segments, ScanKind::Scan)
+    )?;
+    let ids = ids_of(&header, &pages, &bodies, rows, at)?;
+    // Only the candidate frames that hold a chunk of one of `rows`: an occurrence starts in a
+    // chunk of the row, and its frame is a candidate.
+    // The chunks of `rows` are marked in one pass; each candidate frame then checks its own
+    // range of chunk ids, so the cost follows the rows' ids and the candidates, not the store.
+    if u32::try_from(rows.len()).ok() != Some(header.n_rows) {
+        let mut used = ChunkBits::new(header.store.n_chunks);
+        for &id in ids.iter().flatten().flatten() {
+            used.set(id);
+        }
+        let store = &header.store;
+        frames.retain(|&f| {
+            let Some(entry) = store.frames.get(f) else {
+                return false;
+            };
+            (entry.first_chunk..entry.first_chunk.saturating_add(entry.n_chunks))
+                .any(|id| used.get(id))
+        });
+    }
+    // Each frame is searched on the decoding threads as soon as it is decoded, and its body is
+    // kept only when a chunk of it ends with a prefix of the needle: a continuation may need it.
     let mut frame_segments = Vec::with_capacity(frames.len());
     for &f in &frames {
         let seg = header.store.frame_segment(f).ok_or(StrataError::Corrupt {
@@ -318,11 +365,7 @@ pub(crate) async fn payload_contains(
             body,
         })
     };
-    let (bodies, frame_hits) = futures::try_join!(
-        file.fetch(&ref_segments, ScanKind::Scan),
-        file.fetch_map(&frame_segments, kind, search)
-    )?;
-    let ids = ids_of(&header, &pages, &bodies, &rows, at)?;
+    let frame_hits = file.fetch_map(&frame_segments, kind, search).await?;
 
     // Hits and partial hits among the chunks of the candidate frames.
     let mut decoded: HashMap<usize, Decoded> = HashMap::new();
@@ -472,15 +515,15 @@ mod tests {
     }
 
     #[test]
-    fn frames_are_read_like_a_scan_when_they_fill_a_quarter_of_their_span() {
+    fn frames_are_read_dense_when_they_fill_a_quarter_of_their_span() {
         let seg = |offset: u64, len: u32| (SegmentRef { offset, len }, Kind::PayloadFrame);
         assert_eq!(frames_kind(&[]), ScanKind::Point);
-        assert_eq!(frames_kind(&[seg(100, 10)]), ScanKind::Scan);
+        assert_eq!(frames_kind(&[seg(100, 10)]), ScanKind::Dense);
         // 2 × 25 bytes over 200: exactly a quarter.
-        assert_eq!(frames_kind(&[seg(0, 25), seg(175, 25)]), ScanKind::Scan);
+        assert_eq!(frames_kind(&[seg(0, 25), seg(175, 25)]), ScanKind::Dense);
         assert_eq!(frames_kind(&[seg(0, 25), seg(176, 25)]), ScanKind::Point);
         // The order of the segments does not matter.
-        assert_eq!(frames_kind(&[seg(175, 25), seg(0, 25)]), ScanKind::Scan);
+        assert_eq!(frames_kind(&[seg(175, 25), seg(0, 25)]), ScanKind::Dense);
     }
 
     const LOWER: &[u8] = b"abcdefghijklmnopqrstuvwxyz";

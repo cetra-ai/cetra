@@ -19,7 +19,22 @@ pub(crate) fn map_in_order<I: Sync, T: Send>(
     threads: usize,
     f: impl Fn(&I) -> Result<T> + Sync,
 ) -> Result<Vec<T>> {
-    let run = |group: &[I]| -> Result<Vec<T>> { group.iter().map(&f).collect() };
+    map_in_order_with(items, weight, threads, || Ok(()), |(), item| f(item))
+}
+
+/// [`map_in_order`], where each group first builds a state with `init` (a compressor, a
+/// buffer) that `f` then uses for every item of the group.
+pub(crate) fn map_in_order_with<I: Sync, S, T: Send>(
+    items: &[I],
+    weight: impl Fn(&I) -> usize,
+    threads: usize,
+    init: impl Fn() -> Result<S> + Sync,
+    f: impl Fn(&mut S, &I) -> Result<T> + Sync,
+) -> Result<Vec<T>> {
+    let run = |group: &[I]| -> Result<Vec<T>> {
+        let mut state = init()?;
+        group.iter().map(|item| f(&mut state, item)).collect()
+    };
     let groups = groups(items, weight, threads.max(1));
     if groups.len() < 2 {
         return run(items);

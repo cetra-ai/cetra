@@ -488,6 +488,7 @@ where
                 let (store_seg, written) = payload::write_payload_columns(
                     &refs,
                     config.payload_zstd_level,
+                    config.write_threads,
                     &mut codec,
                     &mut out,
                 )?;
@@ -1183,6 +1184,41 @@ mod tests {
             })
             .collect();
         arrow::array::BinaryArray::from_iter_values(values.iter())
+    }
+
+    /// The thread count does not change the file: a payload column of about 6 MiB (a trained
+    /// dictionary, about a hundred frames) and a column of noise, on 1 and 7 threads.
+    #[tokio::test]
+    async fn the_writer_threads_do_not_change_the_bytes() {
+        let n = 30_000;
+        let text: Vec<String> = sentences(n)
+            .iter()
+            .map(|v| v.unwrap_or_default().repeat(2))
+            .collect();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("text", DataType::Utf8, false),
+            Field::new("blob", DataType::Binary, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(arrow::array::StringArray::from(text)),
+                Arc::new(noise(n)),
+            ],
+        )
+        .unwrap();
+        let config = |threads| Config {
+            payload_min_avg: 100,
+            write_threads: threads,
+            ..Config::default()
+        };
+        let (_, one, summary) = written(&batch, config(1)).await;
+        let (file, seven, _) = written(&batch, config(7)).await;
+        assert!(summary.columns.iter().all(|c| c.payload.is_some()));
+        assert!(summary.columns[0].payload.as_ref().unwrap().frames > 50);
+        assert!(one == seven, "the bytes differ");
+        let back = crate::reader::read_column(&file, 0).await.unwrap();
+        assert_eq!(back.len(), n);
     }
 
     /// A text column of small chunks gets a chunk dictionary, its chunks are stored with it and
