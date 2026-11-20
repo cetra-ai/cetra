@@ -513,10 +513,16 @@ export function toRunRequest(
   return { ok: true, request };
 }
 
-/** The text of a message's parts joined with a newline, or `undefined` when a part is not text. */
+/**
+ * The text of a message's parts joined with a newline, or `undefined` when a part is not text.
+ * Reasoning parts are dropped, not refused (Precision 4).
+ */
 function plainText(message: Message): string | undefined {
   const texts: string[] = [];
   for (const part of message.parts) {
+    if (part.type === "reasoning") {
+      continue;
+    }
     const content = textOf(part);
     if (content === undefined) {
       return undefined;

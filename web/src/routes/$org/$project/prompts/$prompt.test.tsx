@@ -446,3 +446,13 @@ it("shows the changes of the version shown after a Diff of another version", asy
   await user.click(await screen.findByRole("option", { name: "Latest (v2)" }));
   expect(await screen.findByRole("heading", { name: "Changes in v2" })).toBeInTheDocument();
 });
+
+it("opens the shown version in the playground", async () => {
+  await renderApp("/acme/support-bot/prompts/support-reply?version=1");
+
+  const link = await screen.findByRole("link", { name: "Open in playground" });
+  const url = new URL(link.getAttribute("href") ?? "", "http://x");
+  expect(url.pathname).toBe("/acme/support-bot/playground");
+  expect(url.searchParams.get("prompt")).toBe("support-reply");
+  expect(url.searchParams.get("version")).toBe("1");
+});

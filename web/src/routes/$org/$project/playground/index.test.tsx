@@ -4,6 +4,9 @@ import { beforeEach, expect, it } from "vitest";
 import { server } from "@/mocks/node";
 import { emptyDraft, saveDraft } from "@/lib/playground";
 import { renderApp } from "@/test/render";
+import llmSpanFixture from "../../../../../../fixtures/api/responses/spans/a1000000000000000000000000000001/b100000000000012.json";
+import traceFixture from "../../../../../../fixtures/api/responses/traces/a1000000000000000000000000000001.json";
+import versionTwoFixture from "../../../../../../fixtures/api/responses/prompts/support-reply/versions/2.json";
 import projectFixture from "../../../../../../fixtures/api/static/project.json";
 
 const CONNECTION_ID = "01900000-0000-7000-8000-000000000400";
@@ -11,6 +14,13 @@ const TRACE_ID = "0af7651916cd43dd8448eb211c80319c";
 const RUNS = "/api/v1/projects/:project/playground/runs";
 const PAGE = "/acme/support-bot/playground";
 const PROJECT_KEY = "acme/support-bot";
+const FIXTURE_TRACE = "a1000000000000000000000000000001";
+const LLM_SPAN = "b100000000000012";
+const VERSION = "/api/v1/projects/:project/prompts/:prompt/versions/:version";
+const TRACE_URL = "/api/v1/projects/:project/traces/:trace_id";
+const SPAN_URL = "/api/v1/projects/:project/traces/:trace_id/spans/:span_id";
+const SPAN_SYSTEM = "You are a support agent. Use tools to look up orders.";
+const SPAN_QUESTION = "My order 1234 hasn't arrived.";
 
 const DONE = {
   finish_reason: "stop",
@@ -223,4 +233,62 @@ it("the draft survives a reload", async () => {
 
   await renderApp(PAGE);
   expect(await screen.findByRole("textbox", { name: "Text of message 2" })).toHaveValue("Keep me");
+});
+
+it("opens a prompt version from the URL", async () => {
+  server.use(http.get(VERSION, () => HttpResponse.json(versionTwoFixture)));
+  const { router } = await renderApp(`${PAGE}?prompt=support-reply&version=2`);
+
+  expect(await screen.findByText("From prompt support-reply v2")).toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "Text of message 1" })).toHaveValue(
+    "You are a friendly support agent for {{ product }}. Answer in {{ language }}.",
+  );
+  expect(screen.getByRole("textbox", { name: "Name of placeholder 2" })).toHaveValue("history");
+  expect(screen.getByRole("textbox", { name: "Text of message 3" })).toHaveValue("{{ question }}");
+  expect(screen.getAllByRole("textbox", { name: "Model" })[0]).toHaveValue("gpt-4o");
+  // The source keys leave the URL; the draft keeps its source.
+  expect((router.state.location.search as Record<string, unknown>).prompt).toBeUndefined();
+});
+
+it("opens an LLM span from the URL", async () => {
+  server.use(http.get(SPAN_URL, () => HttpResponse.json(llmSpanFixture)));
+  const { router } = await renderApp(`${PAGE}?trace=${FIXTURE_TRACE}&span=${LLM_SPAN}`);
+
+  expect(await screen.findByText("From a span")).toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "Text of message 1" })).toHaveValue(SPAN_SYSTEM);
+  expect(screen.getByRole("textbox", { name: "Text of message 2" })).toHaveValue(SPAN_QUESTION);
+  expect(screen.getAllByRole("textbox", { name: "Model" })[0]).toHaveValue("claude-sonnet-4-5");
+  expect(
+    screen.queryByText("This span was cut at ingest; the playground shows what was stored."),
+  ).not.toBeInTheDocument();
+  expect((router.state.location.search as Record<string, unknown>).span).toBeUndefined();
+});
+
+it("shows the banner when the span was cut at ingest", async () => {
+  server.use(
+    http.get(SPAN_URL, () => HttpResponse.json({ ...llmSpanFixture, truncated: ["cetra.input"] })),
+  );
+  await renderApp(`${PAGE}?trace=${FIXTURE_TRACE}&span=${LLM_SPAN}`);
+
+  expect(
+    await screen.findByText("This span was cut at ingest; the playground shows what was stored."),
+  ).toBeInTheDocument();
+});
+
+it("reopens a past run from its LLM span", async () => {
+  server.use(
+    http.get(TRACE_URL, () =>
+      HttpResponse.json({
+        ...traceFixture,
+        spans: traceFixture.spans.filter((row) => row.span.span_id === LLM_SPAN),
+      }),
+    ),
+    http.get(SPAN_URL, () => HttpResponse.json(llmSpanFixture)),
+  );
+  await renderApp(`${PAGE}?run=${FIXTURE_TRACE}`);
+
+  expect(await screen.findByRole("textbox", { name: "Text of message 2" })).toHaveValue(
+    SPAN_QUESTION,
+  );
+  expect(screen.getByRole("textbox", { name: "Text of message 1" })).toHaveValue(SPAN_SYSTEM);
 });

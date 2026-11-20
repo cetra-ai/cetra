@@ -1,5 +1,5 @@
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRouterState } from "@tanstack/react-router";
+import { Link, useRouterState } from "@tanstack/react-router";
 import { cn } from "cn";
 import { ArrowLeft } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
@@ -269,6 +269,17 @@ export function TraceView({
               spanId={selectedRow ? selected : undefined}
               selectedIsRoot={selectedIsRoot}
             />
+            {selectedRow?.span.span_kind === "llm" ? (
+              <Button asChild variant="outline" size="sm">
+                <Link
+                  to="/$org/$project/playground"
+                  params={{ org, project }}
+                  search={{ trace: loaded.trace.trace_id, span: selectedRow.span.span_id }}
+                >
+                  Open in playground
+                </Link>
+              </Button>
+            ) : null}
           </>
         }
       />

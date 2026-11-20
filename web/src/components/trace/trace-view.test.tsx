@@ -430,3 +430,22 @@ function traceBody(): HTMLElement {
 function dimmedBodies(): Element[] {
   return [...document.querySelectorAll("[aria-busy='true'].opacity-60")];
 }
+
+describe("open in playground", () => {
+  it("offers the playground for an LLM span and not for another kind", async () => {
+    await renderApp(`/acme/support-bot/traces?mock=fixtures&trace=${TRACE}&span=b100000000000012`);
+    const header = await screen.findByRole("region", { name: "Trace" });
+    const link = within(header).getByRole("link", { name: "Open in playground" });
+    const url = new URL(link.getAttribute("href") ?? "", "http://x");
+    expect(url.pathname).toBe("/acme/support-bot/playground");
+    expect(url.searchParams.get("trace")).toBe(TRACE);
+    expect(url.searchParams.get("span")).toBe("b100000000000012");
+  });
+
+  it("does not offer it for a tool span", async () => {
+    await renderApp(`/acme/support-bot/traces?mock=fixtures&trace=${TRACE}&span=b100000000000013`);
+    const header = await screen.findByRole("region", { name: "Trace" });
+    expect(within(header).getByRole("button", { name: "Run evaluator" })).toBeInTheDocument();
+    expect(within(header).queryByRole("link", { name: "Open in playground" })).not.toBeInTheDocument();
+  });
+});

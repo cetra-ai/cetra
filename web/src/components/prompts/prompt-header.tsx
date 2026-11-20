@@ -177,6 +177,15 @@ export function PromptHeader({
             {hasNextPage ? <SelectItem value={LOAD_MORE}>Load more versions…</SelectItem> : null}
           </SelectContent>
         </Select>
+        <Button asChild variant="outline" size="sm">
+          <Link
+            to="/$org/$project/playground"
+            params={{ org, project }}
+            search={{ prompt: prompt.name, version: shown }}
+          >
+            Open in playground
+          </Link>
+        </Button>
         <DisabledReason reason={canManage ? undefined : VIEWER_REASON}>
           <Button
             type="button"

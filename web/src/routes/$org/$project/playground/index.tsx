@@ -2,8 +2,9 @@ import { createFileRoute } from "@tanstack/react-router";
 import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { $api } from "@/api/client";
-import { fieldErrors, problemMessage } from "@/api/problem";
+import { fieldErrors, problemMessage, problemOf } from "@/api/problem";
 import { spanDetailQuery, traceDetailQuery } from "@/api/queries";
+import { promptQuery, promptVersionQuery } from "@/api/queries-prompts";
 import { connectionsInit } from "@/api/queries-settings";
 import type { Schema } from "@/api/types";
 import { ConfirmDialog } from "@/components/confirm-dialog";
@@ -29,6 +30,7 @@ import {
   type Entry,
   type Message,
   blockedMessages,
+  draftFromPromptVersion,
   draftFromSpan,
   emptyDraft,
   loadDraft,
@@ -194,6 +196,9 @@ function isBlankDraft(draft: Draft): boolean {
   );
 }
 
+/** A draft that replaces the page's, with whether its span was cut at ingest (the banner). */
+type Loaded = { draft: Draft; cut: boolean };
+
 /** Loads a past run: its trace's `llm` span, then that span's detail, as a draft (D-V-38). */
 async function loadRun(
   queryClient: QueryClient,
@@ -201,7 +206,7 @@ async function loadRun(
   project: string,
   traceId: string,
   connections: readonly Connection[],
-): Promise<Draft> {
+): Promise<Loaded> {
   const trace = await queryClient.fetchQuery(traceDetailQuery(org, project, traceId));
   const llm = trace.spans.find((row) => row.span.span_kind === "llm");
   if (llm === undefined) {
@@ -210,8 +215,76 @@ async function loadRun(
   const span = await queryClient.fetchQuery(
     spanDetailQuery(org, project, traceId, llm.span.span_id),
   );
-  return draftFromRun(span, connections);
+  return { draft: draftFromRun(span, connections), cut: span.truncated.length > 0 };
 }
+
+/**
+ * A prompt version as a draft. A version that does not exist gives the latest one instead, and a
+ * prompt that does not exist is an error.
+ */
+async function loadPrompt(
+  queryClient: QueryClient,
+  org: string,
+  project: string,
+  name: string,
+  version: number | undefined,
+  fallbackConnectionId: string | undefined,
+): Promise<Loaded> {
+  if (version !== undefined) {
+    try {
+      const found = await queryClient.fetchQuery(
+        promptVersionQuery(org, project, name, version),
+      );
+      return { draft: draftFromPromptVersion(found, fallbackConnectionId), cut: false };
+    } catch (error) {
+      if (problemOf(error)?.status !== 404) {
+        throw error;
+      }
+    }
+  }
+  const prompt = await queryClient.fetchQuery(promptQuery(org, project, name));
+  const latest = await queryClient.fetchQuery(
+    promptVersionQuery(org, project, name, prompt.latest_version),
+  );
+  return { draft: draftFromPromptVersion(latest, fallbackConnectionId), cut: false };
+}
+
+/** A LLM span as a draft, with the first org connection (D-V-28). */
+async function loadSpan(
+  queryClient: QueryClient,
+  org: string,
+  project: string,
+  traceId: string,
+  spanId: string,
+  fallbackConnectionId: string | undefined,
+): Promise<Loaded> {
+  const span = await queryClient.fetchQuery(spanDetailQuery(org, project, traceId, spanId));
+  return {
+    draft: draftFromSpan(span, fallbackConnectionId),
+    cut: span.truncated.length > 0,
+  };
+}
+
+/**
+ * The source the URL names, as one key: `prompt:<name>@<version>` or `span:<trace>:<span>`. A prompt
+ * wins over a span. `undefined` when the URL names no source.
+ */
+function urlSourceKey(
+  prompt: string | undefined,
+  version: number | undefined,
+  trace: string | undefined,
+  span: string | undefined,
+): string | undefined {
+  if (prompt !== undefined) {
+    return `prompt:${prompt}@${version ?? ""}`;
+  }
+  if (trace !== undefined && span !== undefined) {
+    return `span:${trace}:${span}`;
+  }
+  return undefined;
+}
+
+const SOURCE_OPEN_FAILED = "Could not open the source.";
 
 /** The line that says where the draft came from, or `undefined` for a draft from scratch. */
 function sourceText(source: Draft["source"]): string | undefined {
@@ -269,16 +342,53 @@ function PlaygroundWorkspace({
   const canManage = canManagePrompts(data.role);
   const [saveOpen, setSaveOpen] = useState(false);
   const [recentOpen, setRecentOpen] = useState(false);
-  const [opening, setOpening] = useState(false);
+  // The status text of a source being opened ("Opening the run…").
+  const [opening, setOpening] = useState<string | undefined>();
   const [openError, setOpenError] = useState<string | undefined>();
-  // A run loaded over a draft with content waits here for the user's yes to replace it.
-  const [replacing, setReplacing] = useState<Draft | undefined>();
+  // A source loaded over a draft with content waits here for the user's yes to replace it.
+  const [replacing, setReplacing] = useState<Loaded | undefined>();
+  // Whether the draft's span was cut at ingest (the banner).
+  const [cut, setCut] = useState(false);
   const loadedRun = useRef<string | undefined>(undefined);
+  const loadedSource = useRef<string | undefined>(undefined);
   const draftRef = useRef(draft);
+  // False after unmount: a source that finishes loading then does not navigate back to the page.
+  const mounted = useRef(true);
 
   useEffect(() => {
     draftRef.current = draft;
   }, [draft]);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  // Replaces the draft with a loaded source. The runs of the replaced columns are aborted first:
+  // their results belong to columns that are gone.
+  const replaceWith = useCallback((loaded: Loaded) => {
+    for (const controller of controllers.current.values()) {
+      controller.abort();
+    }
+    controllers.current.clear();
+    setRuns({});
+    setCut(loaded.cut);
+    setDraft(loaded.draft);
+  }, []);
+
+  // A loaded source replaces an empty draft at once, and a draft with content after the user's yes.
+  const applyLoaded = useCallback(
+    (loaded: Loaded) => {
+      if (isBlankDraft(draftRef.current)) {
+        replaceWith(loaded);
+      } else {
+        setReplacing(loaded);
+      }
+    },
+    [replaceWith],
+  );
 
   // `?run=` opens a past run once. The guard keeps StrictMode and the removal of `run` from the URL
   // from loading it again; removing it keeps the draft's source (D-V-38).
@@ -292,29 +402,82 @@ function PlaygroundWorkspace({
       return;
     }
     loadedRun.current = runId;
-    setOpening(true);
+    setOpening("Opening the run…");
     setOpenError(undefined);
     void loadRun(queryClient, org, project, runId, connections)
-      .then(
-        (next) => {
-          if (isBlankDraft(draftRef.current)) {
-            setDraft(next);
-          } else {
-            setReplacing(next);
-          }
-        },
-        (error: unknown) => {
-          setOpenError(problemMessage(error, RUN_OPEN_FAILED));
-        },
-      )
+      .then(applyLoaded, (error: unknown) => {
+        setOpenError(problemMessage(error, RUN_OPEN_FAILED));
+      })
       .finally(() => {
-        setOpening(false);
-        void navigate({
-          search: (previous) => ({ ...previous, run: undefined }),
-          replace: true,
-        });
+        setOpening(undefined);
+        if (mounted.current) {
+          void navigate({
+            search: (previous) => ({ ...previous, run: undefined }),
+            replace: true,
+          });
+        }
       });
-  }, [search.run, queryClient, org, project, connections, navigate]);
+  }, [search.run, queryClient, org, project, connections, navigate, applyLoaded]);
+
+  // `?prompt=` (with `version`) or `?trace=&span=` opens that source once, like `?run=` (D-V-28).
+  // The source keys are then removed from the URL; the draft keeps its source.
+  const { prompt: promptName, version: promptVersion, trace: traceId, span: spanId } = search;
+  const sourceKey = urlSourceKey(promptName, promptVersion, traceId, spanId);
+  useEffect(() => {
+    if (sourceKey === undefined) {
+      loadedSource.current = undefined;
+      return;
+    }
+    if (loadedSource.current === sourceKey) {
+      return;
+    }
+    const fallbackId = connections[0]?.id;
+    let load: Promise<Loaded>;
+    let status: string;
+    if (promptName !== undefined) {
+      status = "Opening the prompt…";
+      load = loadPrompt(queryClient, org, project, promptName, promptVersion, fallbackId);
+    } else if (traceId !== undefined && spanId !== undefined) {
+      status = "Opening the span…";
+      load = loadSpan(queryClient, org, project, traceId, spanId, fallbackId);
+    } else {
+      return;
+    }
+    loadedSource.current = sourceKey;
+    setOpening(status);
+    setOpenError(undefined);
+    void load
+      .then(applyLoaded, (error: unknown) => {
+        setOpenError(problemMessage(error, SOURCE_OPEN_FAILED));
+      })
+      .finally(() => {
+        setOpening(undefined);
+        if (mounted.current) {
+          void navigate({
+            search: (previous) => ({
+              ...previous,
+              prompt: undefined,
+              version: undefined,
+              trace: undefined,
+              span: undefined,
+            }),
+            replace: true,
+          });
+        }
+      });
+  }, [
+    sourceKey,
+    promptName,
+    promptVersion,
+    traceId,
+    spanId,
+    queryClient,
+    org,
+    project,
+    connections,
+    navigate,
+    applyLoaded,
+  ]);
 
   // The draft is saved 500 ms after the last change, and at unmount and page hide.
   const flush = useCallback(() => {
@@ -540,11 +703,16 @@ function PlaygroundWorkspace({
       {sourceText(draft.source) === undefined ? null : (
         <p className="text-caption text-muted-foreground">{sourceText(draft.source)}</p>
       )}
-      {opening ? (
-        <p role="status" className="text-caption text-muted-foreground">
-          Opening the run…
+      {cut ? (
+        <p className="border-b bg-muted px-3 py-1 text-caption">
+          This span was cut at ingest; the playground shows what was stored.
         </p>
       ) : null}
+      {opening === undefined ? null : (
+        <p role="status" className="text-caption text-muted-foreground">
+          {opening}
+        </p>
+      )}
       <FormError message={openError} />
       <ResizablePanelGroup id="playground-split" orientation="horizontal" className="min-h-0 flex-1">
         <ResizablePanel id="playground-editor" defaultSize="40%" minSize="25%" className="min-h-0">
@@ -611,12 +779,12 @@ function PlaygroundWorkspace({
           }
         }}
         title="Replace the current draft?"
-        description="The messages and settings on this page are replaced by the run's."
+        description="The messages and settings on this page are replaced by the ones being opened."
         confirmLabel="Replace draft"
         pending={false}
         onConfirm={() => {
           if (replacing !== undefined) {
-            setDraft(replacing);
+            replaceWith(replacing);
           }
           setReplacing(undefined);
         }}

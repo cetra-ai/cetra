@@ -526,6 +526,21 @@ it("converts a draft to a chat template or names the first message it cannot", (
       { role: "user", content: "a\nb" },
     ],
   });
+
+  // Reasoning parts are dropped from the template, not refused.
+  const withReasoning = draftWith([
+    {
+      role: "assistant",
+      parts: [
+        { type: "reasoning", content: "thinking" },
+        { type: "text", content: "Answer" },
+      ],
+    },
+  ]);
+  expect(toChatTemplate(withReasoning)).toEqual({
+    ok: true,
+    template: [{ role: "assistant", content: "Answer" }],
+  });
 });
 
 it("makes an empty draft with a system and a user message and one column", () => {
