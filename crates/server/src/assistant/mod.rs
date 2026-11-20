@@ -1,6 +1,7 @@
 //! The in-app assistant (track AS). M1: conversation expiry and tool-result stubbing (D-AS-10, D-AS-12).
 //! M2: the tool registry (`tools`, D-AS-5, D-AS-6).
 
+pub(crate) mod history;
 pub(crate) mod settings;
 pub(crate) mod tools;
 
@@ -14,6 +15,8 @@ use crate::meta::assistant::{STUB_BATCH, expire_conversations, stub_tool_results
 
 /// A conversation idle this long is deleted (D-AS-10): 30 days.
 pub(crate) const CONVERSATION_TTL_NS: i64 = 30 * 24 * 60 * 60 * 1_000_000_000;
+/// Tool results are stored in full this long after their turn, then stubbed (D-AS-12): 24 hours.
+pub(crate) const STUB_AFTER_NS: i64 = 24 * 60 * 60 * 1_000_000_000;
 /// How often the job runs.
 const EXPIRY_EVERY: Duration = Duration::from_secs(60 * 60);
 

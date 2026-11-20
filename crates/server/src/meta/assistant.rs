@@ -12,6 +12,10 @@ use super::MetaError;
 pub(crate) const CONVERSATIONS_PER_USER: i64 = 100;
 /// Tool messages stubbed per call of [`stub_tool_results`].
 pub(crate) const STUB_BATCH: i64 = 500;
+/// Messages per conversation (D-AS-10).
+pub(crate) const MESSAGES_PER_CONVERSATION: i64 = 200;
+/// The `409` detail when a conversation is full.
+pub(crate) const TOO_MANY_MESSAGES: &str = "the conversation is full; start a new one";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ConversationRow {
@@ -78,6 +82,14 @@ impl MessageRole {
             _ => Err(corrupt_message("role")),
         }
     }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::Tool => "tool",
+        }
+    }
 }
 
 impl MessageStatus {
@@ -87,6 +99,14 @@ impl MessageStatus {
             "cancelled" => Ok(Self::Cancelled),
             "failed" => Ok(Self::Failed),
             _ => Err(corrupt_message("status")),
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Cancelled => "cancelled",
+            Self::Failed => "failed",
         }
     }
 }
@@ -99,6 +119,45 @@ impl Feedback {
             _ => Err(corrupt_message("feedback")),
         }
     }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Up => "up",
+            Self::Down => "down",
+        }
+    }
+}
+
+/// A message to store. `parts` and `context` are JSON text.
+pub(crate) struct NewMessage {
+    pub(crate) role: MessageRole,
+    pub(crate) parts: String,
+    pub(crate) context: Option<String>,
+    pub(crate) status: MessageStatus,
+    pub(crate) turn_trace_id: Option<String>,
+    pub(crate) stub_after: Option<i64>,
+}
+
+/// Prints the shape of a message, never its text (AGENTS.md § Privacy).
+impl fmt::Debug for NewMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NewMessage")
+            .field("role", &self.role)
+            .field("status", &self.status)
+            .field("parts_len", &self.parts.len())
+            .field("has_context", &self.context.is_some())
+            .field("has_trace", &self.turn_trace_id.is_some())
+            .field("stub_after", &self.stub_after)
+            .finish()
+    }
+}
+
+/// What [`set_feedback`] found and did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FeedbackOutcome {
+    Set,
+    NotFound,
+    NotAnAssistantMessage,
 }
 
 /// A `assistant_conversations` row as SQLite returns it.
@@ -336,7 +395,7 @@ pub(crate) async fn delete_conversation(
 /// # Errors
 ///
 /// Returns [`MetaError`] when the query fails or a stored value does not decode.
-pub(crate) async fn list_messages(
+async fn list_messages(
     pool: &SqlitePool,
     conversation: Uuid,
 ) -> Result<Vec<MessageRow>, MetaError> {
@@ -348,6 +407,137 @@ pub(crate) async fn list_messages(
     .fetch_all(pool)
     .await?;
     records.into_iter().map(message_from).collect()
+}
+
+/// The conversation `id` of `project` and `user` with its messages in sequence order. `None`
+/// when it is not theirs.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when a query fails or a stored value does not decode.
+pub(crate) async fn get_conversation_with_messages(
+    pool: &SqlitePool,
+    project: ProjectId,
+    user: Uuid,
+    id: Uuid,
+) -> Result<Option<(ConversationRow, Vec<MessageRow>)>, MetaError> {
+    let Some(row) = get_conversation(pool, project, user, id).await? else {
+        return Ok(None);
+    };
+    let messages = list_messages(pool, id).await?;
+    Ok(Some((row, messages)))
+}
+
+/// Appends a message to `conversation` and returns its `seq`. Read the count, refuse at
+/// [`MESSAGES_PER_CONVERSATION`] (a conflict), then insert the message and set the count and
+/// `last_active_at = now`.
+///
+/// # Errors
+///
+/// Returns [`MetaError::Conflict`] with [`TOO_MANY_MESSAGES`] when the conversation is full,
+/// [`MetaError::Corrupt`] when the conversation has no count, or [`MetaError::Db`] when a
+/// query fails.
+pub(crate) async fn append_message(
+    conn: &mut SqliteConnection,
+    conversation: Uuid,
+    message: NewMessage,
+    now: i64,
+) -> Result<i64, MetaError> {
+    let count: Option<i64> =
+        sqlx::query_scalar("SELECT message_count FROM assistant_conversations WHERE id = ?")
+            .bind(conversation.to_string())
+            .fetch_optional(&mut *conn)
+            .await?;
+    let count = count.ok_or_else(|| corrupt_conversation("message_count"))?;
+    if count >= MESSAGES_PER_CONVERSATION {
+        return Err(MetaError::Conflict(TOO_MANY_MESSAGES));
+    }
+    let seq = count + 1;
+    sqlx::query(
+        "INSERT INTO assistant_messages \
+         (conversation_id, seq, role, parts, context, status, turn_trace_id, stub_after, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(conversation.to_string())
+    .bind(seq)
+    .bind(message.role.as_str())
+    .bind(&message.parts)
+    .bind(message.context.as_deref())
+    .bind(message.status.as_str())
+    .bind(message.turn_trace_id.as_deref())
+    .bind(message.stub_after)
+    .bind(now)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(
+        "UPDATE assistant_conversations SET message_count = ?, last_active_at = ? WHERE id = ?",
+    )
+    .bind(seq)
+    .bind(now)
+    .bind(conversation.to_string())
+    .execute(&mut *conn)
+    .await?;
+    Ok(seq)
+}
+
+/// Sets the title of `conversation` when it has none (`title = ''`). Otherwise does nothing.
+///
+/// # Errors
+///
+/// Returns [`MetaError::Db`] when the update fails.
+pub(crate) async fn set_title_if_empty(
+    conn: &mut SqliteConnection,
+    conversation: Uuid,
+    title: &str,
+) -> Result<(), MetaError> {
+    sqlx::query("UPDATE assistant_conversations SET title = ? WHERE id = ? AND title = ''")
+        .bind(title)
+        .bind(conversation.to_string())
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+/// Sets or clears (`None`) the feedback of the message `seq` of `conversation`. The conversation
+/// must be `user`'s in `project`; the message must be an assistant message (D-AS-10).
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when a query fails or a stored value does not decode.
+pub(crate) async fn set_feedback(
+    conn: &mut SqliteConnection,
+    project: ProjectId,
+    user: Uuid,
+    conversation: Uuid,
+    seq: i64,
+    feedback: Option<Feedback>,
+) -> Result<FeedbackOutcome, MetaError> {
+    if fetch_conversation(conn, project, user, conversation)
+        .await?
+        .is_none()
+    {
+        return Ok(FeedbackOutcome::NotFound);
+    }
+    let role: Option<String> = sqlx::query_scalar(
+        "SELECT role FROM assistant_messages WHERE conversation_id = ? AND seq = ?",
+    )
+    .bind(conversation.to_string())
+    .bind(seq)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some(role) = role else {
+        return Ok(FeedbackOutcome::NotFound);
+    };
+    if role != MessageRole::Assistant.as_str() {
+        return Ok(FeedbackOutcome::NotAnAssistantMessage);
+    }
+    sqlx::query("UPDATE assistant_messages SET feedback = ? WHERE conversation_id = ? AND seq = ?")
+        .bind(feedback.map(Feedback::as_str))
+        .bind(conversation.to_string())
+        .bind(seq)
+        .execute(&mut *conn)
+        .await?;
+    Ok(FeedbackOutcome::Set)
 }
 
 /// Deletes the conversations whose `last_active_at` is before `idle_before` (nanoseconds).
@@ -1221,5 +1411,156 @@ mod tests {
         assert!(!text.contains("secret-text"));
         assert!(text.contains("parts_len"));
         assert!(text.contains("has_context: true"));
+    }
+
+    #[test]
+    fn new_message_debug_hides_content() {
+        let message = NewMessage {
+            role: MessageRole::Assistant,
+            parts: r#"[{"type":"text","content":"secret-text"}]"#.to_owned(),
+            context: Some(r#"{"note":"secret-text"}"#.to_owned()),
+            status: MessageStatus::Cancelled,
+            turn_trace_id: None,
+            stub_after: None,
+        };
+        let text = format!("{message:?}");
+        assert!(!text.contains("secret-text"));
+        assert!(text.contains("parts_len"));
+        assert!(text.contains("has_context: true"));
+    }
+
+    fn plain(role: MessageRole) -> NewMessage {
+        NewMessage {
+            role,
+            parts: "[]".to_owned(),
+            context: None,
+            status: MessageStatus::Complete,
+            turn_trace_id: None,
+            stub_after: None,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn append_numbers_and_caps() {
+        let (_dir, db) = test_db().await;
+        let w = world(&db).await;
+        let created = create(&db, w.project, w.owner, 10).await;
+        let id = created.id;
+        let seqs = db
+            .write(move |conn| {
+                Box::pin(async move {
+                    let mut seqs = Vec::new();
+                    for _ in 0..MESSAGES_PER_CONVERSATION {
+                        seqs.push(append_message(conn, id, plain(MessageRole::User), 20).await?);
+                    }
+                    Ok(seqs)
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(seqs, (1..=MESSAGES_PER_CONVERSATION).collect::<Vec<i64>>());
+
+        let full = db
+            .write(move |conn| {
+                Box::pin(
+                    async move { append_message(conn, id, plain(MessageRole::User), 30).await },
+                )
+            })
+            .await;
+        assert!(matches!(full, Err(MetaError::Conflict(TOO_MANY_MESSAGES))));
+        assert_eq!(count_messages(&db, id).await, MESSAGES_PER_CONVERSATION);
+        let stored = get_conversation(db.reader(), w.project, w.owner, id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.message_count, MESSAGES_PER_CONVERSATION);
+        assert_eq!(stored.last_active_at, 20);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn title_is_set_once() {
+        let (_dir, db) = test_db().await;
+        let w = world(&db).await;
+        let created = create(&db, w.project, w.owner, 10).await;
+        let id = created.id;
+        db.write(move |conn| {
+            Box::pin(async move { set_title_if_empty(conn, id, "First question").await })
+        })
+        .await
+        .unwrap();
+        db.write(move |conn| Box::pin(async move { set_title_if_empty(conn, id, "Second").await }))
+            .await
+            .unwrap();
+        let stored = get_conversation(db.reader(), w.project, w.owner, id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.title, "First question");
+    }
+
+    async fn feedback_as(
+        db: &MetaDb,
+        project: ProjectId,
+        user: Uuid,
+        conversation: Uuid,
+        seq: i64,
+        feedback: Option<Feedback>,
+    ) -> FeedbackOutcome {
+        db.write(move |conn| {
+            Box::pin(
+                async move { set_feedback(conn, project, user, conversation, seq, feedback).await },
+            )
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn feedback_of(db: &MetaDb, conversation: Uuid, seq: i64) -> Option<Feedback> {
+        list_messages(db.reader(), conversation)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|message| message.seq == seq)
+            .unwrap()
+            .feedback
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn feedback_outcomes() {
+        let (_dir, db) = test_db().await;
+        let w = world(&db).await;
+        let created = create(&db, w.project, w.owner, 10).await;
+        let id = created.id;
+        db.write(move |conn| {
+            Box::pin(async move {
+                insert_message_raw(conn, id, 1, "user", "[]", None, None, 10).await?;
+                insert_message_raw(conn, id, 2, "assistant", "[]", None, None, 10).await?;
+                insert_message_raw(conn, id, 3, "tool", "[]", None, None, 10).await
+            })
+        })
+        .await
+        .unwrap();
+
+        let set = feedback_as(&db, w.project, w.owner, id, 2, Some(Feedback::Up)).await;
+        assert_eq!(set, FeedbackOutcome::Set);
+        assert_eq!(feedback_of(&db, id, 2).await, Some(Feedback::Up));
+
+        let cleared = feedback_as(&db, w.project, w.owner, id, 2, None).await;
+        assert_eq!(cleared, FeedbackOutcome::Set);
+        assert_eq!(feedback_of(&db, id, 2).await, None);
+
+        let by_other = feedback_as(&db, w.project, w.other, id, 2, Some(Feedback::Down)).await;
+        assert_eq!(by_other, FeedbackOutcome::NotFound);
+        assert_eq!(feedback_of(&db, id, 2).await, None);
+
+        let other_project = feedback_as(&db, w.second, w.owner, id, 2, Some(Feedback::Down)).await;
+        assert_eq!(other_project, FeedbackOutcome::NotFound);
+
+        let on_tool = feedback_as(&db, w.project, w.owner, id, 3, Some(Feedback::Up)).await;
+        assert_eq!(on_tool, FeedbackOutcome::NotAnAssistantMessage);
+        assert_eq!(feedback_of(&db, id, 3).await, None);
+
+        let missing = feedback_as(&db, w.project, w.owner, id, 9, Some(Feedback::Up)).await;
+        assert_eq!(missing, FeedbackOutcome::NotFound);
     }
 }

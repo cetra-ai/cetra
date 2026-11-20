@@ -41,9 +41,9 @@ use super::alerts::{
 };
 use super::assistant::{
     AssistantConversation, AssistantConversationDetail, AssistantDraftKind, AssistantFeedback,
-    AssistantMessage, AssistantMessageStatus, AssistantPart, AssistantRole, AssistantSettings,
-    AssistantStatus, AssistantTestRequest, AssistantUnavailable, PutAssistantSettings,
-    UpdateAssistantConversationRequest,
+    AssistantFeedbackRequest, AssistantMessage, AssistantMessageStatus, AssistantPart,
+    AssistantRole, AssistantSettings, AssistantStatus, AssistantTestRequest, AssistantUnavailable,
+    PutAssistantSettings, UpdateAssistantConversationRequest,
 };
 use super::backfills::{Backfill, BackfillEstimate, BackfillStatus, CreateBackfillRequest};
 use super::common::{ExclusionParams, Limit, Page, PageParams, Problem, SortOrder, TimeParam};
@@ -356,6 +356,7 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<AssistantFeedback>();
     set.insert::<AssistantDraftKind>();
     set.insert::<UpdateAssistantConversationRequest>();
+    set.insert::<AssistantFeedbackRequest>();
     set.insert_page::<AssistantConversation>("AssistantConversationPage");
     set.insert::<AssistantSettings>();
     set.insert::<PutAssistantSettings>();
@@ -680,6 +681,7 @@ fn drop_null_from_omitted_optionals(openapi: &mut OpenApi) {
 /// on a request means "keep data forever", while an absent field leaves the default
 /// (spec 09). The server takes both (`api/account.rs`).
 const NULL_IS_A_VALUE: &[(&str, &str)] = &[
+    ("AssistantFeedbackRequest", "feedback"),
     ("CreateProjectRequest", "retention_days"),
     ("UpdateProjectRequest", "retention_days"),
     ("UpdateDatasetRequest", "description"),
@@ -4768,6 +4770,37 @@ fn assistant_paths(paths: PathsBuilder) -> PathsBuilder {
         &[401, 403, 404, 429],
     ))
     .build();
+    let seq = ParameterBuilder::new()
+        .name("seq")
+        .parameter_in(ParameterIn::Path)
+        .required(Required::True)
+        .description(Some("Message position, from 1."))
+        .schema(Some(ObjectBuilder::new().schema_type(Type::Integer)))
+        .build();
+    let feedback = operation(
+        "put_assistant_feedback",
+        "assistant",
+        "Rate an assistant message",
+    )
+    .description(Some(format!(
+        "{ASSISTANT_ACCESS} Sets the rating of an assistant message to `up` or `down`; `null` clears it. A user or tool message is `400`. Any other message is `404`."
+    )))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
+    .parameters(Some(vec![
+        project_param(),
+        path_string("id", "Conversation id."),
+        seq,
+    ]))
+    .request_body(Some(json_body("AssistantFeedbackRequest")))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new().description("Saved.").build(),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
     paths
         .path(
             format!("{PROJECT}/assistant/conversations"),
@@ -4788,6 +4821,10 @@ fn assistant_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/assistant/conversations/{{id}}"),
             PathItem::new(HttpMethod::Delete, delete),
+        )
+        .path(
+            format!("{PROJECT}/assistant/conversations/{{id}}/messages/{{seq}}/feedback"),
+            PathItem::new(HttpMethod::Put, feedback),
         )
 }
 

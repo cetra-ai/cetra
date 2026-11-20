@@ -440,6 +440,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/projects/{project}/assistant/conversations/{id}",
         "delete_assistant_conversation",
     ),
+    (
+        "put",
+        "/api/v1/projects/{project}/assistant/conversations/{id}/messages/{seq}/feedback",
+        "put_assistant_feedback",
+    ),
     ("get", "/api/v1/orgs/{org}/assistant", "get_org_assistant"),
     ("put", "/api/v1/orgs/{org}/assistant", "put_org_assistant"),
     (
@@ -1103,6 +1108,7 @@ fn document_lint() {
                 | "get_assistant_conversation"
                 | "patch_assistant_conversation"
                 | "delete_assistant_conversation"
+                | "put_assistant_feedback"
                 | "put_org_assistant"
                 | "post_org_assistant_test"
                 | "get_project_assistant"
@@ -1178,6 +1184,7 @@ fn document_lint() {
             || *id == "get_alert_rule"
             || *id == "delete_alert_rule"
             || *id == "patch_assistant_conversation"
+            || *id == "put_assistant_feedback"
             || *id == "put_org_assistant"
             || *id == "post_org_assistant_test"
         {
@@ -1635,6 +1642,7 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
     // `null` is a value here, not an absent field: a PATCH clears retention with it
     // (`api/openapi.rs` NULL_IS_A_VALUE).
     const NULL_IS_A_VALUE: &[(&str, &[&str])] = &[
+        ("AssistantFeedbackRequest", &["feedback"]),
         ("CreateProjectRequest", &["retention_days"]),
         ("UpdateProjectRequest", &["retention_days"]),
         (

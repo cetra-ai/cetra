@@ -393,6 +393,7 @@ fn concrete_path(route: &RouteDef, world: &World) -> String {
         .replace("{score_id}", "01900000-0000-7000-8000-000000009999")
         .replace("{trace_id}", "a1000000000000000000000000000001")
         .replace("{span_id}", "b100000000000011")
+        .replace("{seq}", "1")
         .replace("{session_id}", "sess-001")
         .replace("{user_id}", "user-42")
         .replace(

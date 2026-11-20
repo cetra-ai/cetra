@@ -14,10 +14,10 @@ use uuid::Uuid;
 use cetra_core::ids::ProjectId;
 
 use crate::api::assistant::{
-    AssistantConversation, AssistantConversationDetail, AssistantFeedback, AssistantMessage,
-    AssistantMessageStatus, AssistantPart, AssistantRole, AssistantSettings, AssistantStatus,
-    AssistantTestRequest, AssistantUnavailable, PutAssistantSettings,
-    UpdateAssistantConversationRequest,
+    AssistantConversation, AssistantConversationDetail, AssistantFeedback,
+    AssistantFeedbackRequest, AssistantMessage, AssistantMessageStatus, AssistantPart,
+    AssistantRole, AssistantSettings, AssistantStatus, AssistantTestRequest, AssistantUnavailable,
+    PutAssistantSettings, UpdateAssistantConversationRequest,
 };
 use crate::api::common::{FieldError, Page};
 use crate::api::connections::{LlmConnectionTestResult, TestErrorClass};
@@ -30,8 +30,8 @@ use crate::http::error::{self, ApiError, field_error};
 use crate::http::restore::refuse_outbound;
 use crate::meta::MetaError;
 use crate::meta::assistant::{
-    self as store, AssistantSettingsRow, ConversationRow, Feedback, MessageRole, MessageRow,
-    MessageStatus,
+    self as store, AssistantSettingsRow, ConversationRow, Feedback, FeedbackOutcome, MessageRole,
+    MessageRow, MessageStatus,
 };
 use crate::meta::connections;
 
@@ -67,6 +67,13 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             access,
             documented: true,
             handler: get(get_conversation),
+        },
+        RouteDef {
+            method: Method::PUT,
+            path: "/api/v1/projects/{project}/assistant/conversations/{id}/messages/{seq}/feedback",
+            access,
+            documented: true,
+            handler: put(put_feedback),
         },
         RouteDef {
             method: Method::PATCH,
@@ -128,6 +135,12 @@ pub(crate) fn routes() -> Vec<RouteDef> {
 #[derive(Debug, Deserialize)]
 struct ConversationPath {
     id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MessagePath {
+    id: String,
+    seq: String,
 }
 
 /// The id of a path. Text that is not a UUID is `404`: the id space is private.
@@ -284,10 +297,10 @@ async fn get_conversation(
     let user = principal::session_user(&principal)?.id;
     let project = access.project.id;
     let id = parse_id(&path.id)?;
-    let row = store::get_conversation(state.meta.reader(), project, user, id)
-        .await?
-        .ok_or(ApiError::NotFound)?;
-    let messages = store::list_messages(state.meta.reader(), id).await?;
+    let (row, messages) =
+        store::get_conversation_with_messages(state.meta.reader(), project, user, id)
+            .await?
+            .ok_or(ApiError::NotFound)?;
     let messages = messages
         .iter()
         .map(message_json)
@@ -300,6 +313,53 @@ async fn get_conversation(
         last_active_at: row.last_active_at,
         messages,
     }))
+}
+
+fn stored_feedback(feedback: AssistantFeedback) -> Feedback {
+    match feedback {
+        AssistantFeedback::Up => Feedback::Up,
+        AssistantFeedback::Down => Feedback::Down,
+    }
+}
+
+/// `PUT …/assistant/conversations/{id}/messages/{seq}/feedback`: rates an assistant message, or
+/// clears the rating with `null`. Answers `204`. Another user's conversation and a missing message
+/// are `404`; a user or tool message is `400`.
+async fn put_feedback(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(path): error::Path<MessagePath>,
+    error::Json(body): error::Json<AssistantFeedbackRequest>,
+) -> Result<StatusCode, ApiError> {
+    let user = principal::session_user(&principal)?.id;
+    let project = access.project.id;
+    let id = parse_id(&path.id)?;
+    let seq = path
+        .seq
+        .parse::<i64>()
+        .ok()
+        .filter(|seq| *seq >= 1)
+        .ok_or(ApiError::NotFound)?;
+    let feedback = body.feedback.map(stored_feedback);
+    let outcome = state
+        .meta
+        .write(move |conn| {
+            Box::pin(
+                async move { store::set_feedback(conn, project, user, id, seq, feedback).await },
+            )
+        })
+        .await?;
+    match outcome {
+        FeedbackOutcome::Set => {
+            tracing::info!(target: "audit", conversation_id = %id, project_id = %project, user_id = %user, seq, feedback = ?body.feedback, "assistant feedback saved");
+            Ok(StatusCode::NO_CONTENT)
+        }
+        FeedbackOutcome::NotFound => Err(ApiError::NotFound),
+        FeedbackOutcome::NotAnAssistantMessage => {
+            Err(field_error("seq", "only assistant messages take feedback"))
+        }
+    }
 }
 
 /// `PATCH …/assistant/conversations/{id}`: sets the title. Does not move the conversation in the
@@ -982,6 +1042,119 @@ mod tests {
         )
         .await;
         assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    }
+
+    async fn detail_of(
+        app: &TestApp,
+        project: ProjectId,
+        id: Uuid,
+        cookie: &str,
+    ) -> AssistantConversationDetail {
+        let response = send(app, Method::GET, &path(project, id), cookie, None).await;
+        assert_eq!(response.status, StatusCode::OK);
+        response.json()
+    }
+
+    fn feedback_path(project: ProjectId, id: Uuid, seq: impl std::fmt::Display) -> String {
+        format!("{}/messages/{seq}/feedback", path(project, id))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn feedback_is_set_and_cleared() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let conversation = create_as(&app, project, &seeded.cookie).await;
+        seed_three_messages(&app, conversation.id).await;
+        let target = feedback_path(project, conversation.id, 2);
+
+        let down = send(
+            &app,
+            Method::PUT,
+            &target,
+            &seeded.cookie,
+            Some(json!({"feedback": "down"})),
+        )
+        .await;
+        assert_eq!(down.status, StatusCode::NO_CONTENT);
+        let detail = detail_of(&app, project, conversation.id, &seeded.cookie).await;
+        assert_eq!(detail.messages[1].feedback, Some(AssistantFeedback::Down));
+
+        let cleared = send(
+            &app,
+            Method::PUT,
+            &target,
+            &seeded.cookie,
+            Some(json!({"feedback": null})),
+        )
+        .await;
+        assert_eq!(cleared.status, StatusCode::NO_CONTENT);
+        let detail = detail_of(&app, project, conversation.id, &seeded.cookie).await;
+        assert_eq!(detail.messages[1].feedback, None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn feedback_is_404_for_another_user() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let member = app
+            .add_member(&seeded, "bob@example.com", OrgRole::Member)
+            .await;
+        let project = seeded.project.id;
+        let conversation = create_as(&app, project, &seeded.cookie).await;
+        seed_three_messages(&app, conversation.id).await;
+
+        let response = send(
+            &app,
+            Method::PUT,
+            &feedback_path(project, conversation.id, 2),
+            &member.cookie,
+            Some(json!({"feedback": "down"})),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::NOT_FOUND);
+        let detail = detail_of(&app, project, conversation.id, &seeded.cookie).await;
+        assert_eq!(detail.messages[1].feedback, Some(AssistantFeedback::Up));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn feedback_on_a_user_message_is_400() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let conversation = create_as(&app, project, &seeded.cookie).await;
+        seed_three_messages(&app, conversation.id).await;
+
+        let response = send(
+            &app,
+            Method::PUT,
+            &feedback_path(project, conversation.id, 1),
+            &seeded.cookie,
+            Some(json!({"feedback": "up"})),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn feedback_on_a_missing_message_is_404() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let conversation = create_as(&app, project, &seeded.cookie).await;
+        seed_three_messages(&app, conversation.id).await;
+
+        for seq in ["9", "0", "x"] {
+            let response = send(
+                &app,
+                Method::PUT,
+                &feedback_path(project, conversation.id, seq),
+                &seeded.cookie,
+                Some(json!({"feedback": "up"})),
+            )
+            .await;
+            assert_eq!(response.status, StatusCode::NOT_FOUND, "seq {seq}");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

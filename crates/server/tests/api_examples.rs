@@ -17,8 +17,8 @@ use cetra_server::api::account::{
 use cetra_server::api::admin::{AdminLicense, AdminSettings, AdminUser, CreatedAdminUser};
 use cetra_server::api::alerts::{AlertEvent, AlertRule, NotificationChannel};
 use cetra_server::api::assistant::{
-    AssistantConversation, AssistantConversationDetail, AssistantSettings, AssistantStatus,
-    PutAssistantSettings, UpdateAssistantConversationRequest,
+    AssistantConversation, AssistantConversationDetail, AssistantFeedbackRequest,
+    AssistantSettings, AssistantStatus, PutAssistantSettings, UpdateAssistantConversationRequest,
 };
 use cetra_server::api::backfills::{Backfill, BackfillEstimate, CreateBackfillRequest};
 use cetra_server::api::common::{Page, Problem};
@@ -476,6 +476,7 @@ fn static_files_match_their_types() {
 fn request_examples_match_their_types_and_the_openapi_document() {
     roundtrip::<ScoreBatch>("requests/score-batch.json");
     roundtrip::<UpdateAssistantConversationRequest>("requests/assistant-conversation-rename.json");
+    roundtrip::<AssistantFeedbackRequest>("requests/assistant-feedback.json");
     roundtrip::<PutAssistantSettings>("requests/assistant-settings.json");
     roundtrip::<FeedbackRequest>("requests/feedback.json");
     roundtrip::<CreateLlmConnectionRequest>("requests/llm-connection-create.json");
@@ -549,6 +550,7 @@ fn request_examples_match_their_types_and_the_openapi_document() {
             "requests/assistant-conversation-rename.json",
         ),
         ("put_org_assistant", "requests/assistant-settings.json"),
+        ("put_assistant_feedback", "requests/assistant-feedback.json"),
         (
             "post_online_rule_preview",
             "requests/online-rule-preview.json",

@@ -181,6 +181,14 @@ pub struct UpdateAssistantConversationRequest {
     pub title: String,
 }
 
+/// `PUT …/assistant/conversations/{id}/messages/{seq}/feedback`: the rating of an assistant message.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantFeedbackRequest {
+    /// `up` or `down`. `null` clears the rating.
+    pub feedback: Option<AssistantFeedback>,
+}
+
 /// The org's assistant setting (D-AS-3).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct AssistantSettings {
