@@ -2,10 +2,14 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
+  estimateText,
+  formatMoney,
   formatUnits,
+  MAX_UNITS,
   monthlyPrice,
   OVERAGE_PER_100K,
   PLANS,
+  parseUnits,
   SELF_HOSTED,
   suggestedPlan,
   TEAMS_ADDON,
@@ -29,6 +33,15 @@ test("Free matches D177", () => {
   assert.equal(free.priceMonthly, 0);
   assert.equal(free.includedUnits, 100_000);
   assert.equal(free.dataAccess, "30 days");
+});
+
+test("seats and projects match D177", () => {
+  assert.ok(d177.includes("1 seat, 1 project"));
+  assert.ok(d177.includes("unlimited seats"));
+  assert.equal(free.seats, "1 seat");
+  assert.equal(free.projects, "1 project");
+  assert.equal(starter.seats.toLowerCase(), "unlimited seats");
+  assert.equal(starter.projects, null);
 });
 
 test("Starter matches D177", () => {
@@ -68,6 +81,28 @@ test("formatUnits", () => {
   assert.equal(formatUnits(0), "0");
 });
 
+test("formatMoney rounds up to the dollar", () => {
+  assert.equal(formatMoney(30.4), "$31");
+  assert.equal(formatMoney(30), "$30");
+  assert.equal(formatMoney(1184), "$1,184");
+  assert.equal(formatMoney(0), "$0");
+});
+
+test("parseUnits", () => {
+  assert.equal(parseUnits(""), 0);
+  assert.equal(parseUnits("-5"), 0);
+  assert.equal(parseUnits("abc"), 0);
+  assert.equal(parseUnits("100000.7"), 100_000);
+  assert.equal(parseUnits("1e400"), MAX_UNITS);
+  assert.equal(parseUnits(250_000), 250_000);
+});
+
+test("estimateText", () => {
+  assert.equal(estimateText(free, 210_000), "Not available above 100,000 a month");
+  assert.equal(estimateText(starter, 210_000), "$31");
+  assert.equal(estimateText(starter, MAX_UNITS), "Talk to us");
+});
+
 test("suggested plan", () => {
   assert.equal(suggestedPlan(50_000), free);
   assert.equal(suggestedPlan(100_000), free);
@@ -75,7 +110,10 @@ test("suggested plan", () => {
 });
 
 test("licence features match the docs", () => {
-  const mdx = readFileSync("src/content/docs/docs/platform/plans-and-licence.mdx", "utf8");
+  const mdx = readFileSync(
+    new URL("../../content/docs/docs/platform/plans-and-licence.mdx", import.meta.url),
+    "utf8",
+  );
   const keys = mdx
     .split("\n")
     .filter((line) => line.startsWith("| `"))

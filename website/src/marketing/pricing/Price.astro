@@ -1,0 +1,26 @@
+---
+interface Props {
+  /** The price as shown, e.g. "$30" or "Custom". */
+  amount: string;
+  /** Text after the amount, e.g. "/ month". */
+  suffix?: string;
+}
+
+const { amount, suffix } = Astro.props;
+---
+
+<p class="price"><span class="amount">{amount}</span>{suffix && ` ${suffix}`}</p>
+
+<style>
+  .price {
+    font-family: var(--font-display);
+    font-size: var(--text-base);
+    color: var(--fg);
+    margin-top: var(--space-3);
+  }
+  .amount {
+    font-size: var(--text-3xl);
+    letter-spacing: var(--tracking-display);
+    line-height: var(--leading-tight);
+  }
+</style>
