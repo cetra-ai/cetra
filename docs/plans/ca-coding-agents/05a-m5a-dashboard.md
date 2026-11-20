@@ -75,11 +75,15 @@ D1 and D2 do not share files, but D3's widgets need D2's field list to validate.
 
 **Tests** (in `widgets.rs` `mod tests`):
 - Extend `breakdown_field_and_limit_are_checked`: on `WidgetSource::Traces`, `breakdown("session_id", 5)` validates with no error. On `WidgetSource::Spans`, `breakdown("session_id", 5)` still gives the error `breakdown.field` "not a breakdown field of this source".
-- New async test `breakdown_by_session_id_on_traces`, following the pattern of `count_distinct_user_ids_on_traces`:
-  - Data: three traces, two with `session_id = "s1"` and costs 1.0 and 2.0, one with `session_id = "s2"` and cost 5.0. Set `span.session_id` and `cost_total` on their root `llm` spans, the way the existing test sets `user_id`.
-  - Query: `sum cost_total` broken down by `split("session_id", 5, false)`, total shape.
-  - Expect the rows `s2 = 5.0` then `s1 = 3.0`.
-- New test case: a trace with `session_id` null is left out of the groups (spec 05: "Rows whose value is null are left out").
+- New async test `breakdown_by_session_id_on_traces`, following `count_distinct_user_ids_on_traces`, with the same helpers (`span(trace, 0, minute(…), None)`, `context_of(&spans)`, `build`, `answer`, `total_pairs`).
+  - Data: four traces, each one root `llm` span:
+    - two with `session_id = Some("s1")` and `cost_total` 1.0 and 2.0;
+    - one with `Some("s2")` and 5.0;
+    - one with `session_id = None` and 9.0.
+
+    Set `session_id` and `cost_total` on the root span, the way the existing tests do.
+  - Query: `build(WidgetSource::Traces, vec![measure(Agg::Sum, Some("cost_total"), None)], split("session_id", 5, false))`, total shape.
+  - Assert `total_pairs(&data) == vec![(Some("s2".into()), false, vec![Some(5.0)]), (Some("s1".into()), false, vec![Some(3.0)])]`: largest first, and the null-session trace left out (spec 05). If a helper's name or signature differs, use the one `count_distinct_user_ids_on_traces` uses and say so in the report.
 
 **Done when:**
 - `cargo test -p cetra-storage widgets` passes.
@@ -121,6 +125,8 @@ D1 and D2 do not share files, but D3's widgets need D2's field list to validate.
 - `web/src/lib/dashboards/templates.test.ts`
 - `web/src/components/dashboard/dashboard-dialogs.test.tsx`
 - `docs/spec/11-ui.md`
+- `website/src/content/docs/docs/tracing/custom-dashboards.mdx`
+- `CHANGELOG.md`
 
 **Steps:**
 1. In `templates.ts`:
@@ -199,18 +205,31 @@ D1 and D2 do not share files, but D3's widgets need D2's field list to validate.
    }
    ```
 
-   **Match the existing templates' exact shape.** If their objects use another key than `definition: { widgets }`, a `version` field, or another argument order for `numberAt` or `chartAt`, follow them and report the difference. Also check the existing Overview "Top models by cost" table: if a `table` chart needs `share: true` or another option to validate, follow it.
+   This literal was checked against `templates.ts`, `preset.ts` and `validate.ts`: no `version` key, no `share` on tables, and argument orders as written.
 3. `templates.test.ts`:
    - The test asserting the ids and names becomes: ids `["cost", "latency", "quality", "coding_agents"]` and names `["Cost", "Latency", "Quality", "Coding agents"]`. Rename it "the ids and names are Cost, Latency, Quality and Coding agents, in that order".
    - The other tests (validation, no overlap, number tiles summing to 60) must pass unchanged: 5 × 12 = 60.
    - Add the test `the coding agents template filters every widget on coding_agent`: every widget's `query.filter` contains `metadata['coding_agent'] IS NOT NULL`.
-4. `dashboard-dialogs.test.tsx`: the "lists Blank and the three templates" test becomes "lists Blank and the four templates", with labels `["Blank", "Cost", "Latency", "Quality", "Coding agents"]`. The `it.each(TEMPLATES)` test covers the new template automatically.
-5. Spec 11 § Dashboard: "Blank, or one of the templates Cost, Latency and Quality" becomes "Blank, or one of the templates Cost, Latency, Quality and Coding agents (D-CA-11)".
+4. `dashboard-dialogs.test.tsx`: the test "lists Blank and the three templates under Start from" becomes "lists Blank and the four templates under Start from", with labels `["Blank", "Cost", "Latency", "Quality", "Coding agents"]`. The `it.each(TEMPLATES)` test covers the new template automatically.
+5. `website/src/content/docs/docs/tracing/custom-dashboards.mdx`, the "Start from" list, after the **Quality** bullet:
+
+   ```
+      - **Coding agents**: cost, sessions and tool calls of coding agents by person, repository, branch and session.
+   ```
+
+6. `CHANGELOG.md` § `[Unreleased]`, under `### Added` (create the heading after `### Upgrade notes` if absent):
+
+   ```
+   - A "Coding agents" dashboard template, and `session_id` as a breakdown of trace widgets.
+   ```
+
+7. Spec 11 § Dashboard: "Blank, or one of the templates Cost, Latency and Quality" becomes "Blank, or one of the templates Cost, Latency, Quality and Coding agents (D-CA-11)".
 
 **Tests:** listed in steps 3 and 4.
 
 **Done when:**
 - `pnpm --dir web exec vitest run src/lib/dashboards src/components/dashboard --maxWorkers=8` passes.
-- `export PATH=…; just check` passes.
+- `export PATH=…; just check` passes. It includes `check-docs`, whose `check-terms` may flag the new bullet's wording; if it does, report the message.
+- `docs/roadmap.md` is not changed: the coordinator updates the CA row.
 
 **Commit:** `Add the Coding agents dashboard template`
