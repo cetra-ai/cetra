@@ -255,6 +255,68 @@ def test_failed_refresh_keeps_stale_and_warns_once(
     assert len(warnings) == 2
 
 
+def test_failed_refresh_restarts_the_age(served: HttpRecorderLike, seams: Seams) -> None:
+    served.queue_response(200, {**JSON_HEADERS, "ETag": '"v1"'}, prompt_body())
+    get_prompt("support-reply")
+    served.respond_with(lambda method, path, body: (500, {}, b""))
+    seams.now += 61
+    assert get_prompt("support-reply").version == 1  # the refresh fails: the prompt is kept
+    assert len(served.requests) == 4  # the first fetch, then three attempts
+    seams.now += 1  # stale without the restart; fresh with it
+    assert get_prompt("support-reply").version == 1
+    assert len(served.requests) == 4  # no second refresh within one TTL
+    seams.now += 61
+    assert get_prompt("support-reply").version == 1
+    assert len(served.requests) == 7
+
+
+def test_failed_fetch_with_ttl_zero_returns_the_cached_prompt(
+    served: HttpRecorderLike, seams: Seams, caplog: pytest.LogCaptureFixture
+) -> None:
+    served.queue_response(200, {**JSON_HEADERS, "ETag": '"v1"'}, prompt_body())
+    get_prompt("support-reply")
+    served.respond_with(lambda method, path, body: (500, {}, b""))
+    with caplog.at_level(logging.WARNING, logger="cetra"):
+        assert get_prompt("support-reply", cache_ttl_s=0).version == 1
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "cetra" and record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1
+    assert "status 500" in warnings[0]
+
+
+def test_refresh_without_an_etag_sends_no_if_none_match(
+    served: HttpRecorderLike, seams: Seams
+) -> None:
+    served.queue_response(200, JSON_HEADERS, prompt_body(version=1))
+    get_prompt("support-reply")
+    served.queue_response(200, JSON_HEADERS, prompt_body(version=2))
+    seams.now += 61
+    assert get_prompt("support-reply").version == 1
+    assert "If-None-Match" not in served.requests[1][2]
+    assert get_prompt("support-reply").version == 2
+
+
+def test_text_prompt_ignores_a_list_value(seams: Seams) -> None:
+    prompt = get_prompt("t", fallback="Hi {{ name }}")
+    assert prompt.compile(name="Ada", extra=[{"role": "user", "content": "x"}]) == "Hi Ada"
+
+
+def test_non_finite_numbers_are_type_errors(seams: Seams) -> None:
+    prompt = get_prompt("t", fallback="{{ v }}")
+    for value in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(TypeError):
+            prompt.compile(v=value)
+
+
+def test_float_formatting_stops_at_two_to_the_53(seams: Seams) -> None:
+    prompt = get_prompt("t", fallback="{{ v }}")
+    assert prompt.compile(v=2.0**53) == "9007199254740992"
+    assert prompt.compile(v=2.0**60) == repr(2.0**60)
+
+
 def test_disabled_sdk(seams: Seams) -> None:
     prompt = get_prompt("support-reply", fallback="Hi {{ name }}")
     assert prompt.is_fallback is True
@@ -318,6 +380,18 @@ def test_programming_errors(seams: Seams) -> None:
         get_prompt("x", version=0)
     with pytest.raises(ValueError, match="must not be negative"):
         get_prompt("x", cache_ttl_s=-1)
+    with pytest.raises(ValueError, match="must be finite"):
+        get_prompt("x", cache_ttl_s=float("inf"))
+    with pytest.raises(ValueError, match="must be finite"):
+        get_prompt("x", cache_ttl_s=float("nan"))
+
+
+def test_fork_hook_recreates_the_module_lock(seams: Seams) -> None:
+    before = _prompts._cache_lock
+    _prompts._reinit_after_fork()
+    assert _prompts._cache_lock is not before
+    assert _prompts._cache_lock.acquire(blocking=False)
+    _prompts._cache_lock.release()
 
 
 def test_lru_bound(seams: Seams) -> None:
@@ -386,6 +460,22 @@ def test_client_prompts(http_recorder: HttpRecorderLike) -> None:
         client.prompts.get("support-reply")
     assert info.value.status == 200
     assert info.value.code == "invalid_response"
+
+
+def test_client_prompts_reject_bad_arguments_and_malformed_pages(
+    http_recorder: HttpRecorderLike,
+) -> None:
+    client = Client(api_key=TEST_API_KEY, base_url=http_recorder.url)
+    with pytest.raises(ValueError, match="name is required"):
+        client.prompts.get("")
+    assert http_recorder.requests == []
+
+    for page in (b'{"data": "x"}', b'{"data": [{"id": 1}]}', b'{"data": [], "next_cursor": 3}'):
+        http_recorder.queue_response(200, JSON_HEADERS, page)
+        with pytest.raises(ApiError) as info:
+            client.prompts.list()
+        assert info.value.status == 200
+        assert info.value.code == "invalid_response"
 
 
 def test_logs_have_no_template(

@@ -21,7 +21,8 @@ def _expected_error_fields(case: Mapping[str, Any]) -> dict[str, Any]:
     if error["kind"] == "missing_variable" or error["kind"] == "missing_placeholder":
         fields["name"] = error["name"]
     else:
-        fields.update(reason=error["reason"], line=error["line"], column=error["column"])
+        # A chat error may have no position (a reserved placeholder name).
+        fields.update(reason=error["reason"], line=error.get("line"), column=error.get("column"))
     return fields
 
 
@@ -55,7 +56,13 @@ def test_shared_chat_cases(case: Mapping[str, Any]) -> None:
     template: Sequence[Mapping[str, object]] = case["template"]
     values: dict[str, str] = case["values"]
     placeholders: dict[str, Any] = case["placeholders"]
-    assert chat_names(template) == (case["variables"], case["placeholder_names"])
+    if case["variables"] is None:
+        # The names are not known: the template is refused while they are worked out.
+        with pytest.raises(PromptCompileError) as names_info:
+            chat_names(template)
+        assert _error_fields(names_info.value) == _expected_error_fields(case)
+    else:
+        assert chat_names(template) == (case["variables"], case["placeholder_names"])
 
     if "error" in case:
         with pytest.raises(PromptCompileError) as info:
@@ -102,6 +109,15 @@ def test_chat_placeholder_name_is_trimmed() -> None:
     assert render_chat(template, {}, {"h": [{"role": "user", "content": "x"}]}) == [
         {"role": "user", "content": "x"}
     ]
+
+
+def test_chat_reserved_placeholder_name_is_refused() -> None:
+    template: list[Mapping[str, object]] = [{"type": "placeholder", "name": "loop"}]
+    with pytest.raises(PromptCompileError) as info:
+        chat_names(template)
+    assert info.value.reason == "reserved"
+    assert info.value.line is None
+    assert str(info.value) == "invalid template: reserved"
 
 
 def test_chat_copies_placeholder_messages() -> None:

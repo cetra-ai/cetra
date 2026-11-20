@@ -45,6 +45,8 @@ export class PromptCompileError extends Error {
   readonly reason: string | undefined;
   readonly line: number | undefined;
   readonly column: number | undefined;
+  /** The prompt's name, when the error came from `Prompt.compile` or a fallback. */
+  readonly prompt: string | undefined;
 
   constructor(
     kind: "invalid" | "missing_variable" | "missing_placeholder",
@@ -63,6 +65,7 @@ export class PromptCompileError extends Error {
     this.reason = details.reason;
     this.line = details.line;
     this.column = details.column;
+    this.prompt = details.prompt;
   }
 }
 
@@ -212,19 +215,26 @@ type Entry =
   | { readonly kind: "placeholder"; readonly name: string };
 
 /**
- * Classifies one chat entry. A placeholder has `type === "placeholder"` and a
- * string `name`; any other entry must have string `role` and `content`.
+ * Classifies one chat entry. An entry with `type === "placeholder"` is a
+ * placeholder and needs a string `name`; any other entry must have string
+ * `role` and `content`.
  */
 function classify(entry: unknown): Entry {
   if (typeof entry !== "object" || entry === null) {
     throw new PromptCompileError("invalid", { reason: "not_a_message" });
   }
   const fields = entry as { readonly [key: string]: unknown };
-  if (fields.type === "placeholder" && typeof fields.name === "string") {
+  if (fields.type === "placeholder") {
+    if (typeof fields.name !== "string") {
+      throw new PromptCompileError("invalid", { reason: "not_a_message" });
+    }
     // The tag-name rule of precision 24: trimmed of spaces and tabs, then an ASCII name.
     const name = trimTags(fields.name);
     if (!NAME.test(name)) {
       throw new PromptCompileError("invalid", { reason: "not_a_name" });
+    }
+    if (RESERVED.has(name)) {
+      throw new PromptCompileError("invalid", { reason: "reserved" });
     }
     return { kind: "placeholder", name };
   }

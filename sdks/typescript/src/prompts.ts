@@ -319,6 +319,8 @@ async function revalidate(
   } else if (outcome.kind === "not_modified") {
     store.store(key, { ...entry, fetchedAt: store.now() });
   } else {
+    // Keep the prompt and restart its age: a failing server is retried once per TTL.
+    store.store(key, { ...entry, fetchedAt: store.now() });
     store.warnFailure(name, outcome.reason);
   }
 }
@@ -333,14 +335,27 @@ function unavailable(
     throw new PromptNotAvailable(name, reason);
   }
   debug(`cetra: prompt ${name} not available (${reason}); using the fallback`);
-  return new Prompt({
-    name,
-    version: undefined,
-    config: {},
-    labels: [],
-    isFallback: true,
-    template: fallback,
-  });
+  try {
+    return new Prompt({
+      name,
+      version: undefined,
+      config: {},
+      labels: [],
+      isFallback: true,
+      template: fallback,
+    });
+  } catch (error) {
+    if (error instanceof PromptCompileError) {
+      throw new PromptCompileError(error.kind, {
+        variable: error.variable,
+        reason: error.reason,
+        line: error.line,
+        column: error.column,
+        prompt: name,
+      });
+    }
+    throw error;
+  }
 }
 
 /**
@@ -354,8 +369,10 @@ export function parsePrompt(body: unknown): Prompt | undefined {
   const { name, type, version, template, config, labels } = body;
   if (
     typeof name !== "string" ||
+    name === "" ||
     typeof version !== "number" ||
     !Number.isInteger(version) ||
+    version < 1 ||
     !isRecord(config) ||
     !isStringArray(labels)
   ) {
@@ -364,7 +381,7 @@ export function parsePrompt(body: unknown): Prompt | undefined {
   let shape: string | ChatEntry[];
   if (type === "text" && typeof template === "string") {
     shape = template;
-  } else if (type === "chat" && Array.isArray(template)) {
+  } else if (type === "chat" && Array.isArray(template) && template.every(isFlatEntry)) {
     shape = template as ChatEntry[];
   } else {
     return undefined;
@@ -535,6 +552,24 @@ function invalidResponse(method: string, template: string): ApiError {
     detail: "invalid response",
     errors: [],
   });
+}
+
+/**
+ * A chat entry as the wire has it: a message with exactly string `role` and
+ * `content`, or a placeholder with exactly `type: "placeholder"` and a string
+ * `name`. Anything else (a non-string value, an extra key) is not a prompt.
+ */
+function isFlatEntry(entry: unknown): boolean {
+  if (!isRecord(entry)) {
+    return false;
+  }
+  const keys = Object.keys(entry).sort().join(",");
+  if (entry.type === "placeholder") {
+    return keys === "name,type" && typeof entry.name === "string";
+  }
+  return (
+    keys === "content,role" && typeof entry.role === "string" && typeof entry.content === "string"
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

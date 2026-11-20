@@ -4,10 +4,10 @@ The cache is one per process. A fetch failure never raises by itself: ``get_prom
 stale entry, else the fallback, else raises ``PromptNotAvailable``.
 """
 
+import math
 import os
 import threading
 import time
-import weakref
 from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -59,8 +59,9 @@ class Prompt:
         """Fill the template: a string for a text prompt, a message list for a chat prompt.
 
         Values are ``str``, ``int``, ``float`` or ``bool`` for variables (``true``/``false``
-        for booleans, an integral float as an integer) and lists of ``{role, content}``
-        mappings for placeholders. Any other value is a ``TypeError``. A missing value or an
+        for booleans, an integral float up to 2**53 as an integer, other floats as ``repr``)
+        and lists of ``{role, content}`` mappings for placeholders. A non-finite float is a
+        ``TypeError``, as is any other value. A missing value or an
         invalid template raises ``PromptCompileError``. On success the current span is linked
         to this prompt (D-V-15).
         """
@@ -136,8 +137,6 @@ class _PromptCache:
         self._entries: OrderedDict[_Key, _Entry] = OrderedDict()
         self._in_flight: set[_Key] = set()
         self._last_warning: float | None = None
-        if hasattr(os, "register_at_fork"):
-            self._register_at_fork()
 
     def get(self, key: _Key) -> _Entry | None:
         """The entry for ``key``, marked as the most recently used."""
@@ -195,17 +194,6 @@ class _PromptCache:
         if warn:
             logger.warning("cetra: prompt %s refresh failed (%s)", name, reason)
 
-    def _register_at_fork(self) -> None:
-        """Re-create the lock and forget in-flight refreshes in a forked child (D-F-15)."""
-        ref = weakref.ref(self)
-
-        def after_in_child() -> None:
-            child = ref()
-            if child is not None:
-                child._reinit()
-
-        os.register_at_fork(after_in_child=after_in_child)
-
     def _reinit(self) -> None:
         self._lock = threading.Lock()
         self._in_flight = set()
@@ -231,6 +219,19 @@ def _reset_cache() -> None:
         _cache_instance = None
 
 
+def _reinit_after_fork() -> None:
+    """Re-create the module lock and the cache's lock in a forked child (D-F-15)."""
+    global _cache_lock
+    _cache_lock = threading.Lock()
+    cache = _cache_instance
+    if cache is not None:
+        cache._reinit()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reinit_after_fork)
+
+
 def get_prompt(
     name: str,
     *,
@@ -249,6 +250,8 @@ def get_prompt(
     if not name:
         raise ValueError("get_prompt: name is required")
     _check_target(label, version)
+    if not math.isfinite(cache_ttl_s):
+        raise ValueError("get_prompt: cache_ttl_s must be finite")
     if cache_ttl_s < 0:
         raise ValueError("get_prompt: cache_ttl_s must not be negative")
     runtime = _runtime.current()
@@ -276,6 +279,10 @@ def get_prompt(
         return outcome.prompt
     # A miss sends no ETag, so a 304 cannot come back here.
     reason = outcome.reason if isinstance(outcome, _Failed) else "invalid response"
+    if entry is not None:
+        # A cached label, cache_ttl_s=0, failed fetch: keep the prompt and warn (as TypeScript).
+        cache.note_refresh_failure(name, reason)
+        return entry.prompt
     return _unavailable(name, fallback, reason)
 
 
@@ -322,6 +329,8 @@ def _refresh(
     elif isinstance(outcome, _NotModified):
         cache.touch(key)
     else:
+        # Keep the prompt and restart its age, so a failing server is retried once per TTL.
+        cache.touch(key)
         cache.note_refresh_failure(name, outcome.reason)
 
 
@@ -522,7 +531,12 @@ def _split_values(
         elif isinstance(value, int):
             scalars[key] = str(value)
         elif isinstance(value, float):
-            scalars[key] = str(int(value)) if value.is_integer() else repr(value)
+            if not math.isfinite(value):
+                raise TypeError(f"prompt value {key}: not a finite number")
+            if value.is_integer() and abs(value) <= 2**53:
+                scalars[key] = str(int(value))
+            else:
+                scalars[key] = repr(value)
         elif isinstance(value, (list, tuple)) and all(_is_message(item) for item in value):
             lists[key] = [dict(item) for item in value]
         else:
@@ -550,18 +564,23 @@ def _link_span(prompt: Prompt) -> None:
         logger.debug("cetra: could not link the prompt (%s)", type(error).__name__)
 
 
+def _invalid_answer(method: str, template: str) -> ApiError:
+    """The error of a 2xx answer whose body does not have the shape the call expects."""
+    return ApiError(
+        method=method,
+        path=template,
+        status=200,
+        code="invalid_response",
+        detail="invalid response",
+        errors=(),
+    )
+
+
 def _expect_prompt(method: str, template: str, raw: object) -> Prompt:
     """The prompt of a 2xx body; ``ApiError`` when the body has no prompt shape."""
     prompt = _parse_prompt(raw)
     if prompt is None:
-        raise ApiError(
-            method=method,
-            path=template,
-            status=200,
-            code="invalid_response",
-            detail="invalid response",
-            errors=(),
-        )
+        raise _invalid_answer(method, template)
     return prompt
 
 
@@ -573,6 +592,8 @@ class Prompts:
 
     def get(self, name: str, *, label: str | None = None, version: int | None = None) -> Prompt:
         """The prompt at ``label`` (default ``production``) or ``version``, read from the server."""
+        if not name:
+            raise ValueError("prompts.get: name is required")
         _check_target(label, version)
         template = "/prompts/{prompt}/resolve"
         raw = self._client._request(
@@ -592,10 +613,17 @@ class Prompts:
             if cursor is not None:
                 params["cursor"] = cursor
             page = self._client._request("GET", "/prompts", "/prompts", params=params)
-            names.extend(entry["name"] for entry in page["data"])
+            if not isinstance(page, dict) or not isinstance(page.get("data"), list):
+                raise _invalid_answer("GET", "/prompts")
+            for entry in page["data"]:
+                if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
+                    raise _invalid_answer("GET", "/prompts")
+                names.append(entry["name"])
             cursor = page.get("next_cursor")
             if cursor is None:
                 return names
+            if not isinstance(cursor, str):
+                raise _invalid_answer("GET", "/prompts")
 
     def create(
         self,

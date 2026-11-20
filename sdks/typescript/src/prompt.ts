@@ -19,8 +19,9 @@ import {
 
 /**
  * The values of `Prompt.compile`. Strings, numbers and booleans fill
- * `{{ name }}` (a boolean is `true` or `false`; a number is its shortest
- * text, so `1.0` is `1`); a list of `{role, content}` fills a placeholder.
+ * `{{ name }}` (a boolean is `true` or `false`; a finite number is its
+ * shortest text, so `1.0` is `1`; NaN and infinities are a `TypeError`); a
+ * list of `{role, content}` fills a placeholder.
  */
 export type PromptValues = Readonly<
   Record<string, string | number | boolean | readonly ChatMessage[]>
@@ -100,6 +101,9 @@ export class Prompt {
       if (typeof value === "string") {
         strings.push([key, value]);
       } else if (typeof value === "number") {
+        if (!Number.isFinite(value)) {
+          throw new TypeError(`prompt value ${key}: not a finite number`);
+        }
         strings.push([key, String(value)]);
       } else if (typeof value === "boolean") {
         strings.push([key, value ? "true" : "false"]);

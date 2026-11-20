@@ -293,6 +293,104 @@ describe("getPrompt failures", () => {
   });
 });
 
+describe("getPrompt refresh details", () => {
+  it("restarts the age after a failed refresh, so two stale calls start one refresh", async () => {
+    const rest = new FakeRest(
+      inOrder(
+        { status: 200, json: body(3), headers: { ETag: '"v3"' } },
+        { status: 500 },
+        { status: 500 },
+        { status: 500 },
+      ),
+    );
+    const { cache } = install(rest.fetch, rest.sleep);
+    await getPrompt(NAME);
+    clock += 61_000;
+    expect((await getPrompt(NAME)).version).toBe(3);
+    await cache.settle();
+    expect(rest.requests).toHaveLength(4);
+    clock += 1_000;
+    expect((await getPrompt(NAME)).version).toBe(3);
+    await cache.settle();
+    expect(rest.requests).toHaveLength(4);
+  });
+
+  it("sends no If-None-Match when the cached entry has no ETag", async () => {
+    const rest = new FakeRest(
+      inOrder({ status: 200, json: body(3) }, { status: 200, json: body(4) }),
+    );
+    const { cache } = install(rest.fetch, rest.sleep);
+    await getPrompt(NAME);
+    clock += 61_000;
+    expect((await getPrompt(NAME)).version).toBe(3);
+    await cache.settle();
+    expect(rest.requests[1]?.headers["If-None-Match"]).toBeUndefined();
+    expect((await getPrompt(NAME)).version).toBe(4);
+  });
+
+  it("returns the cached prompt when a fetch fails and cacheTtlS is 0", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const rest = new FakeRest(
+      inOrder({ status: 200, json: body(3) }, { status: 500 }, { status: 500 }, { status: 500 }),
+    );
+    install(rest.fetch, rest.sleep);
+    await getPrompt(NAME);
+    expect((await getPrompt(NAME, { cacheTtlS: 0 })).version).toBe(3);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("names the prompt when the fallback template is invalid", async () => {
+    install(new FakeRest(inOrder({ status: 404 })).fetch);
+    const error = await rejectionOf(getPrompt("x", { fallback: "{{ bad name }}" }));
+    expect(error).toBeInstanceOf(PromptCompileError);
+    expect((error as PromptCompileError).prompt).toBe("x");
+    expect((error as PromptCompileError).message).toBe(
+      "prompt x: invalid template at line 1, column 1: not_a_name",
+    );
+  });
+
+  it("ignores a list given to a text prompt", async () => {
+    install(new FakeRest(inOrder({ status: 404 })).fetch);
+    const prompt = await getPrompt("t", { fallback: "Hi {{ name }}" });
+    expect(prompt.compile({ name: "Ada", extra: [{ role: "user", content: "x" }] })).toBe("Hi Ada");
+  });
+
+  it("rejects a non-finite number and keeps the shortest text of a large one", async () => {
+    install(new FakeRest(inOrder({ status: 404 })).fetch);
+    const prompt = await getPrompt("t", { fallback: "{{ v }}" });
+    for (const value of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      expect(thrownBy(() => prompt.compile({ v: value }))).toBeInstanceOf(TypeError);
+    }
+    expect(prompt.compile({ v: 2 ** 53 })).toBe("9007199254740992");
+    expect(prompt.compile({ v: 2 ** 60 })).toBe(String(2 ** 60));
+  });
+});
+
+describe("parsePrompt strictness", () => {
+  const chat = (template: unknown, version: unknown = 1, name: unknown = NAME): unknown => ({
+    name,
+    type: "chat",
+    version,
+    template,
+    config: {},
+    labels: [],
+  });
+
+  it("rejects a chat entry with a non-string value or an extra key", () => {
+    expect(parsePrompt(chat([{ role: "user", content: 1 }]))).toBeUndefined();
+    expect(parsePrompt(chat([{ role: "user", content: "x", extra: "y" }]))).toBeUndefined();
+    expect(parsePrompt(chat([{ type: "placeholder", name: 2 }]))).toBeUndefined();
+    expect(parsePrompt(chat([{ type: "placeholder", name: "h", role: "u" }]))).toBeUndefined();
+    expect(parsePrompt(chat([{ role: "user", content: "x" }]))).toBeDefined();
+  });
+
+  it("rejects a version below 1 or not an integer, and an empty name", () => {
+    expect(parsePrompt(chat([], 0))).toBeUndefined();
+    expect(parsePrompt(chat([], 1.5))).toBeUndefined();
+    expect(parsePrompt(chat([], 1, ""))).toBeUndefined();
+  });
+});
+
 describe("Prompt.compile", () => {
   it("links the active span with the prompt name and version", async () => {
     const rest = new FakeRest(inOrder({ status: 200, json: CHAT_BODY }, { status: 404 }));

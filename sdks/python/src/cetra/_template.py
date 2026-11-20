@@ -179,6 +179,8 @@ def _checked_entries(template: Sequence[Mapping[str, object]]) -> list[_Entry]:
             name = raw.strip(" \t")
             if _NAME.fullmatch(name) is None:
                 raise PromptCompileError("invalid", reason="not_a_name")
+            if name in RESERVED:
+                raise PromptCompileError("invalid", reason="reserved")
             checked.append(_Placeholder(name))
             continue
         role = entry.get("role")

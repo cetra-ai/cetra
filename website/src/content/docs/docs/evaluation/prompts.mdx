@@ -77,7 +77,7 @@ The options are:
 | Fallback | `fallback` | `fallback` | none | A text template, or a list of `{role, content}` messages, used when no prompt can be fetched. |
 | Cache time | `cache_ttl_s` | `cacheTtlS` | `60` seconds | How long a label stays fresh. `0` turns the label cache off. |
 
-A fallback is not a registry version. Its `version` is `None` in Python and `undefined` in TypeScript, and `is_fallback` is true.
+A fallback is not a registry version. Its `version` is `None` in Python and `undefined` in TypeScript, and its flag is `is_fallback` in Python or `isFallback` in TypeScript, set to true.
 
 ## Compile the prompt
 
@@ -128,10 +128,10 @@ const messages = prompt.compile({
 
 The values are:
 
-- strings, numbers and booleans for variables. A boolean renders as `true` or `false`. A whole number given as a float renders without a fraction, so `1.0` renders as `1`. Other numbers use the language's shortest form.
+- strings, numbers and booleans for variables. A boolean renders as `true` or `false`. A whole number given as a float renders without a fraction, so `1.0` renders as `1`, up to 2^53 in size. Other numbers use the language's own shortest form, so a large or fractional number can read differently in each SDK.
 - a list of `{role, content}` messages for each placeholder. An empty list is allowed.
 
-Any other value raises `TypeError` in both SDKs. A missing variable or placeholder raises `PromptCompileError`. The error names the prompt and the missing name, never the template text or the values. In Python it is a `ValueError`.
+Any other value, and a NaN or an infinite number, raises `TypeError` in both SDKs. A missing variable or placeholder raises `PromptCompileError`. The error names the prompt and the missing name, never the template text or the values. In Python it is a `ValueError`.
 
 `compile` also writes `cetra.prompt.name` and `cetra.prompt.version` on the current span, if that span is recording.
 
@@ -182,11 +182,11 @@ The SDK keeps prompts in the process, so a call does not wait on the server each
 - A version never expires, because a version never changes.
 - A label is fresh for 60 seconds. After that, the stale prompt is returned at once, and one background refresh runs for that key. Calls made during the refresh get the stale prompt.
 - The first fetch of a key waits for the server. Each attempt has a timeout of 5 seconds. Network errors, `429` and `5xx` answers are retried twice. A `Retry-After` header is honored, up to 5 seconds.
-- If a refresh fails, the stale prompt stays in use. The SDK logs one warning a minute, with the prompt name and the status only.
+- If a refresh fails, the stale prompt stays in use, and its 60-second age starts again, so the server is asked again only after another full interval. The SDK logs one warning a minute, with the prompt name and the status only. With `cache_ttl_s` set to `0`, a failed fetch of a cached label still returns the cached prompt.
 - If the first fetch fails, the call returns the fallback. Without a fallback it raises `PromptNotAvailable`.
 - The cache keeps up to 1,000 entries. The least recently used entry is dropped first.
 
-`PromptNotAvailable` has a `name` and a `reason`. The reason is one of `not found`, `status <code>`, `network`, `invalid response` or `sdk disabled`.
+`PromptNotAvailable` has a `reason` and the prompt's name: `name` in Python, `prompt` in TypeScript (`Error.name` is the class name there). The reason is one of `not found`, `status <code>`, `network`, `invalid response` or `sdk disabled`.
 
 Before `init()`, or when no API key is set, `get_prompt` and `getPrompt` act as a failed fetch. They return the fallback or raise `PromptNotAvailable` with the reason `sdk disabled`.
 

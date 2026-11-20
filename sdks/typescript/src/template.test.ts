@@ -35,8 +35,9 @@ type ChatCase = {
   placeholders: Record<string, ChatMessage[]>;
   expected?: ChatMessage[];
   error?: FixtureError;
-  variables: string[];
-  placeholder_names: string[];
+  /** `null` when the names are not known: the template is refused first. */
+  variables: string[] | null;
+  placeholder_names: string[] | null;
 };
 
 const fixture: { text: TextCase[]; chat: ChatCase[] } = JSON.parse(
@@ -101,10 +102,16 @@ describe("shared text cases", () => {
 describe("shared chat cases", () => {
   for (const testCase of fixture.chat) {
     it(testCase.name, () => {
-      expect(chatNames(testCase.template)).toEqual({
-        variables: testCase.variables,
-        placeholders: testCase.placeholder_names,
-      });
+      if (testCase.variables === null || testCase.placeholder_names === null) {
+        expect(projected(thrown(() => chatNames(testCase.template)))).toEqual(
+          expectedOf(testCase.error as FixtureError),
+        );
+      } else {
+        expect(chatNames(testCase.template)).toEqual({
+          variables: testCase.variables,
+          placeholders: testCase.placeholder_names,
+        });
+      }
       if (testCase.error !== undefined) {
         expect(
           projected(
@@ -151,6 +158,40 @@ describe("errors", () => {
     expect(
       projected(thrown(() => renderChat([{ type: "placeholder", name: "" }], {}, {}))),
     ).toEqual({ ...notAName, variable: undefined });
+  });
+
+  it("treat any type placeholder as a placeholder, with a string name", () => {
+    expect(
+      projected(
+        thrown(() => chatNames([{ type: "placeholder", name: 5 } as unknown as ChatEntry])),
+      ),
+    ).toEqual({
+      kind: "invalid",
+      variable: undefined,
+      reason: "not_a_message",
+      line: undefined,
+      column: undefined,
+    });
+    expect(
+      projected(
+        thrown(() => renderChat([{ type: "placeholder", name: "loop" }], {}, { loop: [] })),
+      ),
+    ).toEqual({
+      kind: "invalid",
+      variable: undefined,
+      reason: "reserved",
+      line: undefined,
+      column: undefined,
+    });
+  });
+
+  it("names the prompt in a PromptCompileError", () => {
+    const error = thrown(() => {
+      throw new PromptCompileError("invalid", { reason: "reserved", prompt: "greeting" });
+    });
+    expect(error).toBeInstanceOf(PromptCompileError);
+    expect((error as PromptCompileError).prompt).toBe("greeting");
+    expect(error.message).toBe("prompt greeting: invalid template: reserved");
   });
 
   it("read only the given values, not inherited properties", () => {
