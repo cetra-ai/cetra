@@ -63,9 +63,7 @@ def encode(document: object) -> bytes:
     return json.dumps(document).encode()
 
 
-def test_create_sends_the_body_and_maps_the_queue(
-    client: Client, http_recorder: Recorder
-) -> None:
+def test_create_sends_the_body_and_maps_the_queue(client: Client, http_recorder: Recorder) -> None:
     http_recorder.queue_response(201, JSON_HEADERS, fixture_bytes("annotation-queue.json"))
     queue = client.annotation_queues.create(
         "Relevance review", target="trace", definition_ids=[DEFINITION_ID]
@@ -206,9 +204,7 @@ def test_add_items_needs_exactly_one_kind(client: Client, http_recorder: Recorde
     assert http_recorder.requests == []
 
 
-def test_add_items_checks_types_before_any_request(
-    client: Client, http_recorder: Recorder
-) -> None:
+def test_add_items_checks_types_before_any_request(client: Client, http_recorder: Recorder) -> None:
     with pytest.raises(TypeError, match="trace_ids must be a sequence"):
         client.annotation_queues.add_items(QUEUE_ID, trace_ids="4bf92f3577b34da6a3ce929d0e0e4736")
     with pytest.raises(TypeError, match="session_ids must be a sequence"):

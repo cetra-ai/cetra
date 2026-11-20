@@ -200,7 +200,9 @@ describe("annotation queues", () => {
   });
 
   it("addItemsBatchesAndOffsetsSkipped", async () => {
-    const traces = Array.from({ length: 1_500 }, (_, index) => index.toString(16).padStart(32, "0"));
+    const traces = Array.from({ length: 1_500 }, (_, index) =>
+      index.toString(16).padStart(32, "0"),
+    );
     const rest = new FakeRest(
       inOrder(
         { status: 201, json: { added: 1_000, existing: 0, skipped: [] } },
