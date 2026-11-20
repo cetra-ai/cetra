@@ -102,6 +102,7 @@ Setting an override needs the `project_roles` entitlement (Teams add-on or an en
 | View traces, sessions, dashboards, datasets, experiments, SQL console | ✓ | ✓ | ✓ | ✓ |
 | Annotate (human scores), add to dataset, edit datasets, run SQL exports (an `sk` key with `read` may export, D-H-5), share saved views (D-H-6) | | ✓ | ✓ | ✓ |
 | Manage evaluators, online rules, alert rules, channels, score definitions, dashboards (D-C-16) | | ✓ | ✓ | ✓ |
+| Create and edit annotation queues, add and remove items (D-AQ-11) | | ✓ | ✓ | ✓ |
 | Manage API keys, LLM connections, project settings (retention), GDPR deletions | | | ✓ | ✓ |
 | Create/delete projects, manage members & invites, org limits | | | ✓ | ✓ |
 | Delete org, transfer ownership, change owners | | | | ✓ |
@@ -110,6 +111,8 @@ Setting an override needs the `project_roles` entitlement (Teams add-on or an en
 Evaluators, online rules and score definitions: project `member` and above; API keys cannot manage them (D-I-24). Dashboards: project `member` and above through a session or a read-write PAT; a `read` key and a read-only PAT read them and run their queries (D-C-16).
 
 Annotations: a member changes or deletes only their own `human` scores; a project admin may change or delete anyone's (D-I-26, D-I-36). API keys keep their scope rules.
+
+Annotation queues: `ManageQueues` (member, a `write` key, a read-write PAT) for queues and items; `Review` (member, sessions and read-write PATs only) for next, lease, complete, skip and reopen (D-AQ-11).
 
 LLM connections belong to the org. Org admins and owners manage and test them, and every org member can list them without their keys (D-I-4, D-I-24).
 

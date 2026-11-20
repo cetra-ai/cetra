@@ -16,6 +16,7 @@ use cetra_server::api::account::{
 };
 use cetra_server::api::admin::{AdminLicense, AdminSettings, AdminUser, CreatedAdminUser};
 use cetra_server::api::alerts::{AlertEvent, AlertRule, NotificationChannel};
+use cetra_server::api::annotation_queues::{AnnotationQueue, CreateAnnotationQueue};
 use cetra_server::api::backfills::{Backfill, BackfillEstimate, CreateBackfillRequest};
 use cetra_server::api::common::{Page, Problem};
 use cetra_server::api::connections::{
@@ -414,6 +415,8 @@ fn static_files_match_their_types() {
     roundtrip::<SchemaResponse>("static/schema.json");
     roundtrip::<Page<SavedView>>("static/saved-views.json");
     roundtrip::<Page<DashboardSummary>>("static/dashboards.json");
+    roundtrip::<Page<AnnotationQueue>>("static/annotation-queues.json");
+    roundtrip::<AnnotationQueue>("static/annotation-queue.json");
     roundtrip::<Dashboard>("static/dashboard.json");
     roundtrip::<Dashboard>("static/dashboard-overview.json");
     roundtrip::<Problem>("static/dashboard-stale.json");
@@ -471,6 +474,7 @@ fn request_examples_match_their_types_and_the_openapi_document() {
     roundtrip::<SqlQueryRequest>("requests/sql-query.json");
     roundtrip::<CreateEvaluatorRequest>("requests/evaluator-create.json");
     roundtrip::<CreateScoreDefinitionRequest>("requests/score-definition-create.json");
+    roundtrip::<CreateAnnotationQueue>("requests/annotation-queue-create.json");
     roundtrip::<CreateDatasetRequest>("requests/dataset-create.json");
     roundtrip::<AddItemsRequest>("requests/dataset-items-add.json");
     roundtrip::<ImportMapping>("requests/dataset-import-mapping.json");
@@ -534,6 +538,10 @@ fn request_examples_match_their_types_and_the_openapi_document() {
         (
             "post_score_definition",
             "requests/score-definition-create.json",
+        ),
+        (
+            "create_annotation_queue",
+            "requests/annotation-queue-create.json",
         ),
         ("post_dataset", "requests/dataset-create.json"),
         ("post_dataset_items", "requests/dataset-items-add.json"),
@@ -680,6 +688,10 @@ fn generated_files_roundtrip() {
             "get_saved_view" => roundtrip::<SavedView>(&example.file),
             "list_score_definitions" => roundtrip::<Page<ScoreDefinition>>(&example.file),
             "post_score_definition" => roundtrip::<ScoreDefinition>(&example.file),
+            "list_annotation_queues" => roundtrip::<Page<AnnotationQueue>>(&example.file),
+            "get_annotation_queue" | "create_annotation_queue" => {
+                roundtrip::<AnnotationQueue>(&example.file);
+            }
             "list_models" => roundtrip::<Page<ModelPrice>>(&example.file),
             "list_org_model_prices" => roundtrip::<Page<ModelPrice>>(&example.file),
             "resolve_model_price" => roundtrip::<ModelPriceResolution>(&example.file),

@@ -39,6 +39,11 @@ use super::alerts::{
     CreateAlertRuleRequest, CreateChannelRequest, DeliveryStatus, LatencyTarget,
     NotificationChannel, ScoreAggregation, UpdateAlertRuleRequest, UpdateChannelRequest,
 };
+use super::annotation_queues::{
+    AddQueueItems, AddedQueueItems, AnnotationQueue, AnnotationQueueItem,
+    AnnotationQueueListParams, CreateAnnotationQueue, QueueCounts, QueueItemAddedBy,
+    QueueItemStatus, QueueItemTarget, QueueTarget, SkippedQueueItem, UpdateAnnotationQueue,
+};
 use super::backfills::{Backfill, BackfillEstimate, BackfillStatus, CreateBackfillRequest};
 use super::common::{ExclusionParams, Limit, Page, PageParams, Problem, SortOrder, TimeParam};
 use super::connections::{
@@ -288,6 +293,18 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<UpdateSavedView>();
     set.insert::<Dashboard>();
     set.insert::<DashboardSummary>();
+    set.insert::<AnnotationQueue>();
+    set.insert::<QueueTarget>();
+    set.insert::<QueueCounts>();
+    set.insert::<CreateAnnotationQueue>();
+    set.insert::<UpdateAnnotationQueue>();
+    set.insert::<AnnotationQueueItem>();
+    set.insert::<QueueItemStatus>();
+    set.insert::<QueueItemAddedBy>();
+    set.insert::<QueueItemTarget>();
+    set.insert::<AddQueueItems>();
+    set.insert::<SkippedQueueItem>();
+    set.insert::<AddedQueueItems>();
     set.insert::<CreateDashboard>();
     set.insert::<UpdateDashboard>();
     set.insert::<SaveOverview>();
@@ -327,6 +344,8 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert_page::<PersonalToken>("PersonalTokenPage");
     set.insert_page::<SavedView>("SavedViewPage");
     set.insert_page::<DashboardSummary>("DashboardPage");
+    set.insert_page::<AnnotationQueue>("AnnotationQueuePage");
+    set.insert_page::<AnnotationQueueItem>("AnnotationQueueItemPage");
     set.insert::<EvaluatorKind>();
     set.insert::<OutputScoreBody>();
     set.insert::<Evaluator>();
@@ -558,6 +577,10 @@ pub fn openapi() -> OpenApi {
             tag(
                 "dashboards",
                 "Custom dashboards and their widget definitions.",
+            ),
+            tag(
+                "annotation_queues",
+                "Annotation queues: lists of traces, spans or sessions that reviewers label one at a time.",
             ),
             tag("sql", "SQL console over the project's views."),
             tag("media", "Extracted media blobs."),
@@ -886,6 +909,7 @@ fn paths() -> Paths {
     let paths = org_model_price_paths(paths);
     let paths = saved_view_paths(paths);
     let paths = dashboard_paths(paths);
+    let paths = annotation_queue_paths(paths);
     let paths = sql_paths(paths);
     let paths = deletion_paths(paths);
     let paths = channel_paths(paths);
@@ -3833,6 +3857,118 @@ fn saved_view_paths(paths: PathsBuilder) -> PathsBuilder {
         )
         .path(
             format!("{PROJECT}/saved-views/{{id}}"),
+            PathItem::new(HttpMethod::Delete, delete),
+        )
+}
+
+fn annotation_queue_paths(paths: PathsBuilder) -> PathsBuilder {
+    let list = operation(
+        "list_annotation_queues",
+        "annotation_queues",
+        "List annotation queues",
+    )
+    .description(Some(
+        "Queues of the project, by name then id, with their item counts over the data window. `target_trace_id` keeps the queues that hold a visible trace or span item of that trace; `target_session_id` the queues that hold a visible item of that session; both at once is 400. Readable with a read key and a read-only token.",
+    ))
+    .parameters(Some(with_query::<AnnotationQueueListParams>(vec![
+        project_param(),
+    ])))
+    .responses(responses(
+        "200",
+        json_named("AnnotationQueuePage", "One page of annotation queues."),
+        QUERY_ERRORS,
+    ))
+    .build();
+    let create = operation(
+        "create_annotation_queue",
+        "annotation_queues",
+        "Create an annotation queue",
+    )
+    .description(Some(
+        "Creates a queue at version 1 with 1 to 50 distinct score definitions of the project, in review order. The name is unique in the project (409). A project holds at most 100 queues (409), and the org's plan may cap them (403 `plan_limit`). A session or a read-write personal access token with role member or above, or a `write` API key.",
+    ))
+    .parameters(Some(vec![project_param()]))
+    .request_body(Some(json_body("CreateAnnotationQueue")))
+    .responses(responses(
+        "201",
+        json_of::<AnnotationQueue>("The created queue."),
+        &[400, 401, 403, 404, 409, 413, 415, 429],
+    ))
+    .build();
+    let get = operation(
+        "get_annotation_queue",
+        "annotation_queues",
+        "Get an annotation queue",
+    )
+    .description(Some(
+        "One queue with its item counts over the data window. Any other id is 404. Readable with a read key and a read-only token.",
+    ))
+    .parameters(Some(vec![
+        project_param(),
+        path_uuid("id", "Annotation queue id."),
+    ]))
+    .responses(responses(
+        "200",
+        json_of::<AnnotationQueue>("The queue."),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    let update = operation(
+        "update_annotation_queue",
+        "annotation_queues",
+        "Update an annotation queue",
+    )
+    .description(Some(
+        "Changes the fields given; omitted fields are unchanged, and `\"\"` clears the description or the instructions. The score definitions, when given, replace the whole list. `version` must be the stored version, else 409 with the stored version in `detail`. A successful update raises the version by one. Same roles as create.",
+    ))
+    .parameters(Some(vec![
+        project_param(),
+        path_uuid("id", "Annotation queue id."),
+    ]))
+    .request_body(Some(json_body("UpdateAnnotationQueue")))
+    .responses(responses(
+        "200",
+        json_of::<AnnotationQueue>("The updated queue."),
+        &[400, 401, 403, 404, 409, 413, 415, 429],
+    ))
+    .build();
+    let delete = operation(
+        "delete_annotation_queue",
+        "annotation_queues",
+        "Delete an annotation queue",
+    )
+    .description(Some(
+        "Deletes the queue and its items. The score definitions and the scores stay. Same roles as create.",
+    ))
+    .parameters(Some(vec![
+        project_param(),
+        path_uuid("id", "Annotation queue id."),
+    ]))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new().description("Deleted.").build(),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    paths
+        .path(
+            format!("{PROJECT}/annotation-queues"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/annotation-queues"),
+            PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/annotation-queues/{{id}}"),
+            PathItem::new(HttpMethod::Get, get),
+        )
+        .path(
+            format!("{PROJECT}/annotation-queues/{{id}}"),
+            PathItem::new(HttpMethod::Patch, update),
+        )
+        .path(
+            format!("{PROJECT}/annotation-queues/{{id}}"),
             PathItem::new(HttpMethod::Delete, delete),
         )
 }

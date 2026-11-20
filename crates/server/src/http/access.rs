@@ -174,6 +174,7 @@ pub(crate) fn routes() -> Vec<RouteDef> {
     routes.extend(crate::routes::feedback::routes());
     routes.extend(crate::routes::saved_views::routes());
     routes.extend(crate::routes::dashboards::routes());
+    routes.extend(crate::routes::annotation_queues::routes());
     routes.extend(crate::routes::sql::routes());
     routes.extend(crate::routes::schema::routes());
     routes.extend(crate::routes::facets::routes());

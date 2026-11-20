@@ -1,0 +1,9 @@
+{
+  "name": "Relevance review",
+  "description": "Support bot traces that the relevance judge scored low.",
+  "instructions": "Score each answer against the question it answers. Skip the traces that have no question.",
+  "target": "trace",
+  "definition_ids": [
+    "01900000-0000-7000-8000-000000000600"
+  ]
+}

@@ -10,6 +10,14 @@
     "file": "static/experiment-comparison.json"
   },
   {
+    "operation_id": "create_annotation_queue",
+    "path_params": {},
+    "query": {},
+    "status": 201,
+    "content_type": "application/json",
+    "file": "static/annotation-queue.json"
+  },
+  {
     "operation_id": "create_dashboard",
     "path_params": {},
     "query": {},
@@ -88,6 +96,16 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/alert-rule.json"
+  },
+  {
+    "operation_id": "get_annotation_queue",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000a01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/annotation-queue.json"
   },
   {
     "operation_id": "get_auth_config",
@@ -858,6 +876,14 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/alert-rules.json"
+  },
+  {
+    "operation_id": "list_annotation_queues",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/annotation-queues.json"
   },
   {
     "operation_id": "list_api_keys",

@@ -1212,6 +1212,58 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{project}/annotation-queues": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List annotation queues
+         * @description Queues of the project, by name then id, with their item counts over the data window. `target_trace_id` keeps the queues that hold a visible trace or span item of that trace; `target_session_id` the queues that hold a visible item of that session; both at once is 400. Readable with a read key and a read-only token.
+         */
+        get: operations["list_annotation_queues"];
+        put?: never;
+        /**
+         * Create an annotation queue
+         * @description Creates a queue at version 1 with 1 to 50 distinct score definitions of the project, in review order. The name is unique in the project (409). A project holds at most 100 queues (409), and the org's plan may cap them (403 `plan_limit`). A session or a read-write personal access token with role member or above, or a `write` API key.
+         */
+        post: operations["create_annotation_queue"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/annotation-queues/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get an annotation queue
+         * @description One queue with its item counts over the data window. Any other id is 404. Readable with a read key and a read-only token.
+         */
+        get: operations["get_annotation_queue"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete an annotation queue
+         * @description Deletes the queue and its items. The score definitions and the scores stay. Same roles as create.
+         */
+        delete: operations["delete_annotation_queue"];
+        options?: never;
+        head?: never;
+        /**
+         * Update an annotation queue
+         * @description Changes the fields given; omitted fields are unchanged, and `""` clears the description or the instructions. The score definitions, when given, replace the whole list. `version` must be the stored version, else 409 with the stored version in `detail`. A successful update raises the version by one. Same roles as create.
+         */
+        patch: operations["update_annotation_queue"];
+        trace?: never;
+    };
     "/api/v1/projects/{project}/api-keys": {
         parameters: {
             query?: never;
@@ -2830,6 +2882,26 @@ export interface components {
             /** @description The email domain, e.g. `acme.com`. Punycode for internationalized names. */
             domain: string;
         };
+        /** @description Body of `POST /api/v1/projects/{project}/annotation-queues/{id}/items`. */
+        AddQueueItems: {
+            /** @description 1 to 1 000 targets. */
+            items: components["schemas"]["QueueItemTarget"][];
+        };
+        /** @description The answer of an add. A target already in the queue counts as `existing`. */
+        AddedQueueItems: {
+            /**
+             * Format: int64
+             * @description Targets added.
+             */
+            added: number;
+            /**
+             * Format: int64
+             * @description Targets that were already in the queue.
+             */
+            existing: number;
+            /** @description Targets that were not added: unknown, hidden, evaluation or guarded. */
+            skipped: components["schemas"]["SkippedQueueItem"][];
+        };
         /** @description `GET /api/v1/admin/license`. Never contains the key. */
         AdminLicense: {
             /** @description Customer name. Omitted with `none` and `invalid`. */
@@ -3141,6 +3213,120 @@ export interface components {
          * @enum {string}
          */
         AlertWindow: "1m" | "5m" | "15m" | "1h" | "6h" | "24h";
+        /** @description An annotation queue with its counts. */
+        AnnotationQueue: {
+            /** @description Item counts by status, over the items the data window shows. */
+            counts: components["schemas"]["QueueCounts"];
+            /**
+             * Format: date-time
+             * @description Creation time, nanoseconds since the Unix epoch. JSON is RFC 3339.
+             */
+            created_at: string;
+            /**
+             * Format: uuid
+             * @description Creator. Omitted for an API key's queue and when the user is gone.
+             */
+            created_by?: string;
+            /** @description The score definitions a review fills in, in order (1 to 50). */
+            definition_ids: string[];
+            /** @description Free text, 0 to 1 000 characters. Omitted when none. */
+            description?: string;
+            /**
+             * Format: uuid
+             * @description Queue id.
+             */
+            id: string;
+            /** @description Markdown for the reviewers, 0 to 10 000 characters. Omitted when none. */
+            instructions?: string;
+            /** @description Display name, unique in the project. */
+            name: string;
+            /** @description What the items are. */
+            target: components["schemas"]["QueueTarget"];
+            /**
+             * Format: date-time
+             * @description Last update, nanoseconds since the Unix epoch. JSON is RFC 3339.
+             */
+            updated_at: string;
+            /**
+             * Format: int64
+             * @description Incremented by every change. A `PATCH` names the version it read.
+             */
+            version: number;
+        };
+        /** @description One target of a queue: a trace, a span or a session. */
+        AnnotationQueueItem: {
+            /** @description Who added the item. */
+            added_by: components["schemas"]["QueueItemAddedBy"];
+            /**
+             * Format: uuid
+             * @description The id of the user, personal token or key that added the item.
+             */
+            added_by_id: string;
+            /**
+             * Format: date-time
+             * @description When the item was added. JSON is RFC 3339.
+             */
+            created_at: string;
+            /**
+             * Format: date-time
+             * @description When the item was completed or skipped. Omitted while pending. JSON is RFC 3339.
+             */
+            done_at?: string;
+            /**
+             * Format: uuid
+             * @description Who completed or skipped the item. Omitted while pending.
+             */
+            done_by_user_id?: string;
+            /**
+             * Format: uuid
+             * @description Item id.
+             */
+            id: string;
+            /**
+             * Format: date-time
+             * @description When the lease ends. Set only while the lease is live. JSON is RFC 3339.
+             */
+            lease_expires_at?: string;
+            /**
+             * Format: uuid
+             * @description The reviewer who holds the lease. Set only while the lease is live.
+             */
+            leased_by_user_id?: string;
+            /**
+             * Format: uuid
+             * @description The queue the item is in.
+             */
+            queue_id: string;
+            /** @description Session id. Session items. Omitted otherwise. */
+            session_id?: string;
+            /** @description Why it was skipped. Omitted unless skipped with a reason. */
+            skip_reason?: string;
+            /** @description Span id, 16 lowercase hex digits. Span items. Omitted otherwise. */
+            span_id?: string;
+            /** @description Where the item is in its review. */
+            status: components["schemas"]["QueueItemStatus"];
+            /**
+             * Format: date-time
+             * @description The trace's start, or the session's earliest visible trace start. JSON is RFC 3339.
+             */
+            target_time: string;
+            /** @description Trace id, 32 lowercase hex digits. Trace and span items. Omitted otherwise. */
+            trace_id?: string;
+        };
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        AnnotationQueueItemPage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["AnnotationQueueItem"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+        };
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        AnnotationQueuePage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["AnnotationQueue"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+        };
         /** @description A project API key. The secret is not a field. */
         ApiKey: {
             /**
@@ -3585,6 +3771,19 @@ export interface components {
             name: string;
             /** @description Default false. */
             notify_while_firing?: boolean;
+        };
+        /** @description Body of `POST /api/v1/projects/{project}/annotation-queues`. */
+        CreateAnnotationQueue: {
+            /** @description Score definitions of the project, 1 to 50, all distinct, in review order. */
+            definition_ids: string[];
+            /** @description Free text, 0 to 1 000 characters. */
+            description?: string;
+            /** @description Markdown for the reviewers, 0 to 10 000 characters. */
+            instructions?: string;
+            /** @description Display name, 1 to 100 characters after trimming. */
+            name: string;
+            /** @description What the items are. Fixed for the queue's life. */
+            target: components["schemas"]["QueueTarget"];
         };
         /** @description `POST /api/v1/projects/{project}/api-keys` body. */
         CreateApiKeyRequest: {
@@ -6522,7 +6721,7 @@ export interface components {
          *     Spec 09 § Conventions. Later endpoints add codes.
          * @enum {string}
          */
-        ProblemCode: "bad_request" | "invalid_filter" | "query_failed" | "query_timeout" | "query_too_large" | "too_many_traces" | "busy" | "restore_mode" | "unauthorized" | "forbidden" | "sso_required" | "email_not_verified" | "plan_limit" | "plan_required" | "owner_not_allowed" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "range_not_satisfiable" | "conflict" | "quota_exceeded" | "rate_limited" | "internal";
+        ProblemCode: "bad_request" | "invalid_filter" | "query_failed" | "query_timeout" | "query_too_large" | "too_many_traces" | "too_many_items" | "busy" | "restore_mode" | "unauthorized" | "forbidden" | "sso_required" | "email_not_verified" | "plan_limit" | "plan_required" | "owner_not_allowed" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "range_not_satisfiable" | "conflict" | "quota_exceeded" | "rate_limited" | "internal";
         /**
          * @description A project the caller can see.
          *
@@ -6631,6 +6830,48 @@ export interface components {
             /** @description A signed `kind: org` token. Never logged. */
             token: string;
         };
+        /** @description Item counts of a queue, by status. */
+        QueueCounts: {
+            /**
+             * Format: int64
+             * @description Items reviewed.
+             */
+            completed: number;
+            /**
+             * Format: int64
+             * @description Items not reviewed yet.
+             */
+            pending: number;
+            /**
+             * Format: int64
+             * @description Items passed over.
+             */
+            skipped: number;
+        };
+        /**
+         * @description Who added an item.
+         * @enum {string}
+         */
+        QueueItemAddedBy: "user" | "pat" | "key";
+        /**
+         * @description Where an item is in its review (D-AQ-5).
+         * @enum {string}
+         */
+        QueueItemStatus: "pending" | "completed" | "skipped";
+        /** @description One target to add to a queue. Exactly the fields of the queue's target are set. */
+        QueueItemTarget: {
+            /** @description Session id. Session queues. */
+            session_id?: string;
+            /** @description Span id, 16 lowercase hex digits. Span queues. */
+            span_id?: string;
+            /** @description Trace id, 32 lowercase hex digits. Trace and span queues. */
+            trace_id?: string;
+        };
+        /**
+         * @description What a queue's items are (D-AQ-2). Fixed at creation.
+         * @enum {string}
+         */
+        QueueTarget: "trace" | "span" | "session";
         /** @description Model reasoning, separate from the user-visible text. */
         ReasoningPart: {
             /** @description The reasoning text. */
@@ -7445,6 +7686,16 @@ export interface components {
             /** @description The account cannot sign in until the email is verified. */
             verification_required: boolean;
         };
+        /** @description A target that was not added, and why. */
+        SkippedQueueItem: {
+            /**
+             * Format: int64
+             * @description Position of the target in the request.
+             */
+            index: number;
+            /** @description Why it was not added. Never the rejected value. */
+            message: string;
+        };
         /** @description A trace of a bulk add that was not copied (D-J-25). */
         SkippedTrace: {
             /**
@@ -8170,6 +8421,25 @@ export interface components {
             name?: string;
             /** @description New `notify_while_firing` flag. */
             notify_while_firing?: boolean;
+        };
+        /**
+         * @description Body of `PATCH /api/v1/projects/{project}/annotation-queues/{id}`. Omitted fields are
+         *     unchanged.
+         */
+        UpdateAnnotationQueue: {
+            /** @description The whole list of score definitions, 1 to 50, all distinct, in review order. */
+            definition_ids?: string[];
+            /** @description Free text, 0 to 1 000 characters. `""` clears it. */
+            description?: string;
+            /** @description Markdown for the reviewers, 0 to 10 000 characters. `""` clears it. */
+            instructions?: string;
+            /** @description Display name, 1 to 100 characters after trimming. */
+            name?: string;
+            /**
+             * Format: int64
+             * @description The version the caller read. Must be the stored one, else `409`.
+             */
+            version: number;
         };
         /** @description Body of `PATCH /channels/{id}`. An absent field keeps its value; `headers` replaces the whole map. */
         UpdateChannelRequest: {
@@ -13995,6 +14265,421 @@ export interface operations {
             };
             /** @description The resource does not exist. */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_annotation_queues: {
+        parameters: {
+            query?: {
+                /** @description Maximum number of items to return (1–1000, default 50). */
+                limit?: components["schemas"]["Limit"];
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+                /** @description Only queues that hold a visible trace or span item of this trace (32 hex digits). */
+                target_trace_id?: string;
+                /** @description Only queues that hold a visible item of this session. Not with `target_trace_id`. */
+                target_session_id?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of annotation queues. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AnnotationQueuePage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    create_annotation_queue: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateAnnotationQueue"];
+            };
+        };
+        responses: {
+            /** @description The created queue. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AnnotationQueue"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is not JSON. */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_annotation_queue: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Annotation queue id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The queue. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AnnotationQueue"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_annotation_queue: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Annotation queue id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    update_annotation_queue: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Annotation queue id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateAnnotationQueue"];
+            };
+        };
+        responses: {
+            /** @description The updated queue. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AnnotationQueue"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is not JSON. */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };

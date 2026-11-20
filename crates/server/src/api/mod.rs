@@ -6,6 +6,7 @@
 pub mod account;
 pub mod admin;
 pub mod alerts;
+pub mod annotation_queues;
 pub mod backfills;
 pub mod common;
 pub mod connections;

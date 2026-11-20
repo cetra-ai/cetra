@@ -150,9 +150,12 @@ pub(crate) enum ApiError {
         #[source]
         error: RunError,
     },
-    /// A dashboard's `version` is not the stored one (409). `current` is the stored version.
+    /// A dashboard's or queue's `version` is not the stored one (409). `current` is the stored
+    /// version; `what` names the resource in the detail.
     #[error("stale version")]
     StaleVersion {
+        /// What changed, as the detail names it: `dashboard`, `annotation queue`.
+        what: &'static str,
         /// The stored version.
         current: i64,
     },
@@ -233,11 +236,9 @@ impl ApiError {
             Self::Query(error) => query_problem(error, "filter", "invalid filter"),
             Self::Sql(error) => query_problem(error, "query", "invalid query"),
             Self::QueryAt { field, error } => query_problem(error, field, "invalid filter"),
-            Self::StaleVersion { current } => Problem::new(
+            Self::StaleVersion { what, current } => Problem::new(
                 ProblemCode::Conflict,
-                Some(format!(
-                    "the dashboard changed; current version is {current}"
-                )),
+                Some(format!("the {what} changed; current version is {current}")),
             ),
             Self::Internal(_) => {
                 Problem::new(ProblemCode::Internal, Some("internal error".to_owned()))
@@ -635,7 +636,11 @@ mod tests {
 
     #[test]
     fn stale_version_is_409_with_the_stored_version() {
-        let problem = ApiError::StaleVersion { current: 7 }.problem();
+        let problem = ApiError::StaleVersion {
+            what: "dashboard",
+            current: 7,
+        }
+        .problem();
         assert_eq!(problem.status, 409);
         assert_eq!(problem.code, ProblemCode::Conflict);
         assert_eq!(
