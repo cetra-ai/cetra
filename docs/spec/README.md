@@ -33,7 +33,7 @@ The product is `cetra` (cetra.sh; D46). Its identifiers are the binary, the crat
 
 ## Non-goals (MVP)
 
-Gateway/proxy, prompt registry, playground, annotation queues, custom dashboards, issue clustering, SAML, 2FA, message dedup, multi-node, Postgres, Iceberg export, sandboxed code evaluators. The design must not preclude any of them.
+Gateway/proxy, prompt registry, playground, custom dashboards, issue clustering, SAML, 2FA, message dedup, multi-node, Postgres, Iceberg export, sandboxed code evaluators. The design must not preclude any of them.
 
 ## Architecture
 
