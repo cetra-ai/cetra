@@ -273,8 +273,20 @@ pub(crate) struct DeliverReport {
 ///
 /// Returns [`MetaError`] only when the due deliveries cannot be read.
 pub(crate) async fn deliver_once(state: &AppState, now: i64) -> Result<DeliverReport, MetaError> {
-    let dues = due_deliveries(state.meta.reader(), now, BATCH).await?;
-    let outcomes = futures::stream::iter(dues)
+    let batch = due_deliveries(state.meta.reader(), now, BATCH).await?;
+    // A row that cannot be decoded is failed, so it is not read again at every tick.
+    for id in batch.unreadable {
+        let failed = Attempt::Failed {
+            error: "the delivery row could not be decoded".to_owned(),
+        };
+        state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move { finish_delivery(conn, id, failed, now).await })
+            })
+            .await?;
+    }
+    let outcomes = futures::stream::iter(batch.deliveries)
         .map(|due| async move { deliver_one(state, &due, now).await })
         .buffer_unordered(CONCURRENCY)
         .collect::<Vec<_>>()

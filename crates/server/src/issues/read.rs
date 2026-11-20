@@ -141,12 +141,14 @@ pub(crate) fn example_issues(
 
 /// The newest occurrence scores of each issue in `issues` (name `issue:<id>`, source `issue`),
 /// up to `per_issue` each, as `(issue, score)` pairs, issue by issue in the given order and
-/// newest first inside an issue. One storage read per issue.
+/// newest first inside an issue. One storage read per issue. `window` limits the occurrences to
+/// those in it (`None`: all).
 pub(crate) async fn occurrence_scores(
     ctx: &QueryContext,
     project: ProjectId,
     issues: &[Uuid],
     per_issue: usize,
+    window: Option<TimeWindow>,
 ) -> Result<Vec<(Uuid, Score)>, ApiError> {
     let mut out = Vec::new();
     for &issue in issues {
@@ -163,7 +165,7 @@ pub(crate) async fn occurrence_scores(
                 evaluator_id: None,
                 rule_id: None,
                 queue_id: None,
-                window: None,
+                window,
                 limit: per_issue,
                 cursor: None,
                 timeout: READ_TIMEOUT,
@@ -232,7 +234,9 @@ mod tests {
             .await
             .unwrap();
 
-        let pairs = occurrence_scores(&ctx, project, &[issue], 3).await.unwrap();
+        let pairs = occurrence_scores(&ctx, project, &[issue], 3, None)
+            .await
+            .unwrap();
 
         let got: Vec<(Uuid, String)> = pairs
             .iter()
@@ -291,7 +295,9 @@ mod tests {
             .await
             .unwrap();
 
-        let pairs = occurrence_scores(&ctx, project, &[b, a], 3).await.unwrap();
+        let pairs = occurrence_scores(&ctx, project, &[b, a], 3, None)
+            .await
+            .unwrap();
 
         let order: Vec<Uuid> = pairs.iter().map(|(id, _)| *id).collect();
         assert_eq!(order, vec![b, a, a]);
@@ -306,7 +312,7 @@ mod tests {
             .await
             .unwrap();
 
-        let pairs = occurrence_scores(&ctx, project, &[Uuid::now_v7()], 3)
+        let pairs = occurrence_scores(&ctx, project, &[Uuid::now_v7()], 3, None)
             .await
             .unwrap();
 

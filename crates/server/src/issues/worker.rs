@@ -900,10 +900,13 @@ async fn assign(
     let project_id = project.id;
     let id = candidate.id;
     let trace_start = loaded.trace_start;
+    let clock = state.clock.clone();
     let (stored, assigned) = state
         .meta
         .write(move |conn| {
             Box::pin(async move {
+                // The event's `at` is read in the write, never before it (D-IC-21).
+                let at = clock.now_ns();
                 let centroids = issues::source_centroids(conn, source_id).await?;
                 let nearest = cluster::nearest(
                     &vector,
@@ -949,7 +952,7 @@ async fn assign(
                     return Ok((true, None::<Uuid>));
                 };
                 let issue_id = issue.id;
-                errors::join_issue(conn, &mut issue, (trace_start, trace_start), now).await?;
+                errors::join_issue(conn, &mut issue, (trace_start, trace_start), at).await?;
                 let members = issue.member_count;
                 if members < CENTROID_MEMBERS
                     && let Some(centroid) = issue.centroid.as_mut()

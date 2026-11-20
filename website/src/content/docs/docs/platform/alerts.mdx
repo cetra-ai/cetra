@@ -47,7 +47,7 @@ Use an issue occurrences rule to hear when an issue keeps happening.
 2. Change the threshold to the count that matters. With **Above** and 0, the rule fires on the first occurrence in the window.
 3. Choose the channels and save the rule.
 
-For an issue from a bad score, feedback or topic source, use a window of 1 hour or more. Those occurrences can be written after the trace, when the trace joins the issue.
+An error source writes its occurrences within a minute or two of the trace, so a 15 minute or 1 hour window works. For an issue from a bad score, feedback or topic source, use a window of 6 or 24 hours. cetra writes those occurrences when the trace joins an issue, which can be minutes after its score, or in a refit, which runs every 6 hours. Each occurrence is dated at the start of its trace, so a refit can add occurrences up to about 6 hours in the past, and a shorter window can miss them.
 
 A rule on an issue counts that issue and the issues merged into it, including an ignored issue. A rule on a source counts its issues that are not ignored or merged, and the issues merged into them.
 

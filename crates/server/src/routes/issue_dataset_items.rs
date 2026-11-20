@@ -92,7 +92,7 @@ async fn add_issue_examples(
 
     let per_issue = usize::try_from(limit).unwrap_or(usize::MAX);
     let ctx = open_query(&state, org, project, None).await?;
-    let scored = occurrence_scores(&ctx, project, &group, per_issue).await?;
+    let scored = occurrence_scores(&ctx, project, &group, per_issue, Some(window)).await?;
     let mut found: Vec<(i64, TraceId, Option<String>)> = Vec::new();
     for (_, score) in scored {
         if let ScoreTarget::Trace { trace_id } = score.target {
@@ -306,6 +306,23 @@ mod tests {
         span.end_time = now + 1_000_000_000;
         span.ingest_time = now;
         app.commit_spans(&seeded.project, vec![span]).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_occurrence_older_than_the_default_period_is_not_copied() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_dataset(&app, &seeded, "faq").await;
+        let src = source(&app, &seeded).await;
+        let target = issue(&app, &seeded, src, IssueState::Open).await;
+        commit_trace(&app, &seeded, &trace(1), &span(1)).await;
+        commit_trace(&app, &seeded, &trace(2), &span(2)).await;
+        occur(&app, &seeded, src, target, &trace(1), 20 * 24, None).await;
+        occur(&app, &seeded, src, target, &trace(2), 2, None).await;
+
+        let result = add_ok(&app, &seeded, target, json!({ "dataset": "faq" })).await;
+
+        assert_eq!(trace_ids(&result), vec![trace(2)]);
     }
 
     #[tokio::test(flavor = "multi_thread")]

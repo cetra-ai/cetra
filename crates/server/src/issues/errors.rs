@@ -659,7 +659,8 @@ fn event(issue: Uuid, kind: EventKind, from: Option<&str>, to: Option<&str>, at:
 /// Applies the occurrence times of a group to its issue, in the caller's transaction: a resolved
 /// issue whose group started after its resolution regresses (D-IC-10), and `first_seen` and
 /// `last_seen` widen to the times. `occurrence_times` is the group's `(first, last)` trace start.
-/// The issue is written when something changed. Returns whether it changed.
+/// The issue is written when something changed. Returns whether it changed. `now` is the clock
+/// read inside the transaction: it stamps the `regressed` event and `updated_at` (D-IC-21).
 pub(crate) async fn join_issue(
     conn: &mut SqliteConnection,
     issue: &mut IssueRow,
@@ -713,10 +714,13 @@ async fn write_groups(
     groups: BTreeMap<String, Group>,
     now: i64,
 ) -> Result<(usize, Vec<Occurrence>), MetaError> {
+    let clock = state.clock.clone();
     state
         .meta
         .write(move |conn| {
             Box::pin(async move {
+                // The events' `at` is read in the write, never before it (D-IC-21).
+                let at = clock.now_ns();
                 let mut created = 0;
                 let mut occurrences = Vec::new();
                 for (fingerprint, group) in groups {
@@ -758,7 +762,7 @@ async fn write_groups(
                                     EventKind::Created,
                                     None,
                                     Some(IssueState::Open.as_str()),
-                                    now,
+                                    at,
                                 ),
                             )
                             .await?;
@@ -780,7 +784,7 @@ async fn write_groups(
                             ),
                         }
                     }
-                    join_issue(conn, &mut issue, (first, last), now).await?;
+                    join_issue(conn, &mut issue, (first, last), at).await?;
                     for (trace_id, hit) in traces {
                         occurrences.push(Occurrence {
                             source_id: source,
@@ -798,4 +802,83 @@ async fn write_groups(
             })
         })
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::meta::issues::SourceKind;
+    use crate::test_support::TestApp;
+    use crate::test_support::issues::{put_source, source_row};
+
+    const HOUR: i64 = 3_600_000_000_000;
+
+    fn group(trace_start: i64) -> BTreeMap<String, Group> {
+        let hit = Hit {
+            span_id: "b100000000000001".parse().expect("span id"),
+            at: trace_start,
+            user_id: None,
+            session_id: None,
+        };
+        let trace: TraceId = "a1000000000000000000000000000001"
+            .parse()
+            .expect("trace id");
+        BTreeMap::from([(
+            "fingerprint".to_owned(),
+            Group {
+                title: "Boom".to_owned(),
+                reason: None,
+                traces: BTreeMap::from([(trace, hit)]),
+            },
+        )])
+    }
+
+    async fn events(app: &TestApp, kind: &str) -> Vec<i64> {
+        sqlx::query_scalar("SELECT at FROM issue_events WHERE kind = ?")
+            .bind(kind)
+            .fetch_all(app.state.meta.reader())
+            .await
+            .expect("events read")
+    }
+
+    #[tokio::test]
+    async fn created_and_regressed_events_carry_the_clock_of_their_write() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let started = app.state.clock.now_ns();
+        let row = source_row(project, "Errors", SourceKind::Error, true, started);
+        let source = row.id;
+        put_source(&app, row).await;
+
+        // The work started at `started`; the write happens an hour later.
+        let created_at = started + HOUR;
+        app.state.clock.set(created_at);
+        write_groups(&app.state, project, source, group(started), started)
+            .await
+            .expect("groups written");
+        assert_eq!(events(&app, "created").await, [created_at]);
+
+        let resolved_at = started - HOUR;
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    sqlx::query("UPDATE issues SET state = 'resolved', resolved_at = ?")
+                        .bind(resolved_at)
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(MetaError::from)?;
+                    Ok(())
+                })
+            })
+            .await
+            .expect("resolved");
+        let regressed_at = started + 2 * HOUR;
+        app.state.clock.set(regressed_at);
+        write_groups(&app.state, project, source, group(started), started)
+            .await
+            .expect("groups written");
+        assert_eq!(events(&app, "regressed").await, [regressed_at]);
+    }
 }

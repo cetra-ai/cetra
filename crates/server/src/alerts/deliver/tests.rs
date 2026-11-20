@@ -261,6 +261,7 @@ async fn due_ids(app: &TestApp, at: i64, limit: i64) -> Vec<Uuid> {
     due_deliveries(app.state.meta.reader(), at, limit)
         .await
         .expect("due")
+        .deliveries
         .iter()
         .map(|due| due.id)
         .collect()
@@ -966,16 +967,17 @@ async fn due_deliveries_order_and_filter() {
     let pool = app.state.meta.reader();
     let ids = |dues: Vec<DueDelivery>| dues.iter().map(|due| due.id).collect::<Vec<Uuid>>();
     assert_eq!(
-        ids(due_deliveries(pool, at, 10).await.expect("due")),
+        ids(due_deliveries(pool, at, 10).await.expect("due").deliveries),
         [early, middle]
     );
     assert_eq!(
-        ids(due_deliveries(pool, at, 1).await.expect("due")),
+        ids(due_deliveries(pool, at, 1).await.expect("due").deliveries),
         [early]
     );
     let later = due_deliveries(pool, NOW + 40 * SECOND, 10)
         .await
-        .expect("due");
+        .expect("due")
+        .deliveries;
     assert_eq!(ids(later), [early, middle, late]);
 
     app.state
@@ -990,7 +992,13 @@ async fn due_deliveries_order_and_filter() {
         })
         .await
         .expect("update");
-    assert!(due_deliveries(pool, at, 10).await.expect("due").is_empty());
+    assert!(
+        due_deliveries(pool, at, 10)
+            .await
+            .expect("due")
+            .deliveries
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -1061,7 +1069,8 @@ async fn due_deliveries_returns_rule_and_issue_deliveries_ordered_together() {
     let [first, second, third, fourth] = seed_interleaved(&app).await;
     let dues = due_deliveries(app.state.meta.reader(), NOW + 40 * SECOND, 10)
         .await
-        .expect("due");
+        .expect("due")
+        .deliveries;
     let ids: Vec<Uuid> = dues.iter().map(|due| due.id).collect();
     assert_eq!(ids, [first, second, third, fourth]);
     let issues: Vec<bool> = dues
@@ -1162,6 +1171,60 @@ async fn due_deliveries_skips_sent_and_future_issue_deliveries() {
     let due = due_ids(&app, NOW + 60 * SECOND, 10).await;
     assert_eq!(due, [pending, later]);
     assert!(!due.contains(&sent));
+}
+
+#[tokio::test]
+async fn an_undecodable_digest_is_failed_and_does_not_block_the_others() {
+    let app = TestApp::new().await;
+    let seed = seed_issue(&app, &webhook("https://hooks.example.com/x")).await;
+    let good =
+        insert_notification(&app, seed.source, &digest(DigestKind::Created, "Boom"), NOW).await;
+    let bad = Uuid::now_v7();
+    app.state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                sqlx::query(
+                    "INSERT INTO issue_notifications (id, source_id, digest, created_at) \
+                     VALUES (?, (SELECT id FROM issue_sources LIMIT 1), 'not json', ?)",
+                )
+                .bind(bad.to_string())
+                .bind(NOW)
+                .execute(&mut *conn)
+                .await?;
+                Ok(())
+            })
+        })
+        .await
+        .expect("bad notification");
+    let broken = insert_issue_delivery(&app, bad, seed.channel, "pending", Some(NOW), NOW).await;
+    let fine = insert_issue_delivery(&app, good, seed.channel, "pending", Some(NOW + 1), NOW).await;
+
+    let batch = due_deliveries(app.state.meta.reader(), NOW + SECOND, 10)
+        .await
+        .expect("due");
+    assert_eq!(
+        batch
+            .deliveries
+            .iter()
+            .map(|due| due.id)
+            .collect::<Vec<_>>(),
+        [fine]
+    );
+    assert_eq!(batch.unreadable, [broken]);
+
+    deliver_once(&app.state, NOW + SECOND).await.expect("pass");
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM notification_deliveries WHERE id = ?")
+            .bind(broken.to_string())
+            .fetch_one(app.state.meta.reader())
+            .await
+            .expect("status");
+    assert_eq!(status, "failed");
+    let batch = due_deliveries(app.state.meta.reader(), NOW + SECOND, 10)
+        .await
+        .expect("due");
+    assert!(batch.unreadable.is_empty());
 }
 
 #[tokio::test]
@@ -1447,7 +1510,8 @@ async fn the_debug_of_a_due_issue_delivery_hides_titles() {
     insert_issue_delivery(&app, notification, seed.channel, "pending", Some(NOW), NOW).await;
     let dues = due_deliveries(app.state.meta.reader(), NOW, 10)
         .await
-        .expect("due");
+        .expect("due")
+        .deliveries;
     let text = format!("{:?}", dues.first().expect("one due delivery"));
     assert!(text.contains("DueDelivery"), "{text}");
     assert!(!text.contains("Secret"), "{text}");

@@ -1130,7 +1130,7 @@ pub(crate) async fn due_deliveries(
     pool: &SqlitePool,
     now: i64,
     limit: i64,
-) -> Result<Vec<DueDelivery>, MetaError> {
+) -> Result<DueBatch, MetaError> {
     let rules: Vec<DueRecord> = sqlx::query_as(
         "SELECT d.id, d.attempts, d.next_attempt_at, d.channel_id, c.kind AS channel_kind, \
          c.config_enc, \
@@ -1176,25 +1176,54 @@ pub(crate) async fn due_deliveries(
     .fetch_all(pool)
     .await?;
     // A pending row always has `next_attempt_at` (the queries filter on it), so the fallback
-    // never applies.
+    // never applies. A row that does not decode is left out and reported, so one bad row does not
+    // block the others.
     let mut due = Vec::with_capacity(rules.len() + issues.len());
+    let mut unreadable = Vec::new();
     for record in rules {
         let key = (
             record.next_attempt_at.unwrap_or(i64::MAX),
             record.id.clone(),
         );
-        due.push((key, due_from(record)?));
+        let id = record.id.clone();
+        match due_from(record) {
+            Ok(delivery) => due.push((key, delivery)),
+            Err(error) => skip_unreadable(&id, &error, &mut unreadable),
+        }
     }
     for record in issues {
         let key = (
             record.next_attempt_at.unwrap_or(i64::MAX),
             record.id.clone(),
         );
-        due.push((key, due_issue_from(record)?));
+        let id = record.id.clone();
+        match due_issue_from(record) {
+            Ok(delivery) => due.push((key, delivery)),
+            Err(error) => skip_unreadable(&id, &error, &mut unreadable),
+        }
     }
     due.sort_by(|a, b| a.0.cmp(&b.0));
     due.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
-    Ok(due.into_iter().map(|(_, delivery)| delivery).collect())
+    Ok(DueBatch {
+        deliveries: due.into_iter().map(|(_, delivery)| delivery).collect(),
+        unreadable,
+    })
+}
+
+/// Logs a delivery row that does not decode (its id and the column, never content) and keeps its
+/// id for the caller, which fails it.
+fn skip_unreadable(id: &str, error: &MetaError, unreadable: &mut Vec<Uuid>) {
+    tracing::error!(delivery_id = %id, error = %error, "a pending delivery row could not be decoded");
+    if let Ok(id) = id.parse() {
+        unreadable.push(id);
+    }
+}
+
+/// The deliveries due now, and the ids of pending rows that could not be decoded.
+#[derive(Debug)]
+pub(crate) struct DueBatch {
+    pub(crate) deliveries: Vec<DueDelivery>,
+    pub(crate) unreadable: Vec<Uuid>,
 }
 
 /// The result of one attempt.

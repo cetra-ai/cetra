@@ -186,7 +186,29 @@ pub(crate) async fn source_channel_ids_by_source(
     Ok(channels)
 }
 
-/// Replaces the channels of `source`. The caller validated the ids (M4.6).
+/// Whether every id in `channels` is a notification channel of `project`, as of this transaction.
+pub(crate) async fn channels_exist(
+    conn: &mut SqliteConnection,
+    project: ProjectId,
+    channels: &[Uuid],
+) -> Result<bool, MetaError> {
+    for channel in channels {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM notification_channels WHERE id = ? AND project_id = ?)",
+        )
+        .bind(channel.to_string())
+        .bind(project.to_string())
+        .fetch_one(&mut *conn)
+        .await?;
+        if !exists {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Replaces the channels of `source`. The caller validated the ids (M4.6) and checked them in the
+/// same transaction with [`channels_exist`].
 pub(crate) async fn set_source_channels(
     conn: &mut SqliteConnection,
     source: Uuid,

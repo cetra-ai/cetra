@@ -231,6 +231,16 @@ enum SourceWrite {
     Missing,
     /// Creating or enabling the source passes the active-source limit (D-IC-13).
     OverLimit(SourceLimitError),
+    /// A channel was deleted after the request's check and before the write.
+    UnknownChannel,
+}
+
+/// The `channel_ids` field error of a channel that no longer exists.
+fn unknown_channel() -> ApiError {
+    ApiError::BadRequest {
+        detail: None,
+        errors: vec![field_error("channel_ids", "unknown channel")],
+    }
 }
 
 async fn list_issue_sources(
@@ -337,6 +347,7 @@ async fn create_issue_source(
             ))
         }
         SourceWrite::OverLimit(error) => Err(error.into()),
+        SourceWrite::UnknownChannel => Err(unknown_channel()),
         SourceWrite::Missing => Err(ApiError::NotFound),
     }
 }
@@ -431,6 +442,7 @@ async fn update_issue_source(
             )))
         }
         SourceWrite::OverLimit(error) => Err(error.into()),
+        SourceWrite::UnknownChannel => Err(unknown_channel()),
         SourceWrite::Missing => Err(ApiError::NotFound),
     }
 }
@@ -573,6 +585,9 @@ async fn insert_checked(
     channels: &[Uuid],
     now: i64,
 ) -> Result<SourceWrite, MetaError> {
+    if !issue_links::channels_exist(conn, row.project_id, channels).await? {
+        return Ok(SourceWrite::UnknownChannel);
+    }
     if row.enabled {
         let active = store::count_enabled_sources(conn, org).await? + 1;
         if let Err(error) = source_limit::check(active, limit) {
@@ -611,14 +626,19 @@ async fn update_checked(
     if current != stored {
         return Err(MetaError::Conflict("issue source changed, retry"));
     }
-    if !stored.enabled && row.enabled {
+    if let Some(ids) = &channels
+        && !issue_links::channels_exist(conn, project, ids).await?
+    {
+        return Ok(SourceWrite::UnknownChannel);
+    }
+    if !current.enabled && row.enabled {
         let active = store::count_enabled_sources(conn, org).await? + 1;
         if let Err(error) = source_limit::check(active, limit) {
             return Ok(SourceWrite::OverLimit(error));
         }
     }
     let budget_changed =
-        stored.budget_usd != row.budget_usd || stored.budget_period != row.budget_period;
+        current.budget_usd != row.budget_usd || current.budget_period != row.budget_period;
     if budget_changed && row.paused_reason.as_deref() == Some(PAUSE_BUDGET) {
         row.paused_reason = None;
         row.paused_at = None;
@@ -631,7 +651,7 @@ async fn update_checked(
     if let Some(channels) = &channels {
         issue_links::set_source_channels(conn, row.id, channels).await?;
     }
-    let enabling = !stored.enabled && row.enabled;
+    let enabling = !current.enabled && row.enabled;
     let first_channels = channels
         .as_ref()
         .is_some_and(|ids| !ids.is_empty() && !had_channels);
@@ -1613,7 +1633,7 @@ async fn get_issue_occurrences(
 
     // The issue, then the merged issues with the most occurrences in the period (D-IC-9).
     let issues = example_issues(id, &merged, &by_name);
-    let scored = occurrence_scores(&ctx, project, &issues, EXAMPLES_PER_NAME).await?;
+    let scored = occurrence_scores(&ctx, project, &issues, EXAMPLES_PER_NAME, None).await?;
     let mut examples: Vec<IssueExample> = scored
         .iter()
         .filter_map(|(issue, score)| example_of(score, *issue))
@@ -3956,6 +3976,63 @@ mod tests {
         )
         .await;
         assert_eq!(channel_error(&unknown), "unknown channel");
+    }
+
+    #[tokio::test]
+    async fn a_channel_deleted_before_the_write_is_an_unknown_channel() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let org = seeded.project.org_id;
+        let now = app.state.clock.now_ns();
+        let gone = vec![Uuid::now_v7()];
+
+        // A create whose channel vanished after the check.
+        let row = created_row(
+            serde_json::from_value(source_body("Late")).unwrap(),
+            project,
+            seeded.user_id,
+            now,
+        );
+        let created = app
+            .state
+            .meta
+            .write(move |conn| {
+                let gone = gone.clone();
+                Box::pin(async move { insert_checked(conn, org, row, None, &gone, now).await })
+            })
+            .await
+            .unwrap();
+        assert!(matches!(created, SourceWrite::UnknownChannel));
+
+        // A PATCH whose channel vanished.
+        let id = id_of(&create_ok(&app, &seeded, &source_body("Existing")).await);
+        let stored = store::get_source(app.state.meta.reader(), project, id)
+            .await
+            .unwrap()
+            .unwrap();
+        let row = stored.clone();
+        let updated = app
+            .state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    update_checked(
+                        conn,
+                        project,
+                        org,
+                        stored,
+                        row,
+                        None,
+                        Some(vec![Uuid::now_v7()]),
+                        now,
+                    )
+                    .await
+                })
+            })
+            .await
+            .unwrap();
+        assert!(matches!(updated, SourceWrite::UnknownChannel));
     }
 
     #[tokio::test]

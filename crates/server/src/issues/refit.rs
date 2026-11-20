@@ -343,10 +343,13 @@ async fn join(
     let vectors = vectors_of(group);
     let (first, last) = trace_span(group, now);
     let centroid = centroid.to_vec();
+    let clock = state.clock.clone();
     state
         .meta
         .write(move |conn| {
             Box::pin(async move {
+                // The events' `at` is read in the write, never before it (D-IC-21).
+                let at = clock.now_ns();
                 let centroids = issues::source_centroids(conn, source_id).await?;
                 // A centroid of another length cannot be compared; the group is then named.
                 let nearest = cluster::nearest(
@@ -374,7 +377,7 @@ async fn join(
                 // The issue's centroid moves by the members this write joined, not by the whole
                 // group: a member that left `pending` meanwhile is not in it (D-IC-7).
                 let joined = centroid_of_assigned(&vectors, &assigned);
-                errors::join_issue(conn, &mut issue, (first, last), now).await?;
+                errors::join_issue(conn, &mut issue, (first, last), at).await?;
                 let members = issue.member_count;
                 let merged = match issue.centroid.as_deref() {
                     Some(old) if members < CENTROID_MEMBERS => {
@@ -618,10 +621,13 @@ async fn create_issue(
     };
     let ids: Vec<Uuid> = group.iter().map(|candidate| candidate.id).collect();
     let vectors = vectors_of(group);
+    let clock = state.clock.clone();
     state
         .meta
         .write(move |conn| {
             Box::pin(async move {
+                // The event's `at` is read in the write, never before it (D-IC-21).
+                let at = clock.now_ns();
                 if !issues::any_pending(conn, &ids).await? {
                     return Ok((issue_id, Vec::new()));
                 }
@@ -639,7 +645,7 @@ async fn create_issue(
                         actor_user_id: None,
                         from_value: None,
                         to_value: Some(IssueState::Open.as_str().to_owned()),
-                        at: now,
+                        at,
                     },
                 )
                 .await?;
@@ -1711,6 +1717,73 @@ mod tests {
         assert_eq!(members, 2);
         let expected = centroid_of(&[near(0, 0.0).as_slice(), near(0, 0.1).as_slice()]);
         assert_close(&centroid, &expected);
+    }
+
+    #[tokio::test]
+    async fn created_and_regressed_events_carry_the_clock_of_their_write() {
+        let (app, seeded) = llm_app().await;
+        let mock = MockLlm::start(Vec::new()).await;
+        let chat = connection(&app, &seeded, &mock).await;
+        let started = app.state.clock.now_ns();
+        let source = store_source(&app, llm_source(seeded.project.id, chat, started)).await;
+        let first = pending(&app, &source, 1, near(0, 0.0), started - MINUTE).await;
+        let second = pending(&app, &source, 2, near(0, 0.1), started - MINUTE).await;
+        let project = projects::project_by_id(app.state.meta.reader(), seeded.project.id)
+            .await
+            .expect("project read")
+            .expect("project");
+        // The refit read its time at `started`; naming took an hour.
+        let scope = Scope {
+            state: &app.state,
+            source: &source,
+            project: &project,
+            now: started,
+        };
+        let created_at = started + 60 * MINUTE;
+        app.state.clock.set(created_at);
+
+        let (issue, _) = create_issue(scope, &[&first, &second], "Fresh", None)
+            .await
+            .expect("create runs");
+
+        let event_at = |kind: &'static str| {
+            let pool = app.state.meta.reader().clone();
+            async move {
+                sqlx::query_scalar::<_, i64>("SELECT at FROM issue_events WHERE kind = ?")
+                    .bind(kind)
+                    .fetch_all(&pool)
+                    .await
+                    .expect("events read")
+            }
+        };
+        assert_eq!(event_at("created").await, [created_at]);
+
+        // A resolved issue regresses on a join, stamped with the clock of that write.
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    sqlx::query(
+                        "UPDATE issues SET state = 'resolved', resolved_at = 1 WHERE id = ?",
+                    )
+                    .bind(issue.to_string())
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(MetaError::from)?;
+                    Ok(())
+                })
+            })
+            .await
+            .expect("resolved");
+        let third = pending(&app, &source, 3, near(0, 0.05), started - MINUTE).await;
+        let fourth = pending(&app, &source, 4, near(0, 0.06), started - MINUTE).await;
+        let regressed_at = started + 120 * MINUTE;
+        app.state.clock.set(regressed_at);
+        join(scope, &near(0, 0.05), &[&third, &fourth])
+            .await
+            .expect("join runs")
+            .expect("the group joins the issue");
+        assert_eq!(event_at("regressed").await, [regressed_at]);
     }
 
     #[test]
