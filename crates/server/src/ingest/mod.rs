@@ -367,6 +367,7 @@ impl Ingest {
         let prices: Arc<PriceTable> = self.prices.for_project(project.org_id, project.id);
         let ctx = self.context(project, retention_cap, now_ns);
         let max_spans = self.max_spans_per_request;
+        let contexts = self.contexts.project(project.id);
         let work = tokio::task::spawn_blocking(move || -> Result<_, IngestError> {
             let spans = request
                 .resource_spans
@@ -378,12 +379,13 @@ impl Ingest {
             if spans > max_spans {
                 return Err(IngestError::TooManySpans);
             }
-            let mut normalized = normalize(
-                &request,
-                &ctx,
-                &prices,
-                &cetra_otel::AgentContexts::default(),
-            );
+            let empty = cetra_otel::AgentContexts::default();
+            let guard = contexts.as_ref().map(|lock| {
+                lock.read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            });
+            let agents = guard.as_deref().unwrap_or(&empty);
+            let mut normalized = normalize(&request, &ctx, &prices, agents);
             let rewritten = rewrite_reserved_environment(&mut normalized.spans);
             Ok((normalized, rewritten))
         });

@@ -1352,6 +1352,146 @@ mod tests {
         assert_eq!(no_key.status, StatusCode::UNAUTHORIZED);
     }
 
+    /// The M1 Claude Code export, with its placeholder session id replaced by `session`.
+    fn claude_export(session: &str) -> Vec<u8> {
+        let text = String::from_utf8(fixture_bytes("claude_code/bash-tool/input.json"))
+            .expect("the fixture is UTF-8");
+        text.replace("capture-volatile-2", session).into_bytes()
+    }
+
+    /// The claude-code context of session `s1`, as `cetra agents hook` posts it.
+    fn s1_context() -> Value {
+        serde_json::json!({
+            "agent": "claude-code",
+            "session_id": "s1",
+            "repository": "https://github.com/Acme/Widgets.git",
+            "branch": "feature/x",
+            "user": "Dev@Example.com",
+        })
+    }
+
+    /// Spans of the project whose stored row matches the SQL `predicate` on `raw_spans`.
+    async fn spans_where(app: &TestApp, project: ProjectId, predicate: &str) -> usize {
+        let query = raw_query(&app.state.storage, project).await;
+        let ctx = SessionContext::new();
+        ctx.register_table("raw_spans", query.spans)
+            .expect("spans register");
+        ctx.sql(&format!("SELECT * FROM raw_spans WHERE {predicate}"))
+            .await
+            .expect("sql")
+            .count()
+            .await
+            .expect("count")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stamped_after_a_context() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let posted = post_to(
+            &app,
+            "/v1/agent-context",
+            &seeded.ingest_key,
+            "application/json",
+            s1_context().to_string(),
+        )
+        .send()
+        .await;
+        assert_eq!(posted.status, StatusCode::NO_CONTENT);
+        let response = post_traces(
+            &app,
+            &seeded.ingest_key,
+            "application/json",
+            claude_export("s1"),
+        )
+        .send()
+        .await;
+        assert_eq!(response.status, StatusCode::OK);
+        let total = stored_spans(&app, project).await;
+        assert!(total > 0);
+        assert_eq!(
+            spans_where(
+                &app,
+                project,
+                "metadata['repository'] = 'github.com/acme/widgets' \
+                 AND metadata['branch'] = 'feature/x' AND user_id = 'dev@example.com'"
+            )
+            .await,
+            total
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn not_stamped_for_another_session() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        post_to(
+            &app,
+            "/v1/agent-context",
+            &seeded.ingest_key,
+            "application/json",
+            s1_context().to_string(),
+        )
+        .send()
+        .await;
+        let response = post_traces(
+            &app,
+            &seeded.ingest_key,
+            "application/json",
+            claude_export("s2"),
+        )
+        .send()
+        .await;
+        assert_eq!(response.status, StatusCode::OK);
+        assert!(stored_spans(&app, project).await > 0);
+        assert_eq!(
+            spans_where(&app, project, "metadata['branch'] IS NOT NULL").await,
+            0
+        );
+        assert_eq!(
+            spans_where(
+                &app,
+                project,
+                "metadata['repository'] = 'github.com/acme/widgets'"
+            )
+            .await,
+            0
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn not_stamped_before_the_context() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let response = post_traces(
+            &app,
+            &seeded.ingest_key,
+            "application/json",
+            claude_export("s1"),
+        )
+        .send()
+        .await;
+        assert_eq!(response.status, StatusCode::OK);
+        let posted = post_to(
+            &app,
+            "/v1/agent-context",
+            &seeded.ingest_key,
+            "application/json",
+            s1_context().to_string(),
+        )
+        .send()
+        .await;
+        assert_eq!(posted.status, StatusCode::NO_CONTENT);
+        assert!(stored_spans(&app, project).await > 0);
+        assert_eq!(
+            spans_where(&app, project, "metadata['branch'] IS NOT NULL").await,
+            0
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn logs_and_metrics_keep_the_body_cap() {
         let app =

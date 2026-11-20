@@ -1,7 +1,5 @@
 //! `agent_contexts` rows: the persisted copy of the session contexts a coding-agent hook
 //! reported (D-CA-9). Only the store in `agent_context` reads them back at startup.
-// Until the store (S2) calls these, only the tests do.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use cetra_core::ids::ProjectId;
 use sqlx::{SqliteConnection, SqlitePool};

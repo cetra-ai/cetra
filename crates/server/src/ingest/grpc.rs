@@ -602,6 +602,74 @@ mod tests {
             .expect("count")
     }
 
+    /// Spans of the project whose stored row matches the SQL `predicate` on `raw_spans`.
+    async fn spans_where(
+        app: &TestApp,
+        project: cetra_core::ids::ProjectId,
+        predicate: &str,
+    ) -> usize {
+        let query = raw_query(&app.state.storage, project).await;
+        let ctx = SessionContext::new();
+        ctx.register_table("raw_spans", query.spans)
+            .expect("spans register");
+        ctx.sql(&format!("SELECT * FROM raw_spans WHERE {predicate}"))
+            .await
+            .expect("sql")
+            .count()
+            .await
+            .expect("count")
+    }
+
+    /// The M1 Claude Code export, its placeholder session id replaced by `session`, decoded.
+    fn claude_traces(session: &str) -> ExportTraceServiceRequest {
+        let text = include_str!("../../../../fixtures/otlp/claude_code/bash-tool/input.json")
+            .replace("capture-volatile-2", session);
+        decode_json(text.as_bytes()).expect("fixture decodes")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stamp_on_grpc_too() {
+        let app = TestApp::new().await;
+        let seeded: Seeded = app.seed().await;
+        let posted = app
+            .request(axum::http::Method::POST, "/v1/agent-context")
+            .header("authorization", &format!("Bearer {}", seeded.ingest_key))
+            .header("content-type", "application/json")
+            .body(
+                serde_json::json!({
+                    "agent": "claude-code",
+                    "session_id": "s1",
+                    "repository": "https://github.com/Acme/Widgets.git",
+                    "branch": "feature/x",
+                    "user": "Dev@Example.com",
+                })
+                .to_string(),
+            )
+            .send()
+            .await;
+        assert_eq!(posted.status, axum::http::StatusCode::NO_CONTENT);
+        send(
+            &app.state,
+            &[bearer(&seeded.ingest_key)],
+            &claude_traces("s1"),
+        )
+        .await
+        .expect("exported");
+        let project = seeded.project.id;
+        let total = stored_spans(&app, project).await;
+        assert!(total > 0);
+        assert_eq!(
+            spans_where(
+                &app,
+                project,
+                "metadata['repository'] = 'github.com/acme/widgets' \
+                 AND metadata['branch'] = 'feature/x' AND user_id = 'dev@example.com'"
+            )
+            .await,
+            total
+        );
+    }
+
     fn assert_status(status: &tonic::Status, code: Code, message: &str) {
         assert_eq!(status.code(), code, "{status:?}");
         assert_eq!(status.message(), message);
