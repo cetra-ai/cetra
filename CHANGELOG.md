@@ -125,6 +125,9 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ### Changed
 
+- Traces, Spans, Sessions and Users come back from cache within 15 minutes, with the same rows and
+  scroll position; newer rows wait behind an "N new … ↑" pill, and a new filter or range keeps the
+  previous rows dimmed until the answer arrives.
 - The self-hosting guides moved from `docs/self-hosting/` to cetra.sh/docs/self-hosting/.
 - The SDK guides moved from the package READMEs to cetra.sh/docs/reference/python/ and
   cetra.sh/docs/reference/typescript/; the READMEs keep install and the quick start.
