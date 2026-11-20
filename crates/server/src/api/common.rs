@@ -376,7 +376,7 @@ pub struct PageParams {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct ExclusionParams {
-    /// Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false.
+    /// Include traces from the reserved environments (`cetra-eval`, `cetra-playground`, `cetra-assistant`). Default false.
     #[serde(default)]
     pub include_eval: bool,
     /// Include experiment traces. Default false.

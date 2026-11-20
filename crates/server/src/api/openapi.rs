@@ -4252,7 +4252,7 @@ fn dashboard_paths(paths: PathsBuilder) -> PathsBuilder {
         .build();
     let query = operation("query_widget", "dashboards", "Get one widget's data")
         .description(Some(
-            "Answers one widget query over `[from, to)`: a series (one value per bucket) or a total (one value over the range, with `compare` also the previous range). Spec 05 § Dashboard queries. The dashboard's `filter` is a traces expression, and the default exclusions apply: evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are left out unless `include_eval` or `include_experiments` is set. A read: a read-only personal access token and a `read` key may call it. Results are cached for 10 seconds per project and body.",
+            "Answers one widget query over `[from, to)`: a series (one value per bucket) or a total (one value over the range, with `compare` also the previous range). Spec 05 § Dashboard queries. The dashboard's `filter` is a traces expression, and the default exclusions apply: evaluation, playground and assistant traces (`environment = cetra-eval`, `environment = cetra-playground` or `environment = cetra-assistant`) and experiment traces are left out unless `include_eval` or `include_experiments` is set. A read: a read-only personal access token and a `read` key may call it. Results are cached for 10 seconds per project and body.",
         ))
         .parameters(Some(vec![project_param()]))
         .request_body(Some(json_body("WidgetQueryRequest")))
@@ -4645,10 +4645,12 @@ fn media_paths(paths: PathsBuilder) -> PathsBuilder {
 }
 
 const EXCLUSIONS: &str = concat!(
-    "Evaluation and playground traces (`environment = ",
+    "Evaluation, playground and assistant traces (`environment = ",
     cetra_core::cetra_name!("-eval"),
-    "` or `environment = ",
+    "`, `environment = ",
     cetra_core::cetra_name!("-playground"),
+    "` or `environment = ",
+    cetra_core::cetra_name!("-assistant"),
     "`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set."
 );
 

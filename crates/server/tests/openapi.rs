@@ -1560,7 +1560,7 @@ fn assert_exclusions(document: &Value) {
         "list_users",
         "stream_traces",
     ];
-    const TEXT: &str = "Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.";
+    const TEXT: &str = "Evaluation, playground and assistant traces (`environment = cetra-eval`, `environment = cetra-playground` or `environment = cetra-assistant`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.";
     let mut found = BTreeSet::new();
     let Some(paths) = document["paths"].as_object() else {
         panic!("paths");
