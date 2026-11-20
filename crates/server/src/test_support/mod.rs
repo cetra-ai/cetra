@@ -362,6 +362,9 @@ impl TestApp {
         .await
         .expect("stored org tokens load");
         let eval = crate::eval::EvalQueue::new(config.eval.workers);
+        let issue_workers = Arc::new(tokio::sync::Semaphore::new(
+            usize::try_from(config.issues.workers).unwrap_or(usize::MAX),
+        ));
         let org_sso = crate::ee::org_sso::OrgSso::new(
             cetra_eval::EgressPolicy {
                 allow_private_network: config.security.allow_private_network_egress,
@@ -392,6 +395,8 @@ impl TestApp {
             live: crate::live::LiveBus::new(crate::live::StreamTiming::TEST),
             widget_cache: crate::routes::dashboards::WidgetCache::default(),
             issue_score_rules: crate::issues::triggers::ScoreRules::default(),
+            issue_workers,
+            issue_wake: tokio::sync::Notify::new(),
             usage: crate::usage::Usage::default(),
             alert_email_count: crate::alerts::quota::DailyEmailCount::default(),
             deletions: crate::deletion::Deletions::new(),

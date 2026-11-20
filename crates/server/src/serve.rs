@@ -461,6 +461,9 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
     }
     let storage = Arc::new(storage);
     let eval = crate::eval::EvalQueue::new(config.eval.workers);
+    let issue_workers = Arc::new(tokio::sync::Semaphore::new(
+        usize::try_from(config.issues.workers).unwrap_or(usize::MAX),
+    ));
     let limits = Limits::new(&config.demo);
     let state = AppState::new(AppInner {
         config,
@@ -498,6 +501,8 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         pending: crate::eval::pending::PendingTraces::default(),
         telemetry,
         issue_score_rules: crate::issues::triggers::ScoreRules::default(),
+        issue_workers,
+        issue_wake: tokio::sync::Notify::new(),
     });
     crate::ee::sso_enforcement::warn_if_unlicensed(&state);
     if let Err(error) = crate::bootstrap::prepare(&state).await {

@@ -5,3 +5,4 @@ pub(crate) mod source_limit;
 pub(crate) mod sources;
 pub(crate) mod topics;
 pub(crate) mod triggers;
+pub(crate) mod worker;

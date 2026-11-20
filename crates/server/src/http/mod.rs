@@ -105,11 +105,20 @@ pub(crate) struct AppInner {
     pub(crate) telemetry: crate::telemetry::Telemetry,
     /// The `score` and `feedback` issue sources' rules, read by each score write (D-IC-4).
     pub(crate) issue_score_rules: crate::issues::triggers::ScoreRules,
+    /// The IC candidate worker slots (`issues.workers`, D-IC-12).
+    pub(crate) issue_workers: Arc<tokio::sync::Semaphore>,
+    /// Wakes the IC candidate loop: a candidate was queued, or a worker finished.
+    pub(crate) issue_wake: tokio::sync::Notify,
 }
 
 impl AppState {
     pub(crate) fn new(inner: AppInner) -> Self {
         Self(Arc::new(inner))
+    }
+
+    /// Wakes the IC candidate loop (D-IC-12).
+    pub(crate) fn issues_wake(&self) {
+        self.issue_wake.notify_one();
     }
 
     /// Drops the cached answers of `project` (D-M-11).
