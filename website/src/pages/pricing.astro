@@ -50,7 +50,7 @@ import { CONTACT_EMAIL } from "../marketing/site";
     <div class="cards">
       <Card title={SELF_HOSTED.name}>
         <p class="price"><span class="amount">${SELF_HOSTED.priceYearly}</span></p>
-        <ul class="points">
+        <ul class="points bullets">
           {SELF_HOSTED.features.map((feature) => <li>{feature}</li>)}
         </ul>
         <div class="actions">
@@ -61,7 +61,7 @@ import { CONTACT_EMAIL } from "../marketing/site";
         <p class="price">
           <span class="amount">${SELF_HOSTED.licence.priceYearly.toLocaleString("en-US")}</span> / year
         </p>
-        <ul class="points">
+        <ul class="points bullets">
           {SELF_HOSTED.licence.features.map((feature) => <li>{feature}</li>)}
         </ul>
         <p class="muted licence-note">Billed yearly, per licence. A 30-day trial is available from sales.</p>
@@ -94,25 +94,7 @@ import { CONTACT_EMAIL } from "../marketing/site";
     line-height: var(--leading-tight);
   }
   .points {
-    list-style: none;
-    padding: 0;
     margin: var(--space-5) 0 0;
-    display: grid;
-    gap: var(--space-2);
-  }
-  .points li {
-    position: relative;
-    padding-left: var(--space-4);
-  }
-  .points li::before {
-    content: "";
-    position: absolute;
-    left: 0;
-    top: 0.55em;
-    width: 6px;
-    height: 6px;
-    background: var(--accent);
-    border-radius: 50%;
   }
   .licence-note {
     margin-top: var(--space-4);

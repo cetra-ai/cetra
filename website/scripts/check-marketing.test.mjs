@@ -152,7 +152,26 @@ describe("checkPage", () => {
 
   it("skip link target #main must exist", () => {
     const body = '<h1>A</h1><a href="#main">Skip to content</a>';
-    assert.deepEqual(checkPage("/x/", page({ body }), noindex), ["skip link target #main missing"]);
+    assert.deepEqual(checkPage("/x/", page({ body }), noindex), ["missing id target: main"]);
+  });
+
+  it("aria-labelledby with a missing target", () => {
+    const body = '<h1>A</h1><div aria-labelledby="nope"></div>';
+    assert.deepEqual(checkPage("/x/", page({ body }), noindex), ["missing id target: nope"]);
+  });
+
+  it("aria-controls with a missing target", () => {
+    const body =
+      '<h1>A</h1><button type="button" aria-label="Open" aria-controls="panel"></button>';
+    assert.deepEqual(checkPage("/x/", page({ body }), noindex), ["missing id target: panel"]);
+  });
+
+  it("aria-labelledby and aria-controls with existing targets pass", () => {
+    const body =
+      '<h1>A</h1><h2 id="t">T</h2><section aria-labelledby="t"></section>' +
+      '<button type="button" aria-label="Open" aria-controls="p1 p2"></button>' +
+      '<div id="p1"></div><div id="p2"></div>';
+    assert.deepEqual(checkPage("/x/", page({ body }), noindex), []);
   });
 
   it("skip link with its target present", () => {

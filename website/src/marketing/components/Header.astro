@@ -93,6 +93,7 @@ const shown = stars !== null && stars >= MIN_STARS_SHOWN ? stars : null;
   }
   .actions {
     display: flex;
+    flex-wrap: nowrap;
     gap: var(--space-3);
     align-items: center;
   }
@@ -193,7 +194,11 @@ const shown = stars !== null && stars >= MIN_STARS_SHOWN ? stars : null;
     const close = () => menu.removeAttribute("open");
     menu.querySelectorAll("a").forEach((link) => link.addEventListener("click", close));
     document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") close();
+      if (event.key !== "Escape") return;
+      // Keep focus in the menu: if it was inside, return it to the summary that opens the menu.
+      const focusWasInside = menu.contains(document.activeElement);
+      close();
+      if (focusWasInside) menu.querySelector<HTMLElement>("summary")?.focus();
     });
     document.addEventListener("click", (event) => {
       if (!menu.contains(event.target as Node)) close();

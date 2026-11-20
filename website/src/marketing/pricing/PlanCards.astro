@@ -19,7 +19,7 @@ import { CLOUD, CONTACT_EMAIL } from "../site";
           <div class="actions">
             <Button href={CLOUD.signup} external>{plan.cta}</Button>
           </div>
-          <ul class="points">
+          <ul class="points bullets">
             <li>{formatUnits(plan.includedUnits)} spans and scores a month</li>
             <li>{plan.overage ? `Then $${OVERAGE_PER_100K} per 100,000` : "Hard limit, no overage"}</li>
             <li>{plan.dataAccess} of history</li>
@@ -38,7 +38,7 @@ import { CLOUD, CONTACT_EMAIL } from "../site";
     <p class="price">
       <span class="amount">${TEAMS_ADDON.priceMonthly}</span> / month on top of {TEAMS_ADDON.requires}
     </p>
-    <ul class="points">
+    <ul class="points bullets">
       {TEAMS_ADDON.features.map((feature) => <li>{feature}</li>)}
     </ul>
     <div class="actions">
@@ -47,7 +47,7 @@ import { CLOUD, CONTACT_EMAIL } from "../site";
   </Card>
   <Card title={ENTERPRISE.name}>
     <p class="price"><span class="amount">Custom</span></p>
-    <ul class="points">
+    <ul class="points bullets">
       {ENTERPRISE.features.map((feature) => <li>{feature}</li>)}
     </ul>
     <div class="actions">
@@ -101,25 +101,7 @@ import { CLOUD, CONTACT_EMAIL } from "../site";
     margin-top: var(--space-5);
   }
   .points {
-    list-style: none;
-    padding: 0;
     margin: var(--space-5) 0 0;
-    display: grid;
-    gap: var(--space-2);
-  }
-  .points li {
-    position: relative;
-    padding-left: var(--space-4);
-  }
-  .points li::before {
-    content: "";
-    position: absolute;
-    left: 0;
-    top: 0.55em;
-    width: 6px;
-    height: 6px;
-    background: var(--accent);
-    border-radius: 50%;
   }
   .note {
     font-size: var(--text-sm);
