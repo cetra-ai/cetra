@@ -926,6 +926,7 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "bytesize",
+ "cetra-capture",
  "cetra-core",
  "cetra-eval",
  "cetra-otel",

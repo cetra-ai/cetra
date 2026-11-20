@@ -545,6 +545,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "post_evaluator_run",
     ),
     (
+        "post",
+        "/api/v1/projects/{project}/playground/runs",
+        "post_playground_run",
+    ),
+    (
         "get",
         "/api/v1/projects/{project}/online-rules/{id}/backfills",
         "list_backfills",
@@ -912,6 +917,7 @@ const TAGS: &[&str] = &[
     "users",
     "scores",
     "evaluation",
+    "playground",
     "score_definitions",
     "datasets",
     "prompts",
@@ -1204,6 +1210,9 @@ fn document_lint() {
             || *id == "delete_prompt_label"
         {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
+        } else if *id == "post_playground_run" {
+            // The stream answers 503 when a dependency is down; the test collects 4xx codes only.
+            expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
         } else if *id == "post_evaluator_test" {
             // The test only collects 4xx codes; the operation also declares 503.
             expected_errors.extend(["400", "401", "403", "404", "429"]);

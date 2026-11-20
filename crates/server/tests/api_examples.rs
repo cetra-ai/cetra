@@ -50,6 +50,7 @@ use cetra_server::api::online_rules::{
 use cetra_server::api::openapi::openapi;
 use cetra_server::api::org_sso::OrgSso;
 use cetra_server::api::payload::Payload;
+use cetra_server::api::playground::PlaygroundRunRequest;
 use cetra_server::api::prompts::{
     CreatePromptRequest, CreateVersionRequest, Prompt, PromptLabelEvent, PromptMetrics,
     PromptSettings, PromptVersion, SetLabelRequest,
@@ -485,6 +486,7 @@ fn request_examples_match_their_types_and_the_openapi_document() {
     roundtrip::<FromTraceRequest>("requests/dataset-from-trace.json");
     roundtrip::<ExperimentResultsRequest>("requests/experiment-results.json");
     roundtrip::<CreateOnlineRuleRequest>("requests/online-rule-create.json");
+    roundtrip::<PlaygroundRunRequest>("requests/playground-run.json");
     // `ModelPriceInput` has no `Serialize`, so it is only deserialized.
     let price_text = fs::read_to_string(api_dir().join("requests/model-price-create.json"))
         .unwrap_or_else(|error| panic!("{error}"));
@@ -533,6 +535,7 @@ fn request_examples_match_their_types_and_the_openapi_document() {
         ("post_evaluator", "requests/evaluator-create.json"),
         ("post_evaluator_test", "requests/evaluator-test.json"),
         ("post_evaluator_run", "requests/evaluator-run.json"),
+        ("post_playground_run", "requests/playground-run.json"),
         ("post_online_rule", "requests/online-rule-create.json"),
         ("patch_online_rule", "requests/online-rule-update.json"),
         (

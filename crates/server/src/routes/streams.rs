@@ -504,7 +504,7 @@ fn search_window(batch: &Pending, ids: &[TraceId]) -> Option<TimeWindow> {
 
 /// Sends `event` to the client. `false` when the client is gone, or has not made room for it
 /// within `timeout` (G review m-1): the stream then ends.
-async fn send(tx: &mpsc::Sender<Event>, event: Event, timeout: Duration) -> bool {
+pub(crate) async fn send(tx: &mpsc::Sender<Event>, event: Event, timeout: Duration) -> bool {
     matches!(
         tokio::time::timeout(timeout, tx.send(event)).await,
         Ok(Ok(()))
@@ -536,7 +536,7 @@ fn has_last_event_id(headers: &HeaderMap) -> bool {
 }
 
 /// The response body of a stream task. `X-Accel-Buffering: no` stops proxies buffering it.
-fn sse_response(rx: mpsc::Receiver<Event>) -> Response {
+pub(crate) fn sse_response(rx: mpsc::Receiver<Event>) -> Response {
     let body = futures::stream::unfold(rx, |mut rx| async move {
         rx.recv()
             .await
@@ -550,12 +550,12 @@ fn sse_response(rx: mpsc::Receiver<Event>) -> Response {
 }
 
 /// An event whose data is the JSON of `value`, or `None` when it cannot be encoded.
-fn json_event(name: &str, id: u64, value: &impl Serialize) -> Option<Event> {
+pub(crate) fn json_event(name: &str, id: u64, value: &impl Serialize) -> Option<Event> {
     let data = serde_json::to_string(value).ok()?;
     Some(Event::default().event(name).id(id.to_string()).data(data))
 }
 
-fn ping_event() -> Event {
+pub(crate) fn ping_event() -> Event {
     Event::default().event("ping").data("{}")
 }
 

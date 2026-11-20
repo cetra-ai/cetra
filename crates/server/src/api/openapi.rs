@@ -112,6 +112,10 @@ use super::org_sso::{
     AddOrgSsoDomain, DomainStatus, JitRole, OrgSso, OrgSsoDomain, OrgSsoProvider, PatchOrgSso,
     PutOrgSsoProvider, SsoDiscoverRequest, SsoDiscovery,
 };
+use super::playground::{
+    PlaygroundParams, PlaygroundResponseFormat, PlaygroundRunRequest, PlaygroundSource,
+    PlaygroundTool,
+};
 use super::prompts::{
     CreatePromptRequest, CreateVersionRequest, Prompt, PromptKind, PromptLabel, PromptLabelEvent,
     PromptListParams, PromptMetrics, PromptMetricsParams, PromptScoreMean, PromptSettings,
@@ -199,6 +203,11 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<VerifyEmailRequest>();
     set.insert::<ResendVerificationRequest>();
     set.insert::<UpdateMeRequest>();
+    set.insert::<PlaygroundRunRequest>();
+    set.insert::<PlaygroundParams>();
+    set.insert::<PlaygroundTool>();
+    set.insert::<PlaygroundResponseFormat>();
+    set.insert::<PlaygroundSource>();
     set.insert::<ChangePasswordRequest>();
     set.insert::<Me>();
     set.insert::<User>();
@@ -569,6 +578,7 @@ pub fn openapi() -> OpenApi {
                 "Named score shapes that score writes and evaluators must fit.",
             ),
             tag("datasets", "Versioned datasets and their items."),
+            tag("playground", "Playground runs: one model run streamed over SSE, traced in cetra-playground (not billed)."),
             tag(
                 "prompts",
                 "The prompt registry: versioned prompts with labels (D-V-2).",
@@ -905,6 +915,7 @@ fn paths() -> Paths {
     let paths = online_rule_paths(paths);
     let paths = eval_job_paths(paths);
     let paths = backfill_paths(paths);
+    let paths = playground_paths(paths);
     let paths = score_definition_paths(paths);
     let paths = dataset_paths(paths);
     let paths = prompt_paths(paths);
@@ -2888,6 +2899,29 @@ fn eval_job_paths(paths: PathsBuilder) -> PathsBuilder {
             format!("{PROJECT}/evaluators/{{id}}/run"),
             PathItem::new(HttpMethod::Post, run),
         )
+}
+
+fn playground_paths(paths: PathsBuilder) -> PathsBuilder {
+    let run = operation(
+        "post_playground_run",
+        "playground",
+        "Stream a playground run",
+    )
+    .description(Some(
+        "Members and above, through a session or a read-write personal access token. API keys cannot call it. Answers `text/event-stream`: `start` `{trace_id}`, then `text` `{delta}` and `tool_call` `{id, name, arguments}` events, then one last `done` `{finish_reason, usage, cost_usd, latency_ms, ttft_ms, output}` or `error` `{class, message}` (class `retryable`, `pause` or `permanent`). A `ping` comes every 15 seconds. A response format is answered in `text` events. Tools are never run. A tool named `auto`, `none` or `required` cannot be forced by name through `tool_choice`. The run is traced into the reserved environment `cetra-playground`, which is not billed. The connection is used whatever its status, and a failure never marks it failing.",
+    ))
+    .parameters(Some(vec![project_param()]))
+    .request_body(Some(json_body("PlaygroundRunRequest")))
+    .responses(responses(
+        "200",
+        sse("The run's events, as `text/event-stream`."),
+        &[400, 401, 403, 404, 413, 429, 503],
+    ))
+    .build();
+    paths.path(
+        format!("{PROJECT}/playground/runs"),
+        PathItem::new(HttpMethod::Post, run),
+    )
 }
 
 fn backfill_paths(paths: PathsBuilder) -> PathsBuilder {

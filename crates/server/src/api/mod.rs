@@ -28,6 +28,7 @@ pub mod online_rules;
 pub mod openapi;
 pub mod org_sso;
 pub mod payload;
+pub mod playground;
 pub mod prompts;
 pub mod saved_views;
 pub mod schema;
