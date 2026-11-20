@@ -35,6 +35,14 @@ const { title, href, tone = "surface" } = Astro.props;
   h3 {
     font-size: var(--text-lg);
   }
+  /* The whole card is the link: the title reads as a heading, the card shows the hover. */
+  h3 a {
+    color: var(--fg);
+    text-decoration: none;
+  }
+  .card:has(a):hover h3 a {
+    color: var(--accent);
+  }
   h3 a::after {
     content: "";
     position: absolute;
