@@ -38,8 +38,9 @@ pub use experiments::{
     experiment_traces,
 };
 pub use facets::{
-    FacetData, FacetKind, FacetRequest, FacetValue, FacetView, HISTOGRAM_BUCKETS, Histogram,
-    HistogramBucket, MAX_FACET_KEY, MAX_FACET_LIMIT, MAX_FACET_QUERY, facet,
+    FacetData, FacetField, FacetKind, FacetValue, FacetView, FacetsRequest, HISTOGRAM_BUCKETS,
+    Histogram, HistogramBucket, MAX_FACET_FIELDS, MAX_FACET_KEY, MAX_FACET_LIMIT, MAX_FACET_QUERY,
+    facets,
 };
 pub use prompts::{
     MAX_PROMPT_VERSIONS, PromptMetricsRequest, PromptScoreMean, PromptVersionMetrics,
