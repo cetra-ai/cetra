@@ -363,28 +363,31 @@ fn settle(
     }
 }
 
-/// Ends one batch's sweep: the error issues first (D-IC-2), then the rules. A failed error read
-/// skips that batch's error issues and never stops the rules: the rule enqueue is not idempotent
-/// (it spends the hourly cap), so the error sweep is not retried on its own. The batch is retried
-/// only when [`rule_batch`] fails, and a retry re-runs the idempotent error sweep. The rules' reads,
-/// admission and enqueue come after: see [`read_candidates`]. A project with no rules or no error
-/// sources skips its step.
+/// Ends one batch's sweep: the error issues first (D-IC-2), then the rules. A project with no
+/// rules retries the batch when its error sweep fails: nothing else ran, and the error sweep is
+/// idempotent. With rules, a failed error sweep skips that batch's error issues and never stops
+/// the rules: the rule enqueue is not idempotent (it spends the hourly cap), so the error sweep is
+/// not retried on its own. The batch is then retried only when [`rule_batch`] fails, and a retry
+/// re-runs the idempotent error sweep. The rules' reads, admission and enqueue come after: see
+/// [`read_candidates`].
 async fn sweep_batch(
     ctx: &SweepCtx<'_>,
     around: i64,
     batch: &[Completed],
     report: &mut SweepReport,
 ) -> Result<(), ()> {
-    if !ctx.sources.is_empty()
-        && crate::issues::errors::sweep_batch(ctx, around, batch)
-            .await
-            .is_err()
-    {
-        tracing::warn!(
-            project_id = %ctx.project,
-            batch = batch.len(),
-            "error issues of a batch were not swept; its online rules go on"
-        );
+    if !ctx.sources.is_empty() {
+        let swept = crate::issues::errors::sweep_batch(ctx, around, batch).await;
+        if ctx.rules.is_empty() {
+            return swept;
+        }
+        if swept.is_err() {
+            tracing::warn!(
+                project_id = %ctx.project,
+                batch = batch.len(),
+                "error issues of a batch were not swept; its online rules go on"
+            );
+        }
     }
     if ctx.rules.is_empty() {
         return Ok(());
@@ -2543,7 +2546,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn a_failed_error_read_skips_the_batch_without_rules() {
+        async fn a_failed_error_read_retries_the_batch_without_rules() {
             let app = TestApp::new().await;
             let seeded = app.seed().await;
             let project = seeded.project.id;
@@ -2564,9 +2567,14 @@ mod tests {
             let now = app.state.clock.now_ns();
             faults::fail_next_read(RunError::Timeout);
             let report = sweep_once(&app.state, now).await.unwrap();
-            // The batch is not retried: its error issues are skipped, and the trace is finished.
-            assert_eq!(report.failed_batches, 0);
+            // No rules ran, so the batch is retried.
+            assert_eq!(report.failed_batches, 1);
             assert!(issues_of(&app).await.is_empty());
+            assert_eq!(app.state.pending.len(), 1, "the trace stays pending");
+
+            let report = sweep_once(&app.state, now).await.unwrap();
+            assert_eq!(report.failed_batches, 0);
+            assert_eq!(issues_of(&app).await.len(), 1);
             assert_eq!(app.state.pending.len(), 0);
         }
 

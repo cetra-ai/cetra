@@ -114,7 +114,7 @@ Error spans are read through track I's completion sweeper (D-I-8, D-I-9):
 - the tracked set grows to include projects with an enabled error source;
 - a new storage read, `error_spans`, takes the same batch, filter and exclusions as `span_refresh`. It returns, for at most 50 error spans per trace (earliest first): `trace_id`, `span_id`, `start_time`, `service_name`, `name`, `status_message`, and the type and message of the last `exception` event.
 - `span_refresh` returns ids only, which is why the new read exists. It ships in M1.
-- Within a batch the error sweep runs before the online rules. A failed error read skips that batch's error issues and never stops the online rules: the rule enqueue spends the hourly cap and is not idempotent, so the batch is retried only when the rules fail, and a retry re-runs the idempotent error sweep.
+- Within a batch the error sweep runs before the online rules. In a project with no online rules, a failed error sweep retries the batch. Otherwise it skips that batch's error issues and never stops the online rules: the rule enqueue spends the hourly cap and is not idempotent, so the batch is retried only when the rules fail, and a retry re-runs the idempotent error sweep.
 
 The normalizer removes the common personal data shapes, but a message can still hold a name or another identifier in plain words. Titles and reasons of error issues are payload-derived data (§ Logs and privacy), never logged.
 
