@@ -1188,9 +1188,17 @@ async fn playground_run_end_to_end() {
     let trace_id = playground["trace_id"].as_str().unwrap().to_owned();
     let detail = server
         .api
-        .get(&format!("{project}/traces/{trace_id}?include_eval=true"))
+        .get(&format!("{project}/traces/{trace_id}"))
         .await;
-    assert!(detail.to_string().contains("for cetra."), "{detail}");
+    let span_id = detail["spans"][0]["span"]["span_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let span = server
+        .api
+        .get(&format!("{project}/traces/{trace_id}/spans/{span_id}"))
+        .await;
+    assert!(span.to_string().contains("for cetra."), "{span}");
 
     let default = server.api.get(&format!("{project}/traces")).await;
     assert!(

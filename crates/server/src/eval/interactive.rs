@@ -47,7 +47,7 @@ pub(crate) async fn acquire(
     );
     let slot = match timeout_at(deadline, Arc::clone(limit.slots()).acquire_owned()).await {
         Ok(Ok(permit)) => permit,
-        Ok(Err(_closed)) | Err(_elapsed) => return Err(Busy),
+        Ok(Err(_)) | Err(_) => return Err(Busy),
     };
     loop {
         if limit.take_token(state.clock.now_ns()) {

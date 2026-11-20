@@ -33,7 +33,9 @@ use tokio::time::{Instant, MissedTickBehavior, interval_at};
 use uuid::Uuid;
 
 use crate::api::common::{FieldError, TextPosition};
-use crate::api::playground::{PlaygroundParams, PlaygroundRunRequest, PlaygroundSource, PlaygroundTool};
+use crate::api::playground::{
+    PlaygroundParams, PlaygroundRunRequest, PlaygroundSource, PlaygroundTool,
+};
 use crate::auth::limits::PlaygroundGuard;
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::ProjectPerm;
@@ -130,12 +132,7 @@ async fn run_playground(
         body.connection_id,
     )
     .await?
-    .ok_or_else(|| {
-        field_error(
-            "connection_id",
-            "connection not found in this organization",
-        )
-    })?;
+    .ok_or_else(|| field_error("connection_id", "connection not found in this organization"))?;
     // D-V-36: the connection is used whatever its status; it is never marked failing here.
     let connection = state
         .connections
@@ -287,8 +284,7 @@ async fn run_task(task: RunTask) {
 
     let elapsed = started.elapsed();
     let latency_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
-    let ended_ns =
-        started_ns.saturating_add(i64::try_from(elapsed.as_nanos()).unwrap_or(i64::MAX));
+    let ended_ns = started_ns.saturating_add(i64::try_from(elapsed.as_nanos()).unwrap_or(i64::MAX));
     let error_text = if run.cancelled {
         Some(CANCELLED.to_owned())
     } else {
@@ -590,9 +586,7 @@ fn tool_choice(choice: &str, tools: &[PlaygroundTool]) -> Result<ToolChoice, Api
         "auto" => Ok(ToolChoice::Auto),
         "none" => Ok(ToolChoice::None),
         "required" => Ok(ToolChoice::Required),
-        name if tools.iter().any(|tool| tool.name == name) => {
-            Ok(ToolChoice::Tool(name.to_owned()))
-        }
+        name if tools.iter().any(|tool| tool.name == name) => Ok(ToolChoice::Tool(name.to_owned())),
         _ => Err(field_error(
             "tool_choice",
             "must be auto, none, required or the name of a tool",
@@ -622,9 +616,9 @@ fn check_reserved(body: &PlaygroundRunRequest) -> Result<(), ApiError> {
 fn check_model(model: &str) -> Result<(), ApiError> {
     let valid = !model.is_empty()
         && model.len() <= 256
-        && !model
-            .chars()
-            .any(|ch| ch.is_whitespace() || ch.is_control() || matches!(ch, '/' | '\\' | '%' | '?' | '#'));
+        && !model.chars().any(|ch| {
+            ch.is_whitespace() || ch.is_control() || matches!(ch, '/' | '\\' | '%' | '?' | '#')
+        });
     if valid {
         Ok(())
     } else {
@@ -820,7 +814,7 @@ mod tests {
     }
 
     /// A turn whose assistant message holds `calls`.
-    fn calls_turn(calls: Value) -> Turn {
+    fn calls_turn(calls: &Value) -> Turn {
         serde_json::from_value(json!({
             "api": "openai.chat",
             "model": "gpt-test",
@@ -922,16 +916,8 @@ mod tests {
     }
 
     /// The trace's detail, or `None` when it is not there.
-    async fn trace_detail(
-        app: &TestApp,
-        seeded: &Seeded,
-        trace_id: &str,
-        include_eval: bool,
-    ) -> Option<Value> {
-        let path = format!(
-            "/api/v1/projects/{}/traces/{trace_id}?include_eval={include_eval}",
-            seeded.project.id
-        );
+    async fn trace_detail(app: &TestApp, seeded: &Seeded, trace_id: &str) -> Option<Value> {
+        let path = format!("/api/v1/projects/{}/traces/{trace_id}", seeded.project.id);
         let response = app
             .request(Method::GET, &path)
             .header(header::COOKIE.as_str(), &seeded.cookie)
@@ -948,22 +934,38 @@ mod tests {
         let stream = stream_run(&app, &seeded, &run_body(connection)).await;
         assert_eq!(stream.status.as_u16(), 200);
         let events = read_events(stream).await;
-        assert_eq!(
-            names(&events),
-            ["start", "text", "text", "text", "done"]
-        );
+        assert_eq!(names(&events), ["start", "text", "text", "text", "done"]);
         assert_eq!(text_deltas(&events), "Hello there, friend.");
         let done = &events[4].1;
         assert_eq!(done["usage"]["input"], 10);
-        assert_eq!(done["output"]["parts"][0]["content"], "Hello there, friend.");
+        assert_eq!(
+            done["output"]["parts"][0]["content"],
+            "Hello there, friend."
+        );
 
         // One trace in the reserved environment, with the rendered system message; the default
         // list leaves it out.
-        let trace_id = events[0].1["trace_id"].as_str().expect("trace id").to_owned();
-        let detail = trace_detail(&app, &seeded, &trace_id, true)
+        let trace_id = events[0].1["trace_id"]
+            .as_str()
+            .expect("trace id")
+            .to_owned();
+        let detail = trace_detail(&app, &seeded, &trace_id)
             .await
             .expect("the playground trace");
-        assert!(detail.to_string().contains("for cetra."));
+        let span_id = detail["spans"][0]["span"]["span_id"]
+            .as_str()
+            .expect("span id");
+        let span_path = format!(
+            "/api/v1/projects/{}/traces/{trace_id}/spans/{span_id}",
+            seeded.project.id
+        );
+        let span = app
+            .request(Method::GET, &span_path)
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(span.status, 200, "{}", text(&span));
+        assert!(text(&span).contains("for cetra."));
         let with_eval = list_traces(&app, &seeded, "include_eval=true").await;
         let playground = with_eval["data"]
             .as_array()
@@ -1056,7 +1058,10 @@ mod tests {
         let read_only = app.personal_token(seeded.user_id, false).await;
         let refused = app
             .request(Method::POST, &path)
-            .header(header::AUTHORIZATION.as_str(), &format!("Bearer {read_only}"))
+            .header(
+                header::AUTHORIZATION.as_str(),
+                &format!("Bearer {read_only}"),
+            )
             .json(&body)
             .send()
             .await;
@@ -1065,7 +1070,10 @@ mod tests {
         let read_write = app.personal_token(seeded.user_id, true).await;
         let stream = app
             .request(Method::POST, &path)
-            .header(header::AUTHORIZATION.as_str(), &format!("Bearer {read_write}"))
+            .header(
+                header::AUTHORIZATION.as_str(),
+                &format!("Bearer {read_write}"),
+            )
             .json(&body)
             .send_stream()
             .await;
@@ -1133,7 +1141,7 @@ mod tests {
         drop(stream);
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         loop {
-            if let Some(detail) = trace_detail(&app, &seeded, &trace_id, true).await
+            if let Some(detail) = trace_detail(&app, &seeded, &trace_id).await
                 && detail["trace"]["status"] == "error"
             {
                 break;
@@ -1149,8 +1157,10 @@ mod tests {
     #[tokio::test]
     async fn tool_calls_and_response_format() {
         let (_mock, base) = provider(vec![
-            calls_turn(json!([{"id": "call_1", "name": "lookup", "arguments": {"q": "refund"}}])),
-            calls_turn(json!([{"id": "call_2", "name": "submit_answer", "arguments": {"answer": "yes"}}])),
+            calls_turn(&json!([{"id": "call_1", "name": "lookup", "arguments": {"q": "refund"}}])),
+            calls_turn(
+                &json!([{"id": "call_2", "name": "submit_answer", "arguments": {"answer": "yes"}}]),
+            ),
         ])
         .await;
         let (app, seeded) = new_app().await;
@@ -1245,10 +1255,8 @@ mod tests {
         let connection = create_connection(&app, &seeded, "acme", &base, 2, "native").await;
         let mut body = run_body(connection);
         body["messages"][1]["parts"][0]["content"] = json!("canary-text");
-        let (events, logs) = capture_logs(async {
-            read_events(stream_run(&app, &seeded, &body).await).await
-        })
-        .await;
+        let (events, logs) =
+            capture_logs(async { read_events(stream_run(&app, &seeded, &body).await).await }).await;
         assert_eq!(names(&events).last().copied(), Some("done"));
         assert!(logs.contains("playground run"), "{logs}");
         assert!(!logs.contains("canary-text"), "{logs}");

@@ -1103,6 +1103,9 @@ fn parse_versions(text: Option<&str>) -> Result<Vec<i64>, FieldError> {
     };
     let mut versions: Vec<i64> = Vec::new();
     for part in text.split(',') {
+        if part.trim().is_empty() {
+            return Err(field_error("versions", "must name 1 to 50 versions"));
+        }
         match part.trim().parse::<i64>() {
             Ok(version) if version >= 1 => {
                 if !versions.contains(&version) {
@@ -2485,6 +2488,34 @@ mod tests {
             let response = call(&app, Method::GET, &format!("{metrics}?{query}"), auth, None).await;
             assert_eq!(field_names(&response), [field], "{query}");
         }
+        for query in ["versions=", "versions=1,", "versions=,2"] {
+            let response = call(
+                &app,
+                Method::GET,
+                &format!("{metrics}?{WINDOW}&{query}"),
+                auth,
+                None,
+            )
+            .await;
+            assert_eq!(field_names(&response), ["versions"], "{query}");
+            let body: Value = response.json();
+            assert_eq!(
+                body["errors"][0]["message"], "must name 1 to 50 versions",
+                "{query}"
+            );
+        }
+        // The window as epoch milliseconds (2026-01-01 to 2026-01-02 UTC) gives the same rows.
+        let by_millis = call(
+            &app,
+            Method::GET,
+            &format!("{metrics}?from=1767225600000&to=1767312000000"),
+            auth,
+            None,
+        )
+        .await;
+        assert_eq!(by_millis.status, StatusCode::OK);
+        let by_millis: PromptMetrics = by_millis.json();
+        assert_eq!(by_millis.versions.len(), 2);
         let versions_51 = (1..=51)
             .map(|version| version.to_string())
             .collect::<Vec<_>>()
@@ -2498,6 +2529,8 @@ mod tests {
         )
         .await;
         assert_eq!(field_names(&response), ["versions"]);
+        let body: Value = response.json();
+        assert_eq!(body["errors"][0]["message"], "must name 1 to 50 versions");
 
         let missing = call(
             &app,

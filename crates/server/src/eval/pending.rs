@@ -389,7 +389,10 @@ fn group_by_trace(spans: &[Span]) -> Vec<(TraceId, Group)> {
     let mut index: HashMap<TraceId, usize> = HashMap::new();
     let mut groups: Vec<(TraceId, Group)> = Vec::new();
     for span in spans {
-        if span.environment.as_deref().is_some_and(environment::is_reserved)
+        if span
+            .environment
+            .as_deref()
+            .is_some_and(environment::is_reserved)
             || span.metadata.contains_key(metadata_key::EXPERIMENT_ID)
         {
             continue;

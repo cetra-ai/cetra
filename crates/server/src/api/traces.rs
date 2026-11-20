@@ -768,7 +768,7 @@ pub struct TraceListParams {
     /// Opaque cursor from a previous page.
     #[serde(default)]
     pub cursor: Option<String>,
-    /// Include traces from the evaluation environment. Default false. Spec 05 § Default exclusions.
+    /// Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions.
     #[serde(default)]
     pub include_eval: bool,
     /// Include experiment traces. Default false. Spec 05 § Default exclusions.
@@ -790,7 +790,7 @@ pub struct TraceStreamParams {
     /// 1,024 bytes (D-G-39).
     #[serde(default)]
     pub search: Option<String>,
-    /// Include traces from the evaluation environment. Default false. Spec 05 § Default exclusions.
+    /// Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions.
     #[serde(default)]
     pub include_eval: bool,
     /// Include experiment traces. Default false. Spec 05 § Default exclusions.
@@ -840,7 +840,7 @@ pub struct SpanListParams {
     /// Opaque cursor from a previous page.
     #[serde(default)]
     pub cursor: Option<String>,
-    /// Include spans from the evaluation environment. Default false. Spec 05 § Default exclusions.
+    /// Include spans from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions.
     #[serde(default)]
     pub include_eval: bool,
     /// Include experiment spans. Default false. Spec 05 § Default exclusions.

@@ -28,7 +28,7 @@ use crate::trace::{
 const MAX_MESSAGES: usize = 200;
 
 /// One request entry: a canonical message or a placeholder.
-#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(untagged)]
 pub enum PlaygroundEntry {
     /// Replaced, in place, by the messages given under `name` in `placeholders`.
@@ -40,6 +40,22 @@ pub enum PlaygroundEntry {
     },
     /// A canonical message (spec 01).
     Message(Message),
+}
+
+impl fmt::Debug for PlaygroundEntry {
+    /// Kinds and sizes only: never the message content or the placeholder's name.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Placeholder { .. } => formatter
+                .debug_struct("Placeholder")
+                .finish_non_exhaustive(),
+            Self::Message(message) => formatter
+                .debug_struct("Message")
+                .field("role_len", &message.role.as_str().len())
+                .field("parts", &message.parts.len())
+                .finish_non_exhaustive(),
+        }
+    }
 }
 
 /// The `type` of a placeholder entry.
@@ -298,10 +314,7 @@ fn tool_definitions_json(tools: &[ToolDefinition]) -> String {
             let mut object = Map::new();
             object.insert("name".to_owned(), Value::String(tool.name.clone()));
             if let Some(description) = &tool.description {
-                object.insert(
-                    "description".to_owned(),
-                    Value::String(description.clone()),
-                );
+                object.insert("description".to_owned(), Value::String(description.clone()));
             }
             object.insert("parameters".to_owned(), tool.parameters.clone());
             Value::Object(object)

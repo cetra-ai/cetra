@@ -1129,7 +1129,9 @@ mod tests {
         let shown = exclusions(&ctx, FilterView::Traces, true, false, false)
             .expect("include eval")
             .expect("experiment clause");
+        // The dataset's own evaluation trace and the playground trace are both shown.
         let mut expected = listed.clone();
+        expected.insert("a1000000000000000000000000000005".to_owned());
         expected.insert(playground_id.to_owned());
         assert_eq!(
             matching_expr(&ctx, FilterView::Traces, shown, "trace_id").await,

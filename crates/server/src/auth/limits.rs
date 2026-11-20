@@ -809,7 +809,10 @@ mod tests {
             limits.admit(ada, org, 0).err(),
             Some(RetryAfter(Duration::from_secs(1)))
         );
-        assert!(limits.admit(bob, org, 0).is_ok(), "another user is not held back");
+        assert!(
+            limits.admit(bob, org, 0).is_ok(),
+            "another user is not held back"
+        );
         drop(held);
         assert!(limits.admit(ada, org, 0).is_ok(), "a slot is free again");
     }
@@ -831,7 +834,10 @@ mod tests {
             Some(RetryAfter(Duration::from_secs(1)))
         );
         let other_org = cetra_core::ids::OrgId::new_v7();
-        assert!(limits.admit(outsider, other_org, 0).is_ok(), "another org has its own cap");
+        assert!(
+            limits.admit(outsider, other_org, 0).is_ok(),
+            "another org has its own cap"
+        );
     }
 
     #[test]

@@ -1372,7 +1372,7 @@ export interface paths {
         put?: never;
         /**
          * Get one widget's data
-         * @description Answers one widget query over `[from, to)`: a series (one value per bucket) or a total (one value over the range, with `compare` also the previous range). Spec 05 § Dashboard queries. The dashboard's `filter` is a traces expression, and the default exclusions apply: evaluation traces (`environment = cetra-eval`) and experiment traces are left out unless `include_eval` or `include_experiments` is set. A read: a read-only personal access token and a `read` key may call it. Results are cached for 10 seconds per project and body.
+         * @description Answers one widget query over `[from, to)`: a series (one value per bucket) or a total (one value over the range, with `compare` also the previous range). Spec 05 § Dashboard queries. The dashboard's `filter` is a traces expression, and the default exclusions apply: evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are left out unless `include_eval` or `include_experiments` is set. A read: a read-only personal access token and a `read` key may call it. Results are cached for 10 seconds per project and body.
          */
         post: operations["query_widget"];
         delete?: never;
@@ -2121,7 +2121,7 @@ export interface paths {
         };
         /**
          * Get facets
-         * @description Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. A facet describes one field over the rows the list would show: the window, the default exclusions, `search` and `filter`, but not the list's cursor, sort or limit. The field is a column of the view, or `map['key']` of a map column; a bare map column facets its keys. `kind` is `values` (strings, booleans, lists and `map['key']`), `keys` (a bare map) or `histogram` (numbers: min, max, approximate p50, p95 and p99, and 20 equal buckets below p99 plus one bucket from p99 to max). `total` counts rows, `missing` the rows with no value (null, or an empty list or map). Values are counted per row: a list counts a row once under each distinct element. Keys starting with `cetra.` are left out. `q` keeps values containing it, ignoring case. Spans count stored copies separately. Sessions take no `search`. Nothing is cached on the server; a facet is computed on each call.
+         * @description Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. A facet describes one field over the rows the list would show: the window, the default exclusions, `search` and `filter`, but not the list's cursor, sort or limit. The field is a column of the view, or `map['key']` of a map column; a bare map column facets its keys. `kind` is `values` (strings, booleans, lists and `map['key']`), `keys` (a bare map) or `histogram` (numbers: min, max, approximate p50, p95 and p99, and 20 equal buckets below p99 plus one bucket from p99 to max). `total` counts rows, `missing` the rows with no value (null, or an empty list or map). Values are counted per row: a list counts a row once under each distinct element. Keys starting with `cetra.` are left out. `q` keeps values containing it, ignoring case. Spans count stored copies separately. Sessions take no `search`. Nothing is cached on the server; a facet is computed on each call.
          */
         get: operations["get_facets"];
         put?: never;
@@ -2405,6 +2405,26 @@ export interface paths {
          * @description Project members and above. API keys cannot call it. Clears the rule's pause.
          */
         post: operations["post_online_rule_resume"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/playground/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Stream a playground run
+         * @description Members and above, through a session or a read-write personal access token. API keys cannot call it. Answers `text/event-stream`: `start` `{trace_id}`, then `text` `{delta}` and `tool_call` `{id, name, arguments}` events, then one last `done` `{finish_reason, usage, cost_usd, latency_ms, ttft_ms, output}` or `error` `{class, message}` (class `retryable`, `pause` or `permanent`). A `ping` comes every 15 seconds. A response format is answered in `text` events. Tools are never run. A tool named `auto`, `none` or `required` cannot be forced by name through `tool_choice`. The run is traced into the reserved environment `cetra-playground`, which is not billed. The connection is used whatever its status, and a failure never marks it failing.
+         */
+        post: operations["post_playground_run"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2782,7 +2802,7 @@ export interface paths {
         };
         /**
          * List sessions
-         * @description Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.
+         * @description Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.
          */
         get: operations["list_sessions"];
         put?: never;
@@ -2802,7 +2822,7 @@ export interface paths {
         };
         /**
          * Get a session
-         * @description Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Turns are the session's traces by start time, at most 1000. `input` and `output` are the root span's payloads, omitted when the trace has no root.
+         * @description Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Turns are the session's traces by start time, at most 1000. `input` and `output` are the root span's payloads, omitted when the trace has no root.
          */
         get: operations["get_session"];
         put?: never;
@@ -2822,7 +2842,7 @@ export interface paths {
         };
         /**
          * List spans
-         * @description Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.
+         * @description Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.
          */
         get: operations["list_spans"];
         put?: never;
@@ -2862,7 +2882,7 @@ export interface paths {
         };
         /**
          * List traces
-         * @description Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.
+         * @description Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.
          */
         get: operations["list_traces"];
         put?: never;
@@ -2882,7 +2902,7 @@ export interface paths {
         };
         /**
          * Stream traces
-         * @description Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Server-sent events: `trace` data is a TraceSummary; `resync` and `ping` data are `{}`. `ping` is sent every 15 seconds.
+         * @description Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Server-sent events: `trace` data is a TraceSummary; `resync` and `ping` data are `{}`. `ping` is sent every 15 seconds.
          */
         get: operations["stream_traces"];
         put?: never;
@@ -2959,7 +2979,7 @@ export interface paths {
         };
         /**
          * List users
-         * @description Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. The filter runs on the `traces` view before traces are grouped by user.
+         * @description Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. The filter runs on the `traces` view before traces are grouped by user.
          */
         get: operations["list_users"];
         put?: never;
@@ -2979,7 +2999,7 @@ export interface paths {
         };
         /**
          * Get a user
-         * @description Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Sessions are the user's 100 most recent.
+         * @description Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Sessions are the user's 100 most recent.
          */
         get: operations["get_user"];
         put?: never;
@@ -6731,6 +6751,130 @@ export interface components {
          * @enum {string}
          */
         PlanStatus: "active" | "grace";
+        /** @description Sampling parameters and the completion cap. A provider without a field does not get it. */
+        PlaygroundParams: {
+            /**
+             * Format: double
+             * @description OpenAI and Gemini.
+             */
+            frequency_penalty?: number;
+            /**
+             * Format: int32
+             * @description Completion cap, including reasoning tokens. From 1 to 65 536. Default 4 096.
+             */
+            max_tokens?: number;
+            /**
+             * Format: double
+             * @description OpenAI and Gemini.
+             */
+            presence_penalty?: number;
+            /** @description OpenAI only, sent as given. */
+            reasoning_effort?: string;
+            /**
+             * Format: int64
+             * @description OpenAI and Gemini.
+             */
+            seed?: number;
+            /** @description Stop sequences. Default: none. */
+            stop?: string[];
+            /**
+             * Format: double
+             * @description Sampling temperature.
+             */
+            temperature?: number;
+            /**
+             * Format: double
+             * @description Nucleus sampling.
+             */
+            top_p?: number;
+        };
+        /** @description The schema an answer must match. `name` is the schema's name in the provider's native mode. */
+        PlaygroundResponseFormat: {
+            /** @description Schema name. `[A-Za-z0-9_-]`, 1 to 64 characters. */
+            name: string;
+            schema: {
+                [key: string]: unknown;
+            };
+            /** @description Strict schema adherence where the provider supports it. Default: false. */
+            strict?: boolean;
+        };
+        /**
+         * @description `POST /api/v1/projects/{project}/playground/runs` body.
+         *
+         *     Unknown fields are refused. Each `messages` entry is a canonical message (spec 01) or a
+         *     placeholder `{"type": "placeholder", "name": ...}`; a placeholder is replaced, in place, by the
+         *     messages given under its name in `placeholders`.
+         */
+        PlaygroundRunRequest: {
+            /**
+             * Format: uuid
+             * @description LLM connection of the caller's org to call.
+             */
+            connection_id: string;
+            /**
+             * @description Canonical messages (spec 01) and placeholder entries, at least one. A text part of a
+             *     message written here is rendered with `variables`; a placeholder's messages are not.
+             */
+            messages: Record<string, never>[];
+            /**
+             * @description Provider model id: 1 to 256 bytes, with no whitespace, control character, `/`, `\`, `%`,
+             *     `?` or `#`.
+             */
+            model: string;
+            /** @description Sampling parameters and the completion cap. Default: none. */
+            params?: components["schemas"]["PlaygroundParams"];
+            /** @description Messages that replace the placeholder entries of `messages`, by name. Default: none. */
+            placeholders?: Record<string, never>;
+            /** @description The schema the answer must match. The answer is streamed as `text` events. */
+            response_format?: components["schemas"]["PlaygroundResponseFormat"];
+            /** @description Where the messages came from: a prompt version or a span. Recorded on the run's trace. */
+            source?: components["schemas"]["PlaygroundSource"];
+            /**
+             * @description `auto`, `none`, `required`, or the name of one of `tools`. A tool named `auto`, `none` or
+             *     `required` cannot be forced by name. Default: the provider's choice.
+             */
+            tool_choice?: string;
+            /** @description Tools the model may call. A tool is never run. Default: none. */
+            tools?: components["schemas"]["PlaygroundTool"][];
+            /** @description Values of the `{{name}}` variables in the text parts of `messages`. Default: none. */
+            variables?: {
+                [key: string]: string;
+            };
+        };
+        /**
+         * @description Where a run's messages came from. Recorded as `prompt:<name>@<version>` or
+         *     `span:<trace>:<span>` on the run's trace.
+         */
+        PlaygroundSource: {
+            /** @description A prompt version: `{"prompt": {"name": "...", "version": 2}}`. */
+            prompt: {
+                /** @description Prompt name. */
+                name: string;
+                /**
+                 * Format: int64
+                 * @description Prompt version number.
+                 */
+                version: number;
+            };
+        } | {
+            /** @description A span: `{"span": {"trace_id": "...", "span_id": "..."}}`. */
+            span: {
+                /** @description The span, 16 lowercase hex digits. */
+                span_id: components["schemas"]["SpanId"];
+                /** @description Trace of the span, 32 lowercase hex digits. */
+                trace_id: components["schemas"]["TraceId"];
+            };
+        };
+        /** @description A tool the model may call. */
+        PlaygroundTool: {
+            /** @description What the tool does. Default: none. */
+            description?: string;
+            /** @description `[A-Za-z0-9_-]`, 1 to 64 characters, unique within the request. */
+            name: string;
+            parameters: {
+                [key: string]: unknown;
+            };
+        };
         /**
          * @description RFC 7807 problem document.
          *
@@ -9063,7 +9207,7 @@ export interface components {
             from: string;
             /** @description The dashboard's split. Ignored when the query has its own breakdown, and for scores. */
             group_by?: components["schemas"]["MetricsGroupBy"];
-            /** @description Include traces from the evaluation environment. Default false. */
+            /** @description Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. */
             include_eval?: boolean;
             /** @description Include experiment traces. Default false. */
             include_experiments?: boolean;
@@ -19579,7 +19723,7 @@ export interface operations {
                 from?: components["schemas"]["TimeParam"];
                 /** @description Exclusive range end. RFC 3339 or epoch milliseconds. */
                 to?: components["schemas"]["TimeParam"];
-                /** @description Include traces from the evaluation environment. Default false. */
+                /** @description Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. */
                 include_eval?: boolean;
                 /** @description Include experiment traces. Default false. */
                 include_experiments?: boolean;
@@ -21230,6 +21374,96 @@ export interface operations {
             };
             /** @description Too many requests. */
             429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_playground_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PlaygroundRunRequest"];
+            };
+        };
+        responses: {
+            /** @description The run's events, as `text/event-stream`. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": string;
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -23489,7 +23723,7 @@ export interface operations {
                 limit?: components["schemas"]["Limit"];
                 /** @description Opaque cursor from a previous page. */
                 cursor?: string;
-                /** @description Include traces from the evaluation environment. Default false. Spec 05 § Default exclusions. */
+                /** @description Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions. */
                 include_eval?: boolean;
                 /** @description Include experiment traces. Default false. Spec 05 § Default exclusions. */
                 include_experiments?: boolean;
@@ -23580,7 +23814,7 @@ export interface operations {
     get_session: {
         parameters: {
             query?: {
-                /** @description Include traces from the evaluation environment. Default false. */
+                /** @description Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. */
                 include_eval?: boolean;
                 /** @description Include experiment traces. Default false. */
                 include_experiments?: boolean;
@@ -23689,7 +23923,7 @@ export interface operations {
                 limit?: components["schemas"]["Limit"];
                 /** @description Opaque cursor from a previous page. */
                 cursor?: string;
-                /** @description Include spans from the evaluation environment. Default false. Spec 05 § Default exclusions. */
+                /** @description Include spans from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions. */
                 include_eval?: boolean;
                 /** @description Include experiment spans. Default false. Spec 05 § Default exclusions. */
                 include_experiments?: boolean;
@@ -23907,7 +24141,7 @@ export interface operations {
                 limit?: components["schemas"]["Limit"];
                 /** @description Opaque cursor from a previous page. */
                 cursor?: string;
-                /** @description Include traces from the evaluation environment. Default false. Spec 05 § Default exclusions. */
+                /** @description Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions. */
                 include_eval?: boolean;
                 /** @description Include experiment traces. Default false. Spec 05 § Default exclusions. */
                 include_experiments?: boolean;
@@ -24006,7 +24240,7 @@ export interface operations {
                  *     1,024 bytes (D-G-39).
                  */
                 search?: string;
-                /** @description Include traces from the evaluation environment. Default false. Spec 05 § Default exclusions. */
+                /** @description Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions. */
                 include_eval?: boolean;
                 /** @description Include experiment traces. Default false. Spec 05 § Default exclusions. */
                 include_experiments?: boolean;
@@ -24362,7 +24596,7 @@ export interface operations {
                 limit?: components["schemas"]["Limit"];
                 /** @description Opaque cursor from a previous page. */
                 cursor?: string;
-                /** @description Include traces from the evaluation environment. Default false. Spec 05 § Default exclusions. */
+                /** @description Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions. */
                 include_eval?: boolean;
                 /** @description Include experiment traces. Default false. Spec 05 § Default exclusions. */
                 include_experiments?: boolean;
@@ -24457,7 +24691,7 @@ export interface operations {
                 from?: components["schemas"]["TimeParam"];
                 /** @description Exclusive range end. RFC 3339 or epoch milliseconds. */
                 to?: components["schemas"]["TimeParam"];
-                /** @description Include traces from the evaluation environment. Default false. Spec 05 § Default exclusions. */
+                /** @description Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions. */
                 include_eval?: boolean;
                 /** @description Include experiment traces. Default false. Spec 05 § Default exclusions. */
                 include_experiments?: boolean;

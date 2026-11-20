@@ -8211,7 +8211,7 @@
           "dashboards"
         ],
         "summary": "Get one widget's data",
-        "description": "Answers one widget query over `[from, to)`: a series (one value per bucket) or a total (one value over the range, with `compare` also the previous range). Spec 05 § Dashboard queries. The dashboard's `filter` is a traces expression, and the default exclusions apply: evaluation traces (`environment = cetra-eval`) and experiment traces are left out unless `include_eval` or `include_experiments` is set. A read: a read-only personal access token and a `read` key may call it. Results are cached for 10 seconds per project and body.",
+        "description": "Answers one widget query over `[from, to)`: a series (one value per bucket) or a total (one value over the range, with `compare` also the previous range). Spec 05 § Dashboard queries. The dashboard's `filter` is a traces expression, and the default exclusions apply: evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are left out unless `include_eval` or `include_experiments` is set. A read: a read-only personal access token and a `read` key may call it. Results are cached for 10 seconds per project and body.",
         "operationId": "query_widget",
         "parameters": [
           {
@@ -13745,7 +13745,7 @@
           "traces"
         ],
         "summary": "Get facets",
-        "description": "Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. A facet describes one field over the rows the list would show: the window, the default exclusions, `search` and `filter`, but not the list's cursor, sort or limit. The field is a column of the view, or `map['key']` of a map column; a bare map column facets its keys. `kind` is `values` (strings, booleans, lists and `map['key']`), `keys` (a bare map) or `histogram` (numbers: min, max, approximate p50, p95 and p99, and 20 equal buckets below p99 plus one bucket from p99 to max). `total` counts rows, `missing` the rows with no value (null, or an empty list or map). Values are counted per row: a list counts a row once under each distinct element. Keys starting with `cetra.` are left out. `q` keeps values containing it, ignoring case. Spans count stored copies separately. Sessions take no `search`. Nothing is cached on the server; a facet is computed on each call.",
+        "description": "Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. A facet describes one field over the rows the list would show: the window, the default exclusions, `search` and `filter`, but not the list's cursor, sort or limit. The field is a column of the view, or `map['key']` of a map column; a bare map column facets its keys. `kind` is `values` (strings, booleans, lists and `map['key']`), `keys` (a bare map) or `histogram` (numbers: min, max, approximate p50, p95 and p99, and 20 equal buckets below p99 plus one bucket from p99 to max). `total` counts rows, `missing` the rows with no value (null, or an empty list or map). Values are counted per row: a list counts a row once under each distinct element. Keys starting with `cetra.` are left out. `q` keeps values containing it, ignoring case. Spans count stored copies separately. Sessions take no `search`. Nothing is cached on the server; a facet is computed on each call.",
         "operationId": "get_facets",
         "parameters": [
           {
@@ -13814,7 +13814,7 @@
           {
             "name": "include_eval",
             "in": "query",
-            "description": "Include traces from the evaluation environment. Default false.",
+            "description": "Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false.",
             "required": false,
             "schema": {
               "type": "boolean"
@@ -16017,6 +16017,119 @@
           },
           "429": {
             "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/playground/runs": {
+      "post": {
+        "tags": [
+          "playground"
+        ],
+        "summary": "Stream a playground run",
+        "description": "Members and above, through a session or a read-write personal access token. API keys cannot call it. Answers `text/event-stream`: `start` `{trace_id}`, then `text` `{delta}` and `tool_call` `{id, name, arguments}` events, then one last `done` `{finish_reason, usage, cost_usd, latency_ms, ttft_ms, output}` or `error` `{class, message}` (class `retryable`, `pause` or `permanent`). A `ping` comes every 15 seconds. A response format is answered in `text` events. Tools are never run. A tool named `auto`, `none` or `required` cannot be forced by name through `tool_choice`. The run is traced into the reserved environment `cetra-playground`, which is not billed. The connection is used whatever its status, and a failure never marks it failing.",
+        "operationId": "post_playground_run",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlaygroundRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The run's events, as `text/event-stream`.",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is larger than the limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is busy or a dependency is unavailable. Retry later.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -19083,7 +19196,7 @@
           "sessions"
         ],
         "summary": "List sessions",
-        "description": "Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.",
+        "description": "Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.",
         "operationId": "list_sessions",
         "parameters": [
           {
@@ -19162,7 +19275,7 @@
           {
             "name": "include_eval",
             "in": "query",
-            "description": "Include traces from the evaluation environment. Default false. Spec 05 § Default exclusions.",
+            "description": "Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions.",
             "required": false,
             "schema": {
               "type": "boolean"
@@ -19268,7 +19381,7 @@
           "sessions"
         ],
         "summary": "Get a session",
-        "description": "Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Turns are the session's traces by start time, at most 1000. `input` and `output` are the root span's payloads, omitted when the trace has no root.",
+        "description": "Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Turns are the session's traces by start time, at most 1000. `input` and `output` are the root span's payloads, omitted when the trace has no root.",
         "operationId": "get_session",
         "parameters": [
           {
@@ -19292,7 +19405,7 @@
           {
             "name": "include_eval",
             "in": "query",
-            "description": "Include traces from the evaluation environment. Default false.",
+            "description": "Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false.",
             "required": false,
             "schema": {
               "type": "boolean"
@@ -19398,7 +19511,7 @@
           "spans"
         ],
         "summary": "List spans",
-        "description": "Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.",
+        "description": "Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.",
         "operationId": "list_spans",
         "parameters": [
           {
@@ -19486,7 +19599,7 @@
           {
             "name": "include_eval",
             "in": "query",
-            "description": "Include spans from the evaluation environment. Default false. Spec 05 § Default exclusions.",
+            "description": "Include spans from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions.",
             "required": false,
             "schema": {
               "type": "boolean"
@@ -19741,7 +19854,7 @@
           "traces"
         ],
         "summary": "List traces",
-        "description": "Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.",
+        "description": "Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.",
         "operationId": "list_traces",
         "parameters": [
           {
@@ -19829,7 +19942,7 @@
           {
             "name": "include_eval",
             "in": "query",
-            "description": "Include traces from the evaluation environment. Default false. Spec 05 § Default exclusions.",
+            "description": "Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions.",
             "required": false,
             "schema": {
               "type": "boolean"
@@ -19935,7 +20048,7 @@
           "traces"
         ],
         "summary": "Stream traces",
-        "description": "Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Server-sent events: `trace` data is a TraceSummary; `resync` and `ping` data are `{}`. `ping` is sent every 15 seconds.",
+        "description": "Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Server-sent events: `trace` data is a TraceSummary; `resync` and `ping` data are `{}`. `ping` is sent every 15 seconds.",
         "operationId": "stream_traces",
         "parameters": [
           {
@@ -19968,7 +20081,7 @@
           {
             "name": "include_eval",
             "in": "query",
-            "description": "Include traces from the evaluation environment. Default false. Spec 05 § Default exclusions.",
+            "description": "Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions.",
             "required": false,
             "schema": {
               "type": "boolean"
@@ -20407,7 +20520,7 @@
           "users"
         ],
         "summary": "List users",
-        "description": "Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. The filter runs on the `traces` view before traces are grouped by user.",
+        "description": "Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. The filter runs on the `traces` view before traces are grouped by user.",
         "operationId": "list_users",
         "parameters": [
           {
@@ -20486,7 +20599,7 @@
           {
             "name": "include_eval",
             "in": "query",
-            "description": "Include traces from the evaluation environment. Default false. Spec 05 § Default exclusions.",
+            "description": "Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions.",
             "required": false,
             "schema": {
               "type": "boolean"
@@ -20592,7 +20705,7 @@
           "users"
         ],
         "summary": "Get a user",
-        "description": "Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Sessions are the user's 100 most recent.",
+        "description": "Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Sessions are the user's 100 most recent.",
         "operationId": "get_user",
         "parameters": [
           {
@@ -20634,7 +20747,7 @@
           {
             "name": "include_eval",
             "in": "query",
-            "description": "Include traces from the evaluation environment. Default false. Spec 05 § Default exclusions.",
+            "description": "Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions.",
             "required": false,
             "schema": {
               "type": "boolean"
@@ -27900,6 +28013,226 @@
           "grace"
         ]
       },
+      "PlaygroundParams": {
+        "type": "object",
+        "description": "Sampling parameters and the completion cap. A provider without a field does not get it.",
+        "properties": {
+          "frequency_penalty": {
+            "type": "number",
+            "format": "double",
+            "description": "OpenAI and Gemini."
+          },
+          "max_tokens": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Completion cap, including reasoning tokens. From 1 to 65 536. Default 4 096.",
+            "minimum": 0
+          },
+          "presence_penalty": {
+            "type": "number",
+            "format": "double",
+            "description": "OpenAI and Gemini."
+          },
+          "reasoning_effort": {
+            "type": "string",
+            "description": "OpenAI only, sent as given."
+          },
+          "seed": {
+            "type": "integer",
+            "format": "int64",
+            "description": "OpenAI and Gemini."
+          },
+          "stop": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Stop sequences. Default: none."
+          },
+          "temperature": {
+            "type": "number",
+            "format": "double",
+            "description": "Sampling temperature."
+          },
+          "top_p": {
+            "type": "number",
+            "format": "double",
+            "description": "Nucleus sampling."
+          }
+        },
+        "additionalProperties": false
+      },
+      "PlaygroundResponseFormat": {
+        "type": "object",
+        "description": "The schema an answer must match. `name` is the schema's name in the provider's native mode.",
+        "required": [
+          "name",
+          "schema"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Schema name. `[A-Za-z0-9_-]`, 1 to 64 characters."
+          },
+          "schema": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "strict": {
+            "type": "boolean",
+            "description": "Strict schema adherence where the provider supports it. Default: false."
+          }
+        },
+        "additionalProperties": false
+      },
+      "PlaygroundRunRequest": {
+        "type": "object",
+        "description": "`POST /api/v1/projects/{project}/playground/runs` body.\n\nUnknown fields are refused. Each `messages` entry is a canonical message (spec 01) or a\nplaceholder `{\"type\": \"placeholder\", \"name\": ...}`; a placeholder is replaced, in place, by the\nmessages given under its name in `placeholders`.",
+        "required": [
+          "connection_id",
+          "model",
+          "messages"
+        ],
+        "properties": {
+          "connection_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "LLM connection of the caller's org to call."
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "Canonical messages (spec 01) and placeholder entries, at least one. A text part of a\nmessage written here is rendered with `variables`; a placeholder's messages are not."
+          },
+          "model": {
+            "type": "string",
+            "description": "Provider model id: 1 to 256 bytes, with no whitespace, control character, `/`, `\\`, `%`,\n`?` or `#`."
+          },
+          "params": {
+            "$ref": "#/components/schemas/PlaygroundParams",
+            "description": "Sampling parameters and the completion cap. Default: none."
+          },
+          "placeholders": {
+            "type": "object",
+            "description": "Messages that replace the placeholder entries of `messages`, by name. Default: none."
+          },
+          "response_format": {
+            "$ref": "#/components/schemas/PlaygroundResponseFormat",
+            "description": "The schema the answer must match. The answer is streamed as `text` events."
+          },
+          "source": {
+            "$ref": "#/components/schemas/PlaygroundSource",
+            "description": "Where the messages came from: a prompt version or a span. Recorded on the run's trace."
+          },
+          "tool_choice": {
+            "type": "string",
+            "description": "`auto`, `none`, `required`, or the name of one of `tools`. A tool named `auto`, `none` or\n`required` cannot be forced by name. Default: the provider's choice."
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlaygroundTool"
+            },
+            "description": "Tools the model may call. A tool is never run. Default: none."
+          },
+          "variables": {
+            "type": "object",
+            "description": "Values of the `{{name}}` variables in the text parts of `messages`. Default: none.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "PlaygroundSource": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A prompt version: `{\"prompt\": {\"name\": \"...\", \"version\": 2}}`.",
+            "required": [
+              "prompt"
+            ],
+            "properties": {
+              "prompt": {
+                "type": "object",
+                "description": "A prompt version: `{\"prompt\": {\"name\": \"...\", \"version\": 2}}`.",
+                "required": [
+                  "name",
+                  "version"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "description": "Prompt name."
+                  },
+                  "version": {
+                    "type": "integer",
+                    "format": "int64",
+                    "description": "Prompt version number."
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A span: `{\"span\": {\"trace_id\": \"...\", \"span_id\": \"...\"}}`.",
+            "required": [
+              "span"
+            ],
+            "properties": {
+              "span": {
+                "type": "object",
+                "description": "A span: `{\"span\": {\"trace_id\": \"...\", \"span_id\": \"...\"}}`.",
+                "required": [
+                  "trace_id",
+                  "span_id"
+                ],
+                "properties": {
+                  "span_id": {
+                    "$ref": "#/components/schemas/SpanId",
+                    "description": "The span, 16 lowercase hex digits."
+                  },
+                  "trace_id": {
+                    "$ref": "#/components/schemas/TraceId",
+                    "description": "Trace of the span, 32 lowercase hex digits."
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "description": "Where a run's messages came from. Recorded as `prompt:<name>@<version>` or\n`span:<trace>:<span>` on the run's trace."
+      },
+      "PlaygroundTool": {
+        "type": "object",
+        "description": "A tool the model may call.",
+        "required": [
+          "name",
+          "parameters"
+        ],
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "What the tool does. Default: none."
+          },
+          "name": {
+            "type": "string",
+            "description": "`[A-Za-z0-9_-]`, 1 to 64 characters, unique within the request."
+          },
+          "parameters": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": false
+      },
       "Problem": {
         "type": "object",
         "description": "RFC 7807 problem document.\n\nSpec 09 § Conventions.",
@@ -32118,7 +32451,7 @@
           },
           "include_eval": {
             "type": "boolean",
-            "description": "Include traces from the evaluation environment. Default false."
+            "description": "Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false."
           },
           "include_experiments": {
             "type": "boolean",
@@ -32352,6 +32685,10 @@
     {
       "name": "datasets",
       "description": "Versioned datasets and their items."
+    },
+    {
+      "name": "playground",
+      "description": "Playground runs: one model run streamed over SSE, traced in cetra-playground (not billed)."
     },
     {
       "name": "prompts",

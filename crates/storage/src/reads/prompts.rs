@@ -598,6 +598,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_name_only_span_and_an_early_score_do_not_count() {
+        let (mut spans, mut scores) = fixture();
+        // H: an llm span that names `p` but has no version.
+        spans.push(root(7, T0 + MIN));
+        let mut name_only = llm(7, 1, T0 + MIN, "p", 1, 0.5, 100 * MS);
+        name_only.prompt_version = None;
+        spans.push(name_only);
+        scores.push(trace_score(6, 7, "quality", ScoreValue::Numeric(0.0)));
+        // A score on trace A (p@1) created before the window.
+        let mut early = trace_score(7, 0, "early", ScoreValue::Numeric(1.0));
+        early.created_at = T0 - MIN;
+        early.updated_at = T0 - MIN;
+        scores.push(early);
+        let ctx = context(&spans, &scores);
+        let rows = prompt_metrics(&ctx, request("p", &[]))
+            .await
+            .expect("metrics");
+        let versions: Vec<i64> = rows.iter().map(|row| row.version).collect();
+        assert_eq!(versions, vec![2, 1]);
+        assert_eq!(rows[1].span_count, 3, "the name-only span is not counted");
+        assert_eq!(rows[1].trace_count, 2);
+        assert!(
+            rows.iter()
+                .all(|row| row.scores.iter().all(|score| score.name != "early")),
+            "a score created before the window is ignored"
+        );
+        let quality = score_named(&rows[1], "quality");
+        assert_eq!(
+            quality.count, 1,
+            "the name-only trace's score is not counted"
+        );
+    }
+
+    #[tokio::test]
     async fn version_filter() {
         let (spans, scores) = fixture();
         let ctx = context(&spans, &scores);
