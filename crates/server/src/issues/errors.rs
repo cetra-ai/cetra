@@ -198,11 +198,7 @@ fn keep_hits(
     project: &ProjectRow,
     groups: &mut BTreeMap<String, Group>,
 ) -> Outcome {
-    let cutoff = project.retention_days.map(|days| {
-        ctx.now
-            .saturating_sub(i64::from(days).saturating_mul(DAY_NS))
-            .saturating_add(RETENTION_MARGIN_NS)
-    });
+    let cutoff = retention_cutoff(project, ctx.now);
     let mut outcome = Outcome::default();
     for group in groups.values_mut() {
         group.traces.retain(|trace_id, hit| {
@@ -216,7 +212,7 @@ fn keep_hits(
             if blocked {
                 outcome.blocked += 1;
                 false
-            } else if cutoff.is_some_and(|cutoff| id_time(hit.at) < cutoff) {
+            } else if too_old(cutoff, hit.at) {
                 outcome.too_old += 1;
                 false
             } else {
@@ -226,6 +222,21 @@ fn keep_hits(
     }
     groups.retain(|_, group| !group.traces.is_empty());
     outcome
+}
+
+/// The oldest occurrence time the project keeps (D-IC-18): its retention counted back from `now`,
+/// plus [`RETENTION_MARGIN_NS`]. `None` when the project keeps everything.
+pub(crate) fn retention_cutoff(project: &ProjectRow, now: i64) -> Option<i64> {
+    project.retention_days.map(|days| {
+        now.saturating_sub(i64::from(days).saturating_mul(DAY_NS))
+            .saturating_add(RETENTION_MARGIN_NS)
+    })
+}
+
+/// Whether an occurrence at `at` is older than `cutoff` (see [`retention_cutoff`]), by the time
+/// its score id carries.
+pub(crate) fn too_old(cutoff: Option<i64>, at: i64) -> bool {
+    cutoff.is_some_and(|cutoff| id_time(at) < cutoff)
 }
 
 /// Writes the occurrences of one source as occurrence scores (D-IC-11, D-IC-18). The occurrences

@@ -2990,7 +2990,7 @@ fn issue_source_paths(paths: PathsBuilder) -> PathsBuilder {
         "Refit an issue source now",
     )
         .description(Some(
-            "Project members and above. API keys cannot call it. Sets the source's next refit to now, so the next sweep refits it. 400 for an `error` source. 409 when a refit started less than 10 minutes ago or one is already due.",
+            "Project members and above. API keys cannot call it. Sets the source's next refit to now, so the next sweep refits it. 400 for an `error` source, or a disabled or paused one. The refit is recorded as `manual`. 409 when a refit started less than 10 minutes ago or one is already due.",
         ))
         .parameters(Some(vec![project_param(), id.clone()]))
         .responses(responses(

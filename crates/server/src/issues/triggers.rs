@@ -16,8 +16,8 @@ use crate::eval::sampling;
 use crate::http::AppState;
 use crate::meta::MetaError;
 use crate::meta::issues::{
-    CandidateRow, CandidateStatus, CandidateTarget, SourceKind, SourceRow, admit_daily,
-    insert_candidate, llm_sources,
+    CandidateRow, CandidateStatus, CandidateTarget, SourceKind, SourceRow,
+    insert_admitted_candidate, llm_sources,
 };
 use crate::meta::projects::ProjectRow;
 use crate::meta::score_definitions::DefinitionRow;
@@ -204,8 +204,8 @@ pub(crate) async fn on_scores_written(
         return;
     }
     let now = state.clock.now_ns();
-    // Each entry: the source, its daily cap, and the candidate.
-    let mut found: Vec<(Uuid, u32, CandidateRow)> = Vec::new();
+    // Each entry: the source's daily cap and the candidate, which names its source.
+    let mut found: Vec<(u32, CandidateRow)> = Vec::new();
     for score in rows.iter().filter(|score| !score.deleted) {
         let definition = definitions
             .iter()
@@ -229,7 +229,7 @@ pub(crate) async fn on_scores_written(
                 None,
                 Some(score.score_id),
             );
-            found.push((rule.source_id, rule.daily_cap, row));
+            found.push((rule.daily_cap, row));
         }
     }
     if found.is_empty() {
@@ -242,11 +242,8 @@ pub(crate) async fn on_scores_written(
         .write(move |conn| {
             Box::pin(async move {
                 let mut inserted = 0;
-                for (source, cap, row) in found {
-                    if !admit_daily(conn, source, day_start(now), cap).await? {
-                        continue;
-                    }
-                    if insert_candidate(conn, &row).await? {
+                for (cap, row) in found {
+                    if insert_admitted_candidate(conn, &row, day_start(now), cap).await? {
                         inserted += 1;
                     }
                 }
@@ -597,6 +594,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_duplicate_score_target_does_not_use_the_daily_cap() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let source = source(
+            &app,
+            seeded.project.id,
+            SourceKind::Score,
+            &["quality"],
+            &[],
+            2,
+        )
+        .await;
+        let bad = |n: u8| {
+            item(
+                ScoreTarget::Trace { trace_id: trace(n) },
+                "quality",
+                ScoreValue::Boolean(false),
+            )
+        };
+        write(&app, &seeded.project, judge(), vec![bad(1)]).await;
+        // The same target again is a duplicate: it is not queued and takes no slot of the cap.
+        write(&app, &seeded.project, judge(), vec![bad(1)]).await;
+        write(&app, &seeded.project, judge(), vec![bad(2)]).await;
+        assert_eq!(candidates(&app, source.id).await.len(), 2);
+    }
+
+    #[tokio::test]
     async fn sampling_keeps_the_targets_that_sampled_keeps() {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
@@ -666,5 +690,106 @@ mod tests {
         write(&app, &seeded.project, writer, vec![bad.clone()]).await;
         write(&app, &seeded.project, writer, vec![bad]).await;
         assert_eq!(candidates(&app, source.id).await.len(), 1);
+    }
+
+    /// The stored target, dedup key, trace id, span id and session id of each candidate of
+    /// `source`, sorted by dedup key.
+    async fn stored(
+        app: &TestApp,
+        source: Uuid,
+    ) -> Vec<(
+        String,
+        String,
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+        Option<String>,
+    )> {
+        sqlx::query_as(
+            "SELECT target, dedup_key, trace_id, span_id, session_id FROM issue_candidates \
+             WHERE source_id = ? ORDER BY dedup_key",
+        )
+        .bind(source.to_string())
+        .fetch_all(app.state.meta.reader())
+        .await
+        .expect("candidates read")
+    }
+
+    #[tokio::test]
+    async fn a_span_score_queues_a_span_candidate() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let source = source(
+            &app,
+            seeded.project.id,
+            SourceKind::Score,
+            &["quality"],
+            &[],
+            100,
+        )
+        .await;
+        let t = trace(1);
+        let span = SpanId::from_slice(&[7; 8]).expect("not all zero");
+        write(
+            &app,
+            &seeded.project,
+            judge(),
+            vec![item(
+                ScoreTarget::Span {
+                    trace_id: t,
+                    span_id: span,
+                },
+                "quality",
+                ScoreValue::Boolean(false),
+            )],
+        )
+        .await;
+        assert_eq!(
+            stored(&app, source.id).await,
+            vec![(
+                "span".to_owned(),
+                format!("{}:{t}:{span}", source.id),
+                Some(t.as_bytes().to_vec()),
+                Some(span.as_bytes().to_vec()),
+                None,
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_score_queues_a_session_candidate() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let source = source(
+            &app,
+            seeded.project.id,
+            SourceKind::Score,
+            &["quality"],
+            &[],
+            100,
+        )
+        .await;
+        write(
+            &app,
+            &seeded.project,
+            judge(),
+            vec![item(
+                ScoreTarget::Session {
+                    session_id: "chat-42".to_owned(),
+                },
+                "quality",
+                ScoreValue::Boolean(false),
+            )],
+        )
+        .await;
+        assert_eq!(
+            stored(&app, source.id).await,
+            vec![(
+                "session".to_owned(),
+                format!("{}:session:chat-42", source.id),
+                None,
+                None,
+                Some("chat-42".to_owned()),
+            )]
+        );
     }
 }

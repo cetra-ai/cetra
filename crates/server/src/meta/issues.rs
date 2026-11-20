@@ -1052,13 +1052,45 @@ pub(crate) async fn insert_candidate(
     Ok(result.rows_affected() > 0)
 }
 
+/// Queues `row` under its source's daily cap. The candidate is not inserted, and the count is not
+/// changed, when a candidate with the same `dedup_key` exists already, so a duplicate target does
+/// not use up the cap. A refused admission (the cap is reached, or the source does not exist)
+/// inserts nothing. `true` when the candidate was inserted.
+///
+/// The caller runs this inside its `meta.write` transaction (`BEGIN IMMEDIATE`): the duplicate
+/// check, the count and the insert are then one atomic step, so no other writer can queue the
+/// same target or take the last slot between them.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when a statement fails.
+pub(crate) async fn insert_admitted_candidate(
+    conn: &mut SqliteConnection,
+    row: &CandidateRow,
+    day: i64,
+    cap: u32,
+) -> Result<bool, MetaError> {
+    let known: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM issue_candidates WHERE dedup_key = ?")
+            .bind(&row.dedup_key)
+            .fetch_optional(&mut *conn)
+            .await?;
+    if known.is_some() {
+        return Ok(false);
+    }
+    if !admit_daily(conn, row.source_id, day, cap).await? {
+        return Ok(false);
+    }
+    insert_candidate(conn, row).await
+}
+
 /// Adds one to the source's candidate count for `day` (UTC day start, nanoseconds) when that
 /// count is below `cap`. `false` at the cap, when `cap` is 0, and when the source does not exist.
 ///
 /// # Errors
 ///
 /// Returns [`MetaError`] when the upsert fails.
-pub(crate) async fn admit_daily(
+async fn admit_daily(
     conn: &mut SqliteConnection,
     source: Uuid,
     day: i64,
@@ -1716,13 +1748,17 @@ pub(crate) async fn last_refit_started(
 }
 
 /// Enabled, unpaused LLM sources of active projects in active orgs whose `next_refit_at` is at
-/// or before `now`, ordered by `next_refit_at`, then id.
+/// or before `now`, ordered by `next_refit_at`, then id. Each comes with the trigger its refit
+/// records: `manual` after "Refit now", `schedule` otherwise.
 ///
 /// # Errors
 ///
 /// Returns [`MetaError`] when the query fails or a stored value does not decode.
-pub(crate) async fn due_refits(pool: &SqlitePool, now: i64) -> Result<Vec<SourceRow>, MetaError> {
-    let records: Vec<SourceRecord> = sqlx::query_as(
+pub(crate) async fn due_refits(
+    pool: &SqlitePool,
+    now: i64,
+) -> Result<Vec<(SourceRow, &'static str)>, MetaError> {
+    let records: Vec<DueRefitRecord> = sqlx::query_as(
         "SELECT s.* FROM issue_sources s \
          JOIN projects p ON p.id = s.project_id \
          JOIN orgs o ON o.id = p.org_id \
@@ -1734,10 +1770,17 @@ pub(crate) async fn due_refits(pool: &SqlitePool, now: i64) -> Result<Vec<Source
     .bind(now)
     .fetch_all(pool)
     .await?;
-    records.into_iter().map(source_from).collect()
+    records
+        .into_iter()
+        .map(|record| {
+            let trigger = trigger_from(&record.refit_trigger, SOURCES, "refit_trigger")?;
+            Ok((source_from(record.source)?, trigger))
+        })
+        .collect()
 }
 
-/// Sets the source's next scheduled refit (nanoseconds).
+/// Sets the source's next scheduled refit (nanoseconds) and the trigger that refit records:
+/// `manual` for "Refit now", `schedule` for the refit that a finished refit schedules.
 ///
 /// # Errors
 ///
@@ -1746,9 +1789,11 @@ pub(crate) async fn set_next_refit(
     conn: &mut SqliteConnection,
     source: Uuid,
     at: i64,
+    trigger: &'static str,
 ) -> Result<(), MetaError> {
-    sqlx::query("UPDATE issue_sources SET next_refit_at = ? WHERE id = ?")
+    sqlx::query("UPDATE issue_sources SET next_refit_at = ?, refit_trigger = ? WHERE id = ?")
         .bind(at)
+        .bind(trigger)
         .bind(source.to_string())
         .execute(&mut *conn)
         .await?;
@@ -1998,17 +2043,37 @@ pub(crate) async fn prune_candidates(
     Ok(expired.saturating_add(deleted))
 }
 
-/// Deletes the candidates of the org's projects whose trace starts before `visible_from`
-/// (the org's data window). Returns how many.
+/// Prunes the candidates of the org's projects against the data window and the project
+/// retention:
+/// 1. the candidates whose trace starts before `visible_from` (the org's data window) are deleted;
+/// 2. the `summary` of a finished candidate (`assigned`, `outlier`, `dropped`, `failed` or
+///    `skipped`) created more than `retention_days` ago is cleared, for each project that sets
+///    retention. The row stays: it anchors the issue membership. A candidate still in flight keeps
+///    its summary, since a refit's naming prompt needs a pending one.
+///
+/// Returns how many candidates were deleted.
 ///
 /// # Errors
 ///
-/// Returns [`MetaError`] when the delete fails.
+/// Returns [`MetaError`] when a statement fails.
 pub(crate) async fn prune_to_window(
     conn: &mut SqliteConnection,
     org: OrgId,
     visible_from: i64,
+    now: i64,
 ) -> Result<u64, MetaError> {
+    sqlx::query(
+        "UPDATE issue_candidates SET summary = NULL WHERE summary IS NOT NULL AND project_id IN \
+         (SELECT id FROM projects WHERE org_id = ?1 AND retention_days IS NOT NULL) AND \
+         status IN ('assigned', 'outlier', 'dropped', 'failed', 'skipped') AND \
+         created_at < ?2 - (SELECT retention_days FROM projects \
+         WHERE projects.id = issue_candidates.project_id) * ?3",
+    )
+    .bind(org.to_string())
+    .bind(now)
+    .bind(DAY_NS)
+    .execute(&mut *conn)
+    .await?;
     let result = sqlx::query(
         "DELETE FROM issue_candidates WHERE trace_start < ?1 AND project_id IN \
          (SELECT id FROM projects WHERE org_id = ?2)",
@@ -2338,12 +2403,29 @@ struct RefitRecord {
     error_class: Option<String>,
 }
 
+/// A due source with the trigger of its next refit.
+#[derive(sqlx::FromRow)]
+struct DueRefitRecord {
+    refit_trigger: String,
+    #[sqlx(flatten)]
+    source: SourceRecord,
+}
+
+/// The refit trigger a stored value names (`schedule` or `manual`, D-IC-12).
+fn trigger_from(
+    value: &str,
+    table: &'static str,
+    column: &'static str,
+) -> Result<&'static str, MetaError> {
+    match value {
+        "schedule" => Ok("schedule"),
+        "manual" => Ok("manual"),
+        _ => Err(corrupt(table, column)),
+    }
+}
+
 fn refit_from(record: RefitRecord) -> Result<RefitRow, MetaError> {
-    let trigger = match record.trigger.as_str() {
-        "schedule" => "schedule",
-        "manual" => "manual",
-        _ => return Err(corrupt(REFITS, "trigger")),
-    };
+    let trigger = trigger_from(&record.trigger, REFITS, "trigger")?;
     Ok(RefitRow {
         id: parse_uuid(&record.id, REFITS, "id")?,
         source_id: parse_uuid(&record.source_id, REFITS, "source_id")?,
@@ -2472,13 +2554,13 @@ mod tests {
         EventKind, EventRow, IssueListQuery, IssueRow, IssueSort, IssueState, RefitRow, SourceKind,
         SourceRow, add_spend, admit_daily, candidate_from, claim_candidate, close_open_refits,
         count_enabled_sources, decode_vector, delete_source, due_refits, encode_vector,
-        finish_candidate, finish_refit, get_issue, get_issue_tx, get_source, insert_candidate,
-        insert_event, insert_issue, insert_refit, insert_source, interrupt_candidates,
-        issue_by_fingerprint, last_refit_started, list_events, list_issues, list_refits,
-        list_sources, llm_sources, mark_outliers, merged_ids, open_counts, pending_candidates,
-        ready_candidates, retarget_merged, set_candidate_target, set_candidates_assigned,
-        set_embed_dimension, set_next_refit, source_centroids, spent_between,
-        start_candidate_attempt, sweep_sources, update_issue, update_source,
+        finish_candidate, finish_refit, get_issue, get_issue_tx, get_source,
+        insert_admitted_candidate, insert_candidate, insert_event, insert_issue, insert_refit,
+        insert_source, interrupt_candidates, issue_by_fingerprint, last_refit_started, list_events,
+        list_issues, list_refits, list_sources, llm_sources, mark_outliers, merged_ids,
+        open_counts, pending_candidates, ready_candidates, retarget_merged, set_candidate_target,
+        set_candidates_assigned, set_embed_dimension, set_next_refit, source_centroids,
+        spent_between, start_candidate_attempt, sweep_sources, update_issue, update_source,
     };
     use super::{
         any_pending, clear_budget_pauses, delete_candidates_of_deletion, pause_source,
@@ -3358,6 +3440,14 @@ mod tests {
             .unwrap()
     }
 
+    async fn admit_row(db: &MetaDb, row: CandidateRow, day: i64, cap: u32) -> bool {
+        db.write(move |conn| {
+            Box::pin(async move { insert_admitted_candidate(conn, &row, day, cap).await })
+        })
+        .await
+        .unwrap()
+    }
+
     #[tokio::test]
     async fn a_candidate_round_trips_and_a_duplicate_dedup_key_is_ignored() {
         let (_dir, db) = crate::meta::test_db().await;
@@ -3414,6 +3504,31 @@ mod tests {
         // A cap of 0 admits nothing, and a source that does not exist admits nothing.
         assert!(!admit(&db, src.id, day + 2 * DAY, 0).await);
         assert!(!admit(&db, Uuid::from_u128(999), day, 5).await);
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_does_not_use_the_daily_cap_and_a_refused_candidate_inserts_no_row() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (_, projects) = seed(&db, &["support"]).await;
+        let src = scored_source(projects[0], "scores", SourceKind::Score);
+        put_source(&db, src.clone()).await;
+        let day = 5 * DAY;
+
+        let first = candidate(1, &src, "k1", CandidateStatus::Queued, day);
+        let duplicate = candidate(2, &src, "k1", CandidateStatus::Queued, day);
+        let second = candidate(3, &src, "k2", CandidateStatus::Queued, day);
+        let refused = candidate(4, &src, "k3", CandidateStatus::Queued, day);
+        assert!(admit_row(&db, first, day, 2).await);
+        // The duplicate is not inserted and the cap of 2 still has one slot left.
+        assert!(!admit_row(&db, duplicate, day, 2).await);
+        assert!(admit_row(&db, second, day, 2).await);
+        // The cap is reached: the refused candidate inserts no row and the count stays at 2.
+        assert!(!admit_row(&db, refused, day, 2).await);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM issue_candidates").await, 2);
+        assert_eq!(
+            count(&db, "SELECT candidates FROM issue_source_days").await,
+            2
+        );
     }
 
     #[tokio::test]
@@ -4141,15 +4256,31 @@ mod tests {
         .unwrap();
 
         let due_now = due_refits(db.reader(), NOW).await.unwrap();
-        assert_eq!(due_now, vec![due.clone()]);
+        assert_eq!(due_now, vec![(due.clone(), "schedule")]);
 
-        // A source moved to `now` by `set_next_refit` is due.
+        // A source moved to `now` by a "Refit now" is due, and its refit records `manual`.
         let later_id = later.id;
-        db.write(move |conn| Box::pin(async move { set_next_refit(conn, later_id, NOW).await }))
-            .await
-            .unwrap();
+        db.write(move |conn| {
+            Box::pin(async move { set_next_refit(conn, later_id, NOW, "manual").await })
+        })
+        .await
+        .unwrap();
         let due_after = due_refits(db.reader(), NOW).await.unwrap();
         assert_eq!(due_after.len(), 2);
+        let moved = SourceRow {
+            next_refit_at: Some(NOW),
+            ..later.clone()
+        };
+        assert!(due_after.contains(&(moved, "manual")));
+
+        // The refit that the finished refit schedules records `schedule` again.
+        db.write(move |conn| {
+            Box::pin(async move { set_next_refit(conn, later_id, NOW + 1, "schedule").await })
+        })
+        .await
+        .unwrap();
+        let rescheduled = due_refits(db.reader(), NOW).await.unwrap();
+        assert_eq!(rescheduled, vec![(due.clone(), "schedule")]);
 
         let swept = llm_sources(db.reader()).await.unwrap();
         let mut ids: Vec<Uuid> = swept.iter().map(|(row, _, _)| row.id).collect();
@@ -4419,11 +4550,77 @@ mod tests {
         }
 
         let removed = db
-            .write(move |conn| Box::pin(async move { prune_to_window(conn, org, 100).await }))
+            .write(move |conn| Box::pin(async move { prune_to_window(conn, org, 100, NOW).await }))
             .await
             .unwrap();
         assert_eq!(removed, 1);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM issue_candidates").await, 1);
+    }
+
+    #[tokio::test]
+    async fn prune_to_window_clears_the_summaries_older_than_the_project_retention() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (org, projects) = seed(&db, &["short", "plain"]).await;
+        let short = scored_source(projects[0], "scores", SourceKind::Score);
+        let plain = scored_source(projects[1], "scores", SourceKind::Score);
+        put_source(&db, short.clone()).await;
+        put_source(&db, plain.clone()).await;
+        let now = 10 * DAY;
+        db.write(move |conn| {
+            Box::pin(async move {
+                sqlx::query("UPDATE projects SET retention_days = 1 WHERE id = ?")
+                    .bind(projects[0].to_string())
+                    .execute(&mut *conn)
+                    .await?;
+                Ok::<(), MetaError>(())
+            })
+        })
+        .await
+        .unwrap();
+        let summarized = |id: u128, source: &SourceRow, dedup: &str, created_at: i64| {
+            let mut row = candidate(id, source, dedup, CandidateStatus::Assigned, created_at);
+            row.summary = Some("a summary".to_owned());
+            row
+        };
+        // Past the 1-day retention of `short`: its summary goes.
+        let old = summarized(1, &short, "old", now - 2 * DAY);
+        // Within the retention of `short`: its summary stays.
+        let recent = summarized(2, &short, "recent", now - DAY / 2);
+        // `plain` sets no retention: its old summary stays.
+        let kept = summarized(3, &plain, "plain", now - 2 * DAY);
+        // Past the retention of `short`, but still pending: a refit's naming prompt needs its
+        // summary, so it stays.
+        let mut waiting = candidate(
+            4,
+            &short,
+            "waiting",
+            CandidateStatus::Pending,
+            now - 2 * DAY,
+        );
+        waiting.summary = Some("a pending summary".to_owned());
+        let (old_id, recent_id, kept_id, waiting_id) = (old.id, recent.id, kept.id, waiting.id);
+        for row in [old, recent, kept, waiting] {
+            assert!(put_candidate(&db, row).await);
+        }
+
+        let removed = db
+            .write(move |conn| Box::pin(async move { prune_to_window(conn, org, 0, now).await }))
+            .await
+            .unwrap();
+        assert_eq!(removed, 0);
+        assert_eq!(read_candidate(&db, old_id).await.summary, None);
+        assert_eq!(
+            read_candidate(&db, recent_id).await.summary.as_deref(),
+            Some("a summary")
+        );
+        assert_eq!(
+            read_candidate(&db, kept_id).await.summary.as_deref(),
+            Some("a summary")
+        );
+        assert_eq!(
+            read_candidate(&db, waiting_id).await.summary.as_deref(),
+            Some("a pending summary")
+        );
     }
 
     #[tokio::test]

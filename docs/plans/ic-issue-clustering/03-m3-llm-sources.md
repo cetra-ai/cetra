@@ -36,7 +36,7 @@ Out of scope:
 |---|---|
 | D-IC-1 | Source fields; sampling and the daily cap for LLM kinds only |
 | D-IC-4 | One summary, then one embedding; prompts in code; the triggers; session-target input |
-| D-IC-5 | Embedding connection, model and dimension fixed per source; Anthropic cannot embed; 512 dimensions requested |
+| D-IC-5 | Embedding connection, model and dimension fixed per source; Anthropic cannot embed; no size requested, the first answer's dimension stored |
 | D-IC-6 | Vectors in `meta.db`; retention of vectors and candidates; pruning to the data window |
 | D-IC-7 | Join at cosine ≥ floor; running mean up to 500 members |
 | D-IC-8 | Refit: ≥ 20 pending of 7 days, ≤ 5 000; average linkage; ≥ `min_issue_size`; join or name; outliers after 7 days |
@@ -277,8 +277,10 @@ Column meanings:
        dimension: Option<u32>, call_trace_id: Option<TraceId>, cost_usd: f64, created_at: i64, updated_at: i64 }
    /// Inserts unless `dedup_key` exists; true when inserted.
    pub(crate) async fn insert_candidate(conn, &CandidateRow) -> Result<bool, MetaError>;
-   /// Adds one to today's count when it is below `cap`; false at the cap.
-   pub(crate) async fn admit_daily(conn, source: Uuid, day: i64, cap: u32) -> Result<bool, MetaError>;
+   /// Inserts unless `dedup_key` exists, and admits under the source's daily cap: a duplicate or a
+   /// refused candidate changes nothing. Runs inside the caller's `meta.write` transaction, so the
+   /// check, the count and the insert are atomic. `admit_daily` (count below `cap`, private) is its helper.
+   pub(crate) async fn insert_admitted_candidate(conn, &CandidateRow, day: i64, cap: u32) -> Result<bool, MetaError>;
    pub(crate) async fn add_spend(conn, source: Uuid, day: i64, usd: f64) -> Result<(), MetaError>;
    pub(crate) async fn spent_between(pool, source: Uuid, from_day: i64, to_day: i64) -> Result<f64, MetaError>;
    /// Queued candidates ready at `now` of enabled, unpaused sources of active projects and orgs, oldest
@@ -332,6 +334,7 @@ Column meanings:
 - the new columns round-trip, with empty lists stored as NULL;
 - `insert_candidate` deduplicates;
 - `admit_daily` stops at the cap and starts again the next day;
+- `insert_admitted_candidate`: a duplicate does not use the cap, and a refused candidate inserts no row;
 - `claim_candidate`, `start_candidate_attempt` and `finish_candidate` are fenced, and a stale `claims` returns false;
 - `interrupt_candidates` requeues, then fails at 3;
 - `ready_candidates` skips paused sources, saturated connections and future `not_before`;
@@ -386,16 +389,16 @@ Column meanings:
    ```rust
    /// Where `value` sits between bad (0) and good (1) under `definition`, or None (D-I-47).
    pub(crate) fn goodness(value: &ScoreValue, definition: Option<&DefinitionRow>) -> Option<f64>;
-   /// A score that makes a candidate (D-IC-4): `false`, or goodness ≤ 1/3.
+   /// A score that makes a candidate (D-IC-4): goodness ≤ 1/3 (a boolean is bad at its bad value).
    pub(crate) fn is_bad(value: &ScoreValue, definition: Option<&DefinitionRow>) -> bool;
    ```
    `goodness`:
-   - **Boolean**: `true` → 1, `false` → 0, with or without a definition.
+   - **Boolean**: without a live definition, `true` → 1 and `false` → 0. With a live definition of direction `Higher` or `Lower`, the same values oriented as for numeric (`Lower` flips them, so `true` → 0). Direction `None` → `None`.
    - **Numeric**: needs a definition with `min_value` and `max_value`, `min < max`, and direction `Higher` or `Lower`. `p = clamp((v − min) / (max − min), 0, 1)`; `Higher` → `p`, `Lower` → `1 − p`.
    - **Categorical**: needs direction `Higher` or `Lower` and the label's category to have a numeric `value`. Position the value between the min and max of all category values, then orient as for numeric. A single distinct value is `None`.
    - **Text**: `None`.
 
-   `is_bad` is `goodness ≤ 1/3`, with `None` meaning not bad. An archived definition counts as none. Copy the exact branches of `score-tone.ts` and report any difference you find between it and these words.
+   `is_bad` is `goodness ≤ 1/3`, with `None` meaning not bad: no separate rule for `false`, so a boolean without a definition is bad when `false`, and with direction `Lower` when `true`. An archived definition counts as none. Copy the exact branches of `score-tone.ts` and report any difference you find between it and these words.
 2. `triggers.rs`: the in-memory set of score and feedback sources.
    ```rust
    #[derive(Debug, Clone)]
@@ -418,7 +421,7 @@ Column meanings:
         - target, trace, span and session from the score, and the user from the score;
         - `trace_start: None`, `score_id: Some(score.score_id)`;
         - the `dedup_key` of M3.1.
-     3. In one `state.meta.write`, for each candidate: `admit_daily(conn, source, day_start(now), cap)`. At the cap, skip it. Otherwise `insert_candidate`; when the insert returns false (duplicate), there is no rollback of the daily count: rare, and accepted.
+     3. In one `state.meta.write`, for each candidate: `insert_admitted_candidate(conn, &row, day_start(now), cap)`. A duplicate (same `dedup_key`) or a candidate at the cap is skipped, and neither takes a slot of the daily cap: the duplicate check, the count and the insert run in the same `BEGIN IMMEDIATE` transaction.
      4. Any error logs a `warn!` with the project id and the count, and returns.
      5. After a successful insert, call `state.issues_wake()` (M3.4 adds it; until then, nothing).
    - In `scores.rs` `write`, call `crate::issues::triggers::on_scores_written(state, project, writer, &rows, &definitions).await;` after the usage add, before `Ok(ids)`.
@@ -439,13 +442,13 @@ Column meanings:
    2. Rows through `api::convert::match_rows(&batches, false)`, which gives the trace id and start.
    3. Keep the rows that `sampled(rate, source.id, trace, None)` keeps.
    4. One `state.meta.write`:
-      - per row, `admit_daily`, then `insert_candidate`;
+      - per row, `insert_admitted_candidate(conn, &row, day_start(now), cap)`; a duplicate takes no slot of the cap;
       - the candidate has target `trace`, `trace_start` from the row, `score_id` `None`, and user and session `None` (the worker fills them from the loaded trace).
    5. Wake the IC workers.
 4. `issues/mod.rs`: `pub(crate) mod bad_score; pub(crate) mod topics; pub(crate) mod triggers;`.
 
 **Tests:**
-- `bad_score`: a table of cases matching `score-tone.ts` (numeric higher and lower, categorical, boolean without a definition, text, archived);
+- `bad_score`: a table of cases matching `score-tone.ts` (numeric higher and lower, categorical, boolean under higher, lower and none and without a definition, text, archived);
 - triggers:
   - a bad judge score on a project with a `score` source queues one candidate;
   - a good score queues none;
@@ -454,6 +457,7 @@ Column meanings:
   - the daily cap stops at `cap`;
   - sampling 0.0001 queues nothing in 20 traces (choose ids that are known not to be sampled, or check with `sampled`);
   - the same score written twice queues one candidate;
+  - a span score queues a `span` candidate with its span id, and a session score a `session` candidate with its session id, under the dedup keys of M3.1;
 - topics (in `eval/trigger.rs`'s tests): a completed production trace queues a candidate, a filter excludes one, a project with only a topic source is tracked, and an eval trace is never a candidate.
 
 **Commit:** `Queue issue candidates from bad scores and new traces`
@@ -549,7 +553,7 @@ The tests are split the same way.
          - `Pause` → pause the source (`pause_source(conn, id, "connection", detail, now)` from M3.6; until M3.6 lands, mark it failed, and M3.6 replaces that) and `Requeue`;
          - `Permanent` → `Failed { class: "permanent" }`.
    6. **Embed**, with the same budget, slot (`embed_connection_id`), attempt and error handling:
-      - `embed(EmbeddingInput { connection, model: embed_model, text: summary, dimensions: Some(512), timeout: 30 s, trace: CallTrace { call_trace_id(…, 2), root_name: "cetra.issue.embed", … } })`;
+      - `embed(EmbeddingInput { connection, model: embed_model, text: summary, dimensions: None, timeout: 30 s, trace: CallTrace { call_trace_id(…, 2), root_name: "cetra.issue.embed", … } })`;
       - commit the trace and the usage;
       - the estimate is `ceil(chars / 4)` input tokens at the input price. Add `budget::input_price_usd(tokens, &PriceRow) -> f64`, which uses `price_input` only.
    7. **Dimension.** `set_embed_dimension(conn, source, dim)`. When it returns another dimension: `Failed { class: "embedding_dimension_changed" }`.
@@ -663,7 +667,7 @@ The tests are split the same way.
      2. delete candidates older than 30 days;
      3. delete `issue_source_days` older than 62 days;
      4. keep the newest 50 refits per source.
-   - `prune_to_window(conn, org, visible_from) -> Result<u64, MetaError>`: delete candidates whose `trace_start < visible_from` in that org's projects.
+   - `prune_to_window(conn, org, visible_from, now) -> Result<u64, MetaError>`: delete candidates whose `trace_start < visible_from` in that org's projects, and clear the `summary` of candidates in a project with `retention_days` set when their `created_at` is older than `now - retention_days` days (the row stays: it anchors issue membership).
 2. `worker.rs` and `refit.rs`: a `Pause` error calls `pause_sources_of_connection` for the failing connection, plus `connections::set_connection_status(conn, id, "failing", None, now)`, in the finish write, with the D-I-14 fence (`connection_unchanged`, made `pub(crate)` in `execute.rs`) as the judge path does. Replace the M3.4 placeholder failure.
 3. `dispatch.rs`:
    - `budget_once` also calls `issues::clear_budget_pauses`;

@@ -508,7 +508,7 @@ pub(crate) async fn prune_once(state: &AppState, now: i64) -> Result<PruneReport
         let removed = state
             .meta
             .write(move |conn| {
-                Box::pin(async move { issues::prune_to_window(conn, org, visible_from).await })
+                Box::pin(async move { issues::prune_to_window(conn, org, visible_from, now).await })
             })
             .await?;
         if removed > 0 {

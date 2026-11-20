@@ -42,12 +42,10 @@ pub(crate) fn goodness(value: &ScoreValue, definition: Option<&DefinitionRow>) -
     }
 }
 
-/// A score that makes a candidate (D-IC-4): a `false`, or a goodness of at most a third (D-I-47).
-/// An archived definition counts as none. A neutral score is never bad by its value.
+/// A score that makes a candidate (D-IC-4): a goodness of at most a third (D-I-47). A boolean is
+/// bad at the value its direction makes bad, so `false` without a definition and under `higher`,
+/// `true` under `lower`. An archived definition counts as none. A neutral score is never bad.
 pub(crate) fn is_bad(value: &ScoreValue, definition: Option<&DefinitionRow>) -> bool {
-    if matches!(value, ScoreValue::Boolean(false)) {
-        return true;
-    }
     goodness(value, definition).is_some_and(|good| good <= 1.0 / 3.0)
 }
 
@@ -208,6 +206,25 @@ mod tests {
         );
         let neutral = definition(ScoreDataType::Boolean, ScoreDirection::None, None, &[]);
         assert_eq!(goodness(&ScoreValue::Boolean(true), Some(&neutral)), None);
+    }
+
+    #[test]
+    fn a_boolean_is_bad_at_the_value_its_direction_calls_bad() {
+        // Direction `higher`: `false` is the bad value.
+        let higher = definition(ScoreDataType::Boolean, ScoreDirection::Higher, None, &[]);
+        assert!(is_bad(&ScoreValue::Boolean(false), Some(&higher)));
+        assert!(!is_bad(&ScoreValue::Boolean(true), Some(&higher)));
+        // Direction `lower`: `false` is good, so `true` is the bad value.
+        let lower = definition(ScoreDataType::Boolean, ScoreDirection::Lower, None, &[]);
+        assert!(is_bad(&ScoreValue::Boolean(true), Some(&lower)));
+        assert!(!is_bad(&ScoreValue::Boolean(false), Some(&lower)));
+        // Direction `none` is neutral for both values.
+        let neutral = definition(ScoreDataType::Boolean, ScoreDirection::None, None, &[]);
+        assert!(!is_bad(&ScoreValue::Boolean(false), Some(&neutral)));
+        assert!(!is_bad(&ScoreValue::Boolean(true), Some(&neutral)));
+        // No definition: `false` is bad, `true` is not.
+        assert!(is_bad(&ScoreValue::Boolean(false), None));
+        assert!(!is_bad(&ScoreValue::Boolean(true), None));
     }
 
     #[test]

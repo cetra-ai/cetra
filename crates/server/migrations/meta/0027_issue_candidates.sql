@@ -14,6 +14,7 @@ ALTER TABLE issue_sources ADD COLUMN budget_usd REAL;
 ALTER TABLE issue_sources ADD COLUMN budget_period TEXT;
 ALTER TABLE issue_sources ADD COLUMN paused_detail TEXT;
 ALTER TABLE issue_sources ADD COLUMN next_refit_at INTEGER;
+ALTER TABLE issue_sources ADD COLUMN refit_trigger TEXT NOT NULL DEFAULT 'schedule' CHECK (refit_trigger IN ('schedule', 'manual'));
 
 ALTER TABLE issues ADD COLUMN centroid BLOB;
 ALTER TABLE issues ADD COLUMN member_count INTEGER NOT NULL DEFAULT 0;

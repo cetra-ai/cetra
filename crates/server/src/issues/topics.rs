@@ -10,7 +10,7 @@ use crate::eval::budget::day_start;
 use crate::eval::pending::Completed;
 use crate::eval::sampling;
 use crate::eval::trigger::{READ_TIMEOUT, SweepCtx};
-use crate::meta::issues::{CandidateRow, admit_daily, insert_candidate};
+use crate::meta::issues::{CandidateRow, insert_admitted_candidate};
 
 /// Topic candidates of one batch of completed traces, for every topic source of the project, in
 /// id order. A source whose filter does not parse is skipped, with the hourly warning the rules
@@ -19,8 +19,9 @@ use crate::meta::issues::{CandidateRow, admit_daily, insert_candidate};
 /// # Errors
 ///
 /// `Err(())` when a read or a write fails. Its caller retries the batch when no rule runs with it
-/// (`eval::trigger`). A retry re-admits the traces of the sources that were already written: the
-/// dedup keys keep them from being queued twice, but they count again against their daily caps.
+/// (`eval::trigger`). A retry is safe: each source's candidates are written in one transaction, so
+/// a source that was written before the failure is either fully queued or not at all, and a trace
+/// that is already queued is a duplicate that takes no slot of the daily cap.
 pub(crate) async fn sweep_batch(
     ctx: &SweepCtx<'_>,
     around: i64,
@@ -125,16 +126,14 @@ pub(crate) async fn sweep_batch(
                 )
             })
             .collect();
-        let (source_id, now, count) = (source.id, ctx.now, candidates.len());
+        let (now, count) = (ctx.now, candidates.len());
         let outcome = ctx
             .state
             .meta
             .write(move |conn| {
                 Box::pin(async move {
                     for row in candidates {
-                        if admit_daily(conn, source_id, day_start(now), cap).await? {
-                            insert_candidate(conn, &row).await?;
-                        }
+                        insert_admitted_candidate(conn, &row, day_start(now), cap).await?;
                     }
                     Ok(())
                 })

@@ -13,7 +13,7 @@ This document holds the goals, the architecture, the contracts between parts, th
 - **Four kinds of signal** produce issue candidates (user, 2026-11-20):
   - errors (spans with `status = 'error'`);
   - bad evaluation scores (failed checks, judge scores in the bad third of their definition, D-I-47);
-  - negative user feedback (`end_user` and `human` scores in the bad third, or `false`);
+  - negative user feedback (`end_user` and `human` scores in the bad third, or a boolean at its bad value);
   - topics (sampled production traces, grouped by what the user asked).
 - **Stable issues.** An issue keeps its id, title, history, state and links for life. New occurrences join existing issues, and a new problem becomes a new issue within minutes to hours, without a full recompute that would renumber everything.
 - **A lifecycle** that respects human decisions: open, resolved, ignored, merged. A resolved issue that recurs is reopened and marked regressed. Nothing automatic overrides a state that a person set, except that regression reopen.
@@ -82,7 +82,7 @@ An **issue source** is a per-project rule with:
   - for `error`, a `spans` DSL expression, ANDed with `status = 'error'` by the read;
   - for the other kinds, a `traces` DSL expression. A `topic` source defaults to `environment = 'production'`.
 - for the LLM kinds only (`score`, `feedback`, `topic`):
-  - `sample_rate` in `(0, 1]`, sampled by SHA-256 as in D-I-10 with the label `cetra.issue-sample.v1` and the source id;
+  - `sample_rate` in `(0, 1]`, sampled by SHA-256 as in D-I-10 with the label `cetra.sample.v1` and the source id;
   - `daily_cap`, the maximum number of candidates accepted per UTC day (default 500, 1–10 000), counted in `issue_source_days` so it survives restarts.
   An `error` source has neither: every error span is fingerprinted, so a new error always becomes an issue (D-IC-2). Sending one for an `error` source is a 400.
 - for `score` and `feedback`, the score names it watches (1–8), and for `feedback` the score sources it accepts (`end_user`, `human`, default both);
@@ -136,23 +136,24 @@ The prompts live in code, versioned (`summary_prompt_version` on each candidate)
 Triggers:
 - `score` and `feedback` candidates come from **score writes**. At the end of a successful `scores::write` (one place, so the API, the SDK, end-user feedback, annotations and evaluators all pass through it), `issues::on_scores_written` looks at the written rows. It returns at once for a project without an enabled `score` or `feedback` source, using an in-memory set rebuilt like I's tracked set. It queues a candidate for a live score when all of these hold:
   - the score's name and source match a source;
-  - its value is bad: `false` for a boolean, a failed check, or a numeric or categorical value in its definition's bad third (D-I-47). Scores without a definition, or with direction `none`, never qualify, except booleans.
+  - its value is bad: a numeric or categorical value in its definition's bad third, in the definition's direction (D-I-47), or a boolean at the value its direction makes bad (`false` under `higher`, `true` under `lower`). A boolean with no live definition is bad when it is `false`. Scores with direction `none`, and scores that their definition cannot place (no range, another type, an unknown category), never qualify.
   - the sampling and the daily cap pass.
   The source's `traces` filter is checked by the worker before the first call, with one `trace_refresh` read on the target trace. A trace that does not match ends `dropped`. Scores of source `issue` never reach this check (D-IC-11).
 - The input of a session-target score is its comment or reason, plus the input and output previews of the session's latest trace that started before the score.
 - `topic` candidates come from **trace completion**, through the sweeper as for error sources.
 - Both skip `cetra-eval` traces and experiment traces, as online rules do (D-I-17).
+- Perf: a score candidate's first load has no trace start, so it reads every file of the project; later attempts read from the stored trace start.
 
 ### D-IC-5 Embeddings come from the org's connection, locked per source
 
-The embedding connection and model are fixed when the source is created and cannot change afterwards. Changing them means a new source, because vectors of two models are not comparable. A budgeted source needs a price for both models, else 400 (D-I-15's rule). The price table may lack an embedding model; then the source runs without a budget, and its cost shows as unknown. Each vector is stored with its model name and dimension, and a vector whose dimension differs from the source's first one fails the candidate (`embedding_dimension_changed`). When the provider supports it, the call requests 512 dimensions (OpenAI `dimensions`, Gemini `outputDimensionality`), so vectors stay small; otherwise the native size is kept, at most 4 096 (a larger answer fails the source with a pause). Embedding calls are priced from the price table's `input` price (D82) and count toward the source's budget.
+The embedding connection and model are fixed when the source is created and cannot change afterwards. Changing them means a new source, because vectors of two models are not comparable. A budgeted source needs a price for both models, else 400 (D-I-15's rule). The price table may lack an embedding model; then the source runs without a budget, and its cost shows as unknown. Each vector is stored with its model name and dimension, and a vector whose dimension differs from the source's first one fails the candidate (`embedding_dimension_changed`). The call requests no size (no `dimensions`, no `outputDimensionality`): the provider's native size is kept, the dimension of the source's first answer is stored, and at most 4 096 are accepted (a larger answer fails the source with a pause). Embedding calls are priced from the price table's `input` price (D82) and count toward the source's budget.
 
 ### D-IC-6 Vectors live in `meta.db`, scanned brute force
 
 - **Centroids.** Each issue of an LLM source keeps its centroid (f32 little-endian BLOB) and its member count in `meta.db`. A centroid is a mean of many embeddings and holds no readable text. It is not recomputed when members are deleted, and this is accepted.
 - **Candidates.** Each candidate keeps its vector while it is useful: unassigned candidates for 7 days (the refit pool), assigned ones for 30 days (the namer's examples). An hourly pruner deletes older vectors and keeps the candidate row (summary, issue, target) for 30 days in total, or less when the trace leaves the org's data window (D175): candidates whose `trace_start` is older than the window are deleted.
 - **No index.** Assignment compares one vector with every open, resolved or ignored issue centroid of the source. A refit loads the source's unassigned vectors, at most 5 000 (D-IC-8).
-- **Size.** The daily cap bounds storage: 500 candidates × 512 × 4 bytes × 30 days ≈ 30 MB per source at the default.
+- **Size.** The daily cap bounds storage: 500 candidates × 1 536 × 4 bytes × 30 days ≈ 92 MB per source at the default, for a model of 1 536 dimensions; at the 4 096 limit it is ≈ 246 MB.
 
 Rejected:
 - an external vector database (single binary);
@@ -414,5 +415,5 @@ M1 and M2 can run in parallel: M1 touches `cetra-core`, `cetra-storage`, `cetra-
 1. **Units.** Should occurrence scores count as billable units (D173)? The design says no (D-IC-11): they are derived, rewrites are idempotent, and an error storm must not bill. Counting them would mean one unit per distinct issue per trace, and up to the daily cap per topic source.
 2. **Deletion and titles.** After every member of an issue is deleted (a GDPR deletion by user, for example), should the issue's LLM-written title and description be deleted or regenerated? The design keeps them, since they are aggregates written in generic words by the prompt, but a strict reading of D24 may want them removed when the issue has no members left.
 3. **Regression rule.** Sentry-style reopening of a resolved issue (this design) versus MLflow's "a regression is a new issue".
-4. **Defaults.** Daily cap 500, floor 0.80, minimum issue size 5, refit every 6 h, 512 dimensions: are these right for the cloud's Free and Starter orgs?
+4. **Defaults.** Daily cap 500, floor 0.80, minimum issue size 5, refit every 6 h: are these right for the cloud's Free and Starter orgs?
 5. **Topic issues.** Topics are not problems. Should they be shown on the same Issues page (filtered by kind), or on their own "Topics" page?

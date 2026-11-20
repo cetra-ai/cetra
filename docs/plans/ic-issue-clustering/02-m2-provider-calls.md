@@ -30,7 +30,7 @@ Out of scope: any server code, any route, the connection test (M3 adds the embed
 |---|---|
 | D-IC-2 | Error fingerprint fields and normalization rules |
 | D-IC-4 | Summary calls use the judge adapters and structured-output modes |
-| D-IC-5 | Embeddings from the org's connection: OpenAI-compatible or Gemini, 512 dimensions requested |
+| D-IC-5 | Embeddings from the org's connection: OpenAI-compatible or Gemini; no dimension requested, the first answer's dimension is stored (≤ 4 096) |
 | D-IC-8 | Average linkage, nearest-neighbour chain, cut at `1 − floor` |
 | D-IC-15 | These pieces live in `cetra-eval` |
 | D-IC-17 | Fingerprint bytes, placeholders, tie-breaks, L2-normalized vectors (≤ 4 096 dimensions, finite), call-trace shape |

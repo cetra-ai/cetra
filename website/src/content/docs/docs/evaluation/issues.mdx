@@ -111,11 +111,12 @@ A source can also read bad scores, user feedback or new traces. cetra summarizes
 
 ### How candidates are made
 
-- A bad score is a score in the bad third of its score definition's range, in the definition's direction. A definition with no direction gives no bad scores.
+- A bad score is a number or a category in the bad third of its score definition's range, in the definition's direction. A definition with no direction gives no bad scores.
+- A boolean score is bad at the value its definition's direction calls bad: `false` by default, or `true` when the direction is **Lower is better**. A boolean with no definition is bad when it is `false`.
 - A feedback candidate is a feedback score of a chosen name, from a chosen feedback source.
 - A topic candidate is a new production trace that matches the filter.
 
-The **Sample rate** is the share of matching items that become candidates. The **Daily cap** is the most candidates a UTC day admits, 500 by default. Candidates past the cap are dropped.
+The **Sample rate** is the share of matching items that become candidates. The **Daily cap** is the most candidates a UTC day admits, 500 by default. Matching items past the cap are skipped: they make no candidate, so cetra does not summarize or embed them.
 
 ### Cost and budgets
 
@@ -125,7 +126,7 @@ If a connection fails, the source pauses, and its page shows the provider's erro
 
 ### Refits
 
-cetra groups the waiting candidates in a refit. The first refit runs an hour after you create the source, and then one runs every 6 hours. To group the candidates now, open the source page and select **Refit now**. A refit started less than 10 minutes ago blocks a new one.
+cetra groups the waiting candidates in a refit. The first refit runs an hour after you create the source, and then one runs every 6 hours. To group the candidates now, open the source page and select **Refit now**. A refit started less than 10 minutes ago blocks a new one. **Refit now** is unavailable while the source is disabled or paused.
 
 - A candidate joins the issue nearest to it when their similarity is at least the **Join floor**. The floor is 0.80 by default, and it can be from 0.5 to 0.99. A higher floor needs the candidates to be more alike.
 - Candidates that are alike enough to form a group of at least the **Minimum issue size** become a new issue, which cetra names with the chat model. The minimum is 5 by default, and it can be from 2 to 100.

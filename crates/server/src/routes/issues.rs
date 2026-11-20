@@ -14,6 +14,7 @@ use cetra_core::enums::ScoreSource;
 use cetra_core::ids::{OrgId, ProjectId};
 use cetra_core::score::{Score, ScoreTarget};
 use cetra_eval::Adapter;
+use cetra_eval::issue::cluster;
 use cetra_storage::{
     MAX_COUNT_NAMES, QueryContext, ScoreListRequest, ScoreNameCount, ScoreNameCountsRequest,
     TimeWindow, ViewName,
@@ -42,6 +43,7 @@ use crate::issues::source_limit::{self, SourceLimitError};
 use crate::meta::MetaError;
 use crate::meta::connections;
 use crate::meta::issues::{self as store, IssueSort, RefitRow, SourceKind, SourceRow};
+use crate::meta::online_rules::PAUSE_BUDGET;
 
 use super::orgs::page_named;
 use super::read::{READ_TIMEOUT, open_query};
@@ -448,9 +450,10 @@ async fn delete_issue_source(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `POST …/issue-sources/{id}/refit` (D-IC-8): asks for a refit now. An `error` source has none
-/// (400). Refused with 409 when a refit started less than 10 minutes ago, or when one is already
-/// due. Answers 202 with the source.
+/// `POST …/issue-sources/{id}/refit` (D-IC-8): asks for a refit now. An `error` source has no refit
+/// (400), and a disabled or paused source cannot be refit (400) until it is enabled or resumed.
+/// Refused with 409 when a refit started less than 10 minutes ago, or when one is already due.
+/// Answers 202 with the source. The refit records the trigger `manual`.
 async fn post_issue_source_refit(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
@@ -466,6 +469,18 @@ async fn post_issue_source_refit(
     if !row.kind.is_llm() {
         return Err(bad_request_field("kind", "only LLM sources have refits"));
     }
+    if !row.enabled {
+        return Err(bad_request_field(
+            "enabled",
+            "a disabled source cannot be refit",
+        ));
+    }
+    if row.paused_reason.is_some() {
+        return Err(bad_request_field(
+            "paused_reason",
+            "a paused source cannot be refit; resume it first",
+        ));
+    }
     if let Some(started) = store::last_refit_started(state.meta.reader(), id).await?
         && now - started < REFIT_COOLDOWN_NS
     {
@@ -480,7 +495,9 @@ async fn post_issue_source_refit(
     }
     state
         .meta
-        .write(move |conn| Box::pin(async move { store::set_next_refit(conn, id, now).await }))
+        .write(move |conn| {
+            Box::pin(async move { store::set_next_refit(conn, id, now, "manual").await })
+        })
         .await?;
     tracing::info!(
         target: "audit",
@@ -545,13 +562,14 @@ async fn insert_checked(
 }
 
 /// The PATCH's write: the source must be the row the checks ran against. Enabling a disabled
-/// source checks the active-source limit (D-IC-13).
+/// source checks the active-source limit (D-IC-13). A changed budget clears a `budget` pause in the
+/// same write, as a changed rule budget does (D-I-15).
 async fn update_checked(
     conn: &mut SqliteConnection,
     project: ProjectId,
     org: OrgId,
     stored: SourceRow,
-    row: SourceRow,
+    mut row: SourceRow,
     limit: Option<u64>,
 ) -> Result<SourceWrite, MetaError> {
     let Some(current) = store::get_source_tx(conn, project, stored.id).await? else {
@@ -565,6 +583,13 @@ async fn update_checked(
         if let Err(error) = source_limit::check(active, limit) {
             return Ok(SourceWrite::OverLimit(error));
         }
+    }
+    let budget_changed =
+        stored.budget_usd != row.budget_usd || stored.budget_period != row.budget_period;
+    if budget_changed && row.paused_reason.as_deref() == Some(PAUSE_BUDGET) {
+        row.paused_reason = None;
+        row.paused_at = None;
+        row.paused_detail = None;
     }
     if !store::update_source(conn, &row).await? {
         return Ok(SourceWrite::Missing);
@@ -1498,6 +1523,29 @@ async fn merge_checked(
 
     target.first_seen = target.first_seen.min(issue.first_seen);
     target.last_seen = target.last_seen.max(issue.last_seen);
+    // The target's centroid becomes the member-weighted mean of both (D-IC-9). An error issue has
+    // no centroid, so its target keeps its own; the counts add up either way.
+    let merged = match (target.centroid.as_deref(), issue.centroid.as_deref()) {
+        (Some(kept), Some(other)) => {
+            match cluster::merge_centroids(kept, target.member_count, other, issue.member_count) {
+                Ok(merged) => Some(merged),
+                Err(error) => {
+                    tracing::warn!(
+                        issue_id = %id,
+                        target_id = %into,
+                        error_class = ?error,
+                        "issue centroid could not be merged; the target keeps its centroid"
+                    );
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+    if merged.is_some() {
+        target.centroid = merged;
+    }
+    target.member_count = target.member_count.saturating_add(issue.member_count);
     target.updated_at = now;
     store::update_issue(conn, &target).await?;
 
@@ -3575,6 +3623,253 @@ mod tests {
         let errors = create_ok(&app, &seeded, &source_body("Errors")).await;
         let refused = refit_now(&app, &seeded, id_of(&errors)).await;
         assert_eq!(refused.status, 400, "{}", text(&refused));
+    }
+
+    #[tokio::test]
+    async fn refit_now_on_a_disabled_or_paused_source_is_400() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let openai = connection(&app, &seeded, "openai").await;
+        let disabled = create_ok(&app, &seeded, &topic_body("Disabled", openai, openai)).await;
+        let disabled_id = id_of(&disabled);
+        let turned_off = patch(&app, &seeded, disabled_id, &json!({ "enabled": false })).await;
+        assert_eq!(turned_off.status, 200, "{}", text(&turned_off));
+        let refused = refit_now(&app, &seeded, disabled_id).await;
+        assert_eq!(refused.status, 400, "{}", text(&refused));
+        assert!(text(&refused).contains("disabled source"));
+
+        let paused = create_ok(&app, &seeded, &topic_body("Paused", openai, openai)).await;
+        let paused_id = id_of(&paused);
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    store::pause_source(conn, paused_id, "connection", Some("paused"), now).await
+                })
+            })
+            .await
+            .unwrap();
+        let refused = refit_now(&app, &seeded, paused_id).await;
+        assert_eq!(refused.status, 400, "{}", text(&refused));
+        assert!(text(&refused).contains("paused source"));
+    }
+
+    #[tokio::test]
+    async fn refit_now_makes_the_source_due_as_a_manual_refit() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let openai = connection(&app, &seeded, "openai").await;
+        let created = create_ok(&app, &seeded, &topic_body("Topics", openai, openai)).await;
+        let id = id_of(&created);
+        let accepted = refit_now(&app, &seeded, id).await;
+        assert_eq!(accepted.status, 202, "{}", text(&accepted));
+
+        let now = app.state.clock.now_ns();
+        let due = store::due_refits(app.state.meta.reader(), now)
+            .await
+            .unwrap();
+        let triggers: Vec<&str> = due
+            .iter()
+            .filter(|(row, _)| row.id == id)
+            .map(|(_, trigger)| *trigger)
+            .collect();
+        assert_eq!(triggers, vec!["manual"]);
+    }
+
+    #[tokio::test]
+    async fn merge_weights_the_target_centroid_and_sums_the_counts() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let openai = connection(&app, &seeded, "openai").await;
+        let created = create_ok(&app, &seeded, &topic_body("Topics", openai, openai)).await;
+        let source = id_of(&created);
+        let now = app.state.clock.now_ns();
+        let target = Uuid::now_v7();
+        let merged = Uuid::now_v7();
+        put_issue(
+            &app,
+            IssueRow {
+                centroid: Some(vec![1.0, 0.0, 0.0]),
+                member_count: 3,
+                ..issue_row(project, source, target, "target", IssueState::Open, now)
+            },
+        )
+        .await;
+        put_issue(
+            &app,
+            IssueRow {
+                centroid: Some(vec![0.0, 1.0, 0.0]),
+                member_count: 1,
+                ..issue_row(project, source, merged, "merged", IssueState::Open, now)
+            },
+        )
+        .await;
+
+        let response = merge_request(&app, &seeded, merged, target).await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+
+        let stored = store::get_issue(app.state.meta.reader(), project, target)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.member_count, 4);
+        // A 3 to 1 mean of two orthogonal unit vectors, normalized.
+        let norm = 0.625_f32.sqrt();
+        let expected = [0.75 / norm, 0.25 / norm, 0.0];
+        let centroid = stored.centroid.expect("a centroid");
+        assert_eq!(centroid.len(), expected.len());
+        for (actual, expected) in centroid.iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-5, "{centroid:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_changed_budget_resumes_a_budget_pause_and_another_change_keeps_it() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let org = seeded.org_id;
+        let openai = connection(&app, &seeded, "openai").await;
+        let created = create_ok(&app, &seeded, &topic_body("Budgeted", openai, openai)).await;
+        let id = id_of(&created);
+        let now = app.state.clock.now_ns();
+        let stored = store::get_source(app.state.meta.reader(), project, id)
+            .await
+            .unwrap()
+            .unwrap();
+        // The source is paused because its budget of 1 USD is spent.
+        let paused = SourceRow {
+            budget_usd: Some(1.0),
+            budget_period: Some("day".to_owned()),
+            paused_reason: Some("budget".to_owned()),
+            paused_at: Some(now),
+            paused_detail: Some("budget reached".to_owned()),
+            updated_at: now,
+            ..stored
+        };
+        let row = paused.clone();
+        app.state
+            .meta
+            .write(move |conn| Box::pin(async move { store::update_source(conn, &row).await }))
+            .await
+            .unwrap();
+
+        // A change that leaves the budget alone keeps the pause.
+        let renamed = SourceRow {
+            name: "Renamed".to_owned(),
+            updated_at: now + 1,
+            ..paused.clone()
+        };
+        let outcome = app
+            .state
+            .meta
+            .write(move |conn| {
+                Box::pin(
+                    async move { update_checked(conn, project, org, paused, renamed, None).await },
+                )
+            })
+            .await
+            .unwrap();
+        let SourceWrite::Done(kept) = outcome else {
+            panic!("the rename is written");
+        };
+        assert_eq!(kept.paused_reason.as_deref(), Some("budget"));
+
+        // Raising the budget resumes the source.
+        let stored = store::get_source(app.state.meta.reader(), project, id)
+            .await
+            .unwrap()
+            .unwrap();
+        let raised = SourceRow {
+            budget_usd: Some(5.0),
+            updated_at: now + 2,
+            ..stored.clone()
+        };
+        let outcome = app
+            .state
+            .meta
+            .write(move |conn| {
+                Box::pin(
+                    async move { update_checked(conn, project, org, stored, raised, None).await },
+                )
+            })
+            .await
+            .unwrap();
+        let SourceWrite::Done(resumed) = outcome else {
+            panic!("the raise is written");
+        };
+        assert_eq!(resumed.paused_reason, None);
+        assert_eq!(resumed.paused_detail, None);
+        let read = store::get_source(app.state.meta.reader(), project, id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(read.paused_reason, None);
+        assert_eq!(read.budget_usd, Some(5.0));
+    }
+
+    /// A topic source on `openai` with a 1 USD daily budget, paused with reason `budget`.
+    async fn budget_paused(app: &TestApp, seeded: &Seeded, openai: Uuid, name: &str) -> Uuid {
+        let mut body = topic_body(name, openai, openai);
+        body["budget_usd"] = json!(1.0);
+        body["budget_period"] = json!("day");
+        let id = id_of(&create_ok(app, seeded, &body).await);
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    store::pause_source(conn, id, PAUSE_BUDGET, Some("budget reached"), now).await
+                })
+            })
+            .await
+            .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn a_budget_pause_ends_on_a_budget_change_or_a_clear_but_not_a_rename() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let openai = connection(&app, &seeded, "openai").await;
+        let raised = budget_paused(&app, &seeded, openai, "Raised").await;
+        let cleared = budget_paused(&app, &seeded, openai, "Cleared").await;
+        let renamed = budget_paused(&app, &seeded, openai, "Renamed").await;
+
+        let response = patch(&app, &seeded, raised, &json!({ "budget_usd": 5.0 })).await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let body: Value = response.json();
+        assert!(body["paused_reason"].is_null(), "{body}");
+        let stored = store::get_source(app.state.meta.reader(), project, raised)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.paused_reason, None);
+        assert_eq!(stored.budget_usd, Some(5.0));
+
+        let response = patch(&app, &seeded, cleared, &json!({ "clear_budget": true })).await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let body: Value = response.json();
+        assert!(body["paused_reason"].is_null(), "{body}");
+        let stored = store::get_source(app.state.meta.reader(), project, cleared)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.paused_reason, None);
+        assert_eq!(stored.budget_usd, None);
+
+        let response = patch(&app, &seeded, renamed, &json!({ "name": "Still paused" })).await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let body: Value = response.json();
+        assert_eq!(body["paused_reason"], "budget", "{body}");
+        let stored = store::get_source(app.state.meta.reader(), project, renamed)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.paused_reason.as_deref(), Some("budget"));
     }
 
     #[tokio::test]

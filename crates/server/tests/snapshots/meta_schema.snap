@@ -592,7 +592,7 @@ CREATE TABLE issue_sources (
     paused_at     INTEGER,
     created_by    TEXT REFERENCES users(id) ON DELETE SET NULL,
     created_at    INTEGER NOT NULL,
-    updated_at    INTEGER NOT NULL, sample_rate REAL, daily_cap INTEGER, score_names TEXT, feedback_sources TEXT, chat_connection_id TEXT REFERENCES llm_connections(id), chat_model TEXT, embed_connection_id TEXT REFERENCES llm_connections(id), embed_model TEXT, embed_dimension INTEGER, floor REAL, min_issue_size INTEGER, budget_usd REAL, budget_period TEXT, paused_detail TEXT, next_refit_at INTEGER, last_notified_at INTEGER,
+    updated_at    INTEGER NOT NULL, sample_rate REAL, daily_cap INTEGER, score_names TEXT, feedback_sources TEXT, chat_connection_id TEXT REFERENCES llm_connections(id), chat_model TEXT, embed_connection_id TEXT REFERENCES llm_connections(id), embed_model TEXT, embed_dimension INTEGER, floor REAL, min_issue_size INTEGER, budget_usd REAL, budget_period TEXT, paused_detail TEXT, next_refit_at INTEGER, refit_trigger TEXT NOT NULL DEFAULT 'schedule' CHECK (refit_trigger IN ('schedule', 'manual')), last_notified_at INTEGER,
     UNIQUE (project_id, name)
 )
 

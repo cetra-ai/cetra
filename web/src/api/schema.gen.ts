@@ -2439,7 +2439,7 @@ export interface paths {
         put?: never;
         /**
          * Refit an issue source now
-         * @description Project members and above. API keys cannot call it. Sets the source's next refit to now, so the next sweep refits it. 400 for an `error` source. 409 when a refit started less than 10 minutes ago or one is already due.
+         * @description Project members and above. API keys cannot call it. Sets the source's next refit to now, so the next sweep refits it. 400 for an `error` source, or a disabled or paused one. The refit is recorded as `manual`. 409 when a refit started less than 10 minutes ago or one is already due.
          */
         post: operations["post_issue_source_refit"];
         delete?: never;

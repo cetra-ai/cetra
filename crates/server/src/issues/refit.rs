@@ -73,12 +73,12 @@ pub(crate) async fn run_refits(state: AppState, mut stop: watch::Receiver<bool>)
                 continue;
             }
         };
-        for source in &due {
+        for (source, trigger) in due {
             if *stop.borrow() {
                 return;
             }
             let now = state.clock.now_ns();
-            if let Err(error) = refit_source(&state, source, "schedule", now).await {
+            if let Err(error) = refit_source(&state, &source, trigger, now).await {
                 tracing::error!(
                     source_id = %source.id,
                     error = %error,
@@ -147,7 +147,7 @@ pub(crate) async fn refit_source(
         .write(move |conn| {
             Box::pin(async move {
                 issues::finish_refit(conn, &stored).await?;
-                issues::set_next_refit(conn, source_id, next).await
+                issues::set_next_refit(conn, source_id, next, "schedule").await
             })
         })
         .await?;
@@ -283,6 +283,8 @@ async fn steps(
         project: &project,
         now,
     };
+    // The occurrences older than the project's retention are not written (D-IC-18).
+    let kept_from = errors::retention_cutoff(&project, now);
     // Step 7: each kept cluster joins an issue or is named into a new one.
     for (index, members) in kept.iter().enumerate() {
         let group: Vec<&CandidateRow> = members.iter().map(|&position| &usable[position]).collect();
@@ -296,21 +298,22 @@ async fn steps(
         if let Some((issue_id, assigned)) = join(scope, &centroid, &group).await? {
             row.joined = row.joined.saturating_add(count32(assigned.len()));
             let assigned: HashSet<Uuid> = assigned.into_iter().collect();
-            let occurrences = occurrences_of(&group, &assigned, issue_id, source_id, now);
+            let occurrences =
+                occurrences_of(&group, &assigned, issue_id, source_id, now, kept_from);
             write_members(state, &project, source_id, occurrences).await;
             continue;
         }
         // Step 7.3: name the cluster, then create its issue.
         let (title, description) = name(scope, row, &group, &centroid, index, &titles).await?;
         let (issue_id, assigned) =
-            create_issue(scope, &group, &centroid, &title, description.as_deref()).await?;
+            create_issue(scope, &group, &title, description.as_deref()).await?;
         if assigned.is_empty() {
             continue;
         }
         row.created = row.created.saturating_add(1);
         titles.push(title);
         let assigned: HashSet<Uuid> = assigned.into_iter().collect();
-        let occurrences = occurrences_of(&group, &assigned, issue_id, source_id, now);
+        let occurrences = occurrences_of(&group, &assigned, issue_id, source_id, now, kept_from);
         write_members(state, &project, source_id, occurrences).await;
     }
     Ok(())
@@ -337,6 +340,7 @@ async fn join(
     let source_id = source.id;
     let project_id = project.id;
     let ids: Vec<Uuid> = group.iter().map(|candidate| candidate.id).collect();
+    let vectors = vectors_of(group);
     let (first, last) = trace_span(group, now);
     let centroid = centroid.to_vec();
     state
@@ -367,11 +371,14 @@ async fn join(
                     return Ok(Some((issue_id, assigned)));
                 }
                 let added = u64::try_from(assigned.len()).unwrap_or(u64::MAX);
+                // The issue's centroid moves by the members this write joined, not by the whole
+                // group: a member that left `pending` meanwhile is not in it (D-IC-7).
+                let joined = centroid_of_assigned(&vectors, &assigned);
                 errors::join_issue(conn, &mut issue, (first, last), now).await?;
                 let members = issue.member_count;
                 let merged = match issue.centroid.as_deref() {
                     Some(old) if members < CENTROID_MEMBERS => {
-                        cluster::merge_centroids(old, members, &centroid, added).ok()
+                        cluster::merge_centroids(old, members, &joined, added).ok()
                     }
                     _ => None,
                 };
@@ -571,16 +578,17 @@ async fn name(
     ))
 }
 
-/// Step 7.3.7: creates the issue of a named cluster in one meta write. The issue's centroid is the
-/// cluster's, and its candidates are assigned to it in the same write. Returns the issue and the
-/// candidates assigned.
+/// Step 7.3.7: creates the issue of a named cluster in one meta write. Its candidates are assigned
+/// to it in the same write, and its centroid and member count are those of the members the write
+/// assigned (a member that left `pending` since the read is not counted). Returns the issue and
+/// the candidates assigned.
 ///
 /// When no member is still `pending` in this write (a deletion removed them since the read), no
-/// issue is written and the returned list is empty.
+/// issue is written and the returned list is empty. The `any_pending` check and the assignment
+/// share the write, so when it passes, the assignment takes at least one member.
 async fn create_issue(
     scope: Scope<'_>,
     group: &[&CandidateRow],
-    centroid: &[f32],
     title: &str,
     description: Option<&str>,
 ) -> Result<(Uuid, Vec<Uuid>), MetaError> {
@@ -605,10 +613,11 @@ async fn create_issue(
         resolved_by: None,
         created_at: now,
         updated_at: now,
-        centroid: Some(centroid.to_vec()),
+        centroid: None,
         member_count: 0,
     };
     let ids: Vec<Uuid> = group.iter().map(|candidate| candidate.id).collect();
+    let vectors = vectors_of(group);
     state
         .meta
         .write(move |conn| {
@@ -618,6 +627,7 @@ async fn create_issue(
                 }
                 issues::insert_issue(conn, &issue).await?;
                 let assigned = issues::set_candidates_assigned(conn, &ids, issue_id, now).await?;
+                issue.centroid = Some(centroid_of_assigned(&vectors, &assigned));
                 issue.member_count = u64::try_from(assigned.len()).unwrap_or(u64::MAX);
                 issues::update_issue(conn, &issue).await?;
                 issues::insert_event(
@@ -640,32 +650,44 @@ async fn create_issue(
 }
 
 /// The occurrences of the assigned members of a group on `issue` (A3, A10): one per candidate
-/// that has a trace.
+/// that has a trace and is not older than `kept_from`, the project's retention cutoff.
 fn occurrences_of(
     group: &[&CandidateRow],
     assigned: &HashSet<Uuid>,
     issue: Uuid,
     source: Uuid,
     now: i64,
+    kept_from: Option<i64>,
 ) -> Vec<Occurrence> {
     group
         .iter()
         .filter(|candidate| assigned.contains(&candidate.id))
-        .filter_map(|candidate| occurrence(candidate, source, issue, now))
+        .filter_map(|candidate| occurrence(candidate, source, issue, now, kept_from))
         .collect()
 }
 
-/// The occurrence of one candidate on `issue`. `None` when the candidate has no trace.
-fn occurrence(candidate: &CandidateRow, source: Uuid, issue: Uuid, now: i64) -> Option<Occurrence> {
+/// The occurrence of one candidate on `issue`. `None` when the candidate has no trace, or when its
+/// trace is older than the retention cutoff `kept_from` (as `keep_hits` decides it).
+fn occurrence(
+    candidate: &CandidateRow,
+    source: Uuid,
+    issue: Uuid,
+    now: i64,
+    kept_from: Option<i64>,
+) -> Option<Occurrence> {
+    let at = candidate
+        .trace_start
+        .unwrap_or(candidate.created_at)
+        .min(now);
+    if errors::too_old(kept_from, at) {
+        return None;
+    }
     Some(Occurrence {
         source_id: source,
         issue_id: issue,
         trace_id: candidate.trace_id?,
         span_id: candidate.span_id,
-        at: candidate
-            .trace_start
-            .unwrap_or(candidate.created_at)
-            .min(now),
+        at,
         user_id: candidate.user_id.clone(),
         session_id: candidate.session_id.clone(),
         reason: candidate.summary.clone(),
@@ -702,6 +724,26 @@ fn trace_span(group: &[&CandidateRow], now: i64) -> (i64, i64) {
         starts.iter().copied().min().unwrap_or(now),
         starts.iter().copied().max().unwrap_or(now),
     )
+}
+
+/// The vectors of a group's candidates, by candidate id. A candidate without a vector is left out.
+fn vectors_of(group: &[&CandidateRow]) -> Vec<(Uuid, Vec<f32>)> {
+    group
+        .iter()
+        .filter_map(|candidate| Some((candidate.id, candidate.vector.clone()?)))
+        .collect()
+}
+
+/// The normalized mean of the vectors of the `assigned` candidates among `vectors` (step 7.1, as
+/// the centroid of the members a write actually takes, D-IC-7).
+fn centroid_of_assigned(vectors: &[(Uuid, Vec<f32>)], assigned: &[Uuid]) -> Vec<f32> {
+    let assigned: HashSet<Uuid> = assigned.iter().copied().collect();
+    let taken: Vec<&[f32]> = vectors
+        .iter()
+        .filter(|(id, _)| assigned.contains(id))
+        .map(|(_, vector)| vector.as_slice())
+        .collect();
+    centroid_of(&taken)
 }
 
 /// The normalized mean of the vectors (step 7.1). A zero mean takes the first vector.
@@ -1324,11 +1366,391 @@ mod tests {
             now,
         };
 
-        let (_, assigned) = create_issue(scope, &[&member], &near(0, 0.0), "Ghost", None)
+        let (_, assigned) = create_issue(scope, &[&member], "Ghost", None)
             .await
             .expect("create runs");
 
         assert!(assigned.is_empty());
         assert_eq!(count(&app, "SELECT COUNT(*) FROM issues").await, 0);
+    }
+
+    /// The centroid of `issue`, with its member count.
+    async fn centroid_and_members(
+        app: &TestApp,
+        project: ProjectId,
+        issue: Uuid,
+    ) -> (Vec<f32>, u64) {
+        let stored = issues::get_issue(app.state.meta.reader(), project, issue)
+            .await
+            .expect("issue read")
+            .expect("issue exists");
+        (stored.centroid.expect("a centroid"), stored.member_count)
+    }
+
+    /// Asserts that two vectors are equal up to float rounding.
+    fn assert_close(actual: &[f32], expected: &[f32]) {
+        assert_eq!(actual.len(), expected.len());
+        for (a, e) in actual.iter().zip(expected) {
+            assert!((a - e).abs() < 1e-5, "{actual:?} != {expected:?}");
+        }
+    }
+
+    /// Marks candidate `id` as assigned elsewhere, as a join or a refit of another group does.
+    async fn assigned_elsewhere(app: &TestApp, id: Uuid) {
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    sqlx::query("UPDATE issue_candidates SET status = 'assigned' WHERE id = ?")
+                        .bind(id.to_string())
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(MetaError::from)?;
+                    Ok(())
+                })
+            })
+            .await
+            .expect("candidate updated");
+    }
+
+    /// The members of each issue of `source`: the title and the trace ids of its candidates.
+    async fn members_by_title(app: &TestApp, source: Uuid) -> Vec<(String, Vec<u8>)> {
+        sqlx::query_as(
+            "SELECT i.title, c.trace_id FROM issue_candidates c \
+             JOIN issues i ON i.id = c.issue_id WHERE c.source_id = ? ORDER BY i.title, c.trace_id",
+        )
+        .bind(source.to_string())
+        .fetch_all(app.state.meta.reader())
+        .await
+        .expect("members read")
+    }
+
+    #[tokio::test]
+    async fn a_refit_now_records_a_manual_refit_and_the_next_one_is_scheduled() {
+        let (app, seeded) = llm_app().await;
+        let mock = MockLlm::start(Vec::new()).await;
+        let chat = connection(&app, &seeded, &mock).await;
+        let now = app.state.clock.now_ns();
+        let source = store_source(&app, llm_source(seeded.project.id, chat, now)).await;
+        let id = source.id;
+        // "Refit now" makes the source due at once and records the request as manual.
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move { issues::set_next_refit(conn, id, now, "manual").await })
+            })
+            .await
+            .expect("request stored");
+
+        let due = issues::due_refits(app.state.meta.reader(), now)
+            .await
+            .expect("due read");
+        let (due_source, trigger) = due
+            .into_iter()
+            .find(|(row, _)| row.id == id)
+            .expect("the source is due");
+        assert_eq!(trigger, "manual");
+        let row = refit_source(&app.state, &due_source, trigger, now)
+            .await
+            .expect("refit runs");
+
+        assert_eq!(row.trigger, "manual");
+        let listed = issues::list_refits(app.state.meta.reader(), id, 10)
+            .await
+            .expect("refits read");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].trigger, "manual");
+        // The refit schedules the next one, on the schedule, six hours after it ended.
+        let finished = row.finished_at.expect("the refit finished");
+        assert!(
+            issues::due_refits(app.state.meta.reader(), finished)
+                .await
+                .expect("due read")
+                .is_empty()
+        );
+        let scheduled = issues::due_refits(app.state.meta.reader(), finished + SIX_HOURS)
+            .await
+            .expect("due read");
+        assert_eq!(scheduled.len(), 1);
+        assert_eq!(scheduled[0].1, "schedule");
+    }
+
+    #[tokio::test]
+    async fn the_same_pending_set_gives_the_same_clusters_twice() {
+        let (app, seeded) = llm_app().await;
+        let mock = MockLlm::start(vec![
+            name("Refund refused"),
+            name("Login fails"),
+            name("Refund refused"),
+            name("Login fails"),
+        ])
+        .await;
+        let chat = connection(&app, &seeded, &mock).await;
+        let now = app.state.clock.now_ns();
+        let first = store_source(&app, llm_source(seeded.project.id, chat, now)).await;
+        let second = store_source(&app, llm_source(seeded.project.id, chat, now)).await;
+        for source in [&first, &second] {
+            for i in 0..12_u8 {
+                pending(
+                    &app,
+                    source,
+                    i + 1,
+                    near(0, 0.01 * f32::from(i)),
+                    now - MINUTE,
+                )
+                .await;
+            }
+            for i in 0..13_u8 {
+                pending(
+                    &app,
+                    source,
+                    i + 20,
+                    near(1, 0.01 * f32::from(i)),
+                    now - MINUTE,
+                )
+                .await;
+            }
+        }
+
+        let a = refit_source(&app.state, &first, "manual", now)
+            .await
+            .expect("refit runs");
+        let b = refit_source(&app.state, &second, "manual", now)
+            .await
+            .expect("refit runs");
+
+        assert_eq!(
+            (a.pending, a.clusters, a.created, a.joined),
+            (b.pending, b.clusters, b.created, b.joined)
+        );
+        assert_eq!((a.created, a.joined), (2, 0));
+        let members = members_by_title(&app, first.id).await;
+        assert_eq!(members.len(), 25);
+        assert_eq!(members, members_by_title(&app, second.id).await);
+    }
+
+    #[tokio::test]
+    async fn a_naming_call_over_the_budget_stops_the_refit_and_pauses_the_source() {
+        let (app, seeded) = llm_app().await;
+        let mock = MockLlm::start(vec![name("Unused")]).await;
+        let chat = connection(&app, &seeded, &mock).await;
+        let now = app.state.clock.now_ns();
+        let source = store_source(
+            &app,
+            SourceRow {
+                // A priced chat model with a budget no call fits in.
+                chat_model: Some("gpt-4o-mini".to_owned()),
+                budget_usd: Some(0.0000001),
+                budget_period: Some("day".to_owned()),
+                ..llm_source(seeded.project.id, chat, now)
+            },
+        )
+        .await;
+        for i in 0..12_u8 {
+            pending(
+                &app,
+                &source,
+                i + 1,
+                near(0, 0.01 * f32::from(i)),
+                now - MINUTE,
+            )
+            .await;
+        }
+        for i in 0..13_u8 {
+            pending(
+                &app,
+                &source,
+                i + 20,
+                near(1, 0.01 * f32::from(i)),
+                now - MINUTE,
+            )
+            .await;
+        }
+
+        let row = refit_source(&app.state, &source, "manual", now)
+            .await
+            .expect("refit runs");
+
+        assert_eq!(row.error_class.as_deref(), Some("budget"));
+        assert_eq!((row.clusters, row.created), (2, 0));
+        assert!(mock.requests().is_empty());
+        let stored = issues::get_source(app.state.meta.reader(), seeded.project.id, source.id)
+            .await
+            .expect("source read")
+            .expect("source exists");
+        assert_eq!(stored.paused_reason.as_deref(), Some("budget"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn naming_waits_for_a_chat_slot_and_the_refit_stops_busy_when_none_comes() {
+        let (app, seeded) = llm_app().await;
+        let mock = MockLlm::start(vec![name("Unused")]).await;
+        let chat = connection(&app, &seeded, &mock).await;
+        let now = app.state.clock.now_ns();
+        let source = store_source(&app, llm_source(seeded.project.id, chat, now)).await;
+        for i in 0..12_u8 {
+            pending(
+                &app,
+                &source,
+                i + 1,
+                near(0, 0.01 * f32::from(i)),
+                now - MINUTE,
+            )
+            .await;
+        }
+        for i in 0..13_u8 {
+            pending(
+                &app,
+                &source,
+                i + 20,
+                near(1, 0.01 * f32::from(i)),
+                now - MINUTE,
+            )
+            .await;
+        }
+        // Every slot the connection has is taken for the whole wait.
+        let connection_row =
+            connections::get_connection(app.state.meta.reader(), seeded.org_id, chat)
+                .await
+                .expect("connection read")
+                .expect("connection exists");
+        let limits = (
+            connection_row.max_concurrency,
+            connection_row.requests_per_minute,
+        );
+        let mut held = Vec::new();
+        while let Some(slot) = app.state.eval.try_connection_permit(chat, limits, now) {
+            held.push(slot);
+        }
+        assert!(!held.is_empty());
+
+        let row = refit_source(&app.state, &source, "manual", now)
+            .await
+            .expect("refit runs");
+
+        assert_eq!(row.error_class.as_deref(), Some("busy"));
+        assert_eq!((row.clusters, row.created), (2, 0));
+        assert!(mock.requests().is_empty());
+        assert!(titles(&app, source.id).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_join_moves_the_centroid_by_the_members_it_takes() {
+        let (app, seeded) = llm_app().await;
+        let mock = MockLlm::start(Vec::new()).await;
+        let chat = connection(&app, &seeded, &mock).await;
+        let now = app.state.clock.now_ns();
+        let source = store_source(&app, llm_source(seeded.project.id, chat, now)).await;
+        let existing = existing_issue(
+            &app,
+            seeded.project.id,
+            source.id,
+            Some(near(0, 0.0)),
+            "Refund questions",
+            3,
+        )
+        .await;
+        let first = pending(&app, &source, 1, near(0, 0.0), now - MINUTE).await;
+        let second = pending(&app, &source, 2, near(0, 0.1), now - MINUTE).await;
+        let left = pending(&app, &source, 3, near(0, 0.2), now - MINUTE).await;
+        // `left` was assigned meanwhile, so the join takes the other two.
+        assigned_elsewhere(&app, left.id).await;
+        let project = projects::project_by_id(app.state.meta.reader(), seeded.project.id)
+            .await
+            .expect("project read")
+            .expect("project");
+        let scope = Scope {
+            state: &app.state,
+            source: &source,
+            project: &project,
+            now,
+        };
+
+        let joined = join(scope, &near(0, 0.1), &[&first, &second, &left])
+            .await
+            .expect("join runs")
+            .expect("the group joins the issue");
+
+        assert_eq!(joined.0, existing);
+        assert_eq!(joined.1.len(), 2);
+        let (centroid, members) = centroid_and_members(&app, seeded.project.id, existing).await;
+        assert_eq!(members, 5);
+        let taken = centroid_of(&[near(0, 0.0).as_slice(), near(0, 0.1).as_slice()]);
+        let expected = cluster::merge_centroids(&near(0, 0.0), 3, &taken, 2).expect("merge");
+        assert_close(&centroid, &expected);
+    }
+
+    #[tokio::test]
+    async fn a_new_issue_takes_the_centroid_of_the_members_it_assigns() {
+        let (app, seeded) = llm_app().await;
+        let mock = MockLlm::start(Vec::new()).await;
+        let chat = connection(&app, &seeded, &mock).await;
+        let now = app.state.clock.now_ns();
+        let source = store_source(&app, llm_source(seeded.project.id, chat, now)).await;
+        let first = pending(&app, &source, 1, near(0, 0.0), now - MINUTE).await;
+        let second = pending(&app, &source, 2, near(0, 0.1), now - MINUTE).await;
+        let left = pending(&app, &source, 3, near(1, 0.0), now - MINUTE).await;
+        assigned_elsewhere(&app, left.id).await;
+        let project = projects::project_by_id(app.state.meta.reader(), seeded.project.id)
+            .await
+            .expect("project read")
+            .expect("project");
+        let scope = Scope {
+            state: &app.state,
+            source: &source,
+            project: &project,
+            now,
+        };
+
+        let (issue, assigned) = create_issue(scope, &[&first, &second, &left], "Fresh", None)
+            .await
+            .expect("create runs");
+
+        assert_eq!(assigned.len(), 2);
+        let (centroid, members) = centroid_and_members(&app, seeded.project.id, issue).await;
+        assert_eq!(members, 2);
+        let expected = centroid_of(&[near(0, 0.0).as_slice(), near(0, 0.1).as_slice()]);
+        assert_close(&centroid, &expected);
+    }
+
+    #[test]
+    fn an_occurrence_older_than_the_retention_cutoff_is_not_written() {
+        // Millisecond times: the cutoff is an id time, which keeps milliseconds only (D-G-26).
+        const SECOND: i64 = 1_000_000_000;
+        let fresh = candidate_at(1, 2 * SECOND);
+        let stale = candidate_at(2, SECOND / 2);
+        let assigned: HashSet<Uuid> = [fresh.id, stale.id].into_iter().collect();
+        let group = [&fresh, &stale];
+        let issue = Uuid::from_u128(7);
+        let source = Uuid::from_u128(8);
+
+        let kept = occurrences_of(&group, &assigned, issue, source, 3 * SECOND, Some(SECOND));
+        assert_eq!(
+            kept.iter()
+                .map(|occurrence| occurrence.at)
+                .collect::<Vec<_>>(),
+            vec![2 * SECOND]
+        );
+        // Without a retention, every trace of the group is written.
+        let all = occurrences_of(&group, &assigned, issue, source, 3 * SECOND, None);
+        assert_eq!(all.len(), 2);
+    }
+
+    /// A candidate of trace `n` that started at `start`, with no vector.
+    fn candidate_at(n: u8, start: i64) -> CandidateRow {
+        let mut row = queued(
+            start,
+            ProjectId::from_uuid(Uuid::from_u128(5)),
+            Uuid::from_u128(6),
+            Place::Trace {
+                trace: trace(n),
+                session: None,
+            },
+            None,
+            Some(start),
+            None,
+        );
+        row.summary = Some("Login fails on refresh.".to_owned());
+        row
     }
 }

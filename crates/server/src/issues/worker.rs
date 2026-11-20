@@ -60,8 +60,6 @@ const SUMMARY_TOKENS: u32 = 200;
 const SUMMARY_TIMEOUT: Duration = Duration::from_secs(60);
 /// Whole-call timeout of the embedding call.
 const EMBED_TIMEOUT: Duration = Duration::from_secs(30);
-/// Embedding size requested from the provider (D-IC-5).
-const EMBED_DIMENSIONS: u32 = 512;
 /// Members a centroid averages; past this a join no longer moves it (D-IC-7).
 pub(crate) const CENTROID_MEMBERS: u64 = 500;
 /// How far before a session candidate's score its latest trace may start (A4).
@@ -245,7 +243,12 @@ async fn execute_candidate(
             tracing::debug!(candidate_id = %candidate.id, "issue candidate claim is no longer current");
             return Ok(());
         }
-        Err(Exit::Meta(error)) => return Err(error),
+        Err(Exit::Meta(error)) => {
+            // The run ends without a finish write. The spend it has not stored yet is recorded
+            // here: a failed write rolled back its own spend, and a stored finish reset `spent_usd`.
+            record_spend(state, candidate.source_id, spent_usd, state.clock.now_ns()).await;
+            return Err(error);
+        }
     };
     let status = finish_label(&finish);
     let class = match &finish {
@@ -368,6 +371,10 @@ async fn steps(
     claims: u32,
     spent_usd: &mut f64,
 ) -> Result<(), Exit> {
+    #[cfg(test)]
+    if faults::take_panic() {
+        panic!("the injected panic of a test");
+    }
     let now = state.clock.now_ns();
     let reader = state.meta.reader();
     // Step 1: a missing, disabled or paused source waits.
@@ -403,7 +410,7 @@ async fn steps(
     // Step 3: the target loads, and its target fields are set (A4).
     let loaded = load(&job).await?;
     // Step 4: a score or feedback candidate must still match the source's filter.
-    if source.kind != SourceKind::Topic && !filter_matches(&job, loaded.trace).await? {
+    if source.kind != SourceKind::Topic && !filter_matches(&job, &loaded).await? {
         return Err(Exit::End(CandidateFinish::Dropped));
     }
     // Step 5: the summary, unless an earlier attempt stored one.
@@ -428,18 +435,22 @@ async fn load(job: &Job<'_>) -> Result<Loaded, Exit> {
         ..
     } = *job;
     let now = state.clock.now_ns();
-    let (trace, span) = match candidate.trace_id {
-        Some(trace) => (trace, candidate.span_id),
-        None => (resolve_session(job).await?, None),
+    // The time hint of the lookup is the trace's own start (M-1). A score's first load has none, so
+    // it reads every file of the project (D154 reads only the day around a hint).
+    let (trace, span, around) = match candidate.trace_id {
+        Some(trace) => (trace, candidate.span_id, candidate.trace_start),
+        None => {
+            let (trace, start) = resolve_session(job).await?;
+            (trace, None, Some(start))
+        }
     };
-    let around = candidate.trace_start.unwrap_or(candidate.created_at);
     let loaded = match trace_load::load_trace(
         state,
         project.id,
         Visibility::window(state, project.org_id),
         trace,
         span,
-        Some(around),
+        around,
     )
     .await
     {
@@ -506,8 +517,9 @@ async fn load(job: &Job<'_>) -> Result<Loaded, Exit> {
 
 /// A session candidate's trace (A4): the score's `created_at` bounds the session's traces to
 /// `[created_at − 30 days, created_at + 1 ns)`, and the newest one starting in that window is the
-/// trace. No score or no trace in the window drops the candidate.
-async fn resolve_session(job: &Job<'_>) -> Result<TraceId, Exit> {
+/// trace. Returns the trace and its start, which is the time hint of its load. No score or no trace
+/// in the window drops the candidate.
+async fn resolve_session(job: &Job<'_>) -> Result<(TraceId, i64), Exit> {
     let Job {
         state,
         project,
@@ -556,13 +568,14 @@ async fn resolve_session(job: &Job<'_>) -> Result<TraceId, Exit> {
     let traces = convert::trace_summaries(&page.batches).map_err(|_| fail("permanent"))?;
     traces
         .first()
-        .map(|trace| trace.trace_id)
+        .map(|trace| (trace.trace_id, trace.start_time))
         .ok_or(Exit::End(CandidateFinish::Dropped))
 }
 
 /// Step 4: whether the trace still matches the source's filter (`trace_refresh`, strict
-/// exclusions). An invalid filter fails the candidate; a read failure retries the load.
-async fn filter_matches(job: &Job<'_>, trace: TraceId) -> Result<bool, Exit> {
+/// exclusions). The read's time hint is the trace's own start, as the load's is (M-1). An invalid
+/// filter fails the candidate; a read failure retries the load.
+async fn filter_matches(job: &Job<'_>, loaded: &Loaded) -> Result<bool, Exit> {
     let Job {
         state,
         source,
@@ -571,10 +584,10 @@ async fn filter_matches(job: &Job<'_>, trace: TraceId) -> Result<bool, Exit> {
         ..
     } = *job;
     let now = state.clock.now_ns();
-    let ctx = read_context(state, project, candidate.created_at)
+    let ctx = read_context(state, project, loaded.trace_start)
         .await
         .ok_or_else(|| load_retry(candidate, now, "storage"))?;
-    let id = trace.to_string();
+    let id = loaded.trace.to_string();
     let read = cetra_storage::trace_refresh(
         &ctx,
         TraceRefreshRequest {
@@ -811,7 +824,7 @@ async fn embed(
             connection: &connection,
             model,
             text: summary,
-            dimensions: Some(EMBED_DIMENSIONS),
+            dimensions: None,
             timeout: EMBED_TIMEOUT,
             trace: CallTrace {
                 trace_id,
@@ -873,14 +886,12 @@ async fn assign(
         return Err(fail("permanent"));
     };
     let dimension = u32::try_from(vector.len()).map_err(|_| fail("permanent"))?;
-    // Step 7: the dimension is fixed by the first embedding of the source (D-IC-5).
     let source_id = source.id;
-    let stored_dimension = state
-        .meta
-        .write(move |conn| {
-            Box::pin(async move { issues::set_embed_dimension(conn, source_id, dimension).await })
-        })
-        .await?;
+    let spent = *spent_usd;
+    // Step 7: the dimension is fixed by the first embedding of the source (D-IC-5). A refused
+    // dimension ends the run with its spend (`write_end`); a failed store is an `Exit::Meta`, whose
+    // spend `execute_candidate` records.
+    let stored_dimension = store_dimension(state, source_id, dimension).await?;
     if stored_dimension != dimension {
         return Err(fail("embedding_dimension_changed"));
     }
@@ -889,7 +900,6 @@ async fn assign(
     let project_id = project.id;
     let id = candidate.id;
     let trace_start = loaded.trace_start;
-    let spent = *spent_usd;
     let (stored, assigned) = state
         .meta
         .write(move |conn| {
@@ -960,7 +970,9 @@ async fn assign(
     if !stored {
         return Ok(());
     }
-    // The occurrence of an assigned candidate (A3). A failed write keeps the assignment.
+    // The occurrence of an assigned candidate (A3). A failed write keeps the assignment. An
+    // occurrence older than the project's retention is not written, as the error sweep does; the
+    // candidate stays assigned.
     if let Some(issue_id) = assigned {
         let occurrence = Occurrence {
             source_id,
@@ -975,6 +987,14 @@ async fn assign(
                 .or_else(|| loaded.session_id.clone()),
             reason: Some(summary.to_owned()),
         };
+        if errors::too_old(errors::retention_cutoff(project, now), occurrence.at) {
+            tracing::debug!(
+                candidate_id = %id,
+                issue_id = %issue_id,
+                "issue occurrence older than the project's retention was not written"
+            );
+            return Ok(());
+        }
         if errors::write_occurrences(state, project, source_id, vec![occurrence])
             .await
             .is_err()
@@ -1239,6 +1259,10 @@ async fn write_finish(
     finish: CandidateFinish,
     spent_usd: f64,
 ) -> Result<bool, MetaError> {
+    #[cfg(test)]
+    if faults::take_finish_write_failure() {
+        return Err(MetaError::from(sqlx::Error::RowNotFound));
+    }
     let now = state.clock.now_ns();
     state
         .meta
@@ -1266,6 +1290,41 @@ async fn finish_with_spend(
         issues::add_spend(conn, source, budget::day_start(now), spent_usd).await?;
     }
     Ok(stored)
+}
+
+/// Stores `dimension` as the embedding dimension of `source` unless one is stored, and returns the
+/// stored one (D-IC-5), in its own write.
+async fn store_dimension(state: &AppState, source: Uuid, dimension: u32) -> Result<u32, MetaError> {
+    #[cfg(test)]
+    if faults::take_dimension_store_failure() {
+        return Err(MetaError::from(sqlx::Error::RowNotFound));
+    }
+    state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move { issues::set_embed_dimension(conn, source, dimension).await })
+        })
+        .await
+}
+
+/// Adds `spent_usd` to the source's spend of today, for a run that ends without a finish write.
+/// A failure is logged: the janitor's next run of the candidate then pays again, which is the
+/// lesser error.
+async fn record_spend(state: &AppState, source: Uuid, spent_usd: f64, now: i64) {
+    if spent_usd <= 0.0 {
+        return;
+    }
+    let written = state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                issues::add_spend(conn, source, budget::day_start(now), spent_usd).await
+            })
+        })
+        .await;
+    if let Err(error) = written {
+        tracing::error!(source_id = %source, error = %error, "issue spend could not be recorded");
+    }
 }
 
 /// Interrupts the candidates `running` since before `now − STALE_NS` (D-I-12, the janitor's
@@ -1309,8 +1368,53 @@ pub(crate) fn call_trace_id(owner: Uuid, claims: u32, call: u32) -> TraceId {
     TraceId::from_bytes(bytes).expect("a non-zero trace id")
 }
 
+/// Test-only faults of the candidate worker. Each is armed by a test on its own thread and fires
+/// once; the tests run their candidates on that thread.
+///
+/// The flags are thread-local, so a test that arms one must run its candidates on the same thread:
+/// use the current-thread `#[tokio::test]` runtime, which runs every task on the test's thread.
+#[cfg(test)]
+mod faults {
+    use std::cell::Cell;
+
+    thread_local! {
+        static PANIC: Cell<bool> = const { Cell::new(false) };
+        static DIMENSION_STORE: Cell<bool> = const { Cell::new(false) };
+        static FINISH_WRITE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// The next job panics, at its start.
+    pub(super) fn panic_next_job() {
+        PANIC.with(|flag| flag.set(true));
+    }
+
+    pub(super) fn take_panic() -> bool {
+        PANIC.with(|flag| flag.replace(false))
+    }
+
+    /// The next store of an embedding dimension fails.
+    pub(super) fn fail_next_dimension_store() {
+        DIMENSION_STORE.with(|flag| flag.set(true));
+    }
+
+    pub(super) fn take_dimension_store_failure() -> bool {
+        DIMENSION_STORE.with(|flag| flag.replace(false))
+    }
+
+    /// The next finish write fails.
+    pub(super) fn fail_next_finish_write() {
+        FINISH_WRITE.with(|flag| flag.set(true));
+    }
+
+    pub(super) fn take_finish_write_failure() -> bool {
+        FINISH_WRITE.with(|flag| flag.replace(false))
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use axum::http::{Method, header};
     use cetra_core::enums::PayloadFormat;
     use cetra_core::ids::{ProjectId, SpanId, TraceId};
@@ -1319,22 +1423,27 @@ mod tests {
     use serde_json::{Value, json};
     use uuid::Uuid;
 
-    use super::{REQUEUE_NS, STALE_NS, call_trace_id, janitor_once, run_candidate, run_pass};
+    use super::{
+        REQUEUE_NS, STALE_NS, call_trace_id, faults, janitor_once, run_candidate, run_pass,
+    };
+    use crate::eval::budget;
     use crate::issues::triggers::{Place, queued};
     use crate::meta::issues::{
         CandidateRow, IssueRow, IssueState, SourceKind, SourceRow, claim_candidate, get_issue,
         insert_candidate, insert_issue, insert_source,
     };
-    use crate::meta::projects::ProjectRow;
+    use crate::meta::projects::{ProjectPatch, ProjectRow, update_project};
     use crate::test_support::mock_llm::{MockLlm, completion, embedding, error as error_reply};
     use crate::test_support::{
-        Seeded, TestApp, TestScore, dataset_span, put_score, raw_span_count,
+        Seeded, TestApp, TestScore, assert_logs_clean, dataset_span, put_score, raw_span_count,
     };
 
     const QUESTION: &str = "Why was my refund refused?";
     const ANSWER: &str = "Refunds are allowed within 30 days.";
     /// A chat model with a price, so a budget applies (as the eval tests' `PRICED`).
     const PRICED: &str = "gpt-4o-mini";
+    /// An embedding model with a built-in price (OpenAI), so an embedding call has a cost.
+    const PRICED_EMBEDDING: &str = "text-embedding-3-small";
     const SUMMARY: &str = "Login fails on refresh.";
     const SUMMARY_JSON: &str = r#"{"summary": "Login fails on refresh.", "is_issue": true}"#;
 
@@ -1668,6 +1777,12 @@ mod tests {
     /// A root span of `on` (a question and its answer) that started half a minute ago, stored.
     async fn store_trace(app: &TestApp, project: &ProjectRow, on: TraceId) {
         let now = app.state.clock.now_ns();
+        store_trace_at(app, project, on, now - 30_000_000_000).await;
+    }
+
+    /// A root span of `on` (a question and its answer) that started at `start`, stored. Its
+    /// session is `session-7` and its user `user-7`.
+    async fn store_trace_at(app: &TestApp, project: &ProjectRow, on: TraceId, start: i64) {
         let mut row: Span = dataset_span(0);
         row.trace_id = on;
         row.span_id = SpanId::from_bytes(1_u64.to_be_bytes()).expect("not all zero");
@@ -1678,9 +1793,40 @@ mod tests {
         row.output_format = Some(PayloadFormat::Text);
         row.session_id = Some("session-7".to_owned());
         row.user_id = Some("user-7".to_owned());
-        row.start_time = now - 30_000_000_000;
-        row.end_time = now - 20_000_000_000;
+        row.start_time = start;
+        row.end_time = start + 10_000_000_000;
         app.commit_spans(project, vec![row]).await;
+    }
+
+    /// Flushes the stored spans to Parquet, so a lookup's time hint decides which files it reads.
+    async fn flushed(app: &TestApp) {
+        app.state
+            .storage
+            .flush_now(Duration::from_secs(10))
+            .await
+            .expect("storage flushes");
+    }
+
+    /// The trace id of candidate `id`, as stored.
+    async fn stored_trace_id(app: &TestApp, id: Uuid) -> Option<Vec<u8>> {
+        sqlx::query_scalar("SELECT trace_id FROM issue_candidates WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_one(app.state.meta.reader())
+            .await
+            .expect("candidate read")
+    }
+
+    /// The cost spent today by `source`, as the budget reads it.
+    async fn spent_today(app: &TestApp, source: Uuid) -> f64 {
+        let now = app.state.clock.now_ns();
+        crate::meta::issues::spent_between(
+            app.state.meta.reader(),
+            source,
+            budget::day_start(now),
+            budget::day_start(now) + budget::DAY_NS,
+        )
+        .await
+        .expect("spend read")
     }
 
     /// A stored boolean score `quality` = false, created now. Returns its id.
@@ -1818,7 +1964,11 @@ mod tests {
         let embeds = mock.embedding_requests();
         assert_eq!(embeds.len(), 1);
         assert_eq!(embeds[0].1["model"], "text-embedding-test");
-        assert_eq!(embeds[0].1["dimensions"], 512);
+        assert!(
+            embeds[0].1.get("dimensions").is_none(),
+            "the provider's native size is kept: {}",
+            embeds[0].1
+        );
         assert_eq!(embeds[0].1["input"], SUMMARY);
         // Both call traces are committed to the project.
         assert!(raw_span_count(&app.state.storage, seeded.project.id).await >= spans_before + 2);
@@ -1925,6 +2075,29 @@ mod tests {
         let (status, error, _, _, _) = outcome_of(&app, row.id).await;
         assert_eq!(status, "dropped", "{error:?}");
         assert_eq!(mock.requests().len(), 1);
+        assert!(mock.embedding_requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_score_whose_trace_the_source_filter_does_not_match_is_dropped_before_the_summary() {
+        let mock = MockLlm::start(vec![completion(SUMMARY_JSON)]).await;
+        let (app, seeded) = llm_app().await;
+        let conn = connection(&app, &seeded, &mock).await;
+        let now = app.state.clock.now_ns();
+        let mut judged = judged_row(seeded.project.id, conn, now);
+        // The stored trace is in `session-7`, so a filter on another session does not match it.
+        judged.filter = Some("session_id = 'session-8'".to_owned());
+        let source = store_source(&app, judged).await;
+        let on_trace = trace(14);
+        store_trace(&app, &seeded.project, on_trace).await;
+        let score = bad_score(&app, seeded.project.id).await;
+        let row = scored_candidate(&app, &source, on_trace, score).await;
+
+        run_once(&app, &row).await;
+
+        let (status, error, _, _, _) = outcome_of(&app, row.id).await;
+        assert_eq!(status, "dropped", "{error:?}");
+        assert!(mock.requests().is_empty(), "no summary is asked");
         assert!(mock.embedding_requests().is_empty());
     }
 
@@ -2126,5 +2299,347 @@ mod tests {
         assert_eq!(status, "failed");
         assert_eq!(error_class.as_deref(), Some("embedding_dimension_changed"));
         assert_eq!(stored_dimension(&app, source.id).await, Some(2));
+    }
+
+    #[tokio::test]
+    async fn a_refused_dimension_still_records_the_embedding_cost() {
+        let mock = MockLlm::start_with_embeddings(
+            vec![completion(SUMMARY_JSON)],
+            vec![embedding(&[1.0, 0.0, 0.0])],
+        )
+        .await;
+        let (app, seeded) = llm_app().await;
+        let conn = connection(&app, &seeded, &mock).await;
+        let now = app.state.clock.now_ns();
+        let source = store_source(
+            &app,
+            SourceRow {
+                embed_model: Some(PRICED_EMBEDDING.to_owned()),
+                embed_dimension: Some(2),
+                ..judged_row(seeded.project.id, conn, now)
+            },
+        )
+        .await;
+        let on_trace = trace(32);
+        store_trace(&app, &seeded.project, on_trace).await;
+        let score = bad_score(&app, seeded.project.id).await;
+        let row = scored_candidate(&app, &source, on_trace, score).await;
+
+        run_once(&app, &row).await;
+
+        let (status, error_class, _, _, _) = outcome_of(&app, row.id).await;
+        assert_eq!(status, "failed");
+        assert_eq!(error_class.as_deref(), Some("embedding_dimension_changed"));
+        assert!(
+            spent_today(&app, source.id).await > 0.0,
+            "the priced embedding is spent"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_embedding_whose_dimension_cannot_be_stored_still_records_its_cost() {
+        let mock = MockLlm::start_with_embeddings(
+            vec![completion(SUMMARY_JSON)],
+            vec![embedding(&[1.0, 0.0, 0.0])],
+        )
+        .await;
+        let (app, seeded) = llm_app().await;
+        let conn = connection(&app, &seeded, &mock).await;
+        let now = app.state.clock.now_ns();
+        let source = store_source(
+            &app,
+            SourceRow {
+                embed_model: Some(PRICED_EMBEDDING.to_owned()),
+                ..judged_row(seeded.project.id, conn, now)
+            },
+        )
+        .await;
+        let on_trace = trace(33);
+        store_trace(&app, &seeded.project, on_trace).await;
+        let score = bad_score(&app, seeded.project.id).await;
+        let row = scored_candidate(&app, &source, on_trace, score).await;
+        faults::fail_next_dimension_store();
+
+        run_once(&app, &row).await;
+
+        // The run ends without a finish: the candidate stays `running` for the janitor.
+        let (status, _, _, _, _) = outcome_of(&app, row.id).await;
+        assert_eq!(status, "running");
+        assert_eq!(mock.embedding_requests().len(), 1);
+        assert_eq!(stored_dimension(&app, source.id).await, None);
+        assert!(
+            spent_today(&app, source.id).await > 0.0,
+            "the paid embedding is spent"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_summary_whose_finish_cannot_be_stored_still_records_its_cost() {
+        let mock = MockLlm::start(vec![completion(SUMMARY_JSON)]).await;
+        let (app, seeded) = llm_app().await;
+        let conn = connection(&app, &seeded, &mock).await;
+        let now = app.state.clock.now_ns();
+        let source = store_source(
+            &app,
+            SourceRow {
+                chat_model: Some(PRICED.to_owned()),
+                budget_usd: Some(100.0),
+                budget_period: Some("day".to_owned()),
+                ..judged_row(seeded.project.id, conn, now)
+            },
+        )
+        .await;
+        let on_trace = trace(34);
+        store_trace(&app, &seeded.project, on_trace).await;
+        let score = bad_score(&app, seeded.project.id).await;
+        let row = scored_candidate(&app, &source, on_trace, score).await;
+        faults::fail_next_finish_write();
+
+        run_once(&app, &row).await;
+
+        // The summary's finish is not stored, so the run ends without one: the candidate stays
+        // `running` for the janitor, and the paid summary is still spent.
+        let (status, _, _, _, _) = outcome_of(&app, row.id).await;
+        assert_eq!(status, "running");
+        assert_eq!(mock.requests().len(), 1);
+        assert!(
+            spent_today(&app, source.id).await > 0.0,
+            "the paid summary is spent"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_topic_candidate_is_summarized_embedded_and_assigned() {
+        let mock = MockLlm::start_with_embeddings(
+            vec![completion(SUMMARY_JSON)],
+            vec![embedding(&[1.0, 0.0, 0.0])],
+        )
+        .await;
+        let (app, seeded) = llm_app().await;
+        let conn = connection(&app, &seeded, &mock).await;
+        let now = app.state.clock.now_ns();
+        let source = store_source(
+            &app,
+            SourceRow {
+                kind: SourceKind::Topic,
+                score_names: Vec::new(),
+                ..judged_row(seeded.project.id, conn, now)
+            },
+        )
+        .await;
+        let issue =
+            existing_issue(&app, seeded.project.id, source.id, vec![1.0, 0.0, 0.0], 4).await;
+        let on_trace = trace(34);
+        store_trace(&app, &seeded.project, on_trace).await;
+        let row = queued(
+            now,
+            seeded.project.id,
+            source.id,
+            Place::Trace {
+                trace: on_trace,
+                session: None,
+            },
+            None,
+            None,
+            None,
+        );
+        let stored = row.clone();
+        app.state
+            .meta
+            .write(move |conn| Box::pin(async move { insert_candidate(conn, &row).await }))
+            .await
+            .expect("candidate stored");
+
+        run_once(&app, &stored).await;
+
+        let (status, error, assigned, summary, _) = outcome_of(&app, stored.id).await;
+        assert_eq!(status, "assigned", "{error:?}");
+        assert_eq!(assigned, Some(issue.to_string()));
+        assert_eq!(summary.as_deref(), Some(SUMMARY));
+        assert_eq!(mock.requests().len(), 1);
+        assert_eq!(mock.embedding_requests().len(), 1);
+        assert_eq!(
+            occurrence_names(&app, &seeded, on_trace).await,
+            vec![format!("issue:{issue}")]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_candidate_resolves_to_its_latest_trace_however_old() {
+        let mock = MockLlm::start_with_embeddings(
+            vec![completion(SUMMARY_JSON)],
+            vec![embedding(&[1.0, 0.0, 0.0])],
+        )
+        .await;
+        let (app, seeded) = llm_app().await;
+        let conn = connection(&app, &seeded, &mock).await;
+        let now = app.state.clock.now_ns();
+        let source = store_source(&app, judged_row(seeded.project.id, conn, now)).await;
+        // The session's only trace started five days before the score, in a file of its own day.
+        let on_trace = trace(35);
+        store_trace_at(&app, &seeded.project, on_trace, now - 5 * budget::DAY_NS).await;
+        flushed(&app).await;
+        let score = bad_score(&app, seeded.project.id).await;
+        let row = queued(
+            now,
+            seeded.project.id,
+            source.id,
+            Place::Session("session-7".to_owned()),
+            None,
+            None,
+            Some(score),
+        );
+        let stored = row.clone();
+        app.state
+            .meta
+            .write(move |conn| Box::pin(async move { insert_candidate(conn, &row).await }))
+            .await
+            .expect("candidate stored");
+
+        run_once(&app, &stored).await;
+
+        let (status, error, _, summary, _) = outcome_of(&app, stored.id).await;
+        assert_eq!(status, "pending", "{error:?}");
+        assert_eq!(summary.as_deref(), Some(SUMMARY));
+        assert_eq!(
+            stored_trace_id(&app, stored.id).await,
+            Some(on_trace.as_bytes().to_vec())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_score_written_days_after_its_trace_loads_the_trace() {
+        let mock = MockLlm::start_with_embeddings(
+            vec![completion(SUMMARY_JSON)],
+            vec![embedding(&[1.0, 0.0, 0.0])],
+        )
+        .await;
+        let (app, seeded) = llm_app().await;
+        let conn = connection(&app, &seeded, &mock).await;
+        let now = app.state.clock.now_ns();
+        let source = store_source(&app, judged_row(seeded.project.id, conn, now)).await;
+        // The trace started three days before the score, in a file of its own day.
+        let on_trace = trace(36);
+        store_trace_at(&app, &seeded.project, on_trace, now - 3 * budget::DAY_NS).await;
+        flushed(&app).await;
+        let score = bad_score(&app, seeded.project.id).await;
+        let row = scored_candidate(&app, &source, on_trace, score).await;
+
+        run_once(&app, &row).await;
+
+        let (status, error, _, summary, _) = outcome_of(&app, row.id).await;
+        assert_eq!(status, "pending", "{error:?}");
+        assert_eq!(summary.as_deref(), Some(SUMMARY));
+    }
+
+    #[tokio::test]
+    async fn an_occurrence_older_than_the_project_retention_is_not_written() {
+        let mock = MockLlm::start_with_embeddings(
+            vec![completion(SUMMARY_JSON)],
+            vec![embedding(&[1.0, 0.0, 0.0])],
+        )
+        .await;
+        let (app, seeded) = llm_app().await;
+        let conn = connection(&app, &seeded, &mock).await;
+        let now = app.state.clock.now_ns();
+        let source = store_source(&app, judged_row(seeded.project.id, conn, now)).await;
+        let issue =
+            existing_issue(&app, seeded.project.id, source.id, vec![1.0, 0.0, 0.0], 4).await;
+        let project_id = seeded.project.id;
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    update_project(
+                        conn,
+                        project_id,
+                        ProjectPatch {
+                            name: None,
+                            retention_days: Some(Some(1)),
+                            trace_completion_timeout_s: None,
+                        },
+                        now,
+                    )
+                    .await
+                })
+            })
+            .await
+            .expect("retention set");
+        // The trace started three days ago, so its occurrence is older than the one-day retention.
+        let on_trace = trace(37);
+        store_trace_at(&app, &seeded.project, on_trace, now - 3 * budget::DAY_NS).await;
+        let score = bad_score(&app, seeded.project.id).await;
+        let row = scored_candidate(&app, &source, on_trace, score).await;
+
+        // Without the retention check the write is attempted and refused, which logs a warning.
+        assert_logs_clean(
+            &["issue occurrences could not be written"],
+            Box::pin(run_once(&app, &row)),
+        )
+        .await;
+
+        let (status, error, assigned, _, _) = outcome_of(&app, row.id).await;
+        assert_eq!(status, "assigned", "{error:?}");
+        assert_eq!(assigned, Some(issue.to_string()));
+        assert!(occurrence_names(&app, &seeded, on_trace).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_candidate_whose_user_a_deletion_blocks_is_skipped_after_its_load() {
+        let mock = MockLlm::start(vec![completion(SUMMARY_JSON)]).await;
+        let (app, seeded) = llm_app().await;
+        let conn = connection(&app, &seeded, &mock).await;
+        let now = app.state.clock.now_ns();
+        let source = store_source(&app, judged_row(seeded.project.id, conn, now)).await;
+        let on_trace = trace(38);
+        store_trace(&app, &seeded.project, on_trace).await;
+        let score = bad_score(&app, seeded.project.id).await;
+        let row = scored_candidate(&app, &source, on_trace, score).await;
+        // D-M-6, check A: the deletion names the trace's user, which only the loaded trace reveals.
+        app.state
+            .deletions
+            .guard
+            .add_user(seeded.project.id, "user-7", Uuid::now_v7(), now);
+
+        run_once(&app, &row).await;
+
+        let (status, error_class, _, _, _) = outcome_of(&app, row.id).await;
+        assert_eq!(status, "skipped");
+        assert_eq!(error_class.as_deref(), Some("deleted"));
+        assert!(mock.requests().is_empty(), "no summary is asked");
+        assert!(occurrence_names(&app, &seeded, on_trace).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_panicking_job_fails_its_candidate_as_internal_and_the_worker_goes_on() {
+        let mock = MockLlm::start_with_embeddings(
+            vec![completion(SUMMARY_JSON)],
+            vec![embedding(&[1.0, 0.0, 0.0])],
+        )
+        .await;
+        let (app, seeded) = llm_app().await;
+        let conn = connection(&app, &seeded, &mock).await;
+        let now = app.state.clock.now_ns();
+        let source = store_source(&app, judged_row(seeded.project.id, conn, now)).await;
+        let on_trace = trace(39);
+        store_trace(&app, &seeded.project, on_trace).await;
+        let score = bad_score(&app, seeded.project.id).await;
+        let row = scored_candidate(&app, &source, on_trace, score).await;
+        faults::panic_next_job();
+
+        run_once(&app, &row).await;
+
+        let (status, error_class, _, _, _) = outcome_of(&app, row.id).await;
+        assert_eq!(status, "failed");
+        assert_eq!(error_class.as_deref(), Some("internal"));
+        // The loop goes on: the next candidate runs to its end.
+        let next_trace = trace(40);
+        store_trace(&app, &seeded.project, next_trace).await;
+        let next_score = bad_score(&app, seeded.project.id).await;
+        let next = scored_candidate(&app, &source, next_trace, next_score).await;
+        run_once(&app, &next).await;
+        let (status, error, _, summary, _) = outcome_of(&app, next.id).await;
+        assert_eq!(status, "pending", "{error:?}");
+        assert_eq!(summary.as_deref(), Some(SUMMARY));
     }
 }
