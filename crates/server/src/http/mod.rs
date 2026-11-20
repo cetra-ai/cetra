@@ -178,8 +178,8 @@ pub(crate) fn serve_router(state: AppState, routes: Vec<access::RouteDef>) -> Ro
     finish(state, routed, None)
 }
 
-/// The OTLP/HTTP listener's router: the OTLP routes `/v1/traces`, `/v1/logs` and `/v1/metrics`
-/// and nothing else (D-G-21, D-G-40).
+/// The OTLP/HTTP listener's router: the OTLP routes `/v1/traces`, `/v1/logs` and `/v1/metrics`,
+/// `/v1/agent-context` (D-CA-9), and nothing else (D-G-21, D-G-40).
 pub(crate) fn otlp_router(state: AppState) -> Router {
     serve_router(state, crate::routes::otlp::routes())
 }

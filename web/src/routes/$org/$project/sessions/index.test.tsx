@@ -1,7 +1,10 @@
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { HttpResponse, http } from "msw";
 import { expect, it, vi } from "vitest";
+import type { Schema } from "@/api/types";
 import { server } from "@/mocks/node";
 import { renderApp } from "@/test/render";
+import queuesFixture from "../../../../../../fixtures/api/static/annotation-queues.json";
 
 function slotRect(left: number, width: number): DOMRect {
   return {
@@ -19,8 +22,10 @@ function slotRect(left: number, width: number): DOMRect {
 
 // Each header is 100 px wide, so the drop index follows the column order.
 function stubHeaderSlots(grid: HTMLElement) {
+  // The selection column has no column id: the slots count the columns only.
   within(grid)
     .getAllByRole("columnheader")
+    .filter((header) => header.hasAttribute("data-column-id"))
     .forEach((header, index) => {
       header.getBoundingClientRect = () => slotRect(index * 100, 100);
     });
@@ -173,4 +178,58 @@ it("returns from a session to the same list search, with the opened row highligh
   await waitFor(() => {
     expect(within(restored).getByRole("row", { name: /sess-002/ })).toHaveClass("live-row");
   });
+});
+
+const QUEUE_LIST = "/api/v1/projects/:project/annotation-queues";
+const QUEUE_ITEMS = "/api/v1/projects/:project/annotation-queues/:id/items";
+const SESSION_QUEUE: Schema<"AnnotationQueue"> = {
+  ...(queuesFixture.data[0] as Schema<"AnnotationQueue">),
+  id: "01900000-0000-7000-8000-000000000a03",
+  name: "Session review",
+  target: "session",
+};
+
+/** The row checkbox of the `index`th loaded row. */
+async function sessionBox(index: number): Promise<HTMLElement> {
+  const grid = await screen.findByRole("grid", { name: "Sessions" });
+  const box = within(grid).getAllByRole("checkbox", { name: "Select row" })[index];
+  if (!box) {
+    throw new Error(`no row checkbox ${index}`);
+  }
+  return box;
+}
+
+it("checks session rows without opening them and adds them to a session queue", async () => {
+  server.use(
+    http.get(QUEUE_LIST, () => HttpResponse.json({ data: [SESSION_QUEUE], next_cursor: null })),
+  );
+  const calls: { id: string; body: { items: { session_id?: string }[] } }[] = [];
+  server.use(
+    http.post(QUEUE_ITEMS, async ({ request, params }) => {
+      const body = (await request.json()) as { items: { session_id?: string }[] };
+      calls.push({ id: String(params.id), body });
+      return HttpResponse.json(
+        { added: body.items.length, existing: 0, skipped: [] },
+        { status: 201 },
+      );
+    }),
+  );
+  const { router, user } = await renderApp("/acme/support-bot/sessions");
+  await user.click(await sessionBox(0));
+  await user.click(await sessionBox(1));
+  await user.click(screen.getByRole("button", { name: "Add 2 to queue" }));
+
+  const dialog = await screen.findByRole("dialog");
+  await user.click(within(dialog).getByRole("combobox", { name: "Queue" }));
+  await user.click(await screen.findByRole("option", { name: "Session review" }));
+  await user.click(within(dialog).getByRole("button", { name: "Add" }));
+
+  expect(await within(dialog).findByText("Added 2 to Session review.")).toBeInTheDocument();
+  expect(calls).toHaveLength(1);
+  expect(calls[0]?.id).toBe(SESSION_QUEUE.id);
+  expect(calls[0]?.body.items).toHaveLength(2);
+  for (const item of calls[0]?.body.items ?? []) {
+    expect(item.session_id).toMatch(/^sess-/);
+  }
+  expect(router.state.location.pathname).toBe("/acme/support-bot/sessions");
 });

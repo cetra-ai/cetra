@@ -5,7 +5,9 @@
 
 pub mod account;
 pub mod admin;
+pub mod agent_context;
 pub mod alerts;
+pub mod annotation_queues;
 pub mod backfills;
 pub mod common;
 pub mod connections;
@@ -29,6 +31,8 @@ pub mod online_rules;
 pub mod openapi;
 pub mod org_sso;
 pub mod payload;
+pub mod playground;
+pub mod prompts;
 pub mod saved_views;
 pub mod schema;
 pub mod score_definitions;

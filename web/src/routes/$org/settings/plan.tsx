@@ -108,6 +108,7 @@ function PlanDetails({
     ["Alert rules", formatLimit(limits.max_alert_rules)],
     ["Active online evaluation rules", formatLimit(limits.max_active_online_rules)],
     ["Active issue sources", formatLimit(limits.max_active_issue_sources)],
+    ["Annotation queues", formatLimit(limits.max_annotation_queues)],
   ];
 
   return (

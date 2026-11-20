@@ -8,6 +8,7 @@
 
 pub mod admin;
 pub mod admin_socket;
+pub(crate) mod agent_context;
 pub(crate) mod alerts;
 pub mod api;
 pub(crate) mod auth;
@@ -31,6 +32,7 @@ pub(crate) mod live;
 pub(crate) mod mcp;
 pub(crate) mod meta;
 pub(crate) mod prices;
+pub(crate) mod prompts;
 pub(crate) mod retention;
 pub(crate) mod routes;
 pub(crate) mod scores;

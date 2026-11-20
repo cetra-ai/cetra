@@ -94,7 +94,7 @@ To write a real score for one trace, use **Run evaluator** on the trace or on a 
 
 Every time an evaluator runs, cetra records a trace of the run in your project, whether it succeeded or failed. For a judge the trace holds the full prompt, the answer, the token counts and the cost. Open it with **View judge trace** on the score.
 
-These traces use the reserved environment `cetra-eval`. They do not count towards your application's numbers: lists, user pages, the dashboard and alerts leave them out, and online rules never select them, so a judge never judges itself. Tick **Evaluation traces** in the **Include** menu of a list to see them. The dashboard shows their cost as a separate series. If an external OTLP sender uses the environment `cetra-eval`, cetra renames it to `cetra-eval-external`.
+These traces use the reserved environment `cetra-eval`. They do not count towards your application's numbers: lists, user pages, the dashboard and alerts leave them out, and online rules never select them, so a judge never judges itself. Tick **Evaluation traces** in the **Include** menu of a list to see them. The dashboard shows their cost as a separate series. If an external OTLP sender uses the environment `cetra-eval`, cetra renames it to `cetra-eval-external`. Playground runs use the reserved environment `cetra-playground` in the same way: they are not billed, lists and the other views leave them out, and an external sender's `cetra-playground` is renamed to `cetra-playground-external`.
 
 ## What judges cost
 

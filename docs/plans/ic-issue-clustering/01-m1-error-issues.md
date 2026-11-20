@@ -75,7 +75,7 @@ No new dependency.
 |---|---|---|
 | M1.1 Score source `issue` | core enums, storage score reads, server convert, web labels, openapi, docs text, design doc and decision log | — |
 | M1.2 Storage reads | `crates/storage/src/reads/{traces,scores,mod}.rs`, `lib.rs` | M1.1 |
-| M1.3 Tables and store | migration `0023_issues.sql`, `meta/issues.rs`, `meta/mod.rs`, schema snapshot, spec 04 | — |
+| M1.3 Tables and store | migration `0026_issues.sql`, `meta/issues.rs`, `meta/mod.rs`, schema snapshot, spec 04 | — |
 | M1.4 Plan limit | entitlements, config, token, CLI, OpenAPI, web plan page, docs | — |
 | M1.5 Issue writer | `scores.rs` | M1.1 |
 | M1.6a Tracked set | new `issues/sources.rs`, `issues/mod.rs`, `eval/trigger.rs` | M1.3 |
@@ -251,7 +251,7 @@ Re-export all of them from `reads/mod.rs` and the crate root, next to `span_refr
 
 **Goal:** the `meta.db` tables and their store functions.
 
-**Edit:** new `crates/server/migrations/meta/0023_issues.sql`; new `crates/server/src/meta/issues.rs`; `crates/server/src/meta/mod.rs` (module list); `crates/server/tests/snapshots/meta_schema.snap` (accepted); `docs/spec/04-metadata-db.md` (new § Issues before § Alerts).
+**Edit:** new `crates/server/migrations/meta/0026_issues.sql`; new `crates/server/src/meta/issues.rs`; `crates/server/src/meta/mod.rs` (module list); `crates/server/tests/snapshots/meta_schema.snap` (accepted); `docs/spec/04-metadata-db.md` (new § Issues before § Alerts).
 
 **Migration** (exact):
 ```sql

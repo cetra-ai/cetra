@@ -221,6 +221,20 @@ pub(crate) async fn write(
             }
         }
     }
+    // A `queue_id` must name an annotation queue of the project (D-AQ-6). The check applies to
+    // every writer.
+    let queue_ids: BTreeSet<Uuid> = items.iter().filter_map(|item| item.queue_id).collect();
+    if !queue_ids.is_empty() {
+        let ids: Vec<Uuid> = queue_ids.into_iter().collect();
+        let known =
+            crate::meta::annotation_queues::existing_ids(state.meta.reader(), project.id, &ids)
+                .await?;
+        for (index, item) in items.iter().enumerate() {
+            if item.queue_id.is_some_and(|id| !known.contains(&id)) {
+                errors.push(field(index, "queue_id", "unknown annotation queue"));
+            }
+        }
+    }
     if !errors.is_empty() {
         return Err(invalid(errors));
     }
@@ -287,6 +301,7 @@ pub(crate) async fn write(
                 metadata,
                 experiment_id,
                 dataset_item_id,
+                queue_id,
                 ..
             } = item;
             // An experiment score is at least as old as its experiment (D-J-13): a client's
@@ -312,6 +327,7 @@ pub(crate) async fn write(
                 rule_id,
                 experiment_id,
                 dataset_item_id,
+                queue_id,
                 author_user_id: author_user,
                 metadata,
                 created_at,
@@ -676,6 +692,7 @@ mod tests {
     use cetra_core::ids::OrgId;
 
     use super::*;
+    use crate::meta::annotation_queues::{NewQueue, QueueCreate, Target, insert_queue_tx};
     use crate::meta::datasets::{DatasetFields, insert_dataset};
     use crate::meta::experiments::{NewExperiment, insert_tx};
     use crate::meta::score_definitions::{DefinitionCategory, DefinitionFields, insert_definition};
@@ -722,6 +739,7 @@ mod tests {
             metadata: BTreeMap::new(),
             experiment_id: None,
             dataset_item_id: None,
+            queue_id: None,
         }
     }
 
@@ -749,6 +767,7 @@ mod tests {
                 source: None,
                 evaluator_id: None,
                 rule_id: None,
+                queue_id: None,
                 window: None,
                 limit: 100,
                 cursor: None,
@@ -2176,6 +2195,7 @@ mod tests {
             metadata: BTreeMap::new(),
             experiment_id: None,
             dataset_item_id: None,
+            queue_id: None,
         };
         let id = "01900000-0000-7000-8000-000000000402";
         let before_cap = app
@@ -2388,6 +2408,79 @@ mod tests {
                 )]
             );
         }
+    }
+
+    /// A trace queue of `project` in `org`, created now. Returns its id.
+    async fn queue(app: &TestApp, org: OrgId, project: ProjectId) -> Uuid {
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    let created = insert_queue_tx(
+                        conn,
+                        project,
+                        org,
+                        NewQueue {
+                            name: format!("q-{}", Uuid::now_v7()),
+                            description: None,
+                            instructions: None,
+                            target: Target::Trace,
+                            definition_ids: Vec::new(),
+                            created_by: None,
+                        },
+                        None,
+                        now,
+                    )
+                    .await?;
+                    let QueueCreate::Created(row) = created else {
+                        panic!("the queue is created");
+                    };
+                    Ok(row.id)
+                })
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unknown_queue_is_refused() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let (other, _) = app.add_project(&seeded, "other", None).await;
+        let foreign = queue(&app, seeded.org_id, other.id).await;
+        for queue_id in [Uuid::now_v7(), foreign] {
+            let result = write(
+                &app.state,
+                &seeded.project,
+                api_writer(),
+                vec![ScoreCreate {
+                    queue_id: Some(queue_id),
+                    ..item("accuracy", 0.5)
+                }],
+            )
+            .await;
+            assert_eq!(
+                refused(result),
+                vec![(
+                    "scores[0].queue_id".to_owned(),
+                    "unknown annotation queue".to_owned(),
+                )]
+            );
+        }
+        let mine = queue(&app, seeded.org_id, seeded.project.id).await;
+        let ids = write(
+            &app.state,
+            &seeded.project,
+            api_writer(),
+            vec![ScoreCreate {
+                queue_id: Some(mine),
+                ..item("accuracy", 0.5)
+            }],
+        )
+        .await
+        .unwrap();
+        assert_eq!(ids.len(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -5,6 +5,62 @@ description: Every public name of the cetra Python SDK with its signature.
 
 Use this page to look up the signature of every public name in `cetra.__all__`; each entry links to the guide section that explains it.
 
+### `AddedQueueItems`
+
+{/* untested: signature */}
+```python
+class AddedQueueItems:
+    added: int
+    existing: int
+    skipped: tuple[SkippedQueueItem, ...]
+```
+
+What `client.annotation_queues.add_items` returns: the targets added, the ones already in the queue, and the ones skipped, each with its position in the call. See [Annotation queues](/docs/reference/python/scores-datasets-experiments/#annotation-queues).
+
+### `AnnotationQueue`
+
+{/* untested: signature */}
+```python
+class AnnotationQueue:
+    id: str
+    name: str
+    description: str | None
+    instructions: str | None
+    target: QueueTarget
+    definition_ids: tuple[str, ...]
+    version: int
+    created_by: str | None
+    created_at: str
+    updated_at: str
+    counts: QueueCounts
+```
+
+An annotation queue with its item counts, as the server returns it. See [Annotation queues](/docs/reference/python/scores-datasets-experiments/#annotation-queues).
+
+### `AnnotationQueueItem`
+
+{/* untested: signature */}
+```python
+class AnnotationQueueItem:
+    id: str
+    queue_id: str
+    trace_id: str | None
+    span_id: str | None
+    session_id: str | None
+    target_time: str
+    status: QueueItemStatus
+    skip_reason: str | None
+    leased_by_user_id: str | None
+    lease_expires_at: str | None
+    done_by_user_id: str | None
+    done_at: str | None
+    added_by: Literal["user", "pat", "key"]
+    added_by_id: str
+    created_at: str
+```
+
+One target of a queue, as `client.annotation_queues.items` returns it. The reviewer fields are set by the web UI. See [Annotation queues](/docs/reference/python/scores-datasets-experiments/#annotation-queues).
+
 ### `ApiError`
 
 {/* untested: signature */}
@@ -25,9 +81,11 @@ Raised by `Client`, `evaluate` and `aevaluate` when the API answers with an erro
 class Client:
     def __init__(self, *, api_key: str | None = None, base_url: str | None = None) -> None: ...
     datasets: Datasets
+    annotation_queues: AnnotationQueues
+    prompts: Prompts
 ```
 
-The REST client for datasets and experiments. It reads the key and the base URL the way `init()` does and raises `ConfigError` without a key. See [Datasets and experiments](/docs/reference/python/scores-datasets-experiments/#datasets-and-experiments).
+The REST client for datasets, experiments, annotation queues and prompts. It reads the key and the base URL the way `init()` does and raises `ConfigError` without a key. See [Datasets and experiments](/docs/reference/python/scores-datasets-experiments/#datasets-and-experiments), [Annotation queues](/docs/reference/python/scores-datasets-experiments/#annotation-queues) and [Prompts](/docs/reference/python/scores-datasets-experiments/#prompts).
 
 ### `ConfigError`
 
@@ -118,6 +176,81 @@ class LlmSpan(Span):
 
 The handle `llm_span` yields. It writes the GenAI attributes of a chat call. See [Manual spans and llm_span](/docs/reference/python/tracing/#manual-spans-and-llm_span).
 
+### `Prompt`
+
+{/* untested: signature */}
+```python
+class Prompt:
+    name: str
+    type: Literal["text", "chat"]
+    template: str | tuple[Mapping[str, str], ...]
+    version: int | None  # None for a fallback
+    config: Mapping[str, Any]
+    labels: tuple[str, ...]
+    variables: tuple[str, ...]
+    placeholders: tuple[str, ...]
+    is_fallback: bool
+
+    def compile(self, **values: object) -> str | list[dict[str, str]]: ...
+```
+
+A prompt version from the registry, or the fallback that `get_prompt` built from a string or message list. `compile` fills the variables and placeholders and links the current span to the prompt. See [Prompts](/docs/reference/python/scores-datasets-experiments/#prompts).
+
+### `PromptCompileError`
+
+{/* untested: signature */}
+```python
+class PromptCompileError(ValueError):
+    kind: str  # invalid, missing_variable or missing_placeholder
+    name: str | None
+    reason: str | None
+    line: int | None
+    column: int | None
+    prompt: str | None
+```
+
+Raised by `compile` when a variable or placeholder has no value, or when a template is invalid, including an invalid fallback. The message names the prompt and never quotes the template. See [Prompts](/docs/reference/python/scores-datasets-experiments/#prompts).
+
+### `PromptNotAvailable`
+
+{/* untested: signature */}
+```python
+class PromptNotAvailable(Exception):
+    name: str
+    reason: str  # not found, status <code>, network, invalid response or sdk disabled
+```
+
+Raised by `get_prompt` when no prompt can be fetched, no stale copy is cached and no fallback was given. See [Prompts](/docs/reference/python/scores-datasets-experiments/#prompts).
+### `QueueCounts`
+
+{/* untested: signature */}
+```python
+class QueueCounts:
+    pending: int
+    completed: int
+    skipped: int
+```
+
+The item counts of an annotation queue, by status. See [Annotation queues](/docs/reference/python/scores-datasets-experiments/#annotation-queues).
+
+### `QueueItemStatus`
+
+{/* untested: signature */}
+```python
+QueueItemStatus = Literal["pending", "completed", "skipped"]
+```
+
+The status of a queue item, the filter of `client.annotation_queues.items`. See [Annotation queues](/docs/reference/python/scores-datasets-experiments/#annotation-queues).
+
+### `QueueTarget`
+
+{/* untested: signature */}
+```python
+QueueTarget = Literal["trace", "span", "session"]
+```
+
+What the items of a queue are. It is fixed when the queue is created. See [Annotation queues](/docs/reference/python/scores-datasets-experiments/#annotation-queues).
+
 ### `Run`
 
 {/* untested: signature */}
@@ -145,6 +278,17 @@ class Score:
 ```
 
 What a scorer returns when it has a reason or metadata to add to the value. See [Experiments](/docs/reference/python/scores-datasets-experiments/#experiments).
+
+### `SkippedQueueItem`
+
+{/* untested: signature */}
+```python
+class SkippedQueueItem:
+    index: int
+    message: str
+```
+
+A target that `add_items` did not add. `index` is its position in the list the call received, and `message` says why without repeating the value. See [Annotation queues](/docs/reference/python/scores-datasets-experiments/#annotation-queues).
 
 ### `Span`
 
@@ -183,10 +327,10 @@ The async form of `evaluate`, for async tasks. See [Experiments](/docs/reference
 
 {/* untested: signature */}
 ```python
-def context(*, session_id: str | None = None, user_id: str | None = None, tags: Sequence[str] | None = None, metadata: Mapping[str, object] | None = None, propagate: bool = False) -> ContextManager: ...
+def context(*, session_id: str | None = None, user_id: str | None = None, tags: Sequence[str] | None = None, metadata: Mapping[str, object] | None = None, propagate: bool = False, prompt: Prompt | None = None) -> ContextManager: ...
 ```
 
-A sync and async context manager that stamps the session, user, tags and metadata on every span started inside it. `propagate=True` also writes the ids to W3C baggage. See [Context and baggage](/docs/reference/python/context/#context-and-baggage).
+A sync and async context manager that stamps the session, user, tags and metadata on every span started inside it. `propagate=True` also writes the ids to W3C baggage. `prompt` stamps the prompt's name and version on those spans, as `compile` does for the current span. See [Context and baggage](/docs/reference/python/context/#context-and-baggage).
 
 ### `current_span_id`
 
@@ -223,6 +367,15 @@ def flush() -> None: ...
 ```
 
 Blocks until the pending spans and scores are exported. Call it at the end of every serverless invocation. See [Serverless](/docs/reference/python/opentelemetry/#serverless).
+
+### `get_prompt`
+
+{/* untested: signature */}
+```python
+def get_prompt(name: str, *, label: str | None = None, version: int | None = None, fallback: str | Sequence[Mapping[str, str]] | None = None, cache_ttl_s: float = 60.0) -> Prompt: ...
+```
+
+Fetches a prompt by label (default `production`) or version. Labels are cached for 60 seconds and then served stale while one refresh runs; a version never expires. See [Prompts](/docs/reference/python/scores-datasets-experiments/#prompts).
 
 ### `init`
 

@@ -1,7 +1,10 @@
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { HttpResponse, http } from "msw";
 import { expect, it, vi } from "vitest";
+import type { Schema } from "@/api/types";
 import { server } from "@/mocks/node";
 import { renderApp } from "@/test/render";
+import queuesFixture from "../../../../../../fixtures/api/static/annotation-queues.json";
 
 const TRACE = "a1000000000000000000000000000006";
 const SPAN = "b100000000000061";
@@ -22,8 +25,10 @@ function slotRect(left: number, width: number): DOMRect {
 
 // Each header is 100 px wide, so the drop index follows the column order.
 function stubHeaderSlots(grid: HTMLElement) {
+  // The selection column has no column id: the slots count the columns only.
   within(grid)
     .getAllByRole("columnheader")
+    .filter((header) => header.hasAttribute("data-column-id"))
     .forEach((header, index) => {
       header.getBoundingClientRect = () => slotRect(index * 100, 100);
     });
@@ -159,4 +164,75 @@ it("has no default view to apply", async () => {
   const { router } = await renderApp("/acme/support-bot/spans");
   expect(await screen.findByRole("button", { name: "Default view" })).toBeInTheDocument();
   expect(router.state.location.search).toEqual({});
+});
+
+const QUEUE_LIST = "/api/v1/projects/:project/annotation-queues";
+const QUEUE_ITEMS = "/api/v1/projects/:project/annotation-queues/:id/items";
+const SPAN_QUEUE: Schema<"AnnotationQueue"> = {
+  ...(queuesFixture.data[0] as Schema<"AnnotationQueue">),
+  id: "01900000-0000-7000-8000-000000000a02",
+  name: "Span review",
+  target: "span",
+};
+
+/** The row checkbox of the `index`th loaded row. */
+async function spanBox(index: number): Promise<HTMLElement> {
+  const grid = await screen.findByRole("grid", { name: "Spans" });
+  const box = within(grid).getAllByRole("checkbox", { name: "Select row" })[index];
+  if (!box) {
+    throw new Error(`no row checkbox ${index}`);
+  }
+  return box;
+}
+
+it("checks span rows without opening them and adds them to a span queue", async () => {
+  server.use(
+    http.get(QUEUE_LIST, () => HttpResponse.json({ data: [SPAN_QUEUE], next_cursor: null })),
+  );
+  const calls: { id: string; body: { items: { trace_id?: string; span_id?: string }[] } }[] = [];
+  server.use(
+    http.post(QUEUE_ITEMS, async ({ request, params }) => {
+      const body = (await request.json()) as { items: { trace_id?: string; span_id?: string }[] };
+      calls.push({ id: String(params.id), body });
+      return HttpResponse.json(
+        { added: body.items.length, existing: 0, skipped: [] },
+        { status: 201 },
+      );
+    }),
+  );
+  const { router, user } = await renderApp("/acme/support-bot/spans");
+  await user.click(await spanBox(0));
+  await user.click(await spanBox(1));
+  await user.click(screen.getByRole("button", { name: "Add 2 to queue" }));
+
+  const dialog = await screen.findByRole("dialog");
+  await user.click(within(dialog).getByRole("combobox", { name: "Queue" }));
+  await user.click(await screen.findByRole("option", { name: "Span review" }));
+  await user.click(within(dialog).getByRole("button", { name: "Add" }));
+
+  expect(await within(dialog).findByText("Added 2 to Span review.")).toBeInTheDocument();
+  expect(calls).toHaveLength(1);
+  expect(calls[0]?.id).toBe(SPAN_QUEUE.id);
+  expect(calls[0]?.body.items).toHaveLength(2);
+  for (const item of calls[0]?.body.items ?? []) {
+    expect(item.trace_id).toMatch(/^[0-9a-f]{32}$/);
+    expect(item.span_id).toMatch(/^[0-9a-f]{16}$/);
+  }
+  expect(router.state.location.search.trace).toBeUndefined();
+});
+
+it("opens a span from its cell and not from its checkbox", async () => {
+  const { router, user } = await renderApp("/acme/support-bot/spans");
+  await user.click(await spanBox(0));
+  expect(router.state.location.search.trace).toBeUndefined();
+
+  const grid = await screen.findByRole("grid", { name: "Spans" });
+  const row = within(grid).getAllByRole("row")[1];
+  if (!row) {
+    throw new Error("missing span row");
+  }
+  fireEvent.click(row);
+  await waitFor(() => {
+    expect(router.state.location.search).toMatchObject({ trace: TRACE, span: SPAN });
+  });
 });

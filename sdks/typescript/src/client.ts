@@ -1,13 +1,15 @@
 /**
- * REST client for datasets and experiments (spec 10 § Datasets and experiments).
+ * REST client for datasets, experiments and annotation queues (spec 10).
  *
  * `Client` raises on failure: `ConfigError` for a missing key or runtime, and
  * `ApiError` for an error answer after retries (D-J-16). Only idempotent calls
  * are retried; the callers pass `retry` for the rest.
  */
 
+import { AnnotationQueues } from "./annotation-queues.js";
 import { ConfigError, resolveConfig } from "./config.js";
 import { Datasets } from "./datasets.js";
+import { Prompts } from "./prompts.js";
 import { defaultSleep, MAX_ATTEMPTS, waitMillis } from "./retry.js";
 import { getFetch, timeoutSignal } from "./web.js";
 
@@ -73,6 +75,8 @@ export class ApiError extends Error {
 
 export class Client {
   readonly datasets: Datasets;
+  readonly prompts: Prompts;
+  readonly annotationQueues: AnnotationQueues;
   readonly #apiKey: string;
   readonly #baseUrl: string;
   readonly #fetch: RestFetch;
@@ -97,6 +101,8 @@ export class Client {
     this.#fetch = fetcher;
     this.#sleep = options.sleep ?? defaultSleep;
     this.datasets = new Datasets(this);
+    this.prompts = new Prompts(this);
+    this.annotationQueues = new AnnotationQueues(this);
   }
 
   /**

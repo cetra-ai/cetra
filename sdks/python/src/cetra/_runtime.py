@@ -281,6 +281,9 @@ def reset() -> None:
 
     The atexit flag is never cleared: a second registration would be wrong (D-F-15).
     """
+    from cetra import _prompts  # deferred: _prompts imports this module
+
+    _prompts._reset_cache()
     global _runtime, _init_called
     runtime, _runtime = _runtime, None
     _init_called = False

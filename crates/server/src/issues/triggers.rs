@@ -352,6 +352,7 @@ mod tests {
             metadata: BTreeMap::new(),
             experiment_id: None,
             dataset_item_id: None,
+            queue_id: None,
         }
     }
 

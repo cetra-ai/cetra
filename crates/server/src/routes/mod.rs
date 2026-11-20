@@ -2,7 +2,9 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 pub(crate) mod admin;
+pub(crate) mod agent_context;
 pub(crate) mod alert_rules;
+pub(crate) mod annotation_queues;
 pub(crate) mod api_keys;
 pub(crate) mod auth;
 pub(crate) mod backfills;
@@ -32,7 +34,9 @@ pub(crate) mod oauth;
 pub(crate) mod online_rules;
 pub(crate) mod orgs;
 pub(crate) mod otlp;
+pub(crate) mod playground;
 pub(crate) mod projects;
+pub(crate) mod prompts;
 pub(crate) mod read;
 pub(crate) mod saved_views;
 pub(crate) mod schema;

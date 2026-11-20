@@ -1,0 +1,8 @@
+{
+  "description": "A cetra.prompt.name with cetra.prompt.version fills the prompt columns. A Langfuse prompt name on the same span loses to it and stays in attributes.",
+  "origin": "hand_written",
+  "spec_refs": [
+    "02 § Context fields",
+    "02 § Normalization rules / 18"
+  ]
+}

@@ -171,6 +171,12 @@
           "column_type": "string_list",
           "nullable": false,
           "description": "Distinct model names."
+        },
+        {
+          "name": "prompts",
+          "column_type": "string_list",
+          "nullable": false,
+          "description": "Registry prompts the trace used, as name@version (D-V-15)."
         }
       ]
     },
@@ -266,7 +272,7 @@
           "name": "environment",
           "column_type": "string",
           "nullable": true,
-          "description": "Deployment environment. cetra-eval is reserved for evaluator runs."
+          "description": "Deployment environment. cetra-eval is reserved for evaluator runs and cetra-playground for playground runs."
         },
         {
           "name": "release",
@@ -309,6 +315,18 @@
           "column_type": "string",
           "nullable": true,
           "description": "coalesce(response_model, request_model)."
+        },
+        {
+          "name": "prompt_name",
+          "column_type": "string",
+          "nullable": true,
+          "description": "Registry prompt the span used (D-V-15)."
+        },
+        {
+          "name": "prompt_version",
+          "column_type": "integer",
+          "nullable": true,
+          "description": "Version of that prompt."
         },
         {
           "name": "operation",
@@ -675,6 +693,12 @@
           "column_type": "string",
           "nullable": true,
           "description": "Dataset item the score belongs to."
+        },
+        {
+          "name": "queue_id",
+          "column_type": "string",
+          "nullable": true,
+          "description": "Annotation queue the score was written from."
         },
         {
           "name": "author_user_id",

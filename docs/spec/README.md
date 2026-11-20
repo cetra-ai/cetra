@@ -33,7 +33,7 @@ The product is `cetra` (cetra.sh; D46). Its identifiers are the binary, the crat
 
 ## Non-goals (MVP)
 
-Gateway/proxy, prompt registry, playground, annotation queues, custom dashboards, SAML, 2FA, message dedup, multi-node, Postgres, Iceberg export, sandboxed code evaluators. The design must not preclude any of them.
+Gateway/proxy, custom dashboards, SAML, 2FA, message dedup, multi-node, Postgres, Iceberg export, sandboxed code evaluators. The design must not preclude any of them.
 
 ## Architecture
 
@@ -105,7 +105,7 @@ These were made while writing the spec and approved afterwards; S3, S4 and S7 we
 | S8 | Sign-up default after bootstrap is `invite_only` | 08 |
 | S9 | API key prefixes `sk-cetra-`, `pk-cetra-`, `pat-cetra-`; keys are project-bound; PATs for CLI/MCP | 08 |
 | S10 | MCP tools are read-only in MVP; MCP auth via PAT bearer (OAuth for MCP later) | 09 |
-| S11 | Ports: 8080 (HTTP: UI, API, OTLP/HTTP, MCP), 4317 (OTLP/gRPC), 4318 (OTLP/HTTP only, standard port) | 09, 12 |
+| S11 | Ports: 8080 (HTTP: UI, API, OTLP/HTTP, MCP), 4317 (OTLP/gRPC), 4318 (OTLP/HTTP and `/v1/agent-context`, standard port) | 09, 12 |
 | S12 | Static assets embedded with `memory-serve` | 11 |
 | S13 | MVP backups are a documented cold snapshot (stop, copy, start); the online `cetra admin backup` command is track N's M2 (D-N-11) | 12 |
 | S14 | SSRF guard on all outbound calls, with an opt-in for private networks (local Ollama/vLLM) | 12 |

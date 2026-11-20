@@ -7,7 +7,7 @@ M4 connects issues to the rest of the product (D-IC-14, amended by D-IC-20 to D-
 - MCP gets a read-only `list_issues` tool;
 - the real binary and the in-process tests cover the whole chain.
 
-**Prerequisites:** M1, M2 and M3 are committed on the branch this one is cut from. Migration `0024` is M3's, so M4's migration is `0025`. M3 writes `created` and `regressed` issue events in its assign path (03 plan § M3.4c); notifications read the `issue_events` table, so they cover M1's error issues and M3's LLM issues alike.
+**Prerequisites:** M1, M2 and M3 are committed on the branch this one is cut from. Migration `0027` is M3's, so M4's migration is `0028`. M3 writes `created` and `regressed` issue events in its assign path (03 plan § M3.4c); notifications read the `issue_events` table, so they cover M1's error issues and M3's LLM issues alike.
 
 **Read first:**
 - `AGENTS.md`;
@@ -28,7 +28,7 @@ The decisions file (D-IC-20 to D-IC-25) leaves these open. Each phase is written
 | Q1 | Extra fields of the `issues.detected` webhook body beyond `{source_id, source_name, project, items, more, issues_url}` | add `type` (`"issues.detected"`), `notification_id` and `occurred_at`, mirroring the alert payload's `type`, `event_id`, `occurred_at`; items hold `{issue_id, kind, title}` only (no per-item URL) | M4.7 |
 | Q2 | Which issues does "Add examples to dataset" read for a group (the issue and its merged issues)? | the issue, then the 7 merged issues with the most occurrences over the default occurrences window (14 days ending now), as the occurrences examples rank them (`example_issues`, 8 names at most); `limit` rows are read per name | M4.10a, M4.11 |
 | Q3 | Answer when the issue group has no occurrence to add | `400` with the field error `issue`: "the issue has no occurrences in the data window" | M4.11 |
-| Q4 | Existing enabled sources when migration `0025` runs (none in practice: the project is unreleased) | the migration sets `last_notified_at` to the migration time for every enabled source, so none is silent forever and none sends a backlog | M4.1 |
+| Q4 | Existing enabled sources when migration `0028` runs (none in practice: the project is unreleased) | the migration sets `last_notified_at` to the migration time for every enabled source, so none is silent forever and none sends a backlog | M4.1 |
 | Q5 | The "View traces" link and button of an `issue_occurrences` alert message | the plain trace list over the event window, without a filter (the rule has none) | M4.4 |
 | Q6 | Preview chart of an `issue_occurrences` rule in the rule form | none (`previewQuery` returns `undefined`, as it does for LLM-span latency) | M4.12a |
 | Q7 | Titles in Slack and email lines | cut to 100 characters (as rule names are); the webhook carries the whole title | M4.7 |
@@ -91,7 +91,7 @@ No new dependency. (`minijinja`, `serde`, `uuid`, `sqlx` and every web package a
 
 | Phase | Edits (summary) | Depends on |
 |---|---|---|
-| M4.1 Decisions, spec 04, migration | `00-design.md`, `docs/mvp-decisions.md`, spec 04, migration `0025` | — |
+| M4.1 Decisions, spec 04, migration | `00-design.md`, `docs/mvp-decisions.md`, spec 04, migration `0028` | — |
 | M4.2 Storage `ScoreCount` | `crates/storage/src/reads/alerts.rs` | — |
 | M4.3 Link store | new `meta/issue_links.rs`, `meta/mod.rs`, new `test_support/issues.rs`, `test_support/mod.rs` | M4.1 |
 | M4.4 K condition | `api/alerts.rs`, `alerts/condition.rs`, `alerts/message.rs`, `routes/alert_rules.rs`, `routes/channels.rs`, `meta/alerts.rs` (tests), `alerts/deliver/tests.rs` (literal), `alerts/evaluate.rs` (the `measure` call and test literals) | M4.3 (its route tests use the shared test helpers) |
@@ -144,7 +144,7 @@ No new dependency. (`minijinja`, `serde`, `uuid`, `sqlx` and every web package a
 - `docs/plans/ic-issue-clustering/00-design.md`;
 - `docs/mvp-decisions.md`;
 - `docs/spec/04-metadata-db.md`;
-- new `crates/server/migrations/meta/0025_issue_links.sql`.
+- new `crates/server/migrations/meta/0028_issue_links.sql`.
 
 **Migration** (exact; M4.3 relies on every name):
 ```sql
@@ -1421,7 +1421,7 @@ Use the file's `Api` helpers (`get`, `post`, `delete`); if `Api` has no `patch`,
 3. Spec 09: § Issues: `channel_ids` on the source create/update/read rows; the new route row `POST /projects/{project}/issues/{issue}/dataset-items` (body, 201 `FromTracesResult`, `ManageDatasets`, errors); § Evaluation & alerts: the condition fields; the MCP tool table gets `list_issues` (arguments, output, `ProjectPerm::View`), "seven" → "eight".
 4. Spec 11: issue page buttons ("Add examples to dataset", "Create alert"), the rule form's metric "Issue occurrences" and scope picker, the source editor's Notifications fieldset.
 5. `alerts.mdx`: a section "Alert on an issue" (metric, scope, the window rule: `15m` or more, because an occurrence is recorded after its trace completes; and advice: `1h` or more for LLM issues, longer than the refit period), the condition rules in the user's words (no filter, no minimum samples, threshold 0 or more, zero is a value), and the notification digest messages (one message per source at most every 10 minutes: "at least about 9 to 10 minutes apart", because the clock runs from the newest event's time, and a first channel added to an enabled source starts from then, with no backlog); style per `website/STYLE.md`. `mcp.mdx`: description "seven" → "eight", a table row for `list_issues`, an example question. `issues.mdx`: sections "Notifications", "Create an alert", "Add examples to a dataset". Every code block is tested or marked untested per `check-samples.mjs` (use plain prose and tables where possible).
-6. `CHANGELOG.md` § `[Unreleased]` § Added: one line each for the `issue_occurrences` alert condition; issue notifications (channels on issue sources, digests); "Add examples to dataset" from an issue; the `list_issues` MCP tool. Under `### Upgrade notes`: "Migration `0025` rebuilds `notification_deliveries` (an issue notification is a delivery without a rule event) and adds `issue_sources.last_notified_at`." (only the second clause if the first is not user-visible; keep it short).
+6. `CHANGELOG.md` § `[Unreleased]` § Added: one line each for the `issue_occurrences` alert condition; issue notifications (channels on issue sources, digests); "Add examples to dataset" from an issue; the `list_issues` MCP tool. Under `### Upgrade notes`: "Migration `0028` rebuilds `notification_deliveries` (an issue notification is a delivery without a rule event) and adds `issue_sources.last_notified_at`." (only the second clause if the first is not user-visible; keep it short).
 7. `docs/roadmap.md`: the IC row: M4 "implemented", list the PR when known, decisions D-IC-20 to D-IC-25.
 
 **Tests:** none (the Closing runs `just check-docs`).
@@ -1439,7 +1439,7 @@ Run in this order, from the worktree, one command at a time (the machine is load
 2. `just openapi` (regenerates `crates/server/openapi.json`, `web/src/api/schema.gen.ts`, `web/src/mocks/generated/*`, `website/src/generated/openapi.json`). Check by hand that the diff shows exactly: `issue_occurrences` in `AlertMetric`, `issue_id`/`source_id` in `AlertCondition`, `channel_ids` on the three source types, the new `post_issue_dataset_items` operation with `IssueDatasetItemsRequest`.
 3. `just api-examples` (regenerates `fixtures/api/static/issue-source*.json` with `channel_ids` and the manifest). If the web tests that read these fixtures need an example of a source with channels, add it to the example generator in `crates/server/src/api_examples.rs` and regenerate (a separate commit step, in the report).
 4. `just docs-gen` (expected: no change; M4 adds no CLI flag or SQL view). `just license-fixtures` only if `just check` reports a stale licence fixture (expected: not needed).
-5. `just check` (Rust, web, SDKs, docs). Fix failures with Haiku briefs under the same rules; insta snapshots that changed because of the new route, fields or migration (notably `crates/server/tests/snapshots/meta_schema.snap`, from migration `0025`) are reviewed with `cargo insta review`, then accepted, and committed with the generated files.
+5. `just check` (Rust, web, SDKs, docs). Fix failures with Haiku briefs under the same rules; insta snapshots that changed because of the new route, fields or migration (notably `crates/server/tests/snapshots/meta_schema.snap`, from migration `0028`) are reviewed with `cargo insta review`, then accepted, and committed with the generated files.
 6. Remove the `#![allow(dead_code)]` of `test_support/issues.rs` (every helper must by now have a caller; delete an unused one). `just assert-clean` after committing the generated files and the accepted snapshots in one commit `Regenerate the IC M4 generated files`.
 7. A Sonnet code review of the whole M4 diff against this plan (`git diff <M3 end>..HEAD`), as the user's plan rules say; fixes by Haiku with exact briefs.
 

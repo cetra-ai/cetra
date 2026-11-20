@@ -21,6 +21,8 @@ import {
   type TraceStreamSource,
   traceStreamHandler,
 } from "@/mocks/sse";
+import queueFixture from "../../../../fixtures/api/static/annotation-queue.json";
+import queueItemFixture from "../../../../fixtures/api/static/annotation-queue-item.json";
 
 const PROJECT = "/api/v1/projects/:project";
 
@@ -91,8 +93,31 @@ const SCORE_DEFINITIONS: Schema<"ScoreDefinition">[] = [
   },
 ];
 
+/**
+ * The queue item the fixtures serve names a fixture trace, which the generated dataset does not
+ * hold, and the queue names fixture score definitions; the dev server points them at the dataset's
+ * first trace and its first two definitions instead.
+ */
+function queueItemHandlers(dataset: Dataset): HttpHandler[] {
+  const item = () =>
+    HttpResponse.json({ ...queueItemFixture, trace_id: dataset.traces[0]?.trace_id });
+  const items = `${PROJECT}/annotation-queues/:id`;
+  return [
+    http.get(items, () =>
+      HttpResponse.json({
+        ...queueFixture,
+        definition_ids: SCORE_DEFINITIONS.slice(0, 2).map((definition) => definition.id),
+      }),
+    ),
+    http.get(`${items}/items/:item_id`, item),
+    http.post(`${items}/items/:item_id/lease`, item),
+    http.post(`${items}/next`, item),
+  ];
+}
+
 export function largeHandlers(dataset: Dataset): HttpHandler[] {
   return [
+    ...queueItemHandlers(dataset),
     widgetQueryHandler(dataset),
     traceStreamHandler(liveTraceSource(dataset)),
     spanStreamHandler(liveSpanSource(dataset)),

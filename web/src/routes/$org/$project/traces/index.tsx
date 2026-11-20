@@ -6,6 +6,12 @@ import { problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
 import { spanDetailQuery, traceDetailQuery } from "@/api/queries";
 import type { Schema } from "@/api/types";
+import { AddMatchingDialog } from "@/components/annotation-queues/add-matching-dialog";
+import {
+  AddToQueueDialog,
+  addToQueueReason,
+  type QueueItemTarget,
+} from "@/components/annotation-queues/add-to-queue-dialog";
 import { useShortcut } from "@/components/command/use-shortcut";
 import { ColumnChooser } from "@/components/data-table/column-chooser";
 import {
@@ -110,6 +116,9 @@ function TracesPage() {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [addIds, setAddIds] = useState<string[]>([]);
+  const [queueOpen, setQueueOpen] = useState(false);
+  const [queueItems, setQueueItems] = useState<readonly QueueItemTarget[]>([]);
+  const [matchOpen, setMatchOpen] = useState(false);
   const applyView = useCallback(
     (next: Record<string, unknown>) => {
       void navigate({
@@ -180,6 +189,8 @@ function TracesPage() {
   });
   const checkedIds = selection.key === selectionKey ? selection.ids : NO_TRACES;
   const addReason = addTracesReason(data.role, checkedIds.size);
+  const queueReason = addToQueueReason(data.role, checkedIds.size);
+  const matchingQueueReason = addToQueueReason(data.role, 0);
   const listOptions = traceListOptions(org, project, {
     from: resolved.from,
     to: resolved.to,
@@ -556,6 +567,37 @@ function TracesPage() {
                           </Button>
                         </DisabledReason>
                       ) : null}
+                      {checkedIds.size > 0 ? (
+                        <DisabledReason reason={queueReason}>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={queueReason !== undefined}
+                            onClick={() => {
+                              setQueueItems(
+                                [...checkedIds].map((traceId) => ({ trace_id: traceId })),
+                              );
+                              setQueueOpen(true);
+                            }}
+                          >
+                            {`Add ${checkedIds.size} to queue`}
+                          </Button>
+                        </DisabledReason>
+                      ) : null}
+                      <DisabledReason reason={matchingQueueReason}>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          disabled={matchingQueueReason !== undefined}
+                          onClick={() => {
+                            setMatchOpen(true);
+                          }}
+                        >
+                          Add matching to queue…
+                        </Button>
+                      </DisabledReason>
                       <DisabledReason
                         reason={canDelete ? undefined : "Only project admins can delete traces"}
                       >
@@ -594,6 +636,27 @@ function TracesPage() {
                   traceIds={addIds}
                   onAdded={() => {
                     setSelection({ key: selectionKey, ids: NO_TRACES });
+                  }}
+                />
+                <AddToQueueDialog
+                  open={queueOpen}
+                  onOpenChange={setQueueOpen}
+                  target="trace"
+                  items={queueItems}
+                  onAdded={() => {
+                    setSelection({ key: selectionKey, ids: NO_TRACES });
+                  }}
+                />
+                <AddMatchingDialog
+                  open={matchOpen}
+                  onOpenChange={setMatchOpen}
+                  target="trace"
+                  selection={{
+                    filter: search.filter,
+                    search: search.search,
+                    from: resolved.from,
+                    to: resolved.to,
+                    includeExperiments: search.exp === 1,
                   }}
                 />
                 <div className="flex min-h-0 flex-1">

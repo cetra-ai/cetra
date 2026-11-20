@@ -235,6 +235,8 @@ pub struct ScoreListRequest<'a> {
     pub evaluator_id: Option<&'a str>,
     /// `rule_id` column, compared with the hyphenated lowercase UUID text.
     pub rule_id: Option<&'a str>,
+    /// Only scores written from this annotation queue (D-AQ-6).
+    pub queue_id: Option<&'a str>,
     /// `created_at ∈ [from, to)`.
     pub window: Option<TimeWindow>,
     /// Rows to return, from 1 to [`MAX_PAGE`].
@@ -448,6 +450,9 @@ fn filters(request: &ScoreListRequest<'_>) -> Result<Option<Expr>, RunError> {
     if let Some(rule_id) = request.rule_id {
         conjuncts.push(col(scores::RULE_ID).eq(lit(rule_id)));
     }
+    if let Some(queue_id) = request.queue_id {
+        conjuncts.push(col(scores::QUEUE_ID).eq(lit(queue_id)));
+    }
     if let Some(window) = request.window {
         conjuncts.push(window.predicate(scores::CREATED_AT));
     }
@@ -575,6 +580,7 @@ mod tests {
             source: None,
             evaluator_id: None,
             rule_id: None,
+            queue_id: None,
             window: None,
             limit: 50,
             cursor: None,
@@ -704,6 +710,7 @@ mod tests {
             "rule_id": or_null(score, "rule_id"),
             "experiment_id": or_null(score, "experiment_id"),
             "dataset_item_id": or_null(score, "dataset_item_id"),
+            "queue_id": or_null(score, "queue_id"),
             "author_user_id": or_null(score, "author_user_id"),
             "metadata": score.get("metadata").cloned().unwrap_or_else(|| json!({})),
             "created_at": score["created_at"],
@@ -1282,5 +1289,26 @@ mod tests {
                 .expect("no names")
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn list_filters_by_queue_id() {
+        const QUEUE_A: &str = "018f6b4e-7c1a-7c1a-8c1a-0000000000a1";
+        const QUEUE_B: &str = "018f6b4e-7c1a-7c1a-8c1a-0000000000b1";
+        let mut in_a = score_row(1, 0, 100, 100, 100, false, "relevance");
+        in_a.queue_id = Some(QUEUE_A.parse().expect("queue a"));
+        let mut in_b = score_row(2, 1, 200, 200, 200, false, "tone");
+        in_b.queue_id = Some(QUEUE_B.parse().expect("queue b"));
+        let no_queue = score_row(3, 2, 300, 300, 300, false, "length");
+        let query = ProjectQuery {
+            scores: live_scores_table(&[in_a, in_b, no_queue]),
+            ..example_query()
+        };
+        let ctx = QueryContext::new(query, None).expect("context");
+
+        let mut queue = request();
+        queue.queue_id = Some(QUEUE_A);
+        let page = score_list(&ctx, queue).await.expect("queue");
+        assert_eq!(ids(&rows(&page)), ["00000000-0000-0000-0000-000000000001"]);
     }
 }

@@ -82,6 +82,7 @@ async fn list_scores(
     let span_id = params.span_id.map(|id| id.to_string());
     let evaluator_id = params.evaluator_id.map(|id| id.to_string());
     let rule_id = params.rule_id.map(|id| id.to_string());
+    let queue_id = params.queue_id.map(|id| id.to_string());
     let created = window(params.from, params.to)?;
     let ctx = open_query(&state, access.project.org_id, access.project.id, None).await?;
     let page = storage::score_list(
@@ -95,6 +96,7 @@ async fn list_scores(
             source: params.source,
             evaluator_id: evaluator_id.as_deref(),
             rule_id: rule_id.as_deref(),
+            queue_id: queue_id.as_deref(),
             window: created,
             limit: page_limit(params.limit),
             cursor: params.cursor.as_deref(),
@@ -328,6 +330,132 @@ mod tests {
         assert_eq!(body["code"], "bad_request");
     }
 
+    /// A trace annotation queue of the seeded project, created now. Returns its id.
+    async fn queue(app: &TestApp, seeded: &Seeded) -> Uuid {
+        use crate::meta::annotation_queues::{NewQueue, QueueCreate, Target, insert_queue_tx};
+        let now = app.state.clock.now_ns();
+        let (org, project) = (seeded.org_id, seeded.project.id);
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    let created = insert_queue_tx(
+                        conn,
+                        project,
+                        org,
+                        NewQueue {
+                            name: "Review".to_owned(),
+                            description: None,
+                            instructions: None,
+                            target: Target::Trace,
+                            definition_ids: Vec::new(),
+                            created_by: None,
+                        },
+                        None,
+                        now,
+                    )
+                    .await?;
+                    let QueueCreate::Created(row) = created else {
+                        panic!("the queue is created");
+                    };
+                    Ok(row.id)
+                })
+            })
+            .await
+            .unwrap()
+    }
+
+    /// A human trace score named `name` on the trace `trace`, with no `score_id` (derived),
+    /// written to `queue_id` when given.
+    fn trace_score(trace: &str, name: &str, queue_id: Option<Uuid>) -> ScoreCreate {
+        ScoreCreate {
+            score_id: None,
+            target: ScoreTarget::Trace {
+                trace_id: TraceId::from_str(trace).unwrap(),
+            },
+            session_id: None,
+            user_id: None,
+            name: name.to_owned(),
+            value: ScoreValue::Numeric(1.0),
+            reason: None,
+            source: None,
+            metadata: BTreeMap::new(),
+            experiment_id: None,
+            dataset_item_id: None,
+            queue_id,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scores_store_and_filter_by_queue_id() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let queue = queue(&app, &seeded).await;
+        let batch = ScoreBatch {
+            scores: vec![
+                trace_score("a1000000000000000000000000000001", "tone", Some(queue)),
+                trace_score("a1000000000000000000000000000002", "tone", None),
+            ],
+        };
+        assert_eq!(
+            post_scores(&app, &seeded, &seeded.cookie, &batch).await,
+            StatusCode::OK
+        );
+
+        let (status, body) = get_json(&app, &seeded, &format!("/scores?queue_id={queue}")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let queued = body["data"].as_array().expect("data");
+        assert_eq!(queued.len(), 1, "{body}");
+        assert_eq!(queued[0]["queue_id"], queue.to_string());
+        let queued_id = queued[0]["score_id"].clone();
+
+        let (status, body) = get_json(&app, &seeded, "/scores").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let all = body["data"].as_array().expect("data");
+        assert_eq!(all.len(), 2, "{body}");
+        let unqueued: Vec<&Json> = all.iter().filter(|s| s["score_id"] != queued_id).collect();
+        assert_eq!(unqueued.len(), 1, "{body}");
+        assert!(unqueued[0].get("queue_id").is_none(), "{body}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn queue_id_does_not_change_the_derived_id() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let trace = "a1000000000000000000000000000001";
+        let queue = queue(&app, &seeded).await;
+
+        let without = ScoreBatch {
+            scores: vec![trace_score(trace, "tone", None)],
+        };
+        let written = app
+            .request(Method::POST, &scores_path(&seeded))
+            .header("cookie", &seeded.cookie)
+            .json(&without)
+            .send()
+            .await;
+        assert_eq!(written.status, StatusCode::OK);
+        let first: ScoreWriteResult = written.json();
+
+        app.state.clock.advance(std::time::Duration::from_secs(60));
+        let with = ScoreBatch {
+            scores: vec![trace_score(trace, "tone", Some(queue))],
+        };
+        let written = app
+            .request(Method::POST, &scores_path(&seeded))
+            .header("cookie", &seeded.cookie)
+            .json(&with)
+            .send()
+            .await;
+        assert_eq!(written.status, StatusCode::OK);
+        let second: ScoreWriteResult = written.json();
+        assert_eq!(first.score_ids, second.score_ids);
+
+        let rows = listed(&app, &seeded).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].queue_id, Some(queue));
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn pages_follow_the_cursor() {
         let (app, seeded) = loaded().await;
@@ -371,6 +499,7 @@ mod tests {
             metadata: BTreeMap::new(),
             experiment_id: None,
             dataset_item_id: None,
+            queue_id: None,
         }
     }
 

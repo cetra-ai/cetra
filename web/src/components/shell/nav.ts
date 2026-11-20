@@ -1,6 +1,7 @@
 import {
   BellRing,
   Bug,
+  ClipboardCheck,
   Database,
   FlaskConical,
   Gauge,
@@ -39,6 +40,12 @@ export const projectNav = [
     to: "/$org/$project/issue-sources",
     label: "Issue sources",
     icon: Radar,
+  },
+  {
+    section: "Evaluate",
+    to: "/$org/$project/annotation-queues",
+    label: "Annotation queues",
+    icon: ClipboardCheck,
   },
   { section: "Evaluate", to: "/$org/$project/datasets", label: "Datasets", icon: Table2 },
   {

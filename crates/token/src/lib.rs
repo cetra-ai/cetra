@@ -130,7 +130,7 @@ pub struct PlanClaim {
     pub add_ons: Vec<String>,
 }
 
-/// The nine limits of D-P-13. Outer `None`: the key is missing (the cell's default applies);
+/// The limits of D-P-13 and D-IC-13. Outer `None`: the key is missing (the cell's default applies);
 /// `Some(None)`: JSON `null` (unlimited); `Some(Some(n))`: the limit.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LimitsClaim {
@@ -204,6 +204,13 @@ pub struct LimitsClaim {
         skip_serializing_if = "Option::is_none"
     )]
     pub max_active_issue_sources: Option<Option<u64>>,
+    /// Annotation queues per org (D-AQ-10).
+    #[serde(
+        default,
+        with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_annotation_queues: Option<Option<u64>>,
 }
 
 /// `kind: "control_plane"` (D-P-24, D-P-28).
@@ -679,6 +686,7 @@ mod tests {
                 max_alert_rules: Some(None),
                 max_active_online_rules: Some(None),
                 max_active_issue_sources: Some(None),
+                max_annotation_queues: Some(None),
             },
         });
         let token = sign(&dev_key(), "dev-1", &claims).unwrap();
@@ -697,6 +705,18 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<LimitsClaim>("{}").unwrap(),
             LimitsClaim::default()
+        );
+
+        // An annotation-queue limit from a token that names it round-trips (D-AQ-10).
+        let queues = LimitsClaim {
+            max_annotation_queues: Some(Some(1)),
+            ..LimitsClaim::default()
+        };
+        let value = serde_json::to_value(&queues).unwrap();
+        assert_eq!(value, json!({"max_annotation_queues": 1}));
+        assert_eq!(
+            serde_json::from_value::<LimitsClaim>(value).unwrap(),
+            queues
         );
     }
 

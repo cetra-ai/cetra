@@ -125,7 +125,7 @@ Each phase lists the amendments it must apply.
 
 | Phase | Edits (summary) | Depends on |
 |---|---|---|
-| M3.1a Tables and rows | migration `0024`, `SourceRow`/`IssueRow` fields, vector codec, every struct literal (A1), spec 04, design doc, decision log | — |
+| M3.1a Tables and rows | migration `0027`, `SourceRow`/`IssueRow` fields, vector codec, every struct literal (A1), spec 04, design doc, decision log | — |
 | M3.1b Store functions | `meta/issues.rs` candidate, spend, refit and source functions (A4, A5, A8, A9, A10) | M3.1a |
 | M3.2 Limiter and config | `eval/dispatch.rs`, `config.rs`, configuration reference | — |
 | M3.3 Triggers | new `issues/bad_score.rs`, new `issues/topics.rs`, new `issues/triggers.rs`, `scores.rs`, `eval/trigger.rs`, `issues/sources.rs`, `http/mod.rs`, `serve.rs` | M3.1 |
@@ -160,7 +160,7 @@ All phases run one after the other in one worktree.
 - **M3.1b**, commit `Add issue candidate and refit store functions`: every function of store-additions item 4, with A4 (`set_candidate_target`), A5 (`finish_candidate`'s variants and `spent_usd`), A8 (`close_open_refits`), A9 (`set_candidates_assigned` returning the assigned ids, fenced on `pending`) and A10 (ordering), and their tests.
 
 **Edit:**
-- new `crates/server/migrations/meta/0024_issue_candidates.sql`;
+- new `crates/server/migrations/meta/0027_issue_candidates.sql`;
 - `crates/server/src/meta/issues.rs`;
 - `docs/spec/04-metadata-db.md` (§ Issues);
 - `docs/plans/ic-issue-clustering/00-design.md` (a new D-IC-19 with this plan's "Decided while writing this plan");

@@ -426,6 +426,7 @@ async fn all_scores(storage: &Storage, project: ProjectId) -> Vec<Value> {
                 source: None,
                 evaluator_id: None,
                 rule_id: None,
+                queue_id: None,
                 window: Some(time_window()),
                 limit: MAX_PAGE,
                 cursor: cursor.as_deref(),

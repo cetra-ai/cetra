@@ -4,7 +4,7 @@
 //! their original IDs, their absolute clock, and how the SDK batched the
 //! exports; this function gives them one JSON shape.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::DateTime;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
@@ -20,18 +20,73 @@ use crate::scenario::{CasePath, TimestampAttribute, TimestampFormat};
 const TEN_SECONDS_NS: i64 = 10_000_000_000;
 const NS_PER_MS: i64 = 1_000_000;
 
-/// The four determinism steps, in order.
+/// The determinism steps, in order.
 pub fn deterministic(
-    exports: Vec<ExportTraceServiceRequest>,
+    mut exports: Vec<ExportTraceServiceRequest>,
     case: &CasePath,
     ingest_time: i64,
     timestamps: &[TimestampAttribute],
+    span_names: &[String],
+    volatile: &[String],
 ) -> Result<ExportTraceServiceRequest, CaptureError> {
+    select(&mut exports, span_names, &case.to_string())?;
     let mut groups = merge(exports);
     remint(&mut groups, &case.to_string());
+    revolatile(&mut groups, volatile);
     shift(&mut groups, ingest_time, timestamps)?;
     prune(&mut groups);
     Ok(to_request(groups))
+}
+
+/// Keeps only the spans whose name is in `span_names`. Empty keeps every span.
+///
+/// Every entry must name at least one span in the exports, or the capture is
+/// incomplete. The reason names the entry, which is a span name from the scenario.
+///
+/// Parent ids are not changed: a kept span whose parent was dropped keeps the
+/// parent's id, and [`remint`] and [`nest`] treat it as a root.
+fn select(
+    exports: &mut [ExportTraceServiceRequest],
+    span_names: &[String],
+    case: &str,
+) -> Result<(), CaptureError> {
+    if span_names.is_empty() {
+        return Ok(());
+    }
+    ensure_every_name_matches(exports, span_names, case)?;
+    for export in exports.iter_mut() {
+        for resource_spans in export.resource_spans.iter_mut() {
+            for scope_spans in resource_spans.scope_spans.iter_mut() {
+                scope_spans
+                    .spans
+                    .retain(|span| span_names.contains(&span.name));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn ensure_every_name_matches(
+    exports: &[ExportTraceServiceRequest],
+    span_names: &[String],
+    case: &str,
+) -> Result<(), CaptureError> {
+    let present: HashSet<&str> = exports
+        .iter()
+        .flat_map(|export| export.resource_spans.iter())
+        .flat_map(|resource_spans| resource_spans.scope_spans.iter())
+        .flat_map(|scope_spans| scope_spans.spans.iter())
+        .map(|span| span.name.as_str())
+        .collect();
+    for name in span_names {
+        if !present.contains(name.as_str()) {
+            return Err(CaptureError::CaptureIncomplete {
+                case: case.to_owned(),
+                reasons: vec![format!("span_names entry matched no span: {name}")],
+            });
+        }
+    }
+    Ok(())
 }
 
 struct Carried {
@@ -361,6 +416,111 @@ fn replace_ids(input: &str, patterns: &[(String, String)]) -> String {
         index += ch.len_utf8();
     }
     out
+}
+
+/// Re-mints the string values of the `volatile` attribute keys as `capture-volatile-<n>`.
+///
+/// Values are numbered by first appearance in output order. Exact matches are
+/// replaced everywhere; then each value of at least 16 characters is replaced
+/// as a substring, so an id embedded in JSON text is masked too.
+fn revolatile(groups: &mut [ResourceGroup], keys: &[String]) {
+    if keys.is_empty() {
+        return;
+    }
+    let mut lists = attribute_lists(groups);
+    let mut found: Vec<(String, String)> = Vec::new();
+    for list in lists.iter() {
+        for attribute in list.iter() {
+            if !keys.contains(&attribute.key) {
+                continue;
+            }
+            let Some(Value::StringValue(text)) = attribute
+                .value
+                .as_ref()
+                .and_then(|value| value.value.as_ref())
+            else {
+                continue;
+            };
+            if !found.iter().any(|(original, _)| original == text) {
+                let placeholder = format!("capture-volatile-{}", found.len() + 1);
+                found.push((text.clone(), placeholder));
+            }
+        }
+    }
+    if found.is_empty() {
+        return;
+    }
+    let mut partial: Vec<(&str, &str)> = found
+        .iter()
+        .filter(|(original, _)| original.chars().count() >= 16)
+        .map(|(original, placeholder)| (original.as_str(), placeholder.as_str()))
+        .collect();
+    partial.sort_by(|left, right| {
+        right
+            .0
+            .len()
+            .cmp(&left.0.len())
+            .then_with(|| left.0.cmp(right.0))
+    });
+    let rewrite = |text: &str| -> String {
+        if let Some((_, placeholder)) = found.iter().find(|(original, _)| original == text) {
+            return placeholder.clone();
+        }
+        let mut out = text.to_owned();
+        for (original, placeholder) in &partial {
+            out = out.replace(*original, placeholder);
+        }
+        out
+    };
+    for list in lists.iter_mut() {
+        for attribute in list.iter_mut() {
+            if let Some(value) = attribute.value.as_mut() {
+                map_strings(value, &rewrite);
+            }
+        }
+    }
+}
+
+/// Every attribute list in output order: each resource and scope, then per span
+/// its own attributes, then its events' and links' attributes.
+fn attribute_lists(groups: &mut [ResourceGroup]) -> Vec<&mut Vec<KeyValue>> {
+    let mut lists = Vec::new();
+    for group in groups.iter_mut() {
+        lists.push(&mut group.resource.attributes);
+        for scope in group.scopes.iter_mut() {
+            lists.push(&mut scope.scope.attributes);
+            for span in scope.spans.iter_mut() {
+                lists.push(&mut span.attributes);
+                for event in span.events.iter_mut() {
+                    lists.push(&mut event.attributes);
+                }
+                for link in span.links.iter_mut() {
+                    lists.push(&mut link.attributes);
+                }
+            }
+        }
+    }
+    lists
+}
+
+/// Calls `rewrite` on every string in `value`, including strings inside arrays and key-value lists.
+fn map_strings(value: &mut AnyValue, rewrite: &impl Fn(&str) -> String) {
+    match &mut value.value {
+        Some(Value::StringValue(text)) => *text = rewrite(text.as_str()),
+        Some(Value::ArrayValue(array)) => {
+            for item in &mut array.values {
+                map_strings(item, rewrite);
+            }
+        }
+        Some(Value::KvlistValue(list)) => {
+            for attribute in &mut list.values {
+                if let Some(item) = attribute.value.as_mut() {
+                    map_strings(item, rewrite);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 fn shift(
@@ -925,6 +1085,8 @@ mod tests {
             &case(),
             INGEST,
             &[],
+            &[],
+            &[],
         )
         .unwrap();
 
@@ -942,6 +1104,8 @@ mod tests {
             vec![packaged("api", "genai", vec![early, late])],
             &case(),
             INGEST,
+            &[],
+            &[],
             &[],
         )
         .unwrap();
@@ -971,6 +1135,8 @@ mod tests {
             ],
             &case(),
             INGEST,
+            &[],
+            &[],
             &[],
         )
         .unwrap();
@@ -1050,6 +1216,8 @@ mod tests {
             &case(),
             INGEST,
             &[],
+            &[],
+            &[],
         )
         .unwrap();
         let spans = &result.resource_spans[0].scope_spans[0].spans;
@@ -1106,6 +1274,8 @@ mod tests {
             &case(),
             INGEST,
             &[],
+            &[],
+            &[],
         )
         .unwrap();
         let span = &result.resource_spans[0].scope_spans[0].spans[0];
@@ -1141,12 +1311,16 @@ mod tests {
             &case(),
             INGEST,
             &[],
+            &[],
+            &[],
         )
         .unwrap();
         let parent_started_first = deterministic(
             vec![packaged("api", "genai", vec![parent_first, child_late])],
             &case(),
             INGEST,
+            &[],
+            &[],
             &[],
         )
         .unwrap();
@@ -1187,6 +1361,8 @@ mod tests {
             &case(),
             INGEST,
             &[],
+            &[],
+            &[],
         )
         .unwrap();
         let base = INGEST - TEN_SECONDS_NS;
@@ -1215,6 +1391,8 @@ mod tests {
             &case(),
             INGEST,
             &[],
+            &[],
+            &[],
         )
         .unwrap_err();
         assert!(
@@ -1235,6 +1413,8 @@ mod tests {
             vec![packaged("api", "genai", vec![sample])],
             &case(),
             INGEST,
+            &[],
+            &[],
             &[],
         )
         .unwrap_err();
@@ -1298,6 +1478,8 @@ mod tests {
             &case(),
             INGEST,
             &specs,
+            &[],
+            &[],
         )
         .unwrap();
         let base = INGEST - TEN_SECONDS_NS;
@@ -1350,6 +1532,8 @@ mod tests {
             &case(),
             INGEST,
             &specs,
+            &[],
+            &[],
         )
         .unwrap();
         let shifted = DateTime::from_timestamp_nanos(INGEST - TEN_SECONDS_NS);
@@ -1383,6 +1567,8 @@ mod tests {
             &case(),
             INGEST,
             &specs,
+            &[],
+            &[],
         )
         .unwrap_err();
         let text = error.to_string();
@@ -1423,6 +1609,8 @@ mod tests {
             &case(),
             INGEST,
             &[],
+            &[],
+            &[],
         )
         .unwrap();
         let spans = &result.resource_spans[0].scope_spans[0].spans;
@@ -1449,5 +1637,205 @@ mod tests {
         let attrs = &json["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["attributes"];
         assert_eq!(attrs[0]["value"]["boolValue"], false);
         assert_eq!(attrs[1]["value"]["intValue"], "0");
+    }
+
+    fn three_spans(parent_id: u8) -> Vec<Span> {
+        let mut a = span("a", MIN_START, MIN_START + 9_000_000);
+        a.trace_id = vec![0x11; 16];
+        a.span_id = vec![parent_id; 8];
+        let mut b = span("b", MIN_START + 1_000_000, MIN_START + 5_000_000);
+        b.trace_id = vec![0x11; 16];
+        b.span_id = vec![0x02; 8];
+        b.parent_span_id = vec![parent_id; 8];
+        let mut c = span("c", MIN_START + 6_000_000, MIN_START + 7_000_000);
+        c.trace_id = vec![0x11; 16];
+        c.span_id = vec![0x03; 8];
+        vec![a, b, c]
+    }
+
+    fn string_of(attribute: &KeyValue) -> String {
+        match &attribute.value.as_ref().unwrap().value {
+            Some(Value::StringValue(text)) => text.clone(),
+            _ => panic!("string"),
+        }
+    }
+
+    const UUID_A: &str = "0190f0a2-0000-7000-8000-00000000000a";
+    const UUID_B: &str = "0190f0a2-0000-7000-8000-00000000000b";
+
+    #[test]
+    fn span_names_keep_only_named_spans() {
+        let names = ["b".to_owned(), "c".to_owned()];
+        let first = deterministic(
+            vec![packaged("api", "genai", three_spans(0x01))],
+            &case(),
+            INGEST,
+            &[],
+            &names,
+            &[],
+        )
+        .unwrap();
+        let second = deterministic(
+            vec![packaged("api", "genai", three_spans(0x0a))],
+            &case(),
+            INGEST,
+            &[],
+            &names,
+            &[],
+        )
+        .unwrap();
+
+        let spans = &first.resource_spans[0].scope_spans[0].spans;
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].name, "b");
+        assert_eq!(spans[1].name, "c");
+        let parent = &spans[0].parent_span_id;
+        assert_eq!(parent.len(), 8);
+        assert!(parent.iter().any(|byte| *byte != 0));
+        assert_ne!(parent, &spans[0].span_id);
+        assert_ne!(parent, &spans[1].span_id);
+        assert_eq!(
+            parent,
+            &second.resource_spans[0].scope_spans[0].spans[0].parent_span_id
+        );
+    }
+
+    #[test]
+    fn every_span_name_must_match() {
+        let names = ["b".to_owned(), "missing".to_owned()];
+        let error = deterministic(
+            vec![packaged("api", "genai", three_spans(0x01))],
+            &case(),
+            INGEST,
+            &[],
+            &names,
+            &[],
+        )
+        .unwrap_err();
+        let CaptureError::CaptureIncomplete { case, reasons } = error else {
+            panic!("expected CaptureIncomplete");
+        };
+        assert_eq!(case, "genai/chat-tool");
+        assert_eq!(
+            reasons,
+            vec!["span_names entry matched no span: missing".to_owned()]
+        );
+    }
+
+    #[test]
+    fn empty_span_names_keep_everything() {
+        let result = deterministic(
+            vec![packaged("api", "genai", three_spans(0x01))],
+            &case(),
+            INGEST,
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+        let names: Vec<&str> = result.resource_spans[0].scope_spans[0]
+            .spans
+            .iter()
+            .map(|span| span.name.as_str())
+            .collect();
+        assert_eq!(names, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn volatile_values_are_renumbered_by_first_appearance() {
+        let mut one = span("one", MIN_START, MIN_START + 1_000);
+        one.attributes = vec![kv("session.id", string_value(UUID_A))];
+        let mut two = span("two", MIN_START + 2_000_000, MIN_START + 3_000_000);
+        two.attributes = vec![kv("session.id", string_value(UUID_A))];
+        let mut three = span("three", MIN_START + 4_000_000, MIN_START + 5_000_000);
+        three.attributes = vec![kv("session.id", string_value(UUID_B))];
+        let result = deterministic(
+            vec![packaged("api", "genai", vec![one, two, three])],
+            &case(),
+            INGEST,
+            &[],
+            &[],
+            &["session.id".to_owned()],
+        )
+        .unwrap();
+        let spans = &result.resource_spans[0].scope_spans[0].spans;
+        assert_eq!(string_of(&spans[0].attributes[0]), "capture-volatile-1");
+        assert_eq!(string_of(&spans[1].attributes[0]), "capture-volatile-1");
+        assert_eq!(string_of(&spans[2].attributes[0]), "capture-volatile-2");
+    }
+
+    #[test]
+    fn volatile_substrings_are_replaced_in_other_attributes() {
+        let mut sample = span("chat", MIN_START, MIN_START + 1_000);
+        sample.attributes = vec![
+            kv("session.id", string_value(UUID_A)),
+            kv("gen_ai.tool.call_id", string_value(UUID_A)),
+            kv(
+                "gen_ai.input.messages",
+                string_value(&format!(r#"[{{"role":"tool","id":"{UUID_A}"}}]"#)),
+            ),
+        ];
+        let result = deterministic(
+            vec![packaged("api", "genai", vec![sample])],
+            &case(),
+            INGEST,
+            &[],
+            &[],
+            &["session.id".to_owned()],
+        )
+        .unwrap();
+        let attributes = &result.resource_spans[0].scope_spans[0].spans[0].attributes;
+        assert_eq!(string_of(&attributes[0]), "capture-volatile-1");
+        assert_eq!(string_of(&attributes[1]), "capture-volatile-1");
+        assert_eq!(
+            string_of(&attributes[2]),
+            r#"[{"role":"tool","id":"capture-volatile-1"}]"#
+        );
+    }
+
+    #[test]
+    fn short_volatile_values_are_replaced_only_exactly() {
+        let mut sample = span("chat", MIN_START, MIN_START + 1_000);
+        sample.attributes = vec![
+            kv("thread.id", string_value("20")),
+            kv("port", string_value("port 2026")),
+        ];
+        let result = deterministic(
+            vec![packaged("api", "genai", vec![sample])],
+            &case(),
+            INGEST,
+            &[],
+            &[],
+            &["thread.id".to_owned()],
+        )
+        .unwrap();
+        let attributes = &result.resource_spans[0].scope_spans[0].spans[0].attributes;
+        assert_eq!(string_of(&attributes[0]), "capture-volatile-1");
+        assert_eq!(string_of(&attributes[1]), "port 2026");
+    }
+
+    #[test]
+    fn two_runs_with_different_ids_give_the_same_output() {
+        let run = |session: &str| {
+            let mut sample = span("chat", MIN_START, MIN_START + 1_000);
+            sample.trace_id = vec![0x11; 16];
+            sample.span_id = vec![0x01; 8];
+            sample.attributes = vec![
+                kv("session.id", string_value(session)),
+                kv("gen_ai.tool.call_id", string_value(session)),
+            ];
+            deterministic(
+                vec![packaged("api", "genai", vec![sample])],
+                &case(),
+                INGEST,
+                &[],
+                &[],
+                &["session.id".to_owned()],
+            )
+            .unwrap()
+        };
+        let left = serde_json::to_value(run(UUID_A)).unwrap();
+        let right = serde_json::to_value(run(UUID_B)).unwrap();
+        assert_eq!(left, right);
     }
 }

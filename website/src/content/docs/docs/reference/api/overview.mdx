@@ -64,6 +64,7 @@ Errors use the problem-details format (RFC 7807) with the content type `applicat
 | `query_timeout` | 422 | The query ran past its time limit. |
 | `query_too_large` | 422 | The query result is over the size limit. |
 | `too_many_traces` | 422 | A deletion by filter matches more than 100,000 traces. |
+| `too_many_items` | 422 | Adding these items would pass the queue's limit of 100,000 items. Nothing is added. |
 | `owner_not_allowed` | 422 | The owner of an organization creation is disabled or an instance administrator. |
 | `rate_limited` | 429 | Too many requests. |
 | `internal` | 500 | A server error. |

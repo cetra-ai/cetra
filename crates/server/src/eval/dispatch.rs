@@ -14,7 +14,7 @@ use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use super::execute::{self, ClaimedJob};
-use super::{budget, lock};
+use super::{EvalQueue, budget, lock};
 use crate::api::evaluators::EvaluatorKind;
 use crate::entitlements::Visibility;
 use crate::http::AppState;
@@ -52,6 +52,36 @@ impl ConnectionLimit {
                 usize::try_from(limits.0).unwrap_or(usize::MAX),
             )),
             bucket: Mutex::new(TokenBucket::new(limits.1, now)),
+        }
+    }
+
+    /// The connection's concurrency slots. Interactive calls wait on them (D-V-35).
+    pub(super) fn slots(&self) -> &Arc<Semaphore> {
+        &self.slots
+    }
+
+    /// Refills the bucket for the time since its last use, then takes one token when there is one.
+    pub(super) fn take_token(&self, now: i64) -> bool {
+        lock(&self.bucket).try_take(now)
+    }
+}
+
+/// The shared limits of `id` (D-I-4, D-I-6, D-V-35): created on first use, and rebuilt when
+/// `limits` (`(max_concurrency, requests_per_minute)`) changed. Running holders keep their old
+/// permits.
+pub(crate) fn connection_limit(
+    eval: &EvalQueue,
+    id: Uuid,
+    limits: (u32, u32),
+    now: i64,
+) -> Arc<ConnectionLimit> {
+    let mut map = lock(&eval.connections);
+    match map.get(&id) {
+        Some(existing) if existing.limits == limits => Arc::clone(existing),
+        _ => {
+            let fresh = Arc::new(ConnectionLimit::new(limits, now));
+            map.insert(id, Arc::clone(&fresh));
+            fresh
         }
     }
 }
@@ -178,41 +208,19 @@ pub(crate) async fn dispatch_once(
     Ok(started)
 }
 
-/// The limit of connection `id` built for `limits`, created when missing. A limit built for other
-/// `limits` is replaced; running jobs keep the old permits until they finish (D-I-6).
-fn limit_for(
-    map: &mut HashMap<Uuid, Arc<ConnectionLimit>>,
-    id: Uuid,
-    limits: (u32, u32),
-    now: i64,
-) -> Arc<ConnectionLimit> {
-    match map.get(&id) {
-        Some(existing) if existing.limits == limits => Arc::clone(existing),
-        _ => {
-            let fresh = Arc::new(ConnectionLimit::new(limits, now));
-            map.insert(id, Arc::clone(&fresh));
-            fresh
-        }
-    }
-}
-
-impl crate::eval::EvalQueue {
+impl EvalQueue {
     /// A slot and a token of connection `id` for an IC call (D-IC-12), sharing the judges' limits.
     /// `None` when no slot or no token is free now; the slot is taken before the token, as `admit`
     /// does, so a token is never spent without a slot.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn try_connection_permit(
         &self,
         id: Uuid,
         limits: (u32, u32),
         now: i64,
     ) -> Option<OwnedSemaphorePermit> {
-        let limit = {
-            let mut map = lock(&self.connections);
-            limit_for(&mut map, id, limits, now)
-        };
-        let slot = Arc::clone(&limit.slots).try_acquire_owned().ok()?;
-        if lock(&limit.bucket).try_take(now) {
+        let limit = connection_limit(self, id, limits, now);
+        let slot = Arc::clone(limit.slots()).try_acquire_owned().ok()?;
+        if limit.take_token(now) {
             Some(slot)
         } else {
             None
@@ -249,17 +257,14 @@ fn saturated_ids(state: &AppState, now: i64) -> Vec<Uuid> {
 fn pick_limits(state: &AppState, candidates: &[Candidate], now: i64) -> PickLimits {
     let mut connections = HashMap::new();
     let mut webhooks = HashMap::new();
-    {
-        let mut map = lock(&state.eval.connections);
-        for candidate in candidates {
-            let (Some(id), Some((max_concurrency, requests_per_minute, _))) =
-                (candidate.connection_id, candidate.connection_limits)
-            else {
-                continue;
-            };
-            let limit = limit_for(&mut map, id, (max_concurrency, requests_per_minute), now);
-            connections.insert(id, limit);
-        }
+    for candidate in candidates {
+        let (Some(id), Some((max_concurrency, requests_per_minute, _))) =
+            (candidate.connection_id, candidate.connection_limits)
+        else {
+            continue;
+        };
+        let limit = connection_limit(&state.eval, id, (max_concurrency, requests_per_minute), now);
+        connections.insert(id, limit);
     }
     {
         let mut map = lock(&state.eval.webhooks);
@@ -947,7 +952,7 @@ mod tests {
 
     #[test]
     fn try_connection_permit_shares_judge_slots() {
-        let queue = crate::eval::EvalQueue::new(4);
+        let queue = EvalQueue::new(4);
         let id = Uuid::from_u128(7);
         let first = queue.try_connection_permit(id, (1, 600), 0);
         assert!(first.is_some(), "a free slot and a token");
@@ -966,7 +971,7 @@ mod tests {
 
     #[test]
     fn try_connection_permit_respects_the_bucket() {
-        let queue = crate::eval::EvalQueue::new(4);
+        let queue = EvalQueue::new(4);
         let id = Uuid::from_u128(8);
         let first = queue.try_connection_permit(id, (4, 1), 0);
         assert!(first.is_some(), "one token at 1 rpm");

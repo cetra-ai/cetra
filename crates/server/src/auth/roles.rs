@@ -114,9 +114,21 @@ pub(crate) enum ProjectPerm {
     /// Datasets and experiments: create, edit, delete, items, import, add from trace, experiment
     /// results (D-J-5). Member and above; a `write` API key; a read-write personal access token.
     ManageDatasets,
+    /// Prompts: create, version, label (unprotected; D-V-10 for protected ones), edit, delete
+    /// (D-V-13). Member and above; a `write` API key; a read-write personal access token.
+    ManagePrompts,
+    /// Run the playground (D-V-26): member and above, a session or a read-write personal access
+    /// token; never an API key.
+    RunPlayground,
     /// Create, edit and delete dashboards (D-C-16). Member and above; no API key; a read-only
     /// personal access token cannot write (the access layer).
     ManageDashboards,
+    /// Annotation queues: create, edit, delete, add and remove items (D-AQ-11). Member and above;
+    /// a `write` API key; a read-write personal access token.
+    ManageQueues,
+    /// Work annotation queue items: next, lease, complete, skip, reopen (D-AQ-11). Member and
+    /// above; never an API key, because a lease names a person.
+    Review,
     /// Read project data through a POST with a body, such as the SQL console (D-H-4).
     /// Same holders as `View`; a read-only PAT and a `read` key may use it on POST.
     Query,
@@ -227,7 +239,11 @@ impl ProjectPerm {
             | Self::ManageEvaluation
             | Self::ManageAlerts
             | Self::ManageDatasets
-            | Self::ManageDashboards => Role::Member,
+            | Self::ManagePrompts
+            | Self::RunPlayground
+            | Self::ManageDashboards
+            | Self::ManageQueues
+            | Self::Review => Role::Member,
             Self::ManageSettings | Self::ManageMembers | Self::Delete | Self::Drop => Role::Admin,
         }
     }
@@ -236,12 +252,18 @@ impl ProjectPerm {
     pub(crate) fn key_scope(self) -> Option<KeyScope> {
         match self {
             Self::View | Self::Query => Some(KeyScope::Read),
-            Self::Annotate | Self::Delete | Self::ManageDatasets => Some(KeyScope::Write),
+            Self::Annotate
+            | Self::Delete
+            | Self::ManageDatasets
+            | Self::ManagePrompts
+            | Self::ManageQueues => Some(KeyScope::Write),
             Self::ManageEvaluation
             | Self::ManageSettings
             | Self::ManageMembers
             | Self::ManageAlerts
             | Self::ManageDashboards
+            | Self::Review
+            | Self::RunPlayground
             | Self::ViewMembers
             | Self::Drop => None,
         }
@@ -330,9 +352,24 @@ mod tests {
             ProjectPerm::ManageDatasets.key_scope(),
             Some(KeyScope::Write)
         );
+        // Prompts: member and above, and a `write` key (D-V-13).
+        assert_eq!(ProjectPerm::ManagePrompts.min_role(), Role::Member);
+        assert_eq!(
+            ProjectPerm::ManagePrompts.key_scope(),
+            Some(KeyScope::Write)
+        );
+        // Playground: member and above; an API key cannot run it (D-V-26).
+        assert_eq!(ProjectPerm::RunPlayground.min_role(), Role::Member);
+        assert!(ProjectPerm::RunPlayground.key_scope().is_none());
         // Dashboards: member and above; an API key cannot manage them (D-C-16).
         assert_eq!(ProjectPerm::ManageDashboards.min_role(), Role::Member);
         assert!(ProjectPerm::ManageDashboards.key_scope().is_none());
+        // Annotation queues: managing them is member and above with a `write` key (D-AQ-11);
+        // a review names a person, so no key may review.
+        assert_eq!(ProjectPerm::ManageQueues.min_role(), Role::Member);
+        assert_eq!(ProjectPerm::ManageQueues.key_scope(), Some(KeyScope::Write));
+        assert_eq!(ProjectPerm::Review.min_role(), Role::Member);
+        assert!(ProjectPerm::Review.key_scope().is_none());
         let viewer =
             effective_project_role(OrgRole::Viewer, None).expect("viewer sees the project");
         assert!(viewer < ProjectPerm::Annotate.min_role());

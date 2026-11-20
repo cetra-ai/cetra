@@ -53,8 +53,52 @@ pub(crate) struct RetentionRun {
 /// [`MetaError`] when the projects cannot be listed.
 pub(crate) async fn retention_once(state: &AppState) -> Result<RetentionRun, MetaError> {
     let now = state.clock.now_ns();
-    let mut run = RetentionRun::default();
-    // The cap of each org, read once per run. A failed read counts once and skips only
+    let (projects, cap_failures) = effective_retention(state, now).await?;
+    let mut run = RetentionRun {
+        failures: cap_failures,
+        ..RetentionRun::default()
+    };
+    for (project, days) in projects {
+        let Some(days) = days else {
+            continue;
+        };
+        let keep = keep_from(now, days);
+        // Annotation queue items age out with the project's data (D-AQ-9). This runs whatever the
+        // storage result is.
+        if drop_queue_items(state, project, keep).await.is_err() {
+            run.failures += 1;
+            tracing::warn!(project_id = %project, "annotation queue retention failed");
+        }
+        // A project dropped by storage is a no-op there (`committer::apply_retention` finds it
+        // in `projects`), so a drop that races this list writes nothing.
+        match state.storage.apply_retention(project, keep).await {
+            Ok(report) => {
+                run.projects += 1;
+                run.files += report.files;
+            }
+            Err(error) => {
+                run.failures += 1;
+                tracing::warn!(project_id = %project, error = %error, "retention failed");
+            }
+        }
+    }
+    Ok(run)
+}
+
+/// Each active project of an active org with its effective retention (`None` when it has
+/// none), and how many org caps could not be read (logged; D-P-45). The cap of each org is
+/// read once per call.
+///
+/// # Errors
+///
+/// [`MetaError`] when the projects cannot be listed.
+pub(crate) async fn effective_retention(
+    state: &AppState,
+    now: i64,
+) -> Result<(Vec<(ProjectId, Option<u32>)>, u64), MetaError> {
+    let mut projects = Vec::new();
+    let mut cap_failures: u64 = 0;
+    // The cap of each org, read once per call. A failed read counts once and skips only
     // the cap: a project's own retention still applies (D-P-45).
     let mut caps: HashMap<OrgId, Result<Option<u32>, ()>> = HashMap::new();
     for (org, project, own) in
@@ -70,7 +114,7 @@ pub(crate) async fn retention_once(state: &AppState) -> Result<RetentionRun, Met
                 {
                     Ok(window) => Ok(crate::entitlements::retention_cap(window)),
                     Err(error) => {
-                        run.failures += 1;
+                        cap_failures += 1;
                         tracing::warn!(org_id = %org, error = %error, "retention window unavailable");
                         Err(())
                     }
@@ -81,37 +125,46 @@ pub(crate) async fn retention_once(state: &AppState) -> Result<RetentionRun, Met
         };
         // D-P-45: the largest window of the last 30 days, plus 30 days (D175). When the org's
         // window read failed there is no cap: the project's own retention still applies and a
-        // project that relies on the cap is skipped (deleting nothing is the safe side).
+        // project that relies on the cap is skipped by the caller (deleting nothing is the safe side).
         let cap = cap.unwrap_or(None);
-        let Some(days) = effective_days(own, cap) else {
-            continue;
-        };
-        // A project dropped by storage is a no-op there (`committer::apply_retention` finds it
-        // in `projects`), so a drop that races this list writes nothing.
-        match state
-            .storage
-            .apply_retention(project, keep_from(now, days))
-            .await
-        {
-            Ok(report) => {
-                run.projects += 1;
-                run.files += report.files;
-            }
-            Err(error) => {
-                run.failures += 1;
-                tracing::warn!(project_id = %project, error = %error, "retention failed");
-            }
-        }
+        projects.push((project, effective_days(own, cap)));
     }
-    Ok(run)
+    Ok((projects, cap_failures))
 }
 
 /// Applies `days` to one project now (a `PATCH`). Errors are logged; the hourly run retries.
 pub(crate) async fn apply_now(state: &AppState, project: ProjectId, days: u32) {
     let keep = keep_from(state.clock.now_ns(), days);
+    if drop_queue_items(state, project, keep).await.is_err() {
+        tracing::warn!(project_id = %project, "annotation queue retention failed");
+    }
     if let Err(error) = state.storage.apply_retention(project, keep).await {
         tracing::warn!(project_id = %project, error = %error, "retention failed");
     }
+}
+
+/// Deletes the annotation queue items of `project` whose `target_time` is before the start of
+/// `keep` (D-AQ-9). Returns the number deleted. Nothing is deleted when `keep` has no start.
+async fn drop_queue_items(
+    state: &AppState,
+    project: ProjectId,
+    keep: NaiveDate,
+) -> Result<u64, MetaError> {
+    // A real day always has a 00:00 start in i64 ns; the `None` arm only keeps the function total.
+    let Some(cutoff) = keep
+        .and_hms_opt(0, 0, 0)
+        .and_then(|start| start.and_utc().timestamp_nanos_opt())
+    else {
+        return Ok(0);
+    };
+    state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                crate::meta::annotation_queues::delete_items_before(conn, project, cutoff).await
+            })
+        })
+        .await
 }
 
 #[cfg(test)]
@@ -120,7 +173,12 @@ mod tests {
     use cetra_core::ids::{OrgId, ProjectId, SpanId, TraceId};
     use cetra_core::span::Span;
 
+    use uuid::Uuid;
+
     use super::*;
+    use crate::meta::annotation_queues::{
+        AddedByKind, NewItem, NewQueue, QueueCreate, Target, insert_items_tx, insert_queue_tx,
+    };
     use crate::meta::entitlements::record_window_end;
     use crate::meta::orgs::insert_org;
     use crate::meta::projects::{ProjectRow, insert_project};
@@ -384,5 +442,114 @@ mod tests {
         assert_eq!(raw_span_count(&app.state.storage, a1.id).await, 0);
         assert_eq!(raw_span_count(&app.state.storage, a2.id).await, 1);
         assert_eq!(raw_span_count(&app.state.storage, short.id).await, 0);
+    }
+
+    /// A trace queue of `project`, created at `NOW`, holding one trace item per `(trace, time)`.
+    /// Returns its id.
+    async fn trace_queue(app: &TestApp, project: &ProjectRow, items: Vec<(String, i64)>) -> Uuid {
+        let (org, project_id) = (project.org_id, project.id);
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    let created = insert_queue_tx(
+                        conn,
+                        project_id,
+                        org,
+                        NewQueue {
+                            name: "traces".to_owned(),
+                            description: None,
+                            instructions: None,
+                            target: Target::Trace,
+                            definition_ids: Vec::new(),
+                            created_by: None,
+                        },
+                        None,
+                        NOW,
+                    )
+                    .await?;
+                    let QueueCreate::Created(row) = created else {
+                        panic!("the queue is created");
+                    };
+                    let items: Vec<NewItem> = items
+                        .into_iter()
+                        .map(|(trace, target_time)| NewItem {
+                            trace_id: Some(trace),
+                            span_id: None,
+                            session_id: None,
+                            target_time,
+                        })
+                        .collect();
+                    insert_items_tx(
+                        conn,
+                        row.id,
+                        project_id,
+                        &items,
+                        (AddedByKind::User, Uuid::now_v7()),
+                        NOW,
+                    )
+                    .await?;
+                    Ok(row.id)
+                })
+            })
+            .await
+            .unwrap()
+    }
+
+    /// The number of items of `queue` on `trace`.
+    async fn queue_items_of(app: &TestApp, queue: Uuid, trace: &str) -> i64 {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM annotation_queue_items WHERE queue_id = ? AND trace_id = ?",
+        )
+        .bind(queue.to_string())
+        .bind(trace.to_owned())
+        .fetch_one(app.state.meta.reader())
+        .await
+        .unwrap()
+    }
+
+    /// D-AQ-9: an item whose target starts before the first kept day goes with the hourly run;
+    /// a newer one stays.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hourly_run_drops_old_queue_items() {
+        let app = TestApp::new().await;
+        app.state.clock.set(NOW);
+        let seeded = app.seed().await;
+        let (short, _) = app.add_project(&seeded, "short", Some(1)).await;
+        let queue = trace_queue(
+            &app,
+            &short,
+            vec![
+                (trace_id(1), NOW - 3 * DAY + 12 * HOUR),
+                (trace_id(2), NOW - 12 * HOUR),
+            ],
+        )
+        .await;
+
+        let run = retention_once(&app.state).await.unwrap();
+        assert_eq!(run.failures, 0);
+        assert_eq!(queue_items_of(&app, queue, &trace_id(1)).await, 0);
+        assert_eq!(queue_items_of(&app, queue, &trace_id(2)).await, 1);
+    }
+
+    /// D-AQ-9: a `PATCH` that sets retention drops the queue items it makes old at once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn apply_now_drops_old_queue_items() {
+        let app = TestApp::new().await;
+        app.state.clock.set(NOW);
+        let seeded = app.seed().await;
+        let queue = trace_queue(
+            &app,
+            &seeded.project,
+            vec![
+                (trace_id(1), NOW - 3 * DAY + 12 * HOUR),
+                (trace_id(2), NOW - 12 * HOUR),
+            ],
+        )
+        .await;
+
+        apply_now(&app.state, seeded.project.id, 1).await;
+        assert_eq!(queue_items_of(&app, queue, &trace_id(1)).await, 0);
+        assert_eq!(queue_items_of(&app, queue, &trace_id(2)).await, 1);
     }
 }

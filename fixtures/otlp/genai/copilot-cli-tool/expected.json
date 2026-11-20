@@ -1,0 +1,127 @@
+{
+  "spans": [
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "0af7651916cd43dd8448eb211c80319c",
+      "span_id": "b7ad6b7169203331",
+      "name": "invoke_agent copilot",
+      "span_kind": "agent",
+      "start_time": "2025-12-31T23:59:55.000000000Z",
+      "end_time": "2025-12-31T23:59:58.000000000Z",
+      "status": "ok",
+      "service_name": "github-copilot",
+      "session_id": "conv-copilot-1",
+      "user_id": "pseudo-user-1",
+      "metadata": {
+        "coding_agent": "copilot"
+      },
+      "provider": "github",
+      "request_model": "gpt-5.5",
+      "operation": "invoke_agent",
+      "attributes": {
+        "enduser.pseudo.id": "pseudo-user-1",
+        "gen_ai.agent.name": "copilot",
+        "gen_ai.conversation.id": "conv-copilot-1",
+        "gen_ai.operation.name": "invoke_agent",
+        "gen_ai.provider.name": "github",
+        "gen_ai.request.model": "gpt-5.5",
+        "gen_ai.usage.cache_read.input_tokens": "300",
+        "gen_ai.usage.input_tokens": "900",
+        "gen_ai.usage.output_tokens": "40",
+        "github.copilot.cost": "1",
+        "github.copilot.nano_aiu": "1200000",
+        "github.copilot.turn_count": "2"
+      },
+      "scope_name": "github.copilot",
+      "scope_version": "1.0.0",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "0af7651916cd43dd8448eb211c80319c",
+      "span_id": "00f067aa0ba902b7",
+      "parent_span_id": "b7ad6b7169203331",
+      "name": "chat gpt-5.5",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:56.000000000Z",
+      "end_time": "2025-12-31T23:59:57.000000000Z",
+      "status": "ok",
+      "service_name": "github-copilot",
+      "metadata": {
+        "coding_agent": "copilot"
+      },
+      "provider": "github",
+      "request_model": "gpt-5.5",
+      "response_model": "gpt-5.5-2026-10-01",
+      "operation": "chat",
+      "input_tokens": 900,
+      "output_tokens": 40,
+      "cache_read_tokens": 300,
+      "total_tokens": 940,
+      "cost_source": "none",
+      "input": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Run echo hello\"}]}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_1\",\"name\":\"bash\",\"arguments\":{\"command\":\"echo hello\"}}],\"finish_reason\":\"tool_call\"}]",
+      "output_format": "messages",
+      "input_preview": "Run echo hello",
+      "attributes": {
+        "gen_ai.operation.name": "chat",
+        "gen_ai.provider.name": "github",
+        "gen_ai.request.model": "gpt-5.5",
+        "gen_ai.response.model": "gpt-5.5-2026-10-01",
+        "gen_ai.usage.cache_read.input_tokens": "300",
+        "gen_ai.usage.input_tokens": "900",
+        "gen_ai.usage.output_tokens": "40",
+        "github.copilot.turn_id": "turn-1"
+      },
+      "scope_name": "github.copilot",
+      "scope_version": "1.0.0",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "0af7651916cd43dd8448eb211c80319c",
+      "span_id": "53995c3f42cd8ad8",
+      "parent_span_id": "b7ad6b7169203331",
+      "name": "bash",
+      "span_kind": "tool",
+      "start_time": "2025-12-31T23:59:57.000000000Z",
+      "end_time": "2025-12-31T23:59:58.000000000Z",
+      "status": "ok",
+      "service_name": "github-copilot",
+      "metadata": {
+        "coding_agent": "copilot"
+      },
+      "operation": "execute_tool",
+      "input": "{\"command\":\"echo hello\"}",
+      "input_format": "json",
+      "output": "hello",
+      "output_format": "text",
+      "input_preview": "{\"command\":\"echo hello\"}",
+      "output_preview": "hello",
+      "attributes": {
+        "cetra.span_name": "execute_tool bash",
+        "gen_ai.operation.name": "execute_tool",
+        "gen_ai.tool.call.id": "call_1",
+        "gen_ai.tool.name": "bash"
+      },
+      "scope_name": "github.copilot",
+      "scope_version": "1.0.0",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    }
+  ],
+  "media": [],
+  "rejected_spans": 0
+}

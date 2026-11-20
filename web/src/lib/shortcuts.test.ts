@@ -22,6 +22,8 @@ it("lists every shortcut the help dialog shows", () => {
     "t",
     "0",
     "⌘↵",
+    "⌘↵",
+    "⌘⇧↵",
     "g then a letter",
     "⌘K",
     "?",
@@ -45,6 +47,7 @@ it("recognizes keys, chords, and modifiers", () => {
   expect(reduceShortcut("g", { ...plain, key: "i" }, false).action).toBe("go-datasets");
   expect(reduceShortcut("g", { ...plain, key: "x" }, false).action).toBe("go-experiments");
   expect(reduceShortcut("g", { ...plain, key: "y" }, false).action).toBe("go-issues");
+  expect(reduceShortcut("g", { ...plain, key: "r" }, false).action).toBe("go-annotation-queues");
   expect(reduceShortcut("g", { ...plain, key: "d" }, false).action).toBe("go-dashboard");
   expect(reduceShortcut("g", { ...plain, key: "j" }, false)).toEqual({
     chord: null,

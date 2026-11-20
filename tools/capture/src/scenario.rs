@@ -26,6 +26,9 @@ pub const GROUPS: &[&str] = &[
     "langfuse",
     "laminar",
     "google_adk",
+    "claude_code",
+    "codex",
+    "gemini_cli",
     "edge",
 ];
 
@@ -136,6 +139,13 @@ pub struct Scenario {
     /// Measured durations or rates. Kept as captured; `just check-capture` ignores their values.
     #[serde(default)]
     pub timing_attributes: Vec<String>,
+    /// Span names to keep. Empty keeps every span. Applied before the determinism steps.
+    #[serde(default)]
+    pub span_names: Vec<String>,
+    /// Attribute keys whose string values are random per run (UUIDs, timestamped ids).
+    /// Their values are replaced by `capture-volatile-<n>` everywhere they appear.
+    #[serde(default)]
+    pub volatile_attributes: Vec<String>,
     /// Scripted provider turns, served in order. At least one, all for the same provider.
     pub turns: Vec<Turn>,
     /// Fixture path, taken from the scenario directory by [`Scenario::load`].
@@ -381,6 +391,15 @@ impl Scenario {
             "timestamp_attributes",
         )?;
         reject_duplicates(&self.timing_attributes, "timing_attributes")?;
+        for (field, values) in [
+            ("span_names", &self.span_names),
+            ("volatile_attributes", &self.volatile_attributes),
+        ] {
+            if values.iter().any(String::is_empty) {
+                return Err(format!("{field} entries must be non-empty"));
+            }
+            reject_duplicates(values, field)?;
+        }
         self.check_env()?;
         check_string_map(self.settings.as_ref(), SETTING_KEYS, "settings", true)?;
         check_string_map(self.context.as_ref(), CONTEXT_KEYS, "context", false)?;
@@ -748,6 +767,8 @@ mod tests {
         assert!(scenario.env.is_empty());
         assert!(scenario.timestamp_attributes.is_empty());
         assert!(scenario.timing_attributes.is_empty());
+        assert!(scenario.span_names.is_empty());
+        assert!(scenario.volatile_attributes.is_empty());
     }
 
     #[test]
@@ -990,6 +1011,33 @@ mod tests {
     }
 
     #[test]
+    fn span_names_and_volatile_attributes_reject_empty_and_duplicate_entries() {
+        let mut value = chat();
+        value["span_names"] = json!(["ok", ""]);
+        assert_reason(value, "span_names entries must be non-empty");
+
+        let mut value = chat();
+        value["volatile_attributes"] = json!([""]);
+        assert_reason(value, "volatile_attributes entries must be non-empty");
+
+        let mut value = chat();
+        value["span_names"] = json!(["a", "a"]);
+        assert_reason(value, "span_names value \"a\" is duplicated");
+
+        let mut value = chat();
+        value["volatile_attributes"] = json!(["session.id", "session.id"]);
+        assert_reason(
+            value,
+            "volatile_attributes value \"session.id\" is duplicated",
+        );
+
+        let mut value = chat();
+        value["span_names"] = json!(["chat"]);
+        value["volatile_attributes"] = json!(["session.id"]);
+        load_value(value).expect("valid span_names and volatile_attributes");
+    }
+
+    #[test]
     fn required_lists_and_library_membership() {
         let mut value = chat();
         value["spec_refs"] = json!([]);
@@ -1056,6 +1104,15 @@ mod tests {
         value["turns"][0]["message"]["extra"] = json!(true);
         let error = serde_json::from_value::<Scenario>(value).expect_err("unknown message field");
         assert!(error.to_string().contains("extra"), "{error}");
+    }
+
+    #[test]
+    fn case_path_accepts_the_coding_agent_groups() {
+        for group in ["claude_code", "codex", "gemini_cli"] {
+            let text = format!("{group}/x");
+            let path: CasePath = text.parse().expect(&text);
+            assert_eq!(path.to_string(), text);
+        }
     }
 
     #[test]

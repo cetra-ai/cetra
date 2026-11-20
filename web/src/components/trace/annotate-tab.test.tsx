@@ -2,39 +2,18 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import type { UserEvent } from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { describe, expect, it } from "vitest";
-import type { Schema } from "@/api/types";
 import { server } from "@/mocks/node";
-import { ADA_ID, BOB_ID, PROJECT_ID } from "@/test/fixtures";
+import { BOB_ID } from "@/test/fixtures";
 import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
 import { serveAnnotationDefinitions } from "@/test/score-definitions";
+import { ADA_SCORE_ID, scoreFor, serveScores } from "@/test/scores";
 import projectFixture from "../../../../fixtures/api/static/project.json";
 
 const TRACE = "a1000000000000000000000000000001";
 const SPAN = "b100000000000014";
 const URL = `/acme/support-bot/traces?trace=${TRACE}&span=${SPAN}`;
-const ADA_SCORE_ID = "01900000-0000-7000-8000-000000000310";
 const BOB_SCORE_ID = "01900000-0000-7000-8000-000000000311";
-
-function scoreFor(overrides: Partial<Schema<"Score">>): Schema<"Score"> {
-  const at = "2026-01-01T10:00:30.000000000Z";
-  return {
-    project_id: PROJECT_ID,
-    score_id: ADA_SCORE_ID,
-    target: { type: "trace", trace_id: TRACE },
-    session_id: "sess-001",
-    user_id: "user-42",
-    name: "helpfulness",
-    value: { data_type: "numeric", value: 0.7 },
-    source: "human",
-    author_user_id: ADA_ID,
-    created_at: at,
-    updated_at: at,
-    deleted: false,
-    ingest_time: at,
-    ...overrides,
-  };
-}
 
 const ADA_SCORE = scoreFor({});
 const BOB_SCORE = scoreFor({
@@ -42,18 +21,6 @@ const BOB_SCORE = scoreFor({
   author_user_id: BOB_ID,
   value: { data_type: "numeric", value: 0.2 },
 });
-
-/** Serves `scores` for every score list and counts the reads. */
-function serveScores(scores: Schema<"Score">[]) {
-  const reads = { count: 0 };
-  server.use(
-    http.get("/api/v1/projects/:project/scores", () => {
-      reads.count += 1;
-      return HttpResponse.json({ data: scores, next_cursor: null });
-    }),
-  );
-  return reads;
-}
 
 /** Records every score write body and answers with `answer()`. */
 function captureScores(

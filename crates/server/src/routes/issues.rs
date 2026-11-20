@@ -1638,6 +1638,7 @@ async fn get_issue_occurrences(
                 source: Some(ScoreSource::Issue),
                 evaluator_id: None,
                 rule_id: None,
+                queue_id: None,
                 window: None,
                 limit: EXAMPLES_PER_NAME,
                 cursor: None,
@@ -2254,6 +2255,7 @@ mod tests {
             )]),
             experiment_id: None,
             dataset_item_id: None,
+            queue_id: None,
         };
         let written = score_writes::write(
             &app.state,

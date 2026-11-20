@@ -297,6 +297,63 @@ A **Widget** is `{id, title, layout: {x, y, w, h}, kind, chart?, query?}`:
 
 Limits: names 1–100 characters (not unique), 50 widgets per dashboard, `definition` at most 256 KiB, 100 dashboards per project. An invalid definition is `400 bad_request` with the path of each error in `errors` (e.g. `widgets[3].query.measures[0].field`). A definition stored before a column was removed still loads; the widget's query answers its own 400.
 
+## Annotation queues
+
+Annotation queues (track AQ, D-AQ-2 to D-AQ-9): a queue of trace, span or session items that members review in order against an ordered list of score definitions. Each queue has one target kind, fixed at creation (D-AQ-2).
+
+```sql
+-- Annotation queues (track AQ, D-AQ-2–D-AQ-9).
+CREATE TABLE annotation_queues (
+  id TEXT PRIMARY KEY,                -- UUIDv7
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  description TEXT,
+  instructions TEXT,                  -- Markdown
+  target TEXT NOT NULL CHECK (target IN ('trace', 'span', 'session')),
+  version INTEGER NOT NULL DEFAULT 1,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE (project_id, name)
+);
+
+CREATE TABLE annotation_queue_definitions (
+  queue_id TEXT NOT NULL REFERENCES annotation_queues(id) ON DELETE CASCADE,
+  definition_id TEXT NOT NULL REFERENCES score_definitions(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL,
+  PRIMARY KEY (queue_id, definition_id)
+);
+
+CREATE TABLE annotation_queue_items (
+  id TEXT PRIMARY KEY,                -- UUIDv7
+  queue_id TEXT NOT NULL REFERENCES annotation_queues(id) ON DELETE CASCADE,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  trace_id TEXT,                      -- lowercase hex; trace and span items
+  span_id TEXT,                       -- lowercase hex; span items
+  session_id TEXT,                    -- session items
+  target_time INTEGER NOT NULL,       -- ns: trace start, or the session's earliest visible trace start
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'completed', 'skipped')),
+  skip_reason TEXT,
+  leased_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+  lease_expires_at INTEGER,
+  done_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+  done_at INTEGER,
+  added_by_kind TEXT NOT NULL CHECK (added_by_kind IN ('user', 'pat', 'key')),
+  added_by_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX annotation_queue_items_target ON annotation_queue_items(
+  queue_id, coalesce(trace_id, ''), coalesce(span_id, ''), coalesce(session_id, '')
+);
+CREATE INDEX annotation_queue_items_claim ON annotation_queue_items(queue_id, status, id);
+CREATE INDEX annotation_queue_items_trace ON annotation_queue_items(project_id, trace_id) WHERE trace_id IS NOT NULL;
+CREATE INDEX annotation_queue_items_session ON annotation_queue_items(project_id, session_id) WHERE session_id IS NOT NULL;
+CREATE INDEX annotation_queue_items_time ON annotation_queue_items(project_id, target_time);
+```
+
+One kind per queue (D-AQ-2). Items are unique per target within a queue. `target_time` drives retention and the data window (D-AQ-9). The lease is `leased_by_user_id` plus `lease_expires_at`: 5 minutes, claimed atomically on the writer (D-AQ-4). At most 100 queues per project, 100 000 items per queue, 50 definitions per queue.
+
 ## Datasets & experiments
 
 Track J (D-J-1–D-J-19, [`plans/j-datasets/00-design.md`](../plans/j-datasets/00-design.md)). Dataset versioning uses validity ranges: an item revision is visible in version *v* iff `valid_from_version ≤ v < coalesce(valid_to_version, ∞)`. Every mutating request makes version `current_version + 1` with one `dataset_versions` row; editing an item closes the old revision and inserts a new one in the new version; a new dataset is at version 0 with no items (D-J-3). An experiment pins a dataset version and snapshots each item's input and expected output into its results, so later edits, item deletions and dataset deletions leave it intact (D-J-10). Experiments have no server evaluators (D-J-11).
@@ -381,6 +438,71 @@ CREATE INDEX experiment_items_revision ON experiment_items(revision_id);
 ```
 
 Experiment scores are rows in the columnar `scores` table with `experiment_id` + `dataset_item_id` set (D-J-12). Per-item cost comes from the item's trace at read time (D-J-13). A trace deletion hard-deletes the dataset item revisions copied from the trace and the experiment results that point at it or snapshot such a revision (D-J-9).
+
+## Prompts (track V)
+
+Track V ([`plans/v-prompts/00-design.md`](../plans/v-prompts/00-design.md), D-V-2 to D-V-13). Prompts belong to a project and their names are immutable. Each prompt keeps its versions, its labels and the history of label moves; the settings row holds the project's protected labels.
+
+```sql
+-- Track V: the prompt registry (D-V-7, D-V-8, D-V-10, D-V-11, spec 04 § Prompts).
+CREATE TABLE prompts (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,                   -- immutable (D-V-2)
+  type TEXT NOT NULL CHECK (type IN ('text', 'chat')),
+  description TEXT,
+  tags TEXT NOT NULL DEFAULT '[]',      -- JSON array of strings
+  latest_version INTEGER NOT NULL,
+  created_by TEXT,                      -- a user id or key:<key id>
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(project_id, name)
+);
+
+CREATE TABLE prompt_versions (
+  prompt_id TEXT NOT NULL REFERENCES prompts(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  template TEXT NOT NULL,               -- JSON: a string (text) or an array (chat)
+  config TEXT NOT NULL DEFAULT '{}',    -- JSON object (D-V-6)
+  commit_message TEXT,
+  created_by TEXT,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (prompt_id, version)
+);
+
+CREATE TABLE prompt_labels (
+  prompt_id TEXT NOT NULL REFERENCES prompts(id) ON DELETE CASCADE,
+  label TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  updated_by TEXT,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (prompt_id, label),
+  FOREIGN KEY (prompt_id, version) REFERENCES prompt_versions(prompt_id, version)
+);
+
+CREATE TABLE prompt_label_events (
+  id INTEGER PRIMARY KEY,               -- rowid: the history's order
+  prompt_id TEXT NOT NULL REFERENCES prompts(id) ON DELETE CASCADE,
+  label TEXT NOT NULL,
+  from_version INTEGER,                 -- NULL: the label was new
+  to_version INTEGER,                   -- NULL: the label was removed
+  actor TEXT,
+  at INTEGER NOT NULL
+);
+CREATE INDEX prompt_label_events_prompt ON prompt_label_events(prompt_id, id);
+
+CREATE TABLE prompt_settings (
+  project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+  protected_labels TEXT NOT NULL,       -- JSON array; no row means ["production"] (D-V-10)
+  updated_by TEXT,
+  updated_at INTEGER NOT NULL
+);
+```
+
+- Versions are immutable and numbered from 1 (D-V-7).
+- `latest` is computed from `prompts.latest_version`, never stored as a label (D-V-8).
+- Every label move, creation and removal writes a `prompt_label_events` row, so the history is complete (D-V-8).
+- A project without a `prompt_settings` row protects `production` (D-V-10).
 
 ## Evaluation
 
@@ -516,6 +638,26 @@ Every create, and every update that changes `version`, writes one `evaluator_ver
 `connection_id` is derived from a judge's config; `secret_enc` holds a webhook's sealed `{signing_secret, url, headers}`, and `config` then keeps `{url_host, timeout_ms, header_names}` (D-I-19).
 
 `eval_jobs` is the durable queue (spec 06 § Online rules › Execution; D-I-11, D-I-12): `dedup_key` makes enqueues idempotent, `claims` fences a worker's finish, and there is no lease. Every hour, finished jobs older than 7 days are deleted, queued jobs older than 24 h (7 days for backfill) are skipped as `expired`, and jobs of inactive projects or orgs are deleted (D-I-28). `rule_spend` holds one row per rule and UTC day; a month is the sum of its days; rows older than 62 days are deleted.
+
+### Coding-agent session contexts (D-CA-9)
+
+```sql
+-- Coding-agent session contexts (D-CA-9): the repository, branch and person a hook reported.
+CREATE TABLE agent_contexts (
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  agent TEXT NOT NULL,          -- claude-code | codex | gemini-cli | copilot
+  session_id TEXT NOT NULL,
+  repository TEXT,              -- canonical form (D-CA-4)
+  branch TEXT,
+  user_id TEXT,                 -- the hook's `user`, lowercased
+  updated_at INTEGER NOT NULL,  -- ns since the Unix epoch, time of the last write
+  PRIMARY KEY (project_id, agent, session_id)
+);
+CREATE INDEX agent_contexts_user ON agent_contexts(project_id, user_id) WHERE user_id IS NOT NULL;
+CREATE INDEX agent_contexts_updated ON agent_contexts(project_id, updated_at);
+```
+
+Written by `POST /v1/agent-context` (last write wins; an unchanged post within an hour writes nothing), loaded into memory before the listeners open, read by ingest from memory only. An hourly sweep deletes rows older than 30 days or the project's retention when shorter; a project keeps at most 10,000 rows, the oldest evicted; a deletion by user deletes the user's rows. Only active projects are loaded and swept; rows of a paused project stay until it is active again or dropped.
 
 ## Issues
 

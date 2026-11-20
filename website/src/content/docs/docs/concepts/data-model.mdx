@@ -29,7 +29,7 @@ Sessions and users are not objects you create. cetra builds them from the `sessi
 
 An organization is the account that owns projects and has members. A project is the unit of data: its spans, scores, datasets, API keys and settings stay apart from every other project's. An API key sends data to one project.
 
-An environment is a label on your data, such as `production` or `staging`. It is a field on each span, not a separate object, so one project can hold several environments. You set it with `CETRA_ENVIRONMENT` or the `environment` option of the SDKs. Two names are reserved: `cetra-eval` marks the traces of evaluators, and `experiment` is the default for experiment runs. The UI hides both until you ask for them.
+An environment is a label on your data, such as `production` or `staging`. It is a field on each span, not a separate object, so one project can hold several environments. You set it with `CETRA_ENVIRONMENT` or the `environment` option of the SDKs. Three names are reserved: `cetra-eval` marks the traces of evaluators, `cetra-playground` marks the traces of playground runs, and `experiment` is the default for experiment runs. The UI hides all three until you ask for them.
 
 ## Traces and spans
 

@@ -327,6 +327,7 @@ pub(crate) fn occurrence_score(project: ProjectId, occurrence: &Occurrence) -> S
         },
         experiment_id: None,
         dataset_item_id: None,
+        queue_id: None,
     }
 }
 

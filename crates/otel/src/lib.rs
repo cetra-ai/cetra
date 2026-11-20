@@ -3,6 +3,7 @@
 //!
 //! Decoding and the span skeleton are specified in `docs/spec/02-ingestion.md`.
 
+mod agents;
 mod bag;
 mod context;
 mod conventions;
@@ -28,6 +29,7 @@ mod warn;
 #[doc(hidden)]
 pub mod fuzz_entry;
 
+pub use agents::{AgentContext, AgentContexts, canonical_repository};
 pub use cost::{PriceRow, PriceScope, PriceTable, PriceTier, builtin_price_rows, exact_pattern};
 pub use decode::{decode_json, decode_protobuf};
 pub use error::{DecodeError, JsonErrorCategory, PriceError};

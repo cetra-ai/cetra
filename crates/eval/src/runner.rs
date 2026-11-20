@@ -14,14 +14,14 @@ use cetra_core::score::ScoreValue;
 use cetra_otel::{IngestContext, Normalized, PriceTable};
 use serde_json::{Map, Value};
 
+use crate::chat::{EmbedCall, TokenUsage, embed as call_embedding};
 use crate::check::{CheckInput, compile_schema, run_check};
 use crate::config::{Check, Evaluator, EvaluatorConfig, JudgeConfig, WebhookConfig};
 use crate::egress::{EgressClient, EgressPolicy};
 use crate::error::{ConfigError, EvalError, JudgeError, WebhookError};
 use crate::judge::{
-    Adapter, CompletionCall, EmbedCall, JUDGEMENT_DESCRIPTION, JUDGEMENT_TOOL, JudgeConnection,
-    JudgeReply, JudgeUsage, answer_schema, call, embed as call_embedding, find_object,
-    parse_answer,
+    Adapter, CompletionCall, JUDGEMENT_DESCRIPTION, JUDGEMENT_TOOL, JudgeConnection, JudgeReply,
+    answer_schema, call, find_object, parse_answer,
 };
 use crate::mapping::resolve::Variables;
 use crate::secret::Secret;
@@ -162,7 +162,7 @@ pub struct CompletionRun {
     /// The answer object, valid against the schema.
     pub outcome: Result<Map<String, Value>, EvalError>,
     /// Token counts, when the provider sent them.
-    pub usage: Option<JudgeUsage>,
+    pub usage: Option<TokenUsage>,
     /// `cost_total` of the `llm` span.
     pub cost_usd: Option<f64>,
     /// The `llm` span had tokens and no price.
@@ -286,7 +286,7 @@ struct SentCall {
     started_ns: i64,
     ended_ns: i64,
     output_text: Option<String>,
-    usage: Option<JudgeUsage>,
+    usage: Option<TokenUsage>,
     response_model: Option<String>,
     error: Option<JudgeError>,
 }
@@ -305,7 +305,7 @@ enum OwnedChild {
         response_model: Option<String>,
         prompt: String,
         output_text: Option<String>,
-        usage: Option<JudgeUsage>,
+        usage: Option<TokenUsage>,
         error: Option<JudgeError>,
     },
     Webhook {

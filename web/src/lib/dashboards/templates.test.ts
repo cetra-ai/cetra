@@ -38,9 +38,27 @@ it("templates' widgets have unique ids and do not overlap", () => {
   }
 });
 
-it("the ids and names are Cost, Latency and Quality, in that order", () => {
-  expect(TEMPLATES.map((template) => template.id)).toEqual(["cost", "latency", "quality"]);
-  expect(TEMPLATES.map((template) => template.name)).toEqual(["Cost", "Latency", "Quality"]);
+it("the ids and names are Cost, Latency, Quality and Coding agents, in that order", () => {
+  expect(TEMPLATES.map((template) => template.id)).toEqual([
+    "cost",
+    "latency",
+    "quality",
+    "coding_agents",
+  ]);
+  expect(TEMPLATES.map((template) => template.name)).toEqual([
+    "Cost",
+    "Latency",
+    "Quality",
+    "Coding agents",
+  ]);
+});
+
+it("the coding agents template filters every widget on coding_agent", () => {
+  const template = TEMPLATES.find((item) => item.id === "coding_agents");
+  expect(template).toBeDefined();
+  for (const widget of template?.definition.widgets ?? []) {
+    expect(widget.query?.filter, widget.id).toContain("metadata['coding_agent'] IS NOT NULL");
+  }
 });
 
 it("each number row fills the width", () => {

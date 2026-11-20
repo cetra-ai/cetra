@@ -319,6 +319,71 @@ pub(crate) struct DemoGuard {
     _visitor: InFlightGuard<Uuid>,
 }
 
+/// Playground runs one user may make per minute (D-V-24).
+pub(crate) const PLAYGROUND_PER_MINUTE: u32 = 60;
+/// Playground runs one user may have in progress at once (D-V-24).
+pub(crate) const PLAYGROUND_USER_IN_FLIGHT: u32 = 4;
+/// Playground runs an org may have in progress at once (D-V-24).
+pub(crate) const PLAYGROUND_ORG_IN_FLIGHT: u32 = 16;
+
+/// Rate and concurrency of the playground, per user and per org (D-V-24).
+pub(crate) struct PlaygroundLimits {
+    /// Runs a minute per user.
+    rate: KeyedLimiter<Uuid>,
+    /// Runs in progress per user.
+    users: InFlight<Uuid>,
+    /// Runs in progress per org.
+    orgs: InFlight<cetra_core::ids::OrgId>,
+}
+
+impl PlaygroundLimits {
+    fn new(max_keys: usize) -> Self {
+        Self {
+            rate: KeyedLimiter::new(
+                Bucket {
+                    capacity: PLAYGROUND_PER_MINUTE,
+                    per: Duration::from_secs(60),
+                },
+                max_keys,
+            ),
+            users: InFlight::new(PLAYGROUND_USER_IN_FLIGHT),
+            orgs: InFlight::new(PLAYGROUND_ORG_IN_FLIGHT),
+        }
+    }
+
+    /// Admits one run of `user` in `org`. The run counts as in progress until the guard drops.
+    /// The org's slot, then the user's, then the rate token.
+    ///
+    /// # Errors
+    ///
+    /// [`RetryAfter`] of 1 s when the org or the user has no free slot, or the rate limiter's
+    /// [`RetryAfter`]. A refusal spends no rate token and holds no slot.
+    pub(crate) fn admit(
+        &self,
+        user: Uuid,
+        org: cetra_core::ids::OrgId,
+        now: i64,
+    ) -> Result<PlaygroundGuard, RetryAfter> {
+        let org_slot = self.orgs.admit(org)?;
+        let user_slot = self.users.admit(user)?;
+        self.rate.check(&user, now)?;
+        Ok(PlaygroundGuard {
+            _org: org_slot,
+            _user: user_slot,
+        })
+    }
+
+    fn prune(&self, now: i64) {
+        self.rate.prune(now);
+    }
+}
+
+/// One admitted playground run. Dropping it frees both slots.
+pub(crate) struct PlaygroundGuard {
+    _org: InFlightGuard<cetra_core::ids::OrgId>,
+    _user: InFlightGuard<Uuid>,
+}
+
 /// The login, form, and mail limiters, plus the password lockout.
 pub(crate) struct Limits {
     /// 10 checks per minute per `(client IP, email)`.
@@ -347,6 +412,8 @@ pub(crate) struct Limits {
     pub(crate) lockout: Lockout,
     /// Implicit visitors of the demo org (D187, spec 08 § Demo org).
     pub(crate) demo: DemoLimits,
+    /// Playground runs per user and per org (D-V-24).
+    pub(crate) playground: PlaygroundLimits,
 }
 
 impl Limits {
@@ -419,6 +486,7 @@ impl Limits {
             mcp: McpLimits::new(MAX_KEYS),
             lockout: Lockout::new(20, Duration::from_secs(15 * 60), MAX_KEYS),
             demo: DemoLimits::new(demo),
+            playground: PlaygroundLimits::new(MAX_KEYS),
         }
     }
 
@@ -435,6 +503,7 @@ impl Limits {
         self.alert_tests_by_channel.prune(now);
         self.mcp.prune(now);
         self.demo.prune(now);
+        self.playground.prune(now);
         self.lockout.prune(now);
     }
 }
@@ -726,5 +795,86 @@ mod tests {
             Some(RetryAfter(Duration::from_secs(30)))
         );
         assert!(limits.admit(ada, 30_000_000_000).is_ok());
+    }
+
+    #[test]
+    fn playground_admits_four_per_user_at_once() {
+        let limits = PlaygroundLimits::new(10);
+        let (ada, bob) = (Uuid::now_v7(), Uuid::now_v7());
+        let org = cetra_core::ids::OrgId::new_v7();
+        let held: Vec<PlaygroundGuard> = (0..PLAYGROUND_USER_IN_FLIGHT)
+            .map(|_| limits.admit(ada, org, 0).expect("under the per-user cap"))
+            .collect();
+        assert_eq!(
+            limits.admit(ada, org, 0).err(),
+            Some(RetryAfter(Duration::from_secs(1)))
+        );
+        assert!(
+            limits.admit(bob, org, 0).is_ok(),
+            "another user is not held back"
+        );
+        drop(held);
+        assert!(limits.admit(ada, org, 0).is_ok(), "a slot is free again");
+    }
+
+    #[test]
+    fn playground_admits_sixteen_per_org_across_users() {
+        let limits = PlaygroundLimits::new(100);
+        let org = cetra_core::ids::OrgId::new_v7();
+        let mut held = Vec::new();
+        for _ in 0..(PLAYGROUND_ORG_IN_FLIGHT / PLAYGROUND_USER_IN_FLIGHT) {
+            let user = Uuid::now_v7();
+            for _ in 0..PLAYGROUND_USER_IN_FLIGHT {
+                held.push(limits.admit(user, org, 0).expect("under the org cap"));
+            }
+        }
+        let outsider = Uuid::now_v7();
+        assert_eq!(
+            limits.admit(outsider, org, 0).err(),
+            Some(RetryAfter(Duration::from_secs(1)))
+        );
+        let other_org = cetra_core::ids::OrgId::new_v7();
+        assert!(
+            limits.admit(outsider, other_org, 0).is_ok(),
+            "another org has its own cap"
+        );
+    }
+
+    #[test]
+    fn playground_allows_sixty_runs_a_minute_per_user() {
+        let limits = PlaygroundLimits::new(10);
+        let (ada, org) = (Uuid::now_v7(), cetra_core::ids::OrgId::new_v7());
+        for _ in 0..PLAYGROUND_PER_MINUTE {
+            assert!(limits.admit(ada, org, 0).is_ok());
+        }
+        let refused = limits.admit(ada, org, 0).err();
+        assert!(
+            matches!(refused, Some(RetryAfter(wait)) if wait > Duration::ZERO),
+            "the 61st run within a minute is refused"
+        );
+        let a_minute_later = 60_000_000_000;
+        assert!(
+            limits.admit(ada, org, a_minute_later).is_ok(),
+            "a minute later one token is back"
+        );
+    }
+
+    #[test]
+    fn a_playground_refusal_spends_no_rate_token() {
+        let limits = PlaygroundLimits::new(10);
+        let (ada, org) = (Uuid::now_v7(), cetra_core::ids::OrgId::new_v7());
+        let mut held: Vec<PlaygroundGuard> = (0..PLAYGROUND_USER_IN_FLIGHT)
+            .map(|_| limits.admit(ada, org, 0).expect("under the per-user cap"))
+            .collect();
+        // Refused by the user's in-flight cap: no token is spent.
+        assert!(limits.admit(ada, org, 0).is_err());
+        held.clear();
+        for _ in 0..(PLAYGROUND_PER_MINUTE - PLAYGROUND_USER_IN_FLIGHT) {
+            assert!(limits.admit(ada, org, 0).is_ok());
+        }
+        assert!(
+            limits.admit(ada, org, 0).is_err(),
+            "exactly 60 tokens were spent, so the 61st is refused"
+        );
     }
 }

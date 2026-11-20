@@ -217,7 +217,7 @@ export interface WirePage<T> {
 }
 
 /** Query of one page: the given fields, then `limit`, then `cursor` when there is one. */
-function pageQuery(
+export function pageQuery(
   fields: Record<string, number>,
   cursor: string | undefined,
 ): Record<string, string | number> {
@@ -229,7 +229,7 @@ function pageQuery(
 }
 
 /** Fetch pages until `next_cursor` is null, mapping every item in order. */
-async function collect<W, T>(
+export async function collect<W, T>(
   fetchPage: (cursor: string | undefined) => Promise<WirePage<W>>,
   map: (wire: W) => T,
 ): Promise<T[]> {

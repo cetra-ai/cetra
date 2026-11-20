@@ -1,0 +1,36 @@
+{
+  "connection_id": "01900000-0000-7000-8000-000000000400",
+  "model": "gpt-4o",
+  "messages": [
+    {
+      "parts": [
+        {
+          "content": "You are a friendly support agent for {{product}}.",
+          "type": "text"
+        }
+      ],
+      "role": "system"
+    },
+    {
+      "parts": [
+        {
+          "content": "Answer in one sentence.",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "variables": {
+    "product": "cetra"
+  },
+  "params": {
+    "temperature": 0.2
+  },
+  "source": {
+    "prompt": {
+      "name": "support-reply",
+      "version": 2
+    }
+  }
+}

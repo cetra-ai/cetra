@@ -18,6 +18,7 @@ import { $api } from "@/api/client";
 import { problemMessage } from "@/api/problem";
 import { traceDetailQuery } from "@/api/queries";
 import type { Schema } from "@/api/types";
+import { QueuesChip } from "@/components/annotation-queues/queues-chip";
 import { forgetTrace } from "@/components/command/recent-traces";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { CopyButton } from "@/components/copy-button";
@@ -290,6 +291,7 @@ export function TraceHeader({
             </Badge>
           ))}
           <IssueChips traceId={trace.trace_id} />
+          <QueuesChip traceId={trace.trace_id} />
         </div>
       </section>
       <ConfirmDialog

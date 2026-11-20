@@ -10,8 +10,10 @@ mod cursor;
 mod deletions;
 mod experiments;
 mod facets;
+mod prompts;
 mod scores;
 mod sessions;
+mod targets;
 mod traces;
 mod users;
 mod widgets;
@@ -28,7 +30,7 @@ pub use alerts::{AlertMeasure, AlertValue, AlertValueRequest, alert_value};
 pub use buckets::{Bucket, BucketWidth};
 pub use deletions::{
     FilterDeletionRequest, MAX_FILTER_DELETION_TRACES, UserDeletionScope, eval_trace_ids,
-    filter_trace_ids, user_deletion_scope,
+    filter_trace_ids, session_ids_of_traces, user_deletion_scope,
 };
 pub use experiments::{
     ExperimentScore, ExperimentScoreMean, ExperimentTrace, MAX_EXPERIMENT_SCORES,
@@ -39,6 +41,10 @@ pub use facets::{
     FacetData, FacetKind, FacetRequest, FacetValue, FacetView, HISTOGRAM_BUCKETS, Histogram,
     HistogramBucket, MAX_FACET_KEY, MAX_FACET_LIMIT, MAX_FACET_QUERY, facet,
 };
+pub use prompts::{
+    MAX_PROMPT_VERSIONS, PromptMetricsRequest, PromptScoreMean, PromptVersionMetrics,
+    prompt_metrics,
+};
 pub use scores::{
     LATEST_SCORE_COLUMNS, MAX_COUNT_NAMES, ScoreListRequest, ScoreNameCount,
     ScoreNameCountsRequest, ScoreTargets, latest_scores, score_list, score_name_counts,
@@ -48,6 +54,11 @@ pub use sessions::{
     MAX_SESSION_TURNS, SESSION_ERROR_TRACE_COUNT, SESSION_FIRST_INPUT_PREVIEW,
     SESSION_LAST_OUTPUT_PREVIEW, SessionDetailData, SessionExtrasRequest, SessionListRequest,
     SessionSort, session_detail, session_extras, session_list,
+};
+pub use targets::{
+    FilteredTargets, MAX_TARGET_IDS, SessionTarget, SessionTargetFilter, SpanTarget,
+    SpanTargetFilter, TraceTarget, filter_session_targets, filter_span_targets, session_targets,
+    span_targets, trace_targets,
 };
 pub use traces::{
     ERROR_SPAN_COLUMNS, ErrorSpansRequest, MAX_ERROR_SPANS_PER_TRACE, MAX_MATCH_COUNT,

@@ -3,11 +3,6 @@
 //! E11 is the OpenAI-compatible adapter, E12 is Anthropic, and E13 is Gemini.
 
 mod answer;
-mod anthropic;
-mod embed;
-mod gemini;
-mod http;
-mod openai;
 
 use std::time::Duration;
 
@@ -15,10 +10,15 @@ use std::time::Duration;
 pub(crate) use answer::Answer;
 pub(crate) use answer::{RawAnswer, answer_schema, find_object, parse_answer};
 pub(crate) use answer::{cut_chars, normalize_label};
-pub(crate) use embed::{EmbedCall, embed};
 use reqwest::Url;
 use serde_json::Value;
 
+use cetra_core::message::{Message, Part, Role};
+use serde_json::Map;
+
+use crate::chat::{
+    CHAT_IDLE_TIMEOUT, ChatParams, ChatReply, ChatRequest, FinishReason, ResponseFormat, TokenUsage,
+};
 use crate::egress::EgressClient;
 use crate::error::JudgeError;
 use crate::secret::Secret;
@@ -85,10 +85,6 @@ pub(crate) const JUDGEMENT_TOOL: &str = "submit_judgement";
 
 /// Description sent with [`JUDGEMENT_TOOL`].
 pub(crate) const JUDGEMENT_DESCRIPTION: &str = "Submit your judgement.";
-
-/// Instruction appended in [`StructuredOutput::Prompt`], before the schema.
-pub(crate) const PROMPT_INSTRUCTION: &str =
-    "Reply with one JSON object and nothing else. It must match this JSON Schema:";
 
 impl StructuredOutput {
     /// The stored connection value.
@@ -198,27 +194,6 @@ impl std::fmt::Debug for CompletionCall<'_> {
     }
 }
 
-/// The user message for this mode.
-///
-/// Prompt mode appends [`PROMPT_INSTRUCTION`] after a blank line, then the
-/// pretty-printed answer schema. Native and tool modes send the prompt as is.
-pub(crate) fn user_message(
-    mode: StructuredOutput,
-    call: &CompletionCall<'_>,
-) -> Result<String, JudgeError> {
-    match mode {
-        StructuredOutput::Native | StructuredOutput::Tool => Ok(call.prompt.to_owned()),
-        StructuredOutput::Prompt => {
-            let schema = serde_json::to_string_pretty(call.schema)
-                .map_err(|_| JudgeError::InvalidRequest)?;
-            Ok(format!(
-                "{prompt}\n\n{PROMPT_INSTRUCTION}\n{schema}",
-                prompt = call.prompt
-            ))
-        }
-    }
-}
-
 /// What the provider returned, before the answer parser runs.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct JudgeReply {
@@ -227,24 +202,78 @@ pub(crate) struct JudgeReply {
     /// Text the model returned. Tool-call arguments are compact JSON.
     pub(crate) output_text: String,
     /// Token counts in OTel semantics.
-    pub(crate) usage: JudgeUsage,
+    pub(crate) usage: TokenUsage,
     /// Model the provider says it ran.
     pub(crate) response_model: Option<String>,
 }
 
-/// Token counts. Input includes cached prompt tokens. Output includes reasoning tokens.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct JudgeUsage {
-    /// Prompt tokens, including cached tokens.
-    pub input: u64,
-    /// Completion tokens, including reasoning tokens.
-    pub output: u64,
-    /// Cached prompt tokens.
-    pub cache_read: u64,
-    /// Prompt tokens written to the cache.
-    pub cache_write: u64,
-    /// Reasoning tokens. They are also included in `output`.
-    pub reasoning: u64,
+/// The chat request of one completion call: the prompt as one user message, the answer
+/// schema as the strict response format, and the call's tool as the forced tool in tool mode.
+fn chat_request(call: &CompletionCall<'_>) -> ChatRequest {
+    ChatRequest {
+        model: call.model.to_owned(),
+        messages: vec![Message {
+            role: Role::User,
+            name: None,
+            parts: vec![Part::Text {
+                content: call.prompt.to_owned(),
+                extra: Map::new(),
+            }],
+            finish_reason: None,
+            extra: Map::new(),
+        }],
+        tools: Vec::new(),
+        tool_choice: None,
+        response_format: Some(ResponseFormat {
+            name: call.schema_name.to_owned(),
+            schema: call.schema.clone(),
+            strict: true,
+            tool_name: call.tool_name.to_owned(),
+            tool_description: call.tool_description.to_owned(),
+        }),
+        params: ChatParams {
+            temperature: call.temperature,
+            ..ChatParams::default()
+        },
+        max_tokens: call.max_output_tokens,
+        timeout: call.timeout,
+        idle_timeout: CHAT_IDLE_TIMEOUT,
+    }
+}
+
+/// The judge's reading of a reply. Refusal, truncation, and filtering fail first, then a
+/// missing answer, then the first tool call (its arguments must be a JSON object), then the text.
+pub(crate) fn judge_reply(reply: ChatReply) -> Result<JudgeReply, JudgeError> {
+    match reply.finish_reason {
+        Some(FinishReason::Refusal) => return Err(JudgeError::Refused),
+        Some(FinishReason::Length) => return Err(JudgeError::Truncated),
+        Some(FinishReason::ContentFilter) => return Err(JudgeError::ContentFiltered),
+        _ => {}
+    }
+    let content = reply.content.ok_or(JudgeError::EmptyAnswer)?;
+    let usage = reply.usage.unwrap_or_default();
+    if let Some(call) = content.tool_calls.first() {
+        let object = call
+            .arguments
+            .as_object()
+            .cloned()
+            .ok_or(JudgeError::NotJson)?;
+        let output_text =
+            serde_json::to_string(&call.arguments).map_err(|_| JudgeError::NotJson)?;
+        return Ok(JudgeReply {
+            answer: RawAnswer::Object(object),
+            output_text,
+            usage,
+            response_model: reply.response_model,
+        });
+    }
+    let text = content.text.ok_or(JudgeError::EmptyAnswer)?;
+    Ok(JudgeReply {
+        answer: RawAnswer::Text(text.clone()),
+        output_text: text,
+        usage,
+        response_model: reply.response_model,
+    })
 }
 
 /// Sends one judge call and returns the model's answer without parsing it.
@@ -261,70 +290,12 @@ pub(crate) async fn call(
     conn: &JudgeConnection,
     call: &CompletionCall<'_>,
 ) -> Result<JudgeReply, JudgeError> {
-    match conn.adapter {
-        Adapter::OpenAi => openai::complete(client, conn, call).await,
-        Adapter::Anthropic => anthropic::complete(client, conn, call).await,
-        Adapter::Gemini => gemini::complete(client, conn, call).await,
-    }
-}
-
-/// Largest provider response body, in bytes (D159).
-pub(crate) const RESPONSE_MAX_BYTES: usize = 4 * 1024 * 1024;
-
-const MODEL_MAX_BYTES: usize = 256;
-
-/// Rejects a model name that would be placed in a URL or a JSON body.
-pub(crate) fn validate_model(model: &str) -> Result<(), JudgeError> {
-    if model.is_empty() || model.len() > MODEL_MAX_BYTES || model.chars().any(forbidden_in_model) {
-        return Err(JudgeError::InvalidModel);
-    }
-    Ok(())
-}
-
-/// The URL parser reads `\` as `/` in http(s) paths, and `%` starts an escape.
-fn forbidden_in_model(ch: char) -> bool {
-    ch.is_whitespace() || ch.is_control() || matches!(ch, '/' | '\\' | '%' | '?' | '#')
-}
-
-/// Joins `path` onto a provider base, preserving a query string.
-///
-/// A base without a trailing slash is treated as a directory. `set_path` drops
-/// the query, so it is written back for bases such as `?api-version=`.
-pub(crate) fn endpoint(
-    base: Option<&Url>,
-    default_base: &str,
-    path: &str,
-) -> Result<Url, JudgeError> {
-    let parsed;
-    let base = match base {
-        Some(base) => base,
-        None => {
-            parsed = Url::parse(default_base).map_err(|_| JudgeError::InvalidRequest)?;
-            &parsed
-        }
-    };
-    let query = base.query().map(ToOwned::to_owned);
-    let mut directory = base.clone();
-    if !directory.path().ends_with('/') {
-        let mut with_slash = directory.path().to_owned();
-        with_slash.push('/');
-        directory.set_path(&with_slash);
-    }
-    let mut url = directory
-        .join(path)
-        .map_err(|_| JudgeError::InvalidRequest)?;
-    if let Some(query) = query {
-        url.set_query(Some(&query));
-    }
-    Ok(url)
+    judge_reply(crate::chat::complete_chat(client, conn, &chat_request(call)).await?)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        Adapter, JUDGEMENT_DESCRIPTION, JUDGEMENT_TOOL, JudgeConnection, StructuredOutput,
-        UnknownName, answer_schema,
-    };
+    use super::{Adapter, JudgeConnection, StructuredOutput, UnknownName};
     use crate::secret::Secret;
 
     #[test]
@@ -390,32 +361,73 @@ mod tests {
     }
 
     #[test]
-    fn prompt_mode_appends_the_schema_after_a_blank_line() {
-        let output = crate::config::JudgeOutput::Boolean;
-        let schema = answer_schema(&output, false);
-        let call = super::CompletionCall {
-            model: "m",
-            prompt: "Grade.",
-            schema: &schema,
-            schema_name: "judge_answer",
-            tool_name: JUDGEMENT_TOOL,
-            tool_description: JUDGEMENT_DESCRIPTION,
-            temperature: None,
-            max_output_tokens: 1,
-            timeout: std::time::Duration::from_secs(1),
+    fn judge_reply_keeps_the_old_priority() {
+        use super::{RawAnswer, judge_reply};
+        use crate::chat::{ChatReply, FinishReason, ReplyContent, TokenUsage, ToolCall};
+        use crate::error::JudgeError;
+        use serde_json::{Value, json};
+
+        let text = |text: &str| ReplyContent {
+            text: Some(text.to_owned()),
+            tool_calls: Vec::new(),
         };
-        let text = super::user_message(StructuredOutput::Prompt, &call).expect("prompt");
+        let tool = |arguments: Value| ReplyContent {
+            text: Some("{}".to_owned()),
+            tool_calls: vec![ToolCall {
+                id: "call_0".to_owned(),
+                name: "submit_judgement".to_owned(),
+                arguments,
+            }],
+        };
+        let reply =
+            |finish_reason: Option<FinishReason>, content: Option<ReplyContent>| ChatReply {
+                finish_reason,
+                content,
+                usage: None,
+                response_model: None,
+            };
+
         assert_eq!(
-            text,
-            "Grade.\n\nReply with one JSON object and nothing else. It must match this JSON Schema:\n{\n  \"type\": \"object\",\n  \"properties\": {\n    \"value\": {\n      \"type\": \"boolean\"\n    }\n  },\n  \"required\": [\n    \"value\"\n  ],\n  \"additionalProperties\": false\n}"
+            judge_reply(reply(Some(FinishReason::Refusal), Some(text("x")))),
+            Err(JudgeError::Refused)
         );
         assert_eq!(
-            super::user_message(StructuredOutput::Native, &call).expect("native"),
-            "Grade."
+            judge_reply(reply(Some(FinishReason::Length), None)),
+            Err(JudgeError::Truncated)
         );
         assert_eq!(
-            super::user_message(StructuredOutput::Tool, &call).expect("tool"),
-            "Grade."
+            judge_reply(reply(Some(FinishReason::ContentFilter), Some(text("x")))),
+            Err(JudgeError::ContentFiltered)
         );
+        assert_eq!(
+            judge_reply(reply(Some(FinishReason::Stop), None)),
+            Err(JudgeError::EmptyAnswer)
+        );
+        assert_eq!(
+            judge_reply(reply(None, Some(tool(json!([1]))))),
+            Err(JudgeError::NotJson)
+        );
+
+        let object =
+            judge_reply(reply(None, Some(tool(json!({"value": true}))))).expect("object answer");
+        assert_eq!(
+            object.answer,
+            RawAnswer::Object(json!({"value": true}).as_object().cloned().expect("object"))
+        );
+        assert_eq!(object.output_text, "{\"value\":true}");
+        assert_eq!(object.usage, TokenUsage::default());
+        assert_eq!(object.response_model, None);
+
+        let empty = ReplyContent {
+            text: None,
+            tool_calls: Vec::new(),
+        };
+        assert_eq!(
+            judge_reply(reply(None, Some(empty))),
+            Err(JudgeError::EmptyAnswer)
+        );
+        let answer = judge_reply(reply(None, Some(text("x")))).expect("text answer");
+        assert_eq!(answer.answer, RawAnswer::Text("x".to_owned()));
+        assert_eq!(answer.output_text, "x");
     }
 }

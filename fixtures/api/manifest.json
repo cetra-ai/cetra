@@ -1,5 +1,25 @@
 [
   {
+    "operation_id": "add_annotation_queue_items",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000a01"
+    },
+    "query": {},
+    "status": 201,
+    "content_type": "application/json",
+    "file": "static/annotation-queue-items-added.json"
+  },
+  {
+    "operation_id": "add_annotation_queue_matching",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000a01"
+    },
+    "query": {},
+    "status": 201,
+    "content_type": "application/json",
+    "file": "static/annotation-queue-matching-added.json"
+  },
+  {
     "operation_id": "compare_experiments",
     "path_params": {},
     "query": {
@@ -8,6 +28,14 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/experiment-comparison.json"
+  },
+  {
+    "operation_id": "create_annotation_queue",
+    "path_params": {},
+    "query": {},
+    "status": 201,
+    "content_type": "application/json",
+    "file": "static/annotation-queue.json"
   },
   {
     "operation_id": "create_dashboard",
@@ -88,6 +116,27 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/alert-rule.json"
+  },
+  {
+    "operation_id": "get_annotation_queue",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000a01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/annotation-queue.json"
+  },
+  {
+    "operation_id": "get_annotation_queue_item",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000a01",
+      "item_id": "01900000-0000-7000-8000-000000000a11"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/annotation-queue-item.json"
   },
   {
     "operation_id": "get_auth_config",
@@ -558,6 +607,81 @@
     "file": "static/project.json"
   },
   {
+    "operation_id": "get_prompt",
+    "path_params": {
+      "prompt": "support-reply"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/prompts/support-reply.json"
+  },
+  {
+    "operation_id": "get_prompt_metrics",
+    "path_params": {
+      "prompt": "support-reply"
+    },
+    "query": {
+      "from": "2026-01-01T00:00:00Z",
+      "to": "2026-01-02T00:00:00Z"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/prompts/support-reply/metrics.json"
+  },
+  {
+    "operation_id": "get_prompt_resolve",
+    "path_params": {
+      "prompt": "support-reply"
+    },
+    "query": {
+      "label": "staging"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/prompts/support-reply/resolve-staging.json"
+  },
+  {
+    "operation_id": "get_prompt_resolve",
+    "path_params": {
+      "prompt": "support-reply"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/prompts/support-reply/resolve.json"
+  },
+  {
+    "operation_id": "get_prompt_settings",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/prompt-settings.json"
+  },
+  {
+    "operation_id": "get_prompt_version",
+    "path_params": {
+      "prompt": "support-reply",
+      "version": "1"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/prompts/support-reply/versions/1.json"
+  },
+  {
+    "operation_id": "get_prompt_version",
+    "path_params": {
+      "prompt": "support-reply",
+      "version": "2"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/prompts/support-reply/versions/2.json"
+  },
+  {
     "operation_id": "get_saved_view",
     "path_params": {
       "id": "01900000-0000-7000-8000-000000000211"
@@ -900,6 +1024,24 @@
     "file": "static/alert-rules.json"
   },
   {
+    "operation_id": "list_annotation_queue_items",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000a01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/annotation-queue-items.json"
+  },
+  {
+    "operation_id": "list_annotation_queues",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/annotation-queues.json"
+  },
+  {
     "operation_id": "list_api_keys",
     "path_params": {},
     "query": {},
@@ -1189,6 +1331,34 @@
     "file": "static/projects.json"
   },
   {
+    "operation_id": "list_prompt_label_events",
+    "path_params": {
+      "prompt": "support-reply"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/prompts/support-reply/label-events.json"
+  },
+  {
+    "operation_id": "list_prompt_versions",
+    "path_params": {
+      "prompt": "support-reply"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/prompts/support-reply/versions.json"
+  },
+  {
+    "operation_id": "list_prompts",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/prompts.json"
+  },
+  {
     "operation_id": "list_saved_views",
     "path_params": {},
     "query": {},
@@ -1273,6 +1443,16 @@
     "status": 200,
     "content_type": "application/json",
     "file": "responses/users.json"
+  },
+  {
+    "operation_id": "next_annotation_queue_item",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000a01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/annotation-queue-item.json"
   },
   {
     "operation_id": "patch_dataset_items",
@@ -1496,6 +1676,24 @@
     "file": "static/personal-token-created.json"
   },
   {
+    "operation_id": "post_prompt",
+    "path_params": {},
+    "query": {},
+    "status": 201,
+    "content_type": "application/json",
+    "file": "responses/prompts/support-reply/versions/1.json"
+  },
+  {
+    "operation_id": "post_prompt_version",
+    "path_params": {
+      "prompt": "support-reply"
+    },
+    "query": {},
+    "status": 201,
+    "content_type": "application/json",
+    "file": "responses/prompts/support-reply/versions/2.json"
+  },
+  {
     "operation_id": "post_score_definition",
     "path_params": {},
     "query": {},
@@ -1520,12 +1718,41 @@
     "file": "static/signup-response.json"
   },
   {
+    "operation_id": "preview_annotation_queue_matching",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000a01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/annotation-queue-matching-preview.json"
+  },
+  {
     "operation_id": "preview_deletion",
     "path_params": {},
     "query": {},
     "status": 200,
     "content_type": "application/json",
     "file": "static/deletion-preview.json"
+  },
+  {
+    "operation_id": "put_prompt_label",
+    "path_params": {
+      "label": "staging",
+      "prompt": "support-reply"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/prompts/support-reply.json"
+  },
+  {
+    "operation_id": "put_prompt_settings",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/prompt-settings.json"
   },
   {
     "operation_id": "query_widget",

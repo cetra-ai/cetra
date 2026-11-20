@@ -16,6 +16,7 @@ use cetra_core::ids::TraceId;
 use opentelemetry_proto::tonic::collector::trace::v1::{
     ExportTraceServiceRequest, trace_service_client::TraceServiceClient,
 };
+use opentelemetry_proto::tonic::trace::v1::Span;
 use prost::Message;
 use serde_json::{Value, json};
 
@@ -682,6 +683,223 @@ async fn live_streams_and_every_read_route_work_end_to_end() {
     server.running.shutdown().await.unwrap();
 }
 
+/// The span id of the application span that the Agent SDK case puts over the Claude Code turn.
+const APP_SPAN_HEX: &str = "a000000000000001";
+const APP_SPAN_BYTES: [u8; 8] = [0xa0, 0, 0, 0, 0, 0, 0, 1];
+
+/// The Claude Code bash-tool export (`fixtures/otlp/claude_code/bash-tool`) as session
+/// `e2e-session`: every span on `trace`, moved so the earliest starts at `start_ns`, and the
+/// interaction span under `parent` when one is given.
+fn claude_code_request(
+    trace: &str,
+    start_ns: i64,
+    parent: Option<&[u8]>,
+) -> ExportTraceServiceRequest {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/otlp/claude_code/bash-tool/input.json"
+    );
+    let text = fs::read_to_string(path)
+        .unwrap()
+        .replace("capture-volatile-2", "e2e-session");
+    let mut request: ExportTraceServiceRequest = serde_json::from_str(&text).unwrap();
+    let trace_id = TraceId::from_str(trace).unwrap().as_bytes().to_vec();
+    let mut spans: Vec<&mut Span> = request
+        .resource_spans
+        .iter_mut()
+        .flat_map(|resource| resource.scope_spans.iter_mut())
+        .flat_map(|scope| scope.spans.iter_mut())
+        .collect();
+    let first = spans
+        .iter()
+        .map(|span| span.start_time_unix_nano)
+        .min()
+        .unwrap();
+    let start = u64::try_from(start_ns).unwrap();
+    for span in &mut spans {
+        span.trace_id = trace_id.clone();
+        span.start_time_unix_nano = span.start_time_unix_nano - first + start;
+        span.end_time_unix_nano = span.end_time_unix_nano - first + start;
+        if let (Some(parent), "claude_code.interaction") = (parent, span.name.as_str()) {
+            span.parent_span_id = parent.to_vec();
+        }
+    }
+    request
+}
+
+/// One application span `app-request` (resource `service.name = e2e-app`) on `trace`, from
+/// `start_ns` to `end_ns`, with the span id `APP_SPAN_HEX`.
+fn app_request(trace: &str, start_ns: i64, end_ns: i64) -> ExportTraceServiceRequest {
+    serde_json::from_value(json!({
+        "resourceSpans": [{
+            "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "e2e-app"}}]},
+            "scopeSpans": [{"spans": [{
+                "traceId": trace,
+                "spanId": APP_SPAN_HEX,
+                "name": "app-request",
+                "startTimeUnixNano": start_ns.to_string(),
+                "endTimeUnixNano": end_ns.to_string(),
+            }]}],
+        }]
+    }))
+    .unwrap()
+}
+
+/// `ns` nanoseconds since the Unix epoch as RFC 3339 in UTC, the form the query parameters take.
+fn rfc3339(ns: i64) -> String {
+    chrono::DateTime::from_timestamp_nanos(ns).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+/// Coding agents end to end (spec 02 § Coding agents, spec 05 § Dashboard queries): an agent
+/// context, a captured Claude Code export, and the same export under an application span, as
+/// the Agent SDK sends it. Both traces get the context's person, repository, branch and agent,
+/// and the "Coding agents" template's repository and session breakdowns group them.
+#[tokio::test(flavor = "multi_thread")]
+async fn coding_agents_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = start(dir.path(), "").await;
+    let project = format!("/api/v1/projects/{}", server.proto_id);
+
+    // The hook's context for the session: a `.git` URL, a mixed-case person and a branch.
+    let context = server
+        .client
+        .post(format!("{}/v1/agent-context", server.http))
+        .header("authorization", format!("Bearer {INIT_KEY}"))
+        .json(&json!({
+            "agent": "claude-code",
+            "session_id": "e2e-session",
+            "repository": "https://github.com/acme/widgets.git",
+            "branch": "feature/e2e",
+            "user": "Dev@Example.com"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(context.status(), 204);
+
+    // Both turns start 60 seconds ago. The application span covers the Claude Code turn.
+    let base = now_ns() - 60 * NANOS_PER_SECOND;
+    let plain_trace = format!("{:032x}", 21);
+    let sdk_trace = format!("{:032x}", 22);
+    post_otlp_http(
+        &server.client,
+        format!("{}/v1/traces", server.http),
+        INIT_KEY,
+        "application/x-protobuf",
+        claude_code_request(&plain_trace, base, None).encode_to_vec(),
+    )
+    .await;
+    let mut sdk = app_request(&sdk_trace, base, base + 2 * NANOS_PER_SECOND);
+    let turn = claude_code_request(&sdk_trace, base, Some(&APP_SPAN_BYTES));
+    sdk.resource_spans.extend(turn.resource_spans);
+    post_otlp_http(
+        &server.client,
+        format!("{}/v1/traces", server.http),
+        INIT_KEY,
+        "application/x-protobuf",
+        sdk.encode_to_vec(),
+    )
+    .await;
+
+    // The range covers both turns and the dashboard queries below.
+    let from = rfc3339(base - 3_600 * NANOS_PER_SECOND);
+    let to = rfc3339(now_ns() + 3_600 * NANOS_PER_SECOND);
+
+    // Both traces are listed for the session. `%20%3D%20%27` is ` = '` in the filter.
+    let listed = poll_json(
+        &server.api,
+        &format!(
+            "{project}/traces?filter=session_id%20%3D%20%27e2e-session%27&from={from}&to={to}"
+        ),
+        |body| body["data"].as_array().is_some_and(|rows| rows.len() == 2),
+        Duration::from_secs(20),
+    )
+    .await;
+    let mut ids: Vec<&str> = listed["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["trace_id"].as_str().unwrap())
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(ids, [plain_trace.as_str(), sdk_trace.as_str()], "{listed}");
+    for row in listed["data"].as_array().unwrap() {
+        assert_eq!(row["user_id"], "dev@example.com", "{row}");
+        assert_eq!(row["session_id"], "e2e-session", "{row}");
+        assert_eq!(
+            row["metadata"]["repository"], "github.com/acme/widgets",
+            "{row}"
+        );
+        assert_eq!(row["metadata"]["branch"], "feature/e2e", "{row}");
+        assert_eq!(row["metadata"]["coding_agent"], "claude-code", "{row}");
+    }
+
+    // The Agent SDK trace's root is the application span, read from the trace's spans.
+    let detail = server
+        .api
+        .get(&format!("{project}/traces/{sdk_trace}"))
+        .await;
+    let root = detail["spans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["span"]["parent_span_id"].is_null())
+        .unwrap();
+    assert_eq!(root["span"]["name"], "app-request", "{detail}");
+
+    // The "Top repositories by cost" and "Top sessions by cost" widgets of the template.
+    let coding_agent = "metadata['coding_agent'] IS NOT NULL";
+    let by_repository = server
+        .api
+        .post(
+            &format!("{project}/dashboards/query"),
+            &json!({
+                "from": from,
+                "to": to,
+                "shape": "total",
+                "query": {
+                    "source": "traces",
+                    "filter": format!("{coding_agent} AND metadata['repository'] IS NOT NULL"),
+                    "measures": [{"agg": "sum", "field": "cost_total", "label": "Cost"}],
+                    "breakdown": {"field": "metadata['repository']", "limit": 10, "other": false},
+                },
+            }),
+        )
+        .await;
+    let rows = by_repository["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{by_repository}");
+    assert_eq!(
+        rows[0]["group"], "github.com/acme/widgets",
+        "{by_repository}"
+    );
+    assert!(rows[0]["values"][0].as_f64().is_some(), "{by_repository}");
+
+    let by_session = server
+        .api
+        .post(
+            &format!("{project}/dashboards/query"),
+            &json!({
+                "from": from,
+                "to": to,
+                "shape": "total",
+                "query": {
+                    "source": "traces",
+                    "filter": format!("{coding_agent} AND session_id IS NOT NULL"),
+                    "measures": [{"agg": "sum", "field": "cost_total", "label": "Cost"}],
+                    "breakdown": {"field": "session_id", "limit": 10, "other": false},
+                },
+            }),
+        )
+        .await;
+    let rows = by_session["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{by_session}");
+    assert_eq!(rows[0]["group"], "e2e-session", "{by_session}");
+
+    drop(server.api);
+    drop(server.client);
+    server.running.shutdown().await.unwrap();
+}
+
 /// Track M end to end: a user deletion hides that user's traces at once and applies once
 /// storage reports it; a project drop answers 404 and ends the project's data.
 #[tokio::test(flavor = "multi_thread")]
@@ -1083,6 +1301,137 @@ async fn online_rules_and_backfill_end_to_end() {
     let log = mock.finish();
     assert!(log.errors.is_empty(), "{:?}", log.errors);
     assert_eq!(log.served.len(), 2, "{:?}", log.served);
+
+    drop(server.api);
+    drop(server.client);
+    server.running.shutdown().await.unwrap();
+    provider.abort();
+}
+
+/// Track V M6 end to end (D-V-20, D-V-22, D-V-33): a playground run streams from the capture
+/// mock through the org's connection, and its trace lives in the reserved environment
+/// `cetra-playground`, which the default trace list leaves out.
+#[tokio::test(flavor = "multi_thread")]
+async fn playground_run_end_to_end() {
+    let mock = cetra_capture::Mock::new(vec![
+        serde_json::from_value(json!({
+            "api": "openai.chat",
+            "model": "gpt-test",
+            "message": {"text": "Hello from cetra."},
+            "finish": "stop",
+            "usage": {"input": 12, "output": 4},
+            "chunks": 3,
+            "ttft_ms": 0,
+            "chunk_delay_ms": 5
+        }))
+        .unwrap(),
+    ]);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let provider_addr = listener.local_addr().unwrap();
+    let router = mock.router();
+    let provider = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let dir = tempfile::tempdir().unwrap();
+    // The mock listens on 127.0.0.1, a private address the run may reach only when allowed.
+    let server = start(
+        dir.path(),
+        "\n[security]\nallow_private_network_egress = true\n",
+    )
+    .await;
+    let project = format!("/api/v1/projects/{}", server.proto_id);
+
+    let connection = server
+        .api
+        .post(
+            "/api/v1/orgs/acme/llm-connections",
+            &json!({
+                "name": "Mock",
+                "adapter": "openai",
+                "api_key": "sk-test-key-0123456789",
+                "base_url": format!("http://{provider_addr}/v1"),
+                "default_model": "gpt-test",
+                "max_concurrency": 4,
+                "requests_per_minute": 600
+            }),
+        )
+        .await;
+
+    // The admin's run: a system message with a variable, a user message, and a prompt source.
+    let body = json!({
+        "connection_id": connection["id"],
+        "model": "gpt-test",
+        "messages": [
+            {"role": "system", "parts": [{"type": "text", "content": "You are a support agent for {{product}}."}]},
+            {"role": "user", "parts": [{"type": "text", "content": "Say hello."}]}
+        ],
+        "variables": {"product": "cetra"},
+        "params": {"temperature": 0.2},
+        "source": {"prompt": {"name": "support-reply", "version": 2}}
+    });
+    let mut response = server
+        .client
+        .post(format!("{}{project}/playground/runs", server.http))
+        .header("cookie", &server.api.cookie)
+        .header("origin", ORIGIN)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success(), "{}", response.status());
+    let events = read_until(&mut response, "event: done", Duration::from_secs(30)).await;
+    assert!(events.contains("event: start"), "{events}");
+    assert!(events.contains("event: text"), "{events}");
+    assert!(events.contains("Hello from cetra."), "{events}");
+    drop(response);
+
+    // The run's trace is in the reserved environment: listed with evaluation traces only.
+    let with_eval = poll_json(
+        &server.api,
+        &format!("{project}/traces?include_eval=true"),
+        |body| {
+            body["data"].as_array().is_some_and(|rows| {
+                rows.iter()
+                    .any(|row| row["environment"] == "cetra-playground")
+            })
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+    let playground = with_eval["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["environment"] == "cetra-playground")
+        .unwrap();
+    let trace_id = playground["trace_id"].as_str().unwrap().to_owned();
+    let detail = server
+        .api
+        .get(&format!("{project}/traces/{trace_id}"))
+        .await;
+    let span_id = detail["spans"][0]["span"]["span_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let span = server
+        .api
+        .get(&format!("{project}/traces/{trace_id}/spans/{span_id}"))
+        .await;
+    assert!(span.to_string().contains("for cetra."), "{span}");
+
+    let default = server.api.get(&format!("{project}/traces")).await;
+    assert!(
+        default["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["environment"] != "cetra-playground"),
+        "{default}"
+    );
+
+    // The mock served exactly the one run, with no error.
+    let log = mock.finish();
+    assert!(log.errors.is_empty(), "{:?}", log.errors);
+    assert_eq!(log.served.len(), 1, "{:?}", log.served);
 
     drop(server.api);
     drop(server.client);

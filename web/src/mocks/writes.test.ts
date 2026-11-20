@@ -81,7 +81,8 @@ it("lists every account and admin write of the contract", () => {
         path.startsWith("/api/v1/projects/{project}/issues") ||
         path.startsWith("/api/v1/projects/{project}/datasets") ||
         path.startsWith("/api/v1/projects/{project}/scores") ||
-        path.startsWith("/api/v1/projects/{project}/experiments");
+        path.startsWith("/api/v1/projects/{project}/experiments") ||
+        path.startsWith("/api/v1/projects/{project}/annotation-queues");
       if (covered && !LATER_TRACKS.includes(operationId)) {
         expected.push({ operationId, method, path });
       }
@@ -344,6 +345,48 @@ it("answers the experiment writes", async () => {
 
   const deleted = await send("DELETE", `${PROJECT}/experiments/${BASELINE_ID}`);
   expect(deleted.status).toBe(204);
+});
+
+it("answers the annotation queue writes", async () => {
+  const queue = `${PROJECT}/annotation-queues`;
+  const queueId = "01900000-0000-7000-8000-000000000a01";
+  const itemId = "01900000-0000-7000-8000-000000000a11";
+
+  const created = await send(
+    "POST",
+    queue,
+    JSON.stringify({ name: "  Review  ", definition_ids: [], target: "trace" }),
+  );
+  expect(created.status).toBe(201);
+  expect(created.json?.name).toBe("Review");
+
+  const updated = await send("PATCH", `${queue}/${queueId}`, JSON.stringify({ version: 2 }));
+  expect(updated.status).toBe(200);
+  expect(updated.json?.version).toBe(3);
+
+  const added = await send(
+    "POST",
+    `${queue}/${queueId}/items`,
+    JSON.stringify({ items: [{ trace_id: "a1000000000000000000000000000001" }] }),
+  );
+  expect(added.status).toBe(201);
+  expect(added.json?.added).toBe(1);
+
+  const next = await send("POST", `${queue}/${queueId}/next`, "{}");
+  expect(next.status).toBe(200);
+  expect(next.json?.id).toBe(itemId);
+
+  const completed = await send("POST", `${queue}/${queueId}/items/${itemId}/complete`);
+  expect(completed.json?.status).toBe("completed");
+
+  const skipped = await send("POST", `${queue}/${queueId}/items/${itemId}/skip`, "{}");
+  expect(skipped.json?.status).toBe("skipped");
+
+  const preview = await send("POST", `${queue}/${queueId}/items/matching/preview`, "{}");
+  expect(preview.json).toEqual({ matched: 42, capped: false });
+
+  expect((await send("DELETE", `${queue}/${queueId}/items/${itemId}/lease`)).status).toBe(204);
+  expect((await send("DELETE", `${queue}/${queueId}`)).status).toBe(204);
 });
 
 it("answers 204 for deletes", async () => {

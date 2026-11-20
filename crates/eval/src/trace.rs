@@ -12,16 +12,19 @@ use cetra_core::score::ScoreValue;
 use cetra_otel::{IngestContext, Normalized, PriceTable, RejectReason, normalize};
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::common::v1::any_value::Value as AnyValueKind;
-use opentelemetry_proto::tonic::common::v1::{AnyValue, InstrumentationScope, KeyValue};
+use opentelemetry_proto::tonic::common::v1::{
+    AnyValue, ArrayValue, InstrumentationScope, KeyValue,
+};
 use opentelemetry_proto::tonic::resource::v1::Resource;
 use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span, Status};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::chat::TokenUsage;
 use crate::config::Evaluator;
 use crate::error::{EvalError, JudgeError, WebhookError};
-use crate::judge::{Adapter, JudgeUsage};
+use crate::judge::Adapter;
 use crate::mapping::resolve::Variables;
 use crate::runner::CallTrace;
 
@@ -82,7 +85,7 @@ pub(crate) enum ChildSpan<'a> {
         /// Assistant text, when the call returned one.
         output_text: Option<&'a str>,
         /// Token counts, when the provider sent them.
-        usage: Option<&'a JudgeUsage>,
+        usage: Option<&'a TokenUsage>,
         /// Provider or parse error. The message is the error's `Display`.
         error: Option<&'a JudgeError>,
     },
@@ -136,7 +139,12 @@ pub(crate) fn build(
     prices: &PriceTable,
 ) -> Normalized {
     let request = export_request(input);
-    let normalized = normalize(&request, ingest, prices);
+    let normalized = normalize(
+        &request,
+        ingest,
+        prices,
+        &cetra_otel::AgentContexts::default(),
+    );
     if normalized.rejections.total() > 0 {
         tracing::warn!(
             evaluator_id = %input.evaluator.id,
@@ -174,7 +182,12 @@ pub(crate) fn build_call(input: &CallTraceInput<'_>) -> Normalized {
     if let Some(child) = &input.child {
         spans.push(child_span(trace.trace_id, root_id, child));
     }
-    let normalized = normalize(&request(spans), trace.ingest, trace.prices);
+    let normalized = normalize(
+        &request(spans),
+        trace.ingest,
+        trace.prices,
+        &cetra_otel::AgentContexts::default(),
+    );
     if normalized.rejections.total() > 0 {
         tracing::warn!(
             root_name = trace.root_name,
@@ -525,7 +538,7 @@ fn child_span(trace_id: TraceId, parent: SpanId, child: &ChildSpan<'_>) -> Span 
     }
 }
 
-fn usage_attrs(usage: &JudgeUsage) -> Vec<KeyValue> {
+pub(crate) fn usage_attrs(usage: &TokenUsage) -> Vec<KeyValue> {
     vec![
         int_attr("gen_ai.usage.input_tokens", token_count(usage.input)),
         int_attr("gen_ai.usage.output_tokens", token_count(usage.output)),
@@ -544,7 +557,7 @@ fn usage_attrs(usage: &JudgeUsage) -> Vec<KeyValue> {
     ]
 }
 
-fn otel_span(
+pub(crate) fn otel_span(
     trace_id: TraceId,
     span_id: &SpanId,
     parent: Option<&SpanId>,
@@ -566,18 +579,18 @@ fn otel_span(
     }
 }
 
-fn error_status(message: &str) -> Status {
+pub(crate) fn error_status(message: &str) -> Status {
     Status {
         message: message.to_owned(),
         code: 2,
     }
 }
 
-fn metadata_attr(key: &str, value: &str) -> KeyValue {
+pub(crate) fn metadata_attr(key: &str, value: &str) -> KeyValue {
     string_attr(&format!("{}{key}", attr::METADATA_PREFIX), value)
 }
 
-fn string_attr(key: &str, value: &str) -> KeyValue {
+pub(crate) fn string_attr(key: &str, value: &str) -> KeyValue {
     KeyValue {
         key: key.to_owned(),
         value: Some(AnyValue {
@@ -587,11 +600,38 @@ fn string_attr(key: &str, value: &str) -> KeyValue {
     }
 }
 
-fn int_attr(key: &str, value: i64) -> KeyValue {
+pub(crate) fn int_attr(key: &str, value: i64) -> KeyValue {
     KeyValue {
         key: key.to_owned(),
         value: Some(AnyValue {
             value: Some(AnyValueKind::IntValue(value)),
+        }),
+        ..KeyValue::default()
+    }
+}
+
+pub(crate) fn double_attr(key: &str, value: f64) -> KeyValue {
+    KeyValue {
+        key: key.to_owned(),
+        value: Some(AnyValue {
+            value: Some(AnyValueKind::DoubleValue(value)),
+        }),
+        ..KeyValue::default()
+    }
+}
+
+/// A list of strings, as an OTLP array value.
+pub(crate) fn string_array_attr(key: &str, values: &[String]) -> KeyValue {
+    let values = values
+        .iter()
+        .map(|value| AnyValue {
+            value: Some(AnyValueKind::StringValue(value.clone())),
+        })
+        .collect();
+    KeyValue {
+        key: key.to_owned(),
+        value: Some(AnyValue {
+            value: Some(AnyValueKind::ArrayValue(ArrayValue { values })),
         }),
         ..KeyValue::default()
     }
@@ -675,9 +715,10 @@ mod tests {
         CallTraceInput, ChildSpan, EvalOrigin, EvalTarget, TraceInput, build, build_call,
         call_cost, judge_metadata, span_id,
     };
+    use crate::chat::TokenUsage;
     use crate::config::{Check, Evaluator, EvaluatorConfig, OutputScore};
     use crate::error::{ErrorClass, EvalError, JudgeError, WebhookError};
-    use crate::judge::{Adapter, JudgeUsage};
+    use crate::judge::Adapter;
     use crate::mapping::resolve::Variables;
     use crate::runner::CallTrace;
 
@@ -741,8 +782,8 @@ mod tests {
         EvalOrigin::Rule(Uuid::parse_str(RULE_ID).expect("rule id"))
     }
 
-    fn usage() -> JudgeUsage {
-        JudgeUsage {
+    fn usage() -> TokenUsage {
+        TokenUsage {
             input: 1_000,
             output: 100,
             cache_read: 200,
@@ -958,7 +999,7 @@ mod tests {
         let target = target();
         let origin = rule();
         let score = ScoreValue::Boolean(true);
-        let usage = JudgeUsage {
+        let usage = TokenUsage {
             input: 10,
             output: 2,
             cache_read: 0,

@@ -48,11 +48,15 @@ Do not edit `responses/`, `manifest.json` or `static/sql-result.json` by hand. R
 | Backfills | `01900000-0000-7000-8000-000000000b00` (`done`), `…0b01` (`failed`, `interrupted`), `…0b02` (`running`, the `202` answer of `post_backfill`), all of rule `…0700`. `backfills.json`, `backfill.json` and the requests use them. They are not live backfills |
 | Dashboard | `01900000-0000-7000-8000-000000000f01`, `Support overview`, version 3, four widgets (a heading, a line chart with a breakdown, a number and a table). `dashboards.json`, `dashboard.json` (list, get, create, update) and `dashboard-stale.json` (the 409 of a stale `PATCH`) use it. They are not live dashboards |
 | Overview | `01900000-0000-7000-8000-000000000f02`, `Overview`, version 3, the first two widgets of `…0f01` (the heading and the line chart). `dashboard-overview.json` is the project's stored Overview (get, save) and is not a live dashboard |
+| Annotation queue | `01900000-0000-7000-8000-000000000a01`, `Relevance review`, version 2, one score definition (`…0600`), 17 items (12 pending, 4 completed, 1 skipped). `annotation-queues.json`, `annotation-queue.json` and `requests/annotation-queue-create.json` use it. They are not live queues |
+| Annotation queue items | `01900000-0000-7000-8000-000000000a11` (pending, leased by Ada, trace `a100…0001`) and `…0a12` (completed, trace `…0002`). `annotation-queue-items.json` and `annotation-queue-item.json` use them. `annotation-queue-items-added.json` is the `201` of an add of `requests/annotation-queue-items-add.json` (trace `…0003` is not found). They are not live items |
+| Annotation queue by filter | `requests/annotation-queue-matching.json` is the body of a preview and an add by filter of queue `…0a01` (a trace filter over 2026-01-01 to 2026-01-02). `annotation-queue-matching-preview.json` is the `200` of the preview (3 matched) and `annotation-queue-matching-added.json` the `201` of the add (2 added, 1 existing). They are not live counts |
 | Dataset | `01900000-0000-7000-8000-000000000c01`, `faq`, at version 2 with 3 live items. `datasets.json` and `datasets/…c01.json` use it. `requests/dataset-create.json` has the same name and schema |
 | Dataset items | `01900000-0000-7000-8000-000000000d01`, `…0d02`, `…0d03`, and `…0d04` (added from a trace in version 4, `static/dataset-item-from-trace.json`) |
 | Dataset revisions | `01900000-0000-7000-8000-000000000d11` (item `…0d01`, version 1), `…0d12` (`…0d02`, version 1, closed at version 2), `…0d13` (`…0d03`, version 1), `…0d14` (`…0d02`, version 2), `…0d15` (`…0d04`, version 4, from trace `a100…0001`) |
 | Experiments | `01900000-0000-7000-8000-000000000e01` (`baseline`, completed, pinned to `faq` version 2), `…0e02` (`candidate`, completed in `experiments.json`, running in `experiment-created.json`). `experiment.json`, `experiments.json`, `experiment-created.json`, `experiment-results.json`, `experiment-comparison.json` and `requests/experiment-results.json` use them. They are not live experiments | `static/evaluator-stats.json` uses `…0e01` and `…0e02` as experiments with the relevance score.
 | Model prices | `01900000-0000-7000-8000-000000000c00`, an org row `Llama 3.1 8B (local)` for `llama3\.1:8b`, any provider, 0 USD; `…0c01`, a project row `gpt-4o (negotiated)` for `gpt\-4o`, provider `openai`, from `2026-01-01T00:00:00.000000000Z`, input 2.0, output 8.0, cache read 1.0. `model-prices.json`, `model-price.json` and `model-price-resolution.json` use them, and `requests/model-price-create.json` is the body of the create |
+| Prompts | `01900000-0000-7000-8000-000000001001`, `support-reply` (chat, versions 1 and 2; `production` on 1, `staging` on 2), and `01900000-0000-7000-8000-000000001002`, `summarize` (text, version 1, `production`). `prompts.json`, `prompts/…` and the `post_prompt` and `post_prompt_version` answers use them. `requests/prompt-create.json` and `requests/prompt-version-create.json` are the bodies of those two creates. They are not live prompts |
 | Judge trace (test result example) | `e1000000000000000000000000000001`; it is not in the dataset |
 | Created account | `01900000-0000-7000-8000-000000000102`, `new@example.com`. `admin-user-created.json` reuses that synthetic token in the reset link. It is not a live reset |
 | Trace ids | `a1000000000000000000000000000001` through `…0006` |
@@ -60,7 +64,7 @@ Do not edit `responses/`, `manifest.json` or `static/sql-result.json` by hand. R
 | Missing parent of trace 6 | `b1000000000000ff` |
 | PNG | `497790947d4666760ce38f3c00e852c71fdb66cae849bae8e9ede352719e1581` |
 
-Session and user ids match `[a-z0-9-]+` so they can be file names. Trace 5 uses environment `cetra-eval` and is left out of the default lists.
+Session and user ids match `[a-z0-9-]+` so they can be file names. Trace 5 uses environment `cetra-eval` and is left out of the default lists, as is any trace in `cetra-playground`.
 
 ## Manifest
 

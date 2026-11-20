@@ -102,6 +102,9 @@ it("shows the plan, features, limits and upgrade link", async () => {
   expect(within(limits).getByRole("row", { name: /Ingest burst/ })).toHaveTextContent("100,000");
   expect(within(limits).getByRole("row", { name: /Data access/ })).toHaveTextContent("1,825 days");
   expect(within(limits).getByRole("row", { name: /Seats/ })).toHaveTextContent("unlimited");
+  expect(within(limits).getByRole("row", { name: /Annotation queues/ })).toHaveTextContent(
+    "unlimited",
+  );
 
   expect(screen.getByRole("link", { name: "Upgrade" })).toHaveAttribute(
     "href",
@@ -125,7 +128,7 @@ it("says instance defaults apply and lists unlimited limits", async () => {
 
   expect(await screen.findByRole("heading", { name: "Self-hosted" })).toBeInTheDocument();
   expect(screen.getByText("Instance defaults apply.")).toBeInTheDocument();
-  expect(screen.getAllByText("unlimited")).toHaveLength(10);
+  expect(screen.getAllByText("unlimited")).toHaveLength(11);
 });
 
 it("warns about the grace period", async () => {

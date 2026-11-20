@@ -16,6 +16,10 @@ use cetra_server::api::account::{
 };
 use cetra_server::api::admin::{AdminLicense, AdminSettings, AdminUser, CreatedAdminUser};
 use cetra_server::api::alerts::{AlertEvent, AlertRule, NotificationChannel};
+use cetra_server::api::annotation_queues::{
+    AddQueueItems, AddedQueueItems, AnnotationQueue, AnnotationQueueItem, CreateAnnotationQueue,
+    NextQueueItem, QueueMatchingAdded, QueueMatchingPreview, QueueMatchingRequest, SkipQueueItem,
+};
 use cetra_server::api::backfills::{Backfill, BackfillEstimate, CreateBackfillRequest};
 use cetra_server::api::common::{Page, Problem};
 use cetra_server::api::connections::{
@@ -54,6 +58,11 @@ use cetra_server::api::online_rules::{
 use cetra_server::api::openapi::openapi;
 use cetra_server::api::org_sso::OrgSso;
 use cetra_server::api::payload::Payload;
+use cetra_server::api::playground::PlaygroundRunRequest;
+use cetra_server::api::prompts::{
+    CreatePromptRequest, CreateVersionRequest, Prompt, PromptLabelEvent, PromptMetrics,
+    PromptSettings, PromptVersion, SetLabelRequest,
+};
 use cetra_server::api::saved_views::SavedView;
 use cetra_server::api::schema::SchemaResponse;
 use cetra_server::api::score_definitions::{CreateScoreDefinitionRequest, ScoreDefinition};
@@ -418,6 +427,11 @@ fn static_files_match_their_types() {
     roundtrip::<SchemaResponse>("static/schema.json");
     roundtrip::<Page<SavedView>>("static/saved-views.json");
     roundtrip::<Page<DashboardSummary>>("static/dashboards.json");
+    roundtrip::<Page<AnnotationQueue>>("static/annotation-queues.json");
+    roundtrip::<AnnotationQueue>("static/annotation-queue.json");
+    roundtrip::<Page<AnnotationQueueItem>>("static/annotation-queue-items.json");
+    roundtrip::<AnnotationQueueItem>("static/annotation-queue-item.json");
+    roundtrip::<AddedQueueItems>("static/annotation-queue-items-added.json");
     roundtrip::<Dashboard>("static/dashboard.json");
     roundtrip::<Dashboard>("static/dashboard-overview.json");
     roundtrip::<Problem>("static/dashboard-stale.json");
@@ -482,7 +496,22 @@ fn request_examples_match_their_types_and_the_openapi_document() {
     roundtrip::<SqlQueryRequest>("requests/sql-query.json");
     roundtrip::<CreateEvaluatorRequest>("requests/evaluator-create.json");
     roundtrip::<CreateScoreDefinitionRequest>("requests/score-definition-create.json");
+    roundtrip::<CreateAnnotationQueue>("requests/annotation-queue-create.json");
+    roundtrip::<AddQueueItems>("requests/annotation-queue-items-add.json");
+    roundtrip::<NextQueueItem>("requests/annotation-queue-next.json");
+    roundtrip::<SkipQueueItem>("requests/annotation-queue-skip.json");
+    // `QueueMatchingRequest` holds a `TimeParam`, which has no `Serialize`, so it is only
+    // deserialized.
+    let matching_text =
+        fs::read_to_string(api_dir().join("requests/annotation-queue-matching.json"))
+            .unwrap_or_else(|error| panic!("{error}"));
+    serde_json::from_str::<QueueMatchingRequest>(&matching_text)
+        .unwrap_or_else(|error| panic!("requests/annotation-queue-matching.json: {error}"));
     roundtrip::<CreateDatasetRequest>("requests/dataset-create.json");
+    roundtrip::<CreatePromptRequest>("requests/prompt-create.json");
+    roundtrip::<CreateVersionRequest>("requests/prompt-version-create.json");
+    roundtrip::<SetLabelRequest>("requests/prompt-label-set.json");
+    roundtrip::<PromptSettings>("requests/prompt-settings.json");
     roundtrip::<AddItemsRequest>("requests/dataset-items-add.json");
     roundtrip::<ImportMapping>("requests/dataset-import-mapping.json");
     roundtrip::<FromTraceRequest>("requests/dataset-from-trace.json");
@@ -501,6 +530,7 @@ fn request_examples_match_their_types_and_the_openapi_document() {
         .unwrap_or_else(|error| panic!("{error}"));
     serde_json::from_str::<UpdateIssueRequest>(&issue_patch_text)
         .unwrap_or_else(|error| panic!("requests/issue-update.json: {error}"));
+    roundtrip::<PlaygroundRunRequest>("requests/playground-run.json");
     // `ModelPriceInput` has no `Serialize`, so it is only deserialized.
     let price_text = fs::read_to_string(api_dir().join("requests/model-price-create.json"))
         .unwrap_or_else(|error| panic!("{error}"));
@@ -549,6 +579,7 @@ fn request_examples_match_their_types_and_the_openapi_document() {
         ("post_evaluator", "requests/evaluator-create.json"),
         ("post_evaluator_test", "requests/evaluator-test.json"),
         ("post_evaluator_run", "requests/evaluator-run.json"),
+        ("post_playground_run", "requests/playground-run.json"),
         ("post_online_rule", "requests/online-rule-create.json"),
         ("post_issue_source", "requests/issue-source-create.json"),
         (
@@ -566,6 +597,30 @@ fn request_examples_match_their_types_and_the_openapi_document() {
         (
             "post_score_definition",
             "requests/score-definition-create.json",
+        ),
+        (
+            "create_annotation_queue",
+            "requests/annotation-queue-create.json",
+        ),
+        (
+            "add_annotation_queue_items",
+            "requests/annotation-queue-items-add.json",
+        ),
+        (
+            "next_annotation_queue_item",
+            "requests/annotation-queue-next.json",
+        ),
+        (
+            "skip_annotation_queue_item",
+            "requests/annotation-queue-skip.json",
+        ),
+        (
+            "preview_annotation_queue_matching",
+            "requests/annotation-queue-matching.json",
+        ),
+        (
+            "add_annotation_queue_matching",
+            "requests/annotation-queue-matching.json",
         ),
         ("post_dataset", "requests/dataset-create.json"),
         ("post_dataset_items", "requests/dataset-items-add.json"),
@@ -590,6 +645,10 @@ fn request_examples_match_their_types_and_the_openapi_document() {
         ("post_backfill", "requests/backfill-create.json"),
         ("post_model_price", "requests/model-price-create.json"),
         ("post_backfill_estimate", "requests/backfill-estimate.json"),
+        ("post_prompt", "requests/prompt-create.json"),
+        ("post_prompt_version", "requests/prompt-version-create.json"),
+        ("put_prompt_label", "requests/prompt-label-set.json"),
+        ("put_prompt_settings", "requests/prompt-settings.json"),
     ];
     let mut failures = Vec::new();
     for (operation_id, file) in requests {
@@ -712,6 +771,18 @@ fn generated_files_roundtrip() {
             "get_saved_view" => roundtrip::<SavedView>(&example.file),
             "list_score_definitions" => roundtrip::<Page<ScoreDefinition>>(&example.file),
             "post_score_definition" => roundtrip::<ScoreDefinition>(&example.file),
+            "list_annotation_queues" => roundtrip::<Page<AnnotationQueue>>(&example.file),
+            "get_annotation_queue" | "create_annotation_queue" => {
+                roundtrip::<AnnotationQueue>(&example.file);
+            }
+            "list_annotation_queue_items" => roundtrip::<Page<AnnotationQueueItem>>(&example.file),
+            "get_annotation_queue_item" => roundtrip::<AnnotationQueueItem>(&example.file),
+            "add_annotation_queue_items" => roundtrip::<AddedQueueItems>(&example.file),
+            "add_annotation_queue_matching" => roundtrip::<QueueMatchingAdded>(&example.file),
+            "preview_annotation_queue_matching" => {
+                roundtrip::<QueueMatchingPreview>(&example.file);
+            }
+            "next_annotation_queue_item" => roundtrip::<AnnotationQueueItem>(&example.file),
             "list_models" => roundtrip::<Page<ModelPrice>>(&example.file),
             "list_org_model_prices" => roundtrip::<Page<ModelPrice>>(&example.file),
             "resolve_model_price" => roundtrip::<ModelPriceResolution>(&example.file),
@@ -750,6 +821,18 @@ fn generated_files_roundtrip() {
             "post_dataset_items_from_traces" => roundtrip::<FromTracesResult>(&example.file),
             "list_dataset_version_changes" => roundtrip::<Page<ItemChange>>(&example.file),
             "list_experiment_trends" => roundtrip::<ExperimentTrends>(&example.file),
+            "list_prompts" => roundtrip::<Page<Prompt>>(&example.file),
+            "get_prompt" => roundtrip::<Prompt>(&example.file),
+            "get_prompt_resolve" | "get_prompt_version" | "post_prompt" | "post_prompt_version" => {
+                roundtrip::<PromptVersion>(&example.file);
+            }
+            "list_prompt_versions" => roundtrip::<Page<PromptVersion>>(&example.file),
+            "put_prompt_label" => roundtrip::<Prompt>(&example.file),
+            "list_prompt_label_events" => roundtrip::<Page<PromptLabelEvent>>(&example.file),
+            "get_prompt_metrics" => roundtrip::<PromptMetrics>(&example.file),
+            "get_prompt_settings" | "put_prompt_settings" => {
+                roundtrip::<PromptSettings>(&example.file);
+            }
             other => panic!("{other} has no round-trip"),
         }
     }

@@ -6,7 +6,9 @@
 //! migration is not this binary's.
 #![cfg_attr(not(test), allow(dead_code))] // `cetra serve` opens this from P5 on
 
+pub(crate) mod agent_contexts;
 pub(crate) mod alerts;
+pub(crate) mod annotation_queues;
 pub(crate) mod api_keys;
 pub(crate) mod backfills;
 pub(crate) mod connections;
@@ -30,6 +32,7 @@ pub(crate) mod password_resets;
 pub(crate) mod pending_traces;
 pub(crate) mod personal_tokens;
 pub(crate) mod projects;
+pub(crate) mod prompts;
 pub(crate) mod rule_spend;
 pub(crate) mod saved_views;
 pub(crate) mod score_definitions;

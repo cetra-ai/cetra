@@ -53,8 +53,8 @@ cetra.flush()  # also waits for pending scores
 
 ## Datasets and experiments
 
-`cetra.Client` is the REST client for datasets and experiments. It reads
-`api_key` and `base_url` the way `init()` does (argument, then
+`cetra.Client` is the REST client for datasets, experiments and annotation
+queues. It reads `api_key` and `base_url` the way `init()` does (argument, then
 `CETRA_API_KEY` / `CETRA_BASE_URL`, then the default), and raises
 `ConfigError` without a key. Unlike tracing and scoring, its calls raise on
 failure (see [Errors](#errors)).
@@ -96,6 +96,45 @@ client.datasets.delete("faq-v1")  # the dataset and its items
   (Draft 2020-12). The server checks every item written afterwards against
   them; a refused item raises `ApiError`, and its `errors` list names the
   failing fields.
+
+### Annotation queues
+
+Members review the items of a queue in the UI. The SDK creates queues and
+fills them with traces, spans or sessions.
+
+{/* untested: needs a running cetra server and an API key */}
+```python
+import cetra
+
+client = cetra.Client()  # the key and URL come from the environment
+definition_id = "01900000-0000-7000-8000-000000000600"  # a score definition's id
+
+queue = client.annotation_queues.create(
+    "Weekly review", target="trace", definition_ids=[definition_id]
+)
+result = client.annotation_queues.add_items(
+    queue.id, trace_ids=["4bf92f3577b34da6a3ce929d0e0e4736"]
+)
+print(result.added, result.existing)
+for skip in result.skipped:  # skip.index is the position in the list you passed
+    print(skip.index, skip.message)
+```
+
+- **Target.** `target` is `"trace"`, `"span"` or `"session"`. It is fixed for
+  the queue's life. `definition_ids` are the score definitions a review fills
+  in, in order (1 to 50, all distinct).
+- **Adding.** `add_items` takes exactly one of `trace_ids`, `spans` (pairs of
+  `(trace_id, span_id)`) or `session_ids`. It sends batches of 1,000. A target
+  already in the queue counts as `existing` and keeps its review state. The
+  server skips a target it cannot add, such as an unknown or hidden one, and
+  `skipped[].index` is its position in your list.
+- **Methods.** `get(queue_id)`, `create(name, target=..., definition_ids=...)`,
+  `update(queue_id, version=...)`, `delete(queue_id)`, `list()` and
+  `items(queue_id, status=...)`. `update` takes the `version` you read; a stale
+  one raises `ApiError` with status `409`. `delete` removes the queue and its
+  items, and the scores stay.
+- **Reviews.** Taking, completing and skipping items is done in the UI only.
+  The key needs the `write` scope to manage queues and items.
 
 ### Experiments
 
@@ -188,6 +227,10 @@ result.assert_min("exact", 0.8)  # raises AssertionError when the mean is below 
 - When the monthly units cap pauses score uploads, the scores are dropped
   with a warning; the run continues, and the local result still holds them.
 - `summary()` prints the experiment id, not a link to the UI.
+
+### Prompts
+
+`client.prompts` manages the prompt registry from scripts and CI: `get(name, label=..., version=...)` reads a prompt version without the SDK's cache, `list()` returns the prompt names, `create` adds a prompt with its first version, `create_version` adds a version, and `set_label(name, label, version)` moves a label to a version. The label `production` is the default for `get`. Each call raises `ApiError` on an error answer, like the dataset calls. Writes are sent once and never retried; reads retry like the other client reads. The [Prompts](/docs/evaluation/prompts/) page shows how the prompts are fetched and linked.
 
 ### Keys
 
