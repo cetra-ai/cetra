@@ -260,6 +260,12 @@ pub enum JudgeError {
     /// The call name does not match `^[a-zA-Z0-9_-]{1,64}$`.
     #[error("invalid call name")]
     InvalidName,
+    /// The provider has no embeddings API. Anthropic has none.
+    #[error("this provider has no embeddings API")]
+    EmbeddingUnsupported,
+    /// The embedding is empty, longer than 4 096 values, not finite, or a zero vector.
+    #[error("invalid embedding")]
+    EmbeddingInvalid,
     /// The model refused the prompt. The refusal text is discarded.
     #[error("model refused")]
     Refused,
@@ -340,6 +346,8 @@ impl fmt::Debug for JudgeError {
             Self::SchemaMismatch => formatter.write_str("SchemaMismatch"),
             Self::InvalidSchema => formatter.write_str("InvalidSchema"),
             Self::InvalidName => formatter.write_str("InvalidName"),
+            Self::EmbeddingUnsupported => formatter.write_str("EmbeddingUnsupported"),
+            Self::EmbeddingInvalid => formatter.write_str("EmbeddingInvalid"),
             Self::Refused => formatter.write_str("Refused"),
             Self::ContentFiltered => formatter.write_str("ContentFiltered"),
             Self::Truncated => formatter.write_str("Truncated"),
@@ -484,6 +492,8 @@ impl JudgeError {
             | Self::SchemaMismatch
             | Self::InvalidSchema
             | Self::InvalidName
+            | Self::EmbeddingUnsupported
+            | Self::EmbeddingInvalid
             | Self::Refused
             | Self::ContentFiltered
             | Self::Truncated => ErrorClass::Permanent,

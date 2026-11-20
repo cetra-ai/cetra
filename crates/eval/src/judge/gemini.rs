@@ -17,7 +17,7 @@ use crate::egress::{EgressClient, EgressRequest};
 use crate::error::JudgeError;
 use crate::secret::Secret;
 
-const DEFAULT_BASE: &str = "https://generativelanguage.googleapis.com";
+pub(super) const DEFAULT_BASE: &str = "https://generativelanguage.googleapis.com";
 
 const FILTERED_FINISH: &[&str] = &[
     "SAFETY",
@@ -33,7 +33,7 @@ pub(crate) async fn complete(
     call: &CompletionCall<'_>,
 ) -> Result<JudgeReply, JudgeError> {
     let url = generate_content_url(conn.base_url.as_ref(), call.model)?;
-    let headers = headers(conn)?;
+    let headers = gemini_headers(conn)?;
     let body = request_body(conn.structured_output, call)?;
     let response = client
         .post(EgressRequest {
@@ -61,7 +61,10 @@ fn generate_content_url(base: Option<&Url>, model: &str) -> Result<Url, JudgeErr
     endpoint(base, DEFAULT_BASE, &path)
 }
 
-fn headers(conn: &JudgeConnection) -> Result<Vec<(HeaderName, HeaderValue)>, JudgeError> {
+/// The request headers of a Gemini call, shared with embeddings.
+pub(super) fn gemini_headers(
+    conn: &JudgeConnection,
+) -> Result<Vec<(HeaderName, HeaderValue)>, JudgeError> {
     let mut map = HeaderMap::new();
     // Extra headers go first: the adapter's own headers are inserted after them and win (D-I-46).
     for (name, value) in &conn.extra_headers {

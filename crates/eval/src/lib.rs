@@ -43,7 +43,8 @@ pub use judge::{Adapter, JudgeConnection, JudgeUsage, StructuredOutput, UnknownN
 pub use mapping::resolve::{ItemData, TraceData, Variables, resolve};
 pub use mapping::{Expr, VariableMapping};
 pub use runner::{
-    CallTrace, CompletionInput, CompletionRun, EvalOutcome, EvalRun, EvalRunner, RunInput,
+    CallTrace, CompletionInput, CompletionRun, EmbeddingInput, EmbeddingRun, EvalOutcome, EvalRun,
+    EvalRunner, MAX_EMBEDDING_DIMENSIONS, RunInput,
 };
 pub use secret::Secret;
 pub use template::PromptTemplate;
@@ -60,6 +61,9 @@ mod complete_tests;
 #[cfg(test)]
 #[path = "../tests/egress_public.rs"]
 mod egress_public_tests;
+#[cfg(test)]
+#[path = "../tests/embed.rs"]
+mod embed_tests;
 #[cfg(test)]
 #[path = "../tests/gemini.rs"]
 mod gemini_tests;

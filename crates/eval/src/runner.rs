@@ -19,8 +19,9 @@ use crate::config::{Check, Evaluator, EvaluatorConfig, JudgeConfig, WebhookConfi
 use crate::egress::{EgressClient, EgressPolicy};
 use crate::error::{ConfigError, EvalError, JudgeError, WebhookError};
 use crate::judge::{
-    Adapter, CompletionCall, JUDGEMENT_DESCRIPTION, JUDGEMENT_TOOL, JudgeConnection, JudgeReply,
-    JudgeUsage, answer_schema, call, find_object, parse_answer,
+    Adapter, CompletionCall, EmbedCall, JUDGEMENT_DESCRIPTION, JUDGEMENT_TOOL, JudgeConnection,
+    JudgeReply, JudgeUsage, answer_schema, call, embed as call_embedding, find_object,
+    parse_answer,
 };
 use crate::mapping::resolve::Variables;
 use crate::secret::Secret;
@@ -205,6 +206,74 @@ impl fmt::Debug for CompletionRun {
     }
 }
 
+/// Largest vector accepted (D-IC-17).
+pub const MAX_EMBEDDING_DIMENSIONS: usize = 4096;
+
+/// One embeddings call (D-IC-5).
+pub struct EmbeddingInput<'a> {
+    /// Provider connection, already decrypted.
+    pub connection: &'a JudgeConnection,
+    /// Provider embedding model id.
+    pub model: &'a str,
+    /// The text to embed. Never logged or traced: the trace keeps only its length.
+    pub text: &'a str,
+    /// Requested size: OpenAI `dimensions`, Gemini `outputDimensionality`. `None` omits it.
+    pub dimensions: Option<u32>,
+    /// Whole-call timeout.
+    pub timeout: Duration,
+    /// Where the call trace goes and how it is priced.
+    pub trace: CallTrace<'a>,
+}
+
+/// The vector or the failure, and the call trace either way.
+pub struct EmbeddingRun {
+    /// L2-normalized vector, 1 to 4 096 finite values.
+    pub outcome: Result<Vec<f32>, EvalError>,
+    /// Input tokens the provider reported. `None` when it reported none (Gemini may not).
+    pub input_tokens: Option<u64>,
+    /// `cost_total` of the `embedding` span. `None` without tokens or a price.
+    pub cost_usd: Option<f64>,
+    /// The `embedding` span had tokens and no price.
+    pub unpriced_model: bool,
+    /// Root and `embedding` spans, normalized.
+    pub trace: Normalized,
+}
+
+/// Prints the model, the text's size, the requested size, the timeout and the trace id, never the text.
+impl fmt::Debug for EmbeddingInput<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EmbeddingInput")
+            .field("model", &self.model)
+            .field("text_bytes", &self.text.len())
+            .field("dimensions", &self.dimensions)
+            .field("timeout", &self.timeout)
+            .field("trace_id", &self.trace.trace_id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Prints the vector's length or the error class, never the vector.
+impl fmt::Debug for EmbeddingRun {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EmbeddingRun")
+            .field(
+                "outcome",
+                &self
+                    .outcome
+                    .as_ref()
+                    .map(Vec::len)
+                    .map_err(EvalError::class),
+            )
+            .field("input_tokens", &self.input_tokens)
+            .field("cost_usd", &self.cost_usd)
+            .field("unpriced_model", &self.unpriced_model)
+            .field("spans", &self.trace.spans.len())
+            .finish_non_exhaustive()
+    }
+}
+
 /// One completion call, before its trace is built.
 struct Attempt {
     outcome: Result<Map<String, Value>, EvalError>,
@@ -344,6 +413,70 @@ impl EvalRunner {
         CompletionRun {
             outcome: attempt.outcome,
             usage,
+            cost_usd,
+            unpriced_model,
+            trace,
+        }
+    }
+
+    /// Embeds `input.text` once. A failure is [`EmbeddingRun::outcome`]; the trace is always built.
+    pub async fn embed(&self, input: EmbeddingInput<'_>) -> EmbeddingRun {
+        let started = now_ns();
+        let call = EmbedCall {
+            model: input.model,
+            text: input.text,
+            dimensions: input.dimensions,
+            timeout: input.timeout,
+        };
+        let reply = call_embedding(&self.client, input.connection, &call).await;
+        let ended = now_ns().max(started);
+        let eval_error = reply
+            .as_ref()
+            .err()
+            .map(|error| EvalError::from(error.clone()));
+        let result = match &eval_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        };
+        let child = ChildSpan::Embedding {
+            started_ns: started,
+            ended_ns: ended,
+            adapter: input.connection.adapter,
+            request_model: input.model,
+            response_model: reply
+                .as_ref()
+                .ok()
+                .and_then(|reply| reply.response_model.as_deref()),
+            text_chars: input.text.chars().count(),
+            input_tokens: reply.as_ref().ok().and_then(|reply| reply.input_tokens),
+            dimensions: reply.as_ref().ok().map(|reply| reply.vector.len()),
+            error: reply.as_ref().err(),
+        };
+        let trace = build_call(&CallTraceInput {
+            trace: &input.trace,
+            started_ns: started,
+            ended_ns: ended,
+            result,
+            child: Some(child),
+        });
+        let (cost_usd, unpriced_model) = call_cost(&trace, SpanKind::Embedding);
+        let input_tokens = reply.as_ref().ok().and_then(|reply| reply.input_tokens);
+        let outcome = match reply {
+            Ok(reply) => Ok(reply.vector),
+            Err(error) => Err(EvalError::from(error)),
+        };
+        tracing::debug!(
+            root_name = input.trace.root_name,
+            duration_ns = ended.saturating_sub(started),
+            error_class = outcome
+                .as_ref()
+                .err()
+                .map_or("none", |error| error.class().as_str()),
+            "embedding"
+        );
+        EmbeddingRun {
+            outcome,
+            input_tokens,
             cost_usd,
             unpriced_model,
             trace,

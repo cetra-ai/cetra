@@ -4,6 +4,7 @@
 
 mod answer;
 mod anthropic;
+mod embed;
 mod gemini;
 mod http;
 mod openai;
@@ -14,6 +15,7 @@ use std::time::Duration;
 pub(crate) use answer::Answer;
 pub(crate) use answer::{RawAnswer, answer_schema, find_object, parse_answer};
 pub(crate) use answer::{cut_chars, normalize_label};
+pub(crate) use embed::{EmbedCall, embed};
 use reqwest::Url;
 use serde_json::Value;
 

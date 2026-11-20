@@ -338,6 +338,64 @@ pub(crate) fn error_reply() -> BoxedStrategy<Value> {
         .boxed()
 }
 
+/// An embedding vector: usually numbers, sometimes empty, overflowing, too long,
+/// or not numbers at all.
+fn vector_value() -> BoxedStrategy<Value> {
+    prop_oneof![
+        4 => prop::collection::vec(
+            prop::sample::select(&[0.0, 0.5, -1.0, 3.0, 1e39, -1e39, 1e-45, 1e308][..])
+                .prop_map(Value::from),
+            0..8,
+        )
+        .prop_map(Value::Array),
+        1 => prop::collection::vec(any::<f64>().prop_map(Value::from), 1..8)
+            .prop_map(Value::Array),
+        1 => (4_090usize..4_110)
+            .prop_map(|count| Value::Array(vec![Value::from(0.5); count])),
+        1 => prop::collection::vec(word_value(), 0..4).prop_map(Value::Array),
+        1 => json(),
+        1 => Just(Value::Null),
+    ]
+    .boxed()
+}
+
+/// An OpenAI-compatible embeddings reply with arbitrary leaves.
+pub(crate) fn openai_embedding_reply() -> BoxedStrategy<Value> {
+    (
+        maybe(vector_value()),
+        prop::option::weighted(0.2, json()),
+        maybe(json()),
+        maybe(word_value()),
+    )
+        .prop_map(|(vector, data, usage, model)| {
+            let data =
+                data.unwrap_or_else(|| Value::Array(vec![object(vec![("embedding", vector)])]));
+            object(vec![
+                ("data", Some(data)),
+                ("usage", usage),
+                ("model", model),
+            ])
+        })
+        .boxed()
+}
+
+/// A Gemini `embedContent` reply with arbitrary leaves.
+pub(crate) fn gemini_embedding_reply() -> BoxedStrategy<Value> {
+    (
+        maybe(vector_value()),
+        prop::option::weighted(0.2, json()),
+        maybe(json()),
+    )
+        .prop_map(|(vector, embedding, usage)| {
+            let embedding = embedding.unwrap_or_else(|| object(vec![("values", vector)]));
+            object(vec![
+                ("embedding", Some(embedding)),
+                ("usageMetadata", usage),
+            ])
+        })
+        .boxed()
+}
+
 /// A value that often fits one of the outputs under test.
 fn score_value() -> BoxedStrategy<Value> {
     prop_oneof![

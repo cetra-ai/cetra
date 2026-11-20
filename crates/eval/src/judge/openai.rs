@@ -15,7 +15,7 @@ use crate::egress::{EgressClient, EgressRequest};
 use crate::error::JudgeError;
 use crate::secret::Secret;
 
-const DEFAULT_BASE: &str = "https://api.openai.com/v1";
+pub(super) const DEFAULT_BASE: &str = "https://api.openai.com/v1";
 
 pub(crate) async fn complete(
     client: &EgressClient,
@@ -24,7 +24,7 @@ pub(crate) async fn complete(
 ) -> Result<JudgeReply, JudgeError> {
     validate_model(call.model)?;
     let url = endpoint(conn.base_url.as_ref(), DEFAULT_BASE, "chat/completions")?;
-    let headers = headers(conn)?;
+    let headers = openai_headers(conn)?;
     let body = request_body(conn.structured_output, call)?;
     let response = client
         .post(EgressRequest {
@@ -46,7 +46,10 @@ pub(crate) async fn complete(
     parse_completion(&response.body)
 }
 
-fn headers(conn: &JudgeConnection) -> Result<Vec<(HeaderName, HeaderValue)>, JudgeError> {
+/// The request headers of an OpenAI-compatible call, shared with embeddings.
+pub(super) fn openai_headers(
+    conn: &JudgeConnection,
+) -> Result<Vec<(HeaderName, HeaderValue)>, JudgeError> {
     let mut map = HeaderMap::new();
     // Extra headers go first: the adapter's own headers are inserted after them and win (D-I-46).
     for (name, value) in &conn.extra_headers {

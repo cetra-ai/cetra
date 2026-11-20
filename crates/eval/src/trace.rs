@@ -86,6 +86,27 @@ pub(crate) enum ChildSpan<'a> {
         /// Provider or parse error. The message is the error's `Display`.
         error: Option<&'a JudgeError>,
     },
+    /// The embeddings call. The text is never traced, only its length.
+    Embedding {
+        /// Child start, nanoseconds since the Unix epoch.
+        started_ns: i64,
+        /// Child end, nanoseconds since the Unix epoch.
+        ended_ns: i64,
+        /// Which provider built the request.
+        adapter: Adapter,
+        /// Model named on the request.
+        request_model: &'a str,
+        /// Model named on the response, when the provider sent one.
+        response_model: Option<&'a str>,
+        /// Length of the embedded text, in characters.
+        text_chars: usize,
+        /// Input tokens, when the provider sent them.
+        input_tokens: Option<u64>,
+        /// Length of the returned vector. Set only when the vector was accepted.
+        dimensions: Option<usize>,
+        /// Provider or validation error. The message is the error's `Display`.
+        error: Option<&'a JudgeError>,
+    },
     /// The webhook POST.
     Webhook {
         /// Child start, nanoseconds since the Unix epoch.
@@ -138,7 +159,7 @@ pub(crate) struct CallTraceInput<'a> {
     pub(crate) ended_ns: i64,
     /// `Err` sets the root status to error with the error's `Display`.
     pub(crate) result: Result<(), &'a EvalError>,
-    /// The existing `ChildSpan` enum: `Llm` here, `Embedding` from M2.3. `Webhook` is never passed.
+    /// `Llm` for a completion, `Embedding` for an embeddings call. `Webhook` is never passed.
     pub(crate) child: Option<ChildSpan<'a>>,
 }
 
@@ -409,6 +430,53 @@ fn child_span(trace_id: TraceId, parent: SpanId, child: &ChildSpan<'_>) -> Span 
                 &span_id(trace_id, 1),
                 Some(&parent),
                 &format!("chat {request_model}"),
+                (*started_ns, *ended_ns),
+                attributes,
+                status,
+            )
+        }
+        ChildSpan::Embedding {
+            started_ns,
+            ended_ns,
+            adapter,
+            request_model,
+            response_model,
+            text_chars,
+            input_tokens,
+            dimensions,
+            error,
+        } => {
+            let mut attributes = vec![
+                string_attr(attr::SPAN_KIND, SpanKind::Embedding.as_str()),
+                string_attr(attr::ENVIRONMENT, environment::EVAL),
+                string_attr("gen_ai.operation.name", "embeddings"),
+                string_attr("gen_ai.provider.name", adapter.provider_name()),
+                string_attr("gen_ai.request.model", request_model),
+                string_attr(
+                    attr::INPUT,
+                    &serde_json::json!({"chars": text_chars}).to_string(),
+                ),
+                string_attr(attr::INPUT_FORMAT, "json"),
+            ];
+            if let Some(model) = response_model {
+                attributes.push(string_attr("gen_ai.response.model", model));
+            }
+            if let Some(tokens) = input_tokens {
+                attributes.push(int_attr("gen_ai.usage.input_tokens", token_count(*tokens)));
+            }
+            if let Some(dimensions) = dimensions {
+                attributes.push(string_attr(
+                    attr::OUTPUT,
+                    &serde_json::json!({"dimensions": dimensions}).to_string(),
+                ));
+                attributes.push(string_attr(attr::OUTPUT_FORMAT, "json"));
+            }
+            let status = error.map(|error| error_status(&error.to_string()));
+            otel_span(
+                trace_id,
+                &span_id(trace_id, 1),
+                Some(&parent),
+                &format!("embeddings {request_model}"),
                 (*started_ns, *ended_ns),
                 attributes,
                 status,
@@ -1186,6 +1254,54 @@ mod tests {
         assert!(!unpriced);
         assert_eq!(call_cost(&normalized, SpanKind::Embedding), (None, false));
         snapshot("call_trace_completion_success", &normalized);
+    }
+
+    #[test]
+    fn call_trace_embedding_success() {
+        let ingest = ingest();
+        let prices = prices();
+        let metadata = [("k", "v")];
+        let trace = CallTrace {
+            trace_id: trace_id(),
+            root_name: "cetra.issue.embed",
+            metadata: &metadata,
+            ingest: &ingest,
+            prices,
+        };
+        let child = ChildSpan::Embedding {
+            started_ns: START,
+            ended_ns: END,
+            adapter: Adapter::OpenAi,
+            request_model: "text-embedding-3-small",
+            response_model: Some("text-embedding-3-small"),
+            text_chars: 14,
+            input_tokens: Some(1_000),
+            dimensions: Some(3),
+            error: None,
+        };
+        let input = CallTraceInput {
+            trace: &trace,
+            started_ns: START,
+            ended_ns: END,
+            result: Ok(()),
+            child: Some(child),
+        };
+        let normalized = build_call(&input);
+        assert_common(&normalized, &[0, 1]);
+        let root = &normalized.spans[0];
+        assert_eq!(root.span_kind, SpanKind::Chain);
+        assert_eq!(root.metadata.get("k").map(String::as_str), Some("v"));
+        let embedding = &normalized.spans[1];
+        assert_eq!(embedding.span_kind, SpanKind::Embedding);
+        assert_eq!(embedding.name, "embeddings text-embedding-3-small");
+        assert_eq!(embedding.input_tokens, Some(1_000));
+        assert_eq!(embedding.input.as_deref(), Some(r#"{"chars":14}"#));
+        assert_eq!(embedding.output.as_deref(), Some(r#"{"dimensions":3}"#));
+        let (cost, unpriced) = call_cost(&normalized, SpanKind::Embedding);
+        assert!(cost.is_some());
+        assert!(!unpriced);
+        assert_eq!(call_cost(&normalized, SpanKind::Llm), (None, false));
+        snapshot("call_trace_embedding_success", &normalized);
     }
 
     #[test]
