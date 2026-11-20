@@ -9,9 +9,10 @@ function page({
   description = '<meta name="description" content="D">',
   canonical = '<link rel="canonical" href="https://cetra.sh/x/">',
   robots = '<meta name="robots" content="noindex">',
+  ogImage = '<meta property="og:image" content="https://cetra.sh/og.png">',
   body = "<h1>A</h1>",
 } = {}) {
-  return `<!doctype html><html ${htmlAttrs}><head>${title}${description}${canonical}${robots}</head><body>${body}</body></html>`;
+  return `<!doctype html><html ${htmlAttrs}><head>${title}${description}${canonical}${robots}${ogImage}</head><body>${body}</body></html>`;
 }
 
 const noindex = { noindex: true };
@@ -272,6 +273,10 @@ describe("checkPage", () => {
       '<h1>A</h1><script>document.write("<h1>B</h1>")</script>' +
       '<style>p::after { content: "powerful"; }</style>';
     assert.deepEqual(checkPage("/x/", page({ body }), noindex), []);
+  });
+
+  it("og:image missing", () => {
+    assert.deepEqual(checkPage("/x/", page({ ogImage: "" }), noindex), ["og:image missing"]);
   });
 });
 

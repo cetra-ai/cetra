@@ -1,9 +1,11 @@
+import sitemap from "@astrojs/sitemap";
 import starlight from "@astrojs/starlight";
 import { defineConfig } from "astro/config";
 import starlightLinksValidator from "starlight-links-validator";
 import starlightLlmsTxt from "starlight-llms-txt";
 import starlightOpenAPI, { openAPISidebarGroups } from "starlight-openapi";
 import starlightSidebarTopics from "starlight-sidebar-topics";
+import { ALWAYS_NOINDEX } from "./src/marketing/routes.mjs";
 
 // The site is cetra.sh: the landing page at `/` (src/pages/index.astro) and the
 // documentation under `/docs/` (src/content/docs/docs/), D-W-2.
@@ -11,6 +13,10 @@ export default defineConfig({
   site: "https://cetra.sh",
   trailingSlash: "always",
   integrations: [
+    // Starlight adds its own sitemap unless one is present; this one leaves out noindex pages.
+    sitemap({
+      filter: (page) => !ALWAYS_NOINDEX.some((route) => page === `https://cetra.sh${route}`),
+    }),
     starlight({
       title: "cetra",
       description:

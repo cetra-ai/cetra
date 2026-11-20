@@ -9,8 +9,8 @@ The design is `docs/website/00-design.md`. It has seven milestones, M1–M7, eac
 | M3 Pricing, self-hosting, security | [`03-m3-pricing-selfhost-security.md`](03-m3-pricing-selfhost-security.md) | done (P1–P3) |
 | M4 Integrations | [`04-m4-integrations.md`](04-m4-integrations.md) | done (I1–I2) |
 | M5 Compare | [`05-m5-compare.md`](05-m5-compare.md) | done (C1–C2) |
-| M6 Benchmarks | not planned (waits for the benchmark, design §9.2) | — |
-| M7 Launch | [`07-m7-launch.md`](07-m7-launch.md) | planned |
+| M6 Benchmarks | not planned: waits for the benchmark | — |
+| M7 Launch | [`07-m7-launch.md`](07-m7-launch.md) | done (L1–L2) |
 
 ## Branches
 

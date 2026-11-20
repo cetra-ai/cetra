@@ -202,6 +202,11 @@ export function checkPage(route, html, { noindex, distFiles = new Set(), launche
   for (const m of scanned.matchAll(BANNED_WORD)) findings.push(`banned word: ${m[0]}`);
   findings.push(...Array.from(scanned.matchAll(CETRA_CAPS), () => "write cetra in lower case"));
 
+  const hasOgImage = metas.some(
+    (m) => m.get("property") === "og:image" && (m.get("content") ?? "").startsWith(`${SITE_URL}/`),
+  );
+  if (!hasOgImage) findings.push("og:image missing");
+
   return findings;
 }
 
