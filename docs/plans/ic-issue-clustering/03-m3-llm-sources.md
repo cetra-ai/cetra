@@ -61,16 +61,80 @@ Out of scope:
 
 No new dependency.
 
+## Amendments (cold review; binding, they override the phase text where they differ)
+
+Each phase lists the amendments it must apply.
+
+- **A1 Struct literals.** New fields on `SourceRow` and `IssueRow` (M3.1a) break every literal outside `meta/issues.rs`. M3.1a fixes them all:
+  - find them with `grep -rn "SourceRow {\|IssueRow {" crates/server/src` (today: `routes/issues.rs` ~249, ~305, ~1490, ~1577, ~1902; `eval/trigger.rs` ~1030, ~2067; `issues/errors.rs` ~657; the conversions in `api/issues.rs`);
+  - new `Option` fields are `None`, list fields `Vec::new()`, and `member_count` is `0`;
+  - an update that rebuilds a row from the stored one copies the stored values.
+  Those files are in M3.1a's Edit list.
+- **A2 Visibility.** These become `pub(crate)` in the phase that first uses them, and that phase lists the file:
+  - in `eval/execute.rs`: `connection_unchanged`, `retry_write`, `spent` and `commit_unless_deleted` (`commit_judge_trace`, `count_judge_usage` and `after_commit` already are);
+  - in `issues/errors.rs`: `write_occurrences`, `Occurrence` and its fields, and `occurrence_score`.
+- **A3 Occurrence span.** `Occurrence.span_id` becomes `Option<SpanId>`. `occurrence_score` writes the `cetra.issue.span_id` metadata key only when it is `Some`.
+  - Error issues keep their span.
+  - A candidate's occurrence has the candidate's `span_id` (a span-target score), else `None`.
+  - Its trace is the candidate's resolved `trace_id` (A4), and `at = min(trace_start, now)`.
+- **A4 Resolved target.** Add `pub(crate) async fn set_candidate_target(conn, id: Uuid, claims: u32, trace_id: TraceId, trace_start: i64, user_id: Option<&str>, session_id: Option<&str>, now: i64) -> Result<bool, MetaError>`, fenced by `status = 'running' AND claims = ?` (M3.1b).
+  - The worker calls it right after a successful load, so retries, refits and the deletion cascade see the trace.
+  - A session target resolves to a trace: read the score (`cetra_storage::score_list` by `score_id`) for its `created_at`; then the newest trace of the session that started before it, with the read `routes/sessions.rs` uses to list a session's traces (filter `session_id = '<id>'`, the window `[created_at − 30 days, created_at + 1 ns)`, newest first, limit 1). If there is none: `Dropped`.
+  - A user or session already set on the candidate is kept.
+- **A5 Finish variants.** `CandidateFinish` is exactly:
+  - `Summarized { summary, prompt_version, call_trace_id }`: stays `running`.
+  - `Pending { vector, embed_model, dimension }`.
+  - `Assigned { issue_id, vector, embed_model, dimension }`.
+  - `Dropped`.
+  - `Retry { not_before }` → `queued`.
+  - `LoadRetry { not_before }` → `queued`, `load_retries + 1`.
+  - `Requeue { not_before }` → `queued`, no counter changes (used before any attempt: source missing or paused, trace load saturated, no connection slot).
+  - `PauseRequeue { not_before }` → `queued`, `attempts − 1` (only after `start_candidate_attempt`).
+  - `Failed { class }`.
+  - `Skipped { class }`.
+
+  `finish_candidate(conn, id, claims, finish, spent_usd: f64, now)` adds `spent_usd` to the row's `cost_usd` for every variant. The caller runs it and `add_spend(conn, source, day_start(now), spent_usd)` (when > 0) in one `state.meta.write` closure.
+  - A load failure with `load_retries` already 3 is `Failed { class: "trace_not_found" }` (three retries, then the fourth failure fails).
+  - A fence that returns `false` stops the candidate silently, with nothing more done.
+  - Summary and embedding calls share the 6 attempts and the backoff; this is intended.
+- **A6 Deletion guard on calls.** The worker follows `execute.rs`:
+  - check 0 at the start;
+  - check A after the load, with the trace's users;
+  - each call trace committed through `commit_unless_deleted`, then `after_commit` for the follow-up;
+  - a block at any point gives `Skipped { class: "deleted" }`.
+  The refit's naming traces hold only summaries and are not guarded (accepted).
+- **A7 Queued expiry.** `prune_candidates` also sets `Skipped { class: "expired" }` on candidates still `queued` more than 1 day after `created_at` (a paused source's backlog).
+- **A8 Refit schedule.**
+  - Every refit, success or error (`busy`, `budget`, `cluster` or a naming error), ends with `next_refit_at = finished_at + 6 h`.
+  - `eval::recover` closes refit rows with `finished_at IS NULL` (`finished_at = now`, `error_class = 'interrupted'`), through `close_open_refits(conn, now)` in M3.1b.
+  - The refit route answers 409 when a refit started less than 10 minutes ago **or** when `next_refit_at <= now` (one is already due).
+  - One refit can hold the loop for a long time (naming waits up to 2 minutes per cluster). Other sources wait; this is accepted.
+- **A9 Refit writes.** Each join and each new issue is one `state.meta.write` that reads `source_centroids` or `get_issue_tx` inside it, then writes the issue and runs `set_candidates_assigned(conn, ids, issue, now) -> Result<Vec<Uuid>, MetaError>`, fenced `AND status = 'pending'`. It returns the ids actually assigned, and occurrences are written only for those. The pending list and vectors are read outside, so a candidate deleted or assigned in between is skipped by the fence.
+- **A10 Determinism and ids.**
+  - `pending_candidates` orders by `created_at DESC, id DESC`, and the refit re-sorts the kept list by `(created_at, id)` ascending.
+  - `call_trace_id(owner: Uuid, claims: u32, call: u32)` uses the call as `u32` BE: 1 summarize, 2 embed, `3 + cluster index` naming.
+  - A refit uses `claims = 0`.
+- **A11 Triggers wiring.** `ProjectSources` gains `topics: Vec<SourceRow>`, and `issues::sources::refresh` fills it from `llm_sources`; a project with only topic sources takes its `org` and `timeout_ns` from that tuple. A separate `pub(crate) async fn refresh_score_rules(state) -> Result<(), MetaError>` in `triggers.rs` rebuilds the score rules:
+  - `refresh` calls it;
+  - so do the source routes after every create, update and delete (moved from M3.7 to M3.3; `routes/issues.rs` is in M3.3's Edit list for these three calls only).
+
+  `on_scores_written` only logs its errors. A burst of bad scores makes one meta write per `scores::write` call, which is accepted. Recursion is impossible: occurrence writes use `Writer::Issue`, which returns first.
+- **A12 Panics and reservations.** `run_candidate` runs inside `AssertUnwindSafe(…).catch_unwind()`, as `dispatch::run_claimed` does; a panic finishes the candidate `Failed { class: "internal" }`. A budget `Reservation` is settled on every success path and released by `Drop` otherwise.
+
 ## Phases
 
 | Phase | Edits (summary) | Depends on |
 |---|---|---|
-| M3.1 Tables and store | migration `0024`, `meta/issues.rs`, schema snapshot, spec 04, design doc, decision log | — |
+| M3.1a Tables and rows | migration `0024`, `SourceRow`/`IssueRow` fields, vector codec, every struct literal (A1), spec 04, design doc, decision log | — |
+| M3.1b Store functions | `meta/issues.rs` candidate, spend, refit and source functions (A4, A5, A8, A9, A10) | M3.1a |
 | M3.2 Limiter and config | `eval/dispatch.rs`, `config.rs`, configuration reference | — |
 | M3.3 Triggers | new `issues/bad_score.rs`, new `issues/topics.rs`, new `issues/triggers.rs`, `scores.rs`, `eval/trigger.rs`, `issues/sources.rs`, `http/mod.rs`, `serve.rs` | M3.1 |
-| M3.4 Worker | new `issues/worker.rs`, new `issues/prompts.rs`, `issues/errors.rs` (shared join), `issues/mod.rs`, `eval/mod.rs`, `serve.rs` | M3.1–M3.3 |
+| M3.4a Prompts and shared code | new `issues/prompts.rs`, `issues/errors.rs` (join, occurrences: A2, A3), `issues/mod.rs`, `eval/execute.rs` (A2) | M3.1b |
+| M3.4b Worker loop | new `issues/worker.rs` (loop, `call_trace_id`), `http/mod.rs`, `serve.rs`, `eval/mod.rs` (spawn, recover, janitor) | M3.4a |
+| M3.4c Candidate run | `issues/worker.rs` (`run_candidate`) | M3.4b |
 | M3.5 Refit | new `issues/refit.rs`, `issues/prompts.rs`, `issues/mod.rs`, `eval/mod.rs` | M3.4 |
-| M3.6 Pauses, budget clear, pruning, deletion, connection test | `meta/online_rules.rs`-side mirrors in `meta/issues.rs`, `routes/connections.rs`, `api/connections.rs`, `meta/evaluators.rs`, `eval/dispatch.rs`, `deletion/resolve.rs`, `issues/worker.rs` | M3.4, M3.5 |
+| M3.6a Pauses, budget and pruning | `meta/issues.rs`, `issues/worker.rs`, `issues/refit.rs`, `eval/dispatch.rs`, `eval/execute.rs` (A2) | M3.5 |
+| M3.6b Connection test, connection guard, deletion | `routes/connections.rs`, `api/connections.rs`, `meta/evaluators.rs`, `deletion/resolve.rs`, spec 03 and 09 | M3.6a |
 | M3.7 API | `api/issues.rs`, `routes/issues.rs`, openapi, fixtures, mocks | M3.1, M3.5 |
 | M3.8 Web and docs | source editor and page, issues list kind filter, docs page, CHANGELOG, specs, roadmap | M3.7 |
 
@@ -87,9 +151,13 @@ All phases run one after the other in one worktree.
 
 ---
 
-### M3.1 Tables and store
+### M3.1 Tables and store (M3.1a, then M3.1b)
 
 **Goal:** the columns and tables of the LLM kinds, and their store functions.
+
+**Split:**
+- **M3.1a**, commit `Add issue candidate, spend and refit tables`: the migration; `SourceKind`'s new variants; the new fields of `SourceRow` and `IssueRow` with their reads and writes in the existing functions; `encode_vector` and `decode_vector`; every struct literal (A1); the spec, design doc and decision log edits; the round-trip and codec tests.
+- **M3.1b**, commit `Add issue candidate and refit store functions`: every function of store-additions item 4, with A4 (`set_candidate_target`), A5 (`finish_candidate`'s variants and `spent_usd`), A8 (`close_open_refits`), A9 (`set_candidates_assigned` returning the assigned ids, fenced on `pending`) and A10 (ordering), and their tests.
 
 **Edit:**
 - new `crates/server/migrations/meta/0024_issue_candidates.sql`;
@@ -242,7 +310,7 @@ Column meanings:
    pub(crate) async fn set_candidates_assigned(conn, ids: &[Uuid], issue: Uuid, now: i64) -> Result<(), MetaError>;
    /// Pending candidates created before `before` become outliers; returns how many.
    pub(crate) async fn mark_outliers(conn, source: Uuid, before: i64, now: i64) -> Result<u64, MetaError>;
-   /// Ten things set the vector of a source the first time: Some(dim) stays.
+   /// Sets the source's embedding dimension when it is NULL; returns the stored dimension.
    pub(crate) async fn set_embed_dimension(conn, source: Uuid, dimension: u32) -> Result<u32, MetaError>; // returns the stored dimension
    pub(crate) struct RefitRow { id, source_id, trigger: &'static str /* schedule|manual */, started_at, finished_at: Option<i64>,
        pending: u32, clusters: u32, created: u32, joined: u32, outliers: u32, cost_usd: f64, error_class: Option<String> }
@@ -274,7 +342,7 @@ Column meanings:
 - `due_refits`;
 - `encode_vector` and `decode_vector` round-trip, and a bad length is refused.
 
-**Commit:** `Add issue candidate, spend and refit tables`
+**Commits:** see the split above.
 
 ---
 
@@ -308,6 +376,8 @@ Column meanings:
 ### M3.3 Triggers
 
 **Goal:** bad scores and completed production traces become queued candidates (D-IC-4).
+
+**Amendments:** A11. Also edit `crates/server/src/routes/issues.rs`, only to call `issues::triggers::refresh_score_rules(&state)` after a source create, update and delete (log errors).
 
 **Edit:** new `crates/server/src/issues/bad_score.rs`, new `crates/server/src/issues/topics.rs`, new `crates/server/src/issues/triggers.rs`, `crates/server/src/issues/mod.rs`, `crates/server/src/issues/sources.rs`, `crates/server/src/scores.rs`, `crates/server/src/eval/trigger.rs`, `crates/server/src/http/mod.rs` (`AppInner` field), `crates/server/src/serve.rs` (field construction).
 
@@ -390,9 +460,16 @@ Column meanings:
 
 ---
 
-### M3.4 Worker
+### M3.4 Worker (M3.4a, M3.4b, M3.4c)
 
 **Goal:** candidates are claimed, summarized, embedded and assigned (D-IC-4, D-IC-5, D-IC-7, D-IC-12).
+
+**Split and amendments:**
+- **M3.4a** (steps 1 and 3, A2, A3), commit `Add issue prompts and share the issue join`.
+- **M3.4b** (steps 2 and 4: `call_trace_id` with A10, the loop, `AppInner` fields, spawn, recover, janitor, A8's `close_open_refits` call in recover), commit `Run the issue candidate workers`. `run_candidate` is a stub that finishes `Requeue { not_before: now + 60 s }`, replaced in M3.4c.
+- **M3.4c** (steps 5 and 6 with A4, A5, A6, A12), commit `Summarize, embed and assign issue candidates`.
+
+The tests are split the same way.
 
 **Edit:** new `crates/server/src/issues/worker.rs`, new `crates/server/src/issues/prompts.rs`, `crates/server/src/issues/errors.rs` (extract the shared join and the occurrence writer), `crates/server/src/issues/mod.rs`, `crates/server/src/eval/mod.rs` (spawn, recover, wake), `crates/server/src/http/mod.rs`, `crates/server/src/serve.rs`.
 
@@ -430,7 +507,7 @@ Column meanings:
 2. Call trace ids (in `worker.rs`):
    ```rust
    /// First 16 bytes of SHA-256(`cetra.issue-call.v1` ‖ candidate or refit id (16) ‖ claims as u32 BE ‖ call byte), all-zero → last byte 1.
-   pub(crate) fn call_trace_id(owner: Uuid, claims: u32, call: u8) -> TraceId;   // call: 1 summarize, 2 embed, 3.. naming index + 3
+   pub(crate) fn call_trace_id(owner: Uuid, claims: u32, call: u32) -> TraceId;  // A10: call as u32 BE; 1 summarize, 2 embed, 3 + naming index
    ```
 3. `errors.rs` refactor:
    - extract from `write_groups` a `pub(crate) async fn join_issue(conn, issue: &mut IssueRow, occurrence_times: (i64, i64), now) -> Result<bool, MetaError>`, which applies the regression and the first and last seen, writes `update_issue` when something changed, and inserts the `regressed` event; `write_groups` calls it;
@@ -504,13 +581,15 @@ Column meanings:
 - the prompt texts are pinned by a unit test (the exact strings above);
 - `call_trace_id` is deterministic and never all zeros.
 
-**Commit:** `Summarize, embed and assign issue candidates`
+**Commits:** see the split above.
 
 ---
 
 ### M3.5 Refit
 
 **Goal:** due sources cluster their pending candidates into new issues (D-IC-8).
+
+**Amendments:** A3, A8, A9, A10.
 
 **Edit:** new `crates/server/src/issues/refit.rs`, `crates/server/src/issues/mod.rs`, `crates/server/src/eval/mod.rs` (spawn), `crates/server/src/issues/worker.rs` (only to reuse its helpers).
 
@@ -562,9 +641,13 @@ Column meanings:
 
 ---
 
-### M3.6 Pauses, budgets, pruning, deletion and the connection test
+### M3.6 Pauses, budgets, pruning, deletion and the connection test (M3.6a, M3.6b)
 
 **Goal:** sources pause and resume with their connections and budgets; old candidates and deleted traces' candidates go away; the connection test covers embeddings.
+
+**Split and amendments:**
+- **M3.6a** (steps 1–3, A7, with `eval/execute.rs` for A2's `connection_unchanged`), commit `Pause and prune issue sources`.
+- **M3.6b** (steps 4–6), commit `Cover issue sources in the connection test and deletions`.
 
 **Edit:** `crates/server/src/meta/issues.rs`, `crates/server/src/issues/worker.rs`, `crates/server/src/issues/refit.rs`, `crates/server/src/eval/dispatch.rs` (budget and prune ticks), `crates/server/src/routes/connections.rs`, `crates/server/src/api/connections.rs`, `crates/server/src/meta/evaluators.rs`, `crates/server/src/deletion/resolve.rs`, `docs/spec/03-storage.md` (§ Cascades: one line), `docs/spec/09-api.md` (connection test body).
 
@@ -605,7 +688,7 @@ Column meanings:
 - a trace deletion deletes its candidates;
 - the connection test with `embedding_model`: OpenAI ok, Anthropic refused.
 
-**Commit:** `Pause, prune and delete issue candidates with their connections and traces`
+**Commits:** see the split above.
 
 ---
 
@@ -638,7 +721,7 @@ Column meanings:
    - **Budget:** `budget_usd` needs `budget_period`, and the chat model must have input and output prices, and the embedding model an input price, else a 400 (`budget::model_price`, and the new input-only check).
    - **PATCH** refuses `embed_connection_id` and `embed_model` (400 `"fixed after create; create a new source"`).
    - Create sets `next_refit_at = now + 1 h` for the LLM kinds.
-3. After every source create, update and delete, call `issues::sources::refresh(&state).await` (log on error) and wake the workers.
+3. The source routes already call `refresh_score_rules` (M3.3). After a create, update or delete, also wake the IC workers.
 4. New routes (tag `issues`):
    - `POST …/issue-sources/{id}/refit` (`ManageEvaluation`): 400 for an `error` source, 409 when `last_refit_started` is less than 10 minutes ago, else `set_next_refit(now)` and `202` with the source;
    - `GET …/issue-sources/{id}/refits` (`View`): `{ data: [IssueRefit] }`, the newest 50.
