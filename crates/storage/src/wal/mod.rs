@@ -202,6 +202,8 @@ pub(crate) fn spans_keyed(
                 provider: None,
                 request_model: None,
                 response_model: None,
+                prompt_name: None,
+                prompt_version: None,
                 operation: None,
                 input_tokens: None,
                 output_tokens: None,

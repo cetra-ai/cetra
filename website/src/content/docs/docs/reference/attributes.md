@@ -26,6 +26,8 @@ The cetra SDKs set these attributes. You can also set them yourself on any OpenT
 | `cetra.cost.total` | float | `set_cost` | The total cost in USD, reported by your code. cetra does not compute a cost when it is present. |
 | `cetra.experiment.id` | string | `evaluate` | The experiment a span belongs to. |
 | `cetra.dataset_item.id` | string | `evaluate` | The dataset item an experiment run used. |
+| `cetra.prompt.name` | string | `context` and `compile` | The registry prompt the span used. |
+| `cetra.prompt.version` | integer | `context` and `compile` | The version of that prompt, 1 or higher. |
 
 ## Set by cetra
 

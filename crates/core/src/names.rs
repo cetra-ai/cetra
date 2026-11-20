@@ -42,6 +42,10 @@ pub mod attr {
     pub const METADATA_PREFIX: &str = crate::cetra_name!(".metadata.");
     /// `cetra.environment`. Spec 02 § Context fields, spec 10.
     pub const ENVIRONMENT: &str = crate::cetra_name!(".environment");
+    /// `cetra.prompt.name`. The registry prompt a span used (D-V-15).
+    pub const PROMPT_NAME: &str = crate::cetra_name!(".prompt.name");
+    /// `cetra.prompt.version`. The version of that prompt (D-V-15).
+    pub const PROMPT_VERSION: &str = crate::cetra_name!(".prompt.version");
     /// `cetra.release`. Spec 02 § Context fields.
     pub const RELEASE: &str = crate::cetra_name!(".release");
     /// `cetra.ttft_ns`. Spec 02 § Model, provider, usage.
@@ -149,6 +153,8 @@ mod tests {
             ("attr", "TAGS", attr::TAGS),
             ("attr", "METADATA_PREFIX", attr::METADATA_PREFIX),
             ("attr", "ENVIRONMENT", attr::ENVIRONMENT),
+            ("attr", "PROMPT_NAME", attr::PROMPT_NAME),
+            ("attr", "PROMPT_VERSION", attr::PROMPT_VERSION),
             ("attr", "RELEASE", attr::RELEASE),
             ("attr", "TTFT_NS", attr::TTFT_NS),
             ("attr", "COST_TOTAL", attr::COST_TOTAL),
@@ -267,6 +273,8 @@ mod tests {
             attr::TAGS,
             attr::METADATA_PREFIX,
             attr::ENVIRONMENT,
+            attr::PROMPT_NAME,
+            attr::PROMPT_VERSION,
             attr::RELEASE,
             attr::TTFT_NS,
             attr::COST_TOTAL,
@@ -308,6 +316,8 @@ mod tests {
         attr::TAGS,
         attr::METADATA_PREFIX,
         attr::ENVIRONMENT,
+        attr::PROMPT_NAME,
+        attr::PROMPT_VERSION,
         attr::RELEASE,
         attr::TTFT_NS,
         attr::COST_TOTAL,

@@ -850,6 +850,7 @@ fn trace_mismatch(
     compare("environment", expected.environment == observed.environment);
     compare("tags", expected.tags == observed.tags);
     compare("models", expected.models == observed.models);
+    compare("prompts", expected.prompts == observed.prompts);
     if unsettled {
         let extra = copies - expected.span_count;
         for (name, want, got) in [

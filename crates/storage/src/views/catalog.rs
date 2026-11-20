@@ -267,6 +267,12 @@ const TRACES: &[ColumnInfo] = &[
         false,
         "Distinct model names.",
     ),
+    col(
+        "prompts",
+        ColumnKind::StringList,
+        false,
+        "Registry prompts the trace used, as name@version (D-V-15).",
+    ),
 ];
 
 const SPANS: &[ColumnInfo] = &[
@@ -366,6 +372,18 @@ const SPANS: &[ColumnInfo] = &[
         ColumnKind::String,
         true,
         "coalesce(response_model, request_model).",
+    ),
+    col(
+        "prompt_name",
+        ColumnKind::String,
+        true,
+        "Registry prompt the span used (D-V-15).",
+    ),
+    col(
+        "prompt_version",
+        ColumnKind::Integer,
+        true,
+        "Version of that prompt.",
     ),
     col(
         "operation",
