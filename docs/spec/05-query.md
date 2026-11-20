@@ -148,7 +148,7 @@ Fields by source:
 
 | Source | Numeric fields | Breakdown fields |
 |---|---|---|
-| traces | `duration_ns`, `span_count`, `error_count`, `llm_count`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens`, `total_tokens`, `cost_total` | `name`, `status`, `environment`, `release`, `user_id`, `tags`, `models`, `metadata['k']` |
+| traces | `duration_ns`, `span_count`, `error_count`, `llm_count`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens`, `total_tokens`, `cost_total` | `name`, `status`, `environment`, `release`, `user_id`, `session_id`, `tags`, `models`, `metadata['k']` |
 | spans | `duration_ns`, `ttft_ns`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens`, `total_tokens`, `cost_input`, `cost_output`, `cost_total` | `name`, `span_kind`, `status`, `service_name`, `environment`, `release`, `provider`, `model`, `operation`, `user_id`, `tags`, `metadata['k']`, `attributes['k']`, `resource_attributes['k']` |
 | scores | `value_num` | `name`, `source`, `data_type`, `target`, `value_str`, `metadata['k']` |
 
