@@ -32,6 +32,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ### Added
 
+- Annotation queues in the UI: create queues, add traces, spans or sessions from their pages and lists, and review them one at a time with Complete and next.
 - Add everything a trace, span or session filter matches to an annotation queue, up to 10 000 per call: `POST /annotation-queues/{id}/items/matching/preview` counts the matches and `POST /annotation-queues/{id}/items/matching` adds them.
 - Annotation queues on the server: queues of traces, spans or sessions with their score definitions and instructions, items added by id, a 5-minute lease with next, complete, skip and reopen, the GDPR and retention cascade, and the `max_annotation_queues` plan limit (Free: 1).
 - `Client.annotation_queues` (Python) and `client.annotationQueues` (TypeScript): create annotation queues and add traces, spans or sessions to them.

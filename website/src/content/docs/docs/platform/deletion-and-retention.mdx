@@ -34,6 +34,7 @@ A deletion removes more than the spans:
 - the scores of the traces;
 - the evaluation traces that judged them, because they hold copies of the evaluated data;
 - dataset items copied from the traces, in every version, and the experiment items that refer to them;
+- [annotation queue](/docs/evaluation/annotation-queues/) items of the traces, spans and sessions;
 - queued evaluation jobs for the traces;
 - media stored for the project's traces, once nothing else uses it.
 
@@ -60,7 +61,7 @@ Data ingested after you make the request is new data, and the request does not c
 
 Each project has a retention in days, or "keep forever". Set it in the project's **Settings**, under **General**, in the **Data retention** card. cetra deletes whole days older than the retention, once an hour and when you save the setting. Lowering retention deletes older data right away.
 
-Retention is by day. Scores and evaluation traces are deleted by their own date, so they can outlive an old trace they refer to.
+Retention is by day. Scores and evaluation traces are deleted by their own date, so they can outlive an old trace they refer to. Annotation queue items go with the day of their trace, span or session, so a queue's counts can drop.
 
 A plan can cap retention. When it does, cetra applies the shorter of the project's setting and the plan's limit. Retention is a core feature, and it needs `retention_management`, which an instance has unless the operator restricts the features. See [Plans and licence](/docs/platform/plans-and-licence/).
 
