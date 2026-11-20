@@ -408,6 +408,32 @@ docs-deploy branch: js-install
     test -n "$url" || { echo "no workers.dev URL in the wrangler output" >&2; exit 1; }
     echo "url=$url/"
 
+# Needs CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID (or a `wrangler login`); the
+# last line printed is `url=<deployed URL>`.
+# Build the web UI on its mocks and deploy it to the `cetra-web-demo` Worker: `main` is production, `pr-<number>` a Preview (D-C-22)
+web-demo-deploy branch: js-install
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{branch}}" in
+      main | pr-[0-9]*) ;;
+      *) echo "branch must be main or pr-<number>, not {{branch}}" >&2; exit 1 ;;
+    esac
+    pnpm --dir web run build:demo
+    test -f web/dist-demo/mockServiceWorker.js || { echo "the demo build has no mockServiceWorker.js" >&2; exit 1; }
+    if [ "{{branch}}" = main ]; then
+      out="$(pnpm --dir web exec wrangler deploy)"
+    else
+      out="$(pnpm --dir web exec wrangler preview --name "{{branch}}")"
+    fi
+    echo "$out"
+    if [ "{{branch}}" = main ]; then
+      url="$(grep -oE 'https://cetra-web-demo\.[a-z0-9-]+\.workers\.dev' <<<"$out" | head -n1)"
+    else
+      url="$(grep -oE 'https://{{branch}}-cetra-web-demo\.[a-z0-9-]+\.workers\.dev' <<<"$out" | head -n1)"
+    fi
+    test -n "$url" || { echo "no workers.dev URL in the wrangler output" >&2; exit 1; }
+    echo "url=$url/"
+
 # Check the docs site's external links (D-W-13); needs lychee 0.24.2 and builds the site first
 docs-links: js-install
     pnpm --dir website run build

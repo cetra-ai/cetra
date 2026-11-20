@@ -2,6 +2,7 @@
 /cetra-data/
 node_modules/
 dist/
+web/dist-demo/
 .venv/
 __pycache__/
 *.pyc
