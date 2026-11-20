@@ -2,6 +2,24 @@
 source: crates/server/src/meta/mod.rs
 expression: text
 ---
+table agent_contexts
+CREATE TABLE agent_contexts (
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  agent TEXT NOT NULL,          -- claude-code | codex | gemini-cli | copilot
+  session_id TEXT NOT NULL,
+  repository TEXT,              -- canonical form (D-CA-4)
+  branch TEXT,
+  user_id TEXT,                 -- the hook's `user`, lowercased
+  updated_at INTEGER NOT NULL,  -- ns since the Unix epoch, time of the last write
+  PRIMARY KEY (project_id, agent, session_id)
+)
+
+index agent_contexts_updated
+CREATE INDEX agent_contexts_updated ON agent_contexts(project_id, updated_at)
+
+index agent_contexts_user
+CREATE INDEX agent_contexts_user ON agent_contexts(project_id, user_id) WHERE user_id IS NOT NULL
+
 table alert_events
 CREATE TABLE alert_events (
   id TEXT PRIMARY KEY,
@@ -815,6 +833,8 @@ index score_definitions_live
 CREATE UNIQUE INDEX score_definitions_live ON score_definitions(project_id, name) WHERE archived_at IS NULL
 
 index sqlite_autoindex__sqlx_migrations_1
+
+index sqlite_autoindex_agent_contexts_1
 
 index sqlite_autoindex_alert_events_1
 

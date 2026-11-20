@@ -445,11 +445,14 @@ fn check_expected(case: &Case, failures: &mut Vec<String>) {
         ));
     }
     let input_ids = input_spans(case);
-    if expected.spans.len() + expected.rejected_spans as usize != input_ids.len() {
+    let counted =
+        expected.spans.len() + expected.rejected_spans as usize + expected.discarded as usize;
+    if counted != input_ids.len() {
         failures.push(format!(
-            "{label}: spans ({}) + rejected_spans ({}) != input spans ({})",
+            "{label}: spans ({}) + rejected_spans ({}) + discarded ({}) != input spans ({})",
             expected.spans.len(),
             expected.rejected_spans,
+            expected.discarded,
             input_ids.len()
         ));
     }
@@ -476,7 +479,9 @@ fn check_expected(case: &Case, failures: &mut Vec<String>) {
         );
         check_kind_costs(&label, span, failures);
         let id = (span.trace_id.to_string(), span.span_id.to_string());
-        if !input_ids.contains(&id) {
+        // Codex's kept spans are re-linked to ids made from the turn id (D-CA-6), so they are
+        // not in input.json.
+        if case.group != "codex" && !input_ids.contains(&id) {
             failures.push(format!(
                 "{label}: expected span {}/{} is not in input.json",
                 id.0, id.1
@@ -1472,6 +1477,7 @@ fn empty_case() -> Case {
             spans: Vec::new(),
             media: Vec::new(),
             rejected_spans: 0,
+            discarded: 0,
         }),
     }
 }

@@ -24,12 +24,16 @@ export function setup(): NodeTracerProvider {
   return provider;
 }
 
-export function mockUrl(pathSuffix = ""): string {
-  const base = process.env.CETRA_CAPTURE_MOCK_URL;
-  if (base === undefined) {
-    throw new Error("CETRA_CAPTURE_MOCK_URL is unset");
+export function requiredEnv(name: string): string {
+  const value = process.env[name];
+  if (value === undefined) {
+    throw new Error(`${name} is unset`);
   }
-  return base + pathSuffix;
+  return value;
+}
+
+export function mockUrl(pathSuffix = ""): string {
+  return requiredEnv("CETRA_CAPTURE_MOCK_URL") + pathSuffix;
 }
 
 export async function finish(
@@ -38,6 +42,11 @@ export async function finish(
 ): Promise<void> {
   await provider.forceFlush();
   await provider.shutdown();
+  writeMeta(aliases);
+}
+
+/** Writes `CETRA_CAPTURE_META` with the versions of `CETRA_CAPTURE_LIBRARIES`. */
+export function writeMeta(aliases: Record<string, string> = {}): void {
   const listed = process.env.CETRA_CAPTURE_LIBRARIES;
   const metaPath = process.env.CETRA_CAPTURE_META;
   if (listed === undefined) {

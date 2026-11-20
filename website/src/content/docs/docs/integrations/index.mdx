@@ -26,8 +26,21 @@ Use this page to find how to connect your framework, provider or instrumentation
 | [OpenTelemetry GenAI](/docs/integrations/opentelemetry-genai/) | ✓ | ✓ | the official `opentelemetry-instrumentation-*` packages | captured |
 | [From Langfuse](/docs/integrations/from-langfuse/) | ✓ | — | keep the Langfuse SDK, export its spans to cetra | captured |
 | [From Laminar](/docs/integrations/from-laminar/) | ✓ | — | keep the Laminar SDK, export its spans to cetra | captured |
+| [Claude Code](/docs/integrations/claude-code/) | — | — | `cetra agents setup claude-code` | captured |
+| [Codex CLI](/docs/integrations/codex/) | — | — | `cetra agents setup codex` | captured |
+| [Gemini CLI](/docs/integrations/gemini-cli/) | — | — | `cetra agents setup gemini-cli` | captured |
+| [GitHub Copilot](/docs/integrations/copilot/) | — | — | `cetra agents setup copilot` | hand-written |
 
 "Captured" means the repository holds spans recorded from the real library, and a test checks how cetra reads them. "SDK test" means an SDK test checks the helper, and the repository holds no recorded spans for it. A ✓ for TypeScript means a helper in `@cetra-ai/sdk`, or a TypeScript library whose spans are captured. A — means no helper or captured run exists for that language: you can still use the library's own OpenTelemetry instrumentation with [Send OpenTelemetry](/docs/get-started/opentelemetry/).
+
+## Coding agents
+
+<CardGrid>
+  <LinkCard title="Claude Code" description="Prompts, model calls and tools, with the Claude Agent SDK." href="/docs/integrations/claude-code/" />
+  <LinkCard title="Codex CLI" description="Turns and tool calls from codex exec." href="/docs/integrations/codex/" />
+  <LinkCard title="Gemini CLI" description="Model calls and tool batches." href="/docs/integrations/gemini-cli/" />
+  <LinkCard title="GitHub Copilot" description="Copilot CLI and VS Code Copilot Chat." href="/docs/integrations/copilot/" />
+</CardGrid>
 
 ## Providers
 

@@ -1714,6 +1714,7 @@ mod tests {
                 spans: Vec::new(),
                 media: Vec::new(),
                 rejections: Rejections::default(),
+                discarded: 0,
             },
         };
         assert_eq!(judge_usage(&run), None);

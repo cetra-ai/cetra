@@ -47,6 +47,7 @@ it("lists the breakdown fields of each source without bare map columns", () => {
     "environment",
     "release",
     "user_id",
+    "session_id",
     "tags",
     "models",
   ]);
@@ -84,8 +85,8 @@ it("drops the list fields from count_distinct and adds the identifiers", () => {
     "environment",
     "release",
     "user_id",
-    "trace_id",
     "session_id",
+    "trace_id",
   ]);
   expect(countDistinctFields("spans")).not.toContain("tags");
   expect(countDistinctFields("spans")).not.toContain("models");

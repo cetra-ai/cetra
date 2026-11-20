@@ -50,7 +50,12 @@ fn run_case(case: &Case, bless: bool) -> Result<(), String> {
     let request = decode_json(&bytes).map_err(|err| format!("{label}: input.json: {err}"))?;
     let prices =
         PriceTable::new(load_prices()).map_err(|err| format!("{label}: prices.json: {err}"))?;
-    let normalized = normalize(&request, &context_of(case)?, &prices);
+    let normalized = normalize(
+        &request,
+        &context_of(case)?,
+        &prices,
+        &cetra_otel::AgentContexts::default(),
+    );
     let actual = document(&normalized);
     let Some(expected) = &case.expected else {
         if bless {
@@ -64,7 +69,7 @@ fn run_case(case: &Case, bless: bool) -> Result<(), String> {
     };
     let mut expected_spans = expected.spans.clone();
     sort_spans(&mut expected_spans);
-    let expected = Value::Object(Map::from_iter([
+    let mut expected_document = Map::from_iter([
         (
             "spans".to_owned(),
             serde_json::to_value(&expected_spans).map_err(|err| err.to_string())?,
@@ -74,7 +79,11 @@ fn run_case(case: &Case, bless: bool) -> Result<(), String> {
             "rejected_spans".to_owned(),
             Value::from(expected.rejected_spans),
         ),
-    ]));
+    ]);
+    if expected.discarded > 0 {
+        expected_document.insert("discarded".to_owned(), Value::from(expected.discarded));
+    }
+    let expected = Value::Object(expected_document);
     let diff = first_diff(&actual, &expected, &label);
     // A matching case keeps its file, so float noise in costs never churns it.
     if bless {
@@ -123,7 +132,7 @@ fn fit(label: &str, name: &str, value: u64) -> Result<usize, String> {
 fn document(normalized: &Normalized) -> Value {
     let mut spans = normalized.spans.clone();
     sort_spans(&mut spans);
-    Value::Object(Map::from_iter([
+    let mut document = Map::from_iter([
         (
             "spans".to_owned(),
             serde_json::to_value(&spans).unwrap_or(Value::Null),
@@ -133,7 +142,11 @@ fn document(normalized: &Normalized) -> Value {
             "rejected_spans".to_owned(),
             Value::from(normalized.rejections.total()),
         ),
-    ]))
+    ]);
+    if normalized.discarded > 0 {
+        document.insert("discarded".to_owned(), Value::from(normalized.discarded));
+    }
+    Value::Object(document)
 }
 
 fn expected_media(media: &[ExpectedMedia]) -> Value {
@@ -337,7 +350,14 @@ fn captured_llm_spans_are_priced_by_the_builtin_snapshot() {
                 continue;
             }
         };
-        for span in normalize(&request, &context, &prices).spans {
+        for span in normalize(
+            &request,
+            &context,
+            &prices,
+            &cetra_otel::AgentContexts::default(),
+        )
+        .spans
+        {
             let llm = matches!(span.span_kind, SpanKind::Llm | SpanKind::Embedding);
             let modelled = span.request_model.is_some() || span.response_model.is_some();
             let counted = span.input_tokens.is_some() || span.output_tokens.is_some();

@@ -3274,6 +3274,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/agent-context": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Send a coding agent's session context
+         * @description Called by `cetra agents hook`. Needs an `sk` key with the `ingest` scope. Later spans of the session carry the repository, branch and person (D-CA-9).
+         */
+        post: operations["post_agent_context"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -3415,6 +3435,19 @@ export interface components {
             data: components["schemas"]["AdminUser"][];
             /** @description Opaque cursor for the next page, or null when this is the last page. */
             next_cursor: string | null;
+        };
+        /** @description A coding agent's session context, sent by `cetra agents hook` (D-CA-9). */
+        AgentContextBody: {
+            /** @description `claude-code`, `codex`, `gemini-cli` or `copilot`. */
+            agent: string;
+            /** @description The branch, 1 to 256 characters. Absent keeps; `null` clears. */
+            branch?: string | null;
+            /** @description The `origin` URL without user-info. Absent keeps the stored value; `null` clears it. */
+            repository?: string | null;
+            /** @description The id the agent puts on its spans, 1 to 256 characters. */
+            session_id: string;
+            /** @description The person, 1 to 256 characters, lowercased by the server. Absent keeps; `null` clears. */
+            user?: string | null;
         };
         /**
          * @description How a measure aggregates its rows.
@@ -26878,6 +26911,73 @@ export interface operations {
             };
             /** @description The server is busy or a dependency is unavailable. Retry later. */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_agent_context: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AgentContextBody"];
+            };
+        };
+        responses: {
+            /** @description Stored. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The organization reached its monthly units cap (code quota_exceeded). Retry-After gives the seconds until it resets. */
+            402: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -2,6 +2,7 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 pub(crate) mod admin;
+pub(crate) mod agent_context;
 pub(crate) mod alert_rules;
 pub(crate) mod annotation_queues;
 pub(crate) mod api_keys;

@@ -86,6 +86,7 @@ const USER_ID: &[Source] = &[
     span("ai.settings.context.userId", Convention::Vercel),
     span("langfuse.user.id", Convention::Langfuse),
     span("lmnr.association.properties.user_id", Convention::Laminar),
+    span("enduser.pseudo.id", Convention::Genai),
 ];
 
 const TAGS: &[Source] = &[

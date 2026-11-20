@@ -53,37 +53,13 @@ pub(crate) struct RetentionRun {
 /// [`MetaError`] when the projects cannot be listed.
 pub(crate) async fn retention_once(state: &AppState) -> Result<RetentionRun, MetaError> {
     let now = state.clock.now_ns();
-    let mut run = RetentionRun::default();
-    // The cap of each org, read once per run. A failed read counts once and skips only
-    // the cap: a project's own retention still applies (D-P-45).
-    let mut caps: HashMap<OrgId, Result<Option<u32>, ()>> = HashMap::new();
-    for (org, project, own) in
-        crate::meta::projects::projects_for_retention(state.meta.reader()).await?
-    {
-        let cap = match caps.get(&org) {
-            Some(cap) => *cap,
-            None => {
-                let cap = match state
-                    .entitlements
-                    .retention_window_at(&state.meta, org, now)
-                    .await
-                {
-                    Ok(window) => Ok(crate::entitlements::retention_cap(window)),
-                    Err(error) => {
-                        run.failures += 1;
-                        tracing::warn!(org_id = %org, error = %error, "retention window unavailable");
-                        Err(())
-                    }
-                };
-                caps.insert(org, cap);
-                cap
-            }
-        };
-        // D-P-45: the largest window of the last 30 days, plus 30 days (D175). When the org's
-        // window read failed there is no cap: the project's own retention still applies and a
-        // project that relies on the cap is skipped (deleting nothing is the safe side).
-        let cap = cap.unwrap_or(None);
-        let Some(days) = effective_days(own, cap) else {
+    let (projects, cap_failures) = effective_retention(state, now).await?;
+    let mut run = RetentionRun {
+        failures: cap_failures,
+        ..RetentionRun::default()
+    };
+    for (project, days) in projects {
+        let Some(days) = days else {
             continue;
         };
         let keep = keep_from(now, days);
@@ -107,6 +83,53 @@ pub(crate) async fn retention_once(state: &AppState) -> Result<RetentionRun, Met
         }
     }
     Ok(run)
+}
+
+/// Each active project of an active org with its effective retention (`None` when it has
+/// none), and how many org caps could not be read (logged; D-P-45). The cap of each org is
+/// read once per call.
+///
+/// # Errors
+///
+/// [`MetaError`] when the projects cannot be listed.
+pub(crate) async fn effective_retention(
+    state: &AppState,
+    now: i64,
+) -> Result<(Vec<(ProjectId, Option<u32>)>, u64), MetaError> {
+    let mut projects = Vec::new();
+    let mut cap_failures: u64 = 0;
+    // The cap of each org, read once per call. A failed read counts once and skips only
+    // the cap: a project's own retention still applies (D-P-45).
+    let mut caps: HashMap<OrgId, Result<Option<u32>, ()>> = HashMap::new();
+    for (org, project, own) in
+        crate::meta::projects::projects_for_retention(state.meta.reader()).await?
+    {
+        let cap = match caps.get(&org) {
+            Some(cap) => *cap,
+            None => {
+                let cap = match state
+                    .entitlements
+                    .retention_window_at(&state.meta, org, now)
+                    .await
+                {
+                    Ok(window) => Ok(crate::entitlements::retention_cap(window)),
+                    Err(error) => {
+                        cap_failures += 1;
+                        tracing::warn!(org_id = %org, error = %error, "retention window unavailable");
+                        Err(())
+                    }
+                };
+                caps.insert(org, cap);
+                cap
+            }
+        };
+        // D-P-45: the largest window of the last 30 days, plus 30 days (D175). When the org's
+        // window read failed there is no cap: the project's own retention still applies and a
+        // project that relies on the cap is skipped by the caller (deleting nothing is the safe side).
+        let cap = cap.unwrap_or(None);
+        projects.push((project, effective_days(own, cap)));
+    }
+    Ok((projects, cap_failures))
 }
 
 /// Applies `days` to one project now (a `PATCH`). Errors are logged; the hourly run retries.

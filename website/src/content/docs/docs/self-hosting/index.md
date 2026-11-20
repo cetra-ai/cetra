@@ -21,7 +21,7 @@ Ports:
 |---|---|
 | 8080 | web UI, API, OTLP/HTTP (`/v1/traces`; `/v1/logs` and `/v1/metrics` are accepted and dropped), MCP (`/mcp`), `/healthz`, `/readyz` |
 | 4317 | OTLP/gRPC |
-| 4318 | OTLP/HTTP only (the standard OTLP port) |
+| 4318 | OTLP/HTTP and `/v1/agent-context` (the standard OTLP port) |
 
 Then:
 
