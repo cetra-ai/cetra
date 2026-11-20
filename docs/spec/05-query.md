@@ -173,7 +173,7 @@ Counts are integers; `rate` is 0 to 1; durations are nanoseconds; costs are summ
 
 ## Facets
 
-`GET /api/v1/projects/{p}/facets?view=traces|spans|sessions&field=<field>&from&to&filter&search&include_eval&include_experiments&q&limit` counts the values of one field over the rows a list would show (window, default exclusions, `search`, `filter`) for the filter sidebar, value autocomplete and presets (D-C-13). One field per request.
+`POST /api/v1/projects/{p}/facets` counts the values of 1 to 20 fields over the rows a list would show (window, default exclusions, `search`, `filter`) for the filter sidebar, value autocomplete and presets (D-C-13, D-C-23). It is a read by POST (D-H-4). The body gives what the fields share once: `view` (`traces`, `spans` or `sessions`), `from`, `to`, `filter`, `search`, `include_eval`, `include_experiments`; then `fields: [{ field, limit?, q? }]`. The answer is `{ view, results }`, with one result per field in request order (a field asked twice is answered twice): `{ field, facet }`, or `{ field, error }` where `error` is a problem document. A bad field, `limit` or `q` (`400 bad_request`) and a field that does not finish before the deadline (`query_timeout`) fail only that field. A malformed body, a bad window, a `search` over 1,024 bytes, `search` on sessions, 0 or more than 20 fields (`400 bad_request`), a bad filter (`400 invalid_filter`, field `filter`) and a timeout while building the rows fail the whole request. The body is at most 64 KiB. Storage builds the list's rows once and computes the fields concurrently under one deadline, the list reads' timeout.
 
 `field` is a facet column of the view, or `map['key']` for a `string_map` column (key 1–256 characters, written as in the DSL). A bare map column facets its keys; keys starting with `cetra.` are left out. Facet columns:
 
@@ -183,13 +183,13 @@ Counts are integers; `rate` is 0 to 1; durations are nanoseconds; costs are summ
 | spans | `name`, `span_kind`, `status`, `service_name`, `environment`, `release`, `provider`, `model`, `request_model`, `response_model`, `prompt_name`, `operation`, `cost_source`, `scope_name`, `session_id`, `user_id` | `tags` | `metadata`, `attributes`, `resource_attributes` | `duration_ms`, `cost_total`, `total_tokens`, `input_tokens`, `output_tokens` |
 | sessions | `user_id` | `tags` | — | `duration_ms`, `trace_count`, `error_count`, `total_tokens`, `cost_total` |
 
-Any other field is `400 bad_request`; so is `search` on sessions. IDs other than session and user IDs are not facets (their cardinality is the row count). A trace filter `prompts @> ['support-bot@5']` selects the traces that link that prompt version (D-V-15).
+Any other field is a `bad_request` error for that field; `search` on sessions is `400 bad_request` for the request. IDs other than session and user IDs are not facets (their cardinality is the row count). A trace filter `prompts @> ['support-bot@5']` selects the traces that link that prompt version (D-V-15).
 
 The answer has `kind` (`values`, `keys` or `histogram`), `total` (rows counted) and `missing` (rows with no value: null, or an empty list or map; for numbers also NaN and ±inf). `values` and `keys` return at most `limit` (1–100, default 10) values with their row counts, by count descending then value ascending, and `more` when more matched; `q` (1–200 characters) keeps values containing it, case-insensitively. A list row counts once under each distinct element, a map row once under each key; booleans are `"true"`/`"false"`. `histogram` returns exact `min` and `max`, approximate `p50`, `p95` and `p99`, and buckets: 20 of equal width over `[min, p99)` plus `[p99, max]`, or one `[min, max]` bucket when `p99 ≤ min`; it is absent when no row has a value. Values are `f64`.
 
 The spans list drops stored copies of a span and facets do not, so a span stored twice before compaction counts twice. The users list filters traces, so its facets count traces.
 
-Cost: there are no pre-aggregates. A values or keys facet is two scans of the window (totals, then groups) and a histogram two (statistics, then buckets), each reading only the faceted column and the filter's columns, so the cost grows with the rows in the window. Answers are not cached on the server; the UI fetches only expanded facets and keeps each answer 30 s.
+Cost: there are no pre-aggregates. A values or keys facet is two scans of the window (totals, then groups) and a histogram two (statistics, then buckets), each reading only the faceted column and the filter's columns, so the cost grows with the rows in the window. The fields of a batch share the window's rows but each runs its own scans, concurrently. Answers are not cached on the server; the UI fetches only expanded facets, keeps each answer 30 s, and sends the fields it asks together (within 10 ms, with the same window, flags, filter and search) as one request (D-C-23).
 
 ## Trace and span APIs
 
