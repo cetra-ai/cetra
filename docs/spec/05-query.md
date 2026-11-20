@@ -177,11 +177,11 @@ Counts are integers; `rate` is 0 to 1; durations are nanoseconds; costs are summ
 
 | View | values | list values | keys | histogram |
 |---|---|---|---|---|
-| traces | `name`, `status`, `environment`, `release`, `session_id`, `user_id`, `has_root` | `tags`, `models` | `metadata` | `duration_ms`, `cost_total`, `total_tokens`, `input_tokens`, `output_tokens`, `span_count`, `error_count`, `llm_count` |
-| spans | `name`, `span_kind`, `status`, `service_name`, `environment`, `release`, `provider`, `model`, `request_model`, `response_model`, `operation`, `cost_source`, `scope_name`, `session_id`, `user_id` | `tags` | `metadata`, `attributes`, `resource_attributes` | `duration_ms`, `cost_total`, `total_tokens`, `input_tokens`, `output_tokens` |
+| traces | `name`, `status`, `environment`, `release`, `session_id`, `user_id`, `has_root` | `tags`, `models`, `prompts` | `metadata` | `duration_ms`, `cost_total`, `total_tokens`, `input_tokens`, `output_tokens`, `span_count`, `error_count`, `llm_count` |
+| spans | `name`, `span_kind`, `status`, `service_name`, `environment`, `release`, `provider`, `model`, `request_model`, `response_model`, `prompt_name`, `operation`, `cost_source`, `scope_name`, `session_id`, `user_id` | `tags` | `metadata`, `attributes`, `resource_attributes` | `duration_ms`, `cost_total`, `total_tokens`, `input_tokens`, `output_tokens` |
 | sessions | `user_id` | `tags` | — | `duration_ms`, `trace_count`, `error_count`, `total_tokens`, `cost_total` |
 
-Any other field is `400 bad_request`; so is `search` on sessions. IDs other than session and user IDs are not facets (their cardinality is the row count).
+Any other field is `400 bad_request`; so is `search` on sessions. IDs other than session and user IDs are not facets (their cardinality is the row count). A trace filter `prompts @> ['support-bot@5']` selects the traces that link that prompt version (D-V-15).
 
 The answer has `kind` (`values`, `keys` or `histogram`), `total` (rows counted) and `missing` (rows with no value: null, or an empty list or map; for numbers also NaN and ±inf). `values` and `keys` return at most `limit` (1–100, default 10) values with their row counts, by count descending then value ascending, and `more` when more matched; `q` (1–200 characters) keeps values containing it, case-insensitively. A list row counts once under each distinct element, a map row once under each key; booleans are `"true"`/`"false"`. `histogram` returns exact `min` and `max`, approximate `p50`, `p95` and `p99`, and buckets: 20 of equal width over `[min, p99)` plus `[p99, max]`, or one `[min, max]` bucket when `p99 ≤ min`; it is absent when no row has a value. Values are `f64`.
 

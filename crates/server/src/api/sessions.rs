@@ -215,6 +215,7 @@ mod tests {
                     total_tokens: Some(2600),
                     cost_total: Some(0.00306),
                     models: vec!["claude-sonnet-4-5".to_owned()],
+                    prompts: Vec::new(),
                     scores: Vec::new(),
                 },
                 input: Some(Payload::Text("My order 1234 hasn't arrived.".to_owned())),

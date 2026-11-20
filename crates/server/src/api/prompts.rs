@@ -5,7 +5,7 @@ use serde_json::Value;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-use super::common::{Limit, any_json, open_object};
+use super::common::{Limit, TimeParam, any_json, open_object};
 
 /// `text` or `chat` (D-V-5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -232,6 +232,80 @@ pub struct ResolveParams {
     /// A version number. Not together with `label`.
     #[serde(default)]
     pub version: Option<i64>,
+}
+
+/// `GET …/prompts/{prompt}/metrics` query (D-V-17). The window is at most 90 days.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+pub struct PromptMetricsParams {
+    /// Window start, RFC 3339 or epoch milliseconds. Default: `to` minus 7 days.
+    #[serde(default)]
+    pub from: Option<TimeParam>,
+    /// Window end, RFC 3339 or epoch milliseconds. Default: now.
+    #[serde(default)]
+    pub to: Option<TimeParam>,
+    /// Comma-separated version numbers, 1 to 50 distinct. Default: every version.
+    #[serde(default)]
+    pub versions: Option<String>,
+}
+
+/// The per-version metrics of a prompt over a window (D-V-17). Versions come newest first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct PromptMetrics {
+    /// Window start.
+    #[serde(with = "cetra_core::time_serde")]
+    #[schema(value_type = String, format = DateTime)]
+    pub from: i64,
+    /// Window end (exclusive).
+    #[serde(with = "cetra_core::time_serde")]
+    #[schema(value_type = String, format = DateTime)]
+    pub to: i64,
+    /// One entry per version that has linked spans in the window.
+    pub versions: Vec<PromptVersionMetrics>,
+}
+
+/// One version's numbers over the window. Span scores count for their span's version; a trace
+/// score counts for every version its linked spans carry (D-V-17).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct PromptVersionMetrics {
+    /// The version, 1 or more.
+    pub version: i64,
+    /// Linked `llm` spans.
+    pub span_count: i64,
+    /// Distinct traces of those spans.
+    pub trace_count: i64,
+    /// Linked spans with status `error`.
+    pub error_count: i64,
+    /// Sum of span costs, USD.
+    pub cost_total: f64,
+    /// Average span cost, USD. Omitted when no span has a cost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_avg: Option<f64>,
+    /// Median span duration, milliseconds (approximate). Omitted when there are no spans.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_p50_ms: Option<f64>,
+    /// 95th percentile span duration, milliseconds (approximate). Omitted when there are no spans.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_p95_ms: Option<f64>,
+    /// Average input tokens. Omitted when no span has them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens_avg: Option<f64>,
+    /// Average output tokens. Omitted when no span has them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens_avg: Option<f64>,
+    /// Numeric and boolean score means, by name.
+    pub scores: Vec<PromptScoreMean>,
+}
+
+/// The mean of one score name for one version.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct PromptScoreMean {
+    /// Score name.
+    pub name: String,
+    /// Average of the numeric and boolean score values.
+    pub mean: f64,
+    /// Number of scores averaged.
+    pub count: i64,
 }
 
 /// Present JSON is `Some(value)`, including null. An absent field stays the default `None`.

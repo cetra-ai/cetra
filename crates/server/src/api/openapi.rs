@@ -114,8 +114,8 @@ use super::org_sso::{
 };
 use super::prompts::{
     CreatePromptRequest, CreateVersionRequest, Prompt, PromptKind, PromptLabel, PromptLabelEvent,
-    PromptListParams, PromptSettings, PromptVersion, ResolveParams, SetLabelRequest,
-    UpdatePromptRequest,
+    PromptListParams, PromptMetrics, PromptMetricsParams, PromptScoreMean, PromptSettings,
+    PromptVersion, PromptVersionMetrics, ResolveParams, SetLabelRequest, UpdatePromptRequest,
 };
 use super::saved_views::{CreateSavedView, SavedView, SavedViewListParams, UpdateSavedView};
 use super::schema::SchemaResponse;
@@ -368,6 +368,9 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<SetLabelRequest>();
     set.insert::<PromptLabelEvent>();
     set.insert::<PromptSettings>();
+    set.insert::<PromptMetrics>();
+    set.insert::<PromptVersionMetrics>();
+    set.insert::<PromptScoreMean>();
     set.insert_page::<Prompt>("PromptPage");
     set.insert_page::<PromptVersion>("PromptVersionPage");
     set.insert_page::<PromptLabelEvent>("PromptLabelEventPage");
@@ -3697,6 +3700,24 @@ fn prompt_paths(paths: PathsBuilder) -> PathsBuilder {
             &[400, 401, 403, 404, 429],
         ))
         .build();
+    let metrics = operation(
+        "get_prompt_metrics",
+        "prompts",
+        "Get per-version prompt metrics",
+    )
+    .description(Some(format!(
+        "{PROMPT_READ} Default window: the last 7 days; at most 90 days (D-V-17)."
+    )))
+    .parameters(Some(with_query::<PromptMetricsParams>(vec![
+        project_param(),
+        prompt.clone(),
+    ])))
+    .responses(responses(
+        "200",
+        json_of::<PromptMetrics>("Per-version metrics of the prompt over the window."),
+        READ_ERRORS,
+    ))
+    .build();
     let label_events = operation(
         "list_prompt_label_events",
         "prompts",
@@ -3779,6 +3800,10 @@ fn prompt_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/prompts/{{prompt}}/labels/{{label}}"),
             PathItem::new(HttpMethod::Delete, label_delete),
+        )
+        .path(
+            format!("{PROJECT}/prompts/{{prompt}}/metrics"),
+            PathItem::new(HttpMethod::Get, metrics),
         )
         .path(
             format!("{PROJECT}/prompts/{{prompt}}/label-events"),

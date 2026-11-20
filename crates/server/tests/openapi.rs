@@ -804,6 +804,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ),
     (
         "get",
+        "/api/v1/projects/{project}/prompts/{prompt}/metrics",
+        "get_prompt_metrics",
+    ),
+    (
+        "get",
         "/api/v1/projects/{project}/prompt-settings",
         "get_prompt_settings",
     ),
@@ -858,6 +863,7 @@ const QUERY_OR_BODY: &[&str] = &[
     "get_prompt_resolve",
     "list_prompt_versions",
     "list_prompt_label_events",
+    "get_prompt_metrics",
     "list_dataset_items",
     "list_dataset_version_changes",
     "list_experiment_trends",
@@ -891,6 +897,7 @@ const READ_OPERATIONS: &[&str] = &[
     "get_evaluator_stats",
     "get_online_rule_stats",
     "get_experiment_summaries",
+    "get_prompt_metrics",
 ];
 
 const TAGS: &[&str] = &[

@@ -6,17 +6,18 @@ use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post, put};
 use cetra_core::ids::ProjectId;
+use cetra_storage::PromptVersionMetrics as StoredVersionMetrics;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::SqliteConnection;
 use uuid::Uuid;
 
-use crate::api::common::{FieldError, Page, PageParams, ProblemCode};
+use crate::api::common::{FieldError, Page, PageParams, ProblemCode, TimeParam};
 use crate::api::prompts::{
     CreatePromptRequest, CreateVersionRequest, Prompt, PromptKind, PromptLabel, PromptLabelEvent,
-    PromptListParams, PromptSettings, PromptVersion, ResolveParams, SetLabelRequest,
-    UpdatePromptRequest,
+    PromptListParams, PromptMetrics, PromptMetricsParams, PromptScoreMean, PromptSettings,
+    PromptVersion, PromptVersionMetrics, ResolveParams, SetLabelRequest, UpdatePromptRequest,
 };
 use crate::auth::principal::Principal;
 use crate::auth::roles::{ProjectPerm, Role};
@@ -34,6 +35,7 @@ use crate::prompts::{
 
 use super::datasets::created_by;
 use super::orgs::page_named;
+use super::read::{Deadline, open_query};
 
 /// The body of a prompt create, a version create and a PATCH: a template of at most 256 KiB,
 /// a config of at most 64 KiB, and the JSON around them.
@@ -41,6 +43,14 @@ const PROMPT_BODY_LIMIT: usize = 512 * 1024;
 
 /// A versions page holds at most this many versions: each carries its template and config.
 const MAX_VERSION_PAGE: u32 = 50;
+
+const DAY_NS: i64 = 86_400_000_000_000;
+
+/// The metrics window when the request names no `from`: 7 days (D-V-17).
+const METRICS_DEFAULT_WINDOW_NS: i64 = 7 * DAY_NS;
+
+/// The longest metrics window: 90 days (D-V-17).
+const METRICS_MAX_WINDOW_NS: i64 = 90 * DAY_NS;
 
 /// Prompt routes. Reads need project view; writes need [`ProjectPerm::ManagePrompts`]. Not
 /// session-only.
@@ -165,6 +175,16 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             },
             documented: true,
             handler: get(list_label_events),
+        },
+        RouteDef {
+            method: Method::GET,
+            path: "/api/v1/projects/{project}/prompts/{prompt}/metrics",
+            access: Access::Project {
+                perm: ProjectPerm::View,
+                session_only: false,
+            },
+            documented: true,
+            handler: get(prompt_metrics),
         },
         RouteDef {
             method: Method::GET,
@@ -1072,6 +1092,114 @@ async fn put_settings(
     );
     Ok(error::Json(PromptSettings {
         protected_labels: stored,
+    }))
+}
+
+/// `versions`: comma-separated version numbers, each at least 1, distinct, at most
+/// [`cetra_storage::MAX_PROMPT_VERSIONS`] of them. Absent: no filter (D-V-17).
+fn parse_versions(text: Option<&str>) -> Result<Vec<i64>, FieldError> {
+    let Some(text) = text else {
+        return Ok(Vec::new());
+    };
+    let mut versions: Vec<i64> = Vec::new();
+    for part in text.split(',') {
+        match part.trim().parse::<i64>() {
+            Ok(version) if version >= 1 => {
+                if !versions.contains(&version) {
+                    versions.push(version);
+                }
+            }
+            _ => {
+                return Err(field_error(
+                    "versions",
+                    "must be comma-separated positive versions",
+                ));
+            }
+        }
+    }
+    if versions.len() > cetra_storage::MAX_PROMPT_VERSIONS {
+        return Err(field_error("versions", "must name 1 to 50 versions"));
+    }
+    Ok(versions)
+}
+
+/// Nanoseconds as milliseconds.
+fn nanos_to_millis(nanos: i64) -> f64 {
+    nanos as f64 / 1e6
+}
+
+fn version_metrics(stored: StoredVersionMetrics) -> PromptVersionMetrics {
+    PromptVersionMetrics {
+        version: stored.version,
+        span_count: stored.span_count,
+        trace_count: stored.trace_count,
+        error_count: stored.error_count,
+        cost_total: stored.cost_total,
+        cost_avg: stored.cost_avg,
+        latency_p50_ms: stored.latency_p50_ns.map(nanos_to_millis),
+        latency_p95_ms: stored.latency_p95_ns.map(nanos_to_millis),
+        input_tokens_avg: stored.input_tokens_avg,
+        output_tokens_avg: stored.output_tokens_avg,
+        scores: stored
+            .scores
+            .into_iter()
+            .map(|score| PromptScoreMean {
+                name: score.name,
+                mean: score.mean,
+                count: score.count,
+            })
+            .collect(),
+    }
+}
+
+/// `GET …/prompts/{prompt}/metrics` (D-V-17): per version, the counts, costs, latencies, token
+/// averages and score means of the prompt's linked `llm` spans in the window.
+async fn prompt_metrics(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(PromptPath { prompt }): error::Path<PromptPath>,
+    error::Query(params): error::Query<PromptMetricsParams>,
+) -> Result<error::Json<PromptMetrics>, ApiError> {
+    let row = find(&state, access.project.id, &prompt).await?;
+    let to = params
+        .to
+        .map_or_else(|| state.clock.now_ns(), TimeParam::ns);
+    let from = params.from.map_or_else(
+        || to.saturating_sub(METRICS_DEFAULT_WINDOW_NS),
+        TimeParam::ns,
+    );
+    let mut errors = Vec::new();
+    if from >= to {
+        errors.push(field_error("from", "must be before to"));
+    } else if to.saturating_sub(from) > METRICS_MAX_WINDOW_NS {
+        errors.push(field_error("from", "the window is at most 90 days"));
+    }
+    let versions = match parse_versions(params.versions.as_deref()) {
+        Ok(versions) => versions,
+        Err(error) => {
+            errors.push(error);
+            Vec::new()
+        }
+    };
+    if !errors.is_empty() {
+        return Err(bad_request(errors));
+    }
+    let deadline = Deadline::start();
+    let ctx = open_query(&state, access.project.org_id, access.project.id, None).await?;
+    let stored = cetra_storage::prompt_metrics(
+        &ctx,
+        cetra_storage::PromptMetricsRequest {
+            prompt: &row.name,
+            window: cetra_storage::TimeWindow::new(from, to)?,
+            versions: &versions,
+            timeout: deadline.remaining()?,
+        },
+    )
+    .await?;
+    Ok(error::Json(PromptMetrics {
+        from,
+        to,
+        versions: stored.into_iter().map(version_metrics).collect(),
     }))
 }
 
@@ -2255,5 +2383,194 @@ mod tests {
         )
         .await;
         assert_eq!(fifty_first.status, StatusCode::CONFLICT);
+    }
+
+    const PROMPT_TRACE: &str = "a5000000000000000000000000000001";
+    const WINDOW: &str = "from=2026-01-01T00:00:00Z&to=2026-01-02T00:00:00Z";
+
+    /// Two `llm` spans of one trace, linked to versions 1 and 2 of `support-reply`, committed
+    /// through the ingest path. Version 2's span is an error.
+    async fn committed_prompt_spans(app: &TestApp, seeded: &Seeded) {
+        let span = |span_id: &str, version: i64, status: &str| -> cetra_core::span::Span {
+            serde_json::from_value(json!({
+                "project_id": seeded.project.id.to_string(),
+                "trace_id": PROMPT_TRACE,
+                "span_id": span_id,
+                "name": "generate",
+                "span_kind": "llm",
+                "start_time": "2026-01-01T00:10:00.000000000Z",
+                "end_time": "2026-01-01T00:10:01.000000000Z",
+                "status": status,
+                "ingest_time": "2026-01-01T00:10:01.000000000Z",
+                "schema_version": 2,
+                "prompt_name": "support-reply",
+                "prompt_version": version
+            }))
+            .unwrap()
+        };
+        app.commit_spans(
+            &seeded.project,
+            vec![
+                span("b100000000000101", 1, "ok"),
+                span("b100000000000102", 2, "error"),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn metrics_route() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let auth = ("cookie", seeded.cookie.as_str());
+        let created = call(
+            &app,
+            Method::POST,
+            &base(&seeded),
+            auth,
+            Some(support_reply_body(&[])),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED);
+        committed_prompt_spans(&app, &seeded).await;
+        let metrics = format!("{}/support-reply/metrics", base(&seeded));
+
+        let response = call(
+            &app,
+            Method::GET,
+            &format!("{metrics}?{WINDOW}"),
+            auth,
+            None,
+        )
+        .await;
+        assert_eq!(
+            response.status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let body: PromptMetrics = response.json();
+        let rows: Vec<(i64, i64, i64, i64)> = body
+            .versions
+            .iter()
+            .map(|version| {
+                (
+                    version.version,
+                    version.span_count,
+                    version.trace_count,
+                    version.error_count,
+                )
+            })
+            .collect();
+        assert_eq!(rows, vec![(2, 1, 1, 1), (1, 1, 1, 0)]);
+
+        let one = call(
+            &app,
+            Method::GET,
+            &format!("{metrics}?{WINDOW}&versions=1"),
+            auth,
+            None,
+        )
+        .await;
+        let one: PromptMetrics = one.json();
+        let versions: Vec<i64> = one.versions.iter().map(|version| version.version).collect();
+        assert_eq!(versions, vec![1]);
+
+        for (query, field) in [
+            ("versions=0", "versions"),
+            ("versions=1,x", "versions"),
+            ("from=2026-01-02T00:00:00Z&to=2026-01-01T00:00:00Z", "from"),
+            ("from=2025-01-01T00:00:00Z&to=2026-01-02T00:00:00Z", "from"),
+        ] {
+            let response = call(&app, Method::GET, &format!("{metrics}?{query}"), auth, None).await;
+            assert_eq!(field_names(&response), [field], "{query}");
+        }
+        let versions_51 = (1..=51)
+            .map(|version| version.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let response = call(
+            &app,
+            Method::GET,
+            &format!("{metrics}?{WINDOW}&versions={versions_51}"),
+            auth,
+            None,
+        )
+        .await;
+        assert_eq!(field_names(&response), ["versions"]);
+
+        let missing = call(
+            &app,
+            Method::GET,
+            &format!("{}/no-such-prompt/metrics?{WINDOW}", base(&seeded)),
+            auth,
+            None,
+        )
+        .await;
+        assert_eq!(missing.status, StatusCode::NOT_FOUND);
+
+        let read_key = bearer(&seeded.read_key);
+        let read = call(
+            &app,
+            Method::GET,
+            &format!("{metrics}?{WINDOW}"),
+            ("authorization", read_key.as_str()),
+            None,
+        )
+        .await;
+        assert_eq!(read.status, StatusCode::OK);
+        let ingest_key = bearer(&seeded.ingest_key);
+        let ingest = call(
+            &app,
+            Method::GET,
+            &format!("{metrics}?{WINDOW}"),
+            ("authorization", ingest_key.as_str()),
+            None,
+        )
+        .await;
+        assert_eq!(ingest.status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn trace_summary_lists_prompts() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let auth = ("cookie", seeded.cookie.as_str());
+        committed_prompt_spans(&app, &seeded).await;
+
+        let traces = format!("/api/v1/projects/{}/traces?{WINDOW}", seeded.project.id);
+        let page: Value = call(&app, Method::GET, &traces, auth, None).await.json();
+        let mut prompts: Vec<&str> = page["data"][0]["prompts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|prompt| prompt.as_str().unwrap())
+            .collect();
+        prompts.sort();
+        assert_eq!(prompts, ["support-reply@1", "support-reply@2"]);
+
+        let spans = format!("/api/v1/projects/{}/spans?{WINDOW}", seeded.project.id);
+        let listed: Value = call(&app, Method::GET, &spans, auth, None).await.json();
+        let mut linked: Vec<(&str, i64)> = listed["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                (
+                    row["prompt_name"].as_str().unwrap(),
+                    row["prompt_version"].as_i64().unwrap(),
+                )
+            })
+            .collect();
+        linked.sort();
+        assert_eq!(linked, [("support-reply", 1), ("support-reply", 2)]);
+
+        let detail = format!(
+            "/api/v1/projects/{}/traces/{PROMPT_TRACE}/spans/b100000000000102",
+            seeded.project.id
+        );
+        let detail: Value = call(&app, Method::GET, &detail, auth, None).await.json();
+        assert_eq!(detail["prompt_name"], "support-reply");
+        assert_eq!(detail["prompt_version"], 2);
     }
 }

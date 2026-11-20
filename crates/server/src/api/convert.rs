@@ -317,6 +317,7 @@ fn trace_batch(batch: &RecordBatch) -> Result<Vec<TraceSummary>, ConvertError> {
     let total_tokens = ints(batch, traces::TOTAL_TOKENS)?;
     let cost_total = floats(batch, traces::COST_TOTAL)?;
     let models = lists(batch, traces::MODELS)?;
+    let prompts = lists(batch, traces::PROMPTS)?;
 
     let mut out = Vec::with_capacity(batch.num_rows());
     for row in 0..batch.num_rows() {
@@ -348,6 +349,7 @@ fn trace_batch(batch: &RecordBatch) -> Result<Vec<TraceSummary>, ConvertError> {
             total_tokens: opt_i64(&total_tokens, row),
             cost_total: opt_f64(&cost_total, row),
             models: list_strings(&models, row, traces::MODELS)?,
+            prompts: list_strings(&prompts, row, traces::PROMPTS)?,
             scores: Vec::new(),
         });
     }
@@ -395,6 +397,8 @@ fn span_batch(batch: &RecordBatch) -> Result<Vec<SpanSummary>, ConvertError> {
     let ttft_ns = ints(batch, spans::TTFT_NS)?;
     let input_preview = strings(batch, spans::INPUT_PREVIEW)?;
     let output_preview = strings(batch, spans::OUTPUT_PREVIEW)?;
+    let prompt_name = strings(batch, spans::PROMPT_NAME)?;
+    let prompt_version = ints(batch, spans::PROMPT_VERSION)?;
 
     let mut out = Vec::with_capacity(batch.num_rows());
     for row in 0..batch.num_rows() {
@@ -423,6 +427,8 @@ fn span_batch(batch: &RecordBatch) -> Result<Vec<SpanSummary>, ConvertError> {
             metadata: map_strings(&metadata, row, spans::METADATA)?,
             provider: opt_string(&provider, row),
             model: opt_string(&response_model, row).or_else(|| opt_string(&request_model, row)),
+            prompt_name: opt_string(&prompt_name, row),
+            prompt_version: opt_i64(&prompt_version, row),
             input_tokens: opt_i64(&input_tokens, row),
             output_tokens: opt_i64(&output_tokens, row),
             cache_read_tokens: opt_i64(&cache_read_tokens, row),

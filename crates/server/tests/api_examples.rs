@@ -51,8 +51,8 @@ use cetra_server::api::openapi::openapi;
 use cetra_server::api::org_sso::OrgSso;
 use cetra_server::api::payload::Payload;
 use cetra_server::api::prompts::{
-    CreatePromptRequest, CreateVersionRequest, Prompt, PromptLabelEvent, PromptSettings,
-    PromptVersion, SetLabelRequest,
+    CreatePromptRequest, CreateVersionRequest, Prompt, PromptLabelEvent, PromptMetrics,
+    PromptSettings, PromptVersion, SetLabelRequest,
 };
 use cetra_server::api::saved_views::SavedView;
 use cetra_server::api::schema::SchemaResponse;
@@ -731,6 +731,7 @@ fn generated_files_roundtrip() {
             "list_prompt_versions" => roundtrip::<Page<PromptVersion>>(&example.file),
             "put_prompt_label" => roundtrip::<Prompt>(&example.file),
             "list_prompt_label_events" => roundtrip::<Page<PromptLabelEvent>>(&example.file),
+            "get_prompt_metrics" => roundtrip::<PromptMetrics>(&example.file),
             "get_prompt_settings" | "put_prompt_settings" => {
                 roundtrip::<PromptSettings>(&example.file);
             }

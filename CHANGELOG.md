@@ -32,6 +32,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ### Added
 
+- Prompt links on spans and traces (D-V-15, D-V-16): `cetra.prompt.name`/`version` and Langfuse's prompt attributes fill `prompt_name`, `prompt_version` and the traces' `prompts` list (filter with `prompts @> ['name@version']`); `GET /prompts/{name}/metrics` gives per-version cost, latency, errors and scores (D-V-17). Spans are now normalized with `schema_version` 2.
 - Dashboard templates — Cost, Latency and Quality — in the New dashboard dialog; the Overview adds top users and top trace names by cost and drops its section headings (D-C-21).
 - A demo org that every signed-in user can read (`demo.org`): users see it last in their org switcher as an implicit viewer, without a membership row (D187).
 - SDK prompts (D-V-14, D-V-15): get_prompt / getPrompt with a 60 s cache, stale-while-revalidate and a fallback, Prompt.compile, prompt links through context(prompt=…) / withContext({ prompt }), and client.prompts.

@@ -146,6 +146,7 @@ Track V ([`plans/v-prompts/00-design.md`](../plans/v-prompts/00-design.md) § AP
 | `PUT /prompts/{prompt}/labels/{label}` | `{version}`; points the label at the version, creating the label when new; `200` with the prompt; `latest` is 400 (D-V-8, D-V-10) |
 | `DELETE /prompts/{prompt}/labels/{label}` | removes the label and keeps the versions; `204`; a label that is not set is 404 (D-V-8, D-V-10) |
 | `GET /prompts/{prompt}/label-events` | label history newest first (`cursor` = id of the last event of a page) (D-V-8) |
+| `GET /prompts/{prompt}/metrics?from=&to=&versions=` | per-version counts, cost, latency p50/p95, token averages and score means of the linked `llm` spans; `from` defaults to 7 days before `to`, `to` to now, and the window is at most 90 days; `versions` is 1 to 50 comma-separated numbers, default all; newest version first (D-V-17) |
 | `GET /prompt-settings` | the project's protected labels, `["production"]` until set (D-V-10) |
 | `PUT /prompt-settings` | `{protected_labels}`, at most 20 valid labels; project admins only (D-V-10) |
 
