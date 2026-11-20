@@ -2,6 +2,7 @@ import { cleanup, render, screen, waitFor, within } from "@testing-library/react
 import { delay, HttpResponse, http } from "msw";
 import { afterEach, expect, it, vi } from "vitest";
 import { FiltersToggle } from "@/components/facets/facet-panel";
+import { ANCHOR_REUSE_MS } from "@/lib/list-anchor";
 import { server } from "@/mocks/node";
 import { renderApp } from "@/test/render";
 
@@ -283,9 +284,10 @@ it("shows the last counts at once when coming back to the list", async () => {
     params: { org: "acme", project: "support-bot" },
   });
   await screen.findByRole("button", { name: /^Status/ });
-  // The list fixes "now" when it opens, so coming back asks for a later window that is not cached.
+  // A list keeps its window for 15 minutes (D-C-23); past that, coming back asks for a later
+  // window that is not cached.
   vi.useFakeTimers({ toFake: ["Date"] });
-  vi.setSystemTime(Date.now() + 20_000);
+  vi.setSystemTime(Date.now() + ANCHOR_REUSE_MS + 20_000);
   server.use(
     http.get("/api/v1/projects/:project/facets", async () => {
       await delay("infinite");
