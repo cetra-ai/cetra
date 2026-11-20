@@ -13,8 +13,8 @@ use serde_json::Value as Json;
 
 use crate::bag::{AttrBag, Use};
 use crate::fields::{ResourceView, Source, first_string, resource, span};
-use crate::value::{as_str, as_string_list, to_json, to_map_string};
-use crate::warn::Warnings;
+use crate::value::{as_i64, as_str, as_string_list, to_json, to_map_string};
+use crate::warn::{Warning, Warnings};
 
 const REQUEST_MODEL: &[Source] = &[
     span("gen_ai.request.model", Convention::Genai),
@@ -45,6 +45,16 @@ const VERCEL_CONTEXT: &str = "ai.settings.context.";
 const ADK_FRAMEWORK: &str = "gcp.vertex.agent";
 
 const OPERATION: &[Source] = &[span("gen_ai.operation.name", Convention::Genai)];
+
+/// (name key, version key), in precedence order (D-V-16). Prompt keys are span
+/// attributes only.
+const PROMPT_SOURCES: &[(&str, &str)] = &[
+    (attr::PROMPT_NAME, attr::PROMPT_VERSION),
+    (
+        "langfuse.observation.prompt.name",
+        "langfuse.observation.prompt.version",
+    ),
+];
 
 const SESSION_ID: &[Source] = &[
     span(attr::SESSION_ID, Convention::Cetra),
@@ -154,6 +164,10 @@ pub(crate) struct ContextFields {
     pub environment: Option<String>,
     /// Release or version.
     pub release: Option<String>,
+    /// Registry prompt name (D-V-16). Stored as read, never checked against the registry.
+    pub prompt_name: Option<String>,
+    /// Registry prompt version, an integer ≥ 1, from the convention that named the prompt.
+    pub prompt_version: Option<i64>,
     /// Tags, first-occurrence order, without duplicates.
     pub tags: Vec<String>,
     /// User metadata. Values follow rule 1.
@@ -175,6 +189,7 @@ pub(crate) fn fill(
     let user_id = string_field(bag, resource, USER_ID);
     let environment = string_field(bag, resource, ENVIRONMENT);
     let release = string_field(bag, resource, RELEASE);
+    let (prompt_name, prompt_version) = prompt(bag, warnings);
     let tags = tags(bag);
     let metadata = metadata(bag, warnings);
     ContextFields {
@@ -187,9 +202,49 @@ pub(crate) fn fill(
         user_id,
         environment,
         release,
+        prompt_name,
+        prompt_version,
         tags,
         metadata,
     }
+}
+
+/// D-V-16 and the pairing rule of spec 02 § Context fields. The first name
+/// that is not blank wins. Its version is read from the same convention only;
+/// the other convention's keys are never read. Without a winning name, a
+/// version key is left in `attributes` with one `prompt_version_without_name`.
+fn prompt(bag: &mut AttrBag<'_>, warnings: &mut Warnings) -> (Option<String>, Option<i64>) {
+    let winner = PROMPT_SOURCES.iter().find_map(|&(name_key, version_key)| {
+        let name = bag
+            .get(name_key)
+            .and_then(as_str)
+            .filter(|text| !text.trim().is_empty())?;
+        Some((name_key, name.to_owned(), version_key))
+    });
+    let Some((name_key, name, version_key)) = winner else {
+        if PROMPT_SOURCES
+            .iter()
+            .any(|&(_, version_key)| bag.get(version_key).is_some())
+        {
+            warnings.add(Warning::PromptVersionWithoutName);
+        }
+        return (None, None);
+    };
+    bag.take(name_key);
+    let version = match bag.get(version_key) {
+        None => None,
+        Some(value) => match as_i64(value) {
+            Ok(Some(number)) if number >= 1 => {
+                bag.take(version_key);
+                Some(number)
+            }
+            _ => {
+                warnings.add(Warning::InvalidPromptVersion);
+                None
+            }
+        },
+    };
+    (Some(name), version)
 }
 
 /// Rule 12 over [`PROVIDER`]. ADK's `gen_ai.system = gcp.vertex.agent` is
@@ -577,6 +632,16 @@ mod tests {
         }
     }
 
+    fn bool_attr(key: &str, flag: bool) -> KeyValue {
+        KeyValue {
+            key: key.to_owned(),
+            value: Some(AnyValue {
+                value: Some(Value::BoolValue(flag)),
+            }),
+            ..KeyValue::default()
+        }
+    }
+
     fn filled<'a>(
         attrs: &'a [KeyValue],
         resource_attrs: &[KeyValue],
@@ -586,6 +651,146 @@ mod tests {
         let view = ResourceView::new(resource_attrs);
         let fields = fill(&mut bag, &view, &mut warnings);
         (fields, bag)
+    }
+
+    fn filled_with_warnings(attrs: &[KeyValue]) -> (ContextFields, AttrBag<'_>, Warnings) {
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(attrs, &mut warnings);
+        let view = ResourceView::new(&[]);
+        let fields = fill(&mut bag, &view, &mut warnings);
+        (fields, bag, warnings)
+    }
+
+    #[test]
+    fn prompt_from_cetra() {
+        let attrs = [
+            string_attr(attr::PROMPT_NAME, "support-reply"),
+            int_attr(attr::PROMPT_VERSION, 2),
+        ];
+        let (fields, bag, warnings) = filled_with_warnings(&attrs);
+        assert_eq!(fields.prompt_name.as_deref(), Some("support-reply"));
+        assert_eq!(fields.prompt_version, Some(2));
+        assert_eq!(bag.state(attr::PROMPT_NAME), Some(Use::Consumed));
+        assert_eq!(bag.state(attr::PROMPT_VERSION), Some(Use::Consumed));
+        assert_eq!(warnings.to_attribute(), None);
+    }
+
+    #[test]
+    fn prompt_version_as_string_and_double() {
+        let (fields, _) = filled(
+            &[
+                string_attr(attr::PROMPT_NAME, "p"),
+                string_attr(attr::PROMPT_VERSION, "7"),
+            ],
+            &[],
+        );
+        assert_eq!(fields.prompt_version, Some(7));
+        let (fields, _) = filled(
+            &[
+                string_attr(attr::PROMPT_NAME, "p"),
+                double_attr(attr::PROMPT_VERSION, 7.0),
+            ],
+            &[],
+        );
+        assert_eq!(fields.prompt_version, Some(7));
+    }
+
+    #[test]
+    fn cetra_name_wins_and_pairs_its_version() {
+        let attrs = [
+            string_attr(attr::PROMPT_NAME, "support-reply"),
+            string_attr("langfuse.observation.prompt.name", "other"),
+            int_attr("langfuse.observation.prompt.version", 5),
+        ];
+        let (fields, bag, warnings) = filled_with_warnings(&attrs);
+        assert_eq!(fields.prompt_name.as_deref(), Some("support-reply"));
+        assert_eq!(fields.prompt_version, None);
+        assert_eq!(bag.state("langfuse.observation.prompt.name"), Some(Use::Unread));
+        assert_eq!(
+            bag.state("langfuse.observation.prompt.version"),
+            Some(Use::Unread)
+        );
+        assert_eq!(warnings.to_attribute(), None);
+    }
+
+    #[test]
+    fn langfuse_pair() {
+        let attrs = [
+            string_attr("langfuse.observation.prompt.name", "summarize"),
+            string_attr("langfuse.observation.prompt.version", "3"),
+        ];
+        let (fields, bag, warnings) = filled_with_warnings(&attrs);
+        assert_eq!(fields.prompt_name.as_deref(), Some("summarize"));
+        assert_eq!(fields.prompt_version, Some(3));
+        assert_eq!(
+            bag.state("langfuse.observation.prompt.name"),
+            Some(Use::Consumed)
+        );
+        assert_eq!(
+            bag.state("langfuse.observation.prompt.version"),
+            Some(Use::Consumed)
+        );
+        assert_eq!(warnings.to_attribute(), None);
+    }
+
+    #[test]
+    fn invalid_versions() {
+        let versions = [
+            int_attr(attr::PROMPT_VERSION, 0),
+            int_attr(attr::PROMPT_VERSION, -1),
+            double_attr(attr::PROMPT_VERSION, 1.5),
+            string_attr(attr::PROMPT_VERSION, "x"),
+            bool_attr(attr::PROMPT_VERSION, true),
+        ];
+        for version in versions {
+            let attrs = [string_attr(attr::PROMPT_NAME, "p"), version];
+            let (fields, bag, warnings) = filled_with_warnings(&attrs);
+            assert_eq!(fields.prompt_name.as_deref(), Some("p"));
+            assert_eq!(fields.prompt_version, None);
+            assert_eq!(bag.state(attr::PROMPT_VERSION), Some(Use::Unread));
+            assert_eq!(
+                warnings.to_attribute().as_deref(),
+                Some("[\"invalid_prompt_version\"]")
+            );
+        }
+    }
+
+    #[test]
+    fn version_without_name() {
+        let attrs = [
+            int_attr(attr::PROMPT_VERSION, 4),
+            int_attr("langfuse.observation.prompt.version", 5),
+        ];
+        let (fields, bag, warnings) = filled_with_warnings(&attrs);
+        assert_eq!(fields.prompt_name, None);
+        assert_eq!(fields.prompt_version, None);
+        assert_eq!(bag.state(attr::PROMPT_VERSION), Some(Use::Unread));
+        assert_eq!(
+            bag.state("langfuse.observation.prompt.version"),
+            Some(Use::Unread)
+        );
+        assert_eq!(
+            warnings.to_attribute().as_deref(),
+            Some("[\"prompt_version_without_name\"]")
+        );
+    }
+
+    #[test]
+    fn empty_name_is_absent() {
+        for name in ["", "  "] {
+            let attrs = [string_attr(attr::PROMPT_NAME, name)];
+            let (fields, bag, warnings) = filled_with_warnings(&attrs);
+            assert_eq!(fields.prompt_name, None, "{name:?}");
+            assert_eq!(fields.prompt_version, None);
+            assert_eq!(bag.state(attr::PROMPT_NAME), Some(Use::Unread));
+            assert_eq!(warnings.to_attribute(), None);
+        }
+    }
+
+    #[test]
+    fn resource_keys_are_ignored() {
+        let (fields, _) = filled(&[], &[string_attr(attr::PROMPT_NAME, "p")]);
+        assert_eq!(fields.prompt_name, None);
     }
 
     #[test]
