@@ -3,10 +3,11 @@ import Button from "../marketing/components/Button.astro";
 import Card from "../marketing/components/Card.astro";
 import Section from "../marketing/components/Section.astro";
 import SectionHeading from "../marketing/components/SectionHeading.astro";
-import { SELF_HOSTED } from "../marketing/data/pricing.mjs";
+import { formatMoney, SELF_HOSTED } from "../marketing/data/pricing.mjs";
 import MarketingLayout from "../marketing/layouts/MarketingLayout.astro";
 import Calculator from "../marketing/pricing/Calculator.astro";
 import PlanCards from "../marketing/pricing/PlanCards.astro";
+import Price from "../marketing/pricing/Price.astro";
 import PricingFaq from "../marketing/pricing/PricingFaq.astro";
 import { CONTACT_EMAIL } from "../marketing/site";
 ---
@@ -16,17 +17,18 @@ import { CONTACT_EMAIL } from "../marketing/site";
   description="cetra Cloud plans from free to Pro, and free self-hosting with no limits. Pay for spans and scores, with a spend cap."
   route="/pricing/"
 >
-  <Section tone="ink" pad="md">
+  <Section tone="ink" pad="md" labelledby="pricing-title">
     <SectionHeading
       level={1}
       align="center"
       eyebrow="Pricing"
       title="Free to start. Free to self-host."
+      id="pricing-title"
       lede="cetra Cloud bills by usage, with a free plan and a spend cap. Self-hosted cetra is free with no limits; companies add a licence for single sign-on."
     />
   </Section>
 
-  <Section tone="ink" pad="md">
+  <Section tone="ink" pad="md" labelledby="plans-title">
     <PlanCards />
   </Section>
 
@@ -49,7 +51,7 @@ import { CONTACT_EMAIL } from "../marketing/site";
     />
     <div class="cards">
       <Card title={SELF_HOSTED.name}>
-        <p class="price"><span class="amount">${SELF_HOSTED.priceYearly}</span></p>
+        <Price amount={formatMoney(SELF_HOSTED.priceYearly)} />
         <ul class="points bullets">
           {SELF_HOSTED.features.map((feature) => <li>{feature}</li>)}
         </ul>
@@ -58,9 +60,7 @@ import { CONTACT_EMAIL } from "../marketing/site";
         </div>
       </Card>
       <Card title={SELF_HOSTED.licence.name}>
-        <p class="price">
-          <span class="amount">${SELF_HOSTED.licence.priceYearly.toLocaleString("en-US")}</span> / year
-        </p>
+        <Price amount={formatMoney(SELF_HOSTED.licence.priceYearly)} suffix="/ year" />
         <ul class="points bullets">
           {SELF_HOSTED.licence.features.map((feature) => <li>{feature}</li>)}
         </ul>
@@ -81,17 +81,6 @@ import { CONTACT_EMAIL } from "../marketing/site";
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: var(--space-5);
     margin-top: var(--space-7);
-  }
-  .price {
-    font-family: var(--font-display);
-    font-size: var(--text-base);
-    color: var(--fg);
-    margin-top: var(--space-3);
-  }
-  .amount {
-    font-size: var(--text-3xl);
-    letter-spacing: var(--tracking-display);
-    line-height: var(--leading-tight);
   }
   .points {
     margin: var(--space-5) 0 0;

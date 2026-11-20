@@ -1,15 +1,11 @@
 ---
-import { formatUnits, monthlyPrice, PLANS, suggestedPlan } from "../data/pricing.mjs";
-
-const DEFAULT_SPANS = 1_000_000;
-const DEFAULT_SCORES = 50_000;
-
-/** The estimate text for one plan. The script below repeats this function; keep them the same. */
-function estimate(plan: Parameters<typeof monthlyPrice>[0], units: number): string {
-  const price = monthlyPrice(plan, units);
-  if (price === null) return `Not available above ${formatUnits(plan.includedUnits)} a month`;
-  return `$${Math.round(price).toLocaleString("en-US")}`;
-}
+import {
+  DEFAULT_SCORES,
+  DEFAULT_SPANS,
+  estimateText,
+  PLANS,
+  suggestedPlan,
+} from "../data/pricing.mjs";
 
 const units = DEFAULT_SPANS + DEFAULT_SCORES;
 const suggested = suggestedPlan(units).id;
@@ -24,8 +20,10 @@ const suggested = suggestedPlan(units).id;
         type="number"
         min="0"
         step="10000"
-        value="1000000"
+        value={DEFAULT_SPANS}
         inputmode="numeric"
+        autocomplete="off"
+        aria-describedby="calc-note"
       />
     </div>
     <div class="field">
@@ -35,66 +33,79 @@ const suggested = suggestedPlan(units).id;
         type="number"
         min="0"
         step="1000"
-        value="50000"
+        value={DEFAULT_SCORES}
         inputmode="numeric"
+        autocomplete="off"
+        aria-describedby="calc-note"
       />
     </div>
   </div>
-  <output id="calc-out" for="calc-spans calc-scores" aria-live="polite" class="out">
+  <div id="calc-out" class="out">
     {
       PLANS.map((plan) => (
         <span class="row" data-plan={plan.id}>
           <span class="row-name">{plan.name}</span>
           <span class="eyebrow" data-suggested hidden={plan.id !== suggested}>Suggested</span>
-          <span class="row-value" data-value>{estimate(plan, units)}</span>
+          <span class="row-value" data-value>{estimateText(plan, units)}</span>
         </span>
       ))
     }
-  </output>
-  <p class="muted note">
-    You can set a spend cap: ingestion stops at the cap, so the bill never passes it. Large
-    volumes get lower rates; talk to us.
+  </div>
+  <p class="visually-hidden" role="status" id="calc-status"></p>
+  <p class="muted note" id="calc-note">
+    You can set a spend cap: ingestion stops at the cap. Usage over the included amount is billed
+    per unit. Large volumes get lower rates; talk to us.
   </p>
 </div>
 
 <script>
-  import { monthlyPrice, PLANS, suggestedPlan } from "../data/pricing.mjs";
+  import {
+    estimateText,
+    formatUnits,
+    parseUnits,
+    PLANS,
+    suggestedPlan,
+  } from "../data/pricing.mjs";
 
   const spans = document.getElementById("calc-spans") as HTMLInputElement;
   const scores = document.getElementById("calc-scores") as HTMLInputElement;
-  const out = document.getElementById("calc-out") as HTMLOutputElement;
+  const out = document.getElementById("calc-out") as HTMLElement;
+  const status = document.getElementById("calc-status") as HTMLElement;
 
-  /** A count from an input: empty, negative or not a number counts as 0. */
-  function count(input: HTMLInputElement): number {
-    const n = Number(input.value);
-    return Number.isFinite(n) && n > 0 ? n : 0;
-  }
+  let timer: number | undefined;
 
-  /** The estimate text for one plan. Same rules as the frontmatter of Calculator.astro. */
-  function estimate(plan: (typeof PLANS)[number], units: number): string {
-    const price = monthlyPrice(plan, units);
-    if (price === null) {
-      return `Not available above ${plan.includedUnits.toLocaleString("en-US")} a month`;
-    }
-    return `$${Math.round(price).toLocaleString("en-US")}`;
-  }
-
-  function render() {
-    const units = count(spans) + count(scores);
+  /** Updates the visual rows at once. */
+  function renderRows(units: number) {
     const suggested = suggestedPlan(units).id;
     for (const plan of PLANS) {
       const row = out.querySelector<HTMLElement>(`[data-plan="${plan.id}"]`);
       const value = row?.querySelector("[data-value]");
       const badge = row?.querySelector<HTMLElement>("[data-suggested]");
       if (!value || !badge) continue;
-      value.textContent = estimate(plan, units);
+      value.textContent = estimateText(plan, units);
       badge.hidden = plan.id !== suggested;
     }
   }
 
-  spans.addEventListener("input", render);
-  scores.addEventListener("input", render);
-  render();
+  /** One sentence for the status region, read by screen readers after a pause in typing. */
+  function announce(units: number) {
+    const suggested = suggestedPlan(units);
+    status.textContent =
+      suggested.id === "free"
+        ? `Free covers ${formatUnits(units)} a month.`
+        : `About ${estimateText(suggested, units)} a month on ${suggested.name}, the suggested plan.`;
+  }
+
+  function onInput() {
+    const units = parseUnits(spans.value) + parseUnits(scores.value);
+    renderRows(units);
+    window.clearTimeout(timer);
+    timer = window.setTimeout(() => announce(units), 400);
+  }
+
+  spans.addEventListener("input", onInput);
+  scores.addEventListener("input", onInput);
+  renderRows(parseUnits(spans.value) + parseUnits(scores.value));
 </script>
 
 <style>

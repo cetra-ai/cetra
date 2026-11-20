@@ -80,7 +80,7 @@ const needs = [
     <SectionHeading title="Day two" id="sh-day2-title" />
     <div class="cards cards--three">
       <Card title="Upgrades" href="/docs/self-hosting/upgrade/">
-        <p>Replace the binary or the image. Database migrations run on start, and Parquet files are never rewritten.</p>
+        <p>Replace the binary or the image. Database migrations run on start, and an upgrade never rewrites your Parquet files.</p>
       </Card>
       <Card title="Backups" href="/docs/self-hosting/backup/">
         <p>Back up a running server with one command, keep the secret key with it, and rehearse the restore.</p>
@@ -98,7 +98,7 @@ const needs = [
       id="sh-licence-title"
       lede="The core is MIT and free. A licence key, checked offline with no call home, unlocks the enterprise features in the same binary."
     />
-    <ul class="points">
+    <ul class="points bullets">
       {SELF_HOSTED.licence.features.map((feature) => <li>{feature}</li>)}
     </ul>
     <div class="actions">
@@ -141,25 +141,7 @@ const needs = [
     margin-top: var(--space-6);
   }
   .points {
-    list-style: none;
-    padding: 0;
     margin: var(--space-6) 0 0;
-    display: grid;
-    gap: var(--space-2);
-  }
-  .points li {
-    position: relative;
-    padding-left: var(--space-4);
-  }
-  .points li::before {
-    content: "";
-    position: absolute;
-    left: 0;
-    top: 0.55em;
-    width: 6px;
-    height: 6px;
-    background: var(--accent);
-    border-radius: 50%;
   }
   .actions {
     display: flex;

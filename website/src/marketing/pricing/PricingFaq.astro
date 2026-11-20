@@ -12,7 +12,7 @@ import SectionHeading from "../components/SectionHeading.astro";
     </details>
     <details>
       <summary><span class="question">What happens at the limit?</span></summary>
-      <p class="muted">On Free, cetra stops accepting new spans for the rest of the month and tells you why. On paid plans, ingestion continues and the extra units are billed, unless you set a spend cap.</p>
+      <p class="muted">On Free, cetra stops accepting new spans and scores for the rest of the month and tells you why. On paid plans, ingestion continues and the extra units are billed, unless you set a spend cap.</p>
     </details>
     <details>
       <summary><span class="question">What does "history" mean?</span></summary>
@@ -43,6 +43,7 @@ import SectionHeading from "../components/SectionHeading.astro";
     justify-content: space-between;
     gap: var(--space-4);
     list-style: none;
+    cursor: pointer;
   }
   summary::-webkit-details-marker {
     display: none;
@@ -50,17 +51,17 @@ import SectionHeading from "../components/SectionHeading.astro";
   .question {
     font-family: var(--font-display);
     font-size: var(--text-lg);
-    cursor: pointer;
   }
+  /* The marker is decoration: its text is empty for screen readers. */
   summary::after {
-    content: "+";
+    content: "+" / "";
     flex: none;
     font-family: var(--font-display);
     font-size: var(--text-xl);
     color: var(--accent);
   }
   details[open] summary::after {
-    content: "−";
+    content: "−" / "";
   }
   details p {
     margin-top: var(--space-3);

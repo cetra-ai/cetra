@@ -1,27 +1,33 @@
 ---
 import Button from "../components/Button.astro";
 import Card from "../components/Card.astro";
-import { ENTERPRISE, formatUnits, OVERAGE_PER_100K, PLANS, TEAMS_ADDON } from "../data/pricing.mjs";
+import {
+  ENTERPRISE,
+  formatMoney,
+  formatUnits,
+  OVERAGE_PER_100K,
+  PLANS,
+  TEAMS_ADDON,
+} from "../data/pricing.mjs";
 import { CLOUD, CONTACT_EMAIL } from "../site";
+import Price from "./Price.astro";
 ---
 
-<h2 class="visually-hidden">Plans</h2>
+<h2 class="visually-hidden" id="plans-title">Plans</h2>
 <div class="grid grid--plans">
   {
     PLANS.map((plan) => (
       <div class:list={["plan", plan.id === "pro" && "plan--pro"]}>
         <Card title={plan.name}>
-          {plan.id === "pro" && <p class="eyebrow badge">Most teams</p>}
-          <p class="price">
-            <span class="amount">${plan.priceMonthly}</span> / month
-          </p>
+          {plan.id === "pro" && <p class="eyebrow badge">Recommended</p>}
+          <Price amount={formatMoney(plan.priceMonthly)} suffix="/ month" />
           <p>{plan.blurb}</p>
           <div class="actions">
             <Button href={CLOUD.signup} external>{plan.cta}</Button>
           </div>
           <ul class="points bullets">
             <li>{formatUnits(plan.includedUnits)} spans and scores a month</li>
-            <li>{plan.overage ? `Then $${OVERAGE_PER_100K} per 100,000` : "Hard limit, no overage"}</li>
+            <li>{plan.overage ? `Then ${formatMoney(OVERAGE_PER_100K)} per 100,000` : "Hard limit, no overage"}</li>
             <li>{plan.dataAccess} of history</li>
             <li>{plan.seats}</li>
             {plan.projects && <li>{plan.projects}</li>}
@@ -35,9 +41,10 @@ import { CLOUD, CONTACT_EMAIL } from "../site";
 </div>
 <div class="grid grid--wide">
   <Card title={TEAMS_ADDON.name}>
-    <p class="price">
-      <span class="amount">${TEAMS_ADDON.priceMonthly}</span> / month on top of {TEAMS_ADDON.requires}
-    </p>
+    <Price
+      amount={formatMoney(TEAMS_ADDON.priceMonthly)}
+      suffix={`/ month on top of ${TEAMS_ADDON.requires}`}
+    />
     <ul class="points bullets">
       {TEAMS_ADDON.features.map((feature) => <li>{feature}</li>)}
     </ul>
@@ -46,7 +53,7 @@ import { CLOUD, CONTACT_EMAIL } from "../site";
     </div>
   </Card>
   <Card title={ENTERPRISE.name}>
-    <p class="price"><span class="amount">Custom</span></p>
+    <Price amount="Custom" />
     <ul class="points bullets">
       {ENTERPRISE.features.map((feature) => <li>{feature}</li>)}
     </ul>
@@ -85,17 +92,6 @@ import { CLOUD, CONTACT_EMAIL } from "../site";
   }
   .badge {
     margin-top: var(--space-2);
-  }
-  .price {
-    font-family: var(--font-display);
-    font-size: var(--text-base);
-    color: var(--fg);
-    margin-top: var(--space-3);
-  }
-  .amount {
-    font-size: var(--text-3xl);
-    letter-spacing: var(--tracking-display);
-    line-height: var(--leading-tight);
   }
   .actions {
     margin-top: var(--space-5);

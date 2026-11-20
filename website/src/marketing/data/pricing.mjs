@@ -2,7 +2,6 @@
 // from here; pricing.test.mjs checks the numbers against D177 in docs/mvp-decisions.md and the
 // licence features against website/src/content/docs/docs/platform/plans-and-licence.mdx.
 // `projects` and `support` are null where D177 states nothing.
-
 /**
  * @typedef {object} Plan
  * @property {string} id
@@ -19,7 +18,12 @@
  * @property {string} blurb
  */
 
-export const UNIT = "span or score";
+/** The calculator's starting values: a typical team's monthly spans and scores. */
+export const DEFAULT_SPANS = 1_000_000;
+export const DEFAULT_SCORES = 50_000;
+
+/** The largest unit count the calculator takes. At or above it the estimate is "Talk to us". */
+export const MAX_UNITS = 1_000_000_000_000;
 
 /** USD per 100,000 units over the included amount (D177: "$4 per 100k, lower with volume"). */
 export const OVERAGE_PER_100K = 4;
@@ -86,7 +90,7 @@ export const ENTERPRISE = {
   name: "Enterprise",
   features: [
     "A dedicated cell",
-    "Custom licence terms for self-hosting",
+    "A self-hosted licence",
     "Audit logs and SCIM",
     "Service level agreements",
   ],
@@ -128,7 +132,49 @@ export function monthlyPrice(plan, units) {
  * @param {number} units
  */
 export function suggestedPlan(units) {
-  return units <= PLANS[0].includedUnits ? PLANS[0] : PLANS[1];
+  const free = planById("free");
+  return units <= free.includedUnits ? free : planById("starter");
+}
+
+/**
+ * @param {string} id
+ * @returns {Plan}
+ */
+function planById(id) {
+  const plan = PLANS.find((p) => p.id === id);
+  if (!plan) throw new Error(`no plan with id ${id}`);
+  return plan;
+}
+
+/**
+ * The estimate shown for one plan: a price, or the reason there is none.
+ * @param {Plan} plan
+ * @param {number} units
+ */
+export function estimateText(plan, units) {
+  if (units > MAX_UNITS - 1) return "Talk to us";
+  const price = monthlyPrice(plan, units);
+  if (price === null) return `Not available above ${formatUnits(plan.includedUnits)} a month`;
+  return formatMoney(price);
+}
+
+/**
+ * A list price in USD, rounded up to the dollar: 30.4 → "$31", 1184 → "$1,184".
+ * @param {number} usd
+ */
+export function formatMoney(usd) {
+  return `$${Math.ceil(usd).toLocaleString("en-US")}`;
+}
+
+/**
+ * A unit count typed into the calculator: a whole number from 0 to MAX_UNITS. Empty, negative
+ * and not-a-number input counts as 0; a value above MAX_UNITS (including Infinity) is MAX_UNITS.
+ * @param {string | number} raw
+ */
+export function parseUnits(raw) {
+  const n = Math.floor(Number(raw));
+  if (Number.isNaN(n) || n < 0) return 0;
+  return Math.min(n, MAX_UNITS);
 }
 
 /**
