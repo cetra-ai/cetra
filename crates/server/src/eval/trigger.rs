@@ -1,7 +1,7 @@
 //! The online-rule trigger (D-I-7 to D-I-11): the tracked projects, the flusher, startup and the
 //! sweeper, which completes traces, matches each rule through storage, samples, caps and enqueues.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use cetra_core::ids::{OrgId, ProjectId, TraceId};
@@ -17,8 +17,10 @@ use crate::eval::hourly::HourlyCaps;
 use crate::eval::pending::{Changes, Completed, Entry};
 use crate::eval::sampling;
 use crate::http::AppState;
+use crate::issues::sources::ProjectSources;
 use crate::meta::MetaError;
 use crate::meta::eval_jobs::{KIND_RULE, NewJob, insert_rule_job};
+use crate::meta::issues::SweepSource;
 use crate::meta::online_rules::{self, TriggerRule};
 use crate::meta::pending_traces::{PendingRow, load_pending, write_pending};
 use crate::meta::projects::{
@@ -45,16 +47,14 @@ pub(crate) struct FlushReport {
     pub(crate) deletes: usize,
 }
 
-/// Reads the enabled, unpaused rules, groups them by project, and sets the tracked set to their
-/// projects (D-I-8). A project's timeout is its stored `trace_completion_timeout_s` when that is
-/// in range, else the default.
+/// Reads the enabled, unpaused rules and groups them by project. A project's timeout is its stored
+/// `trace_completion_timeout_s` when that is in range, else the default. The tracked set is not
+/// touched.
 ///
 /// # Errors
 ///
-/// [`MetaError`] when the read fails; the tracked set is then left as it was.
-pub(crate) async fn refresh_rules(
-    state: &AppState,
-) -> Result<HashMap<ProjectId, ProjectRules>, MetaError> {
+/// [`MetaError`] when the read fails.
+async fn read_rules(state: &AppState) -> Result<HashMap<ProjectId, ProjectRules>, MetaError> {
     #[cfg(test)]
     if faults::take_refresh() {
         return Err(MetaError::Db(sqlx::Error::PoolTimedOut));
@@ -73,13 +73,50 @@ pub(crate) async fn refresh_rules(
             .rules
             .push(rule);
     }
+    Ok(projects)
+}
+
+/// Reads the enabled, unpaused rules, groups them by project, and sets the tracked set to their
+/// projects (D-I-8). A project's timeout is its stored `trace_completion_timeout_s` when that is
+/// in range, else the default.
+///
+/// # Errors
+///
+/// [`MetaError`] when the read fails; the tracked set is then left as it was.
+pub(crate) async fn refresh_rules(
+    state: &AppState,
+) -> Result<HashMap<ProjectId, ProjectRules>, MetaError> {
+    let projects = read_rules(state).await?;
     state
         .pending
         .set_tracked(projects.keys().copied().collect());
     Ok(projects)
 }
 
-/// Startup: the table's rows into the map, after [`refresh_rules`] (D-I-8). When the rules cannot
+/// Reads the rules and the error sources, and sets the tracked set to the union of their
+/// projects (D-I-8, D-IC-2). Either read failing returns its error before the tracked set is
+/// set, so the set stays as it was.
+///
+/// # Errors
+///
+/// [`MetaError`] when a read fails.
+pub(crate) async fn refresh_tracked(
+    state: &AppState,
+) -> Result<
+    (
+        HashMap<ProjectId, ProjectRules>,
+        HashMap<ProjectId, ProjectSources>,
+    ),
+    MetaError,
+> {
+    let rules = read_rules(state).await?;
+    let sources = crate::issues::sources::refresh(state).await?;
+    let tracked: HashSet<ProjectId> = rules.keys().chain(sources.keys()).copied().collect();
+    state.pending.set_tracked(tracked);
+    Ok((rules, sources))
+}
+
+/// Startup: the table's rows into the map, after [`refresh_tracked`] (D-I-8). When the rules cannot
 /// be read, the rows are still loaded: their projects are tracked for now, and the first sweep's
 /// refresh sets the real tracked set and drops the rest.
 ///
@@ -88,7 +125,7 @@ pub(crate) async fn refresh_rules(
 /// [`MetaError`] when the rows cannot be read.
 pub(crate) async fn load(state: &AppState) -> Result<(), MetaError> {
     let rows = load_pending(state.meta.reader()).await?;
-    if let Err(error) = refresh_rules(state).await {
+    if let Err(error) = refresh_tracked(state).await {
         tracing::warn!(
             error = %error,
             "online rules could not be read at startup; stored pending traces are held until the first sweep"
@@ -214,7 +251,7 @@ const BATCH_SPREAD_NS: i64 = 12 * 3_600 * NANOS_PER_SECOND;
 /// Span rules keep this many sampled spans per trace (D-I-10).
 const MAX_SAMPLED_SPANS: usize = 50;
 /// Time allowed for one rule's read.
-const READ_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// Most jobs inserted per write (D-I-11).
 const ENQUEUE_CHUNK: usize = 1_000;
 
@@ -253,22 +290,41 @@ struct Candidates<'a> {
 ///
 /// [`MetaError`] only when the rules cannot be read; a failed batch is counted, not returned.
 pub(crate) async fn sweep_once(state: &AppState, now: i64) -> Result<SweepReport, MetaError> {
-    let projects = refresh_rules(state).await?;
+    let (rules, sources) = refresh_tracked(state).await?;
+    let mut projects: Vec<ProjectId> = rules.keys().chain(sources.keys()).copied().collect();
+    projects.sort();
+    projects.dedup();
     let mut report = SweepReport::default();
-    for (project, project_rules) in &projects {
+    for project in projects {
         if state.eval.is_stopped() {
             break;
         }
-        let completed =
-            state
-                .pending
-                .completed(*project, now, project_rules.timeout_ns, PER_PROJECT_TICK);
+        let project_rules = rules.get(&project);
+        let project_sources = sources.get(&project);
+        let Some((org, timeout_ns)) = project_rules
+            .map(|found| (found.org, found.timeout_ns))
+            .or_else(|| project_sources.map(|found| (found.org, found.timeout_ns)))
+        else {
+            continue;
+        };
+        let project_rule_list: &[TriggerRule] = match project_rules {
+            Some(found) => &found.rules,
+            None => &[],
+        };
+        let project_source_list: &[SweepSource] = match project_sources {
+            Some(found) => &found.sources,
+            None => &[],
+        };
+        let completed = state
+            .pending
+            .completed(project, now, timeout_ns, PER_PROJECT_TICK);
         report.completed += completed.len();
         let ctx = SweepCtx {
             state,
-            org: project_rules.org,
-            project: *project,
-            rules: &project_rules.rules,
+            org,
+            project,
+            rules: project_rule_list,
+            sources: project_source_list,
             now,
         };
         for (around, batch) in batches(&completed) {
@@ -278,7 +334,7 @@ pub(crate) async fn sweep_once(state: &AppState, now: i64) -> Result<SweepReport
             let outcome = sweep_batch(&ctx, around, batch, &mut report).await;
             #[cfg(test)]
             faults::run_before_settle();
-            settle(state, *project, batch, outcome, &mut report);
+            settle(state, project, batch, outcome, &mut report);
         }
     }
     if report.enqueued > 0 {
@@ -287,13 +343,15 @@ pub(crate) async fn sweep_once(state: &AppState, now: i64) -> Result<SweepReport
     Ok(report)
 }
 
-/// What one sweep works with for one project: its state, the rules, and the sweep's clock.
-struct SweepCtx<'a> {
-    state: &'a AppState,
-    org: OrgId,
-    project: ProjectId,
-    rules: &'a [TriggerRule],
-    now: i64,
+/// What one sweep works with for one project: its state, the rules, the error sources, and the
+/// sweep's clock.
+pub(crate) struct SweepCtx<'a> {
+    pub(crate) state: &'a AppState,
+    pub(crate) org: OrgId,
+    pub(crate) project: ProjectId,
+    pub(crate) rules: &'a [TriggerRule],
+    pub(crate) sources: &'a [SweepSource],
+    pub(crate) now: i64,
 }
 
 /// Ends one batch: `Ok` removes its traces that did not grow; `Err` counts a failed read for each
@@ -322,11 +380,30 @@ fn settle(
     }
 }
 
-/// Reads, admits and enqueues one batch: read first, then, chunk by chunk, admit and enqueue. Only
-/// the reads can fail before the hourly cap is touched, so a failed read spends no unit and counts
-/// nothing. A chunk is admitted just before its write, so a failed write spends the cap of its own
-/// chunk only.
+/// Ends one batch's sweep: the error issues first (D-IC-2), then the rules. The error sweep is
+/// idempotent, so a later rule failure that retries the batch repeats nothing that costs a cap.
+/// The rules' reads, admission and enqueue come after: see [`read_candidates`]. A project with no
+/// rules or no error sources skips its step.
 async fn sweep_batch(
+    ctx: &SweepCtx<'_>,
+    around: i64,
+    batch: &[Completed],
+    report: &mut SweepReport,
+) -> Result<(), ()> {
+    if !ctx.sources.is_empty() {
+        crate::issues::errors::sweep_batch(ctx, around, batch).await?;
+    }
+    if ctx.rules.is_empty() {
+        return Ok(());
+    }
+    rule_batch(ctx, around, batch, report).await
+}
+
+/// Reads, admits and enqueues one batch's rules: read first, then, chunk by chunk, admit and
+/// enqueue. Only the reads can fail before the hourly cap is touched, so a failed read spends no
+/// unit and counts nothing. A chunk is admitted just before its write, so a failed write spends the
+/// cap of its own chunk only.
+async fn rule_batch(
     ctx: &SweepCtx<'_>,
     around: i64,
     batch: &[Completed],
@@ -360,6 +437,7 @@ async fn read_candidates<'a>(
         project,
         rules,
         now,
+        ..
     } = *ctx;
     let opened = state
         .storage
@@ -566,7 +644,7 @@ fn batches(completed: &[Completed]) -> Vec<(i64, &[Completed])> {
 }
 
 /// A stored timeout in seconds as nanoseconds; out of range means the default.
-fn timeout_ns(stored: Option<i64>) -> i64 {
+pub(crate) fn timeout_ns(stored: Option<i64>) -> i64 {
     let seconds = stored
         .and_then(|value| u32::try_from(value).ok())
         .filter(|value| (COMPLETION_TIMEOUT_MIN_S..=COMPLETION_TIMEOUT_MAX_S).contains(value))
@@ -674,6 +752,7 @@ mod tests {
 
         use super::super::*;
         use crate::meta::evaluators::{EvaluatorFields, insert_evaluator};
+        use crate::meta::issues::{SourceKind, SourceRow, insert_source, update_source};
         use crate::meta::online_rules::{NewRule, RuleFields, insert_rule};
         use crate::meta::pending_traces::{load_pending, write_pending};
         use crate::meta::projects::insert_project;
@@ -943,6 +1022,72 @@ mod tests {
                 load_pending(app.state.meta.reader()).await.unwrap().len(),
                 total
             );
+        }
+
+        /// An error source of `project`, stored enabled or not.
+        async fn error_source(app: &TestApp, project: ProjectId, enabled: bool) -> SourceRow {
+            let now = app.state.clock.now_ns();
+            let row = SourceRow {
+                id: Uuid::now_v7(),
+                project_id: project,
+                name: format!("Errors {}", Uuid::now_v7()),
+                kind: SourceKind::Error,
+                filter: None,
+                enabled,
+                paused_reason: None,
+                paused_at: None,
+                created_by: None,
+                created_at: now,
+                updated_at: now,
+            };
+            let stored = row.clone();
+            app.state
+                .meta
+                .write(move |conn| Box::pin(async move { insert_source(conn, &row).await }))
+                .await
+                .unwrap();
+            stored
+        }
+
+        #[tokio::test]
+        async fn project_with_only_an_error_source_is_tracked() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, true).await;
+            refresh_tracked(&app.state).await.unwrap();
+            app.state.pending.observe(project, &[rooted_span()], 0);
+            assert_eq!(app.state.pending.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn a_disabled_source_untracks_its_project() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            let mut source = error_source(&app, project, true).await;
+            refresh_tracked(&app.state).await.unwrap();
+            app.state.pending.observe(project, &[rooted_span()], 0);
+            assert_eq!(app.state.pending.len(), 1);
+
+            source.enabled = false;
+            app.state
+                .meta
+                .write(move |conn| {
+                    Box::pin(async move {
+                        update_source(conn, &source).await?;
+                        Ok(())
+                    })
+                })
+                .await
+                .unwrap();
+            let (rules, sources) = refresh_tracked(&app.state).await.unwrap();
+            assert!(rules.is_empty());
+            assert!(sources.is_empty());
+            // The project's held traces are dropped with it.
+            assert_eq!(app.state.pending.len(), 0);
+            app.state.pending.observe(project, &[rooted_span()], 0);
+            assert_eq!(app.state.pending.len(), 0);
         }
     }
 
