@@ -78,10 +78,89 @@ export function AddTracesToDatasetDialog({
   traceIds,
   onAdded,
 }: AddTracesToDatasetDialogProps) {
-  const createDataset = useCreateDataset();
+  const { org, project } = useProject();
   const addFromTraces = useAddFromTraces();
-  const busy = createDataset.isPending || addFromTraces.isPending;
   const count = traceIds.length;
+
+  return (
+    <DatasetTargetDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title={`Add ${count} ${count === 1 ? "trace" : "traces"} to a dataset`}
+      description="Copies each trace's root input and output into a new dataset item, all in one new version."
+      adding={addFromTraces.isPending}
+      add={(datasetId) =>
+        addFromTraces.mutateAsync({
+          params: { path: { project: projectRef(org, project), dataset: datasetId } },
+          body: { items: traceIds.map((trace_id) => ({ trace_id })) },
+        })
+      }
+      onAdded={onAdded}
+    />
+  );
+}
+
+export interface AddIssueExamplesDialogProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  /** The issue whose newest occurrence traces are copied. */
+  issueId: string;
+}
+
+/** Copies the newest occurrence traces of an issue into a dataset as one version (D-IC-22). */
+export function AddIssueExamplesDialog({
+  open,
+  onOpenChange,
+  issueId,
+}: AddIssueExamplesDialogProps) {
+  const { org, project } = useProject();
+  const addExamples = $api.useMutation(
+    "post",
+    "/api/v1/projects/{project}/issues/{id}/dataset-items",
+  );
+
+  return (
+    <DatasetTargetDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title="Add examples to a dataset"
+      description="Copies the input and output of the issue's newest occurrences (up to 100 traces, one item each) into a dataset as one new version."
+      adding={addExamples.isPending}
+      add={(datasetId) =>
+        addExamples.mutateAsync({
+          params: { path: { project: projectRef(org, project), id: issueId } },
+          body: { dataset: datasetId },
+        })
+      }
+    />
+  );
+}
+
+interface DatasetTargetDialogProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  title: string;
+  description: string;
+  /** Adds to the dataset; resolves with J's result. */
+  add: (datasetId: string) => Promise<Schema<"FromTracesResult">>;
+  /** True while that add request runs (the caller's mutation `isPending`). */
+  adding: boolean;
+  /** Optional: the traces list clears its selection; the issue dialog passes none. */
+  onAdded?: () => void;
+}
+
+/** The dialog shell and the dataset form shared by the traces list and the issue page. */
+function DatasetTargetDialog({
+  open,
+  onOpenChange,
+  title,
+  description,
+  add,
+  adding,
+  onAdded,
+}: DatasetTargetDialogProps) {
+  const createDataset = useCreateDataset();
+  const busy = createDataset.isPending || adding;
 
   return (
     <Dialog
@@ -107,17 +186,14 @@ export function AddTracesToDatasetDialog({
         }}
       >
         <DialogHeader>
-          <DialogTitle>{`Add ${count} ${count === 1 ? "trace" : "traces"} to a dataset`}</DialogTitle>
-          <DialogDescription>
-            Copies each trace's root input and output into a new dataset item, all in one new
-            version.
-          </DialogDescription>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
         {open ? (
           <AddTracesForm
-            traceIds={traceIds}
             createDataset={createDataset}
-            addFromTraces={addFromTraces}
+            add={add}
+            adding={adding}
             onAdded={onAdded}
             onClose={() => {
               onOpenChange(false);
@@ -130,16 +206,16 @@ export function AddTracesToDatasetDialog({
 }
 
 function AddTracesForm({
-  traceIds,
   createDataset,
-  addFromTraces,
+  add,
+  adding,
   onAdded,
   onClose,
 }: {
-  traceIds: readonly string[];
   createDataset: ReturnType<typeof useCreateDataset>;
-  addFromTraces: ReturnType<typeof useAddFromTraces>;
-  onAdded: () => void;
+  add: (datasetId: string) => Promise<Schema<"FromTracesResult">>;
+  adding: boolean;
+  onAdded?: () => void;
   onClose: () => void;
 }) {
   const { org, project } = useProject();
@@ -255,14 +331,11 @@ function AddTracesForm({
     }
 
     try {
-      const answer = await addFromTraces.mutateAsync({
-        params: { path: { project: ref, dataset: target.id } },
-        body: { items: traceIds.map((trace_id) => ({ trace_id })) },
-      });
+      const answer = await add(target.id);
       for (const key of datasetWriteKeys(org, project, target.id)) {
         void queryClient.invalidateQueries({ queryKey: key });
       }
-      onAdded();
+      onAdded?.();
       setResult({ dataset: target, added: answer.items.length, skipped: answer.skipped });
     } catch (caught) {
       setFormError(addMessage(caught));
@@ -308,7 +381,7 @@ function AddTracesForm({
     );
   }
 
-  const busy = createDataset.isPending || addFromTraces.isPending;
+  const busy = createDataset.isPending || adding;
   const message = formError ?? errors.dataset;
 
   return (

@@ -6,13 +6,19 @@ import { server } from "@/mocks/node";
 import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
 import datasetFixture from "../../../../fixtures/api/responses/datasets/01900000-0000-7000-8000-000000000c01.json";
+import eventsFixture from "../../../../fixtures/api/static/issue-events.json";
 import fromTracesFixture from "../../../../fixtures/api/static/dataset-items-from-traces.json";
+import issueFixture from "../../../../fixtures/api/static/issue.json";
+import occurrencesFixture from "../../../../fixtures/api/static/issue-occurrences.json";
 import { addTracesReason } from "./add-traces-to-dataset-dialog";
 
 const FROM_TRACES = "/api/v1/projects/:project/datasets/:dataset/items/from-traces";
+const ISSUE_ITEMS = "/api/v1/projects/:project/issues/:id/dataset-items";
 const FIRST = "a1000000000000000000000000000006";
 const SECOND = "a1000000000000000000000000000004";
 const TRACES_URL = "/acme/support-bot/traces";
+const ISSUE_URL = `/acme/support-bot/issues/${issueFixture.id}`;
+const FAQ_ID = "01900000-0000-7000-8000-000000000c01";
 
 /** Answers each from-traces request with 201 and records the body and the dataset. */
 function captureTraces(): { bodies: unknown[]; datasets: string[] } {
@@ -174,5 +180,103 @@ describe("add traces to dataset dialog", () => {
     expect(await within(dialog).findByRole("alert")).toHaveTextContent(
       "Storage is busy. Try again.",
     );
+  });
+});
+
+/** Opens the issue page of the fixture issue and its "Add examples to dataset" dialog. */
+async function openIssueDialog() {
+  server.use(
+    http.get("/api/v1/projects/:project/issues/:id", () => HttpResponse.json(issueFixture)),
+    http.get("/api/v1/projects/:project/issues/:id/occurrences", () =>
+      HttpResponse.json(occurrencesFixture),
+    ),
+    http.get("/api/v1/projects/:project/issues/:id/events", () => HttpResponse.json(eventsFixture)),
+  );
+  const rendered = await renderApp(ISSUE_URL);
+  await rendered.user.click(await screen.findByRole("button", { name: "Add examples to dataset" }));
+  return { ...rendered, dialog: await screen.findByRole("dialog") };
+}
+
+describe("add issue examples to dataset dialog", () => {
+  it("adds an issue's examples to the chosen dataset", async () => {
+    const bodies: unknown[] = [];
+    const issues: string[] = [];
+    server.use(
+      http.post(ISSUE_ITEMS, async ({ request, params }) => {
+        bodies.push(await request.json());
+        issues.push(String(params.id));
+        return HttpResponse.json(fromTracesFixture, { status: 201 });
+      }),
+    );
+    const { user, dialog } = await openIssueDialog();
+
+    expect(
+      within(dialog).getByRole("heading", { name: "Add examples to a dataset" }),
+    ).toBeInTheDocument();
+    await choose(user, dialog, "Dataset", "faq");
+    await user.click(within(dialog).getByRole("button", { name: "Add" }));
+
+    expect(await within(dialog).findByText("Added 1 item to faq.")).toBeInTheDocument();
+    expect(bodies).toEqual([{ dataset: FAQ_ID }]);
+    expect(issues).toEqual([issueFixture.id]);
+  });
+
+  it("lists skipped traces from the issue route", async () => {
+    const { user, dialog } = await openIssueDialog();
+
+    await choose(user, dialog, "Dataset", "faq");
+    await user.click(within(dialog).getByRole("button", { name: "Add" }));
+
+    expect(await within(dialog).findByText("1 trace was not copied")).toBeInTheDocument();
+    expect(within(dialog).getByText("a1000000")).toBeInTheDocument();
+    expect(within(dialog).getByText("the trace or span was not found")).toBeInTheDocument();
+  });
+
+  it("shows the 400 message when the issue has no occurrences", async () => {
+    server.use(
+      http.post(ISSUE_ITEMS, () =>
+        problemResponse(400, "validation_failed", {
+          errors: [{ field: "issue", message: "the issue has no occurrences in the data window" }],
+        }),
+      ),
+    );
+    const { user, dialog } = await openIssueDialog();
+
+    await choose(user, dialog, "Dataset", "faq");
+    await user.click(within(dialog).getByRole("button", { name: "Add" }));
+
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "the issue has no occurrences in the data window",
+    );
+    expect(within(dialog).queryByRole("link", { name: "Open dataset" })).not.toBeInTheDocument();
+  });
+
+  it("creates a new dataset first", async () => {
+    const order: string[] = [];
+    server.use(
+      http.post("/api/v1/projects/:project/datasets", async ({ request }) => {
+        const body = (await request.json()) as { name: string };
+        order.push(`create ${body.name}`);
+        return HttpResponse.json(
+          { ...datasetFixture, id: "01900000-0000-7000-8000-000000000c09", name: body.name },
+          { status: 201 },
+        );
+      }),
+      http.post(ISSUE_ITEMS, ({ params }) => {
+        order.push(`items ${String(params.id)}`);
+        return HttpResponse.json(fromTracesFixture, { status: 201 });
+      }),
+    );
+    const { user, dialog } = await openIssueDialog();
+
+    await choose(user, dialog, "Dataset", "New dataset…");
+    await user.type(
+      within(dialog).getByRole("textbox", { name: "Name of the new dataset" }),
+      "golden",
+    );
+    await user.click(within(dialog).getByRole("button", { name: "Add" }));
+
+    expect(await within(dialog).findByText("Added 1 item to golden.")).toBeInTheDocument();
+    expect(order).toEqual(["create golden", `items ${issueFixture.id}`]);
   });
 });

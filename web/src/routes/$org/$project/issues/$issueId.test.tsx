@@ -178,4 +178,47 @@ it("a merged issue shows the banner to its target and no actions", async () => {
   expect(screen.queryByRole("button", { name: "Resolve" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Merge into…" })).toBeNull();
   expect(screen.queryByRole("link", { name: "View traces" })).toBeNull();
+  expect(screen.queryByRole("link", { name: "Create alert" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Add examples to dataset" })).toBeNull();
+});
+
+it("shows Create alert with the issue prefilled", async () => {
+  serveIssue();
+  await renderApp(PAGE);
+
+  expect(await screen.findByRole("link", { name: "Create alert" })).toHaveAttribute(
+    "href",
+    `/acme/support-bot/alerts/new?metric=issue_occurrences&issue_id=${ISSUE_ID}`,
+  );
+});
+
+it("Create alert opens the prefilled rule form", async () => {
+  serveIssue();
+  const { user, router } = await renderApp(PAGE);
+
+  await user.click(await screen.findByRole("link", { name: "Create alert" }));
+
+  await waitFor(() => expect(router.state.location.pathname).toBe("/acme/support-bot/alerts/new"));
+  expect(await screen.findByRole("combobox", { name: "Metric" })).toHaveTextContent(
+    "Issue occurrences",
+  );
+});
+
+it("shows Add examples to dataset to members", async () => {
+  serveIssue();
+  await renderApp(PAGE);
+
+  expect(
+    await screen.findByRole("button", { name: "Add examples to dataset" }),
+  ).toBeInTheDocument();
+});
+
+it("shows Create alert and Add examples to dataset to members only", async () => {
+  roleAs("viewer");
+  serveIssue();
+  await renderApp(PAGE);
+
+  await screen.findByRole("heading", { name: TITLE });
+  expect(screen.queryByRole("link", { name: "Create alert" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Add examples to dataset" })).toBeNull();
 });

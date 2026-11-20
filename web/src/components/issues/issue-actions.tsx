@@ -4,6 +4,7 @@ import { problemMessage } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
 import { usePatchIssue } from "@/api/queries-issues";
 import type { Schema } from "@/api/types";
+import { AddIssueExamplesDialog } from "@/components/datasets/add-traces-to-dataset-dialog";
 import { FormError } from "@/components/form/form-error";
 import { MergeDialog } from "@/components/issues/merge-dialog";
 import { Button } from "@/components/ui/button";
@@ -35,21 +36,27 @@ export function groupTraceFilter(issue: Schema<"Issue">): { filter: string; note
 
 /**
  * The buttons of an issue that is not merged: its state (members and above only), "Merge into…"
- * (members and above only), and "View traces" (everyone).
+ * (members and above only), "View traces" (everyone), "Create alert" (`canCreateAlert`) and
+ * "Add examples to dataset" (`canAddExamples`).
  */
 export function IssueActions({
   org,
   project,
   issue,
   canEdit,
+  canCreateAlert,
+  canAddExamples,
 }: {
   org: string;
   project: string;
   issue: Schema<"Issue">;
   canEdit: boolean;
+  canCreateAlert: boolean;
+  canAddExamples: boolean;
 }) {
   const patch = usePatchIssue(org, project);
   const [mergeOpen, setMergeOpen] = useState(false);
+  const [examplesOpen, setExamplesOpen] = useState(false);
   const [error, setError] = useState<string | undefined>();
   if (issue.state === "merged") {
     return null;
@@ -109,6 +116,22 @@ export function IssueActions({
             View traces
           </Link>
         </Button>
+        {canCreateAlert ? (
+          <Button asChild variant="outline">
+            <Link
+              to="/$org/$project/alerts/new"
+              params={{ org, project }}
+              search={{ metric: "issue_occurrences", issue_id: issue.id }}
+            >
+              Create alert
+            </Link>
+          </Button>
+        ) : null}
+        {canAddExamples ? (
+          <Button type="button" variant="outline" onClick={() => setExamplesOpen(true)}>
+            Add examples to dataset
+          </Button>
+        ) : null}
       </div>
       {note ? <p className="text-caption text-muted-foreground">{note}</p> : null}
       <FormError message={error} />
@@ -119,6 +142,13 @@ export function IssueActions({
           issue={issue}
           open={mergeOpen}
           onOpenChange={setMergeOpen}
+        />
+      ) : null}
+      {canAddExamples ? (
+        <AddIssueExamplesDialog
+          open={examplesOpen}
+          onOpenChange={setExamplesOpen}
+          issueId={issue.id}
         />
       ) : null}
     </div>

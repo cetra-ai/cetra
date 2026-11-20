@@ -24,7 +24,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
-import { canAnnotate } from "@/lib/roles";
+import { canAnnotate, canManageAlerts, canManageDatasets } from "@/lib/roles";
 
 /** Most examples the page lists: the API returns at most this many (D-IC-16). */
 const EXAMPLES_SHOWN = 20;
@@ -108,7 +108,14 @@ function IssuePage() {
         {merged && issue.merged_into ? (
           <MergedBanner org={org} project={project} targetId={issue.merged_into} />
         ) : null}
-        <IssueActions org={org} project={project} issue={issue} canEdit={canEdit} />
+        <IssueActions
+          org={org}
+          project={project}
+          issue={issue}
+          canEdit={canEdit}
+          canCreateAlert={canManageAlerts(data.role)}
+          canAddExamples={canManageDatasets(data.role)}
+        />
       </div>
 
       <IssueDescription org={org} project={project} issue={issue} canEdit={canEdit && !merged} />

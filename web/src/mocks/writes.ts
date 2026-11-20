@@ -306,6 +306,11 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     path: "/api/v1/projects/{project}/issues/{id}/merge",
   },
   {
+    operationId: "post_issue_dataset_items",
+    method: "post",
+    path: "/api/v1/projects/{project}/issues/{id}/dataset-items",
+  },
+  {
     operationId: "post_online_rule_resume",
     method: "post",
     path: "/api/v1/projects/{project}/online-rules/{id}/resume",
@@ -807,6 +812,8 @@ const RESPONSES: Record<string, Respond> = {
   patch_issue: ({ body, params }) =>
     HttpResponse.json({ ...issueDocument, ...body, id: params.id }),
   post_issue_merge: () => HttpResponse.json(issueDocument),
+  post_issue_dataset_items: () =>
+    HttpResponse.json(datasetItemsFromTracesDocument, { status: 201 }),
   post_online_rule_resume: ({ params }) =>
     HttpResponse.json({ ...onlineRuleResumedDocument, id: params.id }),
   post_backfill_estimate: () => HttpResponse.json(backfillEstimateDocument),
