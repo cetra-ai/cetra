@@ -161,7 +161,7 @@ Run in CI with the docs checks (`just check-docs` or a sibling recipe):
 - **Integrations** come from the docs' matrix, never typed twice.
 - **No unmeasured numbers.** Benchmark figures come only from the benchmark results file, with its machine, version and date.
 - **Links:** internal links validated at build (already done for the docs); external links in the nightly lychee run (track W).
-- **Accessibility and weight:** a Lighthouse-style budget (performance, accessibility ≥ 95; page weight cap) on the built pages.
+- **Accessibility and weight:** `check-marketing.mjs` checks every built marketing page: one `h1`, no skipped heading level, `alt` on images, a name on every link and button, metadata, `noindex`, internal links, and a 350 KB cap without fonts. `contrast.test.mjs` checks WCAG AA contrast for every text colour pair of the tokens. CI never downloads a browser (`website/README.md`), so Lighthouse and axe are not used (M1 plan).
 
 ## 8. Proof assets needed
 
@@ -192,7 +192,7 @@ Built in order, each milestone merged to `main` when done (no feature flag). Unt
 
 | # | Delivers (what works when it's done) | Depends on | Leaves out |
 |---|---|---|---|
-| **M1 Foundation** | Marketing layout (header, footer), design tokens, fonts, the bands and the rim motif, base components (buttons, copy-command box, tabs, section and chapter layouts, card), docs header link back, CI checks wired (data files, links, accessibility and weight budget). A style page at `/_styleguide/` (noindex) to review the look | PR #161 merged (the `website/` project) | Real content, scenes |
+| **M1 Foundation** | Marketing layout (header, footer, release banner), design tokens, fonts, the bands and the rim motif, base components (buttons, copy-command box, tabs, section and chapter layouts, card), the marketing page checks (structure, metadata, `noindex`, internal links, weight, contrast). A style page at `/styleguide/` (noindex) to review the look. The docs already link back to `/` through Starlight's site title; the data-file checks come with their data in M3–M5 | PR #161 merged (the `website/` project) | Real content, scenes |
 | **M2 Homepage** | `/` content as in §6 (at a preview URL, the holding page still live): final copy reviewed with the user, coded UI scenes, install command, cloud links, stack diagram, FAQ | M1; cloud URLs; install command | Compare details, benchmark numbers |
 | **M3 Pricing, self-hosting, security** | `/pricing/` from the plans data file with the units calculator and spend cap; `/self-hosting/`; `/security/` | M1; D172–D178 text confirmed | Enterprise contract terms |
 | **M4 Integrations** | `/integrations/` generated from the docs matrix, logos, links to the docs pages | M1; the docs matrix | — |
