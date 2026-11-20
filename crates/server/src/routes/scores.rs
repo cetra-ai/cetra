@@ -78,12 +78,21 @@ async fn list_scores(
     Extension(access): Extension<ProjectAccess>,
     error::Query(params): error::Query<ScoreListParams>,
 ) -> Result<error::Json<Page<Score>>, ApiError> {
+    Ok(error::Json(score_page(&state, &access, params).await?))
+}
+
+/// One page of scores: the body of `GET /scores`. The assistant's `list_scores` tool shares it (AS M2).
+pub(crate) async fn score_page(
+    state: &AppState,
+    access: &ProjectAccess,
+    params: ScoreListParams,
+) -> Result<Page<Score>, ApiError> {
     let trace_id = params.trace_id.map(|id| id.to_string());
     let span_id = params.span_id.map(|id| id.to_string());
     let evaluator_id = params.evaluator_id.map(|id| id.to_string());
     let rule_id = params.rule_id.map(|id| id.to_string());
     let created = window(params.from, params.to)?;
-    let ctx = open_query(&state, access.project.org_id, access.project.id, None).await?;
+    let ctx = open_query(state, access.project.org_id, access.project.id, None).await?;
     let page = storage::score_list(
         &ctx,
         storage::ScoreListRequest {
@@ -102,10 +111,10 @@ async fn list_scores(
         },
     )
     .await?;
-    Ok(error::Json(Page {
+    Ok(Page {
         data: convert::scores(&page.batches, access.project.id)?,
         next_cursor: page.next_cursor,
-    }))
+    })
 }
 
 /// The writer of a project score route and its log label (D-G-27). Sessions and PATs carry

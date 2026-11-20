@@ -1,6 +1,7 @@
 //! The assistant's tools (track AS M2, D-AS-5, D-AS-6).
 #![cfg_attr(not(test), allow(dead_code))] // used by the turn loop (M3); M3 removes this line
 
+mod reads;
 mod shape;
 
 use std::fmt;
@@ -11,6 +12,7 @@ use serde_json::{Map, Value, json};
 use crate::api::assistant::AssistantDraftKind;
 use crate::auth::principal::AuthUser;
 use crate::http::AppState;
+use crate::http::error::ApiError;
 use crate::mcp::output;
 use crate::mcp::sql;
 use crate::mcp::tools as mcp_tools;
@@ -64,6 +66,31 @@ impl fmt::Debug for ToolResult {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("unknown tool")]
 pub(crate) struct UnknownTool;
+
+/// A tool's failure: most tools fail with an `ApiError`; `query_metrics` shares the dashboard cache's
+/// `Arc<ApiError>`, since `ApiError` is not `Clone` (AS2.4 constructs `Shared`).
+#[derive(Debug)]
+pub(crate) enum ToolError {
+    Api(ApiError),
+    #[allow(dead_code)] // constructed by `query_metrics` (AS2.4); removed with that change
+    Shared(std::sync::Arc<ApiError>),
+}
+
+impl From<ApiError> for ToolError {
+    fn from(error: ApiError) -> Self {
+        Self::Api(error)
+    }
+}
+
+impl ToolError {
+    /// The model's error body, `{"error": {"code", "message", "position"?}}`.
+    fn body(&self) -> Value {
+        match self {
+            Self::Api(error) => output::failure_body(error),
+            Self::Shared(error) => output::failure_body(error),
+        }
+    }
+}
 
 /// The argument the model cannot set: every tool result is fitted by the server (D-AS-20).
 const MAX_CHARS_ARG: &str = "max_chars";
@@ -130,6 +157,36 @@ pub(crate) fn specs() -> Vec<ToolSpec> {
             mcp_tools::GET_SPAN_DESCRIPTION,
             mcp_tools::get_span_schema(),
         ),
+        spec(
+            reads::LIST_SESSIONS,
+            reads::LIST_SESSIONS_DESCRIPTION,
+            reads::list_sessions_schema(),
+        ),
+        spec(
+            reads::GET_SESSION,
+            reads::GET_SESSION_DESCRIPTION,
+            reads::get_session_schema(),
+        ),
+        spec(
+            reads::LIST_SCORES,
+            reads::LIST_SCORES_DESCRIPTION,
+            reads::list_scores_schema(),
+        ),
+        spec(
+            reads::LIST_SCORE_DEFINITIONS,
+            reads::LIST_SCORE_DEFINITIONS_DESCRIPTION,
+            reads::list_score_definitions_schema(),
+        ),
+        spec(
+            reads::GET_PROJECT_SETTINGS,
+            reads::GET_PROJECT_SETTINGS_DESCRIPTION,
+            reads::get_project_settings_schema(),
+        ),
+        spec(
+            reads::LIST_ALERT_RULES,
+            reads::LIST_ALERT_RULES_DESCRIPTION,
+            reads::list_alert_rules_schema(),
+        ),
     ]
 }
 
@@ -140,64 +197,75 @@ fn list_len(value: &Value, key: &str) -> Option<u64> {
         .and_then(|items| u64::try_from(items.len()).ok())
 }
 
-/// Runs `name` with `arguments` for `scope`. The scope's project replaces any `project` the model
-/// sent; the four tools that return data get `max_chars` set to the server's budget.
-pub(crate) async fn run(
-    state: &AppState,
-    scope: &ToolScope,
-    name: &str,
-    mut arguments: JsonObject,
-) -> Result<ToolResult, UnknownTool> {
+/// The arguments of one of the six MCP tools. The scope's project replaces any `project` the model sent
+/// (D-AS-5); a tool that returns data also gets `max_chars` set to the server's budget (D-AS-20).
+fn mcp_arguments(mut arguments: JsonObject, scope: &ToolScope, data: bool) -> JsonObject {
     arguments.insert(
         "project".to_owned(),
         Value::String(scope.project.to_string()),
     );
+    if data {
+        arguments.insert(MAX_CHARS_ARG.to_owned(), json!(shape::MAX_CHARS));
+    }
+    arguments
+}
+
+/// A tool's data and its row count, or its failure.
+fn counted(
+    outcome: Result<Value, ApiError>,
+    rows: impl FnOnce(&Value) -> Option<u64>,
+) -> Result<(Value, Option<u64>), ToolError> {
+    let value = outcome?;
+    let rows = rows(&value);
+    Ok((value, rows))
+}
+
+/// Runs `name` with `arguments` for `scope`. The six MCP tools take the scope's project; the read tools take
+/// no project at all, so one sent is refused.
+pub(crate) async fn run(
+    state: &AppState,
+    scope: &ToolScope,
+    name: &str,
+    arguments: JsonObject,
+) -> Result<ToolResult, UnknownTool> {
     let user = &scope.user;
-    let (outcome, rows) = match name {
-        mcp_tools::GET_SCHEMA => (mcp_tools::get_schema(state, user, arguments).await, None),
-        sql::QUERY_SQL => {
-            arguments.insert(MAX_CHARS_ARG.to_owned(), json!(shape::MAX_CHARS));
-            let outcome = sql::query_sql(state, user, arguments).await;
-            let rows = outcome
-                .as_ref()
-                .ok()
-                .and_then(|value| value["row_count"].as_u64());
-            (outcome, rows)
+    let outcome = match name {
+        mcp_tools::GET_SCHEMA => counted(
+            mcp_tools::get_schema(state, user, mcp_arguments(arguments, scope, false)).await,
+            |_| None,
+        ),
+        sql::QUERY_SQL => counted(
+            sql::query_sql(state, user, mcp_arguments(arguments, scope, true)).await,
+            |value| value["row_count"].as_u64(),
+        ),
+        sql::LIST_SAVED_VIEWS => counted(
+            sql::list_saved_views(state, user, mcp_arguments(arguments, scope, false)).await,
+            |value| list_len(value, "views"),
+        ),
+        traces::SEARCH_TRACES => counted(
+            traces::search_traces(state, user, mcp_arguments(arguments, scope, true)).await,
+            |value| list_len(value, "traces"),
+        ),
+        traces::GET_TRACE => counted(
+            traces::get_trace(state, user, mcp_arguments(arguments, scope, true)).await,
+            |value| list_len(value, "spans"),
+        ),
+        traces::GET_SPAN => counted(
+            traces::get_span(state, user, mcp_arguments(arguments, scope, true)).await,
+            |_| None,
+        ),
+        reads::LIST_SESSIONS => reads::list_sessions(state, scope, arguments).await,
+        reads::GET_SESSION => reads::get_session(state, scope, arguments).await,
+        reads::LIST_SCORES => reads::list_scores(state, scope, arguments).await,
+        reads::LIST_SCORE_DEFINITIONS => {
+            reads::list_score_definitions(state, scope, arguments).await
         }
-        sql::LIST_SAVED_VIEWS => {
-            let outcome = sql::list_saved_views(state, user, arguments).await;
-            let rows = outcome
-                .as_ref()
-                .ok()
-                .and_then(|value| list_len(value, "views"));
-            (outcome, rows)
-        }
-        traces::SEARCH_TRACES => {
-            arguments.insert(MAX_CHARS_ARG.to_owned(), json!(shape::MAX_CHARS));
-            let outcome = traces::search_traces(state, user, arguments).await;
-            let rows = outcome
-                .as_ref()
-                .ok()
-                .and_then(|value| list_len(value, "traces"));
-            (outcome, rows)
-        }
-        traces::GET_TRACE => {
-            arguments.insert(MAX_CHARS_ARG.to_owned(), json!(shape::MAX_CHARS));
-            let outcome = traces::get_trace(state, user, arguments).await;
-            let rows = outcome
-                .as_ref()
-                .ok()
-                .and_then(|value| list_len(value, "spans"));
-            (outcome, rows)
-        }
-        traces::GET_SPAN => {
-            arguments.insert(MAX_CHARS_ARG.to_owned(), json!(shape::MAX_CHARS));
-            (traces::get_span(state, user, arguments).await, None)
-        }
+        reads::GET_PROJECT_SETTINGS => reads::get_project_settings(state, scope, arguments).await,
+        reads::LIST_ALERT_RULES => reads::list_alert_rules(state, scope, arguments).await,
         _ => return Err(UnknownTool),
     };
     Ok(match outcome {
-        Ok(value) => ToolResult {
+        Ok((value, rows)) => ToolResult {
             ok: true,
             value,
             rows,
@@ -205,7 +273,7 @@ pub(crate) async fn run(
         },
         Err(error) => ToolResult {
             ok: false,
-            value: output::failure_body(&error),
+            value: error.body(),
             rows: None,
             draft: None,
         },
@@ -262,8 +330,18 @@ mod tests {
                 "search_traces",
                 "get_trace",
                 "get_span",
+                "list_sessions",
+                "get_session",
+                "list_scores",
+                "list_score_definitions",
+                "get_project_settings",
+                "list_alert_rules",
             ]
         );
+        let mut unique = names.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), names.len());
         for spec in &specs {
             let properties = spec.parameters["properties"].as_object().unwrap();
             assert!(!properties.contains_key("project"), "{}", spec.name);
