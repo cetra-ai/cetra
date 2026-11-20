@@ -83,7 +83,7 @@ pub(crate) struct TurnSetup {
     pub(crate) conversation: Uuid,
     /// The sequence number of the stored user message.
     pub(crate) user_seq: i64,
-    pub(crate) context: Option<serde_json::Value>,
+    pub(crate) context: Option<Value>,
     pub(crate) connection_row: ConnectionRow,
     pub(crate) connection: Arc<JudgeConnection>,
     pub(crate) model: String,
@@ -999,6 +999,7 @@ mod tests {
         format!("http://{addr}/v1")
     }
 
+    #[allow(clippy::needless_pass_by_value)] // `json!` reads the value by reference.
     fn turn(message: Value, finish: &str, chunks: u32, ttft_ms: u64) -> MockTurn {
         serde_json::from_value(json!({
             "api": "openai.chat",
@@ -1017,10 +1018,12 @@ mod tests {
         turn(json!({"text": text}), "stop", chunks, 0)
     }
 
+    #[allow(clippy::needless_pass_by_value)] // `json!` reads the value by reference.
     fn calls_turn(calls: Value) -> MockTurn {
         turn(json!({"tool_calls": calls}), "tool_calls", 1, 0)
     }
 
+    #[allow(clippy::needless_pass_by_value)] // `json!` reads the value by reference.
     fn call(id: &str, name: &str, arguments: Value) -> Value {
         json!({"id": id, "name": name, "arguments": arguments})
     }
@@ -1115,7 +1118,6 @@ mod tests {
             .state
             .connections
             .get(&app.state.secrets, &row)
-            .ok()
             .expect("the connection opens");
         TurnSetup {
             project: seeded.project.clone(),
@@ -1139,12 +1141,11 @@ mod tests {
     fn guard(seeded: &Seeded, conversation: Uuid) -> AssistantGuard {
         AssistantLimits::new()
             .admit(conversation, seeded.user_id, seeded.org_id, real_now())
-            .ok()
             .expect("the turn is admitted")
     }
 
     fn trace(n: u8) -> TraceId {
-        TraceId::from_bytes([n; 16]).ok().expect("a valid trace id")
+        TraceId::from_bytes([n; 16]).expect("a valid trace id")
     }
 
     /// Runs one turn to its end and collects its events.
@@ -1546,7 +1547,7 @@ mod tests {
         assert!(matches!(first, Some(TurnEvent::Start { .. })));
         drop(rx);
 
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             let rows = stored(&app, &seeded, conversation).await;
             let cancelled = rows.iter().any(|row| {
@@ -1570,10 +1571,7 @@ mod tests {
             if cancelled && errored {
                 break;
             }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "the cancel was not stored"
-            );
+            assert!(Instant::now() < deadline, "the cancel was not stored");
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         tokio::time::timeout(Duration::from_secs(2), task)
@@ -1590,7 +1588,6 @@ mod tests {
         let row = connection_row(&app, &seeded, connection).await;
         let _held = interactive::acquire(&app.state, &row, Duration::from_secs(1))
             .await
-            .ok()
             .expect("the only slot");
         let conversation = new_conversation(&app, &seeded).await;
         let user_seq = add_user_message(&app, conversation, "Busy?").await;
@@ -1649,7 +1646,8 @@ mod tests {
         assert_eq!(sent.len(), 4);
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    // One thread: the log capture is a thread-local subscriber.
+    #[tokio::test]
     async fn audit_log_has_no_payload() {
         let base = provider(vec![text_turn("Canary answer.", 1)]).await;
         let (app, seeded) = new_app().await;

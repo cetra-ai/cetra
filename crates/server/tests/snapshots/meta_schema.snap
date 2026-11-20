@@ -544,6 +544,16 @@ CREATE TABLE online_rules (
 index online_rules_evaluator
 CREATE INDEX online_rules_evaluator ON online_rules(evaluator_id)
 
+table org_assistant_settings
+CREATE TABLE org_assistant_settings (
+  org_id TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  connection_id TEXT REFERENCES llm_connections(id) ON DELETE SET NULL,
+  model TEXT,
+  updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  updated_at INTEGER NOT NULL
+)
+
 table org_entitlements
 CREATE TABLE org_entitlements (
     org_id TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
@@ -863,6 +873,8 @@ index sqlite_autoindex_notification_deliveries_1
 index sqlite_autoindex_online_rules_1
 
 index sqlite_autoindex_online_rules_2
+
+index sqlite_autoindex_org_assistant_settings_1
 
 index sqlite_autoindex_org_entitlements_1
 

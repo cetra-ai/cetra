@@ -288,10 +288,12 @@ mod tests {
         }
     }
 
+    #[allow(clippy::needless_pass_by_value)] // `json!` reads the value by reference.
     fn call(id: &str, name: &str, arguments: Value) -> Value {
         json!({"type": "tool_call", "id": id, "name": name, "arguments": arguments})
     }
 
+    #[allow(clippy::needless_pass_by_value)] // `json!` reads the value by reference.
     fn result(id: &str, name: &str, value: Value, size: u64, rows: Option<u64>) -> Value {
         json!({
             "type": "tool_result",

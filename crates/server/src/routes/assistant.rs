@@ -244,7 +244,7 @@ fn message_json(row: &MessageRow) -> Result<AssistantMessage, ApiError> {
     let context = row
         .context
         .as_deref()
-        .map(serde_json::from_str::<serde_json::Value>)
+        .map(serde_json::from_str::<Value>)
         .transpose()
         .map_err(|_| {
             ApiError::from(MetaError::Corrupt {
@@ -528,7 +528,7 @@ async fn post_turn(
         });
     }
     let (connection_row, model) = match assistant_settings::resolve(&state, project.org_id).await? {
-        Resolved::Usable { connection, model } => (connection, model),
+        Resolved::Usable { connection, model } => (*connection, model),
         Resolved::Disabled | Resolved::NoConnection => {
             return Err(ApiError::Conflict {
                 detail: ASSISTANT_OFF,

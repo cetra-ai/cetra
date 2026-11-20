@@ -27,7 +27,7 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) enum Resolved {
     /// The assistant may run: its connection and model.
     Usable {
-        connection: ConnectionRow,
+        connection: Box<ConnectionRow>,
         model: String,
     },
     /// The setting is off, or there is no row.
@@ -53,7 +53,10 @@ pub(crate) async fn resolve(state: &AppState, org: OrgId) -> Result<Resolved, Ap
         return Ok(Resolved::NoConnection);
     };
     match connections::get_connection(state.meta.reader(), org, connection_id).await? {
-        Some(connection) => Ok(Resolved::Usable { connection, model }),
+        Some(connection) => Ok(Resolved::Usable {
+            connection: Box::new(connection),
+            model,
+        }),
         None => Ok(Resolved::NoConnection),
     }
 }

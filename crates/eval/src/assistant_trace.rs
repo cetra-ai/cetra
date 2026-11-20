@@ -22,7 +22,7 @@ use crate::trace::{
 use crate::{Adapter, TokenUsage};
 
 /// The largest span index. Span ids take the index as one byte (`span_id`).
-const LAST_INDEX: usize = usize::from(u8::MAX);
+const LAST_INDEX: usize = u8::MAX as usize;
 
 /// One model call of a turn.
 #[derive(Debug, Clone, PartialEq)]

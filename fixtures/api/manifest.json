@@ -482,6 +482,16 @@
     "file": "static/org.json"
   },
   {
+    "operation_id": "get_org_assistant",
+    "path_params": {
+      "org": "acme"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/org-assistant.json"
+  },
+  {
     "operation_id": "get_org_entitlements",
     "path_params": {
       "org": "acme"
@@ -526,6 +536,14 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/project.json"
+  },
+  {
+    "operation_id": "get_project_assistant",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/project-assistant.json"
   },
   {
     "operation_id": "get_prompt",

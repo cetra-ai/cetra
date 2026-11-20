@@ -737,6 +737,50 @@ export interface paths {
         patch: operations["patch_org"];
         trace?: never;
     };
+    "/api/v1/orgs/{org}/assistant": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get the organization's assistant setting
+         * @description Organization members and above, and viewers. Answers `enabled: false` while the org never saved one (D-AS-3).
+         */
+        get: operations["get_org_assistant"];
+        /**
+         * Save the organization's assistant setting
+         * @description Organization admins and owners, with a session. Enabling needs a connection and a model, and runs the tool-calling test first; a failed test saves nothing (D-AS-3, D-AS-24). Disabling needs no test.
+         */
+        put: operations["put_org_assistant"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/assistant/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Test a connection for the assistant
+         * @description Organization admins and owners, with a session. Runs the tool-calling test on the connection and saves nothing (D-AS-24). A provider failure is `ok: false`, not an error status.
+         */
+        post: operations["post_org_assistant_test"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/orgs/{org}/deletions": {
         parameters: {
             query?: never;
@@ -1247,6 +1291,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{project}/assistant": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get whether the caller can use the assistant
+         * @description Project members and above, with a session. Answers `usable` and, when it is false, the reason: `forbidden`, `restore_mode`, `disabled` or `no_connection` (D-AS-4, D-AS-16).
+         */
+        get: operations["get_project_assistant"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{project}/assistant/conversations": {
         parameters: {
             query?: never;
@@ -1297,6 +1361,46 @@ export interface paths {
          * @description Project members and above, with a session; only the conversation's author (D-AS-4, D-AS-10). Sets the title, 1 to 80 characters after trimming. The conversation keeps its place in the list.
          */
         patch: operations["patch_assistant_conversation"];
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/assistant/conversations/{id}/messages/{seq}/feedback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Rate an assistant message
+         * @description Project members and above, with a session; only the conversation's author (D-AS-4, D-AS-10). Sets the rating of an assistant message to `up` or `down`; `null` clears it. A user or tool message is `400`. Any other message is `404`.
+         */
+        put: operations["put_assistant_feedback"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/assistant/conversations/{id}/turns": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Stream an assistant turn
+         * @description Members and above, with a session (D-AS-4). Streams one turn (D-AS-9); aborting the request cancels it. Not units (D-AS-11).
+         */
+        post: operations["post_assistant_turn"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/v1/projects/{project}/channels": {
@@ -1424,7 +1528,7 @@ export interface paths {
         put?: never;
         /**
          * Get one widget's data
-         * @description Answers one widget query over `[from, to)`: a series (one value per bucket) or a total (one value over the range, with `compare` also the previous range). Spec 05 § Dashboard queries. The dashboard's `filter` is a traces expression, and the default exclusions apply: evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are left out unless `include_eval` or `include_experiments` is set. A read: a read-only personal access token and a `read` key may call it. Results are cached for 10 seconds per project and body.
+         * @description Answers one widget query over `[from, to)`: a series (one value per bucket) or a total (one value over the range, with `compare` also the previous range). Spec 05 § Dashboard queries. The dashboard's `filter` is a traces expression, and the default exclusions apply: evaluation, playground and assistant traces (`environment = cetra-eval`, `environment = cetra-playground` or `environment = cetra-assistant`) and experiment traces are left out unless `include_eval` or `include_experiments` is set. A read: a read-only personal access token and a `read` key may call it. Results are cached for 10 seconds per project and body.
          */
         post: operations["query_widget"];
         delete?: never;
@@ -2173,7 +2277,7 @@ export interface paths {
         };
         /**
          * Get facets
-         * @description Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. A facet describes one field over the rows the list would show: the window, the default exclusions, `search` and `filter`, but not the list's cursor, sort or limit. The field is a column of the view, or `map['key']` of a map column; a bare map column facets its keys. `kind` is `values` (strings, booleans, lists and `map['key']`), `keys` (a bare map) or `histogram` (numbers: min, max, approximate p50, p95 and p99, and 20 equal buckets below p99 plus one bucket from p99 to max). `total` counts rows, `missing` the rows with no value (null, or an empty list or map). Values are counted per row: a list counts a row once under each distinct element. Keys starting with `cetra.` are left out. `q` keeps values containing it, ignoring case. Spans count stored copies separately. Sessions take no `search`. Nothing is cached on the server; a facet is computed on each call.
+         * @description Evaluation, playground and assistant traces (`environment = cetra-eval`, `environment = cetra-playground` or `environment = cetra-assistant`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. A facet describes one field over the rows the list would show: the window, the default exclusions, `search` and `filter`, but not the list's cursor, sort or limit. The field is a column of the view, or `map['key']` of a map column; a bare map column facets its keys. `kind` is `values` (strings, booleans, lists and `map['key']`), `keys` (a bare map) or `histogram` (numbers: min, max, approximate p50, p95 and p99, and 20 equal buckets below p99 plus one bucket from p99 to max). `total` counts rows, `missing` the rows with no value (null, or an empty list or map). Values are counted per row: a list counts a row once under each distinct element. Keys starting with `cetra.` are left out. `q` keeps values containing it, ignoring case. Spans count stored copies separately. Sessions take no `search`. Nothing is cached on the server; a facet is computed on each call.
          */
         get: operations["get_facets"];
         put?: never;
@@ -2854,7 +2958,7 @@ export interface paths {
         };
         /**
          * List sessions
-         * @description Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.
+         * @description Evaluation, playground and assistant traces (`environment = cetra-eval`, `environment = cetra-playground` or `environment = cetra-assistant`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.
          */
         get: operations["list_sessions"];
         put?: never;
@@ -2874,7 +2978,7 @@ export interface paths {
         };
         /**
          * Get a session
-         * @description Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Turns are the session's traces by start time, at most 1000. `input` and `output` are the root span's payloads, omitted when the trace has no root.
+         * @description Evaluation, playground and assistant traces (`environment = cetra-eval`, `environment = cetra-playground` or `environment = cetra-assistant`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Turns are the session's traces by start time, at most 1000. `input` and `output` are the root span's payloads, omitted when the trace has no root.
          */
         get: operations["get_session"];
         put?: never;
@@ -2894,7 +2998,7 @@ export interface paths {
         };
         /**
          * List spans
-         * @description Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.
+         * @description Evaluation, playground and assistant traces (`environment = cetra-eval`, `environment = cetra-playground` or `environment = cetra-assistant`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.
          */
         get: operations["list_spans"];
         put?: never;
@@ -2934,7 +3038,7 @@ export interface paths {
         };
         /**
          * List traces
-         * @description Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.
+         * @description Evaluation, playground and assistant traces (`environment = cetra-eval`, `environment = cetra-playground` or `environment = cetra-assistant`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.
          */
         get: operations["list_traces"];
         put?: never;
@@ -2954,7 +3058,7 @@ export interface paths {
         };
         /**
          * Stream traces
-         * @description Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Server-sent events: `trace` data is a TraceSummary; `resync` and `ping` data are `{}`. `ping` is sent every 15 seconds.
+         * @description Evaluation, playground and assistant traces (`environment = cetra-eval`, `environment = cetra-playground` or `environment = cetra-assistant`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Server-sent events: `trace` data is a TraceSummary; `resync` and `ping` data are `{}`. `ping` is sent every 15 seconds.
          */
         get: operations["stream_traces"];
         put?: never;
@@ -3031,7 +3135,7 @@ export interface paths {
         };
         /**
          * List users
-         * @description Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. The filter runs on the `traces` view before traces are grouped by user.
+         * @description Evaluation, playground and assistant traces (`environment = cetra-eval`, `environment = cetra-playground` or `environment = cetra-assistant`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. The filter runs on the `traces` view before traces are grouped by user.
          */
         get: operations["list_users"];
         put?: never;
@@ -3051,7 +3155,7 @@ export interface paths {
         };
         /**
          * Get a user
-         * @description Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Sessions are the user's 100 most recent.
+         * @description Evaluation, playground and assistant traces (`environment = cetra-eval`, `environment = cetra-playground` or `environment = cetra-assistant`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Sessions are the user's 100 most recent.
          */
         get: operations["get_user"];
         put?: never;
@@ -3539,6 +3643,10 @@ export interface components {
          * @enum {string}
          */
         AssistantFeedback: "up" | "down";
+        /** @description `PUT …/assistant/conversations/{id}/messages/{seq}/feedback`: the rating of an assistant message. */
+        AssistantFeedbackRequest: {
+            feedback?: components["schemas"]["AssistantFeedback"] | null;
+        };
         /** @description One message of a conversation. */
         AssistantMessage: {
             /** @description The page context sent with a user message (D-AS-14). */
@@ -3622,6 +3730,61 @@ export interface components {
          * @enum {string}
          */
         AssistantRole: "user" | "assistant" | "tool";
+        /** @description The org's assistant setting (D-AS-3). */
+        AssistantSettings: {
+            /**
+             * Format: uuid
+             * @description The org's LLM connection the assistant calls.
+             */
+            connection_id?: string;
+            /** @description Whether the assistant is on for the org. */
+            enabled: boolean;
+            /** @description The model the assistant calls on that connection. */
+            model?: string;
+            /**
+             * Format: date-time
+             * @description When the setting was last saved. Absent while the org never saved one.
+             */
+            updated_at?: string;
+        };
+        /** @description `GET /projects/{project}/assistant`: whether the caller can chat, and why not. */
+        AssistantStatus: {
+            /** @description The connection's adapter, when `usable`. */
+            adapter?: string;
+            /** @description The connection's name, when `usable`, for the panel's notice (D-AS-18). */
+            connection_name?: string;
+            /** @description The model, when `usable`. */
+            model?: string;
+            /** @description Why the caller cannot chat. Omitted when `usable`. */
+            reason?: components["schemas"]["AssistantUnavailable"];
+            /** @description Whether the caller can chat now. */
+            usable: boolean;
+        };
+        /** @description `POST /orgs/{org}/assistant/test`: runs the tool-calling test without saving anything. */
+        AssistantTestRequest: {
+            /**
+             * Format: uuid
+             * @description The org's connection to test.
+             */
+            connection_id: string;
+            /** @description The model to test. 1 to 256 bytes after trimming. */
+            model: string;
+        };
+        /** @description `POST …/assistant/conversations/{id}/turns`: one user message and its page context. */
+        AssistantTurnRequest: {
+            /**
+             * @description The page context (D-AS-14): a JSON object with a string `page` (1–64 characters), at most
+             *     8 KiB as compact JSON.
+             */
+            context?: Record<string, never>;
+            /** @description 1–16,384 bytes after trimming (D-AS-15). */
+            message: string;
+        };
+        /**
+         * @description Why the caller cannot use the assistant.
+         * @enum {string}
+         */
+        AssistantUnavailable: "forbidden" | "restore_mode" | "disabled" | "no_connection";
         /**
          * @description Login methods the UI should offer.
          *
@@ -7424,6 +7587,18 @@ export interface components {
             /** @description Opaque cursor for the next page, or null when this is the last page. */
             next_cursor: string | null;
         };
+        /** @description `PUT /orgs/{org}/assistant`: the whole setting. */
+        PutAssistantSettings: {
+            /**
+             * Format: uuid
+             * @description Required when `enabled` is true.
+             */
+            connection_id?: string;
+            /** @description Turns the assistant on or off. Turning it on runs the tool-calling test (D-AS-24). */
+            enabled: boolean;
+            /** @description Required when `enabled` is true. 1 to 256 bytes after trimming. */
+            model?: string;
+        };
         /** @description `PUT /api/v1/orgs/{org}/sso/provider`. `Debug` omits the client secret. */
         PutOrgSsoProvider: {
             /** @description The OAuth client id; 1 to 255 characters. */
@@ -9416,7 +9591,7 @@ export interface components {
             from: string;
             /** @description The dashboard's split. Ignored when the query has its own breakdown, and for scores. */
             group_by?: components["schemas"]["MetricsGroupBy"];
-            /** @description Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. */
+            /** @description Include traces from the reserved environments (`cetra-eval`, `cetra-playground`, `cetra-assistant`). Default false. */
             include_eval?: boolean;
             /** @description Include experiment traces. Default false. */
             include_experiments?: boolean;
@@ -12022,6 +12197,227 @@ export interface operations {
             };
             /** @description Too many requests. */
             429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_org_assistant: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The setting. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssistantSettings"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    put_org_assistant: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PutAssistantSettings"];
+            };
+        };
+        responses: {
+            /** @description The saved setting. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssistantSettings"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_org_assistant_test: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AssistantTestRequest"];
+            };
+        };
+        responses: {
+            /** @description The outcome. A provider failure is ok: false, not an error status. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LlmConnectionTestResult"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -15069,6 +15465,65 @@ export interface operations {
             };
         };
     };
+    get_project_assistant: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The caller's status. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssistantStatus"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     list_assistant_conversations: {
         parameters: {
             query?: never;
@@ -15372,6 +15827,181 @@ export interface operations {
             };
             /** @description Too many requests. */
             429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    put_assistant_feedback: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Conversation id. */
+                id: string;
+                /** @description Message position, from 1. */
+                seq: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AssistantFeedbackRequest"];
+            };
+        };
+        responses: {
+            /** @description Saved. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_assistant_turn: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Conversation id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AssistantTurnRequest"];
+            };
+        };
+        responses: {
+            /** @description The turn's events, as `text/event-stream`: `start`, `text`, `tool_call`, `tool_result` and `draft` events, then one `done` or `error`. A `ping` comes every 15 seconds. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": string;
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -20244,7 +20874,7 @@ export interface operations {
                 from?: components["schemas"]["TimeParam"];
                 /** @description Exclusive range end. RFC 3339 or epoch milliseconds. */
                 to?: components["schemas"]["TimeParam"];
-                /** @description Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. */
+                /** @description Include traces from the reserved environments (`cetra-eval`, `cetra-playground`, `cetra-assistant`). Default false. */
                 include_eval?: boolean;
                 /** @description Include experiment traces. Default false. */
                 include_experiments?: boolean;
@@ -24244,7 +24874,7 @@ export interface operations {
                 limit?: components["schemas"]["Limit"];
                 /** @description Opaque cursor from a previous page. */
                 cursor?: string;
-                /** @description Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions. */
+                /** @description Include traces from the reserved environments (`cetra-eval`, `cetra-playground`, `cetra-assistant`). Default false. Spec 05 § Default exclusions. */
                 include_eval?: boolean;
                 /** @description Include experiment traces. Default false. Spec 05 § Default exclusions. */
                 include_experiments?: boolean;
@@ -24335,7 +24965,7 @@ export interface operations {
     get_session: {
         parameters: {
             query?: {
-                /** @description Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. */
+                /** @description Include traces from the reserved environments (`cetra-eval`, `cetra-playground`, `cetra-assistant`). Default false. */
                 include_eval?: boolean;
                 /** @description Include experiment traces. Default false. */
                 include_experiments?: boolean;
@@ -24444,7 +25074,7 @@ export interface operations {
                 limit?: components["schemas"]["Limit"];
                 /** @description Opaque cursor from a previous page. */
                 cursor?: string;
-                /** @description Include spans from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions. */
+                /** @description Include spans from the reserved environments (`cetra-eval`, `cetra-playground`, `cetra-assistant`). Default false. Spec 05 § Default exclusions. */
                 include_eval?: boolean;
                 /** @description Include experiment spans. Default false. Spec 05 § Default exclusions. */
                 include_experiments?: boolean;
@@ -24662,7 +25292,7 @@ export interface operations {
                 limit?: components["schemas"]["Limit"];
                 /** @description Opaque cursor from a previous page. */
                 cursor?: string;
-                /** @description Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions. */
+                /** @description Include traces from the reserved environments (`cetra-eval`, `cetra-playground`, `cetra-assistant`). Default false. Spec 05 § Default exclusions. */
                 include_eval?: boolean;
                 /** @description Include experiment traces. Default false. Spec 05 § Default exclusions. */
                 include_experiments?: boolean;
@@ -24761,7 +25391,7 @@ export interface operations {
                  *     1,024 bytes (D-G-39).
                  */
                 search?: string;
-                /** @description Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions. */
+                /** @description Include traces from the reserved environments (`cetra-eval`, `cetra-playground`, `cetra-assistant`). Default false. Spec 05 § Default exclusions. */
                 include_eval?: boolean;
                 /** @description Include experiment traces. Default false. Spec 05 § Default exclusions. */
                 include_experiments?: boolean;
@@ -25117,7 +25747,7 @@ export interface operations {
                 limit?: components["schemas"]["Limit"];
                 /** @description Opaque cursor from a previous page. */
                 cursor?: string;
-                /** @description Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions. */
+                /** @description Include traces from the reserved environments (`cetra-eval`, `cetra-playground`, `cetra-assistant`). Default false. Spec 05 § Default exclusions. */
                 include_eval?: boolean;
                 /** @description Include experiment traces. Default false. Spec 05 § Default exclusions. */
                 include_experiments?: boolean;
@@ -25212,7 +25842,7 @@ export interface operations {
                 from?: components["schemas"]["TimeParam"];
                 /** @description Exclusive range end. RFC 3339 or epoch milliseconds. */
                 to?: components["schemas"]["TimeParam"];
-                /** @description Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions. */
+                /** @description Include traces from the reserved environments (`cetra-eval`, `cetra-playground`, `cetra-assistant`). Default false. Spec 05 § Default exclusions. */
                 include_eval?: boolean;
                 /** @description Include experiment traces. Default false. Spec 05 § Default exclusions. */
                 include_experiments?: boolean;
