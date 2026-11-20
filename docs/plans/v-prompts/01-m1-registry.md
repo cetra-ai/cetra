@@ -161,7 +161,8 @@ A template is a Rust `&str`. Scanning goes left to right over the source:
 /// Names minijinja reads as literals or globals; a variable cannot use them (D-V-3).
 pub const RESERVED: &[&str] = &[
     "true", "false", "none", "True", "False", "None",
-    "loop", "self", "range", "dict", "namespace",
+    "and", "or", "not", "in", "is", "if", "else",
+    "loop", "self", "range", "dict", "namespace", "debug",
 ];
 ```
 
@@ -171,9 +172,12 @@ pub const RESERVED: &[&str] = &[
 //! Plain `{{ name }}` prompt templates (D-V-3): substitution only, no logic.
 //!
 //! Every template this module accepts is also a valid minijinja template that renders the same
-//! output for string values, so a registry prompt can serve as a judge template (D163). The
-//! Python and TypeScript SDKs implement the same rules; `fixtures/prompts/render.json` holds the
-//! shared cases.
+//! output for string values, so a registry prompt can serve as a judge template (D163), with two
+//! known differences: minijinja drops one trailing newline of the template (its default
+//! `keep_trailing_newline = false`), and it reports the first missing variable in sorted order
+//! where this module reports the first in template order. Judges also cap templates at 64 KiB,
+//! the registry at 256 KiB. The Python and TypeScript SDKs implement the same rules;
+//! `fixtures/prompts/render.json` holds the shared cases.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -300,6 +304,9 @@ Text case shape: `{"name", "template", "values", "expected"}` or, for an error, 
 | `whitespace-control` | `"{{- a }}"` | `{}` | invalid `not_a_name` 1:1 | `null` |
 | `newline-in-tag` | `"{{ a\n}}"` | `{}` | invalid `not_a_name` 1:1 | `null` |
 | `reserved` | `"{{ true }}"` | `{}` | invalid `reserved` 1:1 | `null` |
+| `reserved-not` | `"{{ not }}"` | `{}` | invalid `reserved` 1:1 | `null` |
+| `reserved-if` | `"x {{if}}"` | `{}` | invalid `reserved` 1:3 | `null` |
+| `trailing-newline` | `"{{a}}\n"` | `{"a":"x"}` | `"x\n"` | `["a"]` |
 | `position-second-line` | `"ok\nab {{ x.y }}"` | `{}` | invalid `not_a_name` 2:4 | `null` |
 | `position-after-emoji` | `"👋 {%"` | `{}` | invalid `block` 1:3 | `null` |
 
@@ -321,11 +328,11 @@ Error cases still carry `variables` and `placeholder_names`.
 
 ### Tests (`plain_template.rs`, `#[cfg(test)] mod tests`)
 
-1. `shared_text_cases` — reads `../../fixtures/prompts/render.json` with `include_str!` (path relative to `crates/eval/src/`; check it), and for every `text` case: `variables(template)` equals `variables` (or is an `Invalid` error when it is `null`); `render(template, values)` equals `expected`, or the error equals the case's error (`Invalid { at: TextAt { line, column }, reason }` with `reason.as_str() == reason`, or `MissingVariable { name }`). Every case name appears in the assertion message.
+1. `shared_text_cases` — reads `include_str!("../../../fixtures/prompts/render.json")` (relative to `crates/eval/src/plain_template.rs`), and for every `text` case: `variables(template)` equals `variables` (or is an `Invalid` error when it is `null`); `render(template, values)` equals `expected`, or the error equals the case's error (`Invalid { at: TextAt { line, column }, reason }` with `reason.as_str() == reason`, or `MissingVariable { name }`). Every case name appears in the assertion message.
 2. `scan_segments` — `scan("a{{x}}b{{ y }}")` is `[Text("a"), Var("x"), Text("b"), Var("y")]`; `scan("")` is `[]`; `scan("{{x}}{{y}}")` is `[Var("x"), Var("y")]`.
-3. `accepted_templates_render_the_same_in_minijinja` — for every valid text case, build a `crate::PromptTemplate::compile(template)` and render it with `crate::Variables::from_map(values as BTreeMap<String, serde_json::Value::String>)`; the output equals `expected`. This proves the subset property (D-V-3). If `PromptTemplate::render` differs for any case, STOP and report the case name.
+3. `accepted_templates_render_the_same_in_minijinja` — for every valid text case (no `error`), build a `crate::PromptTemplate::compile(template)` and render it with `crate::Variables::from_map(values as BTreeMap<String, serde_json::Value::String>)`; the output equals `expected`, except for the case `trailing-newline`, where it equals `expected` without its final `\n` (minijinja's default; module doc). For every `invalid` case whose reason is `reserved`, assert that `PromptTemplate::compile` fails, or compiles and renders without any value supplied (it names an engine literal or global). This proves the subset property (D-V-3). If any other case differs, STOP and report the case name.
 4. `errors_hold_no_template_text` — render a template `"{{ secret_payload.x }}"` and `"{{secret_payload}}"` with no values; the `Display` of both errors does not contain `secret_payload` for the `Invalid` one (the name is allowed in `MissingVariable`, which only holds the variable name; assert the Invalid display has no `secret_payload`).
-5. `proptest_render_never_panics` — with `proptest` (already a dev-dependency of `cetra-eval`; check `crates/eval/Cargo.toml`; if absent, STOP), for any `String` source, `scan`, `variables` and `render(&source, &BTreeMap::new())` return without panicking; and for a source built as text without `{`/`}` plus `{{v0}}`, `render` with `v0 → x` equals the text with `x` in place. Cases: the crate's `CETRA_PROPTEST_CASES` convention if `crates/eval` already reads it (grep `CETRA_PROPTEST_CASES crates/eval`), else the proptest default.
+5. `proptest_render_never_panics` — with `proptest` (a dev-dependency of `cetra-eval`) and the crate's config `crate::hostile_tests::config()` (from `crates/eval/tests/hostile.rs`, included by `lib.rs`; it reads `CETRA_PROPTEST_CASES` and turns failure persistence off), in `proptest! { #![proptest_config(crate::hostile_tests::config())] … }`: for any `String` source, `scan`, `variables` and `render(&source, &BTreeMap::new())` return without panicking; and for a source built as text without `{`/`}` plus `{{v0}}`, `render` with `v0 → x` equals the text with `x` in place.
 
 ### Done when
 
@@ -868,7 +875,7 @@ Write the regex-like checks by hand with `chars().all(…)` (no `regex` crate in
 
 Module doc: `//! Prompt registry request and response types (spec 09 § Prompts, D-V-2 to D-V-13).`
 
-Derives: responses `#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]`; requests add `#[serde(deny_unknown_fields)]`; query params `#[derive(Debug, Clone, PartialEq, Eq, Deserialize, IntoParams)] #[serde(deny_unknown_fields)]`. Every field has a doc comment. Optional response fields carry `#[serde(default, skip_serializing_if = "Option::is_none")]`. `template` and `config` fields are `serde_json::Value` with `#[schema(schema_with = any_json)]` (template is a string or an array) and `#[schema(value_type = Object)]` (config), as `api/datasets.rs` does for its JSON fields.
+Derives: responses `#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]`; requests add `#[serde(deny_unknown_fields)]`; query params `#[derive(Debug, Clone, PartialEq, Eq, Deserialize, IntoParams)] #[serde(deny_unknown_fields)]`. Every field has a doc comment. Optional response fields carry `#[serde(default, skip_serializing_if = "Option::is_none")]`. `template` fields are `serde_json::Value` with `#[schema(schema_with = any_json)]` (a string or an array). `config` fields use `#[schema(schema_with = open_object)]`, the helper of D-J-27 that `api/datasets.rs` uses for `metadata` (find its exact name with `grep -n "fn open_object" crates/server/src/api/*.rs`; if it has another name, use that one).
 
 ```rust
 /// `text` or `chat`.
@@ -902,7 +909,7 @@ pub struct PromptVersion {
     #[serde(rename = "type")] pub kind: PromptKind,
     pub version: i64,
     #[schema(schema_with = any_json)] pub template: Value,
-    #[schema(value_type = Object)] pub config: Value,
+    #[schema(schema_with = open_object)] pub config: Value,
     /// Labels pointing at this version, ordered; includes `latest` when this is the latest version.
     pub labels: Vec<String>,
     /// Variable names, in order of first appearance.
@@ -918,23 +925,24 @@ pub struct CreatePromptRequest {
     pub name: String,
     #[serde(rename = "type")] pub kind: PromptKind,
     #[schema(schema_with = any_json)] pub template: Value,
-    #[serde(default)] #[schema(value_type = Option<Object>)] pub config: Option<Value>,
-    #[serde(default)] pub labels: Vec<String>,
-    #[serde(default)] pub commit_message: Option<String>,
-    #[serde(default)] pub description: Option<String>,
-    #[serde(default)] pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] #[schema(schema_with = open_object)] pub config: Option<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub commit_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub tags: Vec<String>,
 }
 
 pub struct CreateVersionRequest {
     #[schema(schema_with = any_json)] pub template: Value,
-    #[serde(default)] #[schema(value_type = Option<Object>)] pub config: Option<Value>,
-    #[serde(default)] pub labels: Vec<String>,
-    #[serde(default)] pub commit_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] #[schema(schema_with = open_object)] pub config: Option<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub commit_message: Option<String>,
 }
 
+/// Derives only `Deserialize` (+ `Debug, Clone, PartialEq, ToSchema`), as `UpdateDatasetRequest` does.
 pub struct UpdatePromptRequest {
     /// `null` clears.
-    #[serde(default, deserialize_with = "present")] pub description: Option<Option<String>>,
+    #[serde(default, deserialize_with = "present")] #[schema(value_type = Option<String>)] pub description: Option<Option<String>>,
     #[serde(default)] pub tags: Option<Vec<String>>,
 }
 
@@ -948,6 +956,7 @@ pub struct PromptLabelEvent {
     /* at: time */
 }
 
+/// Both the request and the response of the settings routes; `#[serde(deny_unknown_fields)]`.
 pub struct PromptSettings {
     /// Labels only project admins and `write` keys may move (D-V-10).
     pub protected_labels: Vec<String>,
@@ -1042,7 +1051,10 @@ Base path `/api/v1/projects/{project}`. Path struct `#[derive(Debug, Deserialize
 
 Every row: `session_only: false`, `documented: true`. Body limit on the two POSTs and the PATCH: `.layer(DefaultBodyLimit::max(PROMPT_BODY_LIMIT))` with `const PROMPT_BODY_LIMIT: usize = 512 * 1024;`.
 
-### 2. Shared helpers in `routes/prompts.rs`
+### 2. Imports and shared helpers in `routes/prompts.rs`
+
+Imports as `routes/datasets.rs` does: `use crate::meta::prompts as store;` (the handler names collide with the store's), the extractors `crate::http::error::{self, ApiError}` with `error::Json`, `error::Path`, `error::Query` (never axum's own, so rejections are problem+json), `crate::http::access::{Access, ProjectAccess, RouteDef}`, `crate::http::AppState`, `crate::auth::principal::Principal`, `crate::auth::roles::{ProjectPerm, Role}`, `crate::api::common::{FieldError, Page, PageParams, ProblemCode}` (whatever subset you use; `ProblemCode` lives where `ApiError::Forbidden` takes it from), `super::datasets::created_by`, `super::orgs::page_named`.
+
 
 ```rust
 /// The prompt named by the path, or 404.
@@ -1056,7 +1068,7 @@ fn may_touch_protected(principal: &Principal, access: &ProjectAccess) -> bool {
 /// `Prompt` JSON of a row.
 fn prompt_json(row: &PromptRow) -> Prompt;
 
-/// `PromptVersion` JSON. `latest` is appended to `labels` when `version.version == prompt.latest_version`.
+/// `PromptVersion` JSON. `labels` = the version's stored labels plus `latest` when `version.version == prompt.latest_version`, sorted.
 /// The stored template and config texts are parsed back (`Corrupt` → 500) and the body re-parsed
 /// with `prompts::parse_body` for `variables`/`placeholders` (a stored body that no longer parses is
 /// `MetaError::Corrupt { table: "prompt_versions", column: "template" }`).
@@ -1083,7 +1095,7 @@ fn new_version(prompt_type: PromptType, template: &Value, config: Option<&Value>
   1. `label` and `version` both present → 400 field `version`: "give label or version, not both". `label` present → `check_label("label", …)` unless it is `latest`.
   2. `find` the prompt. Version present → `get_version`; label `latest` → `get_version(prompt.latest_version)`; else `resolve_label(label or DEFAULT_LABEL)`. None → `ApiError::NotFound`.
   3. Body bytes = `serde_json::to_vec(&version_json(..)?)`. `etag = format!("\"{}\"", hex::encode(&Sha256::digest(&bytes)[..16]))`.
-  4. If the request header `If-None-Match` (take `headers: HeaderMap` as an extractor) split on `,`, trimmed, contains `etag` or `*` → answer `304` with headers `ETag` and `Cache-Control: no-cache` and an empty body.
+  4. If the request header `If-None-Match` (take `headers: HeaderMap` as an extractor), split on `,`, each entry trimmed and stripped of a leading `W/`, contains `etag` or `*` → answer `304` with headers `ETag` and `Cache-Control: no-cache` and an empty body.
   5. Else `200`, `Content-Type: application/json`, `ETag`, `Cache-Control: no-cache`, the bytes. Return type `Result<Response, ApiError>` built with `(StatusCode, [(HeaderName, String); N], Vec<u8>).into_response()`.
 - **`list_versions`**: `find`; `cursor` = the decimal of the last version of the previous page (`None` first); a cursor that does not parse as a positive `i64` → 400 field `cursor`: "invalid cursor". `store::list_versions(pool, id, before, limit)`; if `limit + 1` rows came back, drop the last and set `next_cursor` to the last kept version's decimal. Map each with `version_json`.
 - **`create_version`**: `find` (outside the write, for the type) then `new_version(prompt.prompt_type, …)`; one write: `get_prompt_tx` again (404 if deleted meanwhile), protected check over `body.labels`, `store::add_version`. Audit `"prompt version created"` with `version`. `201`. A template whose shape does not fit the prompt's type is reported by `parse_body` (field `template`).
@@ -1107,7 +1119,7 @@ Constants: `PROMPT_READ = "Any project member, or an API key with `read`."`, `PR
 | `post_prompt_version` | POST `/prompts/{prompt}/versions` | 201 `PromptVersion`; 400 401 403 404 409 413 429 | — |
 | `get_prompt_version` | GET `/prompts/{prompt}/versions/{version}` | 200 `PromptVersion`; 401 403 404 429 | — |
 
-In `tests/openapi.rs`: add each row to `OPERATIONS`; `"prompts"` to `TAGS`; the `yes` rows to `QUERY_OR_BODY`; `post_prompt` and `post_prompt_version` to the branch that already expects `["400","401","403","404","409","413","429"]` (the `post_dataset` branch); `patch_prompt` to the branch expecting `400 401 403 404 413 429` if one exists, else add one `else if` with exactly those; `delete_prompt` to the branch of `delete_dataset`; `("PromptPage","Prompt")` and `("PromptVersionPage","PromptVersion")` to `pages`. If the document lint rejects the `304` response of `get_prompt_resolve`, add a narrow exception for that operation id and status in the lint, with the comment `// D-V-12: the fetch answers 304 on a matching If-None-Match.`, and say so in your report.
+In `tests/openapi.rs`: add each row to `OPERATIONS`; `"prompts"` to `TAGS`; the `yes` rows to `QUERY_OR_BODY`; `post_prompt` and `post_prompt_version` to the branch that already expects `["400","401","403","404","409","413","429"]` (the `post_dataset` branch); `patch_prompt` to the branch expecting `400 401 403 404 413 429` if one exists, else add one `else if` with exactly those; no change for `delete_prompt` (it declares the default set `401 403 404 429`); `("PromptPage","Prompt")` and `("PromptVersionPage","PromptVersion")` to the `pages` tuple list (around line 1237). `assert_nullability` (around lines 1488–1560) has its own `NULL_IS_A_VALUE` list and its own list of page names: add `("UpdatePromptRequest", &["description"])` to the first and `"PromptPage"`, `"PromptVersionPage"` to the second.
 
 Then `just openapi`.
 
@@ -1122,7 +1134,7 @@ Then `just openapi`.
   - `get_prompt_version` → `responses/prompts/support-reply/versions/2.json`.
   - one more `out.add("get_prompt_version", …)` with path params `prompt` = `support-reply`, `version` = `1` → `responses/prompts/support-reply/versions/1.json`;
   - hand-listed: `example_created("post_prompt", BTreeMap::new(), "responses/prompts/support-reply/versions/1.json")` and `example_created("post_prompt_version", params(&[("prompt", EXAMPLE_PROMPT)]), "responses/prompts/support-reply/versions/2.json")`. If the helpers' signatures differ, follow the shape of the datasets entries.
-- `fixtures/api/requests/prompt-create.json`: `{"name":"support-reply","type":"chat","template":[…v1 template…],"config":{"model":"gpt-4o","params":{"temperature":0.3,"max_tokens":512}},"labels":["production"],"commit_message":"First version"}`; `fixtures/api/requests/prompt-version-create.json`: the v2 template, its config, `"labels":["staging"]`, `"commit_message":"Friendlier tone"`. Register both in `tests/api_examples.rs`'s `requests` table (`post_prompt`, `post_prompt_version`) and the request round-trips (`CreatePromptRequest`, `CreateVersionRequest`); add the response round-trips per operation id (`Page<Prompt>`, `Prompt`, `PromptVersion`, `Page<PromptVersion>`).
+- `fixtures/api/requests/prompt-create.json`: `{"name":"support-reply","type":"chat","template":[…v1 template…],"config":{"model":"gpt-4o","params":{"temperature":0.3,"max_tokens":512}},"labels":["production"],"commit_message":"First version"}`; `fixtures/api/requests/prompt-version-create.json`: the v2 template, its config, `"labels":["staging"]`, `"commit_message":"Friendlier tone"`. Both files are canonical JSON as the round-trip check writes it: pretty-printed with 2 spaces, a trailing newline, keys in struct field order (`name`, `type`, `template`, `config`, `labels`, `commit_message`, then `description`, `tags` when present). Register both in `tests/api_examples.rs`'s `requests` table (`post_prompt`, `post_prompt_version`) and the request round-trips (`CreatePromptRequest`, `CreateVersionRequest`). Response round-trips per operation id: `list_prompts` → `Page<Prompt>`; `get_prompt` → `Prompt`; `get_prompt_resolve`, `get_prompt_version`, `post_prompt`, `post_prompt_version` → `PromptVersion`; `list_prompt_versions` → `Page<PromptVersion>`. `generated_files_roundtrip` panics on an operation id it does not know.
 - Run `just api-examples`. `fixtures/api/README.md` § Fixed identifiers gets the two prompt ids.
 
 ### Tests (`routes/prompts.rs`, `#[cfg(test)] mod tests`)
@@ -1132,11 +1144,11 @@ Use `TestApp`, Ada's cookie (org owner → project admin), a member, a viewer, `
 1. `create_get_and_list` — POST the `prompt-create.json` body → 201, `version == 1`, `labels == ["latest", "production"]` (sorted), `variables == ["product","question"]`, `placeholders == ["history"]`; GET `/{name}` → `latest_version == 1`, labels `[production → 1]`; GET list → one prompt; `?q=SUPPORT` finds it; `?label=staging` finds none; `?label=latest` finds it.
 2. `versions_and_resolve` — POST a version with `labels: ["staging"]` → 201 version 2; `resolve` (no query) → version 1; `?label=staging` → 2; `?label=latest` → 2; `?version=1` → 1; `?version=9` → 404; `?label=nope` → 404; `?label=a&version=1` → 400 field `version`; `?label=BAD` → 400 field `label`; `versions` list → 2, 1; `?limit=1` → one item and a `next_cursor`, and the next page → version 1 with no cursor; `versions/2` → 2.
 3. `resolve_etag` — first `resolve` → 200 with an `etag` header and `cache-control: no-cache`; again with `If-None-Match: <etag>` → 304 and an empty body; with `If-None-Match: "other", <etag>` → 304; with `"other"` → 200; after moving `production` to version 2 (POST a version with `labels: ["production"]` as Ada) the old tag gives 200 and a new tag.
-4. `validation_errors` — create with a bad name, a `{% %}` template, `type: "text"` with an array template, a bad config `temperature: 5`, label `latest`: one 400 whose `errors` list each field (`name`, `template`, `config.params.temperature`, `labels[0]`); a duplicate name → 409; a version whose template does not fit the type → 400 field `template`.
+4. `validation_errors` — one create with a bad name (`a b`), a `{% %}` text template, a bad config `temperature: 5` and label `latest`: one 400 whose `errors` list `name`, `template` (with a position), `config.params.temperature` and `labels[0]`; a second create with `type: "text"` and an array template → 400 field `template`; a duplicate name → 409; a version whose template does not fit the type → 400 field `template`.
 5. `permissions` — viewer: GET list 200, POST 403; member: POST without labels 201; `read_key`: GET resolve 200, POST 403; `ingest_key`: GET resolve 403; `write_key`: POST 201; a read-only PAT POST 403; a read-write PAT of the member POST 201.
 6. `protected_labels` — member POST create with `labels: ["production"]` → 403 and no prompt created (GET → 404); member create without labels, then POST version with `labels: ["production"]` → 403 (latest_version stays 1); member version with `labels: ["staging"]` → 201; `write_key` version with `["production"]` → 201; Ada (admin) → 201; member DELETE of a prompt carrying `production` → 403; member DELETE of a prompt with only `staging` → 204.
 7. `patch_and_delete` — PATCH `description` then `{"description": null}` clears it; PATCH tags `[" a ", "a", "b"]` → `["a","b"]`; DELETE → 204, GET → 404, DELETE again → 404.
-8. `other_project_is_404` — a prompt in another project (`app.add_project`) is not visible through the first project's paths (404), and a key of project A gets 404 on project B's path.
+8. `other_project_is_404` — a prompt created in another project (`app.add_project`, then Ada's cookie) is 404 through the first project's base path; `app.write_key(&seeded)` (project A) gets 404 on project B's prompt path.
 9. `audit_log_has_no_payload` — inside `capture_logs`, create a prompt named `canary-name-x` whose template is `canary-template-y` with tag `canary-tag-z` and commit message `canary-commit-w`, using `write_key`; the logs contain `prompt created` and `actor=key:`, and none of the four canaries.
 
 ### Done when
@@ -1199,7 +1211,9 @@ In the protected check of every route (V1.4's and these), a project admin is `ac
 | `get_prompt_settings` | GET `/prompt-settings` | 200 `PromptSettings`; 401 403 404 429 | — |
 | `put_prompt_settings` | PUT `/prompt-settings` | 200 `PromptSettings`; 400 401 403 404 413 429 | — |
 
-Place each write in the `document_lint` branch with exactly its error set; add a new `else if` when no branch has that exact set. `label` is a string path parameter ("Label name."). `put_prompt_settings`' description: "Project admins (D-V-10)."
+Place each write in the `document_lint` branch with exactly its error set; add a new `else if` only when no branch has that exact set. `delete_prompt_label` (`400 401 403 404 429`) goes in the existing branch that holds `get_evaluator || delete_score_definition`; `get_prompt_settings` needs no change (default set). `label` is a string path parameter ("Label name."). `put_prompt_settings`' description: "Project admins (D-V-10)."
+
+In `tests/openapi.rs` also add `("PromptLabelEventPage","PromptLabelEvent")` to the `pages` tuple list and `"PromptLabelEventPage"` to `assert_nullability`'s page-name list.
 
 Then `just openapi`.
 
@@ -1207,23 +1221,24 @@ Then `just openapi`.
 
 - Responses: `list_prompt_label_events` → `responses/prompts/support-reply/label-events.json`; `get_prompt_settings` → `responses/prompt-settings.json` (the default `["production"]`).
 - Static or hand-listed: `put_prompt_label` → reuse `responses/prompts/support-reply.json` with status 200 (`example("put_prompt_label", params(&[("prompt", EXAMPLE_PROMPT), ("label", "staging")]), BTreeMap::new(), "responses/prompts/support-reply.json", "application/json")` or the helper that fits); `put_prompt_settings` → `responses/prompt-settings.json`.
-- Requests: `fixtures/api/requests/prompt-label-set.json` `{"version":2}`, `fixtures/api/requests/prompt-settings.json` `{"protected_labels":["production"]}`, registered in the `requests` table and round-tripped (`SetLabelRequest`, `PromptSettings`); response round-trips for `Page<PromptLabelEvent>` and `PromptSettings`.
+- Requests (canonical JSON, pretty-printed): `fixtures/api/requests/prompt-label-set.json` `{"version": 2}`, `fixtures/api/requests/prompt-settings.json` `{"protected_labels": ["production"]}`, registered in the `requests` table and round-tripped (`SetLabelRequest`, `PromptSettings`). Response round-trips: `put_prompt_label` → `Prompt`; `get_prompt_settings`, `put_prompt_settings` → `PromptSettings`; `list_prompt_label_events` → `Page<PromptLabelEvent>`.
 - `just api-examples`.
 
 ### 4. Specs, changelog, roadmap
 
 - `docs/spec/04-metadata-db.md`: a new `## Prompts (track V)` section after `## Datasets & experiments`: the migration's SQL verbatim in a `sql` block, then four bullets: versions are immutable and numbered from 1 (D-V-7); `latest` is computed, never stored (D-V-8); label moves are recorded in `prompt_label_events` (D-V-8); a project without a `prompt_settings` row protects `production` (D-V-10).
 - `docs/spec/09-api.md`: a new `### Prompts` section after `### Datasets & experiments` with one table row per route of V1.4 and V1.5 (path, who, what), in the style of the datasets table; mention the `ETag`/`304` of `resolve` and that errors use the existing codes.
-- `docs/spec/08-auth.md`: after the datasets/evaluators permission paragraph: "Prompts: every project member and a `read` key read them; members and above, read-write PATs and `write` keys create versions and move labels (`ProjectPerm::ManagePrompts`); protected labels need a project admin or a `write` key; project admins edit the protected list (D-V-10, D-V-13)."
+- `docs/spec/08-auth.md`: in the permission table (around lines 100–106) add a row `| Read prompts · create versions and move unprotected labels · move protected labels, edit the protected list | ✓ · · | ✓ ✓ · | ✓ ✓ ✓ | ✓ ✓ ✓ |` in the table's own column style (viewer, member, admin, owner; adapt the cell format to the table you find), and after the datasets/evaluators permission paragraph: "Prompts: every project member and a `read` key read them; members and above, read-write PATs and `write` keys create versions and move labels (`ProjectPerm::ManagePrompts`); protected labels need a project admin or a `write` key; project admins edit the protected list (D-V-10, D-V-13)."
 - `CHANGELOG.md` `### Added`: `- Prompt registry API (D191, D-V-2 to D-V-13): versioned text and chat prompts with plain {{var}} templates, labels with protected labels, label history, and a fetch with ETag at GET /prompts/{name}/resolve.`
 - `docs/roadmap.md` V row status: `**In progress.** M1 (registry API) implemented.`
+- The user documentation page for prompts comes with M2 (SDK) and M4 (UI); M1's routes appear in the generated API reference only.
 
 ### Tests (`routes/prompts.rs`)
 
 1. `labels_move_and_history` — on the seeded-style prompt (create it in the test with labels `production`), Ada PUT `staging` → version 2 (after adding version 2) → 200, labels include `staging → 2`; PUT `production` → 2; DELETE `staging` → 204; DELETE again → 404; PUT to version 9 → 404; PUT `latest` → 400; label-events → newest first: staging removed (to absent), production 1→2, staging new→2, production new→1; `?limit=2` pages.
 2. `label_protection` — member PUT `production` → 403; member PUT `staging` → 200; member DELETE `production` → 403; `write_key` PUT `production` → 200.
 3. `settings` — GET → `["production"]`; member PUT → 403; `write_key` PUT → 403; Ada PUT `["prod"]` → 200; now member PUT `production` → 200 and member PUT `prod` → 403; Ada PUT `["latest"]` → 400; 21 labels → 400.
-4. `label_cap_conflict` — 50 labels set by Ada, then a 51st → 409.
+4. `label_cap_conflict` — create a prompt with no label, then Ada PUTs labels `l00` … `l49` (50 labels) on version 1, all 200; a 51st, `l50`, → 409.
 
 ### Done when
 
