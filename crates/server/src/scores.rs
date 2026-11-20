@@ -334,6 +334,7 @@ pub(crate) async fn write(
             u64::try_from(rows.len()).unwrap_or(u64::MAX),
         );
     }
+    crate::issues::triggers::on_scores_written(state, project, writer, &rows, &definitions).await;
     Ok(ids)
 }
 

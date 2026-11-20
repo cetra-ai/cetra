@@ -296,6 +296,7 @@ async fn create_issue_source(
                 user_id = %user.id,
                 "issue source created"
             );
+            reload_score_rules(&state).await;
             Ok((StatusCode::CREATED, error::Json(source_json(&row, 0))))
         }
         SourceWrite::OverLimit(error) => Err(error.into()),
@@ -348,6 +349,7 @@ async fn update_issue_source(
                 user_id = %user.id,
                 "issue source updated"
             );
+            reload_score_rules(&state).await;
             let open = store::open_counts(state.meta.reader(), project).await?;
             Ok(error::Json(source_json(&row, open_issues(&open, id))))
         }
@@ -380,7 +382,16 @@ async fn delete_issue_source(
         user_id = %user_id,
         "issue source deleted"
     );
+    reload_score_rules(&state).await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Reloads the score rules after a source write (A11). A failure is logged; the next sweeper tick
+/// reads the rules again.
+async fn reload_score_rules(state: &AppState) {
+    if let Err(error) = crate::issues::triggers::refresh_score_rules(state).await {
+        tracing::warn!(error = %error, "issue score rules could not be reloaded");
+    }
 }
 
 /// The create's write: when the source is enabled, the active-source limit is checked with it

@@ -20,7 +20,7 @@ use crate::http::AppState;
 use crate::issues::sources::ProjectSources;
 use crate::meta::MetaError;
 use crate::meta::eval_jobs::{KIND_RULE, NewJob, insert_rule_job};
-use crate::meta::issues::SweepSource;
+use crate::meta::issues::{SourceRow, SweepSource};
 use crate::meta::online_rules::{self, TriggerRule};
 use crate::meta::pending_traces::{PendingRow, load_pending, write_pending};
 use crate::meta::projects::{
@@ -298,6 +298,10 @@ pub(crate) async fn sweep_once(state: &AppState, now: i64) -> Result<SweepReport
             Some(found) => &found.sources,
             None => &[],
         };
+        let project_topic_list: &[SourceRow] = match project_sources {
+            Some(found) => &found.topics,
+            None => &[],
+        };
         let completed = state
             .pending
             .completed(project, now, timeout_ns, PER_PROJECT_TICK);
@@ -308,6 +312,7 @@ pub(crate) async fn sweep_once(state: &AppState, now: i64) -> Result<SweepReport
             project,
             rules: project_rule_list,
             sources: project_source_list,
+            topic_sources: project_topic_list,
             now,
         };
         for (around, batch) in batches(&completed) {
@@ -326,14 +331,15 @@ pub(crate) async fn sweep_once(state: &AppState, now: i64) -> Result<SweepReport
     Ok(report)
 }
 
-/// What one sweep works with for one project: its state, the rules, the error sources, and the
-/// sweep's clock.
+/// What one sweep works with for one project: its state, the rules, the error and topic sources,
+/// and the sweep's clock.
 pub(crate) struct SweepCtx<'a> {
     pub(crate) state: &'a AppState,
     pub(crate) org: OrgId,
     pub(crate) project: ProjectId,
     pub(crate) rules: &'a [TriggerRule],
     pub(crate) sources: &'a [SweepSource],
+    pub(crate) topic_sources: &'a [SourceRow],
     pub(crate) now: i64,
 }
 
@@ -363,13 +369,12 @@ fn settle(
     }
 }
 
-/// Ends one batch's sweep: the error issues first (D-IC-2), then the rules. A project with no
-/// rules retries the batch when its error sweep fails: nothing else ran, and the error sweep is
-/// idempotent. With rules, a failed error sweep skips that batch's error issues and never stops
-/// the rules: the rule enqueue is not idempotent (it spends the hourly cap), so the error sweep is
-/// not retried on its own. The batch is then retried only when [`rule_batch`] fails, and a retry
-/// re-runs the idempotent error sweep. The rules' reads, admission and enqueue come after: see
-/// [`read_candidates`].
+/// Ends one batch's sweep: the error issues first (D-IC-2), then the topic candidates (D-IC-4),
+/// then the rules. A failed step with no rules after it retries the batch: nothing else ran, and
+/// the error sweep is idempotent, as is a topic write's retry up to its daily caps. A failed step
+/// with rules after it is logged and the rules go on: the rule enqueue is not idempotent (it spends
+/// the hourly cap), so the batch is retried only when [`rule_batch`] fails, and a retry re-runs
+/// the idempotent steps. The rules' reads, admission and enqueue come after: see [`read_candidates`].
 async fn sweep_batch(
     ctx: &SweepCtx<'_>,
     around: i64,
@@ -378,14 +383,29 @@ async fn sweep_batch(
 ) -> Result<(), ()> {
     if !ctx.sources.is_empty() {
         let swept = crate::issues::errors::sweep_batch(ctx, around, batch).await;
-        if ctx.rules.is_empty() {
-            return swept;
-        }
         if swept.is_err() {
+            // Nothing after it: the batch is retried. Topics are not run, so a retry does not
+            // admit their traces twice.
+            if ctx.rules.is_empty() {
+                return swept;
+            }
             tracing::warn!(
                 project_id = %ctx.project,
                 batch = batch.len(),
                 "error issues of a batch were not swept; its online rules go on"
+            );
+        }
+    }
+    if !ctx.topic_sources.is_empty() {
+        let topics = crate::issues::topics::sweep_batch(ctx, around, batch).await;
+        if topics.is_err() {
+            if ctx.rules.is_empty() {
+                return topics;
+            }
+            tracing::warn!(
+                project_id = %ctx.project,
+                batch = batch.len(),
+                "topic candidates of a batch were not queued; its online rules go on"
             );
         }
     }
@@ -3112,6 +3132,161 @@ mod tests {
                     .len(),
                 1
             );
+        }
+
+        /// A topic source of `project`, enabled, with `filter` and a sample rate of 1, stored
+        /// directly (its candidates come from the sweep only).
+        async fn topic_source(
+            app: &TestApp,
+            project: ProjectId,
+            filter: Option<&str>,
+        ) -> SourceRow {
+            let now = app.state.clock.now_ns();
+            let row = SourceRow {
+                id: Uuid::now_v7(),
+                project_id: project,
+                name: format!("Topics {}", Uuid::now_v7()),
+                kind: SourceKind::Topic,
+                filter: filter.map(str::to_owned),
+                enabled: true,
+                paused_reason: None,
+                paused_at: None,
+                created_by: None,
+                created_at: now,
+                updated_at: now,
+                sample_rate: Some(1.0),
+                daily_cap: Some(100),
+                score_names: Vec::new(),
+                feedback_sources: Vec::new(),
+                chat_connection_id: None,
+                chat_model: None,
+                embed_connection_id: None,
+                embed_model: None,
+                embed_dimension: None,
+                floor: None,
+                min_issue_size: None,
+                budget_usd: None,
+                budget_period: None,
+                paused_detail: None,
+                next_refit_at: None,
+            };
+            let stored = row.clone();
+            app.state
+                .meta
+                .write(move |conn| Box::pin(async move { insert_source(conn, &row).await }))
+                .await
+                .unwrap();
+            stored
+        }
+
+        /// The dedup keys of the candidates of `source`, sorted.
+        async fn topic_candidates(app: &TestApp, source: Uuid) -> Vec<String> {
+            sqlx::query_scalar(
+                "SELECT dedup_key FROM issue_candidates WHERE source_id = ? ORDER BY dedup_key",
+            )
+            .bind(source.to_string())
+            .fetch_all(app.state.meta.reader())
+            .await
+            .unwrap()
+        }
+
+        #[tokio::test]
+        async fn a_completed_trace_queues_a_topic_candidate() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            let source = topic_source(&app, project, None).await;
+            // Tracked before the commit, as a rule's project is (see `rule`).
+            refresh_tracked(&app.state).await.unwrap();
+            let at = set_clock(&app);
+            let start = at - 30 * SECOND;
+            app.commit_spans(&seeded.project, vec![span(trace_id(1), 1, true, start)])
+                .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            assert_eq!(
+                topic_candidates(&app, source.id).await,
+                vec![format!("{}:{}", source.id, trace_id(1))]
+            );
+            let starts: Vec<Option<i64>> =
+                sqlx::query_scalar("SELECT trace_start FROM issue_candidates WHERE source_id = ?")
+                    .bind(source.id.to_string())
+                    .fetch_all(app.state.meta.reader())
+                    .await
+                    .unwrap();
+            assert_eq!(starts, vec![Some(start)]);
+        }
+
+        #[tokio::test]
+        async fn a_topic_filter_excludes_its_traces() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            let excluded = topic_source(&app, project, Some("environment = 'cetra-eval'")).await;
+            let kept = topic_source(&app, project, None).await;
+            refresh_tracked(&app.state).await.unwrap();
+            let at = set_clock(&app);
+            app.commit_spans(
+                &seeded.project,
+                vec![span(trace_id(1), 1, true, at - 30 * SECOND)],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            assert!(topic_candidates(&app, excluded.id).await.is_empty());
+            assert_eq!(topic_candidates(&app, kept.id).await.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn a_project_with_only_a_topic_source_is_tracked() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            topic_source(&app, project, None).await;
+            let (rules, sources) = refresh_tracked(&app.state).await.unwrap();
+            assert!(rules.is_empty());
+            assert!(sources[&project].sources.is_empty());
+            assert_eq!(sources[&project].topics.len(), 1);
+            app.state
+                .pending
+                .observe(project, &[span(trace_id(1), 1, true, 0)], 0);
+            assert_eq!(app.state.pending.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn an_evaluation_trace_is_never_a_topic_candidate() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            let source = topic_source(&app, project, None).await;
+            refresh_tracked(&app.state).await.unwrap();
+            let at = set_clock(&app);
+            let start = at - 30 * SECOND;
+            let mut eval_span = span(trace_id(1), 1, true, start);
+            eval_span.environment = Some(cetra_core::names::environment::EVAL.to_owned());
+            app.commit_spans(&seeded.project, vec![eval_span]).await;
+            // Forced into the map, the strict read still skips the evaluation trace.
+            app.state.pending.load(vec![(
+                project,
+                trace_id(1),
+                Entry {
+                    first_seen: at,
+                    last_seen: at,
+                    min_start: start,
+                    root_ended: true,
+                    failed_reads: 0,
+                    spans: 1,
+                },
+            )]);
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            assert!(topic_candidates(&app, source.id).await.is_empty());
         }
     }
 }

@@ -391,6 +391,7 @@ impl TestApp {
             last_ingest: crate::ingest::last_ingest::LastIngest::default(),
             live: crate::live::LiveBus::new(crate::live::StreamTiming::TEST),
             widget_cache: crate::routes::dashboards::WidgetCache::default(),
+            issue_score_rules: crate::issues::triggers::ScoreRules::default(),
             usage: crate::usage::Usage::default(),
             alert_email_count: crate::alerts::quota::DailyEmailCount::default(),
             deletions: crate::deletion::Deletions::new(),

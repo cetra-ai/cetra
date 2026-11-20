@@ -103,6 +103,8 @@ pub(crate) struct AppInner {
     pub(crate) org_sso: crate::ee::org_sso::OrgSso,
     /// The Prometheus registry served on `metrics_addr` (N M3, D-N-28).
     pub(crate) telemetry: crate::telemetry::Telemetry,
+    /// The `score` and `feedback` issue sources' rules, read by each score write (D-IC-4).
+    pub(crate) issue_score_rules: crate::issues::triggers::ScoreRules,
 }
 
 impl AppState {

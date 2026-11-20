@@ -497,6 +497,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         eval,
         pending: crate::eval::pending::PendingTraces::default(),
         telemetry,
+        issue_score_rules: crate::issues::triggers::ScoreRules::default(),
     });
     crate::ee::sso_enforcement::warn_if_unlicensed(&state);
     if let Err(error) = crate::bootstrap::prepare(&state).await {
